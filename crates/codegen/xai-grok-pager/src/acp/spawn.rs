@@ -1,19 +1,27 @@
 //! Agent spawning — creates the agent process and ACP channels.
 //!
-//! Simplified to only support GrokShell (in-process) mode.
-//! Subprocess and remote modes can be added later if needed.
+//! Defaults to GrokShell (in-process) mode. Setting `GROK_ACP_AGENT_CMD`
+//! switches the pager into external-agent client mode over ACP stdio.
 
-use std::io::IsTerminal;
-use std::rc::Rc;
-use std::thread;
-use std::time::Duration;
+use std::{
+    fs::OpenOptions,
+    io::{IsTerminal, Write},
+    path::PathBuf,
+    process::Stdio,
+    rc::Rc,
+    thread,
+    time::Duration,
+};
 
-use anyhow::Result;
+use agent_client_protocol as acp;
+use anyhow::{Context, Result, anyhow, bail};
+use tokio::io::AsyncReadExt;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
 
 use xai_acp_lib::{
     AcpAgentChannel, AcpClientChannel, AcpClientTx, AcpGatewayReceiver, AcpGatewaySender,
-    acp_channels,
+    LineBufferedRead, acp_channels,
 };
 use xai_grok_shell::{
     agent::{
@@ -32,11 +40,16 @@ const AGENT_JOIN_SLACK: Duration = Duration::from_secs(2);
 /// is taking a moment. Short joins (the common case) print nothing.
 const JOIN_NOTICE_AFTER: Duration = Duration::from_millis(1500);
 
+/// Full command string for an external ACP agent subprocess. The value is
+/// shlex-split into argv and connected as NDJSON ACP over stdin/stdout.
+const EXTERNAL_AGENT_CMD_ENV: &str = "GROK_ACP_AGENT_CMD";
+
 /// Result of spawning a child agent.
 pub struct SpawnedAgent {
-    /// Agent worker OS thread. Hand to [`AgentShutdownGuard`] so the worker is
-    /// cancelled and joined — letting session actors flush SessionEnd hooks —
-    /// on every exit path.
+    /// Agent worker OS thread. In the default in-process path this owns the
+    /// GrokShell worker; in external-agent mode it owns the ACP stdio bridge and
+    /// child process. Hand to [`AgentShutdownGuard`] for cancellation + join on
+    /// every exit path.
     pub thread_handle: thread::JoinHandle<Result<()>>,
     pub channel: AcpClientChannel,
     pub cancel: CancellationToken,
@@ -188,6 +201,17 @@ pub async fn spawn_grok_shell(
     // re-login). No-op where the OS listener is unavailable.
     auth_manager.start_system_power_listener();
 
+    if let Some(command) = external_agent_command()? {
+        let agent_cancel = cancel.child_token();
+        let (channel, handle) = spawn_external_agent_subprocess(command, agent_cancel.clone())?;
+        return Ok(SpawnedAgent {
+            thread_handle: handle,
+            channel,
+            cancel: agent_cancel,
+            auth_manager,
+        });
+    }
+
     // Both embedded-agent paths (`--no-leader` and leader fallback) converge
     // here, so the agent's external-OTEL gate is applied exactly once, before boot.
     xai_grok_shell::agent::app::apply_otel_config(&auth_manager, &agent_config.grok_com_config);
@@ -241,6 +265,206 @@ pub async fn spawn_grok_shell(
         cancel: agent_cancel,
         auth_manager: auth_manager_for_pager,
     })
+}
+
+fn external_agent_command() -> Result<Option<String>> {
+    match std::env::var(EXTERNAL_AGENT_CMD_ENV) {
+        Ok(command) if command.trim().is_empty() => {
+            bail!("{EXTERNAL_AGENT_CMD_ENV} is set but empty")
+        }
+        Ok(command) => Ok(Some(command)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(err) => Err(anyhow!(
+            "{EXTERNAL_AGENT_CMD_ENV} is not valid UTF-8: {err}"
+        )),
+    }
+}
+
+fn split_external_agent_command(command: &str) -> Result<Vec<String>> {
+    let argv = shlex::split(command)
+        .ok_or_else(|| anyhow!("{EXTERNAL_AGENT_CMD_ENV} has invalid shell quoting"))?;
+    if argv.is_empty() {
+        bail!("{EXTERNAL_AGENT_CMD_ENV} produced an empty argv");
+    }
+    Ok(argv)
+}
+
+fn external_agent_stderr_log_path() -> PathBuf {
+    let log_dir = grok_home().join("logs");
+    if std::fs::create_dir_all(&log_dir).is_ok() {
+        log_dir.join("acp-external-agent-stderr.log")
+    } else {
+        std::env::temp_dir().join("grok-acp-external-agent-stderr.log")
+    }
+}
+
+fn spawn_external_agent_subprocess(
+    command: String,
+    cancel: CancellationToken,
+) -> Result<(AcpClientChannel, thread::JoinHandle<Result<()>>)> {
+    let argv = split_external_agent_command(&command)?;
+    let (program, args) = argv
+        .split_first()
+        .context("external ACP agent argv unexpectedly empty")?;
+    let program = program.clone();
+    let args = args.to_vec();
+    let stderr_log_path = external_agent_stderr_log_path();
+    let (acp_client, acp_agent) = acp_channels();
+
+    tracing::info!(
+        command = %command,
+        stderr_log = %stderr_log_path.display(),
+        "spawning external ACP agent subprocess"
+    );
+
+    let thread_handle = thread::Builder::new()
+        .name("acp-external-agent".into())
+        .spawn(move || -> Result<()> {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&rt, async move {
+                run_external_agent_bridge(program, args, stderr_log_path, acp_agent, cancel).await
+            })
+        })?;
+
+    Ok((acp_client, thread_handle))
+}
+
+async fn run_external_agent_bridge(
+    program: String,
+    args: Vec<String>,
+    stderr_log_path: PathBuf,
+    channel: AcpAgentChannel,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let mut child = tokio::process::Command::new(&program);
+    child
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = child
+        .spawn()
+        .with_context(|| format!("failed to spawn external ACP agent '{program}'"))?;
+    let stdin = child
+        .stdin
+        .take()
+        .context("external ACP agent stdin was not piped")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("external ACP agent stdout was not piped")?;
+    if let Some(stderr) = child.stderr.take() {
+        let log_path = stderr_log_path.clone();
+        let pid = child.id();
+        tokio::task::spawn_local(async move {
+            tee_external_agent_stderr(stderr, log_path, pid).await;
+        });
+    }
+
+    let gw_tx = AcpGatewaySender::new(channel.tx).with_tracing(true);
+    let incoming = LineBufferedRead::spawn_local(stdout.compat());
+    let (conn, handle_io) =
+        acp::ClientSideConnection::new(gw_tx, stdin.compat_write(), incoming, |fut| {
+            tokio::task::spawn_local(fut);
+        });
+    let gw_rx = AcpGatewayReceiver::new(channel.rx, conn).with_tracing(true);
+    let handle_io_task = tokio::task::spawn_local(handle_io);
+    let gateway_task = tokio::task::spawn_local(gw_rx.run());
+    tokio::task::yield_now().await;
+
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            handle_io_task.abort();
+            gateway_task.abort();
+            kill_external_agent(&mut child, &stderr_log_path).await;
+            Ok(())
+        }
+        status = child.wait() => {
+            cancel.cancel();
+            handle_io_task.abort();
+            gateway_task.abort();
+            let status = status.context("failed waiting for external ACP agent")?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "external ACP agent exited with {status}; stderr log: {}",
+                    stderr_log_path.display()
+                ))
+            }
+        }
+    }
+}
+
+async fn kill_external_agent(child: &mut tokio::process::Child, stderr_log_path: &PathBuf) {
+    if let Err(error) = child.start_kill() {
+        tracing::debug!(%error, "external ACP agent was already stopped before kill");
+    }
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(status)) => {
+            tracing::debug!(%status, "external ACP agent exited after cancel");
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "failed waiting for external ACP agent after kill");
+        }
+        Err(_) => {
+            tracing::warn!(
+                stderr_log = %stderr_log_path.display(),
+                "external ACP agent did not exit within kill wait"
+            );
+        }
+    }
+}
+
+async fn tee_external_agent_stderr(
+    mut stderr: tokio::process::ChildStderr,
+    log_path: PathBuf,
+    pid: Option<u32>,
+) {
+    let mut file = match OpenOptions::new().create(true).append(true).open(&log_path) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                stderr_log = %log_path.display(),
+                "failed to open external ACP agent stderr log"
+            );
+            return;
+        }
+    };
+    let _ = writeln!(file, "\n--- external ACP agent stderr pid={pid:?} ---");
+
+    let mut buf = [0_u8; 8192];
+    loop {
+        match stderr.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Err(error) = file.write_all(&buf[..n]) {
+                    tracing::warn!(
+                        %error,
+                        stderr_log = %log_path.display(),
+                        "failed writing external ACP agent stderr log"
+                    );
+                    break;
+                }
+                let _ = file.flush();
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    stderr_log = %log_path.display(),
+                    "failed reading external ACP agent stderr"
+                );
+                break;
+            }
+        }
+    }
 }
 
 /// Spawn an agent in a dedicated thread with direct RPC dispatch.
@@ -375,5 +599,18 @@ mod tests {
             classify_join(Err(Box::new(7u32))),
             JoinOutcome::Panicked("non-string panic payload".to_string())
         );
+    }
+
+    #[test]
+    fn external_command_is_shlex_split() {
+        assert_eq!(
+            split_external_agent_command("pi-acp --name 'Grok Build'").unwrap(),
+            vec!["pi-acp", "--name", "Grok Build"]
+        );
+    }
+
+    #[test]
+    fn external_command_rejects_bad_quoting() {
+        assert!(split_external_agent_command("pi-acp 'unterminated").is_err());
     }
 }
