@@ -609,7 +609,7 @@ pub async fn run(
     let prefetch_elapsed = startup_start.elapsed();
     let requested_confinement = xai_grok_sandbox::requested_confinement_profile();
     let LeaderMode {
-        use_leader,
+        mut use_leader,
         policy_disable_reason,
         disabled_by_confinement,
     } = resolve_leader_mode(
@@ -620,6 +620,9 @@ pub async fn run(
         true,
         requested_confinement,
     );
+    if args.agent_cmd.is_some() {
+        use_leader = false;
+    }
     tracing::info!(
         use_leader,
         ?policy_disable_reason,
@@ -757,6 +760,7 @@ pub async fn run(
         ),
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
+        agent_cmd: args.agent_cmd.clone(),
     };
     let mut config_watcher = crate::appearance::ConfigWatcher::start().await?;
     let alt_screen_config_mode = config_watcher.current().alt_screen;

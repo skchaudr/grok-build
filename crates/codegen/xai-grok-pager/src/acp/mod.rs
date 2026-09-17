@@ -146,6 +146,8 @@ pub struct ConnectFlags {
     /// Seed agent sessions with auto (classifier) permission mode.
     /// Ignored when `default_yolo_mode` is true.
     pub default_auto_mode: bool,
+    /// Command to spawn an external ACP agent process over stdio (e.g. "dsh acp").
+    pub agent_cmd: Option<String>,
 }
 
 /// Connect to an agent: spawn, initialize, authenticate.
@@ -191,8 +193,12 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     apply_config_writes(&flags);
 
     // Spawn the agent
-    let memory_config = agent_config.memory_config.clone();
-    let spawned = spawn::spawn_grok_shell(agent_config, cancel, memory_config).await?;
+    let spawned = if let Some(cmd) = &flags.agent_cmd {
+        spawn::spawn_external_subprocess(cmd, cancel).await?
+    } else {
+        let memory_config = agent_config.memory_config.clone();
+        spawn::spawn_grok_shell(agent_config, cancel, memory_config).await?
+    };
     let auth_manager = spawned.auth_manager.clone();
     let (tx, rx) = (spawned.channel.tx, spawned.channel.rx);
 

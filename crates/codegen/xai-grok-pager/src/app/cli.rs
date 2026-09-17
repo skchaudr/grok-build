@@ -450,6 +450,9 @@ pub struct PagerArgs {
         alias = "dangerously-skip-permissions"
     )]
     pub yolo: bool,
+    /// Command to spawn an external ACP agent process over stdio (e.g. "dsh acp").
+    #[arg(long = "agent-cmd", value_name = "COMMAND", global = true)]
+    pub agent_cmd: Option<String>,
     /// Trust this folder and persist the decision to the trust store.
     #[arg(long = "trust", alias = "trust-folder", hide = true)]
     pub trust: bool,
