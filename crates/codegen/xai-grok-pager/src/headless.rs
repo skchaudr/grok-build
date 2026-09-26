@@ -616,13 +616,17 @@ async fn open_session(
             acp_tx,
         )
         .await;
-        if let Ok(resp) = try_load {
-            return Ok(OpenedSession {
-                session_id: acp::SessionId::new(sid.to_string()),
-                models: ModelState::from(resp.models),
-            });
+        match try_load {
+            Ok(resp) => {
+                return Ok(OpenedSession {
+                    session_id: acp::SessionId::new(sid.to_string()),
+                    models: ModelState::from(resp.models),
+                });
+            }
+            Err(e) => {
+                anyhow::bail!("Session load failed over ACP: {e}");
+            }
         }
-        anyhow::bail!("Session does not exist");
     }
 
     let new_resp: acp::NewSessionResponse = acp_send(
@@ -822,6 +826,7 @@ fn headless_materialize_ctx(
         } else {
             crate::app::session_startup::TitleResolution::Allowed
         },
+        has_agent_cmd: false,
     }
 }
 

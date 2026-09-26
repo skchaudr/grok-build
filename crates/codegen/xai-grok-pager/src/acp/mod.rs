@@ -146,6 +146,8 @@ pub struct ConnectFlags {
     /// Seed agent sessions with auto (classifier) permission mode.
     /// Ignored when `default_yolo_mode` is true.
     pub default_auto_mode: bool,
+    /// Command to spawn an external ACP agent process over stdio (e.g. "dsh acp").
+    pub agent_cmd: Option<String>,
 }
 
 /// Connect to an agent: spawn, initialize, authenticate.
@@ -191,8 +193,12 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     apply_config_writes(&flags);
 
     // Spawn the agent
-    let memory_config = agent_config.memory_config.clone();
-    let spawned = spawn::spawn_grok_shell(agent_config, cancel, memory_config).await?;
+    let spawned = if let Some(cmd) = &flags.agent_cmd {
+        spawn::spawn_external_subprocess(cmd, cancel).await?
+    } else {
+        let memory_config = agent_config.memory_config.clone();
+        spawn::spawn_grok_shell(agent_config, cancel, memory_config).await?
+    };
     let auth_manager = spawned.auth_manager.clone();
     let (tx, rx) = (spawned.channel.tx, spawned.channel.rx);
 
@@ -214,6 +220,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
         bounded_eager_auth(
             &tx,
+            flags.agent_cmd.is_some(),
             &auth_methods,
             default_auth_method_id.as_ref(),
             needs_login,
@@ -327,6 +334,7 @@ pub async fn connect_via_leader(
     let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
         bounded_eager_auth(
             &tx,
+            false,
             &auth_methods,
             default_auth_method_id.as_ref(),
             needs_login,
@@ -715,6 +723,7 @@ async fn eager_auth_or_login_fallback(
 /// through unchanged and the agent finishes authentication in the background.
 async fn bounded_eager_auth(
     tx: &AcpAgentTx,
+    external_agent: bool,
     auth_methods: &[acp::AuthMethod],
     default_auth_method_id: Option<&acp::AuthMethodId>,
     needs_login: bool,
@@ -728,6 +737,12 @@ async fn bounded_eager_auth(
     AuthStartMode,
     Option<serde_json::Value>,
 ) {
+    // External ACP agents may own their credentials and require no client
+    // authentication. An empty list from the built-in Grok agent still means
+    // its configured authentication method is unavailable.
+    if external_agent && auth_methods.is_empty() {
+        return (false, None, None, AuthStartMode::Pending, None);
+    }
     match tokio::time::timeout(
         xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
         eager_auth_or_login_fallback(
@@ -919,6 +934,60 @@ mod tests {
         assert_eq!(label.as_deref(), Some("Acme Corp"));
         assert_eq!(method_id.as_ref().unwrap().0.as_ref(), "grok.com");
         assert_eq!(mode, AuthStartMode::Command);
+    }
+
+    #[tokio::test]
+    async fn external_agent_empty_auth_methods_is_ready_without_authentication() {
+        let (client, mut agent) = xai_acp_lib::acp_channels();
+        let (needs_login, label, method, _, meta) = bounded_eager_auth(
+            &client.tx,
+            true,
+            &[],
+            None,
+            false,
+            None,
+            None,
+            AuthStartMode::Pending,
+        )
+        .await;
+        assert!(!needs_login);
+        assert!(label.is_none());
+        assert!(method.is_none());
+        assert!(meta.is_none());
+        assert!(
+            agent.rx.try_recv().is_err(),
+            "no authenticate request is required"
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_agent_empty_auth_methods_still_requires_login() {
+        let (client, _agent) = xai_acp_lib::acp_channels();
+        let (needs_login, _, method, _, _) = bounded_eager_auth(
+            &client.tx,
+            false,
+            &[],
+            None,
+            false,
+            None,
+            None,
+            AuthStartMode::Pending,
+        )
+        .await;
+        assert!(needs_login);
+        assert!(method.is_none());
+    }
+
+    #[tokio::test]
+    async fn external_agent_advertised_login_is_preserved() {
+        let (client, _agent) = xai_acp_lib::acp_channels();
+        let methods = vec![make_auth_method("grok.com", "External login", None)];
+        let (needs, label, method, mode) = startup_auth_metadata(&methods);
+        let (needs_login, label, method, _, _) =
+            bounded_eager_auth(&client.tx, true, &methods, None, needs, label, method, mode).await;
+        assert!(needs_login);
+        assert_eq!(label.as_deref(), Some("External login"));
+        assert_eq!(method.as_ref().unwrap().0.as_ref(), "grok.com");
     }
 
     #[test]

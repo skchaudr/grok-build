@@ -243,6 +243,88 @@ pub async fn spawn_grok_shell(
     })
 }
 
+/// Spawn an external ACP agent subprocess (e.g. `dsh acp`) and bridge it over stdio pipes.
+pub async fn spawn_external_subprocess(
+    cmd: &str,
+    cancel: &CancellationToken,
+) -> Result<SpawnedAgent> {
+    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+    use xai_acp_lib::LineBufferedRead;
+
+    let mut parts = shlex::split(cmd)
+        .ok_or_else(|| anyhow::anyhow!("Invalid command syntax for --agent-cmd: {}", cmd))?;
+    if parts.is_empty() {
+        anyhow::bail!("--agent-cmd cannot be empty");
+    }
+    let bin = parts.remove(0);
+
+    let (client_channel, agent_channel) = acp_channels();
+    let cancel = cancel.clone();
+    let bridge_cancel = cancel.clone();
+
+    let auth_manager = std::sync::Arc::new(AuthManager::new(
+        &grok_home(),
+        xai_grok_shell::auth::GrokComConfig::default(),
+    ));
+
+    let thread_handle = thread::Builder::new()
+        .name("pager-external-agent-bridge".into())
+        .spawn(move || -> Result<()> {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&rt, async move {
+                let mut child = tokio::process::Command::new(&bin)
+                    .args(&parts)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::inherit())
+                    .spawn()
+                    .map_err(|e| anyhow::anyhow!("Failed to spawn external agent '{bin}': {e}"))?;
+
+                let child_stdin = child.stdin.take().expect("child stdin piped");
+                let child_stdout = child.stdout.take().expect("child stdout piped");
+
+                let gw_tx = AcpGatewaySender::new(agent_channel.tx).with_tracing(true);
+                let incoming = LineBufferedRead::spawn_local(child_stdout.compat());
+                let (conn, handle_io) = agent_client_protocol::ClientSideConnection::new(
+                    gw_tx,
+                    child_stdin.compat_write(),
+                    incoming,
+                    |fut| {
+                        tokio::task::spawn_local(fut);
+                    },
+                );
+                let gw_rx = AcpGatewayReceiver::new(agent_channel.rx, conn).with_tracing(true);
+
+                let io_task = tokio::task::spawn_local(handle_io);
+                let rx_task = tokio::task::spawn_local(gw_rx.run());
+
+                tokio::select! {
+                    biased;
+                    _ = bridge_cancel.cancelled() => {
+                        let _ = child.kill().await;
+                    }
+                    status = child.wait() => {
+                        tracing::info!("External ACP agent exited: {:?}", status);
+                    }
+                }
+
+                io_task.abort();
+                rx_task.abort();
+                Ok(())
+            })
+        })?;
+
+    Ok(SpawnedAgent {
+        thread_handle,
+        channel: client_channel,
+        cancel,
+        auth_manager,
+    })
+}
+
 /// Spawn an agent in a dedicated thread with direct RPC dispatch.
 ///
 /// The agent runs on a single-threaded tokio LocalSet runtime.

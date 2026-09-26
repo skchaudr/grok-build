@@ -400,6 +400,8 @@ pub struct MaterializeCtx {
     pub chat_mode: bool,
     /// See [`TitleResolution`]; carried from the pre-sandbox pin outcome.
     pub title_resolution: TitleResolution,
+    /// When true, external ACP agent owns sessions (skip grok local registry check).
+    pub has_agent_cmd: bool,
 }
 impl MaterializeCtx {
     /// `--resume` miss bails fast.
@@ -416,6 +418,7 @@ impl MaterializeCtx {
             } else {
                 TitleResolution::Allowed
             },
+            has_agent_cmd: args.agent_cmd.is_some(),
         }
     }
 }
@@ -603,6 +606,14 @@ async fn resolve_existing_session(
     session_id: &str,
     cwd: &str,
 ) -> anyhow::Result<ResolvedExisting> {
+    if ctx.has_agent_cmd {
+        return Ok(ResolvedExisting {
+            id: session_id.to_string(),
+            original_cwd: None,
+            title: None,
+            deferred_local_miss: false,
+        });
+    }
     if let Some(local_id) = xai_grok_shell::session::resolve_local_session(session_id, cwd) {
         tracing::info!(session_id = %session_id, local_id = %local_id, "Session found locally");
         return Ok(ResolvedExisting {
@@ -987,6 +998,7 @@ mod tests {
             allow_remote_restore: true,
             chat_mode: true,
             title_resolution: TitleResolution::Allowed,
+            has_agent_cmd: false,
         }
     }
     #[test]
@@ -1096,6 +1108,7 @@ mod tests {
             allow_remote_restore: false,
             chat_mode: false,
             title_resolution: TitleResolution::Allowed,
+            has_agent_cmd: false,
         };
         let err = materialize_startup_for_cwd(
             ctx,
@@ -1186,6 +1199,7 @@ mod tests {
                 allow_remote_restore: false,
                 chat_mode: false,
                 title_resolution: TitleResolution::Allowed,
+                has_agent_cmd: false,
             }
         }
         async fn resume(arg: &str, cwd: &str) -> anyhow::Result<MaterializedStartup> {
