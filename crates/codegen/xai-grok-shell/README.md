@@ -232,7 +232,9 @@ export GROK_AUTH_TOKEN_TTL=3600               # optional
 
 If your binary outputs a bare token string (not JSON with `expires_in`), set `auth_token_ttl` to the token's expected lifetime in seconds. Without it, Grok cannot detect expiry proactively and will only refresh after a 401.
 
-The command is run via `sh -c`, so it can be a binary path, a shell script, or a pipeline.
+The command runs through the platform shell — `sh -c` on macOS/Linux, `cmd /C` on Windows — so it can be a binary path, a script, or a pipeline.
+
+> **Windows:** write the path as a TOML *literal* string (single quotes) so backslashes survive: `auth_provider_command = 'C:\corp\grok-auth.exe'`. Inside a double-quoted TOML string `\t`, `\n`, `\r`, `\b` and `\f` are escape sequences, so `"C:\temp\auth.exe"` parses into a path containing a tab character and the provider fails to start — after which Grok falls back to browser login as if the setting were ignored.
 
 When `auth_provider_label` is set, the TUI welcome screen shows **"Login with Acme Corp"** instead of "Login with grok.com". In headless mode (`grok -p`), the label has no effect — stderr from your binary is printed directly to the terminal.
 
@@ -266,16 +268,25 @@ echo "{\"access_token\": \"$TOKEN\", \"expires_in\": 3600}"
 
 #### Example: Auth Binary with Refresh Support
 
-When Grok needs to refresh an expired token, it re-runs your binary with `GROK_AUTH_EXPIRED=1` set in the environment. Your binary can use this to take a faster silent-refresh path:
+Grok runs your binary on two different contracts, and `GROK_AUTH_EXPIRED` is how it tells them apart:
+
+| | `GROK_AUTH_EXPIRED=1` | unset |
+|---|---|---|
+| **What it is** | A headless refresh over a credential Grok already holds — near-expiry rotation, or a token the server rejected | A sign-in: `grok login`, the sign-in screen, or the escalation after a headless run couldn't mint |
+| **Is anyone watching?** | No. stdin is closed and nothing renders your prompts | Yes. A user is waiting, and your stderr reaches them |
+| **Budget** | A few seconds (7s), then Grok kills the process | 300s — enough for a browser round trip or a device code |
+| **So your binary should** | Mint silently, or **exit non-zero**. Never block | Do the full SSO flow, and always mint fresh |
 
 ```bash
 #!/bin/sh
 if [ "$GROK_AUTH_EXPIRED" = "1" ]; then
-    # Token expired — attempt silent refresh (no user interaction)
+    # Headless: silent refresh only. If that can't work — the SSO session
+    # lapsed, say — exit non-zero rather than block. Grok then shows the
+    # sign-in screen, which re-runs this binary with the variable unset.
     echo "Refreshing token..." >&2
-    TOKEN=$(my-company-auth --refresh --silent)
+    TOKEN=$(my-company-auth --refresh --silent) || exit 1
 else
-    # First login — full interactive SSO flow
+    # A user is attached — full interactive SSO flow.
     echo "Authenticating via Acme Corp SSO..." >&2
     TOKEN=$(my-company-auth --login --interactive)
 fi
@@ -288,7 +299,11 @@ fi
 echo "{\"access_token\": \"$TOKEN\", \"expires_in\": 3600}"
 ```
 
-`GROK_AUTH_EXPIRED` is optional — if your binary ignores it, Grok still works. It just runs the same flow for both login and refresh.
+Exiting promptly on `GROK_AUTH_EXPIRED=1` is what makes the handover to the sign-in screen fast: a binary that blocks instead pays the whole refresh timeout on every start with an expired token.
+
+One case stays ambiguous, and only in **leader mode** (`--leader`, or `[cli] use_leader = true`; off by default): with no credential at all, the leader makes one extra attempt in the background just after startup, and that run has the variable unset, like a sign-in. A binary that mints without help (service account, keytab, mounted token) succeeds there and the session heals itself. One that must prompt just sits, up to the 300s sign-in ceiling — nothing waits on it, the sign-in screen is already up, and its stderr goes to `~/.grok/leader.log` rather than to the user.
+
+`GROK_AUTH_EXPIRED` is optional — if your binary ignores it, Grok still works. It just runs the same flow for both login and refresh, and a flow that prompts will be killed on the headless run before it can finish.
 
 ### Automatic Credential Refresh
 
@@ -300,6 +315,7 @@ This is transparent — you don't need to do anything. Grok handles it in the ba
 
 - **Before expiry:** If your binary returned `expires_in` in its JSON output, or you set `auth_token_ttl` in config, Grok re-runs the binary ~5 minutes before the token expires, so you never see an auth error.
 - **On auth error:** If the server rejects a request with 401/403 (e.g. token was revoked or expired), Grok re-runs the binary and retries the request once.
+- **When the refresh run can't mint:** refreshes are headless (no stdin, short timeout), so a binary that needs you to complete an SSO flow cannot succeed there. Grok then stops treating the stored credential as usable and runs your binary in its interactive mode instead — at startup that is the same sign-in flow a machine with no credentials gets; mid-session the turn fails with a re-auth prompt and `/login` re-runs the binary.
 - **OIDC:** If you're using OIDC and have a `refresh_token`, Grok silently refreshes via your IdP without re-opening the browser.
 
 **Tuning the refresh buffer:**
@@ -311,7 +327,7 @@ export GROK_AUTH_EARLY_INVALIDATION_SECS=300
 ```
 
 **Keep in mind:**
-- When using `auth_provider_command`, you don't need to run `grok login` before starting — Grok runs your binary automatically on first launch. You _can_ run `grok login` to explicitly hydrate `auth.json` ahead of time if you prefer.
+- When using `auth_provider_command`, you don't need to run `grok login` before starting — on first launch Grok runs your binary on the real terminal (URL and progress on stderr), then opens the UI already signed in. You _can_ run `grok login` to explicitly hydrate `auth.json` ahead of time if you prefer. Mid-session `/login` still uses the in-TUI copy-link overlay.
 - If both OIDC and `auth_provider_command` are configured: at **login** time, Grok tries OIDC silent refresh first (if a `refresh_token` exists), then the external binary, then browser-based login. During a **session**, whichever method is configured is used exclusively — if `auth_provider_command` is set it handles all mid-session refreshes; otherwise OIDC silent refresh is used.
 - Your binary's stderr output is displayed to the user but interactive stdin is not supported. This works well for browser-based SSO flows where the binary displays a URL and you complete authentication in the browser.
 
@@ -328,10 +344,11 @@ Common log messages:
 
 | Log message | What it means |
 |-------------|---------------|
-| `auth: running external auth provider` | Your binary is being called (includes the command and whether it's a refresh) |
+| `auth: running external auth provider (headless refresh)` | Your binary is being called with `GROK_AUTH_EXPIRED=1` and a few seconds to work |
+| `auth: running external auth provider (interactive login)` | Your binary is being called on the sign-in contract: no `GROK_AUTH_EXPIRED`, stderr shown, 300s |
 | `auth: external auth provider returned fresh token` | Success — token was parsed and stored |
 | `auth: external auth provider failed` | Binary exited non-zero, or exited 0 but stdout was empty/unparseable (the `error` field has details) |
-| `auth: external auth provider timed out (likely needs interactive auth), killing` | Binary didn't exit before the timeout (60s initial, 5s mid-session refresh) and was killed |
+| `auth: external auth provider timed out (likely needs interactive auth), killing` | Binary didn't exit before the 7s headless-refresh timeout and was killed. Exiting non-zero on `GROK_AUTH_EXPIRED=1` avoids this wait entirely |
 | `auth: failed to start external auth provider` | The command couldn't be spawned (e.g. binary not found) |
 
 ### Per-Model Auth Providers
@@ -430,11 +447,9 @@ grok [OPTIONS]
 | `--sandbox <PROFILE>`      | OS-level filesystem/network guardrails (see [Sandbox](#sandbox))       |
 | `--light`                  | Use light theme (macOS Basic) instead of dark                          |
 | `--single-turn`            | Exit after first response (requires `--prompt`)                        |
-| `--no-memory`              | Force-disable cross-session memory (overrides all other settings)      |
 | `--subagents`              | Enable subagent/task tool support (see [Subagents](#subagents))        |
 | `--disable-web-search`     | Remove web search tool from the agent toolset                          |
 | `--agent-profile <PATH>`   | Load a custom agent definition file (see [Agent Profiles](#agent-profiles)) |
-| `--experimental-memory`    | Enable cross-session memory persistence (see [Memory](#memory))        |
 | `--allow <RULE>`           | Permission allow rule with glob patterns (repeatable). See [Permission Rules](#permission-rules-allow--deny). |
 | `--deny <RULE>`            | Permission deny rule with glob patterns (repeatable). See [Permission Rules](#permission-rules-allow--deny). |
 
@@ -481,10 +496,10 @@ Type `/` in the input to access commands:
 | `/new`                             |           | Start a new session (clears context)                     |
 | `/load [workspace] [session]`      | `/resume` | Load a previous session                                  |
 | `/rewind <prompt>`                 |           | Rewind to a previous prompt (restores files)             |
-| `/compact [context]`               |           | Compact conversation history                             |
+| `/compact`                         |           | Compact conversation history                             |
 | `/always-approve [on\|off]`        | `/yolo`   | Toggle auto-approve mode                                 |
 | `/multiline`                       | `/ml`     | Toggle multiline input mode                              |
-| `/memory [workspace\|global] <text>` |         | Append text to a memory file (requires `--experimental-memory`) |
+| `/memory [workspace\|global] <text>` |         | Append text to a memory file (requires memory enabled) |
 | `/flush`                           |           | Save current session knowledge to memory now             |
 | `/skills [name]`                   |           | List skills or inject a skill into context               |
 | `/plugins [list\|reload\|trust]`   | `/plugin` | Manage plugins (list, reload, trust)                     |
@@ -1321,8 +1336,8 @@ Each feature section below documents its own config. This section covers the gen
 auto_update = true                     # check for updates on launch
 
 [models]
-default = "grok-4.5"                   # model used for new sessions
-web_search = "grok-4.5"                # model used by the web_search tool
+default = "grok-4.6"                   # model used for new sessions
+web_search = "grok-4.6"                # model used by the web_search tool
 
 [ui]
 max_thoughts_width = 120               # max column width for reasoning display
@@ -1348,12 +1363,6 @@ output_byte_limit = 65536              # max output size (64KB)
 [toolset.web_fetch]
 proxy_endpoint = "https://proxy.example.com"   # egress proxy URL (all requests routed through it)
 allowed_domains = ["docs.rs", "x.ai"]           # override the built-in ~84-domain allowlist
-
-[shortcuts]
-send = ["Enter"]
-newline = ["Shift+Enter", "Alt+Enter"]
-quit = ["Ctrl+D", "Ctrl+Q"]
-confirm_quit = true
 ```
 
 ### Telemetry
@@ -1446,10 +1455,45 @@ If LSP tools are enabled but no usable server config is found, Grok emits a non-
 | `initializationOptions` | JSON passed during LSP initialize. |
 | `settings` | Configuration sent via workspace settings updates. |
 | `workspaceFolder` | Override workspace folder path sent to the server. |
+| `workspaceOpen` | Solution or projects to load, for servers that need to be told explicitly (see below). |
 | `startupTimeout` | Max startup wait in milliseconds before startup is considered failed. |
 | `shutdownTimeout` | Max graceful shutdown wait in milliseconds. |
 | `restartOnCrash` | Whether to restart the server after a crash. |
 | `maxRestarts` | Maximum restart attempts before giving up. |
+
+#### Telling a server which solution to load (`workspaceOpen`)
+
+Most servers work out what to analyze from the workspace folder. A few do not,
+and instead load their workspace through a protocol extension. The C# server
+(`Microsoft.CodeAnalysis.LanguageServer`, "Roslyn") is the notable one: on its
+own it treats every file as a loose "miscellaneous file" and reports no
+project-level diagnostics at all, until it is told to open a solution or a set
+of projects.
+
+```json
+{
+  "csharp": {
+    "command": "dotnet",
+    "args": [
+      "/path/to/Microsoft.CodeAnalysis.LanguageServer.dll",
+      "--stdio",
+      "--logLevel", "Warning",
+      "--extensionLogDirectory", "/tmp/roslyn-logs"
+    ],
+    "extensionToLanguage": { ".cs": "csharp" },
+    "workspaceOpen": { "solution": "MyApp.sln" },
+    "startupTimeout": 60000
+  }
+}
+```
+
+Use `"projects": ["src/App/App.csproj", "src/Lib/Lib.csproj"]` instead of
+`"solution"` when there is no solution file. Paths may be absolute or relative
+to the workspace root. Wrappers such as `roslyn-language-server` already send
+these notifications themselves, in which case `workspaceOpen` can be omitted.
+
+Note that `--logLevel` is required by that server, and that anything more
+verbose than `Warning` makes it stream every internal log line to the client.
 
 #### Installing language servers
 
@@ -1749,9 +1793,31 @@ never removes or replaces another layer's block. Each hook's `/hooks-list` name 
 prefixed with the layer it came from (for example `managed:` or
 `requirements/user:`).
 
-Config-layer hooks are convenience distribution, not an enforcement boundary: on
-an unmanaged device a user can still edit these files. Tamper-resistant,
-admin-enforced hooks are tracked separately.
+Hooks from two kinds of layer are enforced: they cannot be disabled from the
+hooks modal, the enable/disable APIs, or the `disabled-hooks` file, and a
+byte-identical copy in a lower layer cannot take over their provenance.
+
+- The **root-owned** system layers (`/etc/grok/requirements.toml`,
+  `/etc/grok/managed_config.toml`). Enforcement relies on OS file ownership, so
+  deploy these files root-owned (or via MDM).
+- The **signed** `$GROK_HOME/requirements.toml` the deployment sync writes.
+  Its hooks are enforced while the file's bytes match the server-signed
+  envelope (`requirements/signed:` names); an edited copy, or one whose
+  signature file is missing or unreadable, is the user's own file again
+  (`requirements/user:` names, disableable); an unreadable `requirements.toml`
+  contributes no hooks. Pair the policy with `fail_closed = true`, which
+  refuses the session on an edited copy or a missing signature (an unreadable
+  file is a read error, not tampering, and still starts).
+
+Hooks in the other `$GROK_HOME` layers (`managed_config.toml`, `config.toml`)
+remain convenience distribution, not an enforcement boundary: the user owns
+that directory and can edit or repoint it.
+
+`allow_managed_hooks_only = true` (also `allowManagedHooksOnly`) in any policy
+layer is a tighten-only pin that skips every hook that is not managed policy:
+user, project, plugin, agent-frontmatter, and vendor-compat hooks are left out of
+dispatch and show `[disabled]` in the modal, and enabling them is refused.
+ACP client-registered hooks are unaffected. A non-boolean value engages the pin.
 
 ---
 
@@ -1780,7 +1846,7 @@ context_window = 256000               # Total context window in tokens (for auto
 
 **Credential resolution order:** `api_key` → `env_key` → cached `auth_provider` token (terminal: a cache miss resolves to no credential, never the session token) → session token → `XAI_API_KEY`. See [Per-Model Auth Providers](#per-model-auth-providers).
 
-The `context_window` parameter is used to calculate when auto-compact should trigger. If not specified, Grok falls back to built-in defaults for known models.
+The `context_window` parameter is used to calculate when auto-compact should trigger. If not specified, Grok falls back to built-in defaults for known models. To offer a choice of windows, set `context_windows = [256000, 500000]`. `context_window` stays the default (the first listed window when unset), and older clients ignore the list.
 
 ### Overriding Built-in Models
 
@@ -1915,9 +1981,9 @@ models_base_url = "https://api.acme.com/v1"
 api_key = "my-api-key"
 ```
 
-When using `[endpoints]` with partial model overrides, the `base_url` is inherited from the endpoints config — you don't need to specify it in each `[model.*]` section.
+Each `[model.*]` section inherits `base_url` from the `[endpoints]` config. `XAI_API_KEY` is still required. A per-model `api_key`/`env_key` authenticates that model's inference requests. The startup model-list fetch still uses `XAI_API_KEY`.
 
-**Auth behavior:** When `models_base_url` is set, Grok uses API key auth (`Authorization: Bearer`) instead of session auth. `grok login` is not required — only the API key.
+**Auth behavior:** When `models_base_url` is set, Grok authenticates the model-list request with `XAI_API_KEY` (`Authorization: Bearer`). That request never uses your `grok login` session. With an external auth provider (`auth_provider_command`) and no `XAI_API_KEY`, it sends the provider's token instead. Otherwise, if `XAI_API_KEY` is unset, the fetch fails with an error asking you to set it. Inference requests to the custom host authenticate with each model's `api_key`/`env_key`.
 
 ---
 
@@ -1972,7 +2038,7 @@ args = ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]
 
 If you also have a `linear` server in `~/.grok/config.toml`, the project version replaces it entirely.
 
-> **Note:** Only `[mcp_servers]` is supported in project-scoped `.grok/config.toml`. Other config sections (models, shortcuts, etc.) are only read from `~/.grok/config.toml`.
+> **Note:** Only `[mcp_servers]` is supported in project-scoped `.grok/config.toml`. Other config sections (models, etc.) are only read from `~/.grok/config.toml`.
 
 ### Tool Naming
 
@@ -2040,7 +2106,7 @@ See the [MCP Server Registry](https://github.com/modelcontextprotocol/servers) f
 
 ## Memory
 
-> **Experimental:** requires `--experimental-memory` (or `GROK_MEMORY=1` / `[memory] enabled = true` in config).
+> **Experimental:** enable with `GROK_MEMORY=1`, `[memory] enabled = true`, or managed remote settings.
 
 Cross-session memory lets Grok remember facts, decisions, code patterns, and debugging workflows across separate sessions in the same project.
 
@@ -2058,9 +2124,6 @@ An SQLite index enables fast hybrid search (FTS5 keyword + optional vector KNN) 
 ### Enabling memory
 
 ```bash
-# Per-session flag
-grok --experimental-memory
-
 # Environment variable (persists for the shell session)
 export GROK_MEMORY=1
 grok
@@ -2201,7 +2264,8 @@ restrict_network = true
 # Paths the agent can read but NOT write/delete
 read_only = ["/data"]
 
-# Additional writable paths
+# Additional writable paths (literal directory grants — no globs;
+# trailing /** is treated as the parent directory)
 read_write = ["/tmp/scratch"]
 
 # Paths denied entirely
@@ -2311,7 +2375,7 @@ Grok includes these tools by default:
 | `task`           | Launch subagent sessions (requires `--subagents`)              |
 | `kill_task`      | Terminate a running background task or subagent                |
 | `get_task_output` | Get output and status from a background task or subagent      |
-| `memory_search`  | Search cross-session memory (requires `--experimental-memory`) |
+| `memory_search`  | Search cross-session memory (requires memory enabled) |
 | `memory_get`     | Read a memory file by path                                     |
 | `search_tool`    | Discover available integration tools (MCP)                     |
 | `use_tool`       | Call an integration tool discovered via `search_tool`           |
@@ -2565,7 +2629,7 @@ The `--debug` firehose uses a fixed filter (first-party crates at `debug`) and i
 
 ```bash
 # Debug auth, info for everything else
-GROK_LOG_FILE=/tmp/grok-debug.log RUST_LOG="info,xai_grok_shell::auth=debug" grok
+GROK_LOG_FILE=/tmp/grok-debug.log RUST_LOG="info,xai_grok_login=debug" grok
 ```
 
 ### Authentication fails

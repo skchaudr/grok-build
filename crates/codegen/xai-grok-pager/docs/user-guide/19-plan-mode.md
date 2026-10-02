@@ -82,6 +82,8 @@ Scroll the plan with the arrow keys or `j`/`k`. The action bar shows these short
 
 Press `Tab` to move focus between the plan preview and the prompt.
 
+While the plan approval view is open, `Ctrl+P` (command palette → model) still works for switching model before you press `a` to approve.
+
 ### Providing Feedback
 
 The approval view has three focus states:
@@ -90,7 +92,7 @@ The approval view has three focus states:
 - **Commenting**: Add an inline comment to the selected line range (press `c`, or `Enter` on a line).
 - **Prompt**: Type freeform revision notes.
 
-Press `Tab` to switch between the preview and the prompt. When you send feedback -- inline comments, freeform notes, or both -- the agent receives it and revises the plan. Plan mode stays active so you can iterate.
+Press `Tab` to switch between the preview and the prompt. When you send feedback -- inline comments, freeform notes, or both -- the agent receives it and revises the plan. Plan mode stays active so you can iterate. A complete pager command typed in the prompt (for example `/feedback <text>` or `/compact`) runs as a command instead of being sent as notes; the review stays open. Pressing `a` while such a command sits in the prompt is refused until you run it with Enter or delete it.
 
 ### Leaving the Approval View
 

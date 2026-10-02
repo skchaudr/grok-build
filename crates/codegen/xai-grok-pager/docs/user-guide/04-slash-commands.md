@@ -2,9 +2,9 @@
 
 Type `/` in the prompt to open the command menu. It fuzzy-matches as you type, and picking a command runs it immediately.
 
-Commands come from two places: **shell builtins**, handled by the agent backend (xai-grok-shell), and **pager builtins**, handled by the TUI frontend (xai-grok-pager). Both show up in the same menu, and any enabled skill with `user-invocable: true` appears there too.
+Commands come from two places: **shell builtins**, handled by the agent backend (xai-grok-shell), and **pager builtins**, handled by the pager frontend (xai-grok-pager). Both show up in the same menu, and any enabled skill with `user-invocable: true` appears there too. If a skill reuses a built-in name such as `login`, the built-in keeps `/login` and the skill stays available as `/plugin-name:login` — the menu badges both so the collision is visible.
 
-Every command below lists its aliases where it has them. A few commands only appear when a feature or session state enables them; those cases are called out inline.
+Every command below lists its aliases where it has them. A few commands only appear when a feature or session state enables them; those cases are called out inline. The menu is also filtered by render mode — see [`/minimal` and `/fullscreen`](#minimal-and-fullscreen).
 
 ---
 
@@ -18,46 +18,38 @@ Start a fresh session and clear the current conversation. Alias: `/clear`.
 
 Open the session picker to reload a previous session from disk.
 
-### `/compact [context]`
+### `/dashboard`
 
-Compress conversation history to reclaim context-window space. Pass a note to tell Grok what to keep:
+Open the [Agent Dashboard](23-dashboard.md): live roster of top-level sessions in this pager (peek, reply, dispatch, pin, rename, stop, attach). Aliases: `/agents-dashboard`, `/sessions`.
 
-```
-/compact
-/compact keep the auth implementation details
-```
+Not `/config-agents` (alias `/agents`), which manages agent *definitions* and personas. Hidden in minimal mode; disable with `GROK_AGENT_DASHBOARD=0` or `[dashboard].enabled = false`.
+
+### `/compact`
+
+Compress conversation history to reclaim context-window space.
 
 Grok also auto-compacts once the context window hits 85% (tune it with `[session] auto_compact_threshold_percent`).
 
 ### `/context`
 
-Show how the context window is being used: a category breakdown (system prompt, messages, reasoning and overhead, free space) plus informational rows for tool definitions, the skills listing, and MCP server announcements with their estimated token cost.
+Show the context window split into System prompt, Messages, Reasoning/overhead, and Free.
+Rows for Tool definitions, Skills, and MCP servers are already counted in those totals.
 
 ### `/session-info`
 
-Show session details — auth method, model, turn count, and context usage. Aliases: `/status`, `/info`.
+Show session details — auth method, model, turn count, and context usage. Aliases: `/status`, `/info`. Click a value or drag to select and copy; `c` copies the session ID and `y` copies the whole block.
 
 ### `/fork`
 
 Branch the current session into a new agent, keeping history up to this point.
 
-### `/rewind`
+### `/rewind` (alias: `/undo`)
 
-Roll the conversation back to an earlier turn and discard everything after it.
-
-### `/edit-prompt`
-
-In minimal mode, open an external editor for an empty composer. Grok resolves `$VISUAL`, then `$EDITOR`, then `vi`; command values may include quoted arguments. Saving replaces the draft without sending it, and saving an empty file clears it. The command is hidden outside minimal mode.
-
-```
-/edit-prompt
-```
-
-To edit an **existing** draft when a terminal or multiplexer reserves `Ctrl+G`, open the command palette and select **Edit Prompt in External Editor**. That direct route preserves the existing text and refuses pasted, file-reference, or image chips without flattening them. Typing `/edit-prompt` into the composer necessarily replaces that input, so it starts from an empty draft.
+Roll the conversation back to an earlier turn and discard everything after it. `/undo` is the same command.
 
 ### `/copy`
 
-Copy the most recent response to the clipboard. Pass a number to copy the Nth-latest response instead, or a file path to write the text to a file rather than the clipboard (handy over SSH, where the local clipboard is often unreachable).
+Copy the most recent response's source markdown to the clipboard. Pass a number to copy the Nth-latest response instead, or a file path to write the text to a file rather than the clipboard (handy over SSH, where the local clipboard is often unreachable).
 
 ```
 /copy
@@ -80,13 +72,22 @@ Quit the application. Alias: `/exit`.
 
 Leave the current session and return to the welcome screen. Alias: `/welcome`.
 
+### `/delete`
+
+Delete the current session's history. Confirms first. Stops any running turn, background tasks, and subagents before wiping history. Returns to the welcome screen, or to the dashboard when you opened the session from the dashboard.
+
+To delete a session you are not in, open `/resume` or the welcome session list and press `d` then `y`. On the dashboard, press `Ctrl+X` twice or click `[✗]`.
+
 ### `/rename`
 
 Rename the current session. Alias: `/title`.
 
 ```
 /rename new session title
+/rename --auto
 ```
+
+`--auto` unpins a manual title and lets auto-titling resume. It applies to Build sessions only — chat conversations have no local auto-titler. It must be the only argument (`/rename --auto Something` is an error). A session cannot be named `--auto` via this command; use the dashboard rename editor (`Ctrl+R`) for that pathological case.
 
 ---
 
@@ -94,12 +95,13 @@ Rename the current session. Alias: `/title`.
 
 ### `/model <name>`
 
-Switch models. Accepts a model ID or display name (case-insensitive), and for reasoning models you can add an effort level as a second argument. Alias: `/m`.
+Switch models. Accepts a model ID or display name (case-insensitive). When the model offers more than one context window, you can add a window size next. For reasoning models you can add an effort level last. The picker asks in the same order: model, then window, then effort. Alias: `/m`.
 
 ```
-/model grok-build
-/model Grok Build
+/model grok-4.6
+/model Grok 4.6
 /model Reasoning X high
+/model Reasoning X 500k high
 ```
 
 ### `/effort <level>`
@@ -110,6 +112,15 @@ Set reasoning effort on the **current** model without reselecting it. Levels are
 /effort high
 ```
 
+### `/context-window <size>`
+
+Set the context window for the current model. The command is listed only when the model supports more than one size. It accepts the short label or the raw token count. The choice lasts for the session. It carries over to a new model that supports the same size. A size smaller than the current usage starts an auto-compact.
+
+```
+/context-window 500k
+/context-window 256000
+```
+
 ### `/always-approve` and `/auto`
 
 Both are real toggles for the permission mode: they stay in the menu, and running the mode you're already in turns it back off.
@@ -117,19 +128,19 @@ Both are real toggles for the permission mode: they stay in the menu, and runnin
 | Command | When off | When already on |
 |---|---|---|
 | `/always-approve` | Skip all permission prompts | Back to ask |
-| `/auto` | Classifier approves safe tools (dangerous ones may still prompt) | Back to ask |
+| `/auto` | Auto-review: a classifier approves safe tools (dangerous ones may still prompt) | Back to ask |
 
-Running one while the other is active switches modes — for example, `/auto` while always-approve is on switches to auto. `/auto` only appears when the auto permission-mode feature is enabled. You can also change mode with `Shift+Tab` (cycles Normal / Plan / Always-approve), `Ctrl+O`, or `/settings`.
+Running one while the other is active switches modes — for example, `/auto` while always-approve is on switches to Auto-review. `/auto` only appears when the Auto-review permission-mode feature is enabled. You can also change mode with `Shift+Tab` (cycles Normal / Plan / Auto-review (when enabled) / Always-approve), `Ctrl+O`, or `/settings`.
 
 ### `/multiline`
 
-Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`.
+Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`. With multiline off, the composer footer shows the newline chord once the draft is non-empty.
 
 ### `/history`
 
 Open prompt-history search: fuzzy-search this session's prompts newest-first, then press `Enter` or `Tab` to drop a match back into the prompt.
 
-For quick recall, press `↑` on an empty prompt instead. The panel opens with your most recent prompt already filled in; `↑`/`↓` step through entries (each lands in the input), `↓` past the newest entry closes the panel, and typing edits the recalled prompt in place.
+For quick recall, press `↑` on an empty prompt instead. With prompts queued, that moves focus into the queue pane, highlighting the last row; otherwise the panel opens with your most recent prompt already filled in, and `↑`/`↓` step through entries (each lands in the input), `↓` past the newest entry closes the panel, and typing edits the recalled prompt in place.
 
 ### `/compact-mode`
 
@@ -139,9 +150,19 @@ Toggle compact display — less padding and tighter spacing for denser output.
 
 Toggle vim-style scrollback keys (`j`/`k`, `h`/`l`, `g`/`G`, `y`/`Y`, and so on). With it off (the default), a bare letter or `Shift+letter` in the scrollback just focuses the prompt and types the character. The setting persists to `[ui] vim_mode`.
 
+### `/edit-prompt`
+
+Open an external editor for the prompt, in either render mode. Grok resolves `$VISUAL`, then `$EDITOR`, then `vi`; command values may include quoted arguments. Saving replaces the draft without sending it, and saving an empty file clears it. Typing `/edit-prompt` necessarily replaces the composer's contents, so the editor starts from an empty draft; to edit an **existing** draft, choose **Edit Prompt in External Editor** from the command palette (or press `Ctrl+G` in minimal mode), which preserves the text and refuses pasted, file-reference, or image chips without flattening them.
+
+```
+/edit-prompt
+```
+
 ### `/minimal` and `/fullscreen`
 
-Reopen the current session in the other render mode. `/minimal` (offered while you're in fullscreen) switches to the experimental scrollback-native mode; `/fullscreen` (offered while you're in minimal; alias `/full`) switches back to the standard alt-screen TUI. Both relaunch the pager on the same conversation for this session only — they don't touch `config.toml`, and the relaunch banner reminds you how to switch back. The `--minimal` / `--fullscreen` CLI flags are session-scoped the same way. To make plain `grok` open in a given mode by default, use `/settings` → **Default screen mode** or set `[ui] screen_mode`.
+Switch the current session to the other render mode, in place. `/minimal` (offered while you're in fullscreen) switches to the experimental scrollback-native mode; `/fullscreen` (offered while you're in minimal; alias `/full`) switches back to standard fullscreen mode. The switch happens inside the running process — nothing restarts, so a running turn keeps streaming and your composer draft, queued prompts, and permission mode all carry over; a marker (committed line in minimal, toast in fullscreen) reminds you how to switch back. Both are session-scoped — they don't touch `config.toml` — and the `--minimal` / `--fullscreen` CLI flags are session-scoped the same way. To make plain `grok` open in a given mode by default, use `/settings` → **Default screen mode** or set `[ui] screen_mode`. (If the in-place transition misbehaves in an exotic terminal, `GROK_SCREEN_MODE_SWITCH=exec` restores the old behavior of relaunching the pager onto the same session.)
+
+A handful of commands only work in one of the two modes, because the surface they drive doesn't exist in the other: `/find`, `/jump`, `/timeline`, `/theme`, `/tutorial`, and `/dashboard` are fullscreen-only, while `/expand` is minimal-only. (`/workflow runs` is different: it opens the run pane in fullscreen and degrades to a text overview in minimal rather than refusing.) Those are hidden from the command menu and the palette in the mode they can't run in. If you type one out anyway, Grok says why — and points you at whichever is actually useful. When the other mode is the only way to get it, that's the mode switch: `/theme isn't available in minimal mode (minimal renders with your terminal's own palette). Run /fullscreen to switch this session.` When this mode already does the job another way, it names that instead: `/expand isn't available in fullscreen mode: press Tab to focus the scrollback, then → on the block.` Everything else works in both. Note that `--no-alt-screen` still counts as fullscreen here, so it keeps the fullscreen-only commands.
 
 ### `/plan`
 
@@ -159,24 +180,28 @@ Open a preview of the current saved plan. Aliases: `/show-plan`, `/plan-view`.
 
 ## Memory
 
-`/flush`, `/dream`, and `/memory` require memory to be enabled (`--experimental-memory` or `GROK_MEMORY=1`); `/memory` also needs a configured memory backend. `/remember` is always available.
+`/flush` and `/dream` require memory enabled through `GROK_MEMORY=1`, `[memory] enabled = true`, or managed remote settings. `/memory` is available whenever a memory store is configured for the session, including when `[memory] enabled = false` turned memory off, so you can browse saved notes and turn memory on for the session from inside the modal. It is hidden only when no memory store is configured, or when `--no-memory` / `GROK_MEMORY=0` turned memory off for the whole process. `/remember` is always available.
 
 ### `/memory`
 
-Browse, view, and manage saved memories. Pass `on` or `off` to enable or disable memory. Alias: `/mem`.
+Browse, view, and manage saved memories. Alias: `/mem`. Inside the modal, `t`
+turns memory on or off for the session, `x` deletes the selected note, and `s`
+shows content-free queue, lease, retention, and pinned-rollout diagnostics.
+The `t` toggle is session-scoped: it does not edit `config.toml`, and new
+sessions follow the config again. It cannot override `--no-memory` or
+`GROK_MEMORY=0`.
 
 ```
 /memory
-/memory off
 ```
 
 ### `/flush`
 
-Save the current session's knowledge to memory right now, triggering an LLM summary of the most important content. Reach for it before compaction, or any time you want to lock in context.
+Save the current session's knowledge to memory right now, triggering an LLM summary of the most important content. Reach for it before compaction, or any time you want to lock in context. The status line shows "Flushing memory…" while it runs, and a scrollback line reports the outcome (for example "Memory flushed through turn 12").
 
 ### `/dream`
 
-Run memory consolidation — merge session logs into organized topics.
+Run memory consolidation — merge session logs into organized topics. The status line shows "Consolidating memory…" while it runs, and a scrollback line reports what happened: how many observations were merged into how many topics, that there was nothing to consolidate, or that another session is already consolidating.
 
 ### `/remember`
 
@@ -190,19 +215,19 @@ Save a note to memory immediately, without waiting for an automatic summary.
 
 ## Hooks and Plugins
 
-`/hooks`, `/plugins`, `/marketplace`, and `/skills` all open the same extensions modal, each on its own tab.
+`/hooks`, `/plugins`, `/marketplace`, `/skills`, and `/workflows` all open the same extensions modal, each on its own tab.
 
 ### `/hooks`
 
 Open the extensions modal on the Hooks tab, where you can view loaded hooks, add or remove custom ones, and toggle them individually. The modal does not grant project trust — see [10-hooks.md](10-hooks.md) for the trust model.
 
-The shell also advertises individual `/hooks-list`, `/hooks-trust`, `/hooks-add`, `/hooks-remove`, and `/hooks-untrust` commands; in the TUI pager these are folded into the `/hooks` modal.
+The shell also advertises individual `/hooks-list`, `/hooks-trust`, `/hooks-add`, `/hooks-remove`, and `/hooks-untrust` commands; in the pager these are folded into the `/hooks` modal.
 
 ### `/plugins`
 
 Open the extensions modal on the Plugins tab to view installed plugins, install new ones from the marketplace, and manage trust.
 
-The shell additionally supports subcommands (`/plugins list`, `/plugins install <source>`, `/plugins uninstall <name>`, `/plugins update`, `/plugins reload`). In the TUI, the modal does the same work visually.
+The shell additionally supports subcommands (`/plugins list`, `/plugins install <source>`, `/plugins uninstall <name>`, `/plugins update`, `/plugins reload`). In the pager, the modal does the same work visually.
 
 ### `/marketplace`
 
@@ -273,21 +298,27 @@ Kick off a background research workflow. It plans a bounded set of questions, ga
 /deep-research Compare the migration risks of PostgreSQL 17 and MySQL 9
 ```
 
-The command returns right away — follow progress in `/workflows`, and the final report appears in the conversation on its own.
+The command returns right away — follow progress in `/workflow runs`, and the final report appears in the conversation on its own.
 
-Model-launched workflows may set `agent_budget` on the `workflow` tool. It's an absolute cumulative cap on logical child-agent calls: every `agent()` call and every item in a `parallel()` panel spends one slot, while schema-correction retries don't. The default is 128, explicit values run 1–1,024, and a panel that would cross the remaining budget is rejected before any of its children launch. `budget()` reports the cap as `total`, admitted calls as `spent`, `reserved` (always zero), and `remaining`. Named slash launches use the default budget.
+Workflows use an absolute cumulative `agent_budget` cap on logical child-agent calls: every `agent()` call and every item in a `parallel()` panel spends one slot, while schema-correction retries don't. The default is 128, explicit values run 1–1,024, and a panel that would cross the remaining budget is rejected before any of its children launch. Model-launched workflows set `agent_budget` on the `workflow` tool; named slash launches accept `--agent-budget N` or an `agent_budget` field in their JSON args. Named launches can also set child reasoning effort with `--effort LEVEL` or JSON `effort`, without changing the current session's `/effort`; a child script's own `effort` option takes precedence. Separately, a host-configured cap (32 by default) bounds how many children run at a time per run; larger panels queue and still act as a barrier. `budget()` reports the cap as `total`, admitted calls as `spent`, `reserved` (always zero), and `remaining`.
 
 ### `/workflow`
 
-Launch a saved workflow, or manage a running one by the session-unique display name shown in `/workflows`. Launch the same workflow twice and the display names are numbered (`review-changes`, `review-changes-2`); you never need the internal run IDs.
+Launch a saved workflow, or manage a running one by its session-unique display name. Launch the same workflow twice and the display names are numbered (`review-changes`, `review-changes-2`); you never need the internal run IDs. Bare `/workflow` prints a text overview of this session's runs.
+
+Type `/workflow` and a space to autocomplete saved workflow names (built-in, project, and user) plus the manage verbs `runs`, `pause`, `resume`, `stop`, and `save`. Picking a name fills it in and offers launch flags before you add args; it does not launch until you press Enter. `pause` / `resume` / `stop` / `save` then list this session's run handles — a bare `/workflow stop` does not pick a run.
 
 ```
-/workflow review-changes {"target":"origin/main...HEAD"}
+/workflow review-changes --agent-budget 256 --effort high {"target":"origin/main...HEAD"}
+/workflow review-changes {"target":"origin/main...HEAD","agent_budget":256,"effort":"high"}
+/workflow runs
 /workflow pause review-changes
 /workflow resume review-changes
 /workflow stop review-changes-2
 /workflow save review-changes
 ```
+
+`/workflow runs` opens the live **Workflow Runs** dashboard in the fullscreen TUI — active and retained runs, not a catalog of saved definitions. Each row shows the run's display name, phase, agent roster, progress, and result. Inside a run's detail view, `p` pauses, `r` resumes an ordinary pause, and `x` stops. Budget-limited runs can't bare-resume: `r` returns the shell's rejection (raise the cap with a model/tool resume that passes a higher `agent_budget`), while `x` still stops. `s` saves the run's script, but it's hidden for known built-ins and numbered duplicate handles — for those, choose a new unique `meta.name` and save the edited script explicitly. In minimal mode and non-TUI clients, `/workflow runs` prints the same text overview as bare `/workflow`.
 
 Project workflows live in `.grok/workflows/*.rhai`; user workflows live in `~/.grok/workflows/*.rhai`. A same-process pause/resume continues the original immutable script, args, and `agent_budget` cap from committed host-call results — to iterate, edit the returned script copy and launch it as a new run.
 
@@ -295,7 +326,7 @@ A budget-limited run is different: it only resumes through a model/tool resume r
 
 ### `/workflows`
 
-Open the live workflows **run** dashboard — active and retained runs, not a catalog of saved definitions. Each row shows the run's display name, phase, agent roster, progress, and result. Inside a run's detail view, `p` pauses, `r` resumes an ordinary pause, and `x` stops. Budget-limited runs can't bare-resume: `r` returns the shell's rejection (raise the cap with a model/tool resume that passes a higher `agent_budget`), while `x` still stops. `s` saves the run's script, but it's hidden for known built-ins and numbered duplicate handles — for those, choose a new unique `meta.name` and save the edited script explicitly.
+Open the extensions modal on the **Workflows** tab — a browse-only catalog of the saved workflows Grok discovered (built-ins, project `.grok/workflows/`, and user `~/.grok/workflows/`), with each entry's source, description, and path. The same catalog is listed for the model under the skill listing in the session preamble. Launch one with `/workflow <name>` (or its own slash command), then watch it in `/workflow runs`.
 
 ---
 
@@ -303,13 +334,14 @@ Open the live workflows **run** dashboard — active and retained runs, not a ca
 
 ### `/theme`
 
-Switch the TUI color theme. Alias: `/t`.
+Switch the color theme. Alias: `/t`.
 
 ### `/feedback [message]`
 
-Report an issue or send feedback.
+Report an issue or send feedback. Bare `/feedback` opens the feedback form in every mode, including `--minimal`. Its **Write** tab is a report box: `Enter` sends, `Esc` closes. Its **Drafts** tab (`Ctrl+Tab` switches) holds reports saved for later — failed sends and feedback the agent drafted for you — and `Enter` loads one into Write so you can review, pick a type, and send it. `/feedback <message>` sends the message immediately, in any mode; if the send fails, the message is saved to Drafts.
 
 ```
+/feedback
 /feedback Something isn't working correctly
 ```
 
@@ -317,8 +349,11 @@ Report an issue or send feedback.
 
 Send an aside to the agent without interrupting the current task. In minimal mode (`--minimal`), the answer shows up in a dismissible panel above the prompt: `Esc` dismisses it, a finished answer is saved into native scrollback, and a late reply to an already-dismissed panel is dropped. The side question and its answer aren't part of the main turn.
 
+`/btw` can also appear mid-message: the whole message (minus the token) becomes the side question and nothing goes to the main turn. Only `/btw` works this way; other commands must start the message. For a multi-line side question, use `Alt+Enter` (over SSH) or `Shift+Enter`, a trailing `\`, or `/ml`. Do not rely on `Cmd+Enter`: Apple Terminal inserts a newline locally via CoreGraphics; a delivered `SUPER+Enter` (Kitty) also inserts a newline rather than sending; over SSH Cmd never arrives and the chord sends.
+
 ```
 /btw also check the error handling
+fix the retry loop first. /btw what does WBC stand for?
 ```
 
 ### `/mcps`
@@ -335,7 +370,7 @@ View release notes for the current version. Alias: `/changelog`.
 
 ### `/docs`
 
-Browse the in-TUI How-to Guides, open the online Build docs, or jump straight to a guide by title. Aliases: `/howto`, `/guides`.
+Browse the built-in How-to Guides, open the online Build docs, or jump straight to a guide by title. Aliases: `/howto`, `/guides`.
 
 ```
 /docs
@@ -369,6 +404,8 @@ Open the Claude import modal to bring over `~/.claude` settings: permissions, en
 
 Open the agents modal to view and manage agent definitions, set the default, and switch the active one. Alias: `/agents`.
 
+Not the live multi-session [Agent Dashboard](23-dashboard.md) (`/dashboard` / `Ctrl+\`).
+
 ### `/personas`
 
 Create, edit, and delete personas. A subagent can apply a persona to shape how it behaves.
@@ -394,17 +431,20 @@ View credit usage or manage billing. Alias: `/cost`.
 /usage manage
 ```
 
+Inside a session this opens the usage modal with the account allowance plus that session's context and token totals. From the [Agent Dashboard](23-dashboard.md#dispatch-input) the same modal opens over the dashboard; there is no session there, so only the **Usage limit** tab carries data.
+
+For persisted per-turn token and cost totals of any local session, use `grok usage <session-id> [turn]` from the shell. See [Session Management](17-sessions.md#the-grok-usage-subcommand).
+
 ### `/privacy`
 
-Show or toggle privacy and data-retention status.
+Open Settings on **Coding data, retention, and training**, where you choose
+**Opt in** or **Opt out**. Takes no arguments.
 
 ```
 /privacy
-/privacy opt-in
-/privacy opt-out
 ```
 
-`/privacy` doesn't touch `[features] telemetry`, `trace_upload`, or your external OTEL settings — see [Monitoring Usage](24-monitoring-usage.md#related-settings). On team accounts, only a team admin can toggle privacy this way, and admins can also enable or disable Zero Data Retention for the team ([how to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr)).
+This setting doesn't touch `[features] telemetry`, `trace_upload`, or your external OTEL settings — see [Monitoring Usage](24-monitoring-usage.md#related-settings). On team accounts only a team admin can change it, and admins can also enable or disable Zero Data Retention for the team ([how to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr)). When the choice isn't yours to make, the row says so — `ZDR` or `· Admin Managed` — instead of opening the chooser. ZDR locks coding-data sharing; it does not mute external OTEL or `user.email` — see [ZDR and this stream](24-monitoring-usage.md#zdr-and-this-stream).
 
 ---
 
@@ -435,7 +475,7 @@ Skills from plugins work the same way. When two skills share a name across scope
 /user:commit       # User-scoped skill
 ```
 
-Built-in commands always win over a skill with the same name. Name a skill "compact" and `/compact` still runs the built-in — but `/local:compact` invokes the skill.
+Built-in commands always win the bare name. Name a skill "compact" and `/compact` still runs the built-in — the skill stays available as `/local:compact` (or `/acme:compact` for a plugin). Both appear in the slash menu: the built-in is tagged `built-in` and the skill is tagged `skill · local` / `skill · acme`.
 
 ---
 

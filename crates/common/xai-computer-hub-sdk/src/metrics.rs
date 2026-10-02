@@ -213,6 +213,18 @@ mod inner {
         .expect("computer_hub_client_liveness_deadline_expired_total must register once")
     });
 
+    static AUTH_REFRESH_REFUSED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+        register_int_counter_vec!(
+            "computer_hub_client_auth_refresh_refused_total",
+            "In-band auth.refresh presentations the hub refused or left unanswered, by the \
+             hub's data.reason (other = a reason this SDK does not know; failed = no usable \
+             answer: timeout, transport, unreadable reply). not_later is counted even though \
+             the driver takes it as an acknowledgement.",
+            &["reason"]
+        )
+        .expect("computer_hub_client_auth_refresh_refused_total must register once")
+    });
+
     static HEARTBEAT_PONG_DROPPED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
         register_int_counter!(
             "computer_hub_client_heartbeat_pong_dropped_total",
@@ -224,7 +236,7 @@ mod inner {
     static CANCEL_APPLIED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
         register_int_counter!(
             "hub_cancel_applied_total",
-            "Cancel hooks that hit a live in-flight call and cancelled it."
+            "Live calls cancelled by a Cancel hook. A hook with no call_id counts each call it cancels."
         )
         .expect("hub_cancel_applied_total must register once")
     });
@@ -240,7 +252,7 @@ mod inner {
     static CANCEL_NO_TARGET_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
         register_int_counter!(
             "hub_cancel_no_target_total",
-            "Cancel hooks with no call_id (session-wide, no specific call to cancel)."
+            "Cancel hooks with no call_id that cancelled nothing. The hook set tool_id, or no call was live."
         )
         .expect("hub_cancel_no_target_total must register once")
     });
@@ -429,12 +441,32 @@ mod inner {
         LIVENESS_DEADLINE_EXPIRED_TOTAL.inc();
     }
 
+    /// `reason` is `&'static` so only a label from a fixed set can reach the
+    /// series; a hub string must be mapped first.
+    pub(crate) fn auth_refresh_refused(reason: &'static str) {
+        AUTH_REFRESH_REFUSED_TOTAL
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn auth_refresh_refused_count(reason: &'static str) -> u64 {
+        AUTH_REFRESH_REFUSED_TOTAL
+            .with_label_values(&[reason])
+            .get()
+    }
+
     pub(crate) fn heartbeat_pong_dropped() {
         HEARTBEAT_PONG_DROPPED_TOTAL.inc();
     }
 
-    pub(crate) fn cancel_applied() {
-        CANCEL_APPLIED_TOTAL.inc();
+    #[cfg(test)]
+    pub(crate) fn heartbeat_pong_dropped_count() -> u64 {
+        HEARTBEAT_PONG_DROPPED_TOTAL.get()
+    }
+
+    pub(crate) fn cancel_applied(calls: u64) {
+        CANCEL_APPLIED_TOTAL.inc_by(calls);
     }
 
     pub(crate) fn cancel_pending_tombstoned() {
@@ -491,6 +523,7 @@ mod inner {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum OidcRefreshOutcome {
         SkippedNotExpired,
+        SkippedRecentAttempt,
         Ok,
         FailedUsedStale,
     }
@@ -499,6 +532,7 @@ mod inner {
         pub const fn as_str(self) -> &'static str {
             match self {
                 Self::SkippedNotExpired => "skipped_not_expired",
+                Self::SkippedRecentAttempt => "skipped_recent_attempt",
                 Self::Ok => "ok",
                 Self::FailedUsedStale => "failed_used_stale",
             }
@@ -509,6 +543,7 @@ mod inner {
         register_int_counter_vec!(
             "computer_hub_oidc_refresh_total",
             "OIDC AuthProvider::current outcomes: skipped_not_expired (no network), \
+             skipped_recent_attempt (due, but an attempt ran within the floor), \
              ok (refresh succeeded), failed_used_stale (refresh failed, stale token returned).",
             &["outcome"]
         )
@@ -519,7 +554,7 @@ mod inner {
         register_histogram!(
             "computer_hub_oidc_refresh_duration_seconds",
             "Wall-clock time of an attempted OIDC refresh (discovery + token exchange). \
-             Not sampled for skipped_not_expired.",
+             Not sampled for the skipped_* outcomes.",
             exponential_buckets(0.01, 2.0, 14).expect("valid bucket params")
         )
         .expect("computer_hub_oidc_refresh_duration_seconds must register once")
@@ -561,6 +596,10 @@ mod inner {
 
 #[cfg(not(feature = "metrics"))]
 mod inner {
+    #[cfg(test)]
+    static TEST_HEARTBEAT_PONG_DROPPED: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
     pub(crate) fn pool_connections_inc() {}
     pub(crate) fn pool_connections_dec() {}
     pub(crate) fn pool_evictions_inc() {}
@@ -584,8 +623,18 @@ mod inner {
     pub(crate) fn writer_sink_send_error() {}
     pub(crate) fn reconnect_writer_resume() {}
     pub(crate) fn liveness_deadline_expired() {}
-    pub(crate) fn heartbeat_pong_dropped() {}
-    pub(crate) fn cancel_applied() {}
+    pub(crate) fn auth_refresh_refused(_reason: &'static str) {}
+    pub(crate) fn heartbeat_pong_dropped() {
+        #[cfg(test)]
+        TEST_HEARTBEAT_PONG_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn heartbeat_pong_dropped_count() -> u64 {
+        TEST_HEARTBEAT_PONG_DROPPED.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn cancel_applied(_calls: u64) {}
     pub(crate) fn cancel_pending_tombstoned() {}
     pub(crate) fn cancel_no_target() {}
     pub(crate) fn tool_call_rejected_overloaded() {}
@@ -601,6 +650,7 @@ mod inner {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum OidcRefreshOutcome {
         SkippedNotExpired,
+        SkippedRecentAttempt,
         Ok,
         FailedUsedStale,
     }
@@ -609,6 +659,9 @@ mod inner {
 
 pub(crate) use inner::OidcRefreshOutcome;
 pub(crate) use inner::admission_wait_observe;
+pub(crate) use inner::auth_refresh_refused;
+#[cfg(all(test, feature = "metrics"))]
+pub(crate) use inner::auth_refresh_refused_count;
 pub(crate) use inner::call_dispatch_observe;
 pub(crate) use inner::call_id_collision;
 pub(crate) use inner::cancel_applied;
@@ -619,6 +672,8 @@ pub(crate) use inner::demux_inbox_depth_set;
 pub(crate) use inner::disconnect_detail_class;
 pub(crate) use inner::early_notif_buffered;
 pub(crate) use inner::heartbeat_pong_dropped;
+#[cfg(test)]
+pub(crate) use inner::heartbeat_pong_dropped_count;
 pub(crate) use inner::hook_send;
 pub(crate) use inner::inbox_full_notification_dropped;
 pub(crate) use inner::inbox_full_reject_send_failed;
