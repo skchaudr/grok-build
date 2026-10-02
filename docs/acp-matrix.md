@@ -24,7 +24,7 @@ The script opens a detached tmux session at 120×36, working directory `/tmp/acp
 
 ### DSH route
 
-For `dsh`, the script sets `DSH_ACP_PROVIDER=cliproxy` and `DSH_ACP_MODEL=grok-4.7`. CLIProxyAPI is `http://100.66.99.64:8317/v1`. `CLIPROXY_API_KEY` is read from `~/.dsh/.credentials.yaml` and is not printed.
+For `dsh`, the script sets `DSH_ACP_PROVIDER=cliproxy` and `DSH_ACP_MODEL=gemini-3.8-flash-high`. CLIProxyAPI is `http://100.66.99.64:8317/v1`. `CLIPROXY_API_KEY` is read from `~/.dsh/.credentials.yaml` and is not printed. `acp-enhanced` does not register a cliproxy adapter, so the script also passes a throwaway `--patch` that mounts that one model. The patch is written under `/tmp/acp-matrix-out/dsh/` and is not a profile edit.
 
 ## Results
 
@@ -32,7 +32,7 @@ Artifacts per run: `/tmp/acp-matrix-out/<agent>/` (`pane.txt`, `scrollback.txt`,
 
 | Agent | launch | prompt | assistant text | tool card | slash commands | session/load resume | note |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| dsh | unknown | unknown | unknown | unknown | unknown | unknown | not run |
+| dsh | yes | yes | yes | yes | `/dashboard` `/resume` `/copy` `/rename` `/quit` `/always-approve` `/compact` `/settings` | no | Pane showed `◆ Run ls` and the reply `done` on `cliproxy/gemini-3.8-flash-high`. `--continue` left an empty pane and the debug log has no `session/load`. |
 | cursor | unknown | unknown | unknown | unknown | unknown | unknown | not run |
 | pi | unknown | unknown | unknown | unknown | unknown | unknown | not run |
 | codex | unknown | unknown | unknown | unknown | unknown | unknown | not run |

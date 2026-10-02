@@ -27,7 +27,8 @@ PANE_PATH="${OUT_DIR}/pane.txt"
 SCROLL_PATH="${OUT_DIR}/scrollback.txt"
 DEBUG_FILE="${OUT_DIR}/pager-debug.log"
 ENV_FILE="${OUT_DIR}/dsh.env"
-PROMPT='Use your shell tool to run exactly this command and then stop: ls'
+NONCE="matrix${RANDOM}${RANDOM}"
+PROMPT="Nonce ${NONCE}. Run ls with your shell tool, then reply done."
 
 if [[ ! -x "$ACP_PAGER" ]]; then
   echo "Pager binary missing or not executable: $ACP_PAGER" >&2
@@ -35,12 +36,13 @@ if [[ ! -x "$ACP_PAGER" ]]; then
 fi
 
 mkdir -p "$WORKDIR" "$OUT_DIR"
+: >"$DEBUG_FILE"
 printf '%s\n' sentinel >"${WORKDIR}/SENTINEL.txt"
 rm -f "$ENV_FILE"
 
 agent_cmd_for() {
   case "$1" in
-    dsh) echo 'dsh --profile acp-enhanced' ;;
+    dsh) echo "dsh --profile acp-enhanced --patch ${OUT_DIR}/cliproxy.patch.yml" ;;
     cursor) echo 'cursor-agent acp' ;;
     pi) echo 'pi-acp' ;;
     codex) echo 'codex-acp' ;;
@@ -78,10 +80,27 @@ if [[ "$AGENT" == "dsh" ]]; then
   umask 077
   cat >"$ENV_FILE" <<EOF
 DSH_ACP_PROVIDER=cliproxy
-DSH_ACP_MODEL=grok-4.7
+DSH_ACP_MODEL=gemini-3.8-flash-high
 CLIPROXY_API_KEY=${CLIPROXY_API_KEY}
 EOF
   unset CLIPROXY_API_KEY
+  # acp-enhanced does not register a cliproxy adapter. This throwaway patch
+  # only mounts the :8317 route for the matrix cwd; it is not a profile edit.
+  cat >"${OUT_DIR}/cliproxy.patch.yml" <<'EOF'
+- id: llm-pi-ai
+  config:
+    providers:
+      cliproxy:
+        displayName: CLIProxyAPI (sandbox :8317)
+        apiKeyEnv: CLIPROXY_API_KEY
+        api: openai-completions
+        baseURL: http://100.66.99.64:8317/v1
+        models:
+          - id: gemini-3.8-flash-high
+            name: gemini-3.8-flash-high
+            input:
+              - text
+EOF
 fi
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
@@ -137,8 +156,17 @@ write_result_env() {
     echo "tool_ok=${tool_ok:-0}"
     echo "slash_ok=${slash_ok:-0}"
     echo "resume_ok=${resume_ok:-0}"
-    echo "window=${size}"
+    echo "window=${WINDOW_SIZE:-missing}"
   } >"${OUT_DIR}/result.env"
+}
+
+composer_ready() {
+  local text="$1"
+  # The composer placeholder is not always painted. The live prompt row is
+  # the ❯ glyph plus the always-approve flag this script turns on.
+  [[ "$text" == *"Type a message"* ]] && return 0
+  [[ "$text" == *"always-approve"* && "$text" == *"❯"* ]] && return 0
+  return 1
 }
 
 is_chrome_line() {
@@ -146,6 +174,8 @@ is_chrome_line() {
   [[ -z "${line//[[:space:]]/}" ]] && return 0
   [[ "$line" == *"Type a message"* ]] && return 0
   [[ "$line" == *"always-approve"* ]] && return 0
+  [[ "$line" == *"Shift+Tab"* || "$line" == *"Ctrl+"* || "$line" == *"Enter:send"* ]] && return 0
+  [[ "$line" == *"Esc:unselect"* || "$line" == *"Tab:scrollback"* ]] && return 0
   [[ "$line" == *"──"* || "$line" == *"━━"* ]] && return 0
   [[ "$line" =~ ^[[:space:]]*[┌└┐┘│├┤┬┴┼╭╮╯╰─━] ]] && return 0
   return 1
@@ -153,8 +183,10 @@ is_chrome_line() {
 
 is_tool_line() {
   local line="$1"
-  [[ "$line" =~ \$[[:space:]]*ls([^[:alnum:]_]|$) ]] && return 0
-  [[ "$line" == *"Run "* && "$line" == *"ls"* ]] && return 0
+  # A literal "$ ls" header. An unescaped $ in [[ =~ ]] is end-of-line, which
+  # false-matched the prompt because the prompt ends in "ls".
+  [[ "$line" =~ [$][[:space:]]*ls([^[:alnum:]_]|$) ]] && return 0
+  [[ "$line" == *"Run "* && "$line" == *"ls"* && "$line" != *"/doctor"* ]] && return 0
   [[ "$line" == *"Running"* && "$line" == *"ls"* ]] && return 0
   [[ "$line" == *"Ran "* && "$line" == *"command"* ]] && return 0
   [[ "$line" == *"Bash"* && "$line" == *"ls"* ]] && return 0
@@ -163,13 +195,18 @@ is_tool_line() {
 
 check_prompt_ok() {
   local text="$1"
-  [[ "$text" == *"run exactly this command and then stop: ls"* ]]
+  [[ "$text" == *"$NONCE"* && "$text" == *"reply done"* ]]
 }
 
 check_tool_ok() {
   local text="$1"
-  local line
+  local line seen_prompt=0
   while IFS= read -r line; do
+    if [[ "$line" == *"$NONCE"* ]]; then
+      seen_prompt=1
+      continue
+    fi
+    [[ "$seen_prompt" -eq 1 ]] || continue
     if is_tool_line "$line"; then
       return 0
     fi
@@ -179,14 +216,26 @@ check_tool_ok() {
 
 check_assistant_ok() {
   local text="$1"
-  local line
+  local line seen_prompt=0 seen_tool=0
   while IFS= read -r line; do
+    if [[ "$line" == *"$NONCE"* ]]; then
+      seen_prompt=1
+      continue
+    fi
+    [[ "$seen_prompt" -eq 1 ]] || continue
+    if is_tool_line "$line"; then
+      seen_tool=1
+      continue
+    fi
+    # Prompt wraps and status lines sit above the tool card. A reply is text
+    # after that card.
+    [[ "$seen_tool" -eq 1 ]] || continue
     is_chrome_line "$line" && continue
-    is_tool_line "$line" && continue
-    [[ "$line" == *"run exactly this command and then stop: ls"* ]] && continue
-    [[ "$line" == *"SENTINEL.txt"* ]] && continue
-    # Prose, not a path or a single token.
-    [[ "$line" =~ [[:alpha:]][[:alpha:]]+[[:space:]]+[[:alpha:]] ]] || continue
+    [[ "$line" == *"Grok Build"* || "$line" == *"Ask Grok"* || "$line" == *"/doctor"* ]] && continue
+    [[ "$line" == *"SENTINEL.txt"* || "$line" == *"Waiting for"* || "$line" == *"Worked for"* ]] && continue
+    [[ "$line" == *"Turn failed"* || "$line" == *"Internal error"* || "$line" == *"no content"* ]] && continue
+    [[ "$line" == *"Try sending"* || "$line" == *"Request failed"* || "$line" == *"Dashboard"* ]] && continue
+    [[ "$line" =~ [[:alpha:]] ]] || continue
     return 0
   done <<<"$text"
   return 1
@@ -202,6 +251,7 @@ resume_ok=0
 launch_pager
 
 size="$(tmux display-message -t "$SESSION" -p '#{window_width}x#{window_height}' 2>/dev/null || echo missing)"
+WINDOW_SIZE="$size"
 if [[ "$size" != "120x36" ]]; then
   save_artifacts
   write_result_env
@@ -212,7 +262,7 @@ fi
 READY_DEADLINE=$((SECONDS + 120))
 while ((SECONDS < READY_DEADLINE)); do
   cap="$(capture_scrollback)"
-  if [[ "$cap" == *"Type a message"* ]]; then
+  if composer_ready "$cap"; then
     launch_ok=1
     break
   fi
@@ -225,7 +275,7 @@ done
 if [[ "$launch_ok" -ne 1 ]]; then
   save_artifacts
   write_result_env
-  echo "Ready gate failed: pane did not contain 'Type a message' within 120s" >&2
+  echo "Ready gate failed: pane did not show the composer within 120s" >&2
   echo "Saved: $PANE_PATH" >&2
   tmux kill-session -t "$SESSION" 2>/dev/null || true
   exit 1
@@ -235,10 +285,33 @@ tmux send-keys -t "$SESSION" -l -- "$PROMPT"
 sleep 0.4
 tmux send-keys -t "$SESSION" Enter
 
+# First submit from the home screen opens a project picker. Option 1 is the
+# current throwaway cwd. Do not pick "Don't ask me again" (that writes config).
+PICK_DEADLINE=$((SECONDS + 20))
+while ((SECONDS < PICK_DEADLINE)); do
+  cap="$(capture_visible)"
+  if [[ "$cap" == *"Run Grok Build in a project directory?"* ]]; then
+    tmux send-keys -t "$SESSION" 1
+    sleep 0.3
+    tmux send-keys -t "$SESSION" Enter
+    break
+  fi
+  if check_prompt_ok "$cap"; then
+    break
+  fi
+  sleep 1
+done
+
 PROMPT_DEADLINE=$((SECONDS + 180))
 cap=""
 while ((SECONDS < PROMPT_DEADLINE)); do
   cap="$(capture_scrollback)"
+  if [[ "$cap" == *"Turn failed"* || "$cap" == *"server shut down"* ]]; then
+    break
+  fi
+  if [[ -f "$DEBUG_FILE" ]] && grep -q 'session/prompt" error' "$DEBUG_FILE"; then
+    break
+  fi
   if check_prompt_ok "$cap" && check_assistant_ok "$cap" && check_tool_ok "$cap"; then
     break
   fi
@@ -248,7 +321,9 @@ while ((SECONDS < PROMPT_DEADLINE)); do
   sleep 2
 done
 
-[[ -n "$cap" ]] || cap="$(capture_scrollback)"
+sleep 1
+save_artifacts
+cap="$(cat "$SCROLL_PATH")"
 check_prompt_ok "$cap" && prompt_ok=1 || prompt_ok=0
 check_assistant_ok "$cap" && assistant_ok=1 || assistant_ok=0
 check_tool_ok "$cap" && tool_ok=1 || tool_ok=0
@@ -266,8 +341,13 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   printf '%s\n' "$slash_cap" >"${OUT_DIR}/slash.txt"
   : >"${OUT_DIR}/slash-commands.txt"
   while IFS= read -r line; do
-    if [[ "$line" =~ /[a-zA-Z][a-zA-Z0-9_-]* ]]; then
-      echo "$line" >>"${OUT_DIR}/slash-commands.txt"
+    # Paths like /tmp and /home are not slash commands.
+    if [[ "$line" =~ (^|[[:space:]│])(/[a-z][a-z0-9-]{1,24})([^[:alnum:]/]|$) ]]; then
+      cmd="${BASH_REMATCH[2]}"
+      case "$cmd" in
+        /tmp | /home | /data | /usr | /var | /opt | /etc) continue ;;
+      esac
+      echo "$cmd" >>"${OUT_DIR}/slash-commands.txt"
     fi
   done <<<"$slash_cap"
   if [[ -s "${OUT_DIR}/slash-commands.txt" ]]; then
@@ -278,6 +358,7 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
 fi
 
 # session/load via --continue. Does not change the exit status.
+# scrollback.txt already holds the live turn; resume.txt is separate.
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   tmux send-keys -t "$SESSION" C-q
   sleep 0.6
@@ -291,7 +372,7 @@ RESUME_DEADLINE=$((SECONDS + 90))
 resume_cap=""
 while ((SECONDS < RESUME_DEADLINE)); do
   resume_cap="$(capture_scrollback)"
-  if [[ "$resume_cap" == *"Type a message"* && "$resume_cap" == *"run exactly this command and then stop: ls"* ]]; then
+  if composer_ready "$resume_cap" && [[ "$resume_cap" == *"$NONCE"* ]]; then
     resume_ok=1
     break
   fi
@@ -302,7 +383,6 @@ while ((SECONDS < RESUME_DEADLINE)); do
 done
 printf '%s\n' "$resume_cap" >"${OUT_DIR}/resume.txt"
 
-save_artifacts
 write_result_env
 if [[ -f "$DEBUG_FILE" ]] && grep -q 'session/load' "$DEBUG_FILE"; then
   echo "debug_session_load=1" >>"${OUT_DIR}/result.env"
