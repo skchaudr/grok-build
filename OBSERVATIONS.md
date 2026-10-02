@@ -31,6 +31,14 @@ The external-agent early return in `resolve_existing_session` also omitted upstr
 
 `cargo test -p xai-grok-pager` compiles `tests/registered_features_are_documented.rs`, which `include_str!`s `docs/internal/25-enterprise.md` and `docs/internal/22-environment-variables.md`. Those paths are not in `upstream/main` either. Added both as tables generated from `xai_grok_config_types::FEATURES` (20 rows) so the test can compile and still checks every registered key.
 
+## External-agent AuthManager
+
+`AuthManager::new` is `cfg(any(test, feature = "test-support"))` after the upstream login split. `cargo test` compiled `spawn_external_subprocess`; `cargo build --release` did not. The external spawn now calls `new_with_proxy_base_url` with `CLI_CHAT_PROXY_BASE_URL_DEFAULT`, which is what `new` did.
+
+## Upstream tests that fail here
+
+`cargo test -p xai-grok-pager` ran 10213 passed, 19 failed, 4 ignored. The three external-agent auth tests passed. The 19 failures are paste/`file://` tests and `doctor_cmd::fake_standalone_facts_compose_through_shared_view`. `paste.rs`, `input.rs`, and `doctor_cmd/tests.rs` have no diff against `upstream/main`.
+
 ## Disk
 
 The shared `target/` dir filled the 99 GB volume during the debug build (linker bus error, os error 28). Removed `target/debug/incremental` and `target/release/incremental` (rebuild caches, not the release binaries) to free about 13 GB. Tests were rerun with `CARGO_INCREMENTAL=0`.
