@@ -378,9 +378,12 @@ pub async fn spawn_external_subprocess(
     let cancel = cancel.clone();
     let bridge_cancel = cancel.clone();
 
-    let auth_manager = std::sync::Arc::new(AuthManager::new(
+    // `AuthManager::new` is test-only. External agents still need a pager-side
+    // manager for voice; use the public default proxy, same as that helper.
+    let auth_manager = std::sync::Arc::new(AuthManager::new_with_proxy_base_url(
         &grok_home(),
         xai_grok_shell::auth::GrokComConfig::default(),
+        xai_grok_login::CLI_CHAT_PROXY_BASE_URL_DEFAULT.to_owned(),
     ));
 
     let thread_handle = thread::Builder::new()
