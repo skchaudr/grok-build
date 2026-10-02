@@ -989,6 +989,7 @@ async fn resolve_existing_session(
             original_cwd: None,
             title: None,
             deferred_local_miss: false,
+            suppress_code_restore: false,
         });
     }
     if let Some(local_id) = xai_grok_shell::session::resolve_local_session(session_id, cwd) {

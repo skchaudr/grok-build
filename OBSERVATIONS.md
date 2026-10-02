@@ -24,3 +24,5 @@ Resolution keeps upstream's fallthrough and the `cwd` field. The ACP error bail 
 `ConnectFlags` has upstream `status_line` and our `agent_cmd`.
 
 `MaterializeCtx` has our `has_agent_cmd` plus upstream `restore_code`, `recent_session_selection`, and `restore_progress_on_stdout`. `remote_miss_ctx` was upstream-only and needed `has_agent_cmd: false` added by hand; it was not a conflict hunk.
+
+The external-agent early return in `resolve_existing_session` also omitted upstream's new `ResolvedExisting.suppress_code_restore` field. Set it to `false`, matching the local-hit path.
