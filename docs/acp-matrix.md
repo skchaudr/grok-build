@@ -32,10 +32,12 @@ Artifacts per run: `/tmp/acp-matrix-out/<agent>/` (`pane.txt`, `scrollback.txt`,
 
 | Agent | launch | prompt | assistant text | tool card | slash commands | session/load resume | note |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| dsh | yes | yes | yes | yes | `/dashboard` `/resume` `/copy` `/rename` `/quit` `/always-approve` `/compact` `/settings` | no | Pane showed `◆ Run ls` and the reply `done` on `cliproxy/gemini-3.8-flash-high`. `--continue` left an empty pane and the debug log has no `session/load`. |
-| cursor | unknown | unknown | unknown | unknown | unknown | unknown | not run |
-| pi | unknown | unknown | unknown | unknown | unknown | unknown | not run |
-| codex | unknown | unknown | unknown | unknown | unknown | unknown | not run |
-| grok | unknown | unknown | unknown | unknown | unknown | unknown | not run |
+| dsh | yes | yes | yes | yes | `/dashboard` `/resume` `/copy` `/rename` `/quit` `/always-approve` `/compact` `/settings` | no | `◆ Run ls` and the reply `done` on `cliproxy/gemini-3.8-flash-high`. |
+| cursor | yes | yes | yes | yes | `/dashboard` `/resume` `/copy` `/rename` `/quit` `/always-approve` `/compact` `/settings` | no | Reply was `I'll run ls and then reply.` then `Done.` after `◆ Run ls`. Status line showed `grok-4.7`. |
+| pi | yes | yes | yes | yes | `/dashboard` `/resume` `/copy` `/rename` `/quit` `/always-approve` `/compact` `/settings` | no | Reply was `done.` after `◆ Run ls`. Status line showed `google-antigravity/Gemini 3.6 Flash (Antigravity)`. |
+| codex | yes | yes | no | no | `/dashboard` `/resume` `/copy` `/rename` `/quit` `/always-approve` `/compact` `/settings` | no | Turn failed: `gpt-5.6-sol` requires a newer Codex. Pane also said model metadata for that id was not found. |
+| grok | no | no | no | no | none | no | Pager exits 1 during initialize: `unable to receive 'initialize' response, channel closed`. No composer. |
+
+`--continue` was probed after every agent that stayed up. None of the debug logs contain `session/load`, and the resume captures were empty.
 
 A row is filled only from a pane capture, not from an unchecked exit status.
