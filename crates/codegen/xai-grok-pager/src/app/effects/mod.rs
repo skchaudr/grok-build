@@ -303,7 +303,10 @@ pub(crate) fn execute(
                                 result: Box::new(TaskResult::SessionCreated {
                                     agent_id,
                                     session_id: resp.session_id,
-                                    models: resp.models,
+                                    models: crate::acp::model_state::models_or_config_option(
+                                        resp.models,
+                                        resp.config_options.as_deref(),
+                                    ),
                                     modes: resp.modes,
                                 }),
                             }
@@ -472,7 +475,10 @@ pub(crate) fn execute(
                                     session_id: resp.session_id,
                                     worktree_path: worktree_root,
                                     session_cwd,
-                                    models: resp.models,
+                                    models: crate::acp::model_state::models_or_config_option(
+                                        resp.models,
+                                        resp.config_options.as_deref(),
+                                    ),
                                     modes: resp.modes,
                                     strategy_summary,
                                 }),
@@ -542,7 +548,10 @@ pub(crate) fn execute(
                                 result: Box::new(TaskResult::SessionLoaded {
                                     agent_id,
                                     session_id: acp_session_id,
-                                    models: resp.models,
+                                    models: crate::acp::model_state::models_or_config_option(
+                                        resp.models,
+                                        resp.config_options.as_deref(),
+                                    ),
                                     modes: resp.modes,
                                     code_restored,
                                     restore_summary,

@@ -369,6 +369,41 @@ impl ModelState {
     }
 }
 
+/// Standard ACP agents may advertise models only as a `model`-category select config option (Codex, DSH).
+/// Use the explicit `models` state when present; otherwise build one from that option so the footer and picker work.
+pub fn models_or_config_option(
+    models: Option<acp::SessionModelState>,
+    config_options: Option<&[acp::SessionConfigOption]>,
+) -> Option<acp::SessionModelState> {
+    if models.is_some() {
+        return models;
+    }
+    let option = config_options?
+        .iter()
+        .find(|o| matches!(o.category, Some(acp::SessionConfigOptionCategory::Model)))?;
+    let acp::SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    let entries: Vec<&acp::SessionConfigSelectOption> = match &select.options {
+        acp::SessionConfigSelectOptions::Ungrouped(list) => list.iter().collect(),
+        acp::SessionConfigSelectOptions::Grouped(groups) => {
+            groups.iter().flat_map(|g| g.options.iter()).collect()
+        }
+        _ => return None,
+    };
+    if entries.is_empty() {
+        return None;
+    }
+    let available = entries
+        .into_iter()
+        .map(|o| acp::ModelInfo::new(o.value.0.to_string(), o.name.clone()))
+        .collect();
+    Some(acp::SessionModelState::new(
+        select.current_value.0.to_string(),
+        available,
+    ))
+}
+
 impl From<Option<acp::SessionModelState>> for ModelState {
     fn from(state: Option<acp::SessionModelState>) -> Self {
         state
@@ -407,6 +442,53 @@ impl From<Option<acp::SessionModelState>> for ModelState {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn models_fall_back_to_the_model_config_option() {
+        let option = acp::SessionConfigOption::select(
+            "model",
+            "Model",
+            "m2",
+            vec![
+                acp::SessionConfigSelectOption::new("m1", "Model One"),
+                acp::SessionConfigSelectOption::new("m2", "Model Two"),
+            ],
+        )
+        .category(acp::SessionConfigOptionCategory::Model);
+        let state = models_or_config_option(None, Some(&[option]))
+            .expect("config option should yield model state");
+        assert_eq!(state.current_model_id.0.as_ref(), "m2");
+        assert_eq!(state.available_models.len(), 2);
+        let model_state: ModelState = Some(state).into();
+        assert_eq!(model_state.footer_label(), Some("Model Two".to_owned()));
+    }
+
+    #[test]
+    fn explicit_models_win_over_the_config_option() {
+        let explicit = acp::SessionModelState::new("x", vec![acp::ModelInfo::new("x", "X")]);
+        let option = acp::SessionConfigOption::select(
+            "model",
+            "Model",
+            "m1",
+            vec![acp::SessionConfigSelectOption::new("m1", "One")],
+        )
+        .category(acp::SessionConfigOptionCategory::Model);
+        let got = models_or_config_option(Some(explicit), Some(&[option])).unwrap();
+        assert_eq!(got.current_model_id.0.as_ref(), "x");
+    }
+
+    #[test]
+    fn no_models_and_no_model_option_stays_none() {
+        assert!(models_or_config_option(None, None).is_none());
+        let other = acp::SessionConfigOption::select(
+            "mode",
+            "Mode",
+            "a",
+            vec![acp::SessionConfigSelectOption::new("a", "A")],
+        )
+        .category(acp::SessionConfigOptionCategory::Mode);
+        assert!(models_or_config_option(None, Some(&[other])).is_none());
+    }
 
     fn sample_models() -> ModelState {
         let mut state = ModelState::default();
