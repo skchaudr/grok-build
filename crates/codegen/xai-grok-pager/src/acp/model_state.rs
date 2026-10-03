@@ -394,14 +394,17 @@ pub fn models_or_config_option(
     if entries.is_empty() {
         return None;
     }
-    let available = entries
+    let current = select.current_value.0.to_string();
+    let mut available: Vec<acp::ModelInfo> = entries
         .into_iter()
         .map(|o| acp::ModelInfo::new(o.value.0.to_string(), o.name.clone()))
         .collect();
-    Some(acp::SessionModelState::new(
-        select.current_value.0.to_string(),
-        available,
-    ))
+    // `ModelState` drops a current model that is not in the list, so an agent whose current value is not one of
+    // its options (DSH reports `deepseek-v4-flash` but lists `deepseek-flash`) still gets a footer name.
+    if !available.iter().any(|m| m.model_id.0.as_ref() == current) {
+        available.insert(0, acp::ModelInfo::new(current.clone(), current.clone()));
+    }
+    Some(acp::SessionModelState::new(current, available))
 }
 
 impl From<Option<acp::SessionModelState>> for ModelState {
@@ -461,6 +464,25 @@ mod tests {
         assert_eq!(state.available_models.len(), 2);
         let model_state: ModelState = Some(state).into();
         assert_eq!(model_state.footer_label(), Some("Model Two".to_owned()));
+    }
+
+    #[test]
+    fn grouped_model_option_from_the_wire_yields_state() {
+        let option: acp::SessionConfigOption = serde_json::from_value(serde_json::json!({
+            "id": "model", "type": "select", "name": "Model", "category": "model",
+            "currentValue": "deepseek-official/deepseek-v4-flash",
+            "options": [{"group": "deepseek-official", "name": "DeepSeek", "options": [
+                {"value": "deepseek-official/deepseek-flash", "name": "DeepSeek-V41-Flash"},
+                {"value": "deepseek-official/deepseek-v4-pro", "name": "DeepSeek-V4-Pro"}]}]
+        }))
+        .expect("wire option parses");
+        let state = models_or_config_option(None, Some(&[option])).expect("state");
+        assert_eq!(state.available_models.len(), 3, "current value is added when unlisted");
+        let model_state: ModelState = Some(state).into();
+        assert_eq!(
+            model_state.footer_label(),
+            Some("deepseek-official/deepseek-v4-flash".to_owned())
+        );
     }
 
     #[test]
