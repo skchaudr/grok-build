@@ -328,6 +328,7 @@ pub async fn connect_via_leader(
         fs_write: flags.fs_write,
         status_line: flags.status_line,
         user_message_echo: true,
+        agent_cmd: flags.agent_cmd.clone(),
     };
     startup::enter(StartupPhase::LeaderConnect);
     let conn = {
@@ -371,7 +372,13 @@ pub async fn connect_via_leader(
         cancel: bridge.cancel,
         location: AgentLocation::Leader(status_rx),
     };
-    initialize_connection(endpoint, &flags, auth_manager, false).await
+    initialize_connection(
+        endpoint,
+        &flags,
+        auth_manager,
+        flags.agent_cmd.is_some(),
+    )
+    .await
 }
 /// Prints one warning per flag the chosen backend ignores. `reason` finishes the sentence "has no effect ...".
 /// This runs before tracing is set up, and the pager has already redirected fd 2, so the saved terminal stderr is the sink.

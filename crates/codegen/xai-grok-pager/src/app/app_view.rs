@@ -839,6 +839,8 @@ pub struct AppView {
     pub yolo_policy_block: Option<&'static str>,
     /// One-shot notice that a launch `--yolo` was pinned off; shown on the first agent view.
     pub yolo_launch_block_notice: Option<&'static str>,
+    /// One-shot toast when leader connect falls back to a local agent.
+    pub embedded_fallback_notice: Option<String>,
     /// One-shot switch-back toast after a screen-mode re-exec.
     pub screen_mode_switch_hint: Option<&'static str>,
     /// Require explicit plan approval via the plan viewer UI even in always-approve (YOLO) mode.
@@ -1470,6 +1472,7 @@ impl AppView {
             auto_mode_gate: xai_grok_shell::util::config::auto_permission_mode_enabled_from_disk(),
             yolo_policy_block: None,
             yolo_launch_block_notice: None,
+            embedded_fallback_notice: None,
             screen_mode_switch_hint: None,
             require_plan_approval: false,
             plan_mode: false,

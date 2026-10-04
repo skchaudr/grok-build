@@ -53,6 +53,7 @@
 mod client;
 #[path = "cursor_worker_stub.rs"]
 pub(crate) mod cursor_worker;
+mod external_backend;
 #[cfg(feature = "test-support")]
 pub mod in_process;
 mod lock;

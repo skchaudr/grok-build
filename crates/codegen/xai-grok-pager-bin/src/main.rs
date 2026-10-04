@@ -1442,6 +1442,7 @@ async fn run_agent_command(
             fs_write: false,
             status_line: false,
             user_message_echo: false,
+            agent_cmd: None,
         };
         let conn = connect_or_spawn(&client_type, mode, &env_urls, capabilities.clone()).await?;
         let (tx, rx) = conn.into_channels();

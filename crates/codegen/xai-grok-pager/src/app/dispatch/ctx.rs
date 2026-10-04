@@ -215,6 +215,16 @@ pub(super) fn surface_yolo_launch_block_notice(app: &mut AppView, target: AgentI
             ));
         agent.show_toast(warning);
     }
+    if let Some(notice) = app.embedded_fallback_notice.take()
+        && let Some(agent) = app.agents.get_mut(&target)
+    {
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::system(
+                notice.clone(),
+            ));
+        agent.show_toast(&notice);
+    }
     surface_screen_mode_switch_hint(app, target);
 }
 

@@ -130,6 +130,7 @@ fn test_app() -> AppView {
         auto_mode_gate: true,
         yolo_policy_block: None,
         yolo_launch_block_notice: None,
+        embedded_fallback_notice: None,
         screen_mode_switch_hint: None,
         require_plan_approval: false,
         plan_mode: false,

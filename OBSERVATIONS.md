@@ -61,3 +61,17 @@ The shared `target/` dir filled the 99 GB volume during the debug build (linker 
 - `codex-acp` reaches the composer and echoes the prompt, then fails the turn: `gpt-5.6-sol` requires a newer Codex. No tool card.
 - `grok agent stdio` closes the ACP channel during `initialize` (`recv_failed`). The pager exits 1 before the composer is drawn. With stdin closed and no pager, `grok agent stdio` exits 0 and prints nothing.
 - The home screen has no "Type a message" placeholder. Ready is the `❯` composer plus `always-approve`. The first submit opens "Run Grok Build in a project directory?"; option 1 is the throwaway cwd.
+
+## 2026-10-04 leader external agents
+
+1. The handoff's second forced-off site is stale. `headless.rs` around the cited line sets `has_agent_cmd: false` on a `MaterializeCtx`. It does not set `use_leader = false`. The only forced `use_leader = false` for `--agent-cmd` was `app/mod.rs`.
+
+2. "No Grok login" is not a leader startup failure. `run_leader` marks the server ready after bounded auth even when that auth returns `None`. The gate an external client skips is the pre-ready `leader_starting` error. An external registration is reported `ready: true`, so `LeaderClient::connect` does not wait out the native auth timeout. A native client still gets `Registered { ready: false }` and `leader_starting` until auth finishes. There is no post-ready "no credentials" rejection to add.
+
+3. A failed send on the native agent channel must stay best-effort (`let _ = acp_tx.send`). Several leader tests drop `acp_rx` and inject responses on `response_tx`. Turning that closed channel into a client-visible JSON-RPC error delivered a stray message ahead of the notification those tests assert on. External backends still return a visible error when their process is dead.
+
+4. `cargo test -p xai-grok-shell --lib` did not compile on this branch before the external-agent work. `tool_layer_images_bridge_tests.rs` calls `base64::engine::general_purpose::STANDARD.encode` without `use base64::Engine`. That import was added so `--lib leader::` could run (287 passed).
+
+5. The shared `target/` filled the disk (debug incremental was about 28G) while the pager tests compiled. Incremental was removed. Later builds used `CARGO_INCREMENTAL=0`.
+
+6. `dsh acp` is `dsh --profile acp`. The `gb` picker does not use that command for DSH. It runs `dsh --profile acp-enhanced` with `DSH_ACP_PROVIDER` and `DSH_ACP_MODEL`.

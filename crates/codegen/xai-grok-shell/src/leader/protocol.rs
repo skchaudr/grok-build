@@ -226,6 +226,12 @@ pub struct ClientCapabilities {
     /// The flag it sets is per session, so other subscribers of a shared session receive the echo too.
     #[serde(default)]
     pub user_message_echo: bool,
+
+    /// External ACP command. `None` is the native Grok backend. The exact string
+    /// is the backend identity, shared by every client that asks for it.
+    /// Missing on the wire (old clients) stays `None`.
+    #[serde(default)]
+    pub agent_cmd: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -797,6 +803,12 @@ mod tests {
             let received = read_frame(&mut server).await.unwrap();
             assert_eq!(received, format!("message {}", i).as_bytes());
         }
+    }
+
+    #[test]
+    fn old_client_capabilities_omit_agent_cmd() {
+        let caps: ClientCapabilities = serde_json::from_str(r#"{"yolo_mode":false}"#).unwrap();
+        assert!(caps.agent_cmd.is_none());
     }
 
     #[test]

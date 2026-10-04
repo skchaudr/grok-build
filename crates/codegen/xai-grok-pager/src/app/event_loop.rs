@@ -223,6 +223,8 @@ pub(crate) struct TerminalState {
     /// Type-ahead captured by `init_terminal` AFTER raw mode was enabled (the one field here computed post-takeover).
     /// Replayed into the composer by [`run`] when it is the active consumer at launch, else dropped; see [`capture_startup_typeahead`].
     pub startup_typeahead: Vec<TimedInputEvent>,
+    /// Set when leader connect failed and this process is running the agent locally.
+    pub embedded_fallback_notice: Option<String>,
 }
 /// Result of the event loop run.
 pub(crate) struct RunResult {
@@ -1112,6 +1114,7 @@ pub(crate) async fn run(
         crate::unified_log::warn(warning, None, None);
         app.yolo_launch_block_notice = Some(warning);
     }
+    app.embedded_fallback_notice = term_state.embedded_fallback_notice.take();
     app.require_plan_approval = xai_grok_shell::util::config::load_require_plan_approval();
     app.plan_mode = !args.no_plan;
     app.subagents = !args.no_subagents;

@@ -566,6 +566,34 @@ pub fn resolve_use_leader(
     );
     (resolved.use_leader, resolved.policy_disable_reason)
 }
+/// Leader vs embedded. `--agent-cmd` follows the same precedence as a native client.
+pub(crate) fn connect_target_for(
+    use_leader: bool,
+    _agent_cmd: Option<&str>,
+) -> crate::acp::AgentKind {
+    if use_leader {
+        crate::acp::AgentKind::Leader
+    } else {
+        crate::acp::AgentKind::Embedded
+    }
+}
+/// Visible TUI notice when leader connect fails and the pager runs the agent locally.
+pub(crate) fn embedded_fallback_notice(hostname: &str) -> String {
+    format!("Leader connect failed; running locally on {hostname}")
+}
+fn local_hostname() -> String {
+    let name = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .unwrap_or_default();
+    let name = name.trim();
+    if name.is_empty() {
+        "localhost".to_string()
+    } else {
+        name.to_string()
+    }
+}
 /// How long the sandbox note stays uncovered before a fullscreen TUI opens over it.
 /// Paid only when the note was printed and the screen is about to hide it.
 const SANDBOX_NOTICE_LINGER: std::time::Duration = std::time::Duration::from_millis(1_200);
@@ -813,9 +841,6 @@ pub async fn run(
         true,
         requested_confinement,
     );
-    if args.agent_cmd.is_some() {
-        use_leader = false;
-    }
     tracing::info!(
         use_leader,
         ?policy_disable_reason,
@@ -1071,11 +1096,7 @@ pub async fn run(
         );
     }
     let fallback_flags = use_leader.then(|| connect_flags.clone());
-    let primary_target = if use_leader {
-        crate::acp::AgentKind::Leader
-    } else {
-        crate::acp::AgentKind::Embedded
-    };
+    let primary_target = connect_target_for(use_leader, args.agent_cmd.as_deref());
     xai_grok_telemetry::external::init(
         xai_grok_shell::agent::config::resolve_external_otel_config(
             xai_grok_telemetry::external::config::ExternalClientInfo {
@@ -1186,6 +1207,7 @@ pub async fn run(
         relaunched_into_fullscreen,
         initial_theme: crate::theme::cache::current_kind(),
         startup_typeahead,
+        embedded_fallback_notice: embedded_fallback.then(|| embedded_fallback_notice(&local_hostname())),
     };
     let mut reader_thread = ReaderThread::detached();
     let result = event_loop::run(
@@ -1767,6 +1789,23 @@ mod tests {
     fn config_with_leader(enabled: bool) -> toml::Value {
         let toml_str = format!("[cli]\nuse_leader = {enabled}");
         toml::from_str(&toml_str).unwrap()
+    }
+    #[test]
+    fn agent_cmd_with_leader_connects_via_leader() {
+        assert_eq!(
+            connect_target_for(true, Some("dsh acp")),
+            crate::acp::AgentKind::Leader
+        );
+        assert_eq!(
+            connect_target_for(false, Some("dsh acp")),
+            crate::acp::AgentKind::Embedded
+        );
+    }
+    #[test]
+    fn embedded_fallback_notice_names_the_host() {
+        let msg = embedded_fallback_notice("khoj-38w");
+        assert!(msg.contains("khoj-38w"), "{msg}");
+        assert!(msg.contains("running locally"), "{msg}");
     }
     #[test]
     fn terminal_title_strips_control_characters() {

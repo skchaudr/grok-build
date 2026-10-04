@@ -9,6 +9,9 @@ const LEADER_VERSION: &str = match option_env!("VERSION_WITH_COMMIT") {
     Some(v) => v,
     None => "unknown",
 };
+use super::external_backend::{
+    AgentTraffic, BackendId, Inflight, LiveExternal, SessionRoute, backend_pid, send_to_backend,
+};
 use super::protocol::{
     ClientCapabilities, ClientId, ClientMessage, ClientMode, ControlCommand, ControlPayload,
     FrameReader, InternalMethod, LEADER_PROTOCOL_VERSION, LeaderCapabilities, ProtocolError,
@@ -47,7 +50,8 @@ enum LeaderServerPoll {
     Cancelled,
     Accept(std::io::Result<LeaderStream>),
     Event(ServerEvent),
-    Response(String),
+    Response { backend: BackendId, payload: String },
+    BackendExited { cmd: String, pid: u32, message: String },
 }
 /// A live notification buffered during an in-flight `session/load`: the shared payload plus its `event_seq`.
 /// The `event_seq` is computed at buffer time, when the message is already parsed, so the post-load flush never re-parses.
@@ -1536,6 +1540,25 @@ pub async fn run_leader_server(
     let mut had_clients = false;
     let mut pending_requests: usize = 0;
     let relaunching = Arc::new(AtomicBool::new(false));
+    let mut session_backend: HashMap<String, SessionRoute> = HashMap::new();
+    let mut externals: HashMap<String, LiveExternal> = HashMap::new();
+    let mut inflight: HashMap<String, Inflight> = HashMap::new();
+    let mut pending_initialize: HashSet<String> = HashSet::new();
+    let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel::<AgentTraffic>();
+    let native_in = inbound_tx.clone();
+    tokio::spawn(async move {
+        while let Some(payload) = response_rx.recv().await {
+            if native_in
+                .send(AgentTraffic::FromAgent {
+                    backend: BackendId::Native,
+                    payload,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
     loop {
         let poll = tokio::select! {
             biased;
@@ -1544,7 +1567,14 @@ pub async fn run_leader_server(
                 LeaderServerPoll::Accept(accept_result.map(|(stream, _)| stream))
             }
             Some(event) = event_rx.recv() => LeaderServerPoll::Event(event),
-            Some(payload) = response_rx.recv() => LeaderServerPoll::Response(payload),
+            Some(traffic) = inbound_rx.recv() => match traffic {
+                AgentTraffic::FromAgent { backend, payload } => {
+                    LeaderServerPoll::Response { backend, payload }
+                }
+                AgentTraffic::Exited { cmd, pid, message } => {
+                    LeaderServerPoll::BackendExited { cmd, pid, message }
+                }
+            },
         };
         match poll {
             LeaderServerPoll::Cancelled => {
@@ -1689,13 +1719,31 @@ pub async fn run_leader_server(
                         last_active_client = None;
                     }
                     if !detached_sessions.is_empty() {
-                        let _ = acp_tx.send(internal_notification(
-                            InternalMethod::EvictSessions,
-                            serde_json::json!({ "sessionIds": detached_sessions }),
-                        ));
+                        let session_count = detached_sessions.len();
+                        let mut by_backend: HashMap<BackendId, Vec<String>> = HashMap::new();
+                        for sid in detached_sessions {
+                            let backend = session_backend
+                                .remove(&sid)
+                                .map(|route| route.backend)
+                                .unwrap_or(BackendId::Native);
+                            by_backend.entry(backend).or_default().push(sid);
+                        }
+                        for (backend, sids) in by_backend {
+                            let note = internal_notification(
+                                InternalMethod::EvictSessions,
+                                serde_json::json!({ "sessionIds": sids }),
+                            );
+                            let _ = send_to_backend(
+                                &backend,
+                                note,
+                                &acp_tx,
+                                &mut externals,
+                                &inbound_tx,
+                            );
+                        }
                         info!(
                             client_id = id.0,
-                            session_count = detached_sessions.len(),
+                            session_count,
                             "Sent client-disconnect detach notification for disconnected client"
                         );
                     }
@@ -1794,7 +1842,13 @@ pub async fn run_leader_server(
                 ServerEvent::Message(id, ClientMessage::Acp { payload }) => {
                     let mut json: Option<serde_json::Value> = serde_json::from_str(&payload).ok();
                     let mut payload_mutated = false;
-                    if !*ready_rx.borrow() {
+                    let backend = clients
+                        .get(&id)
+                        .map(|client| {
+                            resolve_backend(json.as_ref(), &client.capabilities, &session_backend)
+                        })
+                        .unwrap_or(BackendId::Native);
+                    if !*ready_rx.borrow() && backend.is_native() {
                         if let Some(error_payload) =
                             json.as_ref().and_then(make_leader_starting_error)
                         {
@@ -1810,6 +1864,33 @@ pub async fn run_leader_server(
                                 client_id = id.0,
                                 "Dropped pre-ready notification (leader not yet ready)"
                             );
+                        }
+                        continue;
+                    }
+                    if let BackendId::External(ref cmd) = backend
+                        && json
+                            .as_ref()
+                            .and_then(|j| j.get("method"))
+                            .and_then(|m| m.as_str())
+                            == Some(AGENT_METHOD_NAMES.initialize)
+                        && let Some(result) = externals
+                            .get(cmd)
+                            .filter(|slot| slot.alive)
+                            .and_then(|slot| slot.cached_initialize.clone())
+                    {
+                        let req_id = json
+                            .as_ref()
+                            .and_then(|j| j.get("id"))
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        let resp = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": result,
+                        });
+                        if let Some(client) = clients.get_mut(&id) {
+                            client.initialize_seen = true;
+                            let _ = client.tx.send(ClientOutbound::Acp(resp.to_string().into()));
                         }
                         continue;
                     }
@@ -1901,18 +1982,74 @@ pub async fn run_leader_server(
                             .record_forward(ns_id.clone(), new_model);
                         client.capabilities.default_model = client.model_switches.default_model();
                     }
-                    if rewritten.is_some() {
-                        pending_requests += 1;
-                        agent_busy.store(true, Ordering::Relaxed);
-                    }
                     let outbound = select_outbound_payload(json.as_ref(), payload_mutated, payload);
-                    let _ = acp_tx.send(outbound);
+                    let is_initialize = json
+                        .as_ref()
+                        .and_then(|j| j.get("method"))
+                        .and_then(|m| m.as_str())
+                        == Some(AGENT_METHOD_NAMES.initialize);
+                    match send_to_backend(&backend, outbound, &acp_tx, &mut externals, &inbound_tx)
+                    {
+                        Ok(()) => {
+                            if let Some((ns_id, _)) = rewritten.as_ref() {
+                                inflight.insert(
+                                    ns_id.clone(),
+                                    Inflight {
+                                        pid: backend_pid(&backend, &externals),
+                                    },
+                                );
+                                if is_initialize {
+                                    pending_initialize.insert(ns_id.clone());
+                                }
+                                pending_requests += 1;
+                                agent_busy.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        Err(message) => {
+                            warn!(client_id = id.0, %message, "failed to dispatch ACP to backend");
+                            if backend.is_native() {
+                                // The native agent channel is best-effort, as before
+                                // (`let _ = acp_tx.send`). Tests drop `acp_rx` and inject
+                                // responses themselves. A client-visible error here races
+                                // those notifications.
+                                if rewritten.is_some() {
+                                    pending_requests += 1;
+                                    agent_busy.store(true, Ordering::Relaxed);
+                                }
+                            } else if let Some(client) = clients.get(&id) {
+                                let req_id = rewritten
+                                    .as_ref()
+                                    .map(|(_, original)| original.clone())
+                                    .unwrap_or(serde_json::Value::Null);
+                                if !req_id.is_null() {
+                                    let err = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": req_id,
+                                        "error": { "code": -32000, "message": message }
+                                    });
+                                    let _ = client
+                                        .tx
+                                        .send(ClientOutbound::Acp(err.to_string().into()));
+                                }
+                            }
+                        }
+                    }
                 }
                 ServerEvent::Message(_, _) => {}
             },
-            LeaderServerPoll::Response(payload) => {
+            LeaderServerPoll::Response { backend, payload } => {
                 let mut json: Option<serde_json::Value> = serde_json::from_str(&payload).ok();
                 let parsed_response = json.as_mut().and_then(parse_response_id);
+                if let Some((_, ref ns_id)) = parsed_response {
+                    inflight.remove(ns_id);
+                    if pending_initialize.remove(ns_id)
+                        && let Some(result) = json.as_ref().and_then(|j| j.get("result")).cloned()
+                        && let BackendId::External(cmd) = &backend
+                        && let Some(slot) = externals.get_mut(cmd)
+                    {
+                        slot.cached_initialize = Some(result);
+                    }
+                }
                 if parsed_response.is_some() {
                     pending_requests = pending_requests.saturating_sub(1);
                     agent_busy.store(pending_requests > 0, Ordering::Relaxed);
@@ -1939,6 +2076,10 @@ pub async fn run_leader_server(
                     && let Some(json) = json.as_mut()
                 {
                     if let Some(session_id) = extract_session_id_from_result(json) {
+                        session_backend.entry(session_id.clone()).or_insert(SessionRoute {
+                            backend: backend.clone(),
+                            pid: backend_pid(&backend, &externals),
+                        });
                         session_subscribers
                             .entry(session_id.clone())
                             .or_default()
@@ -2048,7 +2189,9 @@ pub async fn run_leader_server(
                     .is_some_and(is_machine_wide_broadcast_notification)
                 {
                     for client in clients.values() {
-                        let _ = client.tx.send(ClientOutbound::Acp(payload.clone()));
+                        if backend.is_native() || client_on_backend(client, &backend) {
+                            let _ = client.tx.send(ClientOutbound::Acp(payload.clone()));
+                        }
                     }
                     trace!("Broadcast machine-wide notification to all clients");
                     continue;
@@ -2280,6 +2423,7 @@ pub async fn run_leader_server(
                     );
                 } else if let Some(client_id) = last_active_client
                     && let Some(client) = clients.get(&client_id)
+                    && (backend.is_native() || client_on_backend(client, &backend))
                 {
                     debug!(
                         client_id = client_id.0,
@@ -2292,7 +2436,28 @@ pub async fn run_leader_server(
                     debug!("No client available for notification routing, message dropped");
                 }
             }
+            LeaderServerPoll::BackendExited { cmd, pid, message } => {
+                note_external_exit(
+                    &cmd,
+                    pid,
+                    &message,
+                    &mut externals,
+                    &mut session_backend,
+                    &mut session_driver,
+                    &mut inflight,
+                    &mut pending_initialize,
+                    &mut pending_requests,
+                    &agent_busy,
+                    &clients,
+                    &mut session_subscribers,
+                );
+            }
         }
+    }
+    for (_, mut slot) in externals.drain() {
+        let _ = slot.child.start_kill();
+        // Reap so a killed backend does not stay visible as a zombie in /proc.
+        let _ = slot.child.wait().await;
     }
     control_state.cursor_worker.finalize_on_shutdown().await;
     finalize_workspace_on_shutdown(control_state.clone()).await;
@@ -2300,6 +2465,103 @@ pub async fn run_leader_server(
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
 }
+
+fn resolve_backend(
+    json: Option<&serde_json::Value>,
+    caps: &ClientCapabilities,
+    sessions: &HashMap<String, SessionRoute>,
+) -> BackendId {
+    if let Some(json) = json
+        && let Some(sid) = extract_session_id(json)
+        && let Some(route) = sessions.get(&sid)
+    {
+        return route.backend.clone();
+    }
+    BackendId::from_capabilities(caps)
+}
+
+fn client_on_backend(client: &ClientState, backend: &BackendId) -> bool {
+    &BackendId::from_capabilities(&client.capabilities) == backend
+}
+
+/// A dead external process fails its in-flight requests and its sessions.
+/// An `Exited` whose pid is not the live slot is stale (the command already respawned)
+/// and must not kill the replacement. Sessions and requests that still carry the dead pid
+/// are failed either way.
+fn note_external_exit(
+    cmd: &str,
+    pid: u32,
+    message: &str,
+    externals: &mut HashMap<String, LiveExternal>,
+    session_backend: &mut HashMap<String, SessionRoute>,
+    session_driver: &mut HashMap<String, ClientId>,
+    inflight: &mut HashMap<String, Inflight>,
+    pending_initialize: &mut HashSet<String>,
+    pending_requests: &mut usize,
+    agent_busy: &AtomicBool,
+    clients: &HashMap<ClientId, ClientState>,
+    session_subscribers: &mut HashMap<String, HashSet<ClientId>>,
+) {
+    if let Some(slot) = externals.get_mut(cmd)
+        && slot.pid == pid
+    {
+        slot.alive = false;
+        slot.cached_initialize = None;
+        let _ = slot.child.start_kill();
+    }
+    let text = format!("External agent `{cmd}` exited: {message}");
+    let failed: Vec<String> = inflight
+        .iter()
+        .filter(|(_, inf)| inf.pid == Some(pid))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for ns_id in failed {
+        inflight.remove(&ns_id);
+        pending_initialize.remove(&ns_id);
+        *pending_requests = pending_requests.saturating_sub(1);
+        let mut json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": ns_id,
+            "error": { "code": -32000, "message": text }
+        });
+        if let Some((client_id, _)) = parse_response_id(&mut json)
+            && let Some(client) = clients.get(&client_id)
+        {
+            let _ = client.tx.send(ClientOutbound::Acp(json.to_string().into()));
+        }
+    }
+    agent_busy.store(*pending_requests > 0, Ordering::Relaxed);
+    let dead_sessions: Vec<String> = session_backend
+        .iter()
+        .filter(|(_, route)| route.pid == Some(pid))
+        .map(|(sid, _)| sid.clone())
+        .collect();
+    for sid in dead_sessions {
+        session_backend.remove(&sid);
+        session_driver.remove(&sid);
+        let Some(subs) = session_subscribers.remove(&sid) else {
+            continue;
+        };
+        let note = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": text }
+                }
+            }
+        });
+        let payload: Arc<str> = note.to_string().into();
+        for cid in subs {
+            if let Some(client) = clients.get(&cid) {
+                let _ = client.tx.send(ClientOutbound::Acp(payload.clone()));
+            }
+        }
+    }
+}
+
 fn spawn_client_handler(
     client_id: ClientId,
     stream: LeaderStream,
@@ -2367,7 +2629,12 @@ async fn run_client_session(
             mode,
             capabilities,
         } => {
-            let ready = *ready_rx.borrow();
+            let native_ready = *ready_rx.borrow();
+            let external = capabilities
+                .agent_cmd
+                .as_ref()
+                .is_some_and(|cmd| !cmd.trim().is_empty());
+            let ready = native_ready || external;
             write_message(
                 &mut writer,
                 &ServerMessage::Registered {
@@ -2413,6 +2680,24 @@ async fn run_client_session(
                         return Ok(());
                     }
                     // Loop re-checks *ready_rx.borrow() at top; no Ref held across await.
+                }
+                Some(msg) = server_rx.recv() => {
+                    if write_outbound(&mut writer, &msg).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                msg_result = reader.read_message::<ClientMessage>() => {
+                    match handle_client_inbound_message(
+                        msg_result,
+                        client_id,
+                        &event_tx,
+                        &mut writer,
+                    )
+                    .await?
+                    {
+                        ClientSessionAction::Continue => {}
+                        ClientSessionAction::Break => return Ok(()),
+                    }
                 }
             }
         }
