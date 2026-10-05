@@ -108,6 +108,7 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'stopReason':'end_turn'
     )
     .unwrap();
     transport.session_id = Some("external-123".into());
+    transport.publish_updates().unwrap();
     let answer = async {
         match rx.recv().await.unwrap() {
             xai_acp_lib::AcpClientMessage::RequestPermission(args) => {
@@ -363,4 +364,139 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'configOptions':[{'id':
 #[test]
 fn external_definition_rejects_unknown_backend_fields() {
     assert!(xai_grok_agent::config::AgentDefinition::parse("---\nname: fake\ndescription: worker\nexternalAcp:\n  argv: [fake]\n  machine: local\n  harness: fake\n  identity: worker\n  silentlyIgnoredPolicy: true\n---\n").is_err());
+}
+
+#[tokio::test]
+async fn bootstrap_permission_returns_protocol_error_without_hidden_ui() {
+    let script = r#"
+import json,sys
+r=json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','id':99,'method':'session/request_permission','params':{'sessionId':'external-123','toolCall':{'toolCallId':'t','title':'write','status':'pending'},'options':[]}}),flush=True)
+answer=json.loads(sys.stdin.readline());assert answer['error']['code']==-32000
+"#;
+    let (gateway, mut rx) = test_gateway_with_receiver();
+    let mut transport = ExternalTransport::spawn(
+        &fake_config(script),
+        "child",
+        gateway,
+        CancellationToken::new(),
+    )
+    .unwrap();
+    assert!(
+        transport
+            .rpc("initialize", json!({}))
+            .await
+            .unwrap_err()
+            .contains("bootstrap permission")
+    );
+    assert!(rx.try_recv().is_err());
+    transport.shutdown().await;
+}
+
+#[test]
+fn inherited_web_and_todo_policies_fail_closed_unless_explicitly_disabled() {
+    let mut ctx = crate::test_support::lsp_runtime::ctx_with_toggle(Default::default());
+    ctx.todo_gate = true;
+    assert!(inherited_policy_error(&ctx).unwrap().contains("todo_gate"));
+    ctx.todo_gate = false;
+    ctx.disable_web_search = true;
+    assert!(
+        inherited_policy_error(&ctx)
+            .unwrap()
+            .contains("disable_web_search")
+    );
+    ctx.disable_web_search = false;
+    assert!(inherited_policy_error(&ctx).is_none());
+}
+
+#[tokio::test]
+async fn external_session_lease_is_exclusive_until_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = fake_config("import time; time.sleep(60)");
+    let (gateway, _rx) = test_gateway_with_receiver();
+    let mut first =
+        ExternalTransport::spawn(&config, "first", gateway.clone(), CancellationToken::new())
+            .unwrap();
+    let mut second =
+        ExternalTransport::spawn(&config, "second", gateway, CancellationToken::new()).unwrap();
+    first
+        .acquire_session_lease(&config, "same-session", dir.path())
+        .unwrap();
+    assert!(
+        second
+            .acquire_session_lease(&config, "same-session", dir.path())
+            .unwrap_err()
+            .contains("already leased")
+    );
+    first.shutdown().await;
+    second
+        .acquire_session_lease(&config, "same-session", dir.path())
+        .unwrap();
+    second.shutdown().await;
+}
+
+#[test]
+fn deferred_queue_rejects_active_admission_but_accepts_transaction_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut queue = ExternalQueue {
+        path: dir.path().join("queue.json"),
+        rows: vec![],
+        accepting: false,
+    };
+    assert!(
+        queue
+            .insert("active".into(), "not admitted".into())
+            .is_err()
+    );
+    queue
+        .insert_protected("initial-wake".into(), "transaction message".into())
+        .unwrap();
+    assert!(!queue.accepting);
+    queue.accepting = true;
+    queue
+        .insert("active".into(), "now admitted".into())
+        .unwrap();
+    assert_eq!(queue.rows.len(), 2);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn external_transport_cleanup_kills_local_descendant_process_group() {
+    let script = r#"
+import json,sys,subprocess,time
+child=subprocess.Popen(['sleep','60'])
+r=json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'descendantPid':child.pid}}),flush=True)
+time.sleep(60)
+"#;
+    let (gateway, _rx) = test_gateway_with_receiver();
+    let scope = xai_tty_utils::ProcessScope::new();
+    let mut transport = ExternalTransport::spawn_scoped(
+        &fake_config(script),
+        "child",
+        gateway,
+        CancellationToken::new(),
+        &scope,
+    )
+    .unwrap();
+    let response = transport.rpc("initialize", json!({})).await.unwrap();
+    let pid = response["descendantPid"].as_u64().unwrap();
+    assert_eq!(scope.live_count(), 1);
+    transport.shutdown().await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+        if state.as_ref().is_none_or(|stat| {
+            stat.rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+        }) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "descendant remains live after group cleanup: {pid}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(scope.live_count(), 0);
 }

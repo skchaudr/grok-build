@@ -54,10 +54,17 @@ impl ExternalQueue {
     }
 
     fn insert(&mut self, message_id: String, text: String) -> Result<(), String> {
+        if !self.accepting {
+            return Err("external queue admission is not open".into());
+        }
+        self.insert_protected(message_id, text)
+    }
+
+    fn insert_protected(&mut self, message_id: String, text: String) -> Result<(), String> {
         if self.rows.iter().any(|row| row.message_id == message_id) {
             return Ok(());
         }
-        if !self.accepting || self.rows.iter().filter(|row| !row.consumed).count() >= 64 {
+        if self.rows.iter().filter(|row| !row.consumed).count() >= 64 {
             return Err("external queue closed or full".into());
         }
         self.rows.push(QueuedMessage {
@@ -126,6 +133,8 @@ impl ChildControl for ExternalChildRuntime {
 
 struct ExternalTransport {
     child: Child,
+    group: Option<Arc<xai_tty_utils::ProcessGroup>>,
+    session_lease: Option<std::fs::File>,
     stdout: BufReader<ChildStdout>,
     gateway: GatewaySender,
     native_session_id: String,
@@ -147,30 +156,49 @@ impl ExternalTransport {
         gateway: GatewaySender,
         cancellation: CancellationToken,
     ) -> Result<Self, String> {
+        Self::spawn_scoped(
+            config,
+            native_session_id,
+            gateway,
+            cancellation,
+            &xai_tty_utils::ProcessScope::new(),
+        )
+    }
+
+    // Remote argv must run a supervisor that tears down its remote tree on EOF/disconnect.
+    fn spawn_scoped(
+        config: &ExternalAcpDefinition,
+        native_session_id: &str,
+        gateway: GatewaySender,
+        cancellation: CancellationToken,
+        scope: &xai_tty_utils::ProcessScope,
+    ) -> Result<Self, String> {
         let (program, args) = config
             .argv
             .split_first()
             .ok_or("externalAcp.argv must not be empty")?;
         if program.is_empty()
-            || config.identity.trim().is_empty()
             || config.machine.trim().is_empty()
             || config.harness.trim().is_empty()
+            || config.identity.trim().is_empty()
         {
-            return Err(
-                "externalAcp requires nonempty executable, machine, harness and identity".into(),
-            );
+            return Err("external ACP launch identity must be nonempty".into());
         }
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| format!("external ACP launch failed: {e}"))?;
+            .kill_on_drop(true);
+        let (mut child, group) = scope
+            .spawn(command)
+            .map_err(|e| format!("external ACP scoped launch failed: {e}"))?;
         let stdout = BufReader::new(child.stdout.take().ok_or("external ACP stdout missing")?);
         Ok(Self {
             child,
+            group: Some(group),
+            session_lease: None,
             stdout,
             gateway,
             native_session_id: native_session_id.into(),
@@ -247,6 +275,15 @@ impl ExternalTransport {
     async fn incoming(&mut self, value: Value) -> Result<(), String> {
         let method = value["method"].as_str().unwrap_or_default();
         let mut params = value.get("params").cloned().unwrap_or(json!({}));
+        if method == "session/request_permission" && !self.published {
+            if let Some(id) = value.get("id") {
+                self.write(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"external ACP permission requested before child spawn publication; initialization rejected"}})).await?;
+            }
+            return Err(
+                "external ACP bootstrap permission request rejected before child registration"
+                    .into(),
+            );
+        }
         if method == "session/update"
             || method == "session/request_permission"
             || params.get("sessionId").is_some()
@@ -421,23 +458,75 @@ impl ExternalTransport {
         }
     }
 
+    fn acquire_session_lease(
+        &mut self,
+        config: &ExternalAcpDefinition,
+        session_id: &str,
+        lease_dir: &Path,
+    ) -> Result<(), String> {
+        std::fs::create_dir_all(lease_dir)
+            .map_err(|e| format!("external ACP lease directory: {e}"))?;
+        let identity = serde_json::to_vec(&(
+            &config.machine,
+            &config.harness,
+            &config.identity,
+            session_id,
+        ))
+        .map_err(|e| e.to_string())?;
+        let key = blake3::hash(&identity).to_hex();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lease_dir.join(format!("{key}.lock")))
+            .map_err(|e| e.to_string())?;
+        fs2::FileExt::try_lock_exclusive(&file).map_err(|e| {
+            format!("external ACP session already leased or lease unavailable: {e}")
+        })?;
+        self.session_lease = Some(file);
+        Ok(())
+    }
+
     async fn shutdown(&mut self) {
         if self.cancellation.is_cancelled() {
             if let Some(session_id) = self.session_id.clone() {
                 let _ = self.write(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session_id}})).await;
-                let _ =
-                    tokio::time::timeout(std::time::Duration::from_millis(250), self.child.wait())
-                        .await;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
+        }
+        if let Some(group) = self.group.take() {
+            let _ = group.kill();
         }
         let _ = self.child.start_kill();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait()).await;
+        self.session_lease = None;
     }
 }
 
 #[cfg(test)]
 #[path = "external_acp_tests.rs"]
 mod tests;
+
+impl Drop for ExternalTransport {
+    fn drop(&mut self) {
+        if let Some(group) = self.group.take() {
+            let _ = group.kill();
+        }
+    }
+}
+
+fn inherited_policy_error(ctx: &SubagentSpawnContext) -> Option<&'static str> {
+    if ctx.disable_web_search {
+        Some("external ACP cannot enforce inherited disable_web_search policy")
+    } else if ctx.todo_gate {
+        Some(
+            "external ACP cannot enforce inherited todo_gate policy; explicitly disable it for unrestricted external workers",
+        )
+    } else {
+        None
+    }
+}
 
 pub(super) async fn run_external_child(
     mut run: xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunRequest<
@@ -475,6 +564,7 @@ pub(super) async fn run_external_child(
         if xai_message_delivery_core::AgentId::from_uuid_v7(run.request.id.clone()).is_none() {
             return Err("Subagent id must be a UUIDv7".into());
         }
+        if let Some(error) = inherited_policy_error(&ctx) { return Err(error.into()); }
         if definition.capability_mode.is_some() || run.request.runtime_overrides.capability_mode.is_some()
             || definition.isolation.is_some() || run.request.runtime_overrides.isolation.is_some()
             || !definition.tools.is_empty() || !definition.disallowed_tools.is_empty()
@@ -521,19 +611,25 @@ pub(super) async fn run_external_child(
             Some(state)
         } else { None };
         if !Path::new(&cwd).is_absolute() { return Err("external ACP cwd must be absolute on the worker machine".into()); }
-        transport = Some(ExternalTransport::spawn(&config, &run.request.id, gateway.clone(), run.cancellation.clone())?);
+        let scope = ctx.process_scope.clone().unwrap_or_default();
+        transport = Some(ExternalTransport::spawn_scoped(&config, &run.request.id, gateway.clone(), run.cancellation.clone(), &scope)?);
         let t = transport.as_mut().unwrap();
         let init = t.rpc("initialize", json!({"protocolVersion":1,"clientCapabilities":{"fs":{},"terminal":false},"clientInfo":{"name":"grok-build-teammate","version":env!("CARGO_PKG_VERSION")}})).await?;
         let load_session = init["agentCapabilities"]["loadSession"].as_bool().unwrap_or(false);
         let external_id = if let Some(state) = resume {
             if !load_session { return Err("external ACP backend no longer supports session/load".into()); }
+            let leases = xai_grok_config::user_grok_home().ok_or("external ACP durable lease home unavailable")?.join("external-acp-leases");
+            t.acquire_session_lease(&config, &state.session_id, &leases)?;
             t.session_id = Some(state.session_id.clone());
             t.picker = t.rpc("session/load", json!({"sessionId":state.session_id,"cwd":cwd,"mcpServers":[]})).await?;
             state.session_id
         } else {
             let created = t.rpc("session/new", json!({"cwd":cwd,"mcpServers":[]})).await?;
             t.picker = created.clone();
-            created["sessionId"].as_str().ok_or("external ACP session/new omitted sessionId")?.to_owned()
+            let id = created["sessionId"].as_str().ok_or("external ACP session/new omitted sessionId")?.to_owned();
+            let leases = xai_grok_config::user_grok_home().ok_or("external ACP durable lease home unavailable")?.join("external-acp-leases");
+            t.acquire_session_lease(&config, &id, &leases)?;
+            id
         };
         t.session_id = Some(external_id.clone());
         let definition_model = match &definition.model {
@@ -561,7 +657,7 @@ pub(super) async fn run_external_child(
             if is_wake { prior_queue = Some(b"[]".to_vec()); }
             Vec::new()
         };
-        let queue = Arc::new(parking_lot::Mutex::new(ExternalQueue { path: queue_path, rows, accepting: true }));
+        let queue = Arc::new(parking_lot::Mutex::new(ExternalQueue { path: queue_path, rows, accepting: !is_wake }));
         queue_handle = Some(queue.clone());
         if !is_wake {
             queue.lock().persist()?;
@@ -577,7 +673,7 @@ pub(super) async fn run_external_child(
         if !promoted { return Err("external ACP child promotion rejected".into()); }
         if is_wake {
             let message_id = run.wake_origin.as_ref().unwrap().message_id.clone();
-            let inserted = { queue.lock().insert(message_id, run.request.prompt.clone()) };
+            let inserted = { queue.lock().insert_protected(message_id, run.request.prompt.clone()) };
             if let Err(error) = inserted {
                 run.reporter.settle_deferred_start(false).await;
                 return Err(error);
@@ -590,6 +686,7 @@ pub(super) async fn run_external_child(
                 return Err("external ACP deferred wake commit rejected".into());
             }
             wake_committed = true;
+            queue.lock().accepting = true;
             meta = Some(started_meta);
         }
         if !emit_subagent_notification(&gateway, &ctx.parent_session_id, SessionUpdate::SubagentSpawned {

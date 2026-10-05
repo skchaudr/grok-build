@@ -1170,7 +1170,12 @@ for line in sys.stdin:
         let id = uuid::Uuid::now_v7().to_string();
         let mut request = auto_wake_test_request(&id);
         request.parent_session_id = parent.clone(); request.subagent_type = "queue-worker".into(); request.prompt = "first".into();
-        backend.spawn(request, None).await.unwrap();
+        let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+        let spawn = tokio::task::spawn_local({
+            let backend = backend.clone();
+            async move { backend.spawn(request, Some(registered_tx)).await }
+        });
+        registered_rx.await.unwrap();
         let accepted = backend.send_active_message(ActiveAgentMessageRequest::try_new(&id, "second").unwrap()).await;
         assert!(matches!(accepted, ActiveAgentMessageOutcome::Accepted { .. }), "{accepted:?}");
         let steering = backend.send_active_message(ActiveAgentMessageRequest::try_new_with_operation(&id, "steer", ActiveAgentMessageOperation::Steer).unwrap()).await;
@@ -1180,6 +1185,7 @@ for line in sys.stdin:
         let info = SessionInfo { id: acp::SessionId::new(parent), cwd: cwd.path().to_string_lossy().into_owned() };
         let queue: serde_json::Value = serde_json::from_slice(&std::fs::read(session::persistence::session_dir(&info).join("subagents").join(&id).join("external_queue.json")).unwrap()).unwrap();
         assert_eq!(queue[0]["text"], "second"); assert_eq!(queue[0]["consumed"], true);
+        assert!(spawn.await.unwrap().unwrap().success);
         drop(backend); coordinator.await.unwrap();
     }).await;
 }
