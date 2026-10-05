@@ -156,6 +156,10 @@ impl ChildRunner for TestRunner {
         true
     }
 
+    fn supports_wake_request(&self, request: &SubagentRequest) -> bool {
+        request.subagent_type != "external-without-load"
+    }
+
     fn resolve_root(
         &self,
         agent_id: &xai_message_delivery_core::AgentId,
@@ -1112,6 +1116,21 @@ async fn send_to_owned_pending_that_fails_is_not_active() {
         response_outcome(response).await
     );
     assert!(admissions.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn unsupported_completed_child_wake_preserves_result() {
+    let (mut coordinator, command_tx, admission_tx, _admissions) = fixture();
+    insert_child(&mut coordinator, admission_tx, "child", "parent");
+    finish_child(&mut coordinator, "child");
+    coordinator.completed.get_mut("child").unwrap().request.subagent_type =
+        "external-without-load".to_owned();
+    assert_eq!(
+        ActiveAgentMessageOutcome::Unsupported,
+        response_outcome(begin_send(&mut coordinator, &command_tx, "child", "parent")).await
+    );
+    assert!(!coordinator.pending.contains_key("child"));
+    assert!(coordinator.completed.contains_key("child"));
 }
 
 #[tokio::test]

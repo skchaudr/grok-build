@@ -124,6 +124,13 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 .send(ActiveAgentMessageOutcome::NotFoundOrNotOwned);
             return;
         };
+        if !self.runner.supports_wake_request(&completed.request) {
+            let _ = ingress
+                .request
+                .respond_to
+                .send(ActiveAgentMessageOutcome::Unsupported);
+            return;
+        }
         let mut wake_request = completed.request.clone();
         let agent_address = completed.agent_address.clone();
         let spawner_session_id = completed.spawner_session_id.clone();

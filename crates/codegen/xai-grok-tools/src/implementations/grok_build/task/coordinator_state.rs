@@ -180,6 +180,11 @@ pub trait ChildRunner: 'static {
     /// Whether `run` can continue a woken agent's persisted session in place.
     fn supports_wake(&self) -> bool;
 
+    /// Whether this child's runtime can reload its persisted session before displacement.
+    fn supports_wake_request(&self, _request: &SubagentRequest) -> bool {
+        self.supports_wake()
+    }
+
     fn supports_agent_message_sender(&self) -> bool {
         false
     }
