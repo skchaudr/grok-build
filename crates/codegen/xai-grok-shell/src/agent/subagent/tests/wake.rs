@@ -1080,21 +1080,27 @@ for line in sys.stdin:
  r=json.loads(line); m=r.get('method')
  if m=='initialize': result={'protocolVersion':1,'agentCapabilities':{'loadSession':True}}
  elif m=='session/new': result={'sessionId':'external-123'}
+ elif m=='session/load':
+  assert r['params']['sessionId']=='external-123' and r['params']['cwd']=='/remote/workspace'
+  result={}
  elif m=='session/prompt':
   print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'external-123','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'coordinator done'}}}}),flush=True)
   result={'stopReason':'end_turn'}
  else: continue
  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
 "#;
-        let yaml = format!("---\nname: fake-worker\ndescription: test\nexternalAcp:\n  argv: {}\n  machine: local\n  harness: fake\n  identity: worker\n---\n", serde_json::to_string(&vec!["python3", "-u", "-c", script]).unwrap());
+        let yaml = format!("---\nname: fake-worker\ndescription: test\nexternalAcp:\n  argv: {}\n  machine: local\n  harness: fake\n  identity: worker\n  cwd: /remote/workspace\n---\n", serde_json::to_string(&vec!["python3", "-u", "-c", script]).unwrap());
         std::fs::write(agents.join("fake-worker.md"), yaml).unwrap();
         let mut ctx = ctx_with_toggle(Default::default());
         ctx.parent_cwd = cwd.path().into();
         ctx.parent_session_id = uuid::Uuid::now_v7().to_string();
         let parent_id = ctx.parent_session_id.clone();
+        let mut wake_ctx = ctx_with_toggle(Default::default());
+        wake_ctx.parent_cwd = ctx.parent_cwd.clone();
+        wake_ctx.parent_session_id = ctx.parent_session_id.clone();
         let (gateway, mut gateway_rx) = test_gateway_with_receiver();
         let (tx, rx) = SubagentCoordinator::<RunShellChildTestRunner>::channel();
-        let coordinator = tokio::task::spawn_local(SubagentCoordinator::from_channel(rx, RunShellChildTestRunner::new([ctx], false, gateway), CoordinatorConfig::default()).run());
+        let coordinator = tokio::task::spawn_local(SubagentCoordinator::from_channel(rx, RunShellChildTestRunner::new([ctx, wake_ctx], false, gateway), CoordinatorConfig::default()).run());
         let backend = ChannelBackend::for_coordinator_session(tx, parent_id.as_str());
         let id = uuid::Uuid::now_v7().to_string();
         let mut request = auto_wake_test_request(&id);
@@ -1119,7 +1125,61 @@ for line in sys.stdin:
             }
         }
         assert!(saw_native_update);
+        let outcome = backend.send_active_message(ActiveAgentMessageRequest::try_new(&id, "continue same session").unwrap()).await;
+        assert!(matches!(outcome, ActiveAgentMessageOutcome::Accepted { .. }), "{outcome:?}");
+        let woke = backend.query(&id, true, Some(5_000)).await.unwrap();
+        assert!(matches!(woke.status, SubagentSnapshotStatus::Completed { .. }), "{:?}", woke.status);
+        let wake_meta: SubagentMeta = serde_json::from_slice(&std::fs::read(session::persistence::session_dir(&info).join("subagents").join(&id).join("meta.json")).unwrap()).unwrap();
+        assert_eq!(wake_meta.child_session_id, id);
+        assert_eq!(wake_meta.child_cwd.as_deref(), Some("/remote/workspace"));
+        assert_eq!(wake_meta.external_acp.unwrap().session_id, "external-123");
         drop(backend);
         coordinator.await.unwrap();
+    }).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn external_acp_active_queue_runs_followup_and_steer_is_unsupported() {
+    use xai_grok_tools::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
+    use xai_grok_tools::implementations::grok_build::task::coordinator::{CoordinatorConfig, SubagentCoordinator};
+    tokio::task::LocalSet::new().run_until(async {
+        let cwd = tempfile::tempdir().unwrap();
+        let agents = cwd.path().join(".grok/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let script = r#"import json,sys,time
+for line in sys.stdin:
+ r=json.loads(line); m=r.get('method')
+ if m=='initialize': result={'protocolVersion':1,'agentCapabilities':{'loadSession':True}}
+ elif m=='session/new': result={'sessionId':'external-queue'}
+ elif m=='session/prompt':
+  text=r['params']['prompt'][0]['text'];time.sleep(0.5)
+  print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'external-queue','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':text}}}}),flush=True)
+  result={'stopReason':'end_turn'}
+ else: continue
+ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
+"#;
+        std::fs::write(agents.join("queue-worker.md"), format!("---\nname: queue-worker\ndescription: test\nexternalAcp:\n  argv: {}\n  machine: local\n  harness: fake\n  identity: worker\n---\n", serde_json::to_string(&vec!["python3", "-u", "-c", script]).unwrap())).unwrap();
+        let mut ctx = ctx_with_toggle(Default::default());
+        ctx.parent_cwd = cwd.path().into();
+        ctx.parent_session_id = uuid::Uuid::now_v7().to_string();
+        let parent = ctx.parent_session_id.clone();
+        let (gateway, _gateway_rx) = test_gateway_with_receiver();
+        let (tx, rx) = SubagentCoordinator::<RunShellChildTestRunner>::channel();
+        let coordinator = tokio::task::spawn_local(SubagentCoordinator::from_channel(rx, RunShellChildTestRunner::new([ctx], false, gateway), CoordinatorConfig::default()).run());
+        let backend = ChannelBackend::for_coordinator_session(tx, parent.as_str());
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut request = auto_wake_test_request(&id);
+        request.parent_session_id = parent.clone(); request.subagent_type = "queue-worker".into(); request.prompt = "first".into();
+        backend.spawn(request, None).await.unwrap();
+        let accepted = backend.send_active_message(ActiveAgentMessageRequest::try_new(&id, "second").unwrap()).await;
+        assert!(matches!(accepted, ActiveAgentMessageOutcome::Accepted { .. }), "{accepted:?}");
+        let steering = backend.send_active_message(ActiveAgentMessageRequest::try_new_with_operation(&id, "steer", ActiveAgentMessageOperation::Steer).unwrap()).await;
+        assert_eq!(steering, ActiveAgentMessageOutcome::Unsupported);
+        let finished = backend.query(&id, true, Some(5_000)).await.unwrap();
+        assert!(matches!(finished.status, SubagentSnapshotStatus::Completed { ref output, .. } if output == "firstsecond"), "{:?}", finished.status);
+        let info = SessionInfo { id: acp::SessionId::new(parent), cwd: cwd.path().to_string_lossy().into_owned() };
+        let queue: serde_json::Value = serde_json::from_slice(&std::fs::read(session::persistence::session_dir(&info).join("subagents").join(&id).join("external_queue.json")).unwrap()).unwrap();
+        assert_eq!(queue[0]["text"], "second"); assert_eq!(queue[0]["consumed"], true);
+        drop(backend); coordinator.await.unwrap();
     }).await;
 }

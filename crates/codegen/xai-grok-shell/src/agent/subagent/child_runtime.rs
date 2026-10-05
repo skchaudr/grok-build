@@ -29,7 +29,7 @@ impl ChildControl for ChildRuntime {
     ) -> SendBoxFuture<ActiveMessageAdmission> {
         match self {
             Self::Native(child) => child.send_active_message(delivery),
-            Self::External(_) => Box::pin(std::future::ready(ActiveMessageAdmission::Unsupported)),
+            Self::External(child) => child.send_active_message(delivery),
         }
     }
 

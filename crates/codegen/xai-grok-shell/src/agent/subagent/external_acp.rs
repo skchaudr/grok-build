@@ -4,12 +4,79 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
 use xai_grok_agent::config::ExternalAcpDefinition;
 use xai_grok_tools::implementations::grok_build::task::coordinator::{
-    ChildControl, LocalBoxFuture, SubagentProgress,
+    ActiveMessageAdmission, ChildControl, LocalBoxFuture, SendBoxFuture, SubagentProgress,
 };
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct QueuedMessage {
+    message_id: String,
+    text: String,
+    consumed: bool,
+}
+
+struct ExternalQueue {
+    path: PathBuf,
+    rows: Vec<QueuedMessage>,
+    accepting: bool,
+}
+
+fn durable_external_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or("external durable path parent missing")?;
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    use std::io::Write;
+    file.write_all(bytes).map_err(|e| e.to_string())?;
+    file.as_file().sync_all().map_err(|e| e.to_string())?;
+    file.persist(path).map_err(|e| e.to_string())?;
+    std::fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| e.to_string())
+}
+
+fn persist_external_meta(dir: &Path, meta: &SubagentMeta) -> bool {
+    let result = serde_json::to_vec_pretty(meta)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| durable_external_write(&dir.join("meta.json"), &bytes));
+    if let Err(error) = result {
+        tracing::error!(%error, "external ACP durable metadata write failed");
+        return false;
+    }
+    true
+}
+
+impl ExternalQueue {
+    fn persist(&self) -> Result<(), String> {
+        durable_external_write(
+            &self.path,
+            &serde_json::to_vec(&self.rows).map_err(|e| e.to_string())?,
+        )
+    }
+
+    fn insert(&mut self, message_id: String, text: String) -> Result<(), String> {
+        if self.rows.iter().any(|row| row.message_id == message_id) {
+            return Ok(());
+        }
+        if !self.accepting || self.rows.iter().filter(|row| !row.consumed).count() >= 64 {
+            return Err("external queue closed or full".into());
+        }
+        self.rows.push(QueuedMessage {
+            message_id,
+            text,
+            consumed: false,
+        });
+        if let Err(error) = self.persist() {
+            self.rows.pop();
+            return Err(error);
+        }
+        Ok(())
+    }
+}
 
 pub(crate) struct ExternalChildRuntime {
     pub cancellation: CancellationToken,
     pub progress: Arc<parking_lot::Mutex<SubagentProgress>>,
+    queue: Arc<parking_lot::Mutex<ExternalQueue>>,
 }
 
 impl ChildControl for ExternalChildRuntime {
@@ -17,7 +84,42 @@ impl ChildControl for ExternalChildRuntime {
     fn progress(&self) -> Self::ProgressFuture {
         Box::pin(std::future::ready(self.progress.lock().clone()))
     }
+    fn send_active_message(
+        &self,
+        delivery: ActiveAgentMessageDelivery,
+    ) -> SendBoxFuture<ActiveMessageAdmission> {
+        if delivery.operation() != ActiveAgentMessageOperation::Queue {
+            return Box::pin(std::future::ready(ActiveMessageAdmission::Unsupported));
+        }
+        let queue = self.queue.clone();
+        let cancellation = self.cancellation.clone();
+        Box::pin(async move {
+            let mut queue = queue.lock();
+            if !queue.accepting {
+                return ActiveMessageAdmission::ChannelClosed;
+            }
+            if queue.rows.iter().filter(|row| !row.consumed).count() >= 64 {
+                return ActiveMessageAdmission::Rejected;
+            }
+            match delivery.commit_admission(|| {
+                queue.insert(
+                    delivery.message().message_id.clone(),
+                    delivery.message().text.to_string(),
+                )
+            }) {
+                Some(Ok(())) => ActiveMessageAdmission::Admitted,
+                Some(Err(error)) => {
+                    tracing::error!(%error, "external ACP protected queue persistence failed");
+                    queue.accepting = false;
+                    cancellation.cancel();
+                    ActiveMessageAdmission::ChannelClosed
+                }
+                None => ActiveMessageAdmission::Rejected,
+            }
+        })
+    }
     fn cancel(&self) {
+        self.queue.lock().accepting = false;
         self.cancellation.cancel();
     }
 }
@@ -30,6 +132,10 @@ struct ExternalTransport {
     session_id: Option<String>,
     cancellation: CancellationToken,
     next_id: u64,
+    last_error_code: Option<i64>,
+    published: bool,
+    buffered_updates: Vec<acp::SessionNotification>,
+    picker: Value,
     output: String,
     progress: Arc<parking_lot::Mutex<SubagentProgress>>,
 }
@@ -71,6 +177,10 @@ impl ExternalTransport {
             session_id: None,
             cancellation,
             next_id: 0,
+            last_error_code: None,
+            published: false,
+            buffered_updates: Vec::new(),
+            picker: Value::Null,
             output: String::new(),
             progress: Default::default(),
         })
@@ -93,6 +203,7 @@ impl ExternalTransport {
     }
 
     async fn rpc(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        self.last_error_code = None;
         self.next_id += 1;
         let id = self.next_id;
         self.write(json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params}))
@@ -123,6 +234,7 @@ impl ExternalTransport {
                 return Err("external ACP response id mismatch".into());
             }
             if let Some(error) = value.get("error") {
+                self.last_error_code = error["code"].as_i64();
                 return Err(format!("external ACP {method}: {error}"));
             }
             return value
@@ -206,13 +318,107 @@ impl ExternalTransport {
             }
             let notification: acp::SessionNotification =
                 serde_json::from_value(params).map_err(|e| format!("invalid ACP update: {e}"))?;
-            if !self.gateway.forward_fire_and_forget(notification) {
-                return Err("external ACP update gateway closed".into());
+            if self.published {
+                if !self.gateway.forward_fire_and_forget(notification) {
+                    return Err("external ACP update gateway closed".into());
+                }
+            } else {
+                if self.buffered_updates.len() >= 256 {
+                    return Err("external ACP bootstrap replay exceeds 256 updates".into());
+                }
+                self.buffered_updates.push(notification);
             }
         } else {
             return Err(format!("unsupported external ACP notification: {method}"));
         }
         Ok(())
+    }
+
+    fn publish_updates(&mut self) -> Result<(), String> {
+        self.published = true;
+        for notification in self.buffered_updates.drain(..) {
+            if !self.gateway.forward_fire_and_forget(notification) {
+                return Err("external ACP replay gateway closed".into());
+            }
+        }
+        self.output.clear();
+        *self.progress.lock() = SubagentProgress::default();
+        Ok(())
+    }
+
+    async fn select_model(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        model: &str,
+    ) -> Result<(), String> {
+        let option = self.picker["configOptions"].as_array().and_then(|options| {
+            options
+                .iter()
+                .find(|option| option["category"] == "model" || option["id"] == "model")
+        });
+        let option_id = option
+            .and_then(|option| option["id"].as_str())
+            .unwrap_or("model")
+            .to_owned();
+        match self
+            .rpc(
+                "session/set_config_option",
+                json!({"sessionId":session_id,"configId":option_id,"value":model}),
+            )
+            .await
+        {
+            Ok(response) => {
+                let verified = response["configOptions"].as_array().is_some_and(|options| {
+                    options
+                        .iter()
+                        .any(|option| option["id"] == option_id && option["currentValue"] == model)
+                });
+                if !verified {
+                    return Err(
+                        "external ACP model config response did not verify requested model".into(),
+                    );
+                }
+                self.picker = response;
+                Ok(())
+            }
+            Err(error) if self.last_error_code == Some(-32601) => {
+                let available = self.picker["models"]["availableModels"]
+                    .as_array()
+                    .is_some_and(|models| models.iter().any(|entry| entry["modelId"] == model));
+                if !available {
+                    return Err(
+                        "external ACP legacy model picker does not advertise requested model"
+                            .into(),
+                    );
+                }
+                let selected = self
+                    .rpc(
+                        "session/set_model",
+                        json!({"sessionId":session_id,"modelId":model}),
+                    )
+                    .await
+                    .map_err(|legacy| format!("{error}; {legacy}"))?;
+                let verified_picker = if selected["models"]["currentModelId"].as_str().is_some() {
+                    selected
+                } else {
+                    self.rpc(
+                        "session/load",
+                        json!({"sessionId":session_id,"cwd":cwd,"mcpServers":[]}),
+                    )
+                    .await?
+                };
+                if verified_picker["models"]["currentModelId"] != model {
+                    return Err(
+                        "external ACP legacy model selection was not confirmed by actual picker"
+                            .into(),
+                    );
+                }
+                self.picker = verified_picker;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn shutdown(&mut self) {
@@ -249,6 +455,12 @@ pub(super) async fn run_external_child(
     let start = std::time::Instant::now();
     let mut transport = None;
     let mut meta = None;
+    let is_wake = run.wake_origin.is_some();
+    let mut wake_committed = false;
+    let mut prior_meta = None;
+    let mut resume_model = None;
+    let mut queue_handle = None;
+    let mut prior_queue = None;
     let parent_info = SessionInfo {
         id: acp::SessionId::new(ctx.parent_session_id.as_str()),
         cwd: ctx.parent_cwd.to_string_lossy().into_owned(),
@@ -263,7 +475,6 @@ pub(super) async fn run_external_child(
         if xai_message_delivery_core::AgentId::from_uuid_v7(run.request.id.clone()).is_none() {
             return Err("Subagent id must be a UUIDv7".into());
         }
-        if run.wake_origin.is_some() { return Err("external ACP automatic follow-up wake is not supported by this adapter yet".into()); }
         if definition.capability_mode.is_some() || run.request.runtime_overrides.capability_mode.is_some()
             || definition.isolation.is_some() || run.request.runtime_overrides.isolation.is_some()
             || !definition.tools.is_empty() || !definition.disallowed_tools.is_empty()
@@ -286,10 +497,10 @@ pub(super) async fn run_external_child(
             || !ctx.client_hooks.is_empty()
         { return Err("external ACP cannot enforce requested Grok tool, capability, permission, hook, isolation or prompt policy".into()); }
         if ctx.parent_depth >= ctx.subagents_max_depth { return Err("external ACP subagent depth limit reached".into()); }
-        let cwd = run.request.cwd.clone().or(config.cwd.clone()).unwrap_or_else(|| ctx.parent_cwd.to_string_lossy().into_owned());
-        if !Path::new(&cwd).is_absolute() { return Err("external ACP cwd must be absolute on the worker machine".into()); }
-        let resume = if let Some(id) = run.request.resume_from.as_deref().filter(|id| xai_tool_types::is_not_sentinel(id)) {
-            if !matches!(run.reporter.resume_source(id, &ctx.parent_session_id).await, SubagentResumeLookup::Completed(_) | SubagentResumeLookup::Missing) {
+        let mut cwd = run.request.cwd.clone().or(config.cwd.clone()).unwrap_or_else(|| ctx.parent_cwd.to_string_lossy().into_owned());
+        let resume_id = if is_wake { Some(run.request.id.as_str()) } else { run.request.resume_from.as_deref().filter(|id| xai_tool_types::is_not_sentinel(id)) };
+        let resume = if let Some(id) = resume_id {
+            if !is_wake && !matches!(run.reporter.resume_source(id, &ctx.parent_session_id).await, SubagentResumeLookup::Completed(_) | SubagentResumeLookup::Missing) {
                 return Err("cannot resume an active external ACP child".into());
             }
             let path = session::persistence::session_dir(&parent_info).join("subagents").join(id).join("meta.json");
@@ -297,13 +508,19 @@ pub(super) async fn run_external_child(
             if previous.parent_session_id != ctx.parent_session_id || !matches!(previous.status.as_str(), "completed" | "failed" | "cancelled") {
                 return Err("external ACP resume ownership or terminal-state mismatch".into());
             }
-            let state = previous.external_acp.ok_or("resume source is not an external ACP child")?;
-            if state.definition != config || previous.child_cwd.as_deref() != Some(&cwd) { return Err("external ACP resume backend identity or cwd mismatch".into()); }
+            let state = previous.external_acp.clone().ok_or("resume source is not an external ACP child")?;
+            if state.definition != config { return Err("external ACP resume backend identity mismatch".into()); }
+            let inherited_cwd = previous.child_cwd.clone().ok_or("external ACP resume cwd missing")?;
+            if run.request.cwd.as_ref().is_some_and(|requested| requested != &inherited_cwd) { return Err("external ACP resume cwd mismatch".into()); }
+            cwd = inherited_cwd;
+            resume_model = previous.effective_model_id.clone();
             if !state.load_session { return Err("external ACP backend does not support session/load".into()); }
-            run.request.subagent_type = previous.subagent_type;
+            run.request.subagent_type = previous.subagent_type.clone();
+            if is_wake { prior_meta = Some(previous); }
             let _ = run.reporter.set_resolved_subagent_type(run.request.subagent_type.clone()).await;
             Some(state)
         } else { None };
+        if !Path::new(&cwd).is_absolute() { return Err("external ACP cwd must be absolute on the worker machine".into()); }
         transport = Some(ExternalTransport::spawn(&config, &run.request.id, gateway.clone(), run.cancellation.clone())?);
         let t = transport.as_mut().unwrap();
         let init = t.rpc("initialize", json!({"protocolVersion":1,"clientCapabilities":{"fs":{},"terminal":false},"clientInfo":{"name":"grok-build-teammate","version":env!("CARGO_PKG_VERSION")}})).await?;
@@ -311,10 +528,11 @@ pub(super) async fn run_external_child(
         let external_id = if let Some(state) = resume {
             if !load_session { return Err("external ACP backend no longer supports session/load".into()); }
             t.session_id = Some(state.session_id.clone());
-            t.rpc("session/load", json!({"sessionId":state.session_id,"cwd":cwd,"mcpServers":[]})).await?;
+            t.picker = t.rpc("session/load", json!({"sessionId":state.session_id,"cwd":cwd,"mcpServers":[]})).await?;
             state.session_id
         } else {
             let created = t.rpc("session/new", json!({"cwd":cwd,"mcpServers":[]})).await?;
+            t.picker = created.clone();
             created["sessionId"].as_str().ok_or("external ACP session/new omitted sessionId")?.to_owned()
         };
         t.session_id = Some(external_id.clone());
@@ -322,25 +540,58 @@ pub(super) async fn run_external_child(
             ModelOverride::Override(model) => Some(model.clone()),
             _ => None,
         };
-        let model = run.request.runtime_overrides.model.clone().or(config.model.clone()).or(definition_model);
-        if let Some(model_id) = model.as_ref() { t.rpc("session/set_model", json!({"sessionId":external_id,"modelId":model_id})).await?; }
+        let model = run.request.runtime_overrides.model.clone().or(resume_model).or(config.model.clone()).or(definition_model);
+        if let Some(model_id) = model.as_ref() { t.select_model(&external_id, &cwd, model_id).await?; }
         let started_meta = SubagentMeta {
             external_acp: Some(ExternalAcpState { definition: config.clone(), session_id: external_id.clone(), load_session }),
             subagent_id: run.request.id.clone(), attempt_id: Some(run.attempt_id.to_string()), parent_session_id: ctx.parent_session_id.clone(),
             child_session_id: run.request.id.clone(), subagent_type: run.request.subagent_type.clone(), description: run.request.description.clone(), prompt: run.request.prompt.clone(),
             status: "running".into(), started_at: chrono::Utc::now(), completed_at: None, duration_ms: None, tool_calls: None, turns: None, error: None,
-            effective_context_source: Some(if run.request.resume_from.is_some() { "resumed" } else { "new" }.into()), context_normalized: false, fork_copy_error: None, persona: None,
+            effective_context_source: Some(if is_wake || run.request.resume_from.is_some() { "resumed" } else { "new" }.into()), context_normalized: false, fork_copy_error: None, persona: None,
             resumed_from: run.request.resume_from.clone(), child_cwd: Some(cwd.clone()), worktree_path: None, snapshot_ref: None, effective_model_id: model.clone(),
         };
         std::fs::create_dir_all(&meta_dir).map_err(|e| format!("external ACP metadata directory failed: {e}"))?;
-        if !write_subagent_meta(&meta_dir, &started_meta) { return Err("external ACP metadata persistence failed".into()); }
-        meta = Some(started_meta);
-        let promoted = run.reporter.started(StartedChild {
+        let queue_path = meta_dir.join("external_queue.json");
+        let rows = if is_wake && queue_path.exists() {
+            let bytes = std::fs::read(&queue_path).map_err(|e| e.to_string())?;
+            let rows = serde_json::from_slice(&bytes).map_err(|e| format!("invalid external queue: {e}"))?;
+            prior_queue = Some(bytes);
+            rows
+        } else {
+            if is_wake { prior_queue = Some(b"[]".to_vec()); }
+            Vec::new()
+        };
+        let queue = Arc::new(parking_lot::Mutex::new(ExternalQueue { path: queue_path, rows, accepting: true }));
+        queue_handle = Some(queue.clone());
+        if !is_wake {
+            queue.lock().persist()?;
+            if !persist_external_meta(&meta_dir, &started_meta) { return Err("external ACP metadata persistence failed".into()); }
+            meta = Some(started_meta.clone());
+        }
+        let child = StartedChild {
             child_session_id: run.request.id.clone(), persona: None, resumed_from: run.request.resume_from.clone(), child_cwd: cwd, worktree_path: None,
             effective_model_id: model.clone().unwrap_or_else(|| "external-default".into()), definition_background: definition.background.unwrap_or(false),
-            control: ChildRuntime::External(ExternalChildRuntime { cancellation: run.cancellation.clone(), progress: t.progress.clone() }),
-        }).await;
+            control: ChildRuntime::External(ExternalChildRuntime { cancellation: run.cancellation.clone(), progress: t.progress.clone(), queue: queue.clone() }),
+        };
+        let promoted = if is_wake { run.reporter.started_deferred(child).await } else { run.reporter.started(child).await };
         if !promoted { return Err("external ACP child promotion rejected".into()); }
+        if is_wake {
+            let message_id = run.wake_origin.as_ref().unwrap().message_id.clone();
+            let inserted = { queue.lock().insert(message_id, run.request.prompt.clone()) };
+            if let Err(error) = inserted {
+                run.reporter.settle_deferred_start(false).await;
+                return Err(error);
+            }
+            if !persist_external_meta(&meta_dir, &started_meta) {
+                run.reporter.settle_deferred_start(false).await;
+                return Err("external ACP wake metadata persistence failed".into());
+            }
+            if !run.reporter.settle_deferred_start(true).await {
+                return Err("external ACP deferred wake commit rejected".into());
+            }
+            wake_committed = true;
+            meta = Some(started_meta);
+        }
         if !emit_subagent_notification(&gateway, &ctx.parent_session_id, SessionUpdate::SubagentSpawned {
             subagent_id: run.request.id.clone(), attempt_id: Some(run.attempt_id.to_string()), parent_session_id: ctx.parent_session_id.clone(), parent_prompt_id: run.request.parent_prompt_id.clone(),
             child_session_id: run.request.id.clone(), subagent_type: run.request.subagent_type.clone(), description: run.request.description.clone(), effective_context_source: meta.as_ref().and_then(|m| m.effective_context_source.clone()),
@@ -348,6 +599,7 @@ pub(super) async fn run_external_child(
             agent_address: run.agent_address.as_ref().map(ToString::to_string),
         }, ctx.parent_cmd_tx.as_ref()) { return Err("external ACP spawn notification gateway closed".into()); }
         completion_data.mark_spawned_notification_emitted();
+        t.publish_updates()?;
         let mut prompt = definition.prompt_body.clone().unwrap_or_default();
         if !prompt.is_empty() { prompt.push_str("\n\n"); }
         prompt.push_str(&run.request.prompt);
@@ -370,11 +622,50 @@ pub(super) async fn run_external_child(
                 }, progress_parent_tx.as_ref()) { break; }
             }
         }));
-        let response = t.rpc("session/prompt", json!({"sessionId":external_id,"prompt":[{"type":"text","text":prompt}]})).await?;
-        if response["stopReason"] != "end_turn" { return Err(format!("external ACP prompt stopped: {}", response["stopReason"])); }
-        t.progress.lock().turn_count += 1;
+        let mut next_prompt = if is_wake { None } else { Some(prompt) };
+        loop {
+            let queued = if next_prompt.is_none() {
+                let mut queue = queue.lock();
+                match queue.rows.iter().find(|row| !row.consumed).cloned() {
+                    Some(row) => Some(row),
+                    None => { queue.accepting = false; None }
+                }
+            } else { None };
+            let prompt_text = match next_prompt.take() {
+                Some(prompt) => prompt,
+                None => match queued.as_ref() { Some(row) => row.text.clone(), None => break },
+            };
+            let response = t.rpc("session/prompt", json!({"sessionId":external_id,"prompt":[{"type":"text","text":prompt_text}]})).await?;
+            if response["stopReason"] != "end_turn" { return Err(format!("external ACP prompt stopped: {}", response["stopReason"])); }
+            t.progress.lock().turn_count += 1;
+            if let Some(row) = queued {
+                let mut queue = queue.lock();
+                if let Some(stored) = queue.rows.iter_mut().find(|stored| stored.message_id == row.message_id) { stored.consumed = true; }
+                queue.persist()?;
+            }
+        }
+        if !run.reporter.finalizing().await { return Err("external ACP child finalization rejected".into()); }
         Ok(t.output.clone())
     }.await;
+    if let Some(queue) = queue_handle.as_ref() {
+        queue.lock().accepting = false;
+    }
+    if is_wake && !wake_committed {
+        let _ = run.reporter.settle_deferred_start(false).await;
+        if let Some(bytes) = prior_queue.as_ref() {
+            if let Some(queue) = queue_handle.as_ref() {
+                if let Err(error) = durable_external_write(&queue.lock().path, bytes) {
+                    tracing::error!(%error, "external ACP prior wake queue restoration failed");
+                }
+            }
+        }
+        if let Some(prior) = prior_meta.as_ref() {
+            if !persist_external_meta(&meta_dir, prior) {
+                tracing::error!("external ACP prior wake metadata restoration failed");
+            }
+        }
+        meta = None;
+    }
     let mut result = match attempt {
         Ok(output) => SubagentResult {
             success: true,
@@ -400,7 +691,7 @@ pub(super) async fn run_external_child(
         meta.tool_calls = Some(result.tool_calls);
         meta.turns = Some(result.turns);
         meta.error = result.error.clone();
-        if !write_subagent_meta(&meta_dir, &meta) {
+        if !persist_external_meta(&meta_dir, &meta) {
             result = failure_result(
                 &run.request,
                 "external ACP terminal metadata persistence failed",

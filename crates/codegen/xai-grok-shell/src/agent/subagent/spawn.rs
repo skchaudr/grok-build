@@ -277,6 +277,19 @@ impl coordinator::ChildRunner for ShellChildRunner {
     fn supports_wake(&self) -> bool {
         true
     }
+    fn supports_wake_request(&self, request: &SubagentRequest) -> bool {
+        let Some(ctx) = self.agent_ref.get().try_build_subagent_spawn_context(&request.parent_session_id) else { return false; };
+        let info = crate::session::info::Info {
+            id: acp::SessionId::new(request.parent_session_id.clone()),
+            cwd: ctx.parent_cwd.to_string_lossy().into_owned(),
+        };
+        let path = crate::session::persistence::session_dir(&info).join("subagents").join(&request.id).join("meta.json");
+        let state = std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<super::SubagentMeta>(&bytes).ok()).and_then(|meta| meta.external_acp);
+        match state {
+            Some(state) => state.load_session && super::resolve_agent_definition(&request.subagent_type, &ctx).is_some_and(|definition| definition.external_acp.as_ref() == Some(&state.definition)),
+            None => super::resolve_agent_definition(&request.subagent_type, &ctx).is_none_or(|definition| definition.external_acp.is_none()),
+        }
+    }
     fn supports_agent_message_sender(&self) -> bool {
         true
     }

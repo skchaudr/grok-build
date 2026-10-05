@@ -52,6 +52,7 @@ async fn fake_acp_initialize_new_prompt_and_load_preserve_identity() {
         )
         .await
         .unwrap();
+    transport.publish_updates().unwrap();
     transport
         .rpc(
             "session/prompt",
@@ -204,4 +205,162 @@ async fn fake_acp_process_exit_is_a_visible_failure() {
             .contains("closed")
     );
     transport.shutdown().await;
+}
+
+#[tokio::test]
+async fn config_model_setter_verifies_selection_without_legacy_call() {
+    let script = r#"
+import json,sys
+r=json.loads(sys.stdin.readline()); assert r['method']=='session/set_config_option'
+assert r['params']['configId']=='model' and r['params']['value']=='claude-test'
+print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'configOptions':[{'id':'model','currentValue':'claude-test'}]}}),flush=True)
+"#;
+    let (gateway, _rx) = test_gateway_with_receiver();
+    let mut transport = ExternalTransport::spawn(
+        &fake_config(script),
+        "child",
+        gateway,
+        CancellationToken::new(),
+    )
+    .unwrap();
+    transport.session_id = Some("external-123".into());
+    transport
+        .select_model("external-123", "/remote", "claude-test")
+        .await
+        .unwrap();
+    transport.shutdown().await;
+}
+
+#[tokio::test]
+async fn model_setter_error_other_than_method_not_found_never_falls_back() {
+    let script = r#"
+import json,sys
+r=json.loads(sys.stdin.readline()); assert r['method']=='session/set_config_option'
+print(json.dumps({'jsonrpc':'2.0','id':r['id'],'error':{'code':-32602,'message':'invalid model'}}),flush=True)
+"#;
+    let (gateway, _rx) = test_gateway_with_receiver();
+    let mut transport = ExternalTransport::spawn(
+        &fake_config(script),
+        "child",
+        gateway,
+        CancellationToken::new(),
+    )
+    .unwrap();
+    assert!(
+        transport
+            .select_model("external-123", "/remote", "bad-model")
+            .await
+            .unwrap_err()
+            .contains("invalid model")
+    );
+    assert_eq!(transport.next_id, 1);
+    transport.shutdown().await;
+}
+
+#[tokio::test]
+async fn legacy_model_fallback_requires_method_not_found_and_actual_picker_confirmation() {
+    let script = r#"
+import json,sys
+for line in sys.stdin:
+ r=json.loads(line); m=r['method']
+ if m=='session/set_config_option': response={'error':{'code':-32601,'message':'method not found'}}
+ elif m=='session/set_model': response={'result':{}}
+ elif m=='session/load': response={'result':{'models':{'currentModelId':'legacy-test'}}}
+ else: raise Exception(m)
+ response.update({'jsonrpc':'2.0','id':r['id']});print(json.dumps(response),flush=True)
+"#;
+    let (gateway, _rx) = test_gateway_with_receiver();
+    let mut transport = ExternalTransport::spawn(
+        &fake_config(script),
+        "child",
+        gateway,
+        CancellationToken::new(),
+    )
+    .unwrap();
+    transport.picker = json!({"models":{"availableModels":[{"modelId":"legacy-test"}]}});
+    transport
+        .select_model("external-123", "/remote", "legacy-test")
+        .await
+        .unwrap();
+    assert_eq!(transport.next_id, 3);
+    transport.shutdown().await;
+}
+
+#[tokio::test]
+async fn load_replay_is_buffered_until_spawn_publication_and_not_result_output() {
+    let script = r#"
+import json,sys
+r=json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'external-123','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'old history'}}}}),flush=True)
+print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{}}),flush=True)
+"#;
+    let (gateway, mut rx) = test_gateway_with_receiver();
+    let mut transport = ExternalTransport::spawn(
+        &fake_config(script),
+        "child",
+        gateway,
+        CancellationToken::new(),
+    )
+    .unwrap();
+    transport.session_id = Some("external-123".into());
+    transport.rpc("session/load", json!({})).await.unwrap();
+    assert!(rx.try_recv().is_err());
+    transport.publish_updates().unwrap();
+    assert!(rx.try_recv().is_ok());
+    assert!(transport.output.is_empty());
+    transport.shutdown().await;
+}
+
+#[test]
+fn external_queue_persists_rows_and_refuses_closed_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut queue = ExternalQueue {
+        path: dir.path().join("queue.json"),
+        rows: vec![],
+        accepting: true,
+    };
+    queue
+        .insert("message-1".into(), "follow up".into())
+        .unwrap();
+    let rows: Vec<QueuedMessage> =
+        serde_json::from_slice(&std::fs::read(&queue.path).unwrap()).unwrap();
+    assert_eq!(rows[0].text, "follow up");
+    assert!(!rows[0].consumed);
+    queue.accepting = false;
+    assert!(
+        queue
+            .insert("message-2".into(), "not accepted".into())
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn unverified_config_model_success_is_rejected() {
+    let script = r#"
+import json,sys
+r=json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'configOptions':[{'id':'model','currentValue':'other-model'}]}}),flush=True)
+"#;
+    let (gateway, _rx) = test_gateway_with_receiver();
+    let mut transport = ExternalTransport::spawn(
+        &fake_config(script),
+        "child",
+        gateway,
+        CancellationToken::new(),
+    )
+    .unwrap();
+    assert!(
+        transport
+            .select_model("external-123", "/remote", "requested")
+            .await
+            .unwrap_err()
+            .contains("did not verify")
+    );
+    assert_eq!(transport.next_id, 1);
+    transport.shutdown().await;
+}
+
+#[test]
+fn external_definition_rejects_unknown_backend_fields() {
+    assert!(xai_grok_agent::config::AgentDefinition::parse("---\nname: fake\ndescription: worker\nexternalAcp:\n  argv: [fake]\n  machine: local\n  harness: fake\n  identity: worker\n  silentlyIgnoredPolicy: true\n---\n").is_err());
 }
