@@ -261,7 +261,7 @@ impl ExternalTransport {
                 continue;
             }
             if value.get("id") != Some(&json!(id)) {
-                return Err("external ACP response id mismatch".into());
+                return Err(format!("external ACP {method} response id mismatch: expected {id}, received {value}"));
             }
             if let Some(error) = value.get("error") {
                 self.last_error_code = error["code"].as_i64();
