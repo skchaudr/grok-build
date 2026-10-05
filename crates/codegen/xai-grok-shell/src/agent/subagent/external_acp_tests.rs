@@ -362,6 +362,20 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'configOptions':[{'id':
 }
 
 #[tokio::test]
+async fn session_new_updates_before_response_are_buffered_with_native_identity() {
+    let (gateway, mut rx) = test_gateway_with_receiver();
+    let mut transport = ExternalTransport::spawn(
+        &fake_config("import time; time.sleep(60)"), "child", gateway, CancellationToken::new(),
+    ).unwrap();
+    transport.incoming(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"early-native","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"bootstrap"}}}})).await.unwrap();
+    assert_eq!(transport.session_id.as_deref(), Some("early-native"));
+    assert!(rx.try_recv().is_err());
+    transport.publish_updates().unwrap();
+    assert!(rx.try_recv().is_ok());
+    transport.shutdown().await;
+}
+
+#[tokio::test]
 async fn external_extension_status_is_visible_and_does_not_abort_bootstrap() {
     let (gateway, mut rx) = test_gateway_with_receiver();
     let mut transport = ExternalTransport::spawn(

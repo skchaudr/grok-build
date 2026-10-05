@@ -290,6 +290,9 @@ impl ExternalTransport {
             || method == "session/request_permission"
             || params.get("sessionId").is_some()
         {
+            if self.session_id.is_none() && !self.published && method == "session/update" {
+                self.session_id = params["sessionId"].as_str().map(ToOwned::to_owned);
+            }
             if self.session_id.is_none()
                 || params["sessionId"].as_str() != self.session_id.as_deref()
             {
@@ -643,6 +646,7 @@ pub(super) async fn run_external_child(
             let created = t.rpc("session/new", json!({"cwd":cwd,"mcpServers":[]})).await?;
             t.picker = created.clone();
             let id = created["sessionId"].as_str().ok_or("external ACP session/new omitted sessionId")?.to_owned();
+            if t.session_id.as_ref().is_some_and(|early| early != &id) { return Err("external ACP session/new update identity differs from response".into()); }
             let leases = xai_grok_config::user_grok_home().ok_or("external ACP durable lease home unavailable")?.join("external-acp-leases");
             t.acquire_session_lease(&config, &id, &leases)?;
             id
