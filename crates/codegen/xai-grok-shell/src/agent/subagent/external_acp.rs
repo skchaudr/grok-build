@@ -261,6 +261,31 @@ impl ExternalTransport {
                 continue;
             }
             if value.get("id") != Some(&json!(id)) {
+                // Older native workers leak replies to watcher requests injected by agent/app.rs.
+                if value["jsonrpc"] == "2.0"
+                    && (value.get("result").is_some() ^ value.get("error").is_some())
+                    && matches!(
+                        value["id"].as_str(),
+                        Some(
+                            "skills-reload"
+                                | "workflows-reload"
+                                | "config-auth-reloaded"
+                                | "config-auth-cleared"
+                                | "config-reload-mcp"
+                                | "config-reload-project-mcp"
+                                | "config-reload-models"
+                                | "config-reload-models-cache"
+                        )
+                    )
+                {
+                    self.incoming(json!({
+                        "jsonrpc":"2.0",
+                        "method":"_internal/watcher_response",
+                        "params":value
+                    }))
+                    .await?;
+                    continue;
+                }
                 return Err(format!("external ACP {method} response id mismatch: expected {id}, received {value}"));
             }
             if let Some(error) = value.get("error") {

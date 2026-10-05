@@ -72,6 +72,97 @@ async fn fake_acp_initialize_new_prompt_and_load_preserve_identity() {
 }
 
 #[tokio::test]
+async fn internal_watcher_replies_are_visible_and_numeric_rpc_keeps_waiting() {
+    let ids = [
+        "skills-reload",
+        "workflows-reload",
+        "config-auth-reloaded",
+        "config-auth-cleared",
+        "config-reload-mcp",
+        "config-reload-project-mcp",
+        "config-reload-models",
+        "config-reload-models-cache",
+    ];
+    for published in [false, true] {
+        let script = format!(
+            r#"
+import json, sys
+r=json.loads(sys.stdin.readline())
+for id in {}:
+    for reply in [{{'result':{{'result':{{'reloaded':1}}}}}}, {{'error':{{'code':-32603,'message':'reload failed'}}}}]:
+        print(json.dumps({{'jsonrpc':'2.0','id':id,**reply}}), flush=True)
+print(json.dumps({{'jsonrpc':'2.0','id':r['id'],'result':{{'stopReason':'end_turn'}}}}), flush=True)
+"#,
+            serde_json::to_string(&ids).unwrap()
+        );
+        let (gateway, mut rx) = test_gateway_with_receiver();
+        let mut transport = ExternalTransport::spawn(
+            &fake_config(&script), "native-child", gateway, CancellationToken::new(),
+        ).unwrap();
+        transport.next_id = 2;
+        if published {
+            transport.publish_updates().unwrap();
+        }
+        let result = transport.rpc("session/prompt", json!({})).await.unwrap();
+        assert_eq!(result["stopReason"], "end_turn");
+        assert_eq!(transport.last_error_code, None);
+        assert!(transport.output.is_empty());
+        if !published {
+            assert!(rx.try_recv().is_err());
+            transport.publish_updates().unwrap();
+        }
+        for id in ids {
+            for field in ["result", "error"] {
+                match rx.try_recv().unwrap() {
+                    xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                        let value = serde_json::to_value(args.request).unwrap();
+                        assert_eq!(value["sessionId"], "native-child");
+                        assert_eq!(value["update"]["sessionUpdate"], "agent_message_chunk");
+                        let text = value["update"]["content"]["text"].as_str().unwrap();
+                        assert!(text.contains(id), "{text}");
+                        assert!(text.contains(field), "{text}");
+                        assert!(text.contains(if field == "result" { "reloaded" } else { "reload failed" }));
+                    }
+                    other => panic!("unexpected watcher status: {other:?}"),
+                }
+            }
+        }
+        assert!(rx.try_recv().is_err());
+        transport.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn unrelated_response_id_mismatches_still_fail_closed() {
+    for reply in [
+        json!({"id":"config-unknown","result":{}}),
+        json!({"id":"skills-reload-extra","result":{}}),
+        json!({"id":"unrelated","error":{"code":-32603}}),
+        json!({"id":"3","result":{}}),
+        json!({"id":4,"result":{}}),
+        json!({"id":"skills-reload"}),
+        json!({"id":"skills-reload","result":{},"error":{"code":-32603}}),
+    ] {
+        let mut reply = reply;
+        reply["jsonrpc"] = json!("2.0");
+        let script = format!(
+            "import sys; sys.stdin.readline(); print({}, flush=True)",
+            serde_json::to_string(&reply.to_string()).unwrap()
+        );
+        let (gateway, mut rx) = test_gateway_with_receiver();
+        let mut transport = ExternalTransport::spawn(
+            &fake_config(&script), "native-child", gateway, CancellationToken::new(),
+        ).unwrap();
+        transport.next_id = 2;
+        transport.publish_updates().unwrap();
+        let error = transport.rpc("session/prompt", json!({})).await.unwrap_err();
+        assert!(error.contains("response id mismatch: expected 3"), "{error}");
+        assert!(rx.try_recv().is_err());
+        transport.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn fake_acp_cancel_interrupts_unanswered_request_and_reaps_process() {
     let (gateway, _rx) = test_gateway_with_receiver();
     let token = CancellationToken::new();
