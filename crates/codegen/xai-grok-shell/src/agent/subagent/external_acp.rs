@@ -288,15 +288,15 @@ impl ExternalTransport {
         }
         if method == "session/update"
             || method == "session/request_permission"
-            || params.get("sessionId").is_some()
+            || params["sessionId"].as_str().is_some()
         {
-            if self.session_id.is_none() && !self.published && method == "session/update" {
+            if self.session_id.is_none() && !self.published && (method == "session/update" || (value.get("id").is_none() && method.starts_with('_'))) {
                 self.session_id = params["sessionId"].as_str().map(ToOwned::to_owned);
             }
             if self.session_id.is_none()
                 || params["sessionId"].as_str() != self.session_id.as_deref()
             {
-                return Err("external ACP session identity mismatch".into());
+                return Err(format!("external ACP session identity mismatch for {method}: expected {:?}, received {:?}", self.session_id, params["sessionId"].as_str()));
             }
             params["sessionId"] = json!(self.native_session_id);
         }
