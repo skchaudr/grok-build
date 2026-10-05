@@ -429,6 +429,7 @@ fn backward_compat_meta_without_snapshot_ref() {
 /// Canonical running-status `SubagentMeta`; tests override only the fields under test via `..base_meta()`.
 fn base_meta() -> SubagentMeta {
     SubagentMeta {
+        external_acp: None,
         subagent_id: "sa".into(),
         attempt_id: None,
         parent_session_id: "parent".into(),

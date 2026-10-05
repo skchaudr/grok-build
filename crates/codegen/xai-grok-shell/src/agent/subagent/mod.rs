@@ -53,12 +53,13 @@ pub(crate) use xai_grok_tools::implementations::grok_build::task::coordinator::{
 };
 mod attempt_store;
 mod child_runtime;
+mod external_acp;
 mod handle_request;
 mod prompt_turn_receipt;
 mod prompt_turn_result;
 mod resume_window;
 pub(crate) use child_runtime::{
-    ShellChildRuntime, UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT, UnpromotedResourceFate,
+    ChildRuntime, ShellChildRuntime, UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT, UnpromotedResourceFate,
     await_session_thread_exit,
 };
 pub(crate) use handle_request::run_shell_child;
@@ -1711,6 +1712,9 @@ pub(crate) fn describe_subagent_type(
         SubagentValidateTypeOutcome::Ok => {}
         _ => return SubagentDescribeOutcome::Unavailable,
     }
+    if definition.external_acp.is_some() {
+        return SubagentDescribeOutcome::Unavailable;
+    }
     resolve_subagent_toolset(subagent_type, harness_agent_type, ctx, &mut definition);
     SubagentDescribeOutcome::Ok(summarize_tool_config(&definition.tool_config))
 }
@@ -2098,7 +2102,16 @@ mod progress_publisher_tests {
 /// Links the child session back to its parent.
 /// For the GCS-persisted artifact (`subagent.json`), see [`SubagentSessionMetadata`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ExternalAcpState {
+    pub definition: xai_grok_agent::config::ExternalAcpDefinition,
+    pub session_id: String,
+    pub load_session: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SubagentMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_acp: Option<ExternalAcpState>,
     pub subagent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<String>,

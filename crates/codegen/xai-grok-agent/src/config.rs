@@ -696,6 +696,8 @@ impl BuiltinAgentName {
 pub struct AgentDefinition {
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_acp: Option<ExternalAcpDefinition>,
     /// Plugin namespace for plugin-backed agents only.
     #[serde(skip)]
     pub plugin_name: Option<String>,
@@ -787,6 +789,20 @@ pub struct AgentDefinition {
     #[serde(skip)]
     pub scope: AgentScope,
 }
+/// Trusted ACP launch configuration. Remote transport is supplied explicitly in argv.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExternalAcpDefinition {
+    pub argv: Vec<String>,
+    pub machine: String,
+    pub harness: String,
+    pub identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
 /// Declares that the agent must call a specific tool before the turn ends.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1411,6 +1427,7 @@ impl AgentDefinition {
         Self {
             name: name.to_owned(),
             description: description.to_string(),
+            external_acp: None,
             plugin_name: None,
             builtin_name: None,
             prompt_mode: PromptMode::Extend,

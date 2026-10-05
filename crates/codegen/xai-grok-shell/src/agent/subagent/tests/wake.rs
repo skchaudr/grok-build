@@ -24,7 +24,7 @@ impl RunShellChildTestRunner {
 impl xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunner
     for RunShellChildTestRunner
 {
-    type Control = ShellChildRuntime;
+    type Control = ChildRuntime;
     type RootControl =
         xai_grok_tools::implementations::grok_build::task::root_control::NoRootControl;
     type CompletionData = ShellCompletionData;
@@ -104,6 +104,7 @@ impl xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunner
 
 fn prior_wake_meta(id: &str, model_id: &str) -> SubagentMeta {
     SubagentMeta {
+        external_acp: None,
         subagent_id: id.to_owned(),
         attempt_id: Some("at1.prior".to_owned()),
         parent_session_id: "setup-parent".to_owned(),
@@ -1064,4 +1065,61 @@ async fn started_wake_with_failed_metadata_write_preserves_prior_durable_artifac
             usage_ack.abort();
         })
         .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn configured_external_acp_runs_through_coordinator_and_persists_native_identity() {
+    use xai_grok_tools::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
+    use xai_grok_tools::implementations::grok_build::task::coordinator::{CoordinatorConfig, SubagentCoordinator};
+    tokio::task::LocalSet::new().run_until(async {
+        let cwd = tempfile::tempdir().unwrap();
+        let agents = cwd.path().join(".grok/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let script = r#"import json, sys
+for line in sys.stdin:
+ r=json.loads(line); m=r.get('method')
+ if m=='initialize': result={'protocolVersion':1,'agentCapabilities':{'loadSession':True}}
+ elif m=='session/new': result={'sessionId':'external-123'}
+ elif m=='session/prompt':
+  print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'external-123','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'coordinator done'}}}}),flush=True)
+  result={'stopReason':'end_turn'}
+ else: continue
+ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
+"#;
+        let yaml = format!("---\nname: fake-worker\ndescription: test\nexternalAcp:\n  argv: {}\n  machine: local\n  harness: fake\n  identity: worker\n---\n", serde_json::to_string(&vec!["python3", "-u", "-c", script]).unwrap());
+        std::fs::write(agents.join("fake-worker.md"), yaml).unwrap();
+        let mut ctx = ctx_with_toggle(Default::default());
+        ctx.parent_cwd = cwd.path().into();
+        ctx.parent_session_id = uuid::Uuid::now_v7().to_string();
+        let parent_id = ctx.parent_session_id.clone();
+        let (gateway, mut gateway_rx) = test_gateway_with_receiver();
+        let (tx, rx) = SubagentCoordinator::<RunShellChildTestRunner>::channel();
+        let coordinator = tokio::task::spawn_local(SubagentCoordinator::from_channel(rx, RunShellChildTestRunner::new([ctx], false, gateway), CoordinatorConfig::default()).run());
+        let backend = ChannelBackend::for_coordinator_session(tx, parent_id.as_str());
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut request = auto_wake_test_request(&id);
+        request.parent_session_id = parent_id.clone();
+        request.subagent_type = "fake-worker".into();
+        request.prompt = "work".into();
+        request.run_in_background = false;
+        let result = backend.spawn(request, None).await.unwrap();
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.output.as_ref(), "coordinator done");
+        assert_eq!(result.child_session_id, id);
+        let info = SessionInfo { id: acp::SessionId::new(parent_id), cwd: cwd.path().to_string_lossy().into_owned() };
+        let meta_path = session::persistence::session_dir(&info).join("subagents").join(&id).join("meta.json");
+        let meta: SubagentMeta = serde_json::from_slice(&std::fs::read(meta_path).unwrap()).unwrap();
+        assert_eq!(meta.status, "completed");
+        assert_eq!(meta.external_acp.unwrap().session_id, "external-123");
+        let mut saw_native_update = false;
+        while let Ok(message) = gateway_rx.try_recv() {
+            if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = message {
+                assert_eq!(args.request.session_id.to_string(), id);
+                saw_native_update = true;
+            }
+        }
+        assert!(saw_native_update);
+        drop(backend);
+        coordinator.await.unwrap();
+    }).await;
 }

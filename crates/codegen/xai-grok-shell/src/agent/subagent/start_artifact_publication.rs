@@ -8,7 +8,7 @@ use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_telemetry::instrument_task;
 
 use super::{
-    ShellChildRuntime, SpawnerAddressTarget, SubagentMeta, SubagentSpawnContext,
+    ChildRuntime, SpawnerAddressTarget, SubagentMeta, SubagentSpawnContext,
     emit_subagent_notification, write_subagent_meta,
 };
 use crate::extensions::notification::SessionUpdate;
@@ -36,7 +36,7 @@ pub(super) struct StartArtifactPublication {
     prepared: PreparedStartArtifacts,
     gateway: GatewaySender,
     reporter: xai_grok_tools::implementations::grok_build::task::coordinator::ChildReporter<
-        ShellChildRuntime,
+        ChildRuntime,
     >,
     parent_session_id: String,
     parent_cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<SessionCommand>>,
@@ -56,7 +56,7 @@ impl StartArtifactPublication {
         prepared: PreparedStartArtifacts,
         gateway: GatewaySender,
         reporter: xai_grok_tools::implementations::grok_build::task::coordinator::ChildReporter<
-            ShellChildRuntime,
+            ChildRuntime,
         >,
         ctx: &SubagentSpawnContext,
     ) -> Self {

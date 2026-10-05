@@ -88,7 +88,7 @@ pub(crate) async fn join_worker_task<T>(task: tokio::task::JoinHandle<T>, panic_
     }
 }
 impl coordinator::ChildRunner for ShellChildRunner {
-    type Control = crate::agent::subagent::ShellChildRuntime;
+    type Control = crate::agent::subagent::ChildRuntime;
     type RootControl =
         xai_grok_tools::implementations::grok_build::task::root_control::NoRootControl;
     type CompletionData = crate::agent::subagent::ShellCompletionData;

@@ -8,6 +8,39 @@ use xai_message_delivery_core::DeliveryEnvelope;
 use super::prompt_turn_receipt::{PromptTurnReceipt, cancel_shell_child_turn};
 use crate::session::{SessionCommand, SessionThread};
 
+pub(crate) enum ChildRuntime {
+    Native(ShellChildRuntime),
+    External(super::external_acp::ExternalChildRuntime),
+}
+
+impl ChildControl for ChildRuntime {
+    type ProgressFuture = LocalBoxFuture<SubagentProgress>;
+
+    fn progress(&self) -> Self::ProgressFuture {
+        match self {
+            Self::Native(child) => child.progress(),
+            Self::External(child) => child.progress(),
+        }
+    }
+
+    fn send_active_message(
+        &self,
+        delivery: ActiveAgentMessageDelivery,
+    ) -> SendBoxFuture<ActiveMessageAdmission> {
+        match self {
+            Self::Native(child) => child.send_active_message(delivery),
+            Self::External(_) => Box::pin(std::future::ready(ActiveMessageAdmission::Unsupported)),
+        }
+    }
+
+    fn cancel(&self) {
+        match self {
+            Self::Native(child) => child.cancel(),
+            Self::External(child) => child.cancel(),
+        }
+    }
+}
+
 /// Shell runtime handle retained while a child is active.
 pub(crate) struct ShellChildRuntime {
     pub(crate) child_cmd_tx: mpsc::UnboundedSender<SessionCommand>,

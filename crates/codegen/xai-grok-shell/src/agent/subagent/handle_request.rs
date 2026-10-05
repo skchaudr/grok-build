@@ -355,12 +355,49 @@ pub(super) fn admit_explicit_tool_model(
     )
 )]
 pub(crate) async fn run_shell_child(
-    run: grok_build::task::coordinator::ChildRunRequest<ShellChildRuntime>,
+    run: grok_build::task::coordinator::ChildRunRequest<ChildRuntime>,
     mut ctx: SubagentSpawnContext,
     mut completion_data: ShellCompletionData,
     gateway: GatewaySender,
     mut spawn_root: Option<tracing::Span>,
 ) -> ChildRunOutput<ShellCompletionData> {
+    let dispatch_resume_id = if run.wake_origin.is_some() {
+        Some(run.request.id.as_str())
+    } else {
+        run.request.resume_from.as_deref()
+    };
+    let external_type = dispatch_resume_id
+        .and_then(|id| durable_resume_source_for(id, &ctx.parent_session_id, &ctx.parent_cwd))
+        .map(|source| source.subagent_type)
+        .unwrap_or_else(|| run.request.subagent_type.clone());
+    if let Some(definition) = resolve_agent_definition(&external_type, &ctx)
+        && definition.external_acp.is_some()
+    {
+        return super::external_acp::run_external_child(run, ctx, completion_data, gateway, definition).await;
+    }
+    let resume_id = if run.wake_origin.is_some() {
+        Some(run.request.id.as_str())
+    } else {
+        run.request.resume_from.as_deref()
+    };
+    if let Some(id) = resume_id {
+        let parent_info = SessionInfo {
+            id: acp::SessionId::new(ctx.parent_session_id.clone()),
+            cwd: ctx.parent_cwd.to_string_lossy().into_owned(),
+        };
+        let path = session::persistence::session_dir(&parent_info)
+            .join("subagents").join(id).join("meta.json");
+        if std::fs::read(path).ok()
+            .and_then(|bytes| serde_json::from_slice::<SubagentMeta>(&bytes).ok())
+            .is_some_and(|meta| meta.external_acp.is_some())
+        {
+            return child_run_output(
+                failure_result(&run.request, "External ACP resume definition is missing or changed to native; refusing native transcript fallback"),
+                completion_data,
+                None,
+            );
+        }
+    }
     if let Some(tp) = run.request.spawn_root.traceparent() {
         xai_grok_otel::link_current_span_to_meta(&serde_json::json!({ "traceparent": tp }));
     }
@@ -996,6 +1033,7 @@ pub(crate) async fn run_shell_child(
         InitialContextSource::Resumed => "resumed",
     };
     let subagent_meta = SubagentMeta {
+        external_acp: None,
         subagent_id: subagent_id.clone(),
         attempt_id: attempt_id.clone(),
         parent_session_id: ctx.parent_session_id.clone(),
@@ -1753,7 +1791,7 @@ pub(crate) async fn run_shell_child(
                     .map(|path| path.to_string_lossy().into_owned()),
                 effective_model_id: tracker_model_id.clone(),
                 definition_background,
-                control: ShellChildRuntime {
+                control: ChildRuntime::Native(ShellChildRuntime {
                     child_cmd_tx: child_handle.cmd_tx.clone(),
                     message_delivery: child_handle.message_delivery(),
                     active_message_target_session_id: child_session_id.0.to_string(),
@@ -1768,7 +1806,7 @@ pub(crate) async fn run_shell_child(
                     active_message_parent_prompt_index: ctx
                         .active_message_parent_prompt_index
                         .clone(),
-                },
+                }),
             };
             let promoted = if is_wake {
                 reporter.started_deferred(child).await

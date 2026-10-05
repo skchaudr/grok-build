@@ -1,6 +1,6 @@
 //! One isolated `run_shell_child` spawn for grove-e2e. Feature `test-support`.
 use super::spawn::present_child_completion;
-use super::{ShellChildRuntime, ShellCompletionData, SubagentSpawnContext, run_shell_child};
+use super::{ChildRuntime, ShellCompletionData, SubagentSpawnContext, run_shell_child};
 use crate::session::SessionCommand;
 use crate::util::config::RemoteSettings;
 use agent_client_protocol as acp;
@@ -162,7 +162,7 @@ struct Runner {
     gateway: GatewaySender,
 }
 impl ChildRunner for Runner {
-    type Control = ShellChildRuntime;
+    type Control = ChildRuntime;
     type RootControl = NoRootControl;
     type CompletionData = ShellCompletionData;
     type RunFuture = LocalBoxFuture<ChildRunOutput<ShellCompletionData>>;
