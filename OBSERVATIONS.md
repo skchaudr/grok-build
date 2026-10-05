@@ -75,3 +75,11 @@ The shared `target/` dir filled the 99 GB volume during the debug build (linker 
 5. The shared `target/` filled the disk (debug incremental was about 28G) while the pager tests compiled. Incremental was removed. Later builds used `CARGO_INCREMENTAL=0`.
 
 6. `dsh acp` is `dsh --profile acp`. The `gb` picker does not use that command for DSH. It runs `dsh --profile acp-enhanced` with `DSH_ACP_PROVIDER` and `DSH_ACP_MODEL`.
+
+## 2026-10-05 real Air → khoj DSH session and resume
+
+- Passed on existing `89cae842` binaries, with live OpenRouter Mercury 2.5: Air pager → forwarded socket → khoj leader → DSH. Session `6b31df5c-91d6-4f31-80c0-392d8eda1767` produced raw tool output `khoj-38w`, survived client exit, loaded from a fresh client, remembered ORBIT-6274, and ran hostname/uname again. Full reproduction/evidence: `docs/leader-external-agents-proof.md`.
+- `grok agent stdio` still sets `agent_cmd: None`; it is not a substitute for the actual pager acceptance test. The tested pager logged `use_leader=true embedded_fallback=false`.
+- Mercury's summary dropped the trailing `w` twice; the DSH tool-result events retained the exact hostname. Inspect tool results, not model paraphrases.
+- Darwin binary is stamped 1.0.45 while the VM build is stamped 1.0.46; both identify `89cae842`. Air default uses a tiny `--no-auto-update` launcher to preserve the local build; stock binary remains available.
+- Existing test executables rerun without rebuilding: external agents 8 passed; stdio integration 47 passed/1 ignored; leader unit tests 287 passed. Local MCP paths and optional native `_x.ai/*` methods remain distinct compatibility concerns; neither prevented the tested DSH turns or explicit-ID resume.
