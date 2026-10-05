@@ -368,7 +368,21 @@ impl ExternalTransport {
                 self.buffered_updates.push(notification);
             }
         } else {
-            return Err(format!("unsupported external ACP notification: {method}"));
+            let text = format!("ACP worker status {method}: {params}");
+            let notification: acp::SessionNotification = serde_json::from_value(json!({
+                "sessionId": self.native_session_id,
+                "update": {"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("{text}\n")}}
+            })).map_err(|e| format!("invalid ACP status projection: {e}"))?;
+            if self.published {
+                if !self.gateway.forward_fire_and_forget(notification) {
+                    return Err("external ACP status gateway closed".into());
+                }
+            } else {
+                if self.buffered_updates.len() >= 256 {
+                    return Err("external ACP bootstrap status exceeds 256 updates".into());
+                }
+                self.buffered_updates.push(notification);
+            }
         }
         Ok(())
     }

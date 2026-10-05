@@ -361,6 +361,26 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'configOptions':[{'id':
     transport.shutdown().await;
 }
 
+#[tokio::test]
+async fn external_extension_status_is_visible_and_does_not_abort_bootstrap() {
+    let (gateway, mut rx) = test_gateway_with_receiver();
+    let mut transport = ExternalTransport::spawn(
+        &fake_config("import time; time.sleep(60)"), "child", gateway, CancellationToken::new(),
+    ).unwrap();
+    transport.incoming(json!({"jsonrpc":"2.0","method":"_auth/status_update","params":{"status":"authenticated"}})).await.unwrap();
+    assert!(rx.try_recv().is_err());
+    transport.publish_updates().unwrap();
+    match rx.try_recv().unwrap() {
+        xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
+            assert_eq!(args.request.session_id.to_string(), "child");
+            let value = serde_json::to_value(args.request).unwrap();
+            assert!(value.to_string().contains("_auth/status_update"));
+        }
+        other => panic!("unexpected status update: {other:?}"),
+    }
+    transport.shutdown().await;
+}
+
 #[test]
 fn external_definition_rejects_unknown_backend_fields() {
     assert!(xai_grok_agent::config::AgentDefinition::parse("---\nname: fake\ndescription: worker\nexternalAcp:\n  argv: [fake]\n  machine: local\n  harness: fake\n  identity: worker\n  silentlyIgnoredPolicy: true\n---\n").is_err());
