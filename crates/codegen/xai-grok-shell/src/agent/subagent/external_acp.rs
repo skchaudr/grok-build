@@ -134,6 +134,7 @@ impl ChildControl for ExternalChildRuntime {
 struct ExternalTransport {
     child: Child,
     group: Option<Arc<xai_tty_utils::ProcessGroup>>,
+    _scope: xai_tty_utils::ProcessScope,
     session_lease: Option<std::fs::File>,
     stdout: BufReader<ChildStdout>,
     gateway: GatewaySender,
@@ -198,6 +199,7 @@ impl ExternalTransport {
         Ok(Self {
             child,
             group: Some(group),
+            _scope: scope.clone(),
             session_lease: None,
             stdout,
             gateway,
