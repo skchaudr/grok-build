@@ -50,6 +50,17 @@ async fn outer_ancestor_wakes_completed_descendant_by_raw_id_and_address() {
 }
 
 #[tokio::test]
+async fn root_owned_completed_wake_keeps_automatic_completion_delivery() {
+    let (mut coordinator, command_tx, admission_tx, _admissions) = fixture();
+    insert_child(&mut coordinator, admission_tx, "child", "parent");
+    finish_child(&mut coordinator, "child");
+    coordinator.completed.get_mut("child").unwrap().request.surface_completion = true;
+    let mut response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+    assert!(response.try_recv().is_err());
+    assert!(coordinator.pending.get("child").unwrap().request.surface_completion);
+}
+
+#[tokio::test]
 async fn dropping_coordinator_refuses_parked_wake() {
     let (mut coordinator, command_tx, admission_tx, _admissions) = fixture();
     insert_child(&mut coordinator, admission_tx, "child", "parent");

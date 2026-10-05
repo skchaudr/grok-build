@@ -555,7 +555,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 target,
             } => match begin_pair(self, target, &ingress) {
                 Ok(quota_admission) => {
-                    self.admit_active_message(subagent_id, route, quota_admission, ingress);
+                    if self.active.get(&subagent_id).is_some_and(|child| child.deferred_wake.is_some() && !child.cancellation.is_cancelled()) {
+                        self.park_until_spawn_ready(subagent_id, route, quota_admission, ingress);
+                    } else {
+                        self.admit_active_message(subagent_id, route, quota_admission, ingress);
+                    }
                 }
                 Err(outcome) => {
                     let _ = ingress.request.respond_to.send(outcome);
