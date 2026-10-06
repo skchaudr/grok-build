@@ -6,7 +6,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use crate::git_info;
 use crate::render::line_utils::truncate_line;
@@ -17,9 +17,10 @@ pub fn render_top_bar(
     area: Rect,
     buf: &mut Buffer,
     theme: &Theme,
+    cwd: &Path,
     announcement: Option<&xai_grok_announcements::RemoteAnnouncement>,
 ) {
-    let line = truncate_line(location_line(theme), area.width as usize);
+    let line = truncate_line(location_line(theme, cwd), area.width as usize);
     let line_width = line.width() as u16;
     buf.set_line(area.x, area.y, &line, line_width.min(area.width));
 
@@ -40,11 +41,11 @@ pub fn render_top_bar(
     }
 }
 
-/// Build the `{git branch} {worktree} {cwd}` line for the welcome top bar, reading the live process cwd.
+/// Build the `{git branch} {worktree} {cwd}` line for the welcome top bar from the app's session cwd.
 /// The caller width-truncates the returned line.
-pub(crate) fn location_line(theme: &Theme) -> Line<'static> {
+pub(crate) fn location_line(theme: &Theme, cwd: &Path) -> Line<'static> {
     let info_style = Style::default().fg(theme.gray);
-    let parts = location_parts(&process_cwd());
+    let parts = location_parts(cwd);
 
     let mut spans: Vec<Span> = Vec::new();
     if let Some(branch) = parts.branch.as_deref() {
@@ -63,6 +64,15 @@ pub(crate) fn location_line(theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-fn process_cwd() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn top_bar_uses_requested_cwd_not_process_directory() {
+        let cwd = Path::new("/remote-only/project");
+        let line = location_line(&Theme::current(), cwd);
+        let last = line.spans.last().expect("cwd span");
+        assert_eq!(last.content, crate::util::display_location_path(cwd));
+    }
 }

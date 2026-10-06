@@ -1062,6 +1062,7 @@ pub(crate) async fn run(
             terminal.backend_mut().writer_mut().escape_writer(),
         )
     };
+    app.cwd = args.session_cwd()?;
     app.pending_startup = Some(pending_startup);
     app.tracing_rx = Some(tracing_handle.rx);
     app.last_known_terminal_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(0);

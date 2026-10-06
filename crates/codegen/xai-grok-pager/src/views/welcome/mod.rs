@@ -789,7 +789,7 @@ pub fn render_welcome(
         width: top_bar_area.width.saturating_sub(h_margin * 2),
         height: 1,
     };
-    render_top_bar(top_bar_inner, buf, &theme, None);
+    render_top_bar(top_bar_inner, buf, &theme, params.cwd, None);
 
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {

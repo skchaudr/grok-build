@@ -855,7 +855,7 @@ pub async fn materialize_startup(
         .to_string();
     materialize_startup_for_cwd(ctx, intent, &cwd).await
 }
-/// Same as [`materialize_startup`] but with an explicit process cwd (tests, headless).
+/// Same as [`materialize_startup`] but with an explicit session cwd (external agents, tests, headless).
 pub async fn materialize_startup_for_cwd(
     ctx: MaterializeCtx,
     intent: SessionStartupIntent,

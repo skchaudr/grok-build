@@ -417,7 +417,7 @@ pub struct PagerArgs {
     /// Print version
     #[arg(short = 'v', short_alias = 'V', long = "version", action = ArgAction::SetTrue)]
     pub version: bool,
-    /// Working directory.
+    /// Working directory. With --agent-cmd, an absolute path on the agent host; not checked locally.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
     /// Use a custom leader socket path instead of the default `~/.grok/leader.sock`.
@@ -448,7 +448,7 @@ pub struct PagerArgs {
         alias = "dangerously-skip-permissions"
     )]
     pub yolo: bool,
-    /// Command to spawn an external ACP agent process over stdio (e.g. "dsh acp").
+    /// Command to spawn an external ACP agent process over stdio (interactive mode only).
     #[arg(long = "agent-cmd", value_name = "COMMAND", global = true)]
     pub agent_cmd: Option<String>,
     /// Trust this folder and persist the decision to the trust store.
@@ -850,12 +850,23 @@ impl PagerArgs {
         if let Some(file) = self.debug_file.take() {
             self.debug_file = Some(anchor_to_launch_dir(file, launch_dir));
         }
+        if self.agent_cmd.is_some()
+            && (self.single.is_some()
+                || self.prompt_json.is_some()
+                || self.prompt_file.is_some()
+                || self.memory_flush)
+        {
+            anyhow::bail!("--agent-cmd is only supported in interactive mode, not headless mode");
+        }
         if let Some(ref cwd) = self.cwd {
-            std::env::set_current_dir(cwd).map_err(|e| {
+            super::working_directory::apply(Some(cwd), self.agent_cmd.is_some()).map_err(|e| {
                 anyhow::anyhow!("Failed to set working directory to {:?}: {}", cwd, e)
             })?;
         }
         Ok(self)
+    }
+    pub(crate) fn session_cwd(&self) -> std::io::Result<PathBuf> {
+        super::working_directory::session_cwd(self.cwd.as_deref(), self.agent_cmd.is_some())
     }
     /// Optional-flag accessor; always `false` in builds without the optional feature, so call sites need no `cfg` of their own.
     pub fn chat(&self) -> bool {
@@ -940,7 +951,7 @@ impl PagerArgs {
     /// Re-selecting after the sandbox would race a concurrent rename/create.
     /// Listing failures and ambiguity are hard errors here, reported before the sandbox (fail closed).
     pub fn pin_local_resume_target(&mut self) -> anyhow::Result<()> {
-        let cwd_buf = std::env::current_dir().ok();
+        let cwd_buf = self.session_cwd().ok();
         let cwd_str = cwd_buf.as_deref().map(|p| p.to_string_lossy());
         self.pin_local_resume_target_for_cwd(cwd_str.as_deref())
     }
@@ -981,7 +992,7 @@ impl PagerArgs {
     /// Local, best-effort; `None` when not resuming or nothing is found.
     /// Read once for the profile resume resolution.
     pub fn saved_resume_profile(&self) -> Option<String> {
-        let cwd_buf = std::env::current_dir().ok();
+        let cwd_buf = self.session_cwd().ok();
         let cwd_str = cwd_buf.as_deref().map(|p| p.to_string_lossy());
         self.saved_resume_profile_for_cwd(cwd_str.as_deref())
     }
@@ -1253,6 +1264,50 @@ mod tests {
                 .startup_sandbox_profile(None),
             SandboxStartup::Apply(None)
         );
+    }
+    #[test]
+    fn external_cwd_accepts_remote_path_in_standalone_and_leader_modes() {
+        let launch = std::env::current_dir().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let remote = temp.path().join("remote-only");
+        for mode in ["--leader", "--no-leader"] {
+            let args = PagerArgs::try_parse_from([
+                "grok",
+                "--agent-cmd",
+                "external-agent",
+                mode,
+                "--cwd",
+                remote.to_str().unwrap(),
+                "--leader-socket",
+                "relative.sock",
+            ])
+            .unwrap()
+            .apply_cwd()
+            .unwrap();
+            assert_eq!(args.cwd.as_deref(), Some(remote.as_path()));
+            assert_eq!(std::env::current_dir().unwrap(), launch);
+            assert_eq!(args.leader_socket, Some(launch.join("relative.sock")));
+            assert!(!remote.exists());
+        }
+    }
+    #[test]
+    fn external_agent_headless_is_rejected_before_cwd_changes() {
+        let launch = std::env::current_dir().unwrap();
+        for headless in [
+            vec!["-p", "hello"],
+            vec!["--prompt-json", "[]"],
+            vec!["--prompt-file", "prompt.txt"],
+            vec!["--memory-flush", "--resume", "remote-session"],
+        ] {
+            let mut argv = vec!["grok", "--agent-cmd", "external-agent"];
+            argv.extend(headless);
+            let error = PagerArgs::try_parse_from(argv)
+                .unwrap()
+                .apply_cwd()
+                .unwrap_err();
+            assert!(error.to_string().contains("interactive"));
+            assert_eq!(std::env::current_dir().unwrap(), launch);
+        }
     }
     #[test]
     fn launch_directory_anchoring_precedes_cwd_change() {

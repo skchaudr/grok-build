@@ -9,6 +9,7 @@ mod load;
 mod modal;
 mod optimistic_home;
 mod take_deferred;
+mod working_directory;
 
 fn content_hit(id: &str) -> xai_grok_shell::extensions::session_search::SearchSessionHit {
     xai_grok_shell::extensions::session_search::SearchSessionHit {

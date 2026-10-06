@@ -48,6 +48,7 @@ mod status_line_policy;
 pub mod subagent;
 pub mod subscription;
 pub(crate) mod voice_state;
+mod working_directory;
 pub(crate) mod worktree_session;
 pub(crate) use dispatch::dashboard_stop_readiness;
 /// Display-refresh probe + motion cadence + terminal telemetry at startup.
@@ -786,7 +787,7 @@ pub async fn run(
     }
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
     tokio::task::spawn_blocking(|| {});
-    if let Ok(cwd) = std::env::current_dir() {
+    if let Ok(cwd) = args.session_cwd() {
         crate::git_info::populate_from_cwd_async(cwd);
     }
     let prefetch_wait_started = std::time::Instant::now();
@@ -858,7 +859,7 @@ pub async fn run(
     }
     if args.trust {
         use xai_grok_workspace::folder_trust::{grant_folder_trust, report_cli_trust_grant};
-        match std::env::current_dir() {
+        match args.session_cwd() {
             Ok(cwd) => report_cli_trust_grant(&grant_folder_trust(&cwd)),
             Err(e) => {
                 tracing::warn!(error = %e, "--trust: failed to resolve cwd; folder not trusted");
@@ -893,11 +894,17 @@ pub async fn run(
     let mut materialize_ctx = session_startup::MaterializeCtx::from_pager_args(&args);
     materialize_ctx.restore_progress_on_stdout =
         std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let materialized = session_startup::materialize_startup(materialize_ctx, intent).await?;
+    let startup_cwd = args.session_cwd()?;
+    let materialized = session_startup::materialize_startup_for_cwd(
+        materialize_ctx,
+        intent,
+        &startup_cwd.to_string_lossy(),
+    )
+    .await?;
     if args.chat()
         && let session_startup::MaterializedStartup::Resume { session_id, .. } = &materialized
     {
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = args.session_cwd().unwrap_or_default();
         if session_startup::chat_mode_refuses_local_build_load(true, false, session_id, &cwd) {
             anyhow::bail!(
                 "{} (session id: {session_id})",
