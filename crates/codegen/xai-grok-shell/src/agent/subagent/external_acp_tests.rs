@@ -289,13 +289,29 @@ async fn fake_acp_process_exit_is_a_visible_failure() {
         CancellationToken::new(),
     )
     .unwrap();
+    let error = transport.rpc("initialize", json!({})).await.unwrap_err();
     assert!(
-        transport
-            .rpc("initialize", json!({}))
-            .await
-            .unwrap_err()
-            .contains("closed")
+        error.contains("closed") || error.contains("write failed"),
+        "{error}"
     );
+    transport.shutdown().await;
+}
+
+#[tokio::test]
+async fn exited_process_broken_pipe_is_a_visible_failure() {
+    let (gateway, _rx) = test_gateway_with_receiver();
+    let mut transport = ExternalTransport::spawn(
+        &fake_config("pass"),
+        "child",
+        gateway,
+        CancellationToken::new(),
+    )
+    .unwrap();
+    let stdin = transport.child.stdin.take();
+    transport.child.wait().await.unwrap();
+    transport.child.stdin = stdin;
+    let error = transport.rpc("initialize", json!({})).await.unwrap_err();
+    assert!(error.contains("external ACP write failed"), "{error}");
     transport.shutdown().await;
 }
 
@@ -558,6 +574,57 @@ async fn external_session_lease_is_exclusive_until_cleanup() {
         .acquire_session_lease(&config, "same-session", dir.path())
         .unwrap();
     second.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn external_session_lease_cleanup_releases_fork_inherited_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = fake_config("import time; time.sleep(60)");
+    let (gateway, _rx) = test_gateway_with_receiver();
+    let mut first = ExternalTransport::spawn(
+        &config,
+        "first",
+        gateway.clone(),
+        CancellationToken::new(),
+    )
+    .unwrap();
+    let mut second = ExternalTransport::spawn(
+        &config,
+        "second",
+        gateway,
+        CancellationToken::new(),
+    )
+    .unwrap();
+    first
+        .acquire_session_lease(&config, "same-session", dir.path())
+        .unwrap();
+    let mut pipe = [0; 2];
+    // Only async-signal-safe syscalls run in the forked child before exit.
+    unsafe {
+        assert_eq!(libc::pipe(pipe.as_mut_ptr()), 0);
+        for fd in pipe {
+            assert_eq!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), 0);
+        }
+        let pid = libc::fork();
+        assert!(pid >= 0);
+        if pid == 0 {
+            libc::close(pipe[1]);
+            let mut byte = 0u8;
+            libc::read(pipe[0], (&mut byte as *mut u8).cast(), 1);
+            libc::_exit(0);
+        }
+        libc::close(pipe[0]);
+        first.shutdown().await;
+        let acquired = second.acquire_session_lease(&config, "same-session", dir.path());
+        libc::close(pipe[1]);
+        assert_eq!(libc::waitpid(pid, std::ptr::null_mut(), 0), pid);
+        second.shutdown().await;
+        assert!(
+            acquired.is_ok(),
+            "inherited descriptor retained cleaned-up lease: {acquired:?}"
+        );
+    }
 }
 
 #[test]

@@ -544,7 +544,12 @@ impl ExternalTransport {
         }
         let _ = self.child.start_kill();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait()).await;
-        self.session_lease = None;
+        if let Some(file) = self.session_lease.take() {
+            // Close alone can retain flock in a concurrent fork's pre-exec child.
+            if let Err(error) = fs2::FileExt::unlock(&file) {
+                tracing::warn!(%error, "external ACP session lease unlock failed");
+            }
+        }
     }
 }
 
