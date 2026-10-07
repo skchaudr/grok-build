@@ -64,3 +64,14 @@ This is a rerun of existing test artifacts, not a fresh source build or full-sui
 The pager sends local MCP definitions containing Air paths to the remote session. Shell proof did not exercise those MCPs. DSH returns `Method not found` for several optional native `_x.ai/*` extensions; prompt/tool streaming and explicit-ID resume worked.
 
 `grok agent stdio` currently sets `ClientCapabilities.agent_cmd = None` in pager-bin `run_agent_command`; `-p` also did not prove this route. Use the actual pager path above. No claim here about restart persistence, other ACP harnesses, a multi-machine task team, or newly added orchestration primitives.
+
+## 2026-10-07 Claude Code through the khoj leader
+
+Khoj leader restarted on `grok-e617f5dc` (pinned launcher, same scheme as Air; stock auto-update had replaced `~/.grok/bin/grok` with 1.0.46 at 11:46Z). Air pager `e617f5dc` (built on Mini, rsynced) ran:
+
+```sh
+xai-grok-pager --leader --leader-socket ~/.grok/leader-khoj.sock --always-approve \
+  --agent-cmd 'env CLAUDE_CODE_EXECUTABLE=/home/sab-mini/.local/bin/claude claude-code-acp'
+```
+
+Log: `use_leader=true embedded_fallback=false`, `external agent eager authenticate failed with no pager-driveable login method; proceeding`. Prompt "Run hostname" produced `◆ Run Print the machine hostname` and the reply `khoj-38w`. Footer `Fable 5.1`. Claude credentials and adapter live only on khoj; Air needed neither. Air standalone (`gb claude`) also passed the same day. Not exercised: `--resume` for Claude sessions, local MCP forwarding.
