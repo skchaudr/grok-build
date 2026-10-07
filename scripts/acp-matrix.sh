@@ -44,7 +44,7 @@ agent_cmd_for() {
   case "$1" in
     dsh) echo "dsh --profile acp-enhanced --patch ${OUT_DIR}/cliproxy.patch.yml" ;;
     cursor) echo 'cursor-agent acp' ;;
-    claude) echo 'claude-code-acp' ;;
+    claude) echo "env CLAUDE_CODE_EXECUTABLE=$(command -v claude) claude-code-acp" ;;
     pi) echo 'pi-acp' ;;
     codex) echo 'codex-acp' ;;
     grok) echo 'grok agent stdio' ;;
