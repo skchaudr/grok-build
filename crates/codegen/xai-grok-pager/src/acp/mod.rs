@@ -644,6 +644,7 @@ pub fn find_interactive_login_method(
 /// `auth_methods` is fail-closed: needs_login without an interactive method.
 async fn eager_auth_or_login_fallback(
     tx: &AcpAgentTx,
+    external_agent: bool,
     auth_methods: &[acp::AuthMethod],
     default_auth_method_id: Option<&acp::AuthMethodId>,
     needs_login: bool,
@@ -677,7 +678,7 @@ async fn eager_auth_or_login_fallback(
             auth_start_mode,
             meta,
         ),
-        Err(_) => {
+        Err(err) => {
             let has_api_key = auth_methods
                 .iter()
                 .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::XaiApiKey);
@@ -685,6 +686,18 @@ async fn eager_auth_or_login_fallback(
                 return (false, login_label, login_method_id, auth_start_mode, None);
             }
             let (label, method_id, mode) = find_interactive_login_method(auth_methods);
+            // External ACP agents (e.g. claude-code-acp) may advertise an auth
+            // method whose `authenticate` is a stub ("Method not implemented")
+            // because credentials live in their own CLI. When the pager has no
+            // interactive method it can drive, stay ready and let `session/new`
+            // report `auth_required` if the agent really is logged out.
+            if external_agent && method_id.is_none() {
+                tracing::info!(
+                    error = %err,
+                    "external agent eager authenticate failed with no pager-driveable login method; proceeding"
+                );
+                return (false, None, None, AuthStartMode::Pending, None);
+            }
             (true, label, method_id, mode, None)
         }
     }
@@ -717,6 +730,7 @@ async fn bounded_eager_auth(
         xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
         eager_auth_or_login_fallback(
             tx,
+            external_agent,
             auth_methods,
             default_auth_method_id,
             needs_login,
@@ -911,6 +925,36 @@ mod tests {
             agent.rx.try_recv().is_err(),
             "no authenticate request is required"
         );
+    }
+
+    #[tokio::test]
+    async fn external_agent_stub_authenticate_error_is_ready() {
+        // claude-code-acp advertises `claude-login` but its `authenticate`
+        // replies "Method not implemented". The pager must not fail-closed
+        // to the Grok login screen for that.
+        let (client, agent) = xai_acp_lib::acp_channels();
+        let methods = vec![make_auth_method(
+            "claude-login",
+            "Log in with Claude Code",
+            None,
+        )];
+        // Dropping the agent side makes `authenticate` fail, like the stub does.
+        drop(agent);
+        let (needs_login, label, method, _, meta) = bounded_eager_auth(
+            &client.tx,
+            true,
+            &methods,
+            None,
+            false,
+            None,
+            None,
+            AuthStartMode::Pending,
+        )
+        .await;
+        assert!(!needs_login);
+        assert!(label.is_none());
+        assert!(method.is_none());
+        assert!(meta.is_none());
     }
 
     #[tokio::test]

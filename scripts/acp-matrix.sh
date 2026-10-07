@@ -6,7 +6,7 @@ set -euo pipefail
 
 usage() {
   echo "Usage: $0 <agent>" >&2
-  echo "Agents: dsh | cursor | pi | codex | grok" >&2
+  echo "Agents: dsh | cursor | pi | codex | grok | claude" >&2
   exit 2
 }
 
@@ -14,7 +14,7 @@ usage() {
 
 AGENT="$1"
 case "$AGENT" in
-  dsh | cursor | pi | codex | grok) ;;
+  dsh | cursor | pi | codex | grok | claude) ;;
   *) usage ;;
 esac
 
@@ -44,6 +44,7 @@ agent_cmd_for() {
   case "$1" in
     dsh) echo "dsh --profile acp-enhanced --patch ${OUT_DIR}/cliproxy.patch.yml" ;;
     cursor) echo 'cursor-agent acp' ;;
+    claude) echo 'claude-code-acp' ;;
     pi) echo 'pi-acp' ;;
     codex) echo 'codex-acp' ;;
     grok) echo 'grok agent stdio' ;;
