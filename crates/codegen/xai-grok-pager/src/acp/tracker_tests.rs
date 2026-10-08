@@ -259,6 +259,18 @@ fn tool_call_lifecycle() {
     assert_eq!(tracker.pending_tools.len(), 0);
 }
 #[test]
+fn repeated_tool_call_same_id_upserts_one_card() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(tool_call("tc1", acp::ToolKind::Execute, "Terminal"), &meta(), &mut sb);
+    tracker.handle_update(tool_call("tc1", acp::ToolKind::Execute, "`hostname`"), &meta(), &mut sb);
+    assert_eq!(sb.len(), 1);
+    assert_eq!(tracker.pending_tools.len(), 1);
+    tracker.handle_update(tool_update_completed("tc1"), &meta(), &mut sb);
+    assert_eq!(sb.len(), 1);
+    assert_eq!(tracker.pending_tools.len(), 0);
+}
+#[test]
 fn tool_call_already_completed() {
     let mut sb = ScrollbackState::new();
     let mut tracker = AcpUpdateTracker::new();

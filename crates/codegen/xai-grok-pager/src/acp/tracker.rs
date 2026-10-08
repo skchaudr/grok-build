@@ -1244,6 +1244,20 @@ impl AcpUpdateTracker {
             }
         }
         let tc_id = tc.tool_call_id.0.to_string();
+        // Repeated ToolCall for an id already on screen is an upsert (claude-code-acp sends one at stream start
+        // with empty input and another with the full input); without this each one pushes a duplicate card.
+        if self.pending_tools.contains_key(&tc_id) {
+            let fields = acp::ToolCallUpdateFields::new()
+                .kind(Some(tc.kind))
+                .status(Some(tc.status))
+                .title(Some(tc.title))
+                .content(Some(tc.content))
+                .locations(Some(tc.locations))
+                .raw_input(tc.raw_input)
+                .raw_output(tc.raw_output);
+            let update = acp::ToolCallUpdate::new(tc.tool_call_id, fields);
+            return self.handle_tool_call_update(update, scrollback, is_replay);
+        }
         if let Some(orphan) = self.orphan_updates.remove(&tc_id) {
             let merged = merge_tool_call_update(tc, orphan);
             let block = tool_call_to_block(
