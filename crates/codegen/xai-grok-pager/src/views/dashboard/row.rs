@@ -280,6 +280,17 @@ pub fn roster_activity_to_state(activity: RosterActivity) -> RowState {
         RosterActivity::Dead => RowState::Failed,
     }
 }
+/// Resident external sessions are live on another backend. Idle there means the
+/// dashboard Idle group. Native idle rows stay Inactive.
+fn roster_entry_state(entry: &RosterEntry) -> RowState {
+    if entry.resident
+        && entry.activity == RosterActivity::Idle
+        && entry.session_kind.as_deref() == Some("external")
+    {
+        return RowState::Idle;
+    }
+    roster_activity_to_state(entry.activity)
+}
 /// Append "roster-only" rows for leader sessions not represented by a local `AgentView`.
 /// Skips any roster entry whose `session_id` already matches a locally-attached agent (those carry richer data via [`build_local_rows`]).
 fn append_roster_rows(
@@ -329,7 +340,7 @@ fn append_roster_rows(
                     .map(sanitize)
             })
             .unwrap_or_else(|| sanitize(&entry.session_id));
-        let state = roster_activity_to_state(entry.activity);
+        let state = roster_entry_state(entry);
         let activity = match state {
             RowState::NeedsInput => Some("Awaiting input".to_string()),
             RowState::Working => Some("Working".to_string()),
@@ -1437,6 +1448,31 @@ mod tests {
             let rows = collect_roster(&[roster_entry_with("a", None, activity)], &empty);
             assert_eq!(rows.len(), 1, "untitled {activity:?} entry must be kept");
         }
+    }
+    /// A live external session is resident and idle between turns. That is the
+    /// dashboard's Idle group. A native idle row stays Inactive: only
+    /// `session_kind == "external"` plus `resident` changes the mapping.
+    #[test]
+    fn resident_external_idle_row_renders_idle_native_idle_stays_inactive() {
+        let empty = std::collections::BTreeSet::new();
+        let mut external = roster_entry_with("ext", Some("cursor-agent"), RosterActivity::Idle);
+        external.session_kind = Some("external".to_string());
+        external.resident = true;
+        let mut native = roster_entry_with("native", Some("Fix the bug"), RosterActivity::Idle);
+        native.resident = true;
+        let mut detached = roster_entry_with("disk", Some("old cursor"), RosterActivity::Idle);
+        detached.session_kind = Some("external".to_string());
+        detached.resident = false;
+        let rows = collect_roster(&[external, native, detached], &empty);
+        let state = |label: &str| {
+            rows.iter()
+                .find(|row| row.label == label)
+                .unwrap_or_else(|| panic!("missing {label}"))
+                .state
+        };
+        assert_eq!(state("cursor-agent"), RowState::Idle);
+        assert_eq!(state("Fix the bug"), RowState::Inactive);
+        assert_eq!(state("old cursor"), RowState::Inactive);
     }
     /// Titled (real) sessions always render, even when idle/dormant.
     #[test]

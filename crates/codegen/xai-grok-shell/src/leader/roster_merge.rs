@@ -53,10 +53,6 @@ impl ExternalRoster {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the cursor worker is the only publisher")
-    )]
     pub(crate) fn publisher(&self) -> ExternalRosterPublisher {
         let id = self.inner.next_publisher.fetch_add(1, Ordering::Relaxed);
         ExternalRosterPublisher {

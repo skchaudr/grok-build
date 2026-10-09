@@ -20,12 +20,13 @@ use super::protocol::{
 use super::transport::{LeaderListener, LeaderStream};
 use crate::agent::activity::AgentActivity;
 use crate::agent::config::CursorWorkerConfig;
+use crate::agent::roster::{RosterActivity, RosterEntry, RosterOrigin};
 use crate::cpu_profile::{
     ControlError, ControlErrorCode, CpuProfileManager, CpuProfileStartOptions, CpuProfileStatus,
     ShutdownStopDisposition,
 };
 use crate::leader::cursor_worker::{self, CursorWorkerControl};
-use crate::leader::roster_merge::ExternalRoster;
+use crate::leader::roster_merge::{ExternalRoster, ExternalRosterPublisher};
 use agent_client_protocol::AGENT_METHOD_NAMES;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
@@ -50,8 +51,15 @@ enum LeaderServerPoll {
     Cancelled,
     Accept(std::io::Result<LeaderStream>),
     Event(ServerEvent),
-    Response { backend: BackendId, payload: String },
-    BackendExited { cmd: String, pid: u32, message: String },
+    Response {
+        backend: BackendId,
+        payload: String,
+    },
+    BackendExited {
+        cmd: String,
+        pid: u32,
+        message: String,
+    },
 }
 /// A live notification buffered during an in-flight `session/load`: the shared payload plus its `event_seq`.
 /// The `event_seq` is computed at buffer time, when the message is already parsed, so the post-load flush never re-parses.
@@ -176,9 +184,13 @@ pub struct LeaderServerControlState {
     pub cpu_profile: Arc<Mutex<CpuProfileManager>>,
     pub workspace: Arc<WorkspaceControl>,
     pub(crate) cursor_worker: Arc<CursorWorkerControl>,
+    /// Same roster [`crate::leader::roster_merge::RosterListMerge`] appends to `sessions/list`.
+    /// The cursor worker and external-backend sessions publish into different partitions.
+    pub(crate) external_roster: ExternalRoster,
 }
 impl LeaderServerControlState {
     pub fn new(metadata: LeaderServerMetadata) -> Self {
+        let external_roster = ExternalRoster::new();
         Self {
             metadata,
             cpu_profile: Arc::new(Mutex::new(CpuProfileManager::new())),
@@ -187,8 +199,9 @@ impl LeaderServerControlState {
                 CursorWorkerConfig::default(),
                 None,
                 crate::util::grok_home::grok_home(),
-                ExternalRoster::new(),
+                external_roster.clone(),
             )),
+            external_roster,
         }
     }
     pub(crate) fn with_default_hub_url(mut self, default_hub_url: Option<String>) -> Self {
@@ -205,6 +218,7 @@ impl LeaderServerControlState {
         grok_home: std::path::PathBuf,
         roster: ExternalRoster,
     ) -> Self {
+        self.external_roster = roster.clone();
         self.cursor_worker = Arc::new(CursorWorkerControl::new(
             config,
             leader_hub_url,
@@ -577,6 +591,146 @@ fn extract_session_id_from_result(json: &serde_json::Value) -> Option<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
+
+/// `session/new`, `session/load`, and `session/resume` are the requests whose response
+/// first registers an external route. `cwd` lives on that request, not on the response.
+fn is_external_session_open(json: &serde_json::Value) -> bool {
+    matches!(
+        json.get("method").and_then(|m| m.as_str()),
+        Some("session/new" | "session/load" | "session/resume")
+    )
+}
+
+fn request_cwd(json: &serde_json::Value) -> String {
+    json.pointer("/params/cwd")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Short name for a roster title: the executable's file name (`cursor-agent acp` → `cursor-agent`).
+fn external_agent_title(cmd: &str) -> String {
+    let token = shlex::split(cmd)
+        .and_then(|parts| parts.into_iter().next())
+        .filter(|token| !token.is_empty())
+        .unwrap_or_else(|| cmd.split_whitespace().next().unwrap_or(cmd).to_string());
+    std::path::Path::new(&token)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(token.as_str())
+        .to_string()
+}
+
+fn external_roster_entry(session_id: String, cmd: &str, cwd: String) -> RosterEntry {
+    RosterEntry {
+        session_id,
+        title: Some(external_agent_title(cmd)),
+        cwd,
+        is_worktree: false,
+        session_kind: Some("external".to_string()),
+        model_id: None,
+        reasoning_effort: None,
+        yolo: false,
+        activity: RosterActivity::Idle,
+        last_turn_summary: None,
+        resident: true,
+        last_change_unix_ms: chrono::Utc::now().timestamp_millis(),
+        origin: RosterOrigin::Local,
+    }
+}
+
+fn republish_external_rows(
+    rows: &HashMap<String, RosterEntry>,
+    publisher: &ExternalRosterPublisher,
+) {
+    publisher.replace(rows.values().cloned().collect());
+}
+
+fn request_method(json: &serde_json::Value) -> Option<&str> {
+    json.get("method").and_then(|method| method.as_str())
+}
+
+fn is_session_prompt(json: &serde_json::Value) -> bool {
+    request_method(json) == Some(AGENT_METHOD_NAMES.session_prompt)
+}
+
+fn is_session_cancel(json: &serde_json::Value) -> bool {
+    request_method(json) == Some(AGENT_METHOD_NAMES.session_cancel)
+}
+
+/// ACP close, plus session delete in either the bare or gateway-wrapped spelling.
+fn is_external_session_end(json: &serde_json::Value) -> bool {
+    const END: &[&str] = &[
+        "session/close",
+        "session/delete",
+        "x.ai/session/close",
+        "x.ai/session/delete",
+        "_x.ai/session/close",
+        "_x.ai/session/delete",
+    ];
+    if request_method(json).is_some_and(|method| END.contains(&method)) {
+        return true;
+    }
+    json.pointer("/params/method")
+        .and_then(|method| method.as_str())
+        .is_some_and(|method| {
+            matches!(
+                method,
+                "session/close" | "session/delete" | "x.ai/session/close" | "x.ai/session/delete"
+            )
+        })
+}
+
+fn touch_external_activity(
+    rows: &mut HashMap<String, RosterEntry>,
+    session_id: &str,
+    activity: RosterActivity,
+) -> bool {
+    let Some(row) = rows.get_mut(session_id) else {
+        return false;
+    };
+    if row.activity == activity {
+        return false;
+    }
+    row.activity = activity;
+    row.last_change_unix_ms = chrono::Utc::now().timestamp_millis();
+    true
+}
+
+fn forget_external_prompts(pending: &mut HashMap<String, String>, session_id: &str) {
+    pending.retain(|_, sid| sid != session_id);
+}
+
+/// Prompt, cancel, and close/delete for a session that already has an external row.
+/// Returns whether the published set changed. A missing row is left missing, so a late
+/// response cannot recreate a session that close or delete already dropped.
+fn note_external_turn(
+    json: &serde_json::Value,
+    ns_id: Option<&str>,
+    rows: &mut HashMap<String, RosterEntry>,
+    pending_prompts: &mut HashMap<String, String>,
+) -> bool {
+    let Some(session_id) = extract_session_id(json) else {
+        return false;
+    };
+    if is_session_cancel(json) {
+        forget_external_prompts(pending_prompts, &session_id);
+        return touch_external_activity(rows, &session_id, RosterActivity::Idle);
+    }
+    if is_external_session_end(json) {
+        forget_external_prompts(pending_prompts, &session_id);
+        return rows.remove(&session_id).is_some();
+    }
+    if is_session_prompt(json)
+        && let Some(ns_id) = ns_id
+    {
+        pending_prompts.insert(ns_id.to_string(), session_id.clone());
+        return touch_external_activity(rows, &session_id, RosterActivity::Working);
+    }
+    false
+}
+
 #[derive(Debug)]
 enum ChildSessionEvent {
     Spawned(String),
@@ -1541,6 +1695,10 @@ pub async fn run_leader_server(
     let mut pending_requests: usize = 0;
     let relaunching = Arc::new(AtomicBool::new(false));
     let mut session_backend: HashMap<String, SessionRoute> = HashMap::new();
+    let external_publisher = control_state.external_roster.publisher();
+    let mut external_rows: HashMap<String, RosterEntry> = HashMap::new();
+    let mut pending_external_cwd: HashMap<String, String> = HashMap::new();
+    let mut pending_external_prompt: HashMap<String, String> = HashMap::new();
     let mut externals: HashMap<String, LiveExternal> = HashMap::new();
     let mut inflight: HashMap<String, Inflight> = HashMap::new();
     let mut pending_initialize: HashSet<String> = HashSet::new();
@@ -1721,12 +1879,17 @@ pub async fn run_leader_server(
                     if !detached_sessions.is_empty() {
                         let session_count = detached_sessions.len();
                         let mut by_backend: HashMap<BackendId, Vec<String>> = HashMap::new();
+                        let mut roster_dirty = false;
                         for sid in detached_sessions {
+                            roster_dirty |= external_rows.remove(&sid).is_some();
                             let backend = session_backend
                                 .remove(&sid)
                                 .map(|route| route.backend)
                                 .unwrap_or(BackendId::Native);
                             by_backend.entry(backend).or_default().push(sid);
+                        }
+                        if roster_dirty {
+                            republish_external_rows(&external_rows, &external_publisher);
                         }
                         for (backend, sids) in by_backend {
                             let note = internal_notification(
@@ -1991,6 +2154,17 @@ pub async fn run_leader_server(
                     match send_to_backend(&backend, outbound, &acp_tx, &mut externals, &inbound_tx)
                     {
                         Ok(()) => {
+                            if matches!(backend, BackendId::External(_))
+                                && let Some(json) = json.as_ref()
+                                && note_external_turn(
+                                    json,
+                                    rewritten.as_ref().map(|(ns_id, _)| ns_id.as_str()),
+                                    &mut external_rows,
+                                    &mut pending_external_prompt,
+                                )
+                            {
+                                republish_external_rows(&external_rows, &external_publisher);
+                            }
                             if let Some((ns_id, _)) = rewritten.as_ref() {
                                 inflight.insert(
                                     ns_id.clone(),
@@ -1998,6 +2172,12 @@ pub async fn run_leader_server(
                                         pid: backend_pid(&backend, &externals),
                                     },
                                 );
+                                if matches!(backend, BackendId::External(_))
+                                    && json.as_ref().is_some_and(is_external_session_open)
+                                {
+                                    let cwd = json.as_ref().map(request_cwd).unwrap_or_default();
+                                    pending_external_cwd.insert(ns_id.clone(), cwd);
+                                }
                                 if is_initialize {
                                     pending_initialize.insert(ns_id.clone());
                                 }
@@ -2027,9 +2207,8 @@ pub async fn run_leader_server(
                                         "id": req_id,
                                         "error": { "code": -32000, "message": message }
                                     });
-                                    let _ = client
-                                        .tx
-                                        .send(ClientOutbound::Acp(err.to_string().into()));
+                                    let _ =
+                                        client.tx.send(ClientOutbound::Acp(err.to_string().into()));
                                 }
                             }
                         }
@@ -2040,8 +2219,24 @@ pub async fn run_leader_server(
             LeaderServerPoll::Response { backend, payload } => {
                 let mut json: Option<serde_json::Value> = serde_json::from_str(&payload).ok();
                 let parsed_response = json.as_mut().and_then(parse_response_id);
+                let mut opened_cwd: Option<String> = None;
                 if let Some((_, ref ns_id)) = parsed_response {
                     inflight.remove(ns_id);
+                    opened_cwd = pending_external_cwd.remove(ns_id);
+                    if let Some(session_id) = pending_external_prompt.remove(ns_id) {
+                        let still_prompting = pending_external_prompt
+                            .values()
+                            .any(|pending| pending == &session_id);
+                        if !still_prompting
+                            && touch_external_activity(
+                                &mut external_rows,
+                                &session_id,
+                                RosterActivity::Idle,
+                            )
+                        {
+                            republish_external_rows(&external_rows, &external_publisher);
+                        }
+                    }
                     if pending_initialize.remove(ns_id)
                         && let Some(result) = json.as_ref().and_then(|j| j.get("result")).cloned()
                         && let BackendId::External(cmd) = &backend
@@ -2076,10 +2271,24 @@ pub async fn run_leader_server(
                     && let Some(json) = json.as_mut()
                 {
                     if let Some(session_id) = extract_session_id_from_result(json) {
-                        session_backend.entry(session_id.clone()).or_insert(SessionRoute {
-                            backend: backend.clone(),
-                            pid: backend_pid(&backend, &externals),
-                        });
+                        let first_route = !session_backend.contains_key(&session_id);
+                        session_backend
+                            .entry(session_id.clone())
+                            .or_insert(SessionRoute {
+                                backend: backend.clone(),
+                                pid: backend_pid(&backend, &externals),
+                            });
+                        if first_route && let BackendId::External(cmd) = &backend {
+                            external_rows.insert(
+                                session_id.clone(),
+                                external_roster_entry(
+                                    session_id.clone(),
+                                    cmd,
+                                    opened_cwd.take().unwrap_or_default(),
+                                ),
+                            );
+                            republish_external_rows(&external_rows, &external_publisher);
+                        }
                         session_subscribers
                             .entry(session_id.clone())
                             .or_default()
@@ -2450,6 +2659,8 @@ pub async fn run_leader_server(
                     &agent_busy,
                     &clients,
                     &mut session_subscribers,
+                    &mut external_rows,
+                    &external_publisher,
                 );
             }
         }
@@ -2501,6 +2712,8 @@ fn note_external_exit(
     agent_busy: &AtomicBool,
     clients: &HashMap<ClientId, ClientState>,
     session_subscribers: &mut HashMap<String, HashSet<ClientId>>,
+    external_rows: &mut HashMap<String, RosterEntry>,
+    external_publisher: &ExternalRosterPublisher,
 ) {
     if let Some(slot) = externals.get_mut(cmd)
         && slot.pid == pid
@@ -2536,8 +2749,10 @@ fn note_external_exit(
         .filter(|(_, route)| route.pid == Some(pid))
         .map(|(sid, _)| sid.clone())
         .collect();
+    let mut roster_dirty = false;
     for sid in dead_sessions {
         session_backend.remove(&sid);
+        roster_dirty |= external_rows.remove(&sid).is_some();
         session_driver.remove(&sid);
         let Some(subs) = session_subscribers.remove(&sid) else {
             continue;
@@ -2559,6 +2774,9 @@ fn note_external_exit(
                 let _ = client.tx.send(ClientOutbound::Acp(payload.clone()));
             }
         }
+    }
+    if roster_dirty {
+        republish_external_rows(external_rows, external_publisher);
     }
 }
 

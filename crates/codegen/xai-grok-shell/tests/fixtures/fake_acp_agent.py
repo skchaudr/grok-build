@@ -5,8 +5,10 @@ import json
 import os
 import socket
 import sys
+import time
 
 command = sys.argv[1] if len(sys.argv) > 1 else "fake"
+hold_release = sys.argv[2] if command == "fake-roster-hold" and len(sys.argv) > 2 else None
 pid = os.getpid()
 host = socket.gethostname()
 init_count = 0
@@ -60,6 +62,19 @@ for raw in sys.stdin:
         )
     elif method == "session/prompt":
         sid = params.get("sessionId") or params.get("session_id")
+        if hold_release:
+            while not os.path.exists(hold_release):
+                time.sleep(0.02)
+            kind = open(hold_release, encoding="utf-8").read().strip()
+            if kind == "error":
+                emit(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {"code": -32000, "message": "prompt failed"},
+                    }
+                )
+                continue
         text = f"pid={pid} hostname={host} command={command}"
         emit(
             {
