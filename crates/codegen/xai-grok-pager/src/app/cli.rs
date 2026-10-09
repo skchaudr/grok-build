@@ -455,7 +455,8 @@ pub struct PagerArgs {
         alias = "dangerously-skip-permissions"
     )]
     pub yolo: bool,
-    /// Command to spawn an external ACP agent process over stdio (interactive mode only).
+    /// Command to spawn an external ACP agent process over stdio.
+    /// Headless (`-p` and the other one-shot flags) is allowed only with `--leader`.
     #[arg(long = "agent-cmd", value_name = "COMMAND", global = true)]
     pub agent_cmd: Option<String>,
     /// Trust this folder and persist the decision to the trust store.
@@ -857,7 +858,10 @@ impl PagerArgs {
         if let Some(file) = self.debug_file.take() {
             self.debug_file = Some(anchor_to_launch_dir(file, launch_dir));
         }
+        // One-shot delegation goes through the leader. Without `--leader` the
+        // headless path would ignore `--agent-cmd` and start the native shell.
         if self.agent_cmd.is_some()
+            && !self.leader
             && (self.single.is_some()
                 || self.prompt_json.is_some()
                 || self.prompt_file.is_some()
@@ -1296,6 +1300,26 @@ mod tests {
             assert_eq!(args.leader_socket, Some(launch.join("relative.sock")));
             assert!(!remote.exists());
         }
+    }
+    #[test]
+    fn leader_headless_agent_cmd_is_accepted() {
+        let args = PagerArgs::try_parse_from([
+            "grok",
+            "--leader",
+            "--leader-socket",
+            "leader-mini-hub.sock",
+            "--agent-cmd",
+            "ssh worker",
+            "-p",
+            "hello",
+        ])
+        .unwrap()
+        .apply_cwd()
+        .unwrap();
+        assert!(args.leader);
+        assert_eq!(args.agent_cmd.as_deref(), Some("ssh worker"));
+        assert_eq!(args.single.as_deref(), Some("hello"));
+        assert!(args.leader_socket.is_some());
     }
     #[test]
     fn external_agent_headless_is_rejected_before_cwd_changes() {

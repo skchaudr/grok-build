@@ -1461,34 +1461,29 @@ async fn connect_or_spawn_at(
     let sock_path = lock.socket_path().clone();
     let mut replacing_stale = false;
     if crate::leader::transport::listener_is_ready(&sock_path) {
-        let skip_connect = if let Some(pid) = lock.read_pid() {
-            if crate::util::is_process_alive(pid) {
-                debug!(pid, "Leader PID is alive, attempting connection");
-                false
-            } else {
-                debug!(pid, "Leader PID is dead, skipping socket connect");
-                true
+        // The lock file records a pid on the machine that wrote it. A forwarded
+        // socket's leader is remote, so a dead local pid must not skip the connect.
+        if let Some(pid) = lock.read_pid() {
+            debug!(
+                pid,
+                local_pid_alive = crate::util::is_process_alive(pid),
+                "socket exists; connecting instead of trusting the lock pid"
+            );
+        }
+        match connect_to_leader(&sock_path, client_type, mode, capabilities.clone()).await {
+            Ok(conn) => {
+                if !should_evict_conn(&conn) || policy == LeaderSpawnPolicy::AttachOnly {
+                    info!(
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        "Adopted leader"
+                    );
+                    return Ok(conn);
+                }
+                drop(conn);
+                replacing_stale = true;
             }
-        } else {
-            debug!("Socket exists but no PID in lock, attempting connection");
-            false
-        };
-        if !skip_connect {
-            match connect_to_leader(&sock_path, client_type, mode, capabilities.clone()).await {
-                Ok(conn) => {
-                    if !should_evict_conn(&conn) || policy == LeaderSpawnPolicy::AttachOnly {
-                        info!(
-                            elapsed_ms = start.elapsed().as_millis() as u64,
-                            "Adopted leader"
-                        );
-                        return Ok(conn);
-                    }
-                    drop(conn);
-                    replacing_stale = true;
-                }
-                Err(e) => {
-                    debug!(error = %e, "Connection to existing socket failed");
-                }
+            Err(e) => {
+                debug!(error = %e, "Connection to existing socket failed");
             }
         }
     }
@@ -1499,7 +1494,6 @@ async fn connect_or_spawn_at(
         match lock.try_acquire() {
             Ok(true) => {
                 if crate::leader::transport::listener_is_ready(&sock_path)
-                    && lock.read_pid().is_some_and(crate::util::is_process_alive)
                     && let Ok(conn) =
                         connect_to_leader(&sock_path, client_type, mode, capabilities.clone()).await
                 {
@@ -1538,6 +1532,24 @@ async fn connect_or_spawn_at(
                         socket = %sock_path.display(),
                         "explicit leader socket is down; not spawning a local leader"
                     );
+                    return Err(hub_unreachable(&sock_path));
+                }
+                // The spawned binary is stock `grok` when this client lives under
+                // grok_home, and that binary unlinks the socket before it binds.
+                // Never start it while the path still accepts connections.
+                if crate::leader::transport::socket_accepts_connections(&sock_path).await {
+                    if let Err(e) = lock.release() {
+                        warn!(error = %e, "Failed to release lock after refusing to replace a live socket");
+                    }
+                    info!(
+                        socket = %sock_path.display(),
+                        "socket still accepts connections; not spawning over it"
+                    );
+                    if let Ok(conn) =
+                        connect_to_leader(&sock_path, client_type, mode, capabilities.clone()).await
+                    {
+                        return Ok(conn);
+                    }
                     return Err(hub_unreachable(&sock_path));
                 }
                 info!("Acquired lock, spawning leader subprocess");
@@ -2811,5 +2823,153 @@ mod tests {
                 .is_ok()
         );
         handle.cancel.cancel();
+    }
+
+    /// A forwarded hub: the socket accepts connections, but the sibling lock names a pid that is
+    /// not alive here (the leader is on the other machine). Liveness is the socket, not the pid.
+    async fn hub_with_remote_lock_pid() -> (TempDir, PathBuf, ServerHandle) {
+        let temp = TempDir::new().unwrap();
+        let sock = temp.path().join("leader-mini-hub.sock");
+        let handle = spawn_leader_server(sock.clone()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        fs::write(temp.path().join("leader-mini-hub.lock"), "4000000000").unwrap();
+        assert!(!crate::util::is_process_alive(4_000_000_000));
+        (temp, sock, handle)
+    }
+
+    fn test_env_urls() -> LeaderEnvUrls {
+        LeaderEnvUrls {
+            grok_ws_url: "wss://test.invalid".into(),
+            grok_ws_origin: "https://test.invalid".into(),
+        }
+    }
+
+    async fn assert_original_server_got(handle: &mut ServerHandle, sock: &Path, marker: &str) {
+        let conn = connect_to_leader(
+            sock,
+            "test",
+            ClientMode::Stdio,
+            ClientCapabilities::default(),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("original socket must still accept connections, got {err}"));
+        let (tx, _rx) = conn.into_channels();
+        let line = format!(r#"{{"jsonrpc":"2.0","method":"{marker}","id":1}}"#);
+        assert!(tx.send(line.clone()).is_ok());
+        let got = tokio::time::timeout(Duration::from_secs(2), handle.acp_rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("original leader never saw {marker}"))
+            .unwrap_or_else(|| panic!("original leader channel closed"));
+        assert!(
+            got.contains(marker),
+            "original leader should have received the probe, got {got}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_socket_adopts_when_lock_pid_is_not_local() {
+        let (_temp, sock, mut handle) = hub_with_remote_lock_pid().await;
+        let lock = LeaderLock::from_paths(sock.with_extension("lock"), sock.clone());
+        let started = std::time::Instant::now();
+        let conn = match connect_or_spawn_at(
+            "test",
+            ClientMode::Stdio,
+            &test_env_urls(),
+            ClientCapabilities::default(),
+            lock,
+            LeaderSpawnPolicy::AttachOnly,
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(err) => {
+                panic!("a live explicit socket must be adopted, not judged by its lock pid: {err}")
+            }
+        };
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "adopting a live socket must not wait out a spawn"
+        );
+        drop(conn);
+        assert_original_server_got(&mut handle, &sock, "still-the-hub").await;
+        handle.cancel.cancel();
+    }
+
+    /// `grok -p --leader --leader-socket <forwarded> --agent-cmd <ssh worker>`.
+    /// `ClientMode::Stdio` is the headless one-shot. The lock pid is remote, so a local
+    /// `kill -0` must not spawn stock `grok` over the socket.
+    #[tokio::test]
+    async fn headless_prompt_adopts_forwarded_socket_when_lock_pid_is_not_local() {
+        let (_temp, sock, mut handle) = hub_with_remote_lock_pid().await;
+        let lock = LeaderLock::from_paths(sock.with_extension("lock"), sock.clone());
+        let caps = ClientCapabilities {
+            agent_cmd: Some("ssh worker".into()),
+            ..ClientCapabilities::default()
+        };
+        let started = std::time::Instant::now();
+        let conn = match connect_or_spawn_at(
+            "headless",
+            ClientMode::Stdio,
+            &test_env_urls(),
+            caps,
+            lock,
+            LeaderSpawnPolicy::AttachOnly,
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(err) => panic!("headless -p must adopt the forwarded hub, got {err}"),
+        };
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "headless -p must not spawn a local leader"
+        );
+        // Drop before any session request: that would launch the agent_cmd worker.
+        drop(conn);
+        assert_original_server_got(&mut handle, &sock, "headless-kept-hub").await;
+        handle.cancel.cancel();
+    }
+
+    /// Even the spawn-if-needed path must not replace a socket that still accepts connections.
+    /// The replacement is what unlinks an SSH forward and answers as a local native agent.
+    #[tokio::test]
+    async fn spawning_does_not_replace_a_socket_that_still_accepts() {
+        let temp = TempDir::new().unwrap();
+        let sock = temp.path().join("leader-mini-hub.sock");
+        let mut first = spawn_leader_server(sock.clone()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut second = spawn_leader_server(sock.clone()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let conn = connect_to_leader(
+            &sock,
+            "test",
+            ClientMode::Stdio,
+            ClientCapabilities::default(),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("socket must stay connectable, got {err}"));
+        let (tx, _rx) = conn.into_channels();
+        assert!(
+            tx.send(r#"{"jsonrpc":"2.0","method":"keep-original","id":1}"#.into())
+                .is_ok()
+        );
+        let got = tokio::time::timeout(Duration::from_secs(2), first.acp_rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("original leader never saw the probe"))
+            .unwrap_or_else(|| panic!("original leader channel closed"));
+        assert!(
+            got.contains("keep-original"),
+            "original leader should have kept the socket, got {got}"
+        );
+        // A replacement that bound the path would have this line. Refusing to
+        // bind drops the second server's agent channel, which is not a steal.
+        if let Ok(Some(stolen)) =
+            tokio::time::timeout(Duration::from_millis(50), second.acp_rx.recv()).await
+            && stolen.contains("keep-original")
+        {
+            panic!("a second leader unlinked the live socket: {stolen}");
+        }
+        first.cancel.cancel();
+        second.cancel.cancel();
     }
 }

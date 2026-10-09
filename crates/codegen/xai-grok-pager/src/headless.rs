@@ -94,6 +94,10 @@ pub struct HeadlessOptions {
     pub memory_enabled_override: Option<bool>,
     /// The session is an external ACP agent (`--agent-cmd`). Live updates need not stamp a prompt id.
     pub external_agent: bool,
+    /// Exact `--agent-cmd` string. With `use_leader`, the turn runs on that worker.
+    pub agent_cmd: Option<String>,
+    /// `--leader`: attach to the leader instead of an in-process shell.
+    pub use_leader: bool,
 }
 struct HeadlessEmitter {
     format: OutputFormat,
@@ -432,8 +436,57 @@ async fn spawn_agent(
     memory_config: Option<xai_grok_shell::config::MemoryConfig>,
     options: &HeadlessOptions,
 ) -> Result<SpawnedAgent> {
-    let _ = options;
+    if options.use_leader && options.agent_cmd.is_some() {
+        return spawn_headless_via_leader(agent_config, cancel, options).await;
+    }
     spawn_grok_shell(agent_config, cancel, memory_config).await
+}
+
+/// Attach a headless `-p` turn to the leader. `run_single_turn` still sends `initialize`.
+/// An explicit `--leader-socket` selects attach-only inside `connect_or_spawn`: a forwarded
+/// hub is adopted by connecting, never by checking the lock file's pid on this machine.
+async fn spawn_headless_via_leader(
+    agent_config: AgentConfig,
+    cancel: &CancellationToken,
+    options: &HeadlessOptions,
+) -> Result<SpawnedAgent> {
+    use xai_grok_shell::leader::{
+        ClientCapabilities, ClientMode, ReconnectPolicy, connect_or_spawn,
+    };
+    let capabilities = ClientCapabilities {
+        yolo_mode: options.yolo,
+        auto_mode: agent_config.default_auto_mode && !options.yolo,
+        default_model: agent_config.models.default.clone(),
+        client_version: Some(PAGER_CLIENT_VERSION.to_string()),
+        agent_cmd: options.agent_cmd.clone(),
+        ..ClientCapabilities::default()
+    };
+    let env_urls = xai_grok_shell::leader::LeaderEnvUrls::from(&agent_config.grok_com_config);
+    let conn = connect_or_spawn(
+        HEADLESS_CLIENT_TYPE,
+        ClientMode::Stdio,
+        &env_urls,
+        capabilities,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Couldn't connect to leader: {e}"))?;
+    let bridge = crate::acp::leader_bridge::bridge_leader_connection(
+        conn,
+        cancel.clone(),
+        None,
+        ReconnectPolicy::unbounded(),
+    )?;
+    let auth_manager = std::sync::Arc::new(xai_grok_login::AuthManager::new_with_proxy_base_url(
+        &xai_grok_shell::util::grok_home::grok_home(),
+        agent_config.grok_com_config.clone(),
+        agent_config.endpoints.proxy_url(),
+    ));
+    Ok(SpawnedAgent {
+        thread_handle: bridge.thread_handle,
+        channel: bridge.channel,
+        cancel: bridge.cancel,
+        auth_manager,
+    })
 }
 /// Authenticate via the agent's `defaultAuthMethodId`, failing closed when none is available.
 /// Returns whether the selected method is API-key auth.
@@ -785,6 +838,7 @@ fn headless_materialize_ctx(
     resume_title_pinned: bool,
     restore_code: bool,
     has_worktree: bool,
+    has_agent_cmd: bool,
 ) -> crate::app::session_startup::MaterializeCtx {
     crate::app::session_startup::MaterializeCtx {
         has_worktree,
@@ -796,7 +850,7 @@ fn headless_materialize_ctx(
         } else {
             crate::app::session_startup::TitleResolution::Allowed
         },
-        has_agent_cmd: false,
+        has_agent_cmd,
         restore_code,
         recent_session_selection: crate::app::session_startup::RecentSessionSelection::Any,
         restore_progress_on_stdout: false,
@@ -977,6 +1031,7 @@ pub async fn run_single_turn(
             options.resume_title_pinned,
             options.restore_code,
             worktree.is_some(),
+            options.agent_cmd.is_some(),
         ),
         intent,
         &cwd_str,

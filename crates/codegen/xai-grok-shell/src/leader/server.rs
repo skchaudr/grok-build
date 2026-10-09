@@ -2018,6 +2018,25 @@ fn make_version_mismatch_notification(
         .to_string(),
     )
 }
+/// Bind `socket_path`, removing a stale node first.
+/// A path that still accepts connections is left in place. Unlinking it is how a
+/// spawned local leader stole an SSH forward whose lock pid was not local.
+async fn bind_leader_listener(
+    socket_path: &std::path::Path,
+) -> Result<LeaderListener, ServerError> {
+    if super::transport::socket_accepts_connections(socket_path).await {
+        return Err(ServerError::Io(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!(
+                "leader socket {} already accepts connections; not replacing it",
+                socket_path.display()
+            ),
+        )));
+    }
+    let _ = std::fs::remove_file(socket_path);
+    Ok(LeaderListener::bind(socket_path)?)
+}
+
 /// Caller is responsible for: Cleaning up any stale socket file before calling this Acquiring the leader lock AFTER this function creates the socket The lock acquisition happens after we're actually listening
 /// ACP requests (messages with an `id`) receive a structured `leader_starting` JSON-RPC error so the client can retry rather than hang.
 /// A leader serving only interactive clients (TUI dashboard, IDE) thus never duplicates its ACP stream onto the relay. The auto-update checker and the [`ControlCommand::RelaunchForUpdate`] handler send [`ShutdownReason::AutoUpdate`] before cancelling. Clients then see the real reason; senders must write before cancelling.
@@ -2036,9 +2055,8 @@ pub async fn run_leader_server(
     leader_version_override: Option<&'static str>,
     control_state: LeaderServerControlState,
 ) -> Result<(), ServerError> {
-    let _ = std::fs::remove_file(&socket_path);
+    let listener = bind_leader_listener(&socket_path).await?;
     let shutdown_reason_rx = shutdown_tx.subscribe();
-    let listener = LeaderListener::bind(&socket_path)?;
     info!("Leader server listening");
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let mut clients: HashMap<ClientId, ClientState> = HashMap::new();
@@ -2117,7 +2135,6 @@ pub async fn run_leader_server(
             }
             LeaderServerPoll::Accept(accept_result) => match accept_result {
                 Ok(stream) => {
-                    had_clients = true;
                     let client_id = ClientId::new();
                     let (tx, rx) = mpsc::unbounded_channel();
                     clients.insert(
@@ -2155,6 +2172,7 @@ pub async fn run_leader_server(
                         client.capabilities = capabilities;
                         client.client_type = client_type;
                         client.registered = true;
+                        had_clients = true;
                         client_count.fetch_add(1, Ordering::Relaxed);
                         debug!(client_id = id.0, ?mode, yolo_mode = client.capabilities.yolo_mode, client_type = %client.client_type, "Client registered");
                         xai_grok_telemetry::unified_log::info(
