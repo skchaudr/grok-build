@@ -1727,6 +1727,18 @@ fn open_leader_log(log_path: &Path) -> std::io::Result<std::fs::File> {
 /// Crates that took code out of `xai_grok_shell` are listed so their events keep reaching the leader log.
 const LEADER_DEFAULT_LOG_DIRECTIVES: &str = "xai_grok_shell=info,xai_grok_gateway=info,xai_grok_config=info,xai_grok_cloud_config=info,xai_grok_agent_config=info,xai_grok_external_agent_migration=info,xai_grok_login=info,xai_acp_lib=warn,xai_grok_mcp=warn";
 fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionError> {
+    // Last line before exec. A headless one-shot can connect to the still-forwarded
+    // hub (and return its answer) while this child is starting; the child then
+    // unlinks the socket and stays up (`--no-exit-on-disconnect`). Do not exec
+    // if the path already accepts connections.
+    let sock = socket_path_for_ws_url(&env_urls.grok_ws_url);
+    if crate::leader::transport::blocking_socket_accepts(&sock) {
+        info!(
+            socket = %sock.display(),
+            "not execing a leader; the socket still accepts connections"
+        );
+        return Err(hub_unreachable(&sock));
+    }
     let exe = resolve_exe_for_spawn()?;
     let mut cmd = Command::new(exe);
     cmd.arg("agent").arg("leader");
@@ -2927,6 +2939,41 @@ mod tests {
         // Drop before any session request: that would launch the agent_cmd worker.
         drop(conn);
         assert_original_server_got(&mut handle, &sock, "headless-kept-hub").await;
+        handle.cancel.cancel();
+    }
+
+    /// The one-shot that succeeded through the hub and still left stock `grok agent leader`
+    /// behind: the socket is serving, the lock pid is not local, and spawn-if-needed (the
+    /// pre-attach-only client) must use the hub and must not exec a leader that later unlinks it.
+    #[tokio::test]
+    async fn successful_oneshot_does_not_spawn_over_a_serving_hub() {
+        let (_temp, sock, mut handle) = hub_with_remote_lock_pid().await;
+        let lock = LeaderLock::from_paths(sock.with_extension("lock"), sock.clone());
+        let caps = ClientCapabilities {
+            agent_cmd: Some("ssh worker".into()),
+            ..ClientCapabilities::default()
+        };
+        let started = std::time::Instant::now();
+        let conn = match connect_or_spawn_at(
+            "headless",
+            ClientMode::Stdio,
+            &test_env_urls(),
+            caps,
+            lock,
+            LeaderSpawnPolicy::SpawnIfNeeded,
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(err) => panic!("a serving hub must answer the one-shot, got {err}"),
+        };
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "must not wait out a leader spawn"
+        );
+        drop(conn);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_original_server_got(&mut handle, &sock, "hub-still-serving").await;
         handle.cancel.cancel();
     }
 

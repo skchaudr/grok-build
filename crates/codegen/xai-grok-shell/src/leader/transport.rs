@@ -27,6 +27,22 @@ pub fn listener_is_ready(path: &std::path::Path) -> bool {
 /// A leftover socket node whose listener is gone returns false. A connect that
 /// does not finish in time is treated as in use, so the caller does not unlink it.
 /// The leader lock's pid is not consulted: on a forwarded socket that pid is remote.
+/// Synchronous form of [`socket_accepts_connections`] for the spawn path, which
+/// cannot await. A live listener returns true. A stale socket node returns false.
+pub(super) fn blocking_socket_accepts(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        if !path.exists() {
+            return false;
+        }
+        std::os::unix::net::UnixStream::connect(path).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        listener_is_ready(path)
+    }
+}
+
 pub(super) async fn socket_accepts_connections(path: &std::path::Path) -> bool {
     #[cfg(unix)]
     {

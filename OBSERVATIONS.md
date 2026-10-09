@@ -290,3 +290,9 @@ The lock file next to the forward (`leader-mini-hub.lock`) holds a pid. `connect
 A socket that exists is now connected to. The lock pid is only a log line. Spawn is refused while that socket still accepts a connection, because the spawned stock binary unlinks the path before it binds. `run_leader_server` does the same check before `remove_file`. A connect that never registers no longer counts as "had a client", so the check itself does not shut a leader down and delete the socket. Headless `-p --leader --agent-cmd` goes through that same `connect_or_spawn` (`ClientMode::Stdio`). Without `--leader`, `-p --agent-cmd` is still rejected.
 
 `explicit_socket_adopts_when_lock_pid_is_not_local` and `headless_prompt_adopts_forwarded_socket_when_lock_pid_is_not_local` failed first with `leader hub … is unreachable`, then passed. `spawning_does_not_replace_a_socket_that_still_accepts` failed first because the second leader received the probe, then passed. A `cargo check` of the pager was stopped while disk was 5.8G free and still falling; the pager crate was not rebuilt. The Mini hub and the Mac binaries were not touched.
+
+## 2026-10-09 third repro: a successful one-shot still leaves the stock leader
+
+`gk ask mini` returned the Mini agent's answer through the hub, and afterwards stock `grok agent leader --no-exit-on-disconnect --relay-on-demand` was bound to `~/.grok/leader-mini-hub.sock` on the Air. The spawn is not only the stall path. `connect_or_spawn` can exec that child and then attach the one-shot to the forward that is still listening, so the prompt succeeds, and the child unlinks the socket once it binds and stays up.
+
+`spawn_leader_subprocess` now refuses to exec when that path already accepts a connection. `successful_oneshot_does_not_spawn_over_a_serving_hub` covers a serving socket whose lock pid is not local, including the spawn-if-needed policy the one-shot used before attach-only.
