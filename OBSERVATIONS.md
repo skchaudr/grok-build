@@ -83,3 +83,34 @@ The shared `target/` dir filled the 99 GB volume during the debug build (linker 
 - Mercury's summary dropped the trailing `w` twice; the DSH tool-result events retained the exact hostname. Inspect tool results, not model paraphrases.
 - Darwin binary is stamped 1.0.45 while the VM build is stamped 1.0.46; both identify `89cae842`. Air default uses a tiny `--no-auto-update` launcher to preserve the local build; stock binary remains available.
 - Existing test executables rerun without rebuilding: external agents 8 passed; stdio integration 47 passed/1 ignored; leader unit tests 287 passed. Local MCP paths and optional native `_x.ai/*` methods remain distinct compatibility concerns; neither prevented the tested DSH turns or explicit-ID resume.
+
+## 2026-10-09 external roster publish
+
+`bin/protoc` needs `dotslash`, which this VM does not have. Tests and the release build used `PROTOC=$HOME/.local/protoc-29.3/bin/protoc` and that directory on `PATH`. `CARGO_TARGET_DIR=$HOME/repos/grok-build/target`.
+
+The debug compile filled the volume. `rm -rf $HOME/repos/grok-build/target/release/incremental` freed about 11 GB. Release incremental is a rebuild cache.
+
+`cargo test -p xai-grok-shell --lib leader::` — 293 passed, 0 failed.
+`cargo test -p xai-grok-shell --test test_leader_external_agents` — 8 passed.
+
+`-p xai-grok-pager` builds the library. The pager binary is package `xai-grok-pager-bin` (artifact name still `xai-grok-pager`). `cargo build --release -p xai-grok-pager-bin` produced `$HOME/repos/grok-build/target/release/xai-grok-pager`, `grok 1.0.45 (240a0045b45e) [stable]`, mtime 2026-10-09 02:22:04.
+
+Live probe, tmux session `roster-probe`, socket `$HOME/.grok/leader-roster-test.sock` (torn down after):
+
+```
+$BIN agent leader --leader-socket $SOCK --no-auto-update --no-exit-on-disconnect --debug-file /tmp/roster-probe/leader.log
+$BIN --leader --leader-socket $SOCK --cwd /tmp/ext-roster-live --always-approve
+$BIN --leader --leader-socket $SOCK --cwd /tmp/ext-roster-live --always-approve --agent-cmd 'cursor-agent acp'
+```
+
+Client B prompt `reply with the single word pong` returned `pong` (Worked for 2.7s). Leader log: `spawned external ACP backend cmd=cursor-agent acp pid=192840`. Native Grok relay auth failed; left as-is.
+
+A direct ACP `sessions/list` on the test socket (length-prefixed `register` then `_x.ai/sessions/list`) returned 66 sessions, one external:
+
+`sessionId=abf16d53-dc97-4da2-bb86-fd1ace76f2c3 title=cursor-agent cwd=/tmp/ext-roster-live sessionKind=external activity=idle resident=true`.
+
+Remote settings turn on the workspace dashboard. That view (`Open Previous /resume`, `Idle N`) does not read `leader_roster`, so the first `Ctrl+\` on A did not show the Cursor row. `GROK_WORKSPACE_DASHBOARD=0` on a fresh native client opens the fleet dashboard. Inactive starts collapsed (`Idle` roster activity maps to `Inactive`). Expanding it showed `◇ cursor-agent` (12m) under `▾ Inactive 40`.
+
+Opening that row on A loaded B's transcript (`pong`). Prompt from A, `reply with the single word roster-bridge`, returned `roster-bridge` on A (Worked for 3.3s). B's pane updated at the same time; the capture drew the new reply against the previous `pong` line as `pongroster-bridge`. The prompt reached the Cursor agent.
+
+Follow-up, not done: `session/prompt` does not flip the row between working and idle. `session/close` while the client stays connected does not drop the route, so the row stays until the last subscriber disconnects or the backend process exits. Workspace-dashboard mode still ignores leader roster rows.
