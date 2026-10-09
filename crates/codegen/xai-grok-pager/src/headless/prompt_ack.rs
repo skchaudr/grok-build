@@ -20,11 +20,13 @@ pub(super) const HEADLESS_ABORT_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const PROMPT_ACK_TIMEOUT_ERROR_PREFIX: &str = "prompt_ack_timeout";
 
 /// Classify an inbound client message as an acknowledgment of `prompt_id` (single session, single prompt).
-/// Replayed updates and notifications without a prompt id never count.
+/// Replayed updates never count. A native update must name `prompt_id`. An external agent never stamps
+/// one, so the first live `session/update` for the session counts.
 pub(super) fn headless_ack_signal(
     msg: &AcpClientMessageBox,
     session_id: &acp::SessionId,
     prompt_id: &str,
+    external_agent: bool,
 ) -> Option<AckSignal> {
     match msg {
         AcpClientMessageBox::SessionNotification(notif) => {
@@ -32,8 +34,13 @@ pub(super) fn headless_ack_signal(
                 return None;
             }
             let meta = crate::acp::meta::NotificationMeta::from_json(notif.request.meta.as_ref());
-            (!meta.is_replay && meta.prompt_id.as_deref() == Some(prompt_id))
-                .then_some(AckSignal::SessionUpdate)
+            crate::app::prompt_ack::session_update_acks(
+                meta.is_replay,
+                meta.prompt_id.as_deref(),
+                prompt_id,
+                external_agent,
+            )
+            .then_some(AckSignal::SessionUpdate)
         }
         AcpClientMessageBox::ExtNotification(notif) => {
             if notif.request.method.as_ref()

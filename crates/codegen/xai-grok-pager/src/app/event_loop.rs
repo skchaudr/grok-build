@@ -1067,6 +1067,7 @@ pub(crate) async fn run(
     app.tracing_rx = Some(tracing_handle.rx);
     app.last_known_terminal_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(0);
     app.leader_mode = connection.leader_status_rx.is_some();
+    app.external_agent = args.agent_cmd.is_some();
     app.screen_mode = term_state.screen_mode;
     app.registry = crate::actions::ActionRegistry::defaults_for(term_state.screen_mode);
     app.welcome_prompt.set_screen_mode(term_state.screen_mode);

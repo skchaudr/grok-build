@@ -92,6 +92,8 @@ pub struct HeadlessOptions {
     pub memory_flush: bool,
     /// CLI `--experimental-memory` / `--no-memory` override for the headless agent.
     pub memory_enabled_override: Option<bool>,
+    /// The session is an external ACP agent (`--agent-cmd`). Live updates need not stamp a prompt id.
+    pub external_agent: bool,
 }
 struct HeadlessEmitter {
     format: OutputFormat,
@@ -1264,7 +1266,13 @@ pub async fn run_single_turn(
                     };
                     let msg = msg.boxed();
                     if let Some(watch) = prompt_ack.as_ref()
-                        && headless_ack_signal(&msg, &session_id, watch.prompt_id()).is_some()
+                        && headless_ack_signal(
+                            &msg,
+                            &session_id,
+                            watch.prompt_id(),
+                            options.external_agent,
+                        )
+                        .is_some()
                     {
                         prompt_ack = None;
                     }

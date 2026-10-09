@@ -605,6 +605,8 @@ pub struct AppView {
     /// Recomputed by [`Self::apply_tier_restrictions`] and fanned out to every slash registry (welcome prompt, agents, dashboard).
     /// Deny wins over all other visibility gates.
     pub tier_restricted_commands: Vec<String>,
+    /// This pager was started with `--agent-cmd`. Every session it drives is an external ACP agent.
+    pub external_agent: bool,
     /// Whether the pager is connected via a leader (leader mode).
     /// The Agent Dashboard entry points (`/dashboard`, `Ctrl+\`, `grok dashboard`, the startup hook) are gated on this flag.
     /// They are only meaningful when a leader is coordinating a fleet of sessions.
@@ -1575,6 +1577,7 @@ impl AppView {
             has_external_auth_provider: false,
             backend_billed: false,
             tier_restricted_commands: Vec::new(),
+            external_agent: false,
             leader_mode: false,
             credit_balance: None,
             auto_topup: None,
