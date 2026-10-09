@@ -262,3 +262,51 @@ An unanswered external `session/new` is published immediately as `pending:{names
 Publishing that provisional row makes `_x.ai/sessions/changed` show up on the external client before `session/new`'s result. The changed line is injected on the native response channel and then broadcast to every client. The second-session helper already skipped those lines; the first-session helper had to as well.
 
 `cargo test -p xai-grok-shell --lib leader::` : 305 passed. `df` was not tight enough to stop; nothing was deleted.
+
+## 2026-10-09 cross-machine delegation
+
+Stock `grok` 1.0.50 (`~/.grok/bin/grok`) has no `--agent-cmd`. `grok leader` is `list` / `info` / `kill`. `grok agent` is `stdio`, `headless`, `serve`, `leader`. This branch's debug `xai-grok-pager` accepts `--agent-cmd` and then refuses the one-shot:
+
+```
+$ xai-grok-pager -p hi --leader --leader-socket /tmp/delegate-does-not-exist.sock --agent-cmd 'python3 -c true'
+grok: --agent-cmd is only supported in interactive mode, not headless mode
+```
+
+A leader started with the test helper's default (`no_exit_on_disconnect = false`) unlinks the socket when the readiness probe disconnects. `scripts/leader_delegate.py` then fails with `FileNotFoundError` on connect. `spawn_leader_server_persistent` and `grok agent leader --no-exit-on-disconnect` stay up. External clients are marked ready even when the native backend is not.
+
+`ssh` is spawned by shlex, then OpenSSH joins argv for the remote shell. A `-c` script whose quotes were consumed by shlex is word-split, and zsh globs the parentheses (`no matches found: exec(base64...)`). The argv that reaches `ssh` has to still contain the remote single quotes.
+
+Live private leader, khoj `khoj-38w`, binary `target/debug/xai-grok-pager` (debug, not release). Mini hub was not restarted. Worker B was `ssh -T -o BatchMode=yes sab-mini@100.66.99.64 env WORKER_MODE=hostname python3 -u -c '<base64 of scripts/delegate_acp_worker.py>'` (no file written on the Mini). Worker A was `env DELEGATE_SOCKET=... DELEGATE_TARGET=<that ssh command> python3 scripts/delegate_acp_worker.py delegate`.
+
+```
+$ python3 scripts/leader_delegate.py --leader-socket /tmp/delegate-spike.sock \
+    --agent-cmd "$A_CMD" --prompt "run hostname and report it" --timeout 90
+worker-a delegated; worker-b said: hostname=sab-mini
+```
+
+Debug log: `Leader server listening`; client 1 spawned the local delegate worker (pid 183875); client 2 spawned the ssh command (pid 183877). `df` after the debug pager build: 13G free. Nothing deleted.
+
+Live follow-up, same day: `grok-team-client -p … --leader --leader-socket … --agent-cmd …` prints `grok: --agent-cmd is only supported in interactive mode, not headless mode`. That is the core gap. `~/.dsh/scripts/gk-smoke --deep` (`deep_run`) is the caller: from Air it runs that `grok-team-client -p` against `~/.grok/leader-mini-hub.sock` for the mini and khoj workers. When the delegate one-shot lands, `--deep` should switch to it.
+
+Tests, both ok:
+
+```
+cargo test -p xai-grok-shell --features test-support --test test_leader_external_agents delegate_cli_prints_the_named_workers_final_answer
+cargo test -p xai-grok-shell --features test-support --test test_leader_external_agents session_on_worker_a_delegates_to_worker_b
+```
+
+## 2026-10-09 headless one-shot and a model that chose it
+
+`grok -p --leader --leader-socket S --agent-cmd C` is the binary path. Without `--leader` the old bail remains. With `--leader`, headless connects `ClientMode::Stdio`, passes `capabilities.agent_cmd`, and sets `has_agent_cmd`. An external worker with an empty `authMethods` does not fail closed. `cargo test -p xai-grok-pager-bin --test headless_leader_agent_cmd` printed `command=headless-worker` and passed. `app::cli::tests::leader_headless_agent_cmd_is_accepted` passed.
+
+Native `grok` 1.0.50 `-p` against the same question returned 401 from `cli-chat-proxy.grok.com` (`auth_kind=bearer`, `reason=no auth context`, provider cliproxy). The model session was therefore `claude-code-acp`, started by this debug binary on a private leader (`/tmp/model-delegate.sock`, `--no-exit-on-disconnect`). Prompt, from `/tmp`, in plain words: find the Mini's hostname by running the one-shot, do not ssh, do not guess. The command named in the prompt was:
+
+```
+xai-grok-pager --no-auto-update --leader --leader-socket /tmp/model-delegate.sock --agent-cmd 'python3 /tmp/mini-hostname-acp.py' -p 'Report the hostname of the machine you are running on.'
+```
+
+`/tmp/mini-hostname-acp.py` is an ACP worker that runs `ssh -T -o BatchMode=yes sab-mini@100.66.99.64 hostname` and answers `hostname=<host>`. No file was written on the Mini. The Mini hub was not restarted.
+
+Claude's first tool call (streaming-json, tool id `toolu_01WVajR31ohu1MzV1LBCbUWV`) was that exact command. Description it supplied: "Delegate hostname query to Mini worker via Grok leader". Tool result: `hostname=sab-mini`. It then ran local `hostname` (tool id `toolu_0194NEUPg68NLf6tvPP5dUxK`) and got `khoj-38w`. Final text: the Mini's hostname is `sab-mini`, and this machine is `khoj-38w`. Session id `c8e4ab13-6dbd-4619-8d62-314198aeb017`.
+
+`~/.dsh` worktree `.worktrees/smoke-deep`, branch `fix/smoke-deep`, pushed. `deep_run` was already that `grok-team-client -p --leader --leader-socket --agent-cmd` line. `tests/test_gk_smoke.py` now requires it and rejects `leader_delegate.py`. `python3 -m pytest tests/test_gk_smoke.py -q`: 13 passed.

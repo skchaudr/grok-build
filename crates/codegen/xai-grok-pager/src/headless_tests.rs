@@ -187,8 +187,9 @@ fn headless_materialize_ctx_stays_non_chat() {
     for pinned in [false, true] {
         for restore_code in [false, true] {
             for has_worktree in [false, true] {
-                let ctx = headless_materialize_ctx(pinned, restore_code, has_worktree);
+                let ctx = headless_materialize_ctx(pinned, restore_code, has_worktree, false);
                 assert!(!ctx.chat_mode);
+                assert!(!ctx.has_agent_cmd);
                 assert_eq!(ctx.has_worktree, has_worktree);
                 assert_eq!(ctx.restore_code, restore_code);
                 assert_eq!(
@@ -202,25 +203,28 @@ fn headless_materialize_ctx_stays_non_chat() {
             }
         }
     }
+    let with_agent = headless_materialize_ctx(false, false, false, true);
+    assert!(with_agent.has_agent_cmd);
+    assert!(!with_agent.chat_mode);
 }
 
 #[test]
 fn headless_remote_miss_restores_conversation_instead_of_deferring_worktree() {
     use crate::app::session_startup::{RemoteMissPlan, plan_remote_miss};
     for restore_code in [false, true] {
-        let ctx = headless_materialize_ctx(false, restore_code, false);
+        let ctx = headless_materialize_ctx(false, restore_code, false, false);
         assert!(!matches!(
             plan_remote_miss(ctx, true),
             RemoteMissPlan::DeferToWorktree { .. }
         ));
     }
-    let mut conv = headless_materialize_ctx(false, false, false);
+    let mut conv = headless_materialize_ctx(false, false, false, false);
     conv.allow_remote_restore = true;
     assert_eq!(
         plan_remote_miss(conv, true),
         RemoteMissPlan::RestoreConversation
     );
-    let mut code = headless_materialize_ctx(false, true, false);
+    let mut code = headless_materialize_ctx(false, true, false, false);
     code.allow_remote_restore = true;
     assert_eq!(
         plan_remote_miss(code, true),
@@ -234,7 +238,7 @@ fn headless_remote_miss_restores_conversation_instead_of_deferring_worktree() {
 fn headless_remote_miss_defers_to_worktree_when_requested() {
     use crate::app::session_startup::{RemoteMissPlan, plan_remote_miss};
     for restore_code in [false, true] {
-        let mut ctx = headless_materialize_ctx(false, restore_code, true);
+        let mut ctx = headless_materialize_ctx(false, restore_code, true, false);
         ctx.allow_remote_restore = true;
         assert_eq!(
             plan_remote_miss(ctx, true),
