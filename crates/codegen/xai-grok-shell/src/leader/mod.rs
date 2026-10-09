@@ -74,7 +74,7 @@ pub use protocol::{
     CURSOR_WORKER_DOOR_OPEN_TIMEOUT, CURSOR_WORKER_HUB_REFUSAL_PREFIX, ClientCapabilities,
     ClientId, ClientMode, ControlCommand, ControlPayload, CursorWorkerClaim,
     CursorWorkerDoorStatus, CursorWorkerDoorSummary, CursorWorkerStartArgs, CursorWorkerSummary,
-    LEADER_PROTOCOL_VERSION, LeaderCapabilities, ShutdownReason,
+    LEADER_PROTOCOL_VERSION, LeaderCapabilities, ShutdownReason, session_reload_failure_message,
 };
 use serde::{Deserialize, Serialize};
 pub use server::{

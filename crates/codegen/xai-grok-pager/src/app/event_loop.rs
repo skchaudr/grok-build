@@ -2888,6 +2888,15 @@ pub(crate) async fn run(
                     app.show_toast("Reconnected.");
                 } else if restored {
                     app.show_toast("Session restored. In-progress tools and terminals were lost.");
+                } else if let Some(message) = active_agent_id
+                    .filter(|_| !active_restored)
+                    .and_then(|id| app.agents.get(&id))
+                    .and_then(|agent| agent.session.session_id.as_ref())
+                    .map(|sid| {
+                        xai_grok_shell::leader::session_reload_failure_message(sid.0.as_ref())
+                    })
+                {
+                    app.show_toast(&message);
                 } else {
                     app.show_toast("Session restore failed. Kept the existing transcript.");
                 }

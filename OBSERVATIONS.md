@@ -262,3 +262,15 @@ An unanswered external `session/new` is published immediately as `pending:{names
 Publishing that provisional row makes `_x.ai/sessions/changed` show up on the external client before `session/new`'s result. The changed line is injected on the native response channel and then broadcast to every client. The second-session helper already skipped those lines; the first-session helper had to as well.
 
 `cargo test -p xai-grok-shell --lib leader::` : 305 passed. `df` was not tight enough to stop; nothing was deleted.
+
+## 2026-10-09 leader restart must not drop an open external session
+
+Live Air client pid 63504 had session `01a11fe3-fde2-7a82-981a-793dc4ce82ea` open through the Mini hub. At 10:37 UTC the hub was gone. The client logged `leader.ipc.reconnected` with that session still open. The next prompt, at 10:46, was `Invalid params: "unknown session id"`.
+
+The socket on the Air is an SSH forward of the Mini hub. `connect_or_spawn` took the local lock and started a leader on the Air bound to `leader-mini-hub.sock` (pid 98513, 10 CPUs, no child process). That process is not the Mini hub. Its log shows a native `session/load` (`Loading session data (without updates) from JSONL`) that never logged success, and the session id never appears. The prompt then hit the in-process agent, which did not have the session resident. The session files for the external `grok agent --no-leader` live on the Mini.
+
+Native sessions already survive a restart: the client replays `session/load` into the in-process agent, and that agent reads the session from disk. No native change. The SSH-forward hijack (a dead remote hub plus a local lock spawns a leader on the forward path) is recorded here and left alone. The Mini hub and the Mac binaries were not touched.
+
+External sessions are different because the ACP process dies with the leader. The leader now writes `{sessionId, cwd, cmd}` next to its socket (`<socket-filename>.external-sessions.json`). On a later `session/prompt`, if that session's process is not the live one and the new backend's `initialize` result has `agentCapabilities.loadSession: true`, the leader sends `session/load` and only then the held prompt. If load is not advertised, the cwd is unknown, or load fails, the client gets `Invalid params` data `Couldn't restore this session after the leader restarted. Resume it with: grok --resume <id>`. A raw `unknown session id` from an external prompt is rewritten to that same sentence. The pager uses it when the active tab's reconnect restore fails.
+
+`external_session_prompt_after_leader_restart` failed first with `data: "unknown session id"`, then passed. `external_session_without_load_session_tells_client_to_resume` passed with it. `cargo test -p xai-grok-shell --lib leader::server::tests::` : 177 passed. `cargo test -p xai-grok-shell --test test_leader_external_agents` : 8 passed, including the kill-and-respawn case. `df` after the debug test build was 8.4G free, then 6.6G. The pager crate was not rebuilt: the toast uses the same `SessionId.0` access the pager already compiles, and another debug build could have put `/` under 5G. Nothing was deleted.

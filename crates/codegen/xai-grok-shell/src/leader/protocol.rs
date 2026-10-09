@@ -21,6 +21,13 @@ pub enum ProtocolError {
     ConnectionClosed,
 }
 
+/// What the client should show when an open session cannot be put back after the leader process is replaced.
+pub fn session_reload_failure_message(session_id: &str) -> String {
+    format!(
+        "Couldn't restore this session after the leader restarted. Resume it with: grok --resume {session_id}"
+    )
+}
+
 pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<Vec<u8>, ProtocolError> {
