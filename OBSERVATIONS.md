@@ -196,3 +196,24 @@ Cursor (`cursor-agent acp`), session `c2551294-f753-4aaf-a658-877ba10d5ee7`:
 - `session/new` model ids embed a window in the id string, e.g. `grok-4.7[context=256k,reasoning_effort=high,fast=true]`. There is no used-token field. That string is not a numerator.
 
 Neither agent sent a usable context count. The header stays empty until one of them sends `usage_update`, `_meta.totalTokens`, or `PromptResponse.usage`. A window parsed out of a Cursor model id, with no used count, would be a fake denominator and is not shown.
+
+## 2026-10-09 external context indicator (after the pager change)
+
+`df` before the release build: 6.6G free on `/`. No other `cargo` was running. `CARGO_INCREMENTAL=0`, `CARGO_TARGET_DIR=$HOME/repos/grok-build/target`, `PROTOC=$HOME/.local/protoc-29.3/bin/protoc`.
+
+`cargo test -p xai-grok-pager --lib` filtered to the new cases: 9 passed, 0 failed. The four new assertions failed first (context bar and both headers omitted `54K`; prompt-response `usage` and `_meta.totalTokens` were ignored). The captured `{"stopReason":"end_turn"}` case passed before the change and still passes.
+
+`cargo build --release -p xai-grok-pager-bin` finished in 11m 01s. Binary `$HOME/repos/grok-build/target/release/xai-grok-pager`, `grok 1.0.45 (9343c5af84ed) [stable]`.
+
+Live, tmux `ctx-live` 140×40, then torn down:
+
+```
+$BIN --cwd /tmp/ctx-probe --trust --always-approve --no-auto-update \
+  --agent-cmd 'env CLAUDE_CODE_EXECUTABLE=$HOME/.local/bin/claude claude-code-acp'
+```
+
+Prompt `Reply with the single word pong. Do not use tools.` returned `pong` (Worked for 1.0s). The default header row was:
+
+` /tmp/ctx-probe                                                                                                                 [Dashboard]`
+
+No used count and no ` / ` denominator. The boxed prompt chrome was the one on screen (`╭─ ❯ ─╮`, `Opus 5.5 · always-approve`). Compact mode was not on. That matches the wire capture: this adapter still sends `{"stopReason":"end_turn"}` and nothing else, so the pager has no number to print.
