@@ -294,3 +294,19 @@ Tests, both ok:
 cargo test -p xai-grok-shell --features test-support --test test_leader_external_agents delegate_cli_prints_the_named_workers_final_answer
 cargo test -p xai-grok-shell --features test-support --test test_leader_external_agents session_on_worker_a_delegates_to_worker_b
 ```
+
+## 2026-10-09 headless one-shot and a model that chose it
+
+`grok -p --leader --leader-socket S --agent-cmd C` is the binary path. Without `--leader` the old bail remains. With `--leader`, headless connects `ClientMode::Stdio`, passes `capabilities.agent_cmd`, and sets `has_agent_cmd`. An external worker with an empty `authMethods` does not fail closed. `cargo test -p xai-grok-pager-bin --test headless_leader_agent_cmd` printed `command=headless-worker` and passed. `app::cli::tests::leader_headless_agent_cmd_is_accepted` passed.
+
+Native `grok` 1.0.50 `-p` against the same question returned 401 from `cli-chat-proxy.grok.com` (`auth_kind=bearer`, `reason=no auth context`, provider cliproxy). The model session was therefore `claude-code-acp`, started by this debug binary on a private leader (`/tmp/model-delegate.sock`, `--no-exit-on-disconnect`). Prompt, from `/tmp`, in plain words: find the Mini's hostname by running the one-shot, do not ssh, do not guess. The command named in the prompt was:
+
+```
+xai-grok-pager --no-auto-update --leader --leader-socket /tmp/model-delegate.sock --agent-cmd 'python3 /tmp/mini-hostname-acp.py' -p 'Report the hostname of the machine you are running on.'
+```
+
+`/tmp/mini-hostname-acp.py` is an ACP worker that runs `ssh -T -o BatchMode=yes sab-mini@100.66.99.64 hostname` and answers `hostname=<host>`. No file was written on the Mini. The Mini hub was not restarted.
+
+Claude's first tool call (streaming-json, tool id `toolu_01WVajR31ohu1MzV1LBCbUWV`) was that exact command. Description it supplied: "Delegate hostname query to Mini worker via Grok leader". Tool result: `hostname=sab-mini`. It then ran local `hostname` (tool id `toolu_0194NEUPg68NLf6tvPP5dUxK`) and got `khoj-38w`. Final text: the Mini's hostname is `sab-mini`, and this machine is `khoj-38w`. Session id `c8e4ab13-6dbd-4619-8d62-314198aeb017`.
+
+`~/.dsh` worktree `.worktrees/smoke-deep`, branch `fix/smoke-deep`, pushed. `deep_run` was already that `grok-team-client -p --leader --leader-socket --agent-cmd` line. `tests/test_gk_smoke.py` now requires it and rejects `leader_delegate.py`. `python3 -m pytest tests/test_gk_smoke.py -q`: 13 passed.
