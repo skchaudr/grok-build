@@ -3394,6 +3394,22 @@ fn default_test_control_state(socket_path: &Path) -> LeaderServerControlState {
     })
 }
 pub async fn spawn_leader_server(socket_path: PathBuf) -> Result<ServerHandle, ServerError> {
+    spawn_leader_server_with(socket_path, false).await
+}
+
+/// Like [`spawn_leader_server`], but the listener stays up after the last client
+/// disconnects. A readiness probe would otherwise unlink the socket before a
+/// slower client (a shell script) can connect.
+pub async fn spawn_leader_server_persistent(
+    socket_path: PathBuf,
+) -> Result<ServerHandle, ServerError> {
+    spawn_leader_server_with(socket_path, true).await
+}
+
+async fn spawn_leader_server_with(
+    socket_path: PathBuf,
+    no_exit_on_disconnect: bool,
+) -> Result<ServerHandle, ServerError> {
     let (acp_tx, acp_rx) = mpsc::unbounded_channel();
     let (response_tx, response_rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
@@ -3416,7 +3432,7 @@ pub async fn spawn_leader_server(socket_path: PathBuf) -> Result<ServerHandle, S
             acp_tx,
             response_rx,
             cancel_clone,
-            false,
+            no_exit_on_disconnect,
             client_count_clone,
             agent_busy_clone,
             AgentActivity::default(),

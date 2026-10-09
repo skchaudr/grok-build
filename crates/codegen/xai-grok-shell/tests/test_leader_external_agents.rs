@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use xai_grok_shell::leader::{
     ClientCapabilities, ClientMode, LeaderClient, LeaderServerControlState, LeaderServerMetadata,
     protocol::{ClientMessage, ServerMessage, read_message, write_message},
-    run_leader_server, spawn_leader_server,
+    run_leader_server, spawn_leader_server, spawn_leader_server_persistent,
 };
 
 fn fake_cmd(name: &str) -> String {
@@ -109,9 +109,23 @@ struct ReadyServer {
 }
 
 async fn start_ready() -> ReadyServer {
+    start_server(false).await
+}
+
+/// Stays up across the readiness probe. The delegate CLI is a separate process
+/// and loses the race against exit-on-last-disconnect.
+async fn start_persistent() -> ReadyServer {
+    start_server(true).await
+}
+
+async fn start_server(persistent: bool) -> ReadyServer {
     let temp = TempDir::new().unwrap();
     let sock = temp.path().join("leader.sock");
-    let handle = spawn_leader_server(sock.clone()).await.unwrap();
+    let handle = if persistent {
+        spawn_leader_server_persistent(sock.clone()).await.unwrap()
+    } else {
+        spawn_leader_server(sock.clone()).await.unwrap()
+    };
     wait_for_socket(&sock).await;
     ReadyServer {
         sock,
@@ -456,6 +470,99 @@ async fn leader_shutdown_kills_the_external_process() {
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
     assert!(!pid_alive(pid), "external agent pid {pid} survived leader shutdown");
+}
+
+/// An agent can shell out to `scripts/leader_delegate.py` and get another
+/// worker's final answer. The worker is named by its `--agent-cmd` string.
+#[tokio::test]
+async fn delegate_cli_prints_the_named_workers_final_answer() {
+    let server = start_persistent().await;
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../scripts/leader_delegate.py");
+    let cmd = fake_cmd("delegate-b");
+    let output = tokio::process::Command::new("python3")
+        .arg(&script)
+        .arg("--leader-socket")
+        .arg(&server.sock)
+        .arg("--agent-cmd")
+        .arg(&cmd)
+        .arg("--prompt")
+        .arg("run hostname and report it")
+        .output()
+        .await
+        .expect("spawn leader_delegate.py");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "delegate cli failed: status={} stderr={stderr} stdout={stdout}",
+        output.status
+    );
+    assert!(
+        stdout.contains("command=delegate-b"),
+        "answer should name worker B, got {stdout}"
+    );
+    assert!(
+        stdout.contains("hostname="),
+        "answer should include the worker hostname, got {stdout}"
+    );
+    server.cancel.cancel();
+}
+
+/// Worker A's session shells out to the same CLI, which opens worker B.
+/// The printed answer is B's hostname, wrapped by A.
+#[tokio::test]
+async fn session_on_worker_a_delegates_to_worker_b() {
+    let server = start_persistent().await;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let script = root.join("scripts/leader_delegate.py");
+    let worker = root.join("scripts/delegate_acp_worker.py");
+    let worker_b = format!("python3 {} hostname", worker.display());
+    let worker_a = format!(
+        "env DELEGATE_SOCKET={} DELEGATE_SCRIPT={} DELEGATE_TARGET={} python3 {} delegate",
+        server.sock.display(),
+        script.display(),
+        sh_single(&worker_b),
+        worker.display(),
+    );
+    let output = tokio::process::Command::new("python3")
+        .arg(&script)
+        .arg("--leader-socket")
+        .arg(&server.sock)
+        .arg("--agent-cmd")
+        .arg(&worker_a)
+        .arg("--prompt")
+        .arg("run hostname and report it")
+        .output()
+        .await
+        .expect("spawn leader_delegate.py");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "delegate failed: status={} stderr={stderr} stdout={stdout}",
+        output.status
+    );
+    let host = String::from_utf8(
+        std::process::Command::new("hostname")
+            .output()
+            .expect("hostname")
+            .stdout,
+    )
+    .unwrap();
+    let host = host.trim();
+    assert!(
+        stdout.contains("worker-a delegated"),
+        "worker A should report that it delegated, got {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("hostname={host}")),
+        "worker B should report this machine, got {stdout}"
+    );
+    server.cancel.cancel();
+}
+
+fn sh_single(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 async fn write_raw(writer: &mut (impl AsyncWrite + Unpin), json: &str) {
