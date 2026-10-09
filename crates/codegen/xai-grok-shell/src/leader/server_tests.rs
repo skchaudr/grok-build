@@ -5128,3 +5128,433 @@ async fn leader_client_id_dropped_when_target_disconnected() {
 
     cancel.cancel();
 }
+
+fn fake_roster_agent_cmd() -> String {
+    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake_acp_agent.py");
+    format!("python3 {} fake-roster", script.display())
+}
+
+async fn connect_and_register_caps(
+    sock_path: &std::path::Path,
+    client_type: &str,
+    capabilities: ClientCapabilities,
+) -> (
+    tokio::io::ReadHalf<LeaderStream>,
+    tokio::io::WriteHalf<LeaderStream>,
+) {
+    let stream = LeaderStream::connect(sock_path).await.unwrap();
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    write_message(
+        &mut writer,
+        &ClientMessage::Register {
+            client_type: client_type.into(),
+            mode: ClientMode::Stdio,
+            capabilities,
+        },
+    )
+    .await
+    .unwrap();
+    let _: ServerMessage = read_message(&mut reader).await.unwrap();
+    (reader, writer)
+}
+
+async fn send_acp(writer: &mut tokio::io::WriteHalf<LeaderStream>, payload: &str) {
+    write_message(
+        writer,
+        &ClientMessage::Acp {
+            payload: payload.to_owned(),
+        },
+    )
+    .await
+    .unwrap();
+}
+
+async fn recv_acp_json(reader: &mut tokio::io::ReadHalf<LeaderStream>) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            panic!("timed out waiting for an ACP payload");
+        }
+        let msg = tokio::time::timeout(left, read_message::<_, ServerMessage>(reader))
+            .await
+            .expect("timed out waiting for an ACP payload")
+            .expect("leader closed the client");
+        if let ServerMessage::Acp { payload } = msg {
+            return serde_json::from_str(&payload).expect("ACP payload is JSON");
+        }
+    }
+}
+
+async fn setup_persistent_server_with_roster(
+    temp: &TempDir,
+) -> (
+    std::path::PathBuf,
+    CancellationToken,
+    mpsc::UnboundedSender<String>,
+    mpsc::UnboundedReceiver<String>,
+    ExternalRoster,
+) {
+    let sock_path = temp.path().join("test.sock");
+    let (acp_tx, acp_rx) = mpsc::unbounded_channel();
+    let (response_tx, response_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let control_state = default_test_control_state(&sock_path);
+    let roster = control_state.external_roster.clone();
+    let sock_clone = sock_path.clone();
+    let cancel_clone = cancel.clone();
+    let (_ready_tx, ready_rx) = watch::channel(true);
+    let (shutdown_tx, _shutdown_rx) =
+        watch::channel(super::super::protocol::ShutdownReason::Manual);
+    tokio::spawn(async move {
+        let _ = run_leader_server(
+            sock_clone,
+            acp_tx,
+            response_rx,
+            cancel_clone,
+            true,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            AgentActivity::default(),
+            ready_rx,
+            watch::channel(false).0,
+            shutdown_tx,
+            None,
+            control_state,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (sock_path, cancel, response_tx, acp_rx, roster)
+}
+
+fn spawn_roster_broadcasts(roster: &ExternalRoster, response_tx: mpsc::UnboundedSender<String>) {
+    let roster = roster.clone();
+    tokio::spawn(crate::leader::roster_merge::run_changed_notifier(
+        roster,
+        move |line| {
+            let _ = response_tx.send(line);
+        },
+    ));
+}
+
+fn merged_list_with_native_row(roster: &ExternalRoster) -> String {
+    use crate::leader::roster_merge::RosterListMerge;
+    let merge = RosterListMerge::new(roster.clone());
+    let request = r#"{"jsonrpc":"2.0","id":7,"method":"_x.ai/sessions/list","params":{}}"#;
+    merge.observe_inbound(request);
+    let reply = r#"{"jsonrpc":"2.0","id":7,"result":{"sessions":[{"sessionId":"native-only","cwd":"/tmp","isWorktree":false,"yolo":false,"activity":"idle","resident":true,"lastChangeUnixMs":1,"origin":{"kind":"local"}}]}}"#;
+    merge.filter_outbound(reply).into_owned()
+}
+
+async fn open_external_session(
+    sock: &std::path::Path,
+    cwd: &str,
+) -> (
+    tokio::io::ReadHalf<LeaderStream>,
+    tokio::io::WriteHalf<LeaderStream>,
+    String,
+    u32,
+) {
+    let (mut reader, mut writer) = connect_and_register_caps(
+        sock,
+        "ext-roster",
+        ClientCapabilities {
+            agent_cmd: Some(fake_roster_agent_cmd()),
+            ..ClientCapabilities::default()
+        },
+    )
+    .await;
+    send_acp(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+    )
+    .await;
+    let init = recv_acp_json(&mut reader).await;
+    let pid = init
+        .pointer("/result/meta/pid")
+        .and_then(|v| v.as_u64())
+        .expect("fake agent reports its pid") as u32;
+    send_acp(
+        &mut writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"session/new","params":{{"cwd":"{cwd}","mcpServers":[]}}}}"#
+        ),
+    )
+    .await;
+    let created = recv_acp_json(&mut reader).await;
+    let sid = created
+        .pointer("/result/sessionId")
+        .and_then(|v| v.as_str())
+        .expect("session/new returns a sessionId")
+        .to_string();
+    (reader, writer, sid, pid)
+}
+
+#[test]
+fn external_agent_title_uses_the_executable_basename() {
+    assert_eq!(external_agent_title("cursor-agent acp"), "cursor-agent");
+    assert_eq!(
+        external_agent_title("/usr/local/bin/cursor-agent --yolo"),
+        "cursor-agent"
+    );
+    assert_eq!(
+        external_agent_title(r#""/opt/My Agent/cursor-agent" acp"#),
+        "cursor-agent"
+    );
+}
+
+#[test]
+fn with_cursor_worker_keeps_the_leader_roster() {
+    use crate::agent::roster::{RosterActivity, RosterEntry, RosterOrigin};
+    let roster = ExternalRoster::new();
+    let state = default_test_control_state(std::path::Path::new("/tmp/roster.sock"))
+        .with_cursor_worker(
+            CursorWorkerConfig::default(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+            roster.clone(),
+        );
+    let publisher = state.external_roster.publisher();
+    publisher.replace(vec![RosterEntry {
+        session_id: "ext-1".into(),
+        title: Some("cursor-agent".into()),
+        cwd: "/work".into(),
+        is_worktree: false,
+        session_kind: Some("external".into()),
+        model_id: None,
+        reasoning_effort: None,
+        yolo: false,
+        activity: RosterActivity::Idle,
+        last_turn_summary: None,
+        resident: true,
+        last_change_unix_ms: 1,
+        origin: RosterOrigin::Local,
+    }]);
+    assert_eq!(
+        roster.rows().len(),
+        1,
+        "the server and the list merge must share one roster"
+    );
+}
+
+/// An external `session/new` publishes a row the list merge appends, and the changed
+/// notifier broadcasts it to a native dashboard client.
+#[tokio::test]
+async fn external_session_is_merged_into_sessions_list_and_broadcast() {
+    use crate::agent::roster::RosterActivity;
+    let temp = TempDir::new().unwrap();
+    let (sock, cancel, response_tx, _acp_rx, roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    spawn_roster_broadcasts(&roster, response_tx);
+    let (mut dash_reader, _dash_writer) = connect_and_register(&sock, "dashboard").await;
+    let cwd = "/tmp/ext-roster-probe";
+    let (_ext_reader, _ext_writer, sid, _pid) = open_external_session(&sock, cwd).await;
+
+    let rows = roster.rows();
+    let row = rows
+        .iter()
+        .find(|row| row.session_id == sid)
+        .unwrap_or_else(|| panic!("external session must be published, rows={rows:?}"));
+    assert_eq!(row.title.as_deref(), Some("python3"));
+    assert_eq!(row.cwd, cwd);
+    assert_eq!(row.session_kind.as_deref(), Some("external"));
+    assert_eq!(row.activity, RosterActivity::Idle);
+    assert!(row.resident);
+    assert!(!row.is_worktree);
+
+    let merged = merged_list_with_native_row(&roster);
+    assert!(
+        merged.contains(&sid) && merged.contains("\"sessionKind\":\"external\""),
+        "merged sessions/list must contain the external row, got {merged}"
+    );
+    assert!(
+        merged.contains("native-only"),
+        "the agent's own row stays in the merged list, got {merged}"
+    );
+
+    let broadcast = recv_acp_json(&mut dash_reader).await;
+    let text = broadcast.to_string();
+    assert!(
+        text.contains("sessions/changed") && text.contains(&sid) && text.contains("external"),
+        "dashboard must receive the roster broadcast, got {text}"
+    );
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn external_backend_exit_removes_every_session_row() {
+    let temp = TempDir::new().unwrap();
+    let (sock, cancel, response_tx, _acp_rx, roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    spawn_roster_broadcasts(&roster, response_tx);
+    let (mut dash_reader, _dash_writer) = connect_and_register(&sock, "dashboard").await;
+    let (mut ext_reader, mut writer, sid_a, pid) = open_external_session(&sock, "/tmp/ext-a").await;
+    send_acp(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd":"/tmp/ext-b","mcpServers":[]}}"#,
+    )
+    .await;
+    // The roster broadcast is also delivered to the external client, ahead of the next response.
+    let second = loop {
+        let msg = recv_acp_json(&mut ext_reader).await;
+        if msg.pointer("/result/sessionId").is_some() {
+            break msg;
+        }
+    };
+    let sid_b = second
+        .pointer("/result/sessionId")
+        .and_then(|v| v.as_str())
+        .unwrap()
+        .to_string();
+    let mut seen = 0u8;
+    let announced = tokio::time::Instant::now() + Duration::from_secs(3);
+    while seen != 3 && tokio::time::Instant::now() < announced {
+        let text = recv_acp_json(&mut dash_reader).await.to_string();
+        if text.contains(&sid_a) {
+            seen |= 1;
+        }
+        if text.contains(&sid_b) {
+            seen |= 2;
+        }
+    }
+    assert_eq!(
+        seen, 3,
+        "both sessions are broadcast before the process exits"
+    );
+
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let rows = roster.rows();
+        let gone = rows
+            .iter()
+            .all(|row| row.session_id != sid_a && row.session_id != sid_b);
+        if gone {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("backend exit must drop every session of that process, rows={rows:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let merged = merged_list_with_native_row(&roster);
+    assert!(
+        !merged.contains(&sid_a) && !merged.contains(&sid_b),
+        "exited sessions must leave the merged list, got {merged}"
+    );
+    let removal_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let broadcast = recv_acp_json(&mut dash_reader).await;
+        let removed = broadcast
+            .pointer("/params/removed")
+            .and_then(|v| v.as_array())
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if removed.iter().any(|id| id == &sid_a) && removed.iter().any(|id| id == &sid_b) {
+            break;
+        }
+        if tokio::time::Instant::now() >= removal_deadline {
+            panic!("one exit removes every session, last broadcast={broadcast}");
+        }
+    }
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn external_session_unregister_removes_the_roster_row() {
+    let temp = TempDir::new().unwrap();
+    let (sock, cancel, response_tx, _acp_rx, roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    spawn_roster_broadcasts(&roster, response_tx);
+    let (mut dash_reader, _dash_writer) = connect_and_register(&sock, "dashboard").await;
+    let (ext_reader, ext_writer, sid, _pid) = open_external_session(&sock, "/tmp/ext-unreg").await;
+    let _ = recv_acp_json(&mut dash_reader).await;
+    drop(ext_reader);
+    drop(ext_writer);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let rows = roster.rows();
+        if rows.iter().all(|row| row.session_id != sid) {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("unregister must drop the row, rows={rows:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let broadcast = recv_acp_json(&mut dash_reader).await;
+    let removed = broadcast
+        .pointer("/params/removed")
+        .and_then(|v| v.as_array());
+    assert!(
+        removed.is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(sid.as_str()))),
+        "dashboard must see the row removed, got {broadcast}"
+    );
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn native_session_adds_no_external_roster_row() {
+    let temp = TempDir::new().unwrap();
+    let (sock, cancel, response_tx, mut acp_rx, roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    spawn_roster_broadcasts(&roster, response_tx.clone());
+    let (mut reader, mut writer) = connect_and_register(&sock, "native").await;
+    send_acp(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}"#,
+    )
+    .await;
+    let forwarded = tokio::time::timeout(Duration::from_secs(2), acp_rx.recv())
+        .await
+        .expect("native session/new reaches the native backend")
+        .unwrap();
+    let forwarded: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+    let id = forwarded["id"].as_str().unwrap();
+    response_tx
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","id":"{id}","result":{{"sessionId":"native-sess"}}}}"#
+        ))
+        .unwrap();
+    let created = recv_acp_json(&mut reader).await;
+    assert_eq!(
+        created
+            .pointer("/result/sessionId")
+            .and_then(|v| v.as_str()),
+        Some("native-sess")
+    );
+    assert!(
+        roster.rows().is_empty(),
+        "a native session must not publish an external row, rows={:?}",
+        roster.rows()
+    );
+    let merged = merged_list_with_native_row(&roster);
+    assert!(
+        !merged.contains("sessionKind"),
+        "an empty external roster leaves the agent list without an external row, got {merged}"
+    );
+    let late = tokio::time::timeout(
+        Duration::from_millis(150),
+        read_message::<_, ServerMessage>(&mut reader),
+    )
+    .await;
+    assert!(
+        late.is_err(),
+        "native session/new must not broadcast an external roster change, got {late:?}"
+    );
+    cancel.cancel();
+}
