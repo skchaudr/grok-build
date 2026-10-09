@@ -286,6 +286,8 @@ worker-a delegated; worker-b said: hostname=sab-mini
 
 Debug log: `Leader server listening`; client 1 spawned the local delegate worker (pid 183875); client 2 spawned the ssh command (pid 183877). `df` after the debug pager build: 13G free. Nothing deleted.
 
+Live follow-up, same day: `grok-team-client -p … --leader --leader-socket … --agent-cmd …` prints `grok: --agent-cmd is only supported in interactive mode, not headless mode`. That is the core gap. `~/.dsh/scripts/gk-smoke --deep` (`deep_run`) is the caller: from Air it runs that `grok-team-client -p` against `~/.grok/leader-mini-hub.sock` for the mini and khoj workers. When the delegate one-shot lands, `--deep` should switch to it.
+
 Tests, both ok:
 
 ```
