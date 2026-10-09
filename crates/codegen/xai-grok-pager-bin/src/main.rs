@@ -1763,6 +1763,9 @@ fn configure_process_env(mut args: PagerArgs) -> Result<PagerArgs> {
         if let Some(socket) = args.leader_socket.as_deref() {
             std::env::set_var(xai_grok_shell::leader::LEADER_SOCKET_ENV, socket);
         }
+        if args.leader_no_spawn {
+            std::env::set_var(xai_grok_shell::leader::LEADER_NO_SPAWN_ENV, "1");
+        }
         if args.log_sampling {
             std::env::set_var("GROK_LOG_SAMPLING", "1");
         }

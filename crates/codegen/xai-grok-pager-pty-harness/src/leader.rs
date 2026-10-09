@@ -42,9 +42,22 @@ impl LeaderCluster {
         })
     }
 
-    /// Spawn the leader-electing client (`--leader --leader-socket <S>` plus `extra_args`); it starts a fresh session and brings up the leader.
+    /// Spawn the leader-electing client (`--leader --leader-socket <S>` plus `extra_args`).
+    /// `GROK_LEADER_SPAWN=1` is set only here: an explicit socket otherwise refuses to spawn,
+    /// which is what a client attached to someone else's hub must do.
     pub fn spawn_leader(&self, extra_args: &[&str]) -> Result<PtyHarness> {
-        self.spawn_client(&[], extra_args)
+        let socket = self.socket.to_str().context("socket path is utf-8")?;
+        let mut args: Vec<&str> = vec!["--leader", "--leader-socket", socket];
+        args.extend_from_slice(extra_args);
+        PtyHarness::spawn_with_content_env(
+            &self.binary,
+            self.rows,
+            self.cols,
+            &self.content,
+            &args,
+            &[("GROK_LEADER_SPAWN", "1")],
+        )
+        .context("spawn pager client on shared leader")
     }
 
     /// Attach another client that resumes the shared session through the SAME leader (`--leader --leader-socket <S> --resume` plus `extra_args`).

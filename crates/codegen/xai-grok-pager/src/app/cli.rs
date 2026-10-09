@@ -420,9 +420,12 @@ pub struct PagerArgs {
     /// Working directory. With --agent-cmd, an absolute path on the agent host; not checked locally.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
-    /// Use a custom leader socket path instead of the default `~/.grok/leader.sock`.
-    /// A local/branch build can thus run an isolated leader without colliding with the default one already running on the machine
-    /// Name it `~/.grok/leader-*.sock` to keep `grok leader list/kill` able to find it; any other location works but won't be auto-discovered
+    /// Attach to this leader socket instead of the default `~/.grok/leader.sock`.
+    /// This client does not start a leader on the path. If the hub is down, connect and
+    /// reconnect keep retrying (or report the hub unreachable) rather than binding a local
+    /// leader here. Start the leader separately with `grok agent leader --leader-socket PATH`.
+    /// `GROK_LEADER_SPAWN=1` restores the old behavior where this client may spawn one.
+    /// Name it `~/.grok/leader-*.sock` to keep `grok leader list/kill` able to find it.
     #[arg(
         long = "leader-socket",
         value_name = "PATH",
@@ -430,6 +433,10 @@ pub struct PagerArgs {
         value_hint = ValueHint::FilePath
     )]
     pub leader_socket: Option<PathBuf>,
+    /// Never start a leader process from this client, including on the default socket.
+    /// `--leader-socket` already implies this.
+    #[arg(long = "leader-no-spawn", global = true, action = ArgAction::SetTrue)]
+    pub leader_no_spawn: bool,
     /// Enable debug logging.
     #[arg(long = "debug", global = true)]
     pub debug: bool,
@@ -1372,6 +1379,12 @@ mod tests {
     fn leader_socket_flag_defaults_to_none() {
         let args = PagerArgs::try_parse_from(["grok"]).expect("bare grok parses");
         assert!(args.leader_socket.is_none());
+        assert!(!args.leader_no_spawn);
+    }
+    #[test]
+    fn leader_no_spawn_flag_parses() {
+        let args = PagerArgs::try_parse_from(["grok", "--leader-no-spawn"]).expect("flag parses");
+        assert!(args.leader_no_spawn);
     }
     #[test]
     fn leader_mgmt_list_info_kill_parse() {

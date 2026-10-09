@@ -66,8 +66,8 @@ mod transport;
 use crate::env::GrokBuildEnvironment;
 pub use client::{ClientError, DisconnectReason, LeaderClient, LeaderRegistration};
 pub use lock::{
-    LEADER_SOCKET_ENV, LeaderLock, LockError, SLOT_DIR_ENV, compute_ws_url_suffix,
-    lock_path_for_ws_url, lock_path_for_ws_url_in, socket_path_for_ws_url,
+    LEADER_NO_SPAWN_ENV, LEADER_SOCKET_ENV, LEADER_SPAWN_ENV, LeaderLock, LockError, SLOT_DIR_ENV,
+    compute_ws_url_suffix, lock_path_for_ws_url, lock_path_for_ws_url_in, socket_path_for_ws_url,
     socket_path_for_ws_url_in, ws_url_suffix_from_paths,
 };
 pub use protocol::{
@@ -817,6 +817,12 @@ pub enum ConnectionError {
     SpawnFailed(String),
     #[error("Timeout waiting for leader to start")]
     Timeout,
+    /// The socket was named explicitly (`--leader-socket` / `GROK_LEADER_SOCKET`) or spawn was
+    /// opted out, and nothing accepted a connection. The client must not bind a local leader
+    /// on that path: a forwarded hub socket would be replaced by a process that does not have
+    /// the hub's sessions.
+    #[error("leader hub at {0} is unreachable; not starting a local leader on an explicit socket")]
+    HubUnreachable(String),
     #[error("Reconnection cancelled")]
     Cancelled,
     #[error(
@@ -1371,9 +1377,57 @@ async fn evict_zombie_leader(pid: u32, sock_path: &Path, waited: Duration) {
         })),
     );
 }
+/// Whether this client may start a leader process, or may only attach to one that is already there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaderSpawnPolicy {
+    /// No leader is reachable: acquire the lock and spawn one. The default socket.
+    SpawnIfNeeded,
+    /// Never spawn. An explicit `--leader-socket` names a hub this client did not create.
+    AttachOnly,
+}
+
+fn env_flag_enabled(key: &str) -> bool {
+    std::env::var_os(key).is_some_and(|value| {
+        let value = value.to_string_lossy();
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
+}
+
+/// `GROK_LEADER_SPAWN` forces spawn. Otherwise an explicit socket or `GROK_LEADER_NO_SPAWN` attaches only.
+pub fn leader_spawn_policy_from(
+    explicit_socket: bool,
+    force_spawn: bool,
+    no_spawn: bool,
+) -> LeaderSpawnPolicy {
+    if force_spawn {
+        return LeaderSpawnPolicy::SpawnIfNeeded;
+    }
+    if explicit_socket || no_spawn {
+        LeaderSpawnPolicy::AttachOnly
+    } else {
+        LeaderSpawnPolicy::SpawnIfNeeded
+    }
+}
+
+fn current_leader_spawn_policy() -> LeaderSpawnPolicy {
+    let explicit_socket =
+        std::env::var_os(LEADER_SOCKET_ENV).is_some_and(|value| !value.is_empty());
+    leader_spawn_policy_from(
+        explicit_socket,
+        env_flag_enabled(LEADER_SPAWN_ENV),
+        env_flag_enabled(LEADER_NO_SPAWN_ENV),
+    )
+}
+
+fn hub_unreachable(sock_path: &Path) -> ConnectionError {
+    ConnectionError::HubUnreachable(sock_path.display().to_string())
+}
+
 /// Connect to existing leader or spawn a new one. Uses OS-level file locking (flock) to coordinate: Try to connect to existing socket (fast path) If connection fails, try to acquire exclusive lock
 /// If lock acquired, we are responsible for spawning the leader If lock not acquired, another process is leader/spawning; wait and retry The `env_urls.grok_ws_url` determines which leader instance to connect to.
 /// Different WS URLs get different leader processes (via hashed socket paths).
+/// An explicit `--leader-socket` ([`LeaderSpawnPolicy::AttachOnly`]) never takes that spawn branch.
 pub async fn connect_or_spawn(
     client_type: &str,
     mode: ClientMode,
@@ -1383,8 +1437,27 @@ pub async fn connect_or_spawn(
     if let Some(profile) = xai_grok_sandbox::requested_confinement_profile() {
         return Err(ConnectionError::SandboxConfinement(profile));
     }
+    let lock = LeaderLock::new(&env_urls.grok_ws_url);
+    connect_or_spawn_at(
+        client_type,
+        mode,
+        env_urls,
+        capabilities,
+        lock,
+        current_leader_spawn_policy(),
+    )
+    .await
+}
+
+async fn connect_or_spawn_at(
+    client_type: &str,
+    mode: ClientMode,
+    env_urls: &LeaderEnvUrls,
+    capabilities: ClientCapabilities,
+    mut lock: LeaderLock,
+    policy: LeaderSpawnPolicy,
+) -> Result<LeaderConnection, ConnectionError> {
     let start = std::time::Instant::now();
-    let mut lock = LeaderLock::new(&env_urls.grok_ws_url);
     let sock_path = lock.socket_path().clone();
     let mut replacing_stale = false;
     if crate::leader::transport::listener_is_ready(&sock_path) {
@@ -1403,7 +1476,7 @@ pub async fn connect_or_spawn(
         if !skip_connect {
             match connect_to_leader(&sock_path, client_type, mode, capabilities.clone()).await {
                 Ok(conn) => {
-                    if !should_evict_conn(&conn) {
+                    if !should_evict_conn(&conn) || policy == LeaderSpawnPolicy::AttachOnly {
                         info!(
                             elapsed_ms = start.elapsed().as_millis() as u64,
                             "Adopted leader"
@@ -1430,7 +1503,7 @@ pub async fn connect_or_spawn(
                     && let Ok(conn) =
                         connect_to_leader(&sock_path, client_type, mode, capabilities.clone()).await
                 {
-                    if !should_evict_conn(&conn) {
+                    if !should_evict_conn(&conn) || policy == LeaderSpawnPolicy::AttachOnly {
                         if let Err(e) = lock.release() {
                             warn!(error = %e, "Failed to release lock after adopting leader");
                         }
@@ -1456,6 +1529,16 @@ pub async fn connect_or_spawn(
                     }
                     evict_leader(conn, &lock).await;
                     replacing_stale = true;
+                }
+                if policy == LeaderSpawnPolicy::AttachOnly {
+                    if let Err(e) = lock.release() {
+                        warn!(error = %e, "Failed to release lock after refusing to spawn");
+                    }
+                    info!(
+                        socket = %sock_path.display(),
+                        "explicit leader socket is down; not spawning a local leader"
+                    );
+                    return Err(hub_unreachable(&sock_path));
                 }
                 info!("Acquired lock, spawning leader subprocess");
                 if let Err(e) = lock.release() {
@@ -1517,7 +1600,7 @@ pub async fn connect_or_spawn(
         {
             Ok(conn) => {
                 zombie_timer = None;
-                if !should_evict_conn(&conn) {
+                if !should_evict_conn(&conn) || policy == LeaderSpawnPolicy::AttachOnly {
                     info!(
                         elapsed_ms = start.elapsed().as_millis() as u64,
                         "Adopted leader"
@@ -1531,6 +1614,13 @@ pub async fn connect_or_spawn(
                 continue;
             }
             Err(e) if is_connect_level_failure(&e) => {
+                if policy == LeaderSpawnPolicy::AttachOnly {
+                    info!(
+                        socket = %sock_path.display(),
+                        "explicit leader socket is not connectable; not evicting or spawning"
+                    );
+                    return Err(hub_unreachable(&sock_path));
+                }
                 let holder = live_grok_lock_holder(&lock);
                 match zombie_evict_decision(
                     holder,
@@ -1887,6 +1977,9 @@ mod tests {
             "boom".into()
         )));
         assert!(!is_terminal_refusal(&ConnectionError::Cancelled));
+        assert!(!is_terminal_refusal(&ConnectionError::HubUnreachable(
+            "/tmp/leader.sock".into()
+        )));
         assert!(!is_terminal_refusal(&ConnectionError::Lock(
             LockError::AcquireInProgress {
                 path: PathBuf::from("/x/leader.lock"),
@@ -2629,6 +2722,89 @@ mod tests {
         )
         .await
         .unwrap();
+        let (tx, _rx) = conn.into_channels();
+        assert!(
+            tx.send(r#"{"jsonrpc":"2.0","method":"test","id":1}"#.into())
+                .is_ok()
+        );
+        handle.cancel.cancel();
+    }
+
+    #[test]
+    fn explicit_socket_attaches_only_unless_spawn_is_forced() {
+        use LeaderSpawnPolicy::{AttachOnly, SpawnIfNeeded};
+        assert_eq!(leader_spawn_policy_from(true, false, false), AttachOnly);
+        assert_eq!(leader_spawn_policy_from(false, false, true), AttachOnly);
+        assert_eq!(leader_spawn_policy_from(false, false, false), SpawnIfNeeded);
+        assert_eq!(leader_spawn_policy_from(true, true, true), SpawnIfNeeded);
+    }
+
+    /// The Air client hit this: the Mini hub's forwarded socket was briefly down, the local
+    /// lock was free, and `connect_or_spawn` bound a leader on that same path.
+    #[tokio::test]
+    async fn explicit_socket_does_not_spawn_when_the_hub_is_down() {
+        let temp = TempDir::new().unwrap();
+        let sock = temp.path().join("leader-mini-hub.sock");
+        let lock = LeaderLock::from_paths(temp.path().join("leader-mini-hub.lock"), sock.clone());
+        let env_urls = LeaderEnvUrls {
+            grok_ws_url: "wss://test.invalid".into(),
+            grok_ws_origin: "https://test.invalid".into(),
+        };
+        let started = std::time::Instant::now();
+        let err = match connect_or_spawn_at(
+            "test",
+            ClientMode::Stdio,
+            &env_urls,
+            ClientCapabilities::default(),
+            lock,
+            LeaderSpawnPolicy::AttachOnly,
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(_) => panic!("a down explicit socket must not come back as a connection"),
+        };
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "attach-only must not wait out a leader spawn, elapsed {:?}",
+            started.elapsed()
+        );
+        match err {
+            ConnectionError::HubUnreachable(path) => {
+                assert!(path.contains("leader-mini-hub.sock"), "{path}");
+            }
+            other => panic!("expected hub unreachable, got {other:?}"),
+        }
+        assert!(
+            !sock.exists(),
+            "must not bind a local leader on the explicit socket"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_socket_adopts_a_leader_that_is_already_listening() {
+        let temp = TempDir::new().unwrap();
+        let sock = temp.path().join("leader-mini-hub.sock");
+        let handle = spawn_leader_server(sock.clone()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let lock = LeaderLock::from_paths(temp.path().join("leader-mini-hub.lock"), sock);
+        let env_urls = LeaderEnvUrls {
+            grok_ws_url: "wss://test.invalid".into(),
+            grok_ws_origin: "https://test.invalid".into(),
+        };
+        let conn = match connect_or_spawn_at(
+            "test",
+            ClientMode::Stdio,
+            &env_urls,
+            ClientCapabilities::default(),
+            lock,
+            LeaderSpawnPolicy::AttachOnly,
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(err) => panic!("an explicit socket adopts a listening leader, got {err}"),
+        };
         let (tx, _rx) = conn.into_channels();
         assert!(
             tx.send(r#"{"jsonrpc":"2.0","method":"test","id":1}"#.into())
