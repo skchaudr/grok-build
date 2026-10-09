@@ -8,7 +8,11 @@ import sys
 import time
 
 command = sys.argv[1] if len(sys.argv) > 1 else "fake"
-hold_release = sys.argv[2] if command == "fake-roster-hold" and len(sys.argv) > 2 else None
+hold_release = (
+    sys.argv[2]
+    if command in ("fake-roster-hold", "fake-roster-hold-new") and len(sys.argv) > 2
+    else None
+)
 pid = os.getpid()
 host = socket.gethostname()
 init_count = 0
@@ -26,6 +30,25 @@ def result(req_id, payload):
 
 def identity():
     return {"pid": pid, "hostname": host, "command": command}
+
+
+def session_info(sid, title):
+    emit(
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {"sessionUpdate": "session_info_update", "title": title},
+            },
+        }
+    )
+
+
+def wait_release():
+    while not os.path.exists(hold_release):
+        time.sleep(0.02)
+    return open(hold_release, encoding="utf-8").read().strip()
 
 
 for raw in sys.stdin:
@@ -51,9 +74,22 @@ for raw in sys.stdin:
             },
         )
     elif method == "session/new":
+        if command == "fake-roster-hold-new":
+            kind = wait_release()
+            if kind == "error":
+                emit(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {"code": -32000, "message": "session/new failed"},
+                    }
+                )
+                continue
         sid = f"s-{pid}-{len(sessions) + 1}"
         sessions[sid] = True
         result(req_id, {"sessionId": sid, **identity()})
+        if command == "fake-roster-title":
+            session_info(sid, "Pong Game")
     elif method in ("session/load", "session/resume"):
         sid = params.get("sessionId") or params.get("session_id")
         result(
@@ -63,9 +99,7 @@ for raw in sys.stdin:
     elif method == "session/prompt":
         sid = params.get("sessionId") or params.get("session_id")
         if hold_release:
-            while not os.path.exists(hold_release):
-                time.sleep(0.02)
-            kind = open(hold_release, encoding="utf-8").read().strip()
+            kind = wait_release()
             if kind == "error":
                 emit(
                     {

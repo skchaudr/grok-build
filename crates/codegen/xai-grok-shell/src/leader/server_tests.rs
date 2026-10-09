@@ -5170,6 +5170,22 @@ async fn send_acp(writer: &mut tokio::io::WriteHalf<LeaderStream>, payload: &str
     .unwrap();
 }
 
+async fn recv_matching(
+    reader: &mut tokio::io::ReadHalf<LeaderStream>,
+    mut pred: impl FnMut(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timed out waiting for a matching ACP payload");
+        }
+        let msg = recv_acp_json(reader).await;
+        if pred(&msg) {
+            return msg;
+        }
+    }
+}
+
 async fn recv_acp_json(reader: &mut tokio::io::ReadHalf<LeaderStream>) -> serde_json::Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
@@ -5283,7 +5299,13 @@ async fn open_external_session(
         ),
     )
     .await;
-    let created = recv_acp_json(&mut reader).await;
+    // A provisional roster row is broadcast to every client before session/new returns.
+    let created = loop {
+        let msg = recv_acp_json(&mut reader).await;
+        if msg.pointer("/result/sessionId").is_some() {
+            break msg;
+        }
+    };
     let sid = created
         .pointer("/result/sessionId")
         .and_then(|v| v.as_str())
@@ -5302,6 +5324,41 @@ fn external_agent_title_uses_the_executable_basename() {
     assert_eq!(
         external_agent_title(r#""/opt/My Agent/cursor-agent" acp"#),
         "cursor-agent"
+    );
+}
+
+#[test]
+fn external_agent_title_names_ssh_by_remote_host_and_script() {
+    assert_eq!(
+        external_agent_title(
+            "ssh -o StrictHostKeyChecking=no sab-mini@khoj /home/sab-mini/.dsh/scripts/grok-khoj-worker"
+        ),
+        "khoj: grok-khoj-worker"
+    );
+    assert_eq!(
+        external_agent_title(
+            "ssh sab-mini@100.75.255.75 /home/sab-mini/.dsh/scripts/grok-khoj-worker"
+        ),
+        "100.75.255.75: grok-khoj-worker"
+    );
+}
+
+#[test]
+fn external_agent_title_uses_the_bin_for_agent_stdio() {
+    assert_eq!(
+        external_agent_title(
+            "/Users/sab-mini/.grok/bin/grok-team-hub --no-auto-update agent --no-leader stdio"
+        ),
+        "grok-team-hub"
+    );
+}
+
+#[test]
+fn roster_display_title_is_one_truncated_line() {
+    assert_eq!(roster_display_title("  hello\nworld  "), "hello");
+    assert_eq!(
+        roster_display_title(&"a".repeat(80)),
+        format!("{}...", "a".repeat(60))
     );
 }
 
@@ -5374,7 +5431,11 @@ async fn external_session_is_merged_into_sessions_list_and_broadcast() {
         "the agent's own row stays in the merged list, got {merged}"
     );
 
-    let broadcast = recv_acp_json(&mut dash_reader).await;
+    let broadcast = recv_matching(&mut dash_reader, |msg| {
+        let text = msg.to_string();
+        text.contains("sessions/changed") && text.contains(&sid) && text.contains("external")
+    })
+    .await;
     let text = broadcast.to_string();
     assert!(
         text.contains("sessions/changed") && text.contains(&sid) && text.contains("external"),
@@ -5481,7 +5542,6 @@ async fn external_session_unregister_removes_the_roster_row() {
     spawn_roster_broadcasts(&roster, response_tx);
     let (mut dash_reader, _dash_writer) = connect_and_register(&sock, "dashboard").await;
     let (ext_reader, ext_writer, sid, _pid) = open_external_session(&sock, "/tmp/ext-unreg").await;
-    let _ = recv_acp_json(&mut dash_reader).await;
     drop(ext_reader);
     drop(ext_writer);
 
@@ -5496,7 +5556,16 @@ async fn external_session_unregister_removes_the_roster_row() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let broadcast = recv_acp_json(&mut dash_reader).await;
+    let sid_removed = sid.clone();
+    let broadcast = recv_matching(&mut dash_reader, |msg| {
+        msg.pointer("/params/removed")
+            .and_then(|v| v.as_array())
+            .is_some_and(|ids| {
+                ids.iter()
+                    .any(|id| id.as_str() == Some(sid_removed.as_str()))
+            })
+    })
+    .await;
     let removed = broadcast
         .pointer("/params/removed")
         .and_then(|v| v.as_array());
@@ -5669,7 +5738,6 @@ async fn external_prompt_flips_working_then_idle_on_response() {
     let (mut ext_reader, mut ext_writer, sid, _pid) =
         open_external_session_with(&sock, "/tmp/ext-prompt", &hold_roster_agent_cmd(&release))
             .await;
-    let _ = recv_acp_json(&mut dash_reader).await;
     send_acp(
         &mut ext_writer,
         &format!(
@@ -5678,7 +5746,13 @@ async fn external_prompt_flips_working_then_idle_on_response() {
     )
     .await;
     wait_external_activity(&roster, &sid, RosterActivity::Working).await;
-    let working = recv_acp_json(&mut dash_reader).await.to_string();
+    let sid_working = sid.clone();
+    let working = recv_matching(&mut dash_reader, |msg| {
+        let text = msg.to_string();
+        text.contains("\"activity\":\"working\"") && text.contains(&sid_working)
+    })
+    .await
+    .to_string();
     assert!(
         working.contains("\"activity\":\"working\"") && working.contains(&sid),
         "working flip must be broadcast, got {working}"
@@ -5690,7 +5764,13 @@ async fn external_prompt_flips_working_then_idle_on_response() {
         "prompt response reaches the client, got {response}"
     );
     wait_external_activity(&roster, &sid, RosterActivity::Idle).await;
-    let idle = recv_acp_json(&mut dash_reader).await.to_string();
+    let sid_idle = sid.clone();
+    let idle = recv_matching(&mut dash_reader, |msg| {
+        let text = msg.to_string();
+        text.contains("\"activity\":\"idle\"") && text.contains(&sid_idle)
+    })
+    .await
+    .to_string();
     assert!(
         idle.contains("\"activity\":\"idle\"") && idle.contains(&sid),
         "idle flip must be broadcast, got {idle}"
@@ -5732,11 +5812,10 @@ async fn external_prompt_error_and_cancel_return_to_idle() {
     let (sock, cancel, response_tx, _acp_rx, roster) =
         setup_persistent_server_with_roster(&temp).await;
     spawn_roster_broadcasts(&roster, response_tx);
-    let (mut dash_reader, _dash_writer) = connect_and_register(&sock, "dashboard").await;
+    let (_dash_reader, _dash_writer) = connect_and_register(&sock, "dashboard").await;
     let (mut ext_reader, mut ext_writer, sid, _pid) =
         open_external_session_with(&sock, "/tmp/ext-cancel", &hold_roster_agent_cmd(&release))
             .await;
-    let _ = recv_acp_json(&mut dash_reader).await;
     send_acp(
         &mut ext_writer,
         &format!(
@@ -5797,7 +5876,6 @@ async fn external_session_close_removes_row_while_client_stays() {
     let (mut dash_reader, _dash_writer) = connect_and_register(&sock, "dashboard").await;
     let (mut ext_reader, mut ext_writer, sid, _pid) =
         open_external_session(&sock, "/tmp/ext-close").await;
-    let _ = recv_acp_json(&mut dash_reader).await;
     send_acp(
         &mut ext_writer,
         &format!(
@@ -5820,7 +5898,16 @@ async fn external_session_close_removes_row_while_client_stays() {
         closed.get("result").is_some(),
         "close response still reaches the connected client, got {closed}"
     );
-    let removed = recv_acp_json(&mut dash_reader).await;
+    let sid_closed = sid.clone();
+    let removed = recv_matching(&mut dash_reader, |msg| {
+        msg.pointer("/params/removed")
+            .and_then(|v| v.as_array())
+            .is_some_and(|ids| {
+                ids.iter()
+                    .any(|id| id.as_str() == Some(sid_closed.as_str()))
+            })
+    })
+    .await;
     let gone = removed
         .pointer("/params/removed")
         .and_then(|v| v.as_array())
@@ -5879,5 +5966,230 @@ async fn external_session_delete_removes_only_that_row() {
         deleted.get("result").is_some(),
         "delete response reaches the still-connected client, got {deleted}"
     );
+    cancel.cancel();
+}
+
+fn titled_roster_agent_cmd() -> String {
+    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake_acp_agent.py");
+    format!("python3 {} fake-roster-title", script.display())
+}
+
+fn hold_new_roster_agent_cmd(release: &std::path::Path) -> String {
+    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake_acp_agent.py");
+    format!(
+        "python3 {} fake-roster-hold-new {}",
+        script.display(),
+        release.display()
+    )
+}
+
+async fn wait_external_title(roster: &ExternalRoster, sid: &str, title: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if roster
+            .rows()
+            .iter()
+            .any(|row| row.session_id == sid && row.title.as_deref() == Some(title))
+        {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "session {sid} title did not become {title:?}, rows={:?}",
+                roster.rows()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_cwd_row(roster: &ExternalRoster, cwd: &str) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(row) = roster.rows().into_iter().find(|row| row.cwd == cwd) {
+            return row.session_id;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("no roster row for {cwd}, rows={:?}", roster.rows());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_cwd_gone(roster: &ExternalRoster, cwd: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if roster.rows().iter().all(|row| row.cwd != cwd) {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("roster row for {cwd} stayed, rows={:?}", roster.rows());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// An agent `session_info_update` replaces the executable label.
+#[tokio::test]
+async fn external_session_info_update_becomes_the_roster_title() {
+    let temp = TempDir::new().unwrap();
+    let (sock, cancel, _response_tx, _acp_rx, roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    let (_reader, _writer, sid, _pid) =
+        open_external_session_with(&sock, "/tmp/ext-title", &titled_roster_agent_cmd()).await;
+    wait_external_title(&roster, &sid, "Pong Game").await;
+    cancel.cancel();
+}
+
+/// With no agent title, the first prompt's first line is the roster title.
+#[tokio::test]
+async fn external_first_prompt_becomes_the_roster_title() {
+    let temp = TempDir::new().unwrap();
+    let (sock, cancel, _response_tx, _acp_rx, roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    let (_reader, mut writer, sid, _pid) =
+        open_external_session(&sock, "/tmp/ext-prompt-title").await;
+    send_acp(
+        &mut writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{{"sessionId":"{sid}","prompt":[{{"type":"text","text":"Fix the roster titles\nsecond line"}}]}}}}"#
+        ),
+    )
+    .await;
+    wait_external_title(&roster, &sid, "Fix the roster titles").await;
+    send_acp(
+        &mut writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{{"sessionId":"{sid}","prompt":[{{"type":"text","text":"a later prompt"}}]}}}}"#
+        ),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let title = roster
+        .rows()
+        .into_iter()
+        .find(|row| row.session_id == sid)
+        .and_then(|row| row.title);
+    assert_eq!(title.as_deref(), Some("Fix the roster titles"));
+    cancel.cancel();
+}
+
+/// A title the agent sends wins over the first prompt.
+#[tokio::test]
+async fn external_agent_title_beats_the_first_prompt() {
+    let temp = TempDir::new().unwrap();
+    let (sock, cancel, _response_tx, _acp_rx, roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    let (_reader, mut writer, sid, _pid) =
+        open_external_session_with(&sock, "/tmp/ext-titled-prompt", &titled_roster_agent_cmd())
+            .await;
+    wait_external_title(&roster, &sid, "Pong Game").await;
+    send_acp(
+        &mut writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{{"sessionId":"{sid}","prompt":[{{"type":"text","text":"should not replace"}}]}}}}"#
+        ),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let title = roster
+        .rows()
+        .into_iter()
+        .find(|row| row.session_id == sid)
+        .and_then(|row| row.title);
+    assert_eq!(title.as_deref(), Some("Pong Game"));
+    cancel.cancel();
+}
+
+/// A `session/new` that never returns is on the roster, and leaves when its client does.
+/// A late success must not put the row back.
+#[tokio::test]
+async fn hung_session_new_drops_when_the_client_leaves() {
+    let temp = TempDir::new().unwrap();
+    let release = temp.path().join("release-new");
+    let (sock, cancel, _response_tx, _acp_rx, roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    let (_dash_reader, _dash_writer) = connect_and_register(&sock, "dashboard").await;
+    let cwd = "/tmp/ext-hung-new";
+    let (mut reader, mut writer) = connect_and_register_caps(
+        &sock,
+        "ext-roster",
+        ClientCapabilities {
+            agent_cmd: Some(hold_new_roster_agent_cmd(&release)),
+            ..ClientCapabilities::default()
+        },
+    )
+    .await;
+    send_acp(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+    )
+    .await;
+    let _ = recv_acp_json(&mut reader).await;
+    send_acp(
+        &mut writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"session/new","params":{{"cwd":"{cwd}","mcpServers":[]}}}}"#
+        ),
+    )
+    .await;
+    let pending = wait_cwd_row(&roster, cwd).await;
+    assert!(
+        pending.starts_with("pending:"),
+        "an unanswered session/new is a provisional row, got {pending}"
+    );
+    drop(reader);
+    drop(writer);
+    wait_cwd_gone(&roster, cwd).await;
+    std::fs::write(&release, "ok").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        roster.rows().iter().all(|row| row.cwd != cwd),
+        "a late session/new must not restore the row, rows={:?}",
+        roster.rows()
+    );
+    cancel.cancel();
+}
+
+/// `session/new` that returns an error removes the provisional roster row.
+#[tokio::test]
+async fn session_new_error_drops_the_roster_row() {
+    let temp = TempDir::new().unwrap();
+    let release = temp.path().join("release-err-new");
+    let (sock, cancel, _response_tx, _acp_rx, roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    let cwd = "/tmp/ext-err-new";
+    let (mut reader, mut writer) = connect_and_register_caps(
+        &sock,
+        "ext-roster",
+        ClientCapabilities {
+            agent_cmd: Some(hold_new_roster_agent_cmd(&release)),
+            ..ClientCapabilities::default()
+        },
+    )
+    .await;
+    send_acp(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+    )
+    .await;
+    let _ = recv_acp_json(&mut reader).await;
+    send_acp(
+        &mut writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"session/new","params":{{"cwd":"{cwd}","mcpServers":[]}}}}"#
+        ),
+    )
+    .await;
+    let _ = wait_cwd_row(&roster, cwd).await;
+    std::fs::write(&release, "error").unwrap();
+    let errored = recv_response_id(&mut reader, 2).await;
+    assert!(
+        errored.get("error").is_some(),
+        "session/new error reaches the client, got {errored}"
+    );
+    wait_cwd_gone(&roster, cwd).await;
     cancel.cancel();
 }

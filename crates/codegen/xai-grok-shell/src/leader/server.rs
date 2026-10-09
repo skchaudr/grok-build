@@ -608,18 +608,243 @@ fn request_cwd(json: &serde_json::Value) -> String {
         .to_string()
 }
 
-/// Short name for a roster title: the executable's file name (`cursor-agent acp` → `cursor-agent`).
+const ROSTER_TITLE_CHARS: usize = 60;
+
+/// Roster label for an `--agent-cmd` process.
+/// `ssh user@host /path/script` becomes `host: script`. `<bin> agent … stdio` stays the bin name.
 fn external_agent_title(cmd: &str) -> String {
-    let token = shlex::split(cmd)
-        .and_then(|parts| parts.into_iter().next())
-        .filter(|token| !token.is_empty())
-        .unwrap_or_else(|| cmd.split_whitespace().next().unwrap_or(cmd).to_string());
-    std::path::Path::new(&token)
+    let parts = shlex::split(cmd).unwrap_or_else(|| {
+        cmd.split_whitespace()
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .collect()
+    });
+    let Some(bin) = parts.first() else {
+        return cmd.to_string();
+    };
+    let name = path_basename(bin);
+    if name == "ssh"
+        && let Some(title) = ssh_roster_title(&parts[1..])
+    {
+        return title;
+    }
+    name
+}
+
+fn path_basename(token: &str) -> String {
+    std::path::Path::new(token)
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
-        .unwrap_or(token.as_str())
+        .unwrap_or(token)
         .to_string()
+}
+
+/// First non-option ssh argument is `[user@]host`. The remote command's last
+/// path token is the script. Options that take a value (`-o`, `-p`, `-i`, …) are skipped.
+fn ssh_roster_title(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--" {
+            i += 1;
+            break;
+        }
+        let skip = ssh_option_skip(&args[i]);
+        if skip == 0 {
+            break;
+        }
+        i += skip;
+    }
+    let host = ssh_host(args.get(i)?)?;
+    let script = args.get(i + 1..).and_then(|remote| {
+        remote.iter().rev().find_map(|token| {
+            if token.starts_with('-') {
+                None
+            } else {
+                let base = path_basename(token);
+                (!base.is_empty()).then_some(base)
+            }
+        })
+    });
+    Some(match script {
+        Some(script) => format!("{host}: {script}"),
+        None => host,
+    })
+}
+
+fn ssh_host(dest: &str) -> Option<String> {
+    let host = dest.rsplit_once('@').map(|(_, host)| host).unwrap_or(dest);
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// How many argv tokens this ssh option consumes. `0` means it is the destination.
+fn ssh_option_skip(arg: &str) -> usize {
+    let Some(rest) = arg.strip_prefix('-') else {
+        return 0;
+    };
+    if rest.is_empty() || rest.starts_with('-') {
+        return 1;
+    }
+    let takes_value = matches!(
+        rest.chars().next(),
+        Some(
+            'b' | 'c'
+                | 'D'
+                | 'E'
+                | 'e'
+                | 'F'
+                | 'I'
+                | 'i'
+                | 'J'
+                | 'L'
+                | 'l'
+                | 'm'
+                | 'O'
+                | 'o'
+                | 'p'
+                | 'Q'
+                | 'R'
+                | 'S'
+                | 'W'
+                | 'w'
+        )
+    );
+    if takes_value && rest.chars().nth(1).is_none() {
+        2
+    } else {
+        1
+    }
+}
+
+/// One dashboard line: the first line of `raw`, whitespace collapsed, capped at [`ROSTER_TITLE_CHARS`].
+fn roster_display_title(raw: &str) -> String {
+    let first = raw.lines().next().unwrap_or("");
+    let collapsed = first.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= ROSTER_TITLE_CHARS {
+        return collapsed;
+    }
+    let head: String = collapsed.chars().take(ROSTER_TITLE_CHARS).collect();
+    format!("{head}...")
+}
+
+/// Titles the agent has sent, titles taken from the first prompt, and titles that
+/// arrived before the roster row existed.
+struct ExternalTitles {
+    from_agent: HashSet<String>,
+    from_prompt: HashSet<String>,
+    early: HashMap<String, String>,
+}
+
+struct PendingExternalNew {
+    client_id: ClientId,
+    provisional_id: String,
+}
+
+fn acp_update(json: &serde_json::Value) -> Option<&serde_json::Value> {
+    let params = json.get("params")?;
+    params
+        .get("update")
+        .or_else(|| params.get("params")?.get("update"))
+}
+
+fn extract_session_info_title(json: &serde_json::Value) -> Option<String> {
+    let update = acp_update(json)?;
+    if update.get("sessionUpdate").and_then(|v| v.as_str()) != Some("session_info_update") {
+        return None;
+    }
+    update
+        .get("title")
+        .and_then(|v| v.as_str())
+        .filter(|title| !title.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn prompt_text(json: &serde_json::Value) -> Option<String> {
+    let prompt = json
+        .pointer("/params/prompt")
+        .or_else(|| json.pointer("/params/params/prompt"))?;
+    if let Some(text) = prompt.as_str() {
+        return Some(text.to_string());
+    }
+    let text = prompt
+        .as_array()?
+        .iter()
+        .filter_map(|block| block.get("text").and_then(|value| value.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn apply_agent_title(
+    rows: &mut HashMap<String, RosterEntry>,
+    titles: &mut ExternalTitles,
+    session_id: &str,
+    raw: &str,
+) -> bool {
+    let shown = roster_display_title(raw);
+    if shown.is_empty() {
+        return false;
+    }
+    titles.from_agent.insert(session_id.to_string());
+    let Some(row) = rows.get_mut(session_id) else {
+        titles.early.insert(session_id.to_string(), shown);
+        return false;
+    };
+    if row.title.as_deref() == Some(shown.as_str()) {
+        return false;
+    }
+    row.title = Some(shown);
+    row.last_change_unix_ms = chrono::Utc::now().timestamp_millis();
+    true
+}
+
+fn note_agent_session_title(
+    json: &serde_json::Value,
+    rows: &mut HashMap<String, RosterEntry>,
+    titles: &mut ExternalTitles,
+) -> bool {
+    let Some(session_id) = extract_session_id(json) else {
+        return false;
+    };
+    let Some(raw) = extract_session_info_title(json) else {
+        return false;
+    };
+    apply_agent_title(rows, titles, &session_id, &raw)
+}
+
+fn note_prompt_title(
+    json: &serde_json::Value,
+    session_id: &str,
+    rows: &mut HashMap<String, RosterEntry>,
+    titles: &mut ExternalTitles,
+) -> bool {
+    if titles.from_agent.contains(session_id) || titles.from_prompt.contains(session_id) {
+        return false;
+    }
+    let Some(raw) = prompt_text(json) else {
+        return false;
+    };
+    let shown = roster_display_title(&raw);
+    if shown.is_empty() {
+        return false;
+    }
+    let Some(row) = rows.get_mut(session_id) else {
+        return false;
+    };
+    titles.from_prompt.insert(session_id.to_string());
+    if row.title.as_deref() == Some(shown.as_str()) {
+        return false;
+    }
+    row.title = Some(shown);
+    row.last_change_unix_ms = chrono::Utc::now().timestamp_millis();
+    true
+}
+
+fn result_title(json: &serde_json::Value) -> Option<String> {
+    json.pointer("/result/title")
+        .and_then(|value| value.as_str())
+        .filter(|title| !title.trim().is_empty())
+        .map(str::to_string)
 }
 
 fn external_roster_entry(session_id: String, cmd: &str, cwd: String) -> RosterEntry {
@@ -710,6 +935,7 @@ fn note_external_turn(
     ns_id: Option<&str>,
     rows: &mut HashMap<String, RosterEntry>,
     pending_prompts: &mut HashMap<String, String>,
+    titles: &mut ExternalTitles,
 ) -> bool {
     let Some(session_id) = extract_session_id(json) else {
         return false;
@@ -720,13 +946,18 @@ fn note_external_turn(
     }
     if is_external_session_end(json) {
         forget_external_prompts(pending_prompts, &session_id);
+        titles.from_agent.remove(&session_id);
+        titles.from_prompt.remove(&session_id);
+        titles.early.remove(&session_id);
         return rows.remove(&session_id).is_some();
     }
     if is_session_prompt(json)
         && let Some(ns_id) = ns_id
     {
         pending_prompts.insert(ns_id.to_string(), session_id.clone());
-        return touch_external_activity(rows, &session_id, RosterActivity::Working);
+        let activity = touch_external_activity(rows, &session_id, RosterActivity::Working);
+        let title = note_prompt_title(json, &session_id, rows, titles);
+        return activity || title;
     }
     false
 }
@@ -1699,6 +1930,12 @@ pub async fn run_leader_server(
     let mut external_rows: HashMap<String, RosterEntry> = HashMap::new();
     let mut pending_external_cwd: HashMap<String, String> = HashMap::new();
     let mut pending_external_prompt: HashMap<String, String> = HashMap::new();
+    let mut pending_external_new: HashMap<String, PendingExternalNew> = HashMap::new();
+    let mut external_titles = ExternalTitles {
+        from_agent: HashSet::new(),
+        from_prompt: HashSet::new(),
+        early: HashMap::new(),
+    };
     let mut externals: HashMap<String, LiveExternal> = HashMap::new();
     let mut inflight: HashMap<String, Inflight> = HashMap::new();
     let mut pending_initialize: HashSet<String> = HashSet::new();
@@ -1876,12 +2113,26 @@ pub async fn run_leader_server(
                     if last_active_client == Some(id) {
                         last_active_client = None;
                     }
+                    let mut roster_dirty = false;
+                    let abandoned: Vec<String> = pending_external_new
+                        .iter()
+                        .filter(|(_, pending)| pending.client_id == id)
+                        .map(|(ns_id, _)| ns_id.clone())
+                        .collect();
+                    for ns_id in abandoned {
+                        if let Some(pending) = pending_external_new.remove(&ns_id) {
+                            roster_dirty |= external_rows.remove(&pending.provisional_id).is_some();
+                        }
+                        pending_external_cwd.remove(&ns_id);
+                    }
                     if !detached_sessions.is_empty() {
                         let session_count = detached_sessions.len();
                         let mut by_backend: HashMap<BackendId, Vec<String>> = HashMap::new();
-                        let mut roster_dirty = false;
                         for sid in detached_sessions {
                             roster_dirty |= external_rows.remove(&sid).is_some();
+                            external_titles.from_agent.remove(&sid);
+                            external_titles.from_prompt.remove(&sid);
+                            external_titles.early.remove(&sid);
                             let backend = session_backend
                                 .remove(&sid)
                                 .map(|route| route.backend)
@@ -1890,6 +2141,7 @@ pub async fn run_leader_server(
                         }
                         if roster_dirty {
                             republish_external_rows(&external_rows, &external_publisher);
+                            roster_dirty = false;
                         }
                         for (backend, sids) in by_backend {
                             let note = internal_notification(
@@ -1909,6 +2161,9 @@ pub async fn run_leader_server(
                             session_count,
                             "Sent client-disconnect detach notification for disconnected client"
                         );
+                    }
+                    if roster_dirty {
+                        republish_external_rows(&external_rows, &external_publisher);
                     }
                     debug!(client_id = id.0, "Client removed");
                     if clients.is_empty() && had_clients && !no_exit_on_disconnect {
@@ -2161,6 +2416,7 @@ pub async fn run_leader_server(
                                     rewritten.as_ref().map(|(ns_id, _)| ns_id.as_str()),
                                     &mut external_rows,
                                     &mut pending_external_prompt,
+                                    &mut external_titles,
                                 )
                             {
                                 republish_external_rows(&external_rows, &external_publisher);
@@ -2172,7 +2428,31 @@ pub async fn run_leader_server(
                                         pid: backend_pid(&backend, &externals),
                                     },
                                 );
-                                if matches!(backend, BackendId::External(_))
+                                if let BackendId::External(ref cmd) = backend
+                                    && json
+                                        .as_ref()
+                                        .is_some_and(|j| request_method(j) == Some("session/new"))
+                                {
+                                    let cwd = json.as_ref().map(request_cwd).unwrap_or_default();
+                                    let provisional_id = format!("pending:{ns_id}");
+                                    external_rows.insert(
+                                        provisional_id.clone(),
+                                        external_roster_entry(
+                                            provisional_id.clone(),
+                                            cmd,
+                                            cwd.clone(),
+                                        ),
+                                    );
+                                    pending_external_new.insert(
+                                        ns_id.clone(),
+                                        PendingExternalNew {
+                                            client_id: id,
+                                            provisional_id,
+                                        },
+                                    );
+                                    pending_external_cwd.insert(ns_id.clone(), cwd);
+                                    republish_external_rows(&external_rows, &external_publisher);
+                                } else if matches!(backend, BackendId::External(_))
                                     && json.as_ref().is_some_and(is_external_session_open)
                                 {
                                     let cwd = json.as_ref().map(request_cwd).unwrap_or_default();
@@ -2218,11 +2498,22 @@ pub async fn run_leader_server(
             },
             LeaderServerPoll::Response { backend, payload } => {
                 let mut json: Option<serde_json::Value> = serde_json::from_str(&payload).ok();
+                if matches!(backend, BackendId::External(_))
+                    && let Some(parsed) = json.as_ref()
+                    && note_agent_session_title(parsed, &mut external_rows, &mut external_titles)
+                {
+                    republish_external_rows(&external_rows, &external_publisher);
+                }
                 let parsed_response = json.as_mut().and_then(parse_response_id);
                 let mut opened_cwd: Option<String> = None;
+                let mut pending_removed = false;
+                let mut pending_replaced = false;
                 if let Some((_, ref ns_id)) = parsed_response {
                     inflight.remove(ns_id);
                     opened_cwd = pending_external_cwd.remove(ns_id);
+                    if let Some(pending) = pending_external_new.remove(ns_id) {
+                        pending_removed = external_rows.remove(&pending.provisional_id).is_some();
+                    }
                     if let Some(session_id) = pending_external_prompt.remove(ns_id) {
                         let still_prompting = pending_external_prompt
                             .values()
@@ -2279,14 +2570,22 @@ pub async fn run_leader_server(
                                 pid: backend_pid(&backend, &externals),
                             });
                         if first_route && let BackendId::External(cmd) = &backend {
-                            external_rows.insert(
+                            let mut entry = external_roster_entry(
                                 session_id.clone(),
-                                external_roster_entry(
-                                    session_id.clone(),
-                                    cmd,
-                                    opened_cwd.take().unwrap_or_default(),
-                                ),
+                                cmd,
+                                opened_cwd.take().unwrap_or_default(),
                             );
+                            if let Some(raw) = result_title(json)
+                                .or_else(|| external_titles.early.remove(&session_id))
+                            {
+                                let shown = roster_display_title(&raw);
+                                if !shown.is_empty() {
+                                    entry.title = Some(shown);
+                                    external_titles.from_agent.insert(session_id.clone());
+                                }
+                            }
+                            external_rows.insert(session_id.clone(), entry);
+                            pending_replaced = true;
                             republish_external_rows(&external_rows, &external_publisher);
                         }
                         session_subscribers
@@ -2389,7 +2688,13 @@ pub async fn run_leader_server(
                             }
                         }
                     }
+                    if pending_removed && !pending_replaced {
+                        republish_external_rows(&external_rows, &external_publisher);
+                    }
                     continue;
+                }
+                if pending_removed && !pending_replaced {
+                    republish_external_rows(&external_rows, &external_publisher);
                 }
                 let payload: Arc<str> = payload.into();
                 let json = json;
@@ -2646,6 +2951,20 @@ pub async fn run_leader_server(
                 }
             }
             LeaderServerPoll::BackendExited { cmd, pid, message } => {
+                let dead_reqs: Vec<String> = inflight
+                    .iter()
+                    .filter(|(_, inf)| inf.pid == Some(pid))
+                    .map(|(ns_id, _)| ns_id.clone())
+                    .collect();
+                let mut roster_dirty = false;
+                for ns_id in dead_reqs {
+                    if let Some(pending) = pending_external_new.remove(&ns_id) {
+                        roster_dirty |= external_rows.remove(&pending.provisional_id).is_some();
+                    }
+                }
+                if roster_dirty {
+                    republish_external_rows(&external_rows, &external_publisher);
+                }
                 note_external_exit(
                     &cmd,
                     pid,

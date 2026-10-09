@@ -250,3 +250,15 @@ Prompt `Reply with the single word pong. Do not use tools.` returned `pong` (Wor
 ` /tmp/ctx-probe                                                                                                                 [Dashboard]`
 
 No used count and no ` / ` denominator. The boxed prompt chrome was the one on screen (`╭─ ❯ ─╮`, `Opus 5.5 · always-approve`). Compact mode was not on. That matches the wire capture: this adapter still sends `{"stopReason":"end_turn"}` and nothing else, so the pager has no number to print.
+
+## 2026-10-09 roster titles for external sessions
+
+`external_agent_title` only kept the executable basename, so `ssh … user@host /path/grok-khoj-worker` was `ssh`. The fallback is now `host: script` (user stripped at the last `@`, last non-flag remote token's basename). The live khoj command therefore reads `100.75.255.75: grok-khoj-worker`, not a nickname. `<bin> agent … stdio` stays the bin name (`grok-team-hub`).
+
+An ACP `session_info_update` title replaces that label, including one that arrives before the roster row exists. Otherwise the first `session/prompt` text is used: first line, whitespace collapsed, 60 characters. A later prompt does not replace it. Cursor's captured update `{"sessionUpdate":"session_info_update","title":"Pong Game"}` is the shape the row follows.
+
+An unanswered external `session/new` is published immediately as `pending:{namespaced request id}` so a hung start is visible. That row is removed when the owning client disconnects, when `session/new` returns an error, or when that in-flight request's process exits. A success that arrives after the client is gone does not put the row back.
+
+Publishing that provisional row makes `_x.ai/sessions/changed` show up on the external client before `session/new`'s result. The changed line is injected on the native response channel and then broadcast to every client. The second-session helper already skipped those lines; the first-session helper had to as well.
+
+`cargo test -p xai-grok-shell --lib leader::` : 305 passed. `df` was not tight enough to stop; nothing was deleted.
