@@ -5558,3 +5558,326 @@ async fn native_session_adds_no_external_roster_row() {
     );
     cancel.cancel();
 }
+
+fn hold_roster_agent_cmd(release: &std::path::Path) -> String {
+    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake_acp_agent.py");
+    format!(
+        "python3 {} fake-roster-hold {}",
+        script.display(),
+        release.display()
+    )
+}
+
+async fn open_external_session_with(
+    sock: &std::path::Path,
+    cwd: &str,
+    cmd: &str,
+) -> (
+    tokio::io::ReadHalf<LeaderStream>,
+    tokio::io::WriteHalf<LeaderStream>,
+    String,
+    u32,
+) {
+    let (mut reader, mut writer) = connect_and_register_caps(
+        sock,
+        "ext-roster",
+        ClientCapabilities {
+            agent_cmd: Some(cmd.to_string()),
+            ..ClientCapabilities::default()
+        },
+    )
+    .await;
+    send_acp(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+    )
+    .await;
+    let init = recv_acp_json(&mut reader).await;
+    let pid = init
+        .pointer("/result/meta/pid")
+        .and_then(|v| v.as_u64())
+        .expect("fake agent reports its pid") as u32;
+    send_acp(
+        &mut writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"session/new","params":{{"cwd":"{cwd}","mcpServers":[]}}}}"#
+        ),
+    )
+    .await;
+    let created = loop {
+        let msg = recv_acp_json(&mut reader).await;
+        if msg.pointer("/result/sessionId").is_some() {
+            break msg;
+        }
+    };
+    let sid = created
+        .pointer("/result/sessionId")
+        .and_then(|v| v.as_str())
+        .expect("session/new returns a sessionId")
+        .to_string();
+    (reader, writer, sid, pid)
+}
+
+async fn wait_external_activity(
+    roster: &ExternalRoster,
+    sid: &str,
+    activity: crate::agent::roster::RosterActivity,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if roster
+            .rows()
+            .iter()
+            .any(|row| row.session_id == sid && row.activity == activity)
+        {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "session {sid} did not become {activity:?}, rows={:?}",
+                roster.rows()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn recv_response_id(
+    reader: &mut tokio::io::ReadHalf<LeaderStream>,
+    id: i64,
+) -> serde_json::Value {
+    loop {
+        let msg = recv_acp_json(reader).await;
+        if msg.get("id").and_then(|v| v.as_i64()) == Some(id) {
+            return msg;
+        }
+    }
+}
+
+/// `session/prompt` routed to an external backend marks the row working, then idle
+/// when that request's response arrives. A native prompt does not touch the row.
+#[tokio::test]
+async fn external_prompt_flips_working_then_idle_on_response() {
+    use crate::agent::roster::RosterActivity;
+    let temp = TempDir::new().unwrap();
+    let release = temp.path().join("release");
+    let (sock, cancel, response_tx, mut acp_rx, roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    spawn_roster_broadcasts(&roster, response_tx.clone());
+    let (mut dash_reader, _dash_writer) = connect_and_register(&sock, "dashboard").await;
+    let (mut ext_reader, mut ext_writer, sid, _pid) =
+        open_external_session_with(&sock, "/tmp/ext-prompt", &hold_roster_agent_cmd(&release))
+            .await;
+    let _ = recv_acp_json(&mut dash_reader).await;
+    send_acp(
+        &mut ext_writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{{"sessionId":"{sid}","prompt":[]}}}}"#
+        ),
+    )
+    .await;
+    wait_external_activity(&roster, &sid, RosterActivity::Working).await;
+    let working = recv_acp_json(&mut dash_reader).await.to_string();
+    assert!(
+        working.contains("\"activity\":\"working\"") && working.contains(&sid),
+        "working flip must be broadcast, got {working}"
+    );
+    std::fs::write(&release, "ok").unwrap();
+    let response = recv_response_id(&mut ext_reader, 4).await;
+    assert!(
+        response.get("result").is_some(),
+        "prompt response reaches the client, got {response}"
+    );
+    wait_external_activity(&roster, &sid, RosterActivity::Idle).await;
+    let idle = recv_acp_json(&mut dash_reader).await.to_string();
+    assert!(
+        idle.contains("\"activity\":\"idle\"") && idle.contains(&sid),
+        "idle flip must be broadcast, got {idle}"
+    );
+
+    let (mut native_reader, mut native_writer) = connect_and_register(&sock, "native").await;
+    send_acp(
+        &mut native_writer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"native-sess","prompt":[]}}"#,
+    )
+    .await;
+    let forwarded = tokio::time::timeout(Duration::from_secs(2), acp_rx.recv())
+        .await
+        .expect("native prompt reaches the native backend")
+        .unwrap();
+    let forwarded: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+    let id = forwarded["id"].as_str().unwrap().to_string();
+    response_tx
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","id":"{id}","result":{{"stopReason":"end_turn"}}}}"#
+        ))
+        .unwrap();
+    let _ = recv_response_id(&mut native_reader, 1).await;
+    let row = roster
+        .rows()
+        .into_iter()
+        .find(|row| row.session_id == sid)
+        .expect("external row survives a native prompt");
+    assert_eq!(row.activity, RosterActivity::Idle);
+    cancel.cancel();
+}
+
+/// An error response and `session/cancel` both return the row to idle.
+#[tokio::test]
+async fn external_prompt_error_and_cancel_return_to_idle() {
+    use crate::agent::roster::RosterActivity;
+    let temp = TempDir::new().unwrap();
+    let release = temp.path().join("release");
+    let (sock, cancel, response_tx, _acp_rx, roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    spawn_roster_broadcasts(&roster, response_tx);
+    let (mut dash_reader, _dash_writer) = connect_and_register(&sock, "dashboard").await;
+    let (mut ext_reader, mut ext_writer, sid, _pid) =
+        open_external_session_with(&sock, "/tmp/ext-cancel", &hold_roster_agent_cmd(&release))
+            .await;
+    let _ = recv_acp_json(&mut dash_reader).await;
+    send_acp(
+        &mut ext_writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{{"sessionId":"{sid}","prompt":[]}}}}"#
+        ),
+    )
+    .await;
+    wait_external_activity(&roster, &sid, RosterActivity::Working).await;
+    send_acp(
+        &mut ext_writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","method":"session/cancel","params":{{"sessionId":"{sid}"}}}}"#
+        ),
+    )
+    .await;
+    wait_external_activity(&roster, &sid, RosterActivity::Idle).await;
+    std::fs::write(&release, "ok").unwrap();
+    let _ = recv_response_id(&mut ext_reader, 4).await;
+    assert_eq!(
+        roster
+            .rows()
+            .iter()
+            .find(|row| row.session_id == sid)
+            .map(|row| row.activity),
+        Some(RosterActivity::Idle),
+        "the late prompt response must not leave the row working"
+    );
+
+    let release_err = temp.path().join("release-err");
+    let (mut err_reader, mut err_writer, err_sid, _pid) =
+        open_external_session_with(&sock, "/tmp/ext-err", &hold_roster_agent_cmd(&release_err))
+            .await;
+    send_acp(
+        &mut err_writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{{"sessionId":"{err_sid}","prompt":[]}}}}"#
+        ),
+    )
+    .await;
+    wait_external_activity(&roster, &err_sid, RosterActivity::Working).await;
+    std::fs::write(&release_err, "error").unwrap();
+    let errored = recv_response_id(&mut err_reader, 4).await;
+    assert!(
+        errored.get("error").is_some(),
+        "prompt error reaches the client, got {errored}"
+    );
+    wait_external_activity(&roster, &err_sid, RosterActivity::Idle).await;
+    cancel.cancel();
+}
+
+/// `session/close` drops the external row while the client connection stays up.
+#[tokio::test]
+async fn external_session_close_removes_row_while_client_stays() {
+    let temp = TempDir::new().unwrap();
+    let (sock, cancel, response_tx, _acp_rx, roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    spawn_roster_broadcasts(&roster, response_tx);
+    let (mut dash_reader, _dash_writer) = connect_and_register(&sock, "dashboard").await;
+    let (mut ext_reader, mut ext_writer, sid, _pid) =
+        open_external_session(&sock, "/tmp/ext-close").await;
+    let _ = recv_acp_json(&mut dash_reader).await;
+    send_acp(
+        &mut ext_writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":8,"method":"session/close","params":{{"sessionId":"{sid}"}}}}"#
+        ),
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if roster.rows().iter().all(|row| row.session_id != sid) {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("session/close must drop the row, rows={:?}", roster.rows());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let closed = recv_response_id(&mut ext_reader, 8).await;
+    assert!(
+        closed.get("result").is_some(),
+        "close response still reaches the connected client, got {closed}"
+    );
+    let removed = recv_acp_json(&mut dash_reader).await;
+    let gone = removed
+        .pointer("/params/removed")
+        .and_then(|v| v.as_array())
+        .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(sid.as_str())));
+    assert!(gone, "dashboard must see the close removal, got {removed}");
+    cancel.cancel();
+}
+
+/// A routed `x.ai/session/delete` drops that external row and leaves the client's other row.
+#[tokio::test]
+async fn external_session_delete_removes_only_that_row() {
+    let temp = TempDir::new().unwrap();
+    let (sock, cancel, response_tx, _acp_rx, roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    spawn_roster_broadcasts(&roster, response_tx);
+    let (mut ext_reader, mut ext_writer, sid, _pid) =
+        open_external_session(&sock, "/tmp/ext-del").await;
+    send_acp(
+        &mut ext_writer,
+        r#"{"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd":"/tmp/ext-del-b","mcpServers":[]}}"#,
+    )
+    .await;
+    let second = loop {
+        let msg = recv_acp_json(&mut ext_reader).await;
+        if msg.pointer("/result/sessionId").is_some() {
+            break msg;
+        }
+    };
+    let other = second
+        .pointer("/result/sessionId")
+        .and_then(|v| v.as_str())
+        .unwrap()
+        .to_string();
+    send_acp(
+        &mut ext_writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":9,"method":"_x.ai/session/delete","params":{{"method":"x.ai/session/delete","params":{{"sessionId":"{sid}","cwd":"/tmp/ext-del"}}}}}}"#
+        ),
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let rows = roster.rows();
+        let dropped = rows.iter().all(|row| row.session_id != sid);
+        let kept = rows.iter().any(|row| row.session_id == other);
+        if dropped && kept {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("delete must drop only {sid}, rows={rows:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let deleted = recv_response_id(&mut ext_reader, 9).await;
+    assert!(
+        deleted.get("result").is_some(),
+        "delete response reaches the still-connected client, got {deleted}"
+    );
+    cancel.cancel();
+}

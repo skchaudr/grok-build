@@ -647,6 +647,90 @@ fn republish_external_rows(
     publisher.replace(rows.values().cloned().collect());
 }
 
+fn request_method(json: &serde_json::Value) -> Option<&str> {
+    json.get("method").and_then(|method| method.as_str())
+}
+
+fn is_session_prompt(json: &serde_json::Value) -> bool {
+    request_method(json) == Some(AGENT_METHOD_NAMES.session_prompt)
+}
+
+fn is_session_cancel(json: &serde_json::Value) -> bool {
+    request_method(json) == Some(AGENT_METHOD_NAMES.session_cancel)
+}
+
+/// ACP close, plus session delete in either the bare or gateway-wrapped spelling.
+fn is_external_session_end(json: &serde_json::Value) -> bool {
+    const END: &[&str] = &[
+        "session/close",
+        "session/delete",
+        "x.ai/session/close",
+        "x.ai/session/delete",
+        "_x.ai/session/close",
+        "_x.ai/session/delete",
+    ];
+    if request_method(json).is_some_and(|method| END.contains(&method)) {
+        return true;
+    }
+    json.pointer("/params/method")
+        .and_then(|method| method.as_str())
+        .is_some_and(|method| {
+            matches!(
+                method,
+                "session/close" | "session/delete" | "x.ai/session/close" | "x.ai/session/delete"
+            )
+        })
+}
+
+fn touch_external_activity(
+    rows: &mut HashMap<String, RosterEntry>,
+    session_id: &str,
+    activity: RosterActivity,
+) -> bool {
+    let Some(row) = rows.get_mut(session_id) else {
+        return false;
+    };
+    if row.activity == activity {
+        return false;
+    }
+    row.activity = activity;
+    row.last_change_unix_ms = chrono::Utc::now().timestamp_millis();
+    true
+}
+
+fn forget_external_prompts(pending: &mut HashMap<String, String>, session_id: &str) {
+    pending.retain(|_, sid| sid != session_id);
+}
+
+/// Prompt, cancel, and close/delete for a session that already has an external row.
+/// Returns whether the published set changed. A missing row is left missing, so a late
+/// response cannot recreate a session that close or delete already dropped.
+fn note_external_turn(
+    json: &serde_json::Value,
+    ns_id: Option<&str>,
+    rows: &mut HashMap<String, RosterEntry>,
+    pending_prompts: &mut HashMap<String, String>,
+) -> bool {
+    let Some(session_id) = extract_session_id(json) else {
+        return false;
+    };
+    if is_session_cancel(json) {
+        forget_external_prompts(pending_prompts, &session_id);
+        return touch_external_activity(rows, &session_id, RosterActivity::Idle);
+    }
+    if is_external_session_end(json) {
+        forget_external_prompts(pending_prompts, &session_id);
+        return rows.remove(&session_id).is_some();
+    }
+    if is_session_prompt(json)
+        && let Some(ns_id) = ns_id
+    {
+        pending_prompts.insert(ns_id.to_string(), session_id.clone());
+        return touch_external_activity(rows, &session_id, RosterActivity::Working);
+    }
+    false
+}
+
 #[derive(Debug)]
 enum ChildSessionEvent {
     Spawned(String),
@@ -1614,6 +1698,7 @@ pub async fn run_leader_server(
     let external_publisher = control_state.external_roster.publisher();
     let mut external_rows: HashMap<String, RosterEntry> = HashMap::new();
     let mut pending_external_cwd: HashMap<String, String> = HashMap::new();
+    let mut pending_external_prompt: HashMap<String, String> = HashMap::new();
     let mut externals: HashMap<String, LiveExternal> = HashMap::new();
     let mut inflight: HashMap<String, Inflight> = HashMap::new();
     let mut pending_initialize: HashSet<String> = HashSet::new();
@@ -2069,6 +2154,17 @@ pub async fn run_leader_server(
                     match send_to_backend(&backend, outbound, &acp_tx, &mut externals, &inbound_tx)
                     {
                         Ok(()) => {
+                            if matches!(backend, BackendId::External(_))
+                                && let Some(json) = json.as_ref()
+                                && note_external_turn(
+                                    json,
+                                    rewritten.as_ref().map(|(ns_id, _)| ns_id.as_str()),
+                                    &mut external_rows,
+                                    &mut pending_external_prompt,
+                                )
+                            {
+                                republish_external_rows(&external_rows, &external_publisher);
+                            }
                             if let Some((ns_id, _)) = rewritten.as_ref() {
                                 inflight.insert(
                                     ns_id.clone(),
@@ -2127,6 +2223,20 @@ pub async fn run_leader_server(
                 if let Some((_, ref ns_id)) = parsed_response {
                     inflight.remove(ns_id);
                     opened_cwd = pending_external_cwd.remove(ns_id);
+                    if let Some(session_id) = pending_external_prompt.remove(ns_id) {
+                        let still_prompting = pending_external_prompt
+                            .values()
+                            .any(|pending| pending == &session_id);
+                        if !still_prompting
+                            && touch_external_activity(
+                                &mut external_rows,
+                                &session_id,
+                                RosterActivity::Idle,
+                            )
+                        {
+                            republish_external_rows(&external_rows, &external_publisher);
+                        }
+                    }
                     if pending_initialize.remove(ns_id)
                         && let Some(result) = json.as_ref().and_then(|j| j.get("result")).cloned()
                         && let BackendId::External(cmd) = &backend
