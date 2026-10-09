@@ -164,3 +164,36 @@ Follow-up, not done: `session/prompt` does not flip the row between working and 
 Live probe, same socket `$HOME/.grok/leader-roster-test.sock`, torn down after. Native client A was started with `GROK_WORKSPACE_DASHBOARD=0`. Client B was `--agent-cmd 'cursor-agent acp'`. `sessions/list` returned `caef6db9-7ae6-474f-aaec-ea9f0ed11eb7`, title `cursor-agent`, idle, resident, `sessionKind=external`. A's fleet dashboard showed `▾ Idle 1` / `◇ cursor-agent` above a collapsed `▸ Inactive 39`. B's prompt `Run sleep 4 in the shell, then reply with the single word bridge` moved the row to `▾ Working 1` for the whole turn, then back to Idle. B printed `bridge` (Worked for 10s). A third client sent `session/close` for that id while B's pager stayed up. cursor-agent replied `-32601` `"Method not found": session/close`. The row was already removed on route: the dashboard dropped to `Inactive 39` only, and `sessions/list` had no external row.
 
 Fleet dashboard switch: `GROK_WORKSPACE_DASHBOARD=0` (also `false` / `off` / `no` / `disabled`). `app/event_loop.rs` reads that env first, then remote settings `workspace_dashboard_enabled`, then `false`. There is no `config.toml` key. The remote field is `RemoteSettings.workspace_dashboard_enabled` in `xai-grok-config`. Workspace-dashboard code was not changed; that view still ignores `leader_roster`.
+
+## 2026-10-09 external prompt ack
+
+External ACP agents never stamp a prompt id and never send `x.ai/queue/changed`, so the 120s ack watch aborted turns that were already streaming. A session is treated as external when this pager was started with `--agent-cmd`, or when the leader roster row for that session has `sessionKind: external` (a dashboard open of another client's external session). The first live non-replay `session/update` disarms the watch. A replay does not. A native session still requires the stamped prompt id, and an unstamped update still expires the watch. Headless uses the same rule through `HeadlessOptions.external_agent`. The CLI still rejects `--agent-cmd` in headless mode, so that flag stays false on the `-p` path.
+
+`df` before the builds: 6.6G free on `/`. `target/release/incremental` was 4K. Builds used `CARGO_TARGET_DIR=$HOME/repos/grok-build/target`, `CARGO_INCREMENTAL=0`, and `PROTOC=$HOME/.local/protoc-29.3/bin/protoc`.
+
+Failing tests first (watch still armed / headless classifier returned `None`), then the same filters after the disarm:
+
+```
+CARGO_TARGET_DIR=$HOME/repos/grok-build/target CARGO_INCREMENTAL=0 \
+  PROTOC=$HOME/.local/protoc-29.3/bin/protoc \
+  cargo test -p xai-grok-pager --lib -- \
+  external_unstamped_update_disarms native_unstamped_update_leaves \
+  external_replay_update_does_not leader_attached_external_session \
+  headless_external_unstamped headless_ack_signal_classifies prompt_ack
+```
+
+```
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 10251 filtered out; finished in 0.20s
+```
+
+`disarms_the_child` and `disarms_the_watch` on the same binary: 6 passed.
+
+Live, tmux, `GROK_PROMPT_ACK_TIMEOUT_SECS=10`, `--agent-cmd 'cursor-agent acp' --always-approve --trust --no-alt-screen --no-auto-update`, prompt `Run sleep 30 in the shell, then reply done`. Both tmux sessions were killed after the capture. `~/.grok/bin` was not touched.
+
+Before: copied `$HOME/repos/grok-build/target/release/xai-grok-pager` (mtime 2026-10-09 04:26, before this release link) to `/tmp/xai-grok-pager-before-ack`. cwd `/tmp/epa-before`, tmux `epa-before`. The pane showed `◆ Run sleep 30` and `I'll run sleep 30 and reply once it finishes.`, then at 12.8s after send:
+
+`The agent did not accept your prompt within 10s. The turn was stopped; send the prompt again to retry.`
+
+`Turn cancelled.` Toast: `Prompt not accepted, turn stopped`.
+
+After: `cargo build --release -p xai-grok-pager-bin` finished in 2m 30s. Binary `$HOME/repos/grok-build/target/release/xai-grok-pager`, mtime 2026-10-09 04:33, commit `a73fac48`. cwd `/tmp/epa-after`, tmux `epa-after`. At about 22s the pane still showed `⠴ Run sleep 30 22s`. The turn ended with `Done.` and `Worked for 35s` (39.3s after send). The timeout notice was not on the pane.
