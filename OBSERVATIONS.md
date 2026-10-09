@@ -83,3 +83,36 @@ The shared `target/` dir filled the 99 GB volume during the debug build (linker 
 - Mercury's summary dropped the trailing `w` twice; the DSH tool-result events retained the exact hostname. Inspect tool results, not model paraphrases.
 - Darwin binary is stamped 1.0.45 while the VM build is stamped 1.0.46; both identify `89cae842`. Air default uses a tiny `--no-auto-update` launcher to preserve the local build; stock binary remains available.
 - Existing test executables rerun without rebuilding: external agents 8 passed; stdio integration 47 passed/1 ignored; leader unit tests 287 passed. Local MCP paths and optional native `_x.ai/*` methods remain distinct compatibility concerns; neither prevented the tested DSH turns or explicit-ID resume.
+
+## 2026-10-09 resume hint launcher
+
+Quit hints take an optional launcher (`GROK_RESUME_CMD`) instead of a hardcoded leading `grok`. The quit path reads the env var once and passes it into `print_exit_resume_hint` and `print_relaunch_failure_hint`. Formatting tests pass the string directly, so they do not mutate process env. Unset, empty, and whitespace-only stay `grok`. A trimmed non-empty value replaces that token, including inside the relaunch fallback (`GROK_SCREEN_MODE=fullscreen grok cursor --fullscreen --resume …`). `~/.dsh/scripts/gb` was not edited.
+
+`session_title_resolve` still prints `Resume by session id instead: grok --resume <session-id>`. The brief named plain quit, the `--minimal` variant, and the relaunch-failure fallback, so that other line was left alone.
+
+The root volume had 2.4G free. Removed `target/debug/incremental` (7.6G, rebuild cache) before compiling. Builds used `CARGO_TARGET_DIR=$HOME/repos/grok-build/target` and `CARGO_INCREMENTAL=0`. `bin/protoc` is a dotslash wrapper and `dotslash` is not installed; `PROTOC=$HOME/.local/protoc-29.3/bin/protoc` is what made the build scripts run.
+
+Hint tests were extended before the formatter accepted the new argument. That compile failed with 19× `E0061` (unexpected `resume_cmd` argument). After the parameter was wired through:
+
+```
+CARGO_TARGET_DIR=$HOME/repos/grok-build/target CARGO_INCREMENTAL=0 \
+  PROTOC=$HOME/.local/protoc-29.3/bin/protoc \
+  cargo test -p xai-grok-pager --lib -- \
+  print_exit_resume_hint print_relaunch_failure_hint failed_relaunch_hint print_hints_survive
+```
+
+```
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 10248 filtered out; finished in 0.00s
+```
+
+```
+CARGO_TARGET_DIR=$HOME/repos/grok-build/target CARGO_INCREMENTAL=0 \
+  PROTOC=$HOME/.local/protoc-29.3/bin/protoc \
+  cargo check -p xai-grok-pager
+```
+
+```
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 00s
+```
+
+Exit code 0. No pager warnings on that check.
