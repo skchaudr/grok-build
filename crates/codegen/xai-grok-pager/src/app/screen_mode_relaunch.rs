@@ -176,14 +176,20 @@ pub(crate) fn screen_mode_env_value(want_minimal: bool) -> &'static str {
 }
 
 /// Pasteable shell command when auto re-exec fails (env, flag, and `--resume`).
-pub(crate) fn screen_mode_relaunch_resume_hint(session_id: &str, want_minimal: bool) -> String {
+/// `resume_cmd` replaces the leading `grok` when it is a non-empty trimmed value.
+pub(crate) fn screen_mode_relaunch_resume_hint(
+    session_id: &str,
+    want_minimal: bool,
+    resume_cmd: Option<&str>,
+) -> String {
     let mode = screen_mode_env_value(want_minimal);
     let flag = if want_minimal {
         "--minimal"
     } else {
         "--fullscreen"
     };
-    format!("{GROK_SCREEN_MODE_ENV}={mode} grok {flag} --resume {session_id}")
+    let launcher = super::resume_launcher(resume_cmd);
+    format!("{GROK_SCREEN_MODE_ENV}={mode} {launcher} {flag} --resume {session_id}")
 }
 
 /// Replace the current process with a relaunch into the requested screen mode.
@@ -740,11 +746,19 @@ mod tests {
         // Recovery command must carry GROK_SCREEN_MODE so following the hint after a failed `/fullscreen` does not reopen minimal/inline
         // The explicit flag keeps the resume in the right mode if the env is dropped
         assert_eq!(
-            screen_mode_relaunch_resume_hint("abc-sid", false),
+            screen_mode_relaunch_resume_hint("abc-sid", false, None),
             "GROK_SCREEN_MODE=fullscreen grok --fullscreen --resume abc-sid"
         );
         assert_eq!(
-            screen_mode_relaunch_resume_hint("abc-sid", true),
+            screen_mode_relaunch_resume_hint("abc-sid", true, None),
+            "GROK_SCREEN_MODE=minimal grok --minimal --resume abc-sid"
+        );
+        assert_eq!(
+            screen_mode_relaunch_resume_hint("abc-sid", false, Some("grok cursor")),
+            "GROK_SCREEN_MODE=fullscreen grok cursor --fullscreen --resume abc-sid"
+        );
+        assert_eq!(
+            screen_mode_relaunch_resume_hint("abc-sid", true, Some("  ")),
             "GROK_SCREEN_MODE=minimal grok --minimal --resume abc-sid"
         );
     }

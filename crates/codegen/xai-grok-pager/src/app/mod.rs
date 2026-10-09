@@ -1282,6 +1282,8 @@ pub async fn run(
             if run_result.quit_for_update {
                 return Ok(true);
             }
+            // One read: both quit hints share it, and tests pass the value in directly.
+            let resume_cmd = std::env::var(GROK_RESUME_CMD_ENV).ok();
             if let Some(relaunch) = run_result.relaunch.as_ref() {
                 if let Err(e) = screen_mode_relaunch::exec_screen_mode_relaunch(
                     &relaunch.session_id,
@@ -1293,6 +1295,7 @@ pub async fn run(
                             &e,
                             &relaunch.session_id,
                             relaunch.minimal,
+                            resume_cmd.as_deref(),
                             &mut io::stderr(),
                         );
                     }
@@ -1303,18 +1306,34 @@ pub async fn run(
                 && terminal_reading
             {
                 let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
-                print_exit_resume_hint(&info, width, &mut io::stderr());
+                print_exit_resume_hint(&info, width, resume_cmd.as_deref(), &mut io::stderr());
             }
             Ok(false)
         }
         Err(run_error) => Err(run_error),
     }
 }
+/// Wrapper launch command (`grok cursor`, …). Replaces the leading `grok` in resume hints.
+const GROK_RESUME_CMD_ENV: &str = "GROK_RESUME_CMD";
+/// Non-empty trimmed [`GROK_RESUME_CMD_ENV`] replaces the leading `grok`; unset or blank keeps it.
+fn resume_launcher<'a>(configured: Option<&'a str>) -> &'a str {
+    match configured.map(str::trim) {
+        Some(cmd) if !cmd.is_empty() => cmd,
+        _ => "grok",
+    }
+}
 /// Plain-quit "Resume this session with…" lines (after terminal restore).
 /// Best-effort: closed-pane EIO/BrokenPipe must not panic (`panic = "abort"`).
+/// `resume_cmd` is [`GROK_RESUME_CMD_ENV`], read once by the caller.
 /// TODO: extend beyond --minimal by rebuilding resume argv from launch flags (see screen_mode_relaunch)
-fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write) {
+fn print_exit_resume_hint(
+    info: &ExitInfo,
+    max_width: usize,
+    resume_cmd: Option<&str>,
+    w: &mut impl Write,
+) {
     use crate::render::line_utils::truncate_str;
+    let launcher = resume_launcher(resume_cmd);
     let _ = writeln!(w);
     if let Some(summary) = &info.summary {
         let _ = writeln!(w, "{}", truncate_str(&summary.title, max_width));
@@ -1332,9 +1351,9 @@ fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write)
     }
     let _ = writeln!(w, "Resume this session with:");
     if info.minimal {
-        let _ = writeln!(w, "  grok --minimal --resume {}", info.session_id);
+        let _ = writeln!(w, "  {launcher} --minimal --resume {}", info.session_id);
     } else {
-        let _ = writeln!(w, "  grok --resume {}", info.session_id);
+        let _ = writeln!(w, "  {launcher} --resume {}", info.session_id);
     }
 }
 /// Screen-mode relaunch failure fallback (same quit tail as plain resume).
@@ -1342,6 +1361,7 @@ fn print_relaunch_failure_hint(
     error: &impl std::fmt::Display,
     session_id: &str,
     want_minimal: bool,
+    resume_cmd: Option<&str>,
     w: &mut impl Write,
 ) {
     let _ = writeln!(w, "Failed to relaunch in requested mode: {error}");
@@ -1349,7 +1369,11 @@ fn print_relaunch_failure_hint(
     let _ = writeln!(
         w,
         "  {}",
-        screen_mode_relaunch::screen_mode_relaunch_resume_hint(session_id, want_minimal),
+        screen_mode_relaunch::screen_mode_relaunch_resume_hint(
+            session_id,
+            want_minimal,
+            resume_cmd,
+        ),
     );
 }
 /// `crossterm::enable_raw_mode()` sets flags on stdin only.
@@ -2396,7 +2420,7 @@ mod tests {
     #[test]
     fn print_exit_resume_hint_writes_expected_lines() {
         let mut buf = Vec::new();
-        print_exit_resume_hint(&bare_exit_info("sess-abc", false), 80, &mut buf);
+        print_exit_resume_hint(&bare_exit_info("sess-abc", false), 80, None, &mut buf);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             "\nResume this session with:\n  grok --resume sess-abc\n"
@@ -2405,11 +2429,65 @@ mod tests {
     #[test]
     fn print_exit_resume_hint_includes_minimal_flag() {
         let mut buf = Vec::new();
-        print_exit_resume_hint(&bare_exit_info("sess-abc", true), 80, &mut buf);
+        print_exit_resume_hint(&bare_exit_info("sess-abc", true), 80, None, &mut buf);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             "\nResume this session with:\n  grok --minimal --resume sess-abc\n"
         );
+    }
+    #[test]
+    fn print_exit_resume_hint_uses_configured_resume_cmd() {
+        let mut buf = Vec::new();
+        print_exit_resume_hint(
+            &bare_exit_info("sess-abc", false),
+            80,
+            Some("grok cursor"),
+            &mut buf,
+        );
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "\nResume this session with:\n  grok cursor --resume sess-abc\n"
+        );
+    }
+    #[test]
+    fn print_exit_resume_hint_configured_cmd_includes_minimal_flag() {
+        let mut buf = Vec::new();
+        print_exit_resume_hint(
+            &bare_exit_info("sess-abc", true),
+            80,
+            Some("grok cursor"),
+            &mut buf,
+        );
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "\nResume this session with:\n  grok cursor --minimal --resume sess-abc\n"
+        );
+    }
+    #[test]
+    fn print_exit_resume_hint_trims_resume_cmd() {
+        let mut buf = Vec::new();
+        print_exit_resume_hint(
+            &bare_exit_info("sess-abc", false),
+            80,
+            Some("  grok cursor\n"),
+            &mut buf,
+        );
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "\nResume this session with:\n  grok cursor --resume sess-abc\n"
+        );
+    }
+    #[test]
+    fn print_exit_resume_hint_blank_resume_cmd_keeps_default() {
+        for cmd in [None, Some(""), Some("   "), Some("\t")] {
+            let mut buf = Vec::new();
+            print_exit_resume_hint(&bare_exit_info("sess-abc", false), 80, cmd, &mut buf);
+            assert_eq!(
+                String::from_utf8(buf).unwrap(),
+                "\nResume this session with:\n  grok --resume sess-abc\n",
+                "cmd={cmd:?}"
+            );
+        }
     }
     #[test]
     fn print_exit_resume_hint_includes_session_summary() {
@@ -2423,7 +2501,7 @@ mod tests {
             }),
         };
         let mut buf = Vec::new();
-        print_exit_resume_hint(&info, 80, &mut buf);
+        print_exit_resume_hint(&info, 80, None, &mut buf);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             concat!(
@@ -2449,7 +2527,7 @@ mod tests {
             }),
         };
         let mut buf = Vec::new();
-        print_exit_resume_hint(&info, 20, &mut buf);
+        print_exit_resume_hint(&info, 20, None, &mut buf);
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains(&format!("\n{}…\n", "t".repeat(19))));
         assert!(out.contains(&format!("\n> {}…\n", "p".repeat(17))));
@@ -2459,14 +2537,42 @@ mod tests {
     #[test]
     fn print_relaunch_failure_hint_writes_expected_lines() {
         let mut buf = Vec::new();
-        print_relaunch_failure_hint(&"exec failed", "sess-xyz", false, &mut buf);
-        let hint = screen_mode_relaunch::screen_mode_relaunch_resume_hint("sess-xyz", false);
+        print_relaunch_failure_hint(&"exec failed", "sess-xyz", false, None, &mut buf);
+        let hint = screen_mode_relaunch::screen_mode_relaunch_resume_hint("sess-xyz", false, None);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             format!(
                 "Failed to relaunch in requested mode: exec failed\n\
                  Resume this session with:\n  {hint}\n"
             )
+        );
+    }
+    #[test]
+    fn print_relaunch_failure_hint_uses_configured_resume_cmd() {
+        let mut buf = Vec::new();
+        print_relaunch_failure_hint(
+            &"exec failed",
+            "sess-abc",
+            false,
+            Some("grok cursor"),
+            &mut buf,
+        );
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "Failed to relaunch in requested mode: exec failed\n\
+             Resume this session with:\n  \
+             GROK_SCREEN_MODE=fullscreen grok cursor --fullscreen --resume sess-abc\n"
+        );
+    }
+    #[test]
+    fn print_relaunch_failure_hint_blank_resume_cmd_keeps_default() {
+        let mut buf = Vec::new();
+        print_relaunch_failure_hint(&"exec failed", "sess-abc", true, Some("   "), &mut buf);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "Failed to relaunch in requested mode: exec failed\n\
+             Resume this session with:\n  \
+             GROK_SCREEN_MODE=minimal grok --minimal --resume sess-abc\n"
         );
     }
     /// [`ExitInfo`] with a full summary, for the failing-writer tests.
@@ -2483,10 +2589,10 @@ mod tests {
     #[test]
     fn print_hints_survive_eio() {
         let mut w = AlwaysFailWrite;
-        print_exit_resume_hint(&bare_exit_info("sess-abc", false), 80, &mut w);
-        print_exit_resume_hint(&bare_exit_info("sess-abc", true), 80, &mut w);
-        print_exit_resume_hint(&full_exit_info("sess-abc"), 80, &mut w);
-        print_relaunch_failure_hint(&"exec failed", "sess-xyz", true, &mut w);
+        print_exit_resume_hint(&bare_exit_info("sess-abc", false), 80, None, &mut w);
+        print_exit_resume_hint(&bare_exit_info("sess-abc", true), 80, None, &mut w);
+        print_exit_resume_hint(&full_exit_info("sess-abc"), 80, None, &mut w);
+        print_relaunch_failure_hint(&"exec failed", "sess-xyz", true, None, &mut w);
         print_leader_disabled_by_sandbox("strict", &mut w);
     }
     /// Close the *read* end so writes on the write end get EPIPE.
@@ -2502,10 +2608,10 @@ mod tests {
             libc::close(fds[0]);
         }
         let mut writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
-        print_exit_resume_hint(&bare_exit_info("pipe-sid", false), 80, &mut writer);
-        print_exit_resume_hint(&bare_exit_info("pipe-sid", true), 80, &mut writer);
-        print_exit_resume_hint(&full_exit_info("pipe-sid"), 80, &mut writer);
-        print_relaunch_failure_hint(&"exec failed", "pipe-sid", false, &mut writer);
+        print_exit_resume_hint(&bare_exit_info("pipe-sid", false), 80, None, &mut writer);
+        print_exit_resume_hint(&bare_exit_info("pipe-sid", true), 80, None, &mut writer);
+        print_exit_resume_hint(&full_exit_info("pipe-sid"), 80, None, &mut writer);
+        print_relaunch_failure_hint(&"exec failed", "pipe-sid", false, None, &mut writer);
         print_leader_disabled_by_sandbox("strict", &mut writer);
     }
 }
