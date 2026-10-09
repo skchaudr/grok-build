@@ -164,3 +164,35 @@ Follow-up, not done: `session/prompt` does not flip the row between working and 
 Live probe, same socket `$HOME/.grok/leader-roster-test.sock`, torn down after. Native client A was started with `GROK_WORKSPACE_DASHBOARD=0`. Client B was `--agent-cmd 'cursor-agent acp'`. `sessions/list` returned `caef6db9-7ae6-474f-aaec-ea9f0ed11eb7`, title `cursor-agent`, idle, resident, `sessionKind=external`. A's fleet dashboard showed `▾ Idle 1` / `◇ cursor-agent` above a collapsed `▸ Inactive 39`. B's prompt `Run sleep 4 in the shell, then reply with the single word bridge` moved the row to `▾ Working 1` for the whole turn, then back to Idle. B printed `bridge` (Worked for 10s). A third client sent `session/close` for that id while B's pager stayed up. cursor-agent replied `-32601` `"Method not found": session/close`. The row was already removed on route: the dashboard dropped to `Inactive 39` only, and `sessions/list` had no external row.
 
 Fleet dashboard switch: `GROK_WORKSPACE_DASHBOARD=0` (also `false` / `off` / `no` / `disabled`). `app/event_loop.rs` reads that env first, then remote settings `workspace_dashboard_enabled`, then `false`. There is no `config.toml` key. The remote field is `RemoteSettings.workspace_dashboard_enabled` in `xai-grok-config`. Workspace-dashboard code was not changed; that view still ignores `leader_roster`.
+
+## 2026-10-09 external context indicator (before code)
+
+The token readout the user means is the top status-bar row (`AgentViewLayout` lays `status_bar` down first). `draw` pushes `context_bar_line_for_session` into that row. Default text is `used / total` (`fmt_tokens`), which is the `54K / 500K` shape. Hover swaps in a bar and a percentage. Gateway/chat sessions suppress it.
+
+Two inputs fill `context_state`:
+
+- `session/update` with `sessionUpdate: "usage_update"` (`UsageUpdate`, feature `unstable_session_usage`): `used` and `size` go to `apply_context_used`.
+- `_meta.totalTokens` on any session notification: `confirm_context_used` stores `used` and takes the denominator from the current model's `meta.totalContextTokens` (`get_context_window`). Missing window becomes `0`.
+
+`session/prompt` `PromptResponse.usage` (`totalTokens` / `inputTokens` / `outputTokens`) is deserialized and then ignored. The boxed prompt border (`chrome: true`, session title on `╭─╮`, model on `╰─╯`) has no token slot. Compact mode (`appearance.prompt.compact`) only drops padding and the prompt gap. It does not gate the status-bar readout. The earlier note that only compact chrome reads `token_usage` is stale: both chromes call the same `draw` path. A missing numerator, or a numerator with total `0` and no model window, makes `context_bar_line_for_session` return `None`, so the slot is absent.
+
+`claude-code-acp` 0.16.2 is `~/.local/lib/node_modules/@zed-industries/claude-code-acp` (`dist/acp-agent.js`). npm latest is the same version. It has no usage hook. `streamEventToAcpNotifications` returns `[]` for `message_start` and `message_delta` (where the SDK puts per-message usage). The `result` arm returns `{ stopReason }` and drops `message.usage` and `message.modelUsage` (`contextWindow` lives on that SDK type). `/context` text that contains `Context Usage` is forwarded as a normal agent message, not as `usage_update`.
+
+Live capture, one short turn each, probe in `/tmp/ctx-probe` (not committed). Prompt: `Reply with the single word pong. Do not use tools.`
+
+Claude (`CLAUDE_CODE_EXECUTABLE=$(command -v claude) claude-code-acp`), session `72c10895-4b90-4f41-9860-3b56e3277fd7`:
+
+- `session/new` models have `modelId` / `name` / `description` only. No `totalContextTokens`, no `_meta`.
+- Updates: `available_commands_update`, then `agent_message_chunk` text `""`, `"p"`, `"ong"`. No `_meta`, no `usage_update`.
+- Prompt result: `{"stopReason":"end_turn"}`.
+- stderr: adapter logged `Unexpected case` for an SDK `rate_limit_event` (utilization fractions, not a context count) and did not put it on the wire.
+
+The Claude transcript on disk (`~/.claude/projects/-tmp-ctx-probe/72c10895-….jsonl`) does have assistant `message.usage`: `input_tokens` 2, `cache_creation_input_tokens` 26347, `cache_read_input_tokens` 0, `output_tokens` 4. `cost-state.modelUsage` has no `contextWindow`. That file is not ACP traffic. The pager does not read it, and these numbers are not invented into the header.
+
+Cursor (`cursor-agent acp`), session `c2551294-f753-4aaf-a658-877ba10d5ee7`:
+
+- Updates: `available_commands_update`, `agent_thought_chunk`, `agent_message_chunk` `"pong"`, `session_info_update` `{"title":"Pong Game"}`. No `_meta`, no `usage_update`.
+- Prompt result: `{"stopReason":"end_turn"}`.
+- `session/new` model ids embed a window in the id string, e.g. `grok-4.7[context=256k,reasoning_effort=high,fast=true]`. There is no used-token field. That string is not a numerator.
+
+Neither agent sent a usable context count. The header stays empty until one of them sends `usage_update`, `_meta.totalTokens`, or `PromptResponse.usage`. A window parsed out of a Cursor model id, with no used count, would be a fake denominator and is not shown.
