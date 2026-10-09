@@ -100,6 +100,38 @@ pub fn event_id_counter(event_id: &str) -> Option<u64> {
         .and_then(|c| c.parse::<u64>().ok())
 }
 
+/// Context numbers an agent actually reported on a prompt response.
+/// `window` is set only when the payload includes a size. A missing window is not filled in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReportedContext {
+    pub used: u64,
+    pub window: Option<u64>,
+}
+
+/// Read context usage from a `session/prompt` result.
+/// `_meta.totalTokens` wins over `usage.totalTokens`. Neither field means no update.
+fn meta_u64(meta: &acp::Meta, key: &str) -> Option<u64> {
+    meta.get(key).and_then(|value| value.as_u64())
+}
+
+pub fn reported_context(
+    meta: Option<&acp::Meta>,
+    usage: Option<&acp::Usage>,
+) -> Option<ReportedContext> {
+    let window = meta.and_then(|meta| {
+        meta_u64(meta, "contextWindow")
+            .filter(|size| *size > 0)
+            .or_else(|| meta_u64(meta, "size").filter(|size| *size > 0))
+    });
+    if let Some(used) = meta.and_then(|meta| meta_u64(meta, "totalTokens")) {
+        return Some(ReportedContext { used, window });
+    }
+    usage.map(|usage| ReportedContext {
+        used: usage.total_tokens,
+        window,
+    })
+}
+
 impl NotificationMeta {
     /// Parse from the `_meta` JSON map on a `SessionNotification`.
     pub fn from_json(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> Self {
@@ -214,6 +246,37 @@ mod tests {
 
         assert_eq!(meta.event_id.as_deref(), Some("weird-id-zzz"));
         assert_eq!(meta.event_seq, None);
+    }
+
+    #[test]
+    fn captured_prompt_response_has_no_context_tokens() {
+        // Live `session/prompt` result from claude-code-acp 0.16.2 and cursor-agent acp.
+        let response: acp::PromptResponse =
+            serde_json::from_str(r#"{"stopReason":"end_turn"}"#).expect("captured shape");
+        assert!(reported_context(response.meta.as_ref(), response.usage.as_ref()).is_none());
+    }
+
+    #[test]
+    fn prompt_response_usage_is_used_tokens_without_a_window() {
+        let response: acp::PromptResponse = serde_json::from_str(
+            r#"{"stopReason":"end_turn","usage":{"totalTokens":54000,"inputTokens":50000,"outputTokens":4000}}"#,
+        )
+        .expect("usage shape");
+        let reported =
+            reported_context(response.meta.as_ref(), response.usage.as_ref()).expect("usage");
+        assert_eq!(reported.used, 54_000);
+        assert_eq!(reported.window, None);
+    }
+
+    #[test]
+    fn prompt_response_meta_total_tokens_prefers_an_explicit_window() {
+        let response: acp::PromptResponse = serde_json::from_str(
+            r#"{"stopReason":"end_turn","_meta":{"totalTokens":54000,"contextWindow":500000}}"#,
+        )
+        .expect("meta shape");
+        let reported =
+            reported_context(response.meta.as_ref(), response.usage.as_ref()).expect("meta");
+        assert_eq!((reported.used, reported.window), (54_000, Some(500_000)));
     }
 
     #[test]

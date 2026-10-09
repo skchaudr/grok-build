@@ -86,6 +86,37 @@ fn switcher_text(cur: usize, total: usize) -> String {
         crate::glyphs::chevron()
     )
 }
+fn with_used_tokens(agent: &mut AgentView, used: u64, total: u64) {
+    agent.context_state = Some(xai_grok_shell::session::ContextInfo::from_notification(
+        used, total,
+    ));
+}
+
+#[test]
+fn default_and_compact_headers_show_used_tokens_without_a_window() {
+    let _theme = crate::theme::cache::pin_theme();
+    let registry = ActionRegistry::defaults();
+    for compact in [false, true] {
+        let mut agent = agent_at(120);
+        if compact {
+            let mut appearance = agent.scrollback.appearance().clone();
+            appearance.prompt.compact = true;
+            agent.scrollback.set_appearance(appearance);
+        }
+        with_used_tokens(&mut agent, 54_000, 0);
+        let buf = draw(&mut agent, &registry, false, OverlayHeader::default());
+        let row = header_row(&agent, &buf);
+        assert!(
+            row.contains("54K"),
+            "compact={compact} header must show used tokens, row = {row:?}"
+        );
+        assert!(
+            !row.contains("54K /"),
+            "compact={compact} must not invent a denominator, row = {row:?}"
+        );
+    }
+}
+
 #[test]
 fn worktree_session_header_keeps_badge_and_omits_main_repo_suffix() {
     let _theme = crate::theme::cache::pin_theme();

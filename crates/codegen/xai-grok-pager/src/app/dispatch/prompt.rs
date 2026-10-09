@@ -1578,6 +1578,15 @@ pub(super) fn handle_prompt_response(
             wire_cancellation_category.as_deref(),
             wire_cancellation_context.as_ref(),
         );
+        if let Ok(response) = result.as_ref()
+            && let Some(reported) =
+                crate::acp::meta::reported_context(response.meta.as_ref(), response.usage.as_ref())
+        {
+            let window = reported
+                .window
+                .or_else(|| agent.session.models.get_context_window());
+            agent.apply_context_used(reported.used, window.unwrap_or(0));
+        }
         let rate_limited = agent.session.rate_limited;
         // Fallback mirroring the credit-limit race guard below
         // If the retry notification lost the race with (or never reached) this PromptResponse, detect the free-usage code from the prompt error itself

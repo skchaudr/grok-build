@@ -2073,6 +2073,56 @@ fn always_continue_choice_sets_preference() {
 }
 
 #[test]
+fn prompt_response_usage_fills_context_without_inventing_a_window() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let response: acp::PromptResponse = serde_json::from_str(
+        r#"{"stopReason":"end_turn","usage":{"totalTokens":54000,"inputTokens":50000,"outputTokens":4000}}"#,
+    )
+    .expect("usage shape");
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(response),
+            http_status: None,
+            prompt_id: None,
+        }),
+        &mut app,
+    );
+
+    let context = get_agent(&app, id)
+        .context_state
+        .as_ref()
+        .expect("usage must fill context");
+    assert_eq!(context.used, 54_000);
+    assert_eq!(context.total, 0, "no window was reported");
+}
+
+#[test]
+fn captured_stop_reason_prompt_response_does_not_invent_context() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let response: acp::PromptResponse =
+        serde_json::from_str(r#"{"stopReason":"end_turn"}"#).expect("captured shape");
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(response),
+            http_status: None,
+            prompt_id: None,
+        }),
+        &mut app,
+    );
+
+    assert!(
+        get_agent(&app, id).context_state.is_none(),
+        "stopReason alone is not a token count"
+    );
+}
+
+#[test]
 fn prompt_response_clears_cancel_turn_panel() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);

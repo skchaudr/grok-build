@@ -159,7 +159,15 @@ pub fn context_bar_line_for_session(
         return None;
     }
     let used = used_tokens?;
-    let total = total_tokens.filter(|&t| t > 0)?;
+    let Some(total) = total_tokens.filter(|&t| t > 0) else {
+        // A reported count with no window is still the signal to compact. Do not invent a denominator.
+        let breakpoints = default_breakpoints(theme);
+        let color = crate::theme::quantize(blend_color(0.0, &breakpoints));
+        return Some(Line::from(Span::styled(
+            fmt_tokens(used),
+            Style::default().fg(color).bg(theme.bg_base),
+        )));
+    };
     let pct = xai_token_estimation::usage_percentage(used, total);
 
     // Default form drives the line width: `used / total`, right-padded to the minimum hover width so both states render at the same width
@@ -375,14 +383,36 @@ mod tests {
     }
 
     #[test]
+    fn test_context_bar_shows_used_tokens_without_a_window() {
+        let theme = Theme::default();
+        for hovered in [false, true] {
+            let line = context_bar_line(Some(54_000), None, hovered, &theme).expect("used tokens");
+            let text = line_text(&line);
+            assert_eq!(text, "54K", "hovered={hovered} text={text:?}");
+            assert!(
+                !text.contains('/'),
+                "missing window must not invent a denominator, got {text:?}"
+            );
+        }
+        let zero_total = context_bar_line(Some(54_000), Some(0), false, &theme).expect("used");
+        assert_eq!(line_text(&zero_total), "54K");
+    }
+
+    #[test]
     fn test_context_bar_returns_none_without_tokens() {
         // Mirror across hover states so a future refactor that moves the unavailability checks into per-branch arms can't silently regress one path
         let theme = Theme::default();
         for hovered in [false, true] {
             assert!(context_bar_line(None, Some(1_000_000), hovered, &theme).is_none());
-            assert!(context_bar_line(Some(1_000), None, hovered, &theme).is_none());
-            // Zero total is treated as missing.
-            assert!(context_bar_line(Some(1_000), Some(0), hovered, &theme).is_none());
+            // Used tokens render alone when the window is missing or zero.
+            assert_eq!(
+                line_text(&context_bar_line(Some(1_000), None, hovered, &theme).expect("used")),
+                "1.0K"
+            );
+            assert_eq!(
+                line_text(&context_bar_line(Some(1_000), Some(0), hovered, &theme).expect("used")),
+                "1.0K"
+            );
         }
     }
 
