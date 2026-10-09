@@ -114,3 +114,20 @@ Remote settings turn on the workspace dashboard. That view (`Open Previous /resu
 Opening that row on A loaded B's transcript (`pong`). Prompt from A, `reply with the single word roster-bridge`, returned `roster-bridge` on A (Worked for 3.3s). B's pane updated at the same time; the capture drew the new reply against the previous `pong` line as `pongroster-bridge`. The prompt reached the Cursor agent.
 
 Follow-up, not done: `session/prompt` does not flip the row between working and idle. `session/close` while the client stays connected does not drop the route, so the row stays until the last subscriber disconnects or the backend process exits. Workspace-dashboard mode still ignores leader roster rows.
+
+## 2026-10-09 roster hardening
+
+`df` before the builds: 6.8G free on `/`. `target/release/incremental` and `target/debug/incremental` were each 4K, so nothing was removed.
+
+`RosterActivity::Idle` means resident and no turn in flight. The pager's `roster_activity_to_state` maps both `Idle` and `Dormant` to `RowState::Inactive`, and no activity value maps to `RowState::Idle`, so the leader cannot ask for the Idle group by itself. The fleet row builder now paints `RowState::Idle` only when the row is `resident`, `activity == idle`, and `session_kind == "external"`. A native idle row stays Inactive.
+
+`session/prompt` routed to an external backend sets that row to working and broadcasts it. The prompt response, including an error, sets it back to idle. `session/cancel` sets it back to idle immediately. `session/close` and a routed `session/delete` / `x.ai/session/delete` (bare or `_x.ai` wrapped) drop the row while the client stays connected. Native prompts and native sessions still publish nothing.
+
+`cargo test -p xai-grok-shell --lib leader::` — 297 passed, 0 failed.
+`cargo test -p xai-grok-pager --lib resident_external_idle_row_renders_idle` — 1 passed.
+
+`cargo build --release -p xai-grok-pager-bin` finished in 5m 26s. The binary reports `grok 1.0.45 (20c62ebbb360)` because the version stamp was taken before commit `19b78e4d`; the compile included the pager and shell changes from that commit.
+
+Live probe, same socket `$HOME/.grok/leader-roster-test.sock`, torn down after. Native client A was started with `GROK_WORKSPACE_DASHBOARD=0`. Client B was `--agent-cmd 'cursor-agent acp'`. `sessions/list` returned `caef6db9-7ae6-474f-aaec-ea9f0ed11eb7`, title `cursor-agent`, idle, resident, `sessionKind=external`. A's fleet dashboard showed `▾ Idle 1` / `◇ cursor-agent` above a collapsed `▸ Inactive 39`. B's prompt `Run sleep 4 in the shell, then reply with the single word bridge` moved the row to `▾ Working 1` for the whole turn, then back to Idle. B printed `bridge` (Worked for 10s). A third client sent `session/close` for that id while B's pager stayed up. cursor-agent replied `-32601` `"Method not found": session/close`. The row was already removed on route: the dashboard dropped to `Inactive 39` only, and `sessions/list` had no external row.
+
+Fleet dashboard switch: `GROK_WORKSPACE_DASHBOARD=0` (also `false` / `off` / `no` / `disabled`). `app/event_loop.rs` reads that env first, then remote settings `workspace_dashboard_enabled`, then `false`. There is no `config.toml` key. The remote field is `RemoteSettings.workspace_dashboard_enabled` in `xai-grok-config`. Workspace-dashboard code was not changed; that view still ignores `leader_roster`.
