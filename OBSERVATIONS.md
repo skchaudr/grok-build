@@ -197,3 +197,56 @@ Before: copied `$HOME/repos/grok-build/target/release/xai-grok-pager` (mtime 202
 `Turn cancelled.` Toast: `Prompt not accepted, turn stopped`.
 
 After: `cargo build --release -p xai-grok-pager-bin` finished in 2m 30s. Binary `$HOME/repos/grok-build/target/release/xai-grok-pager`, mtime 2026-10-09 04:33, commit `a73fac48`. cwd `/tmp/epa-after`, tmux `epa-after`. At about 22s the pane still showed `⠴ Run sleep 30 22s`. The turn ended with `Done.` and `Worked for 35s` (39.3s after send). The timeout notice was not on the pane.
+||||||| 19a5f94e
+## 2026-10-09 external context indicator (before code)
+
+The token readout the user means is the top status-bar row (`AgentViewLayout` lays `status_bar` down first). `draw` pushes `context_bar_line_for_session` into that row. Default text is `used / total` (`fmt_tokens`), which is the `54K / 500K` shape. Hover swaps in a bar and a percentage. Gateway/chat sessions suppress it.
+
+Two inputs fill `context_state`:
+
+- `session/update` with `sessionUpdate: "usage_update"` (`UsageUpdate`, feature `unstable_session_usage`): `used` and `size` go to `apply_context_used`.
+- `_meta.totalTokens` on any session notification: `confirm_context_used` stores `used` and takes the denominator from the current model's `meta.totalContextTokens` (`get_context_window`). Missing window becomes `0`.
+
+`session/prompt` `PromptResponse.usage` (`totalTokens` / `inputTokens` / `outputTokens`) is deserialized and then ignored. The boxed prompt border (`chrome: true`, session title on `╭─╮`, model on `╰─╯`) has no token slot. Compact mode (`appearance.prompt.compact`) only drops padding and the prompt gap. It does not gate the status-bar readout. The earlier note that only compact chrome reads `token_usage` is stale: both chromes call the same `draw` path. A missing numerator, or a numerator with total `0` and no model window, makes `context_bar_line_for_session` return `None`, so the slot is absent.
+
+`claude-code-acp` 0.16.2 is `~/.local/lib/node_modules/@zed-industries/claude-code-acp` (`dist/acp-agent.js`). npm latest is the same version. It has no usage hook. `streamEventToAcpNotifications` returns `[]` for `message_start` and `message_delta` (where the SDK puts per-message usage). The `result` arm returns `{ stopReason }` and drops `message.usage` and `message.modelUsage` (`contextWindow` lives on that SDK type). `/context` text that contains `Context Usage` is forwarded as a normal agent message, not as `usage_update`.
+
+Live capture, one short turn each, probe in `/tmp/ctx-probe` (not committed). Prompt: `Reply with the single word pong. Do not use tools.`
+
+Claude (`CLAUDE_CODE_EXECUTABLE=$(command -v claude) claude-code-acp`), session `72c10895-4b90-4f41-9860-3b56e3277fd7`:
+
+- `session/new` models have `modelId` / `name` / `description` only. No `totalContextTokens`, no `_meta`.
+- Updates: `available_commands_update`, then `agent_message_chunk` text `""`, `"p"`, `"ong"`. No `_meta`, no `usage_update`.
+- Prompt result: `{"stopReason":"end_turn"}`.
+- stderr: adapter logged `Unexpected case` for an SDK `rate_limit_event` (utilization fractions, not a context count) and did not put it on the wire.
+
+The Claude transcript on disk (`~/.claude/projects/-tmp-ctx-probe/72c10895-….jsonl`) does have assistant `message.usage`: `input_tokens` 2, `cache_creation_input_tokens` 26347, `cache_read_input_tokens` 0, `output_tokens` 4. `cost-state.modelUsage` has no `contextWindow`. That file is not ACP traffic. The pager does not read it, and these numbers are not invented into the header.
+
+Cursor (`cursor-agent acp`), session `c2551294-f753-4aaf-a658-877ba10d5ee7`:
+
+- Updates: `available_commands_update`, `agent_thought_chunk`, `agent_message_chunk` `"pong"`, `session_info_update` `{"title":"Pong Game"}`. No `_meta`, no `usage_update`.
+- Prompt result: `{"stopReason":"end_turn"}`.
+- `session/new` model ids embed a window in the id string, e.g. `grok-4.7[context=256k,reasoning_effort=high,fast=true]`. There is no used-token field. That string is not a numerator.
+
+Neither agent sent a usable context count. The header stays empty until one of them sends `usage_update`, `_meta.totalTokens`, or `PromptResponse.usage`. A window parsed out of a Cursor model id, with no used count, would be a fake denominator and is not shown.
+
+## 2026-10-09 external context indicator (after the pager change)
+
+`df` before the release build: 6.6G free on `/`. No other `cargo` was running. `CARGO_INCREMENTAL=0`, `CARGO_TARGET_DIR=$HOME/repos/grok-build/target`, `PROTOC=$HOME/.local/protoc-29.3/bin/protoc`.
+
+`cargo test -p xai-grok-pager --lib` filtered to the new cases: 9 passed, 0 failed. The four new assertions failed first (context bar and both headers omitted `54K`; prompt-response `usage` and `_meta.totalTokens` were ignored). The captured `{"stopReason":"end_turn"}` case passed before the change and still passes.
+
+`cargo build --release -p xai-grok-pager-bin` finished in 11m 01s. Binary `$HOME/repos/grok-build/target/release/xai-grok-pager`, `grok 1.0.45 (9343c5af84ed) [stable]`.
+
+Live, tmux `ctx-live` 140×40, then torn down:
+
+```
+$BIN --cwd /tmp/ctx-probe --trust --always-approve --no-auto-update \
+  --agent-cmd 'env CLAUDE_CODE_EXECUTABLE=$HOME/.local/bin/claude claude-code-acp'
+```
+
+Prompt `Reply with the single word pong. Do not use tools.` returned `pong` (Worked for 1.0s). The default header row was:
+
+` /tmp/ctx-probe                                                                                                                 [Dashboard]`
+
+No used count and no ` / ` denominator. The boxed prompt chrome was the one on screen (`╭─ ❯ ─╮`, `Opus 5.5 · always-approve`). Compact mode was not on. That matches the wire capture: this adapter still sends `{"stopReason":"end_turn"}` and nothing else, so the pager has no number to print.
