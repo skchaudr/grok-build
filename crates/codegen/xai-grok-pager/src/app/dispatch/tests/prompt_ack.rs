@@ -6,6 +6,7 @@ use crate::app::dispatch::turn::RewindTarget;
 use crate::app::prompt_ack::{PromptAckDeadlines, PromptAckWatch};
 use pretty_assertions::assert_eq;
 use std::time::{Duration, Instant};
+use xai_acp_lib::AcpClientMessage;
 
 fn agent_ref(app: &AppView, id: AgentId) -> &AgentView {
     let Some(agent) = app.agents.get(&id) else {
@@ -243,6 +244,108 @@ fn expired_watch_while_cancelling_forces_idle() {
         ),
         "no response is coming; the abort ends the turn"
     );
+}
+
+fn unstamped_agent_chunk(session_id: &str, replay: bool) -> AcpClientMessage {
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let mut request = acp::SessionNotification::new(
+        acp::SessionId::new(session_id),
+        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+            acp::TextContent::new("working"),
+        ))),
+    );
+    if replay {
+        request = request.meta(serde_json::json!({ "isReplay": true }).as_object().cloned());
+    }
+    AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+        request,
+        response_tx: tx,
+    })
+}
+
+fn external_roster_entry(session_id: &str) -> crate::app::roster::RosterEntry {
+    crate::app::roster::RosterEntry {
+        session_id: session_id.to_string(),
+        title: Some("cursor-agent".into()),
+        cwd: "/repo".into(),
+        is_worktree: false,
+        session_kind: Some("external".into()),
+        model_id: None,
+        yolo: false,
+        activity: crate::app::roster::RosterActivity::Working,
+        last_turn_summary: None,
+        resident: true,
+        last_change_unix_ms: 1,
+        origin: crate::app::roster::RosterOrigin::default(),
+    }
+}
+
+/// A native session ignores a live update that does not name the awaited prompt, so the fail-safe still aborts.
+#[test]
+fn native_unstamped_update_leaves_the_watch_armed_until_the_deadline() {
+    let mut app = test_app_with_agent();
+    let pid = send_and_arm(&mut app, "native");
+    crate::app::acp_handler::handle(unstamped_agent_chunk("test-session", false), &mut app);
+    let agent = agent_ref(&app, AgentId(0));
+    assert!(
+        agent.prompt_ack.is_some(),
+        "an unstamped update is not an acknowledgment on a native session"
+    );
+    let effects = reconcile_overdue_prompt_acks_at(&mut app, &DEADLINES, past_hard_deadline())
+        .expect("the watch still expires");
+    expect_rewind_cancel(&effects, &pid);
+}
+
+/// An external session's first live update is the acknowledgment, even with no prompt id, so the deadline does not abort.
+#[test]
+fn external_unstamped_update_disarms_the_watch_before_the_deadline() {
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    send_and_arm(&mut app, "sleep 30");
+    crate::app::acp_handler::handle(unstamped_agent_chunk("test-session", false), &mut app);
+    let agent = agent_ref(&app, AgentId(0));
+    assert_eq!(
+        (None, true),
+        (
+            agent.prompt_ack.as_ref(),
+            agent.session.state.is_turn_running()
+        ),
+        "the live update disarmed the watch and the turn is still running"
+    );
+    assert!(
+        reconcile_overdue_prompt_acks_at(&mut app, &DEADLINES, past_hard_deadline()).is_none(),
+        "past the hard deadline there is nothing left to abort"
+    );
+}
+
+/// A replay of an external session is history, not proof the agent accepted this prompt.
+#[test]
+fn external_replay_update_does_not_disarm_the_watch() {
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    send_and_arm(&mut app, "sleep 30");
+    crate::app::acp_handler::handle(unstamped_agent_chunk("test-session", true), &mut app);
+    assert!(
+        agent_ref(&app, AgentId(0)).prompt_ack.is_some(),
+        "a replay must not acknowledge the live prompt"
+    );
+}
+
+/// A leader client that did not pass `--agent-cmd` still treats a roster `sessionKind: external` session as external.
+#[test]
+fn leader_attached_external_session_unstamped_update_disarms_the_watch() {
+    let mut app = test_app_with_agent();
+    app.leader_mode = true;
+    app.external_agent = false;
+    app.leader_roster = vec![external_roster_entry("test-session")];
+    send_and_arm(&mut app, "from the dashboard");
+    crate::app::acp_handler::handle(unstamped_agent_chunk("test-session", false), &mut app);
+    let agent = agent_ref(&app, AgentId(0));
+    assert!(
+        agent.prompt_ack.is_none() && agent.session.state.is_turn_running(),
+        "the attached external session acknowledged on the first live update"
+    );
+    assert!(reconcile_overdue_prompt_acks_at(&mut app, &DEADLINES, past_hard_deadline()).is_none());
 }
 
 #[test]

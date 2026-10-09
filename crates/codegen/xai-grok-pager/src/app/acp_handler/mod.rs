@@ -136,11 +136,36 @@ fn is_replay_bash_execute(update: &acp::SessionUpdate) -> bool {
         .and_then(|v| v.as_bool())
         == Some(true)
 }
-/// Any live update stamped with the awaited prompt id proves the shell accepted it, whichever branch applies it.
-fn ack_prompt_from_update(view: &mut AgentView, meta: &NotificationMeta) {
-    if !meta.is_replay {
-        view.ack_prompt_if_named(
-            meta.prompt_id.as_deref(),
+/// A session is backed by an external ACP agent when this pager was started with `--agent-cmd`,
+/// or when the leader roster marks that session `sessionKind: external` (a dashboard attach of
+/// another client's external session).
+fn session_backed_by_external_agent(app: &AppView, session_id: &str) -> bool {
+    if app.external_agent {
+        return true;
+    }
+    app.leader_roster
+        .iter()
+        .chain(app.dashboard_local_sessions.iter())
+        .any(|entry| {
+            entry.session_id == session_id && entry.session_kind.as_deref() == Some("external")
+        })
+}
+/// Any live update that [`session_update_acks`] accepts proves the agent holds the prompt, whichever branch applies it.
+fn ack_prompt_from_update(view: &mut AgentView, meta: &NotificationMeta, external_agent: bool) {
+    let Some(awaited) = view
+        .prompt_ack
+        .as_ref()
+        .map(|watch| watch.prompt_id().to_owned())
+    else {
+        return;
+    };
+    if crate::app::prompt_ack::session_update_acks(
+        meta.is_replay,
+        meta.prompt_id.as_deref(),
+        &awaited,
+        external_agent,
+    ) {
+        view.note_prompt_ack(
             crate::app::prompt_ack::AckSignal::SessionUpdate,
             std::time::Instant::now(),
         );
@@ -157,6 +182,8 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
             let mut meta = NotificationMeta::from_json(notif.request.meta.as_ref());
             let affected = match find_session_match(app, &notif.request.session_id) {
                 Some(SessionMatch::Root(id)) => {
+                    let external_agent =
+                        session_backed_by_external_agent(app, notif.request.session_id.0.as_ref());
                     let is_active = is_matched_agent_active(app, id);
                     let stashed_adoption_pid = app
                         .pending_running_adoptions
@@ -176,7 +203,7 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     {
                         agent.last_applied_event_seq = Some(seq);
                     }
-                    ack_prompt_from_update(agent, &meta);
+                    ack_prompt_from_update(agent, &meta, external_agent);
                     if drop_unexpected_replay(
                         agent,
                         &meta,
@@ -411,6 +438,18 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     mutated && is_active
                 }
                 Some(SessionMatch::Child(parent_id)) => {
+                    let child_sid = notif.request.session_id.0.as_ref();
+                    let parent_sid = app.agents.get(&parent_id).and_then(|parent| {
+                        parent
+                            .session
+                            .session_id
+                            .as_ref()
+                            .map(|sid| sid.0.to_string())
+                    });
+                    let external_agent = session_backed_by_external_agent(app, child_sid)
+                        || parent_sid
+                            .as_deref()
+                            .is_some_and(|sid| session_backed_by_external_agent(app, sid));
                     let is_active = is_matched_agent_active(app, parent_id);
                     let parent = app
                         .agents
@@ -422,7 +461,7 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         let child_view = parent
                             .child_view_for_live_update_mut(child_key)
                             .expect("find_session_match returned an existing subagent_views key");
-                        ack_prompt_from_update(child_view, &meta);
+                        ack_prompt_from_update(child_view, &meta, external_agent);
                         if let Some(tokens) = meta.total_tokens {
                             confirm_context_used(child_view, tokens);
                         }

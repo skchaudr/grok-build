@@ -1,7 +1,9 @@
 //! Bounded wait for the agent's first acknowledgment of a sent prompt.
 //!
 //! A `session/prompt` RPC has no deadline of its own, so this bounds only the *acknowledgment*: the first
-//! `x.ai/queue/changed`, `session/update`, or turn end that names the prompt id. Shared by the TUI reconcile
+//! `x.ai/queue/changed`, `session/update`, or turn end that names the prompt id. An external ACP agent never
+//! stamps a prompt id and never sends `x.ai/queue/changed`; the first live non-replay `session/update` for
+//! that session is the acknowledgment instead ([`session_update_acks`]). Shared by the TUI reconcile
 //! (`dispatch::reconcile_overdue_prompt_acks`) and the headless runner.
 //!
 //! Invariant: a [`PromptAckWatch`] exists on an agent only while `current_prompt_id == watch.prompt_id`
@@ -123,6 +125,22 @@ impl PromptAckWatch {
         }
         PromptAckOutcome::Waiting
     }
+}
+
+/// Whether a `session/update` acknowledges an armed prompt.
+///
+/// Native agents must stamp `awaited_prompt_id`. External agents never do, so the first live
+/// non-replay update for the session is enough. A replay is history and never counts.
+pub(crate) fn session_update_acks(
+    is_replay: bool,
+    update_prompt_id: Option<&str>,
+    awaited_prompt_id: &str,
+    external_agent: bool,
+) -> bool {
+    if is_replay {
+        return false;
+    }
+    update_prompt_id == Some(awaited_prompt_id) || external_agent
 }
 
 /// Whether a `x.ai/queue/changed` payload proves the shell holds `prompt_id` (queued or running).
