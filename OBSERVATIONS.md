@@ -262,3 +262,21 @@ An unanswered external `session/new` is published immediately as `pending:{names
 Publishing that provisional row makes `_x.ai/sessions/changed` show up on the external client before `session/new`'s result. The changed line is injected on the native response channel and then broadcast to every client. The second-session helper already skipped those lines; the first-session helper had to as well.
 
 `cargo test -p xai-grok-shell --lib leader::` : 305 passed. `df` was not tight enough to stop; nothing was deleted.
+
+## 2026-10-09 session machine picker
+
+Repeated `--agent-choice NAME=CMD` is the picker. `--agent-cmd` alone is unchanged. When both are set, registration still uses `--agent-cmd`, and a chosen session stamps its own command in `session/new` `_meta` (`x.ai/agentCmd`, `x.ai/agentName`).
+
+Zero choices: no picker. One choice: used without asking. Two or more: `/new`, dashboard `+ New Agent`, and a dashboard prompt open the picker, cursor on the first name, reset each time it opens. j/k and arrows move, Enter confirms, Esc cancels. The home session takes the first choice without asking, so the first row can already show that machine.
+
+The machine name is the roster title until an agent or prompt title arrives, then `name · title` (still truncated to 60 characters). No name leaves the old titles alone. The session header paints the same name.
+
+A cold external backend gets a synthetic `initialize` (`protocolVersion: 1`, id `leader-ext-init:…`) immediately before `session/new`. That response is swallowed and cached. It is not a replay of the client's initialize, so an agent that requires client capabilities there may still be incomplete. A later session on the same command reuses the cache.
+
+`client_on_backend` still filters machine-wide broadcasts by the command the client registered with. Session RPC and `session/update` follow the session route, which is how one client prompts two backends.
+
+Cancelling a worktree question after a machine was confirmed leaves `pending_session_agent` set until the next confirm or a picker cancel. A later create can consume that stale choice. The fork worktree path stamps no choice.
+
+`gk all` reserves the worker name `all` (`add-worker` rejects it). A registry that already has a worker named `all` would enter all-mode instead of selecting that worker. `gk all` still requires the Mini hub socket check. It was not run against the live hub.
+
+`df /` stayed at 6.6G free. Nothing was deleted. Pager `app::agent_choice` plus the two CLI parses: 11 passed. `roster_row_uses_the_machine_name_and_keeps_it_beside_a_later_title` passed. `one_client_two_agent_cmds_spawn_two_backends_and_both_sessions_are_promptable` passed.

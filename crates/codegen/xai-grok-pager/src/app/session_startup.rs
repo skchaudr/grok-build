@@ -756,7 +756,7 @@ impl MaterializeCtx {
             } else {
                 TitleResolution::Allowed
             },
-            has_agent_cmd: args.agent_cmd.is_some(),
+            has_agent_cmd: args.launches_external_agent(),
             restore_code: args.restore_code,
             recent_session_selection: args.local_resume_selection(),
             restore_progress_on_stdout: false,

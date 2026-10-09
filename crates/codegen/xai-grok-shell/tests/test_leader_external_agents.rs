@@ -411,6 +411,64 @@ async fn killing_the_agent_reports_an_error_and_the_next_session_respawns() {
 }
 
 #[tokio::test]
+async fn one_client_two_agent_cmds_spawn_two_backends_and_both_sessions_are_promptable() {
+    let server = start_ready().await;
+    let cmd_a = fake_cmd("fake-a");
+    let cmd_b = fake_cmd("fake-b");
+    let mut client = connect(&server.sock, "picker", Some(&cmd_a)).await;
+    let init = initialize(&mut client).await;
+    let pid_a = pid_of(&init);
+    assert_eq!(command_of(&init), "fake-a");
+
+    let created_a = session_new(&mut client, 2).await;
+    let sid_a = created_a["result"]["sessionId"].as_str().unwrap().to_string();
+    assert_eq!(pid_of(&created_a), pid_a);
+
+    client
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"session/new","params":{{"cwd":"/tmp","mcpServers":[],"_meta":{{"x.ai/agentCmd":{cmd_b},"x.ai/agentName":"khoj"}}}}}}"#,
+            cmd_b = serde_json::to_string(&cmd_b).unwrap(),
+        ))
+        .unwrap();
+    let created_b = recv_where(&mut client, |j| j.pointer("/result/sessionId").is_some()).await;
+    let sid_b = created_b["result"]["sessionId"].as_str().unwrap().to_string();
+    let pid_b = pid_of(&created_b);
+    assert_ne!(pid_b, pid_a, "a second agent cmd must spawn its own backend");
+    assert_eq!(command_of(&created_b), "fake-b");
+    assert_ne!(sid_a, sid_b);
+
+    client
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{{"sessionId":"{sid_a}","prompt":[{{"type":"text","text":"a"}}]}}}}"#
+        ))
+        .unwrap();
+    let update_a = recv_where(&mut client, |j| {
+        j.pointer("/params/sessionId").and_then(|v| v.as_str()) == Some(sid_a.as_str())
+            && j.pointer("/params/update/content/text").is_some()
+    })
+    .await;
+    let text_a = update_a.pointer("/params/update/content/text").and_then(|v| v.as_str()).unwrap();
+    assert!(text_a.contains("command=fake-a"), "{text_a}");
+
+    client
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{{"sessionId":"{sid_b}","prompt":[{{"type":"text","text":"b"}}]}}}}"#
+        ))
+        .unwrap();
+    let update_b = recv_where(&mut client, |j| {
+        j.pointer("/params/update/content/text")
+            .and_then(|v| v.as_str())
+            .is_some_and(|text| text.contains("command=fake-b"))
+    })
+    .await;
+    let text_b = update_b.pointer("/params/update/content/text").and_then(|v| v.as_str()).unwrap();
+    assert!(text_b.contains(&format!("pid={pid_b}")), "{text_b}");
+
+    client.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
 async fn old_client_without_agent_cmd_stays_on_the_native_backend() {
     let mut server = start_ready().await;
     let stream = UnixStream::connect(&server.sock).await.unwrap();

@@ -424,6 +424,7 @@ impl AgentView {
             loading_placeholder_id: None,
             pending_recap_entry: None,
             display_name: None,
+            machine_name: None,
             generated_session_title: None,
             title_unpin_committed: false,
             last_turn_summary: None,

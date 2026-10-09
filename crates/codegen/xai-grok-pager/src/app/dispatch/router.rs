@@ -210,6 +210,17 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             effects
         }
         Action::NewSession => dispatch_new_session(app),
+        Action::ConfirmMachinePick => match app.machine_pick_intent.take() {
+            Some(crate::app::agent_choice::MachinePickIntent::DashboardNewAgent) => {
+                dispatch_dashboard_create_new_agent_with_detail(app)
+            }
+            Some(crate::app::agent_choice::MachinePickIntent::DashboardPrompt { text, attach }) => {
+                dispatch_dashboard_dispatch(app, text, attach)
+            }
+            Some(crate::app::agent_choice::MachinePickIntent::NewSession) | None => {
+                dispatch_new_session(app)
+            }
+        },
         Action::LeaveHome => leave_welcome_for_session(app),
         #[cfg(feature = "local-workspace")]
         Action::ConfirmWelcomeLocalWorkspaceAck => {

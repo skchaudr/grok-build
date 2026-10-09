@@ -733,11 +733,14 @@ struct ExternalTitles {
     from_agent: HashSet<String>,
     from_prompt: HashSet<String>,
     early: HashMap<String, String>,
+    /// Machine name from `session/new` `_meta["x.ai/agentName"]`, keyed by session id.
+    machine: HashMap<String, String>,
 }
 
 struct PendingExternalNew {
     client_id: ClientId,
     provisional_id: String,
+    machine: Option<String>,
 }
 
 fn acp_update(json: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -775,21 +778,33 @@ fn prompt_text(json: &serde_json::Value) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+fn titled_with_machine(machine: Option<&str>, raw: &str) -> String {
+    let shown = roster_display_title(raw);
+    if shown.is_empty() {
+        return shown;
+    }
+    match machine.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => roster_display_title(&format!("{name} · {shown}")),
+        None => shown,
+    }
+}
+
 fn apply_agent_title(
     rows: &mut HashMap<String, RosterEntry>,
     titles: &mut ExternalTitles,
     session_id: &str,
     raw: &str,
 ) -> bool {
-    let shown = roster_display_title(raw);
-    if shown.is_empty() {
+    let plain = roster_display_title(raw);
+    if plain.is_empty() {
         return false;
     }
     titles.from_agent.insert(session_id.to_string());
     let Some(row) = rows.get_mut(session_id) else {
-        titles.early.insert(session_id.to_string(), shown);
+        titles.early.insert(session_id.to_string(), plain);
         return false;
     };
+    let shown = titled_with_machine(titles.machine.get(session_id).map(String::as_str), &plain);
     if row.title.as_deref() == Some(shown.as_str()) {
         return false;
     }
@@ -824,7 +839,7 @@ fn note_prompt_title(
     let Some(raw) = prompt_text(json) else {
         return false;
     };
-    let shown = roster_display_title(&raw);
+    let shown = titled_with_machine(titles.machine.get(session_id).map(String::as_str), &raw);
     if shown.is_empty() {
         return false;
     }
@@ -847,10 +862,19 @@ fn result_title(json: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn external_roster_entry(session_id: String, cmd: &str, cwd: String) -> RosterEntry {
+fn external_roster_entry(
+    session_id: String,
+    cmd: &str,
+    cwd: String,
+    machine: Option<&str>,
+) -> RosterEntry {
+    let title = match machine.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => name.to_string(),
+        None => external_agent_title(cmd),
+    };
     RosterEntry {
         session_id,
-        title: Some(external_agent_title(cmd)),
+        title: Some(title),
         cwd,
         is_worktree: false,
         session_kind: Some("external".to_string()),
@@ -1935,6 +1959,7 @@ pub async fn run_leader_server(
         from_agent: HashSet::new(),
         from_prompt: HashSet::new(),
         early: HashMap::new(),
+        machine: HashMap::new(),
     };
     let mut externals: HashMap<String, LiveExternal> = HashMap::new();
     let mut inflight: HashMap<String, Inflight> = HashMap::new();
@@ -2400,6 +2425,35 @@ pub async fn run_leader_server(
                             .record_forward(ns_id.clone(), new_model);
                         client.capabilities.default_model = client.model_switches.default_model();
                     }
+                    if let BackendId::External(ref cmd) = backend
+                        && json
+                            .as_ref()
+                            .is_some_and(|request| request_method(request) == Some("session/new"))
+                        && externals.get(cmd).is_none_or(|slot| {
+                            !slot.alive || slot.cached_initialize.is_none()
+                        })
+                    {
+                        let init_id = format!(
+                            "leader-ext-init:{}",
+                            rewritten
+                                .as_ref()
+                                .map(|(ns_id, _)| ns_id.as_str())
+                                .unwrap_or("0")
+                        );
+                        let init = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": init_id,
+                            "method": "initialize",
+                            "params": { "protocolVersion": 1 }
+                        });
+                        let _ = send_to_backend(
+                            &backend,
+                            init.to_string(),
+                            &acp_tx,
+                            &mut externals,
+                            &inbound_tx,
+                        );
+                    }
                     let outbound = select_outbound_payload(json.as_ref(), payload_mutated, payload);
                     let is_initialize = json
                         .as_ref()
@@ -2434,6 +2488,9 @@ pub async fn run_leader_server(
                                         .is_some_and(|j| request_method(j) == Some("session/new"))
                                 {
                                     let cwd = json.as_ref().map(request_cwd).unwrap_or_default();
+                                    let machine = json
+                                        .as_ref()
+                                        .and_then(|request| meta_string(request, AGENT_NAME_META));
                                     let provisional_id = format!("pending:{ns_id}");
                                     external_rows.insert(
                                         provisional_id.clone(),
@@ -2441,6 +2498,7 @@ pub async fn run_leader_server(
                                             provisional_id.clone(),
                                             cmd,
                                             cwd.clone(),
+                                            machine.as_deref(),
                                         ),
                                     );
                                     pending_external_new.insert(
@@ -2448,6 +2506,7 @@ pub async fn run_leader_server(
                                         PendingExternalNew {
                                             client_id: id,
                                             provisional_id,
+                                            machine,
                                         },
                                     );
                                     pending_external_cwd.insert(ns_id.clone(), cwd);
@@ -2498,6 +2557,21 @@ pub async fn run_leader_server(
             },
             LeaderServerPoll::Response { backend, payload } => {
                 let mut json: Option<serde_json::Value> = serde_json::from_str(&payload).ok();
+                if json
+                    .as_ref()
+                    .and_then(|parsed| parsed.get("id"))
+                    .and_then(|id| id.as_str())
+                    .is_some_and(|id| id.starts_with("leader-ext-init:"))
+                {
+                    if let BackendId::External(cmd) = &backend
+                        && let Some(result) = json.as_ref().and_then(|parsed| parsed.get("result")).cloned()
+                        && let Some(slot) = externals.get_mut(cmd)
+                        && slot.cached_initialize.is_none()
+                    {
+                        slot.cached_initialize = Some(result);
+                    }
+                    continue;
+                }
                 if matches!(backend, BackendId::External(_))
                     && let Some(parsed) = json.as_ref()
                     && note_agent_session_title(parsed, &mut external_rows, &mut external_titles)
@@ -2506,6 +2580,7 @@ pub async fn run_leader_server(
                 }
                 let parsed_response = json.as_mut().and_then(parse_response_id);
                 let mut opened_cwd: Option<String> = None;
+                let mut opened_machine: Option<String> = None;
                 let mut pending_removed = false;
                 let mut pending_replaced = false;
                 if let Some((_, ref ns_id)) = parsed_response {
@@ -2513,6 +2588,7 @@ pub async fn run_leader_server(
                     opened_cwd = pending_external_cwd.remove(ns_id);
                     if let Some(pending) = pending_external_new.remove(ns_id) {
                         pending_removed = external_rows.remove(&pending.provisional_id).is_some();
+                        opened_machine = pending.machine;
                     }
                     if let Some(session_id) = pending_external_prompt.remove(ns_id) {
                         let still_prompting = pending_external_prompt
@@ -2570,15 +2646,22 @@ pub async fn run_leader_server(
                                 pid: backend_pid(&backend, &externals),
                             });
                         if first_route && let BackendId::External(cmd) = &backend {
+                            if let Some(name) = opened_machine.clone() {
+                                external_titles.machine.insert(session_id.clone(), name);
+                            }
                             let mut entry = external_roster_entry(
                                 session_id.clone(),
                                 cmd,
                                 opened_cwd.take().unwrap_or_default(),
+                                external_titles.machine.get(&session_id).map(String::as_str),
                             );
                             if let Some(raw) = result_title(json)
                                 .or_else(|| external_titles.early.remove(&session_id))
                             {
-                                let shown = roster_display_title(&raw);
+                                let shown = titled_with_machine(
+                                    external_titles.machine.get(&session_id).map(String::as_str),
+                                    &raw,
+                                );
                                 if !shown.is_empty() {
                                     entry.title = Some(shown);
                                     external_titles.from_agent.insert(session_id.clone());
@@ -2996,6 +3079,24 @@ pub async fn run_leader_server(
     Ok(())
 }
 
+const AGENT_CMD_META: &str = "x.ai/agentCmd";
+const AGENT_NAME_META: &str = "x.ai/agentName";
+
+fn request_meta<'a>(json: &'a serde_json::Value) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    json.pointer("/params/_meta")
+        .or_else(|| json.pointer("/params/params/_meta"))
+        .and_then(|meta| meta.as_object())
+}
+
+fn meta_string(json: &serde_json::Value, key: &str) -> Option<String> {
+    request_meta(json)
+        .and_then(|meta| meta.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
 fn resolve_backend(
     json: Option<&serde_json::Value>,
     caps: &ClientCapabilities,
@@ -3006,6 +3107,11 @@ fn resolve_backend(
         && let Some(route) = sessions.get(&sid)
     {
         return route.backend.clone();
+    }
+    if let Some(json) = json
+        && let Some(cmd) = meta_string(json, AGENT_CMD_META)
+    {
+        return BackendId::External(cmd);
     }
     BackendId::from_capabilities(caps)
 }

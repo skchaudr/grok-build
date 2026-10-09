@@ -1409,6 +1409,12 @@ impl AgentView {
         let location_budget = left_budget.saturating_sub(upgrade_reserve);
         use unicode_width::UnicodeWidthStr;
         let mut location: Vec<Span> = Vec::new();
+        if let Some(machine) = self.machine_name.as_deref().filter(|name| !name.is_empty()) {
+            location.push(Span::styled(
+                format!("{machine} "),
+                bg.fg(theme.text_primary),
+            ));
+        }
         let probe_local_git = true;
         let lazy_git = probe_local_git
             .then(|| crate::git_info::cwd_git_info_lazy(&self.session.cwd))

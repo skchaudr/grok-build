@@ -1067,7 +1067,10 @@ pub(crate) async fn run(
     app.tracing_rx = Some(tracing_handle.rx);
     app.last_known_terminal_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(0);
     app.leader_mode = connection.leader_status_rx.is_some();
-    app.external_agent = args.agent_cmd.is_some();
+    app.external_agent = args.launches_external_agent();
+    app.machine_picker = crate::app::agent_choice::parse_agent_choices(&args.agent_choices)
+        .ok()
+        .and_then(crate::app::agent_choice::MachinePicker::from_choices);
     app.screen_mode = term_state.screen_mode;
     app.registry = crate::actions::ActionRegistry::defaults_for(term_state.screen_mode);
     app.welcome_prompt.set_screen_mode(term_state.screen_mode);
@@ -4333,6 +4336,7 @@ mod tests {
             preferred_session_id: None,
             minted_session_id: None,
             chat_kind: false,
+            agent_choice: None,
         };
         assert!(welcome_oneshot_applies_to_effects(std::slice::from_ref(
             &worktree
@@ -4596,6 +4600,7 @@ mod tests {
             preferred_session_id: None,
             minted_session_id: None,
             chat_kind: false,
+            agent_choice: None,
         };
         assert_eq!(
             take_load_restore_code(&mut app, std::slice::from_ref(&wt)),

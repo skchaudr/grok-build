@@ -5315,6 +5315,22 @@ async fn open_external_session(
 }
 
 #[test]
+fn roster_row_uses_the_machine_name_and_keeps_it_beside_a_later_title() {
+    let row = external_roster_entry(
+        "s-1".into(),
+        "python3 /tmp/fake_acp_agent.py fake-b",
+        "/tmp".into(),
+        Some("khoj"),
+    );
+    assert_eq!(row.title.as_deref(), Some("khoj"));
+    assert_eq!(
+        titled_with_machine(Some("khoj"), "Pong Game"),
+        "khoj · Pong Game"
+    );
+    assert_eq!(titled_with_machine(None, "Pong Game"), "Pong Game");
+}
+
+#[test]
 fn external_agent_title_uses_the_executable_basename() {
     assert_eq!(external_agent_title("cursor-agent acp"), "cursor-agent");
     assert_eq!(
