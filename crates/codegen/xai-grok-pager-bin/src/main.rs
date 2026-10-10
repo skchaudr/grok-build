@@ -2466,6 +2466,8 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
         }
         let memory_enabled_override = args.memory_enabled_override();
         let memory_flush = args.memory_flush;
+        let external_agent = args.launches_external_agent();
+        let agent_cmd = args.effective_agent_cmd();
         return xai_grok_pager::headless::run_single_turn(
             headless_prompt,
             args.verbatim,
@@ -2503,8 +2505,8 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                 ),
                 memory_flush,
                 memory_enabled_override,
-                external_agent: args.launches_external_agent(),
-                agent_cmd: args.effective_agent_cmd(),
+                external_agent,
+                agent_cmd,
                 use_leader: args.leader,
             },
         )
