@@ -1250,7 +1250,9 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             agent.scrollback.remove_entry(placeholder_id);
         }
         if let Some(m) = new_models {
+            let prompt_images = app.models.agent_prompt_images();
             app.models = Some(m).into();
+            app.models.set_agent_prompt_images(prompt_images);
             agent.session.models = app.models.clone();
         }
         agent.apply_session_modes(modes);

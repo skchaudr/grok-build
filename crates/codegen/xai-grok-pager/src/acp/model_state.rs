@@ -66,6 +66,9 @@ pub struct ModelState {
     /// The model the backend routed the current turn to, when it named one other than `current`.
     /// Footer only; `current` stays the user's selection.
     served_model_name: Option<String>,
+    /// `initialize` reported `agentCapabilities.promptCapabilities.image`.
+    /// External agents (Claude) advertise this instead of per-model `acceptsImages`.
+    agent_prompt_images: bool,
 }
 
 impl ModelState {
@@ -111,7 +114,18 @@ impl ModelState {
     /// Whether the current model accepts image input, read from the model's `meta` (the ACP extension point, same
     /// source as `totalContextTokens`). Honors an explicit `acceptsImages` bool, else an `inputModalities` array
     /// containing `"image"`. Once the ACP server populates the key, non-vision models get suppressed.
+    pub fn set_agent_prompt_images(&mut self, enabled: bool) {
+        self.agent_prompt_images = enabled;
+    }
+
+    pub fn agent_prompt_images(&self) -> bool {
+        self.agent_prompt_images
+    }
+
     pub fn current_model_accepts_images(&self) -> bool {
+        if self.agent_prompt_images {
+            return true;
+        }
         let Some(meta) = self
             .current
             .as_ref()
@@ -435,6 +449,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     context_window_selection,
                     model_changed_during_switch: false,
                     served_model_name: None,
+                    agent_prompt_images: false,
                 }
             })
             .unwrap_or_default()
@@ -477,7 +492,11 @@ mod tests {
         }))
         .expect("wire option parses");
         let state = models_or_config_option(None, Some(&[option])).expect("state");
-        assert_eq!(state.available_models.len(), 3, "current value is added when unlisted");
+        assert_eq!(
+            state.available_models.len(),
+            3,
+            "current value is added when unlisted"
+        );
         let model_state: ModelState = Some(state).into();
         assert_eq!(
             model_state.footer_label(),
@@ -852,6 +871,14 @@ mod tests {
 
         state.override_context_window(64_000);
         assert_eq!(state.get_context_window(), Some(64_000));
+    }
+
+    #[test]
+    fn agent_prompt_image_capability_overrides_a_model_that_refuses_images() {
+        let mut state = state_with_meta(Some(serde_json::json!({ "acceptsImages": false })));
+        assert!(!state.current_model_accepts_images());
+        state.set_agent_prompt_images(true);
+        assert!(state.current_model_accepts_images());
     }
 
     #[test]

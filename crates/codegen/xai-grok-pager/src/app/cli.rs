@@ -1360,8 +1360,14 @@ mod tests {
         .unwrap();
         assert!(args.agent_cmd.is_none());
         let choices = crate::app::agent_choice::parse_agent_choices(&args.agent_choices).unwrap();
-        assert_eq!(choices.first().map(|choice| choice.name.as_str()), Some("mini"));
-        assert_eq!(choices.get(1).map(|choice| choice.name.as_str()), Some("khoj"));
+        assert_eq!(
+            choices.first().map(|choice| choice.name.as_str()),
+            Some("mini")
+        );
+        assert_eq!(
+            choices.get(1).map(|choice| choice.name.as_str()),
+            Some("khoj")
+        );
         assert_eq!(
             choices.get(1).map(|choice| choice.cmd.as_str()),
             Some("ssh khoj worker")
@@ -1373,7 +1379,10 @@ mod tests {
     fn agent_cmd_alone_still_parses_and_is_the_effective_command() {
         let args = PagerArgs::try_parse_from(["grok", "--agent-cmd", "external-agent"]).unwrap();
         assert!(args.agent_choices.is_empty());
-        assert_eq!(args.effective_agent_cmd().as_deref(), Some("external-agent"));
+        assert_eq!(
+            args.effective_agent_cmd().as_deref(),
+            Some("external-agent")
+        );
         assert!(args.launches_external_agent());
     }
 
@@ -1397,7 +1406,7 @@ mod tests {
         }
     }
     #[test]
-    fn leader_headless_agent_cmd_is_accepted() {
+    fn leader_headless_agent_cmd_without_an_explicit_socket_is_accepted() {
         let args = PagerArgs::try_parse_from([
             "grok",
             "--leader",

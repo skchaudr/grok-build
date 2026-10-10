@@ -678,6 +678,17 @@ pub(super) fn dispatch_send_prompt_submission(
     }
     // Match the later slash path: only a line that itself starts with `/` is a command.
     // Chip-stripped text can look like `/feedback` after a leading image without being one.
+    // An external agent owns `/compact` (and the other yielded builtins). Hide those handlers
+    // before the refusal check, so `/compact keep the auth discussion` is a prompt, not an error.
+    if app.external_agent
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        agent
+            .prompt
+            .slash_controller
+            .registry_mut()
+            .set_external_agent(true);
+    }
     if !literal && text.trim().starts_with('/') {
         let slash_input = submission.as_ref().map_or_else(
             || {

@@ -222,9 +222,7 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         agent.attached_as_viewer = !agent.is_self_originated_prompt(notif_pid);
                     }
                     if !dedup_drop {
-                        if let Some(tokens) = meta.total_tokens {
-                            confirm_context_used(agent, tokens);
-                        }
+                        apply_reported_context(agent, &meta, notif.request.meta.as_ref());
                         if let Some(ts) = meta.turn_start_ms {
                             agent.turn_start_ms = Some(ts);
                             agent.turn_start_ms_prompt = meta.prompt_id.clone();
@@ -462,9 +460,7 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             .child_view_for_live_update_mut(child_key)
                             .expect("find_session_match returned an existing subagent_views key");
                         ack_prompt_from_update(child_view, &meta, external_agent);
-                        if let Some(tokens) = meta.total_tokens {
-                            confirm_context_used(child_view, tokens);
-                        }
+                        apply_reported_context(child_view, &meta, notif.request.meta.as_ref());
                         if let acp::SessionUpdate::UsageUpdate(ref usage) = notif.request.update {
                             child_view.apply_context_used(usage.used, usage.size);
                         }

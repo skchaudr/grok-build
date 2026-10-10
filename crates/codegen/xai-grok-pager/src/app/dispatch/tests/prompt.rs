@@ -3529,6 +3529,51 @@ fn slash_compact_enqueues_command() {
     assert!(agent_ref(&app, id).prompt.text().is_empty());
 }
 
+/// Claude advertises `/compact`. The pager must send that text to the agent, including the
+/// argument the native command refuses.
+#[test]
+fn external_agent_forwards_compact_with_args_as_a_prompt() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.external_agent = true;
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .prompt
+            .slash_controller
+            .registry_mut()
+            .set_external_agent(true);
+        let models = agent.session.models.clone();
+        agent.prompt.sync_acp_commands(
+            &[acp::AvailableCommand::new(
+                "compact".to_string(),
+                "Compact the conversation".to_string(),
+            )],
+            None,
+            &models,
+        );
+    }
+
+    let effects = dispatch(
+        Action::SendPrompt("/compact keep the auth discussion".into()),
+        &mut app,
+    );
+
+    match effects.as_slice() {
+        [Effect::SendPrompt { text, .. }] => {
+            assert_eq!(text, "/compact keep the auth discussion");
+        }
+        other => panic!("expected the compact text to be a prompt, got {other:?}"),
+    }
+    assert!(
+        agent_ref(&app, id)
+            .toast
+            .as_ref()
+            .is_none_or(|(msg, _)| !msg.contains("takes no arguments")),
+        "an external agent's /compact accepts the text that follows it"
+    );
+}
+
 #[test]
 fn edit_prompt_direct_route_preserves_nonempty_draft_and_elements() {
     let mut app = test_app_with_agent();
@@ -6015,6 +6060,16 @@ fn yanked_image_chip_is_sent_as_image_block() {
                     .count(),
                 1,
                 "the yanked chip must ride as one image block"
+            );
+            let wire = serde_json::to_value(blocks).expect("prompt blocks serialize");
+            let image = wire
+                .as_array()
+                .and_then(|blocks| blocks.iter().find(|block| block["type"] == "image"))
+                .expect("an image content block");
+            assert_eq!(image["mimeType"], "image/png");
+            assert!(
+                image["data"].as_str().is_some_and(|data| !data.is_empty()),
+                "Claude reads base64 from data, got {image}"
             );
         }
         other => panic!("expected SendPromptBlocks with the image, got {other:?}"),

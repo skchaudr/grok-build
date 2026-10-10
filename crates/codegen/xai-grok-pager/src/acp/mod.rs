@@ -372,13 +372,7 @@ pub async fn connect_via_leader(
         cancel: bridge.cancel,
         location: AgentLocation::Leader(status_rx),
     };
-    initialize_connection(
-        endpoint,
-        &flags,
-        auth_manager,
-        flags.agent_cmd.is_some(),
-    )
-    .await
+    initialize_connection(endpoint, &flags, auth_manager, flags.agent_cmd.is_some()).await
 }
 /// Prints one warning per flag the chosen backend ignores. `reason` finishes the sentence "has no effect ...".
 /// This runs before tracing is set up, and the pager has already redirected fd 2, so the saved terminal stderr is the sink.
@@ -527,12 +521,13 @@ async fn initialize(tx: &AcpAgentTx, flags: &ConnectFlags) -> Result<Initialized
         .and_then(|m| m.get("grokShell"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let models: ModelState = resp
+    let mut models: ModelState = resp
         .meta
         .as_ref()
         .and_then(|m| m.get("modelState"))
         .and_then(|v| serde_json::from_value::<acp::SessionModelState>(v.clone()).ok())
         .into();
+    models.set_agent_prompt_images(resp.agent_capabilities.prompt_capabilities.image);
     let available_commands = parse_available_commands(resp.meta.as_ref());
     let cancel_rewind_enabled = resp
         .meta

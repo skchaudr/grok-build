@@ -447,3 +447,29 @@ Two short interrupts in the same transcript are not this watchdog: `01:20:50.607
 After the `ab82247f` processes were up (hub started `2026-10-10T01:19:37Z`, Air client `2026-10-10T02:09:32Z`), Air has no further `prompt.ack_timeout`. One later external-style session on the hub, `7995ac42-ad2a-4d15-b431-f331a92a53d3`, acked in 61ms via `session_update` and `turn.complete` `ok: true` at `2026-10-10T02:10:40.179Z`. This host's `~/.grok/logs/unified.jsonl` is not that hub log: the Air forward targets `sab-mini@100.66.99.64` (`~/.grok/leader-hub.sock`). That hub file also has no `request_permission`, `claude-acp`, or `ack_timeout` hits for Oct 9–10.
 
 Code edges that can still answer a permission with `Cancelled` without a click (`permissions.rs` unknown `session_id`; `drain_permission_queue` on turn end; replay-only updates leaving `PromptAckWatch` armed) did not show up on this transcript. The observed cancels are the pre-deploy 120s ack watch. No fix written: the deployed tree already disarms that watch on the first live `session/update`.
+
+## 2026-10-10 Claude ACP parity (`/compact`, images, context window)
+
+Reference: `@zed-industries/claude-code-acp` 0.16.2 at `~/.local/lib/node_modules/@zed-industries/claude-code-acp`, plus `~/.dsh/patches/claude-code-acp/0001-context-usage.patch`.
+
+### `/compact` — verified, fixed
+
+`CompactCommand` returns `QueueCommand("/compact")`. The queue drain turns every non-flush, non-dream command into `Effect::Compact`, which calls `x.ai/compact_conversation`. Claude does not implement that method. `apply_acp_commands` also skipped advertised names that collided with a builtin, so Claude's `available_commands_update` for `compact` never replaced the pager command. Claude advertises `/compact` from `supportedCommands()` and accepts trailing text; the native command refuses arguments.
+
+With an external agent, `compact`, `memory`, `flush`, and `dream` yield to the agent. The typed text (`/compact …`) is the prompt. A native Grok session still runs `Effect::Compact`.
+
+### Images — verified, fixed
+
+Paste and path-drop become `PastedImage` chips. The idle drain builds `ContentBlock::Image` with base64 `data` and `mimeType`. Claude's `promptToClaude` reads `type: "image"`, `data`, and `mimeType`. The leader rewrites the JSON-RPC id and re-serializes the value; that path does not drop non-text blocks. `prompt_text` only reads text for the roster title.
+
+`initialize` from claude-code-acp sets `agentCapabilities.promptCapabilities.image: true`. The pager ignored that and only looked at per-model `acceptsImages` / `inputModalities`. A model marked `acceptsImages: false` hid image affordances even when the agent had opted into image prompts. Native Grok does not advertise `promptCapabilities.image` and still uses the model flag. Session create/load keeps the initialize flag when the catalog is replaced.
+
+### Context window — verified, fixed
+
+The context bar prints `used / size` only when the denominator is greater than zero. `usage_update` (`used`, `size`) was already applied. Stock claude-code-acp 0.16.2 does not emit it; the local patch does, as `{sessionUpdate:"usage_update", used, size}`. A notification `_meta` of `{used, size}` (or `totalTokens` plus `contextWindow` / `size`) was only half-read: `totalTokens` updated the numerator and the missing model window left the denominator at 0. Claude models do not carry `totalContextTokens`. Meta now treats `used` as the count and `size` / `contextWindow` as the window. Native sessions that only send `totalTokens` still use the catalog window.
+
+### Tests
+
+Pager: `external_agent_advertised_compact_replaces_the_builtin`, `native_session_keeps_builtin_compact_when_the_catalog_repeats_the_name`, `external_agent_forwards_compact_with_args_as_a_prompt`, `slash_compact_enqueues_command`, `yanked_image_chip_is_sent_as_image_block`, `agent_prompt_image_capability_overrides_a_model_that_refuses_images`, `a_usage_update_on_the_wire_fills_the_context_bar_with_used_and_size`, `a_usage_update_fills_the_context_bar_with_used_and_size`, `meta_used_and_size_fill_the_context_bar_without_a_model_window`, `notification_meta_reads_used_and_size_when_total_tokens_is_absent`, `prompt_response_meta_used_and_size_fill_the_window`.
+
+Shell: `external_prompt_forwards_image_content_blocks`.

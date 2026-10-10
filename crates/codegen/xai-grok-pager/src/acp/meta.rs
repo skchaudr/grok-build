@@ -111,19 +111,34 @@ pub struct ReportedContext {
 /// Read context usage from a `session/prompt` result.
 /// `_meta.totalTokens` wins over `usage.totalTokens`. Neither field means no update.
 fn meta_u64(meta: &acp::Meta, key: &str) -> Option<u64> {
-    meta.get(key).and_then(|value| value.as_u64())
+    json_u64(meta.get(key))
+}
+
+fn json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
+    let value = value?;
+    value.as_u64().or_else(|| {
+        let number = value.as_f64()?;
+        (number.is_finite() && number >= 0.0 && number <= u64::MAX as f64).then_some(number as u64)
+    })
+}
+
+/// Context-window size carried on a notification `_meta` (`contextWindow` or `size`).
+/// A missing or zero size is not a window.
+pub fn notification_context_size(meta: Option<&acp::Meta>) -> Option<u64> {
+    let meta = meta?;
+    meta_u64(meta, "contextWindow")
+        .filter(|size| *size > 0)
+        .or_else(|| meta_u64(meta, "size").filter(|size| *size > 0))
 }
 
 pub fn reported_context(
     meta: Option<&acp::Meta>,
     usage: Option<&acp::Usage>,
 ) -> Option<ReportedContext> {
-    let window = meta.and_then(|meta| {
-        meta_u64(meta, "contextWindow")
-            .filter(|size| *size > 0)
-            .or_else(|| meta_u64(meta, "size").filter(|size| *size > 0))
-    });
-    if let Some(used) = meta.and_then(|meta| meta_u64(meta, "totalTokens")) {
+    let window = notification_context_size(meta);
+    if let Some(used) =
+        meta.and_then(|meta| meta_u64(meta, "totalTokens").or_else(|| meta_u64(meta, "used")))
+    {
         return Some(ReportedContext { used, window });
     }
     usage.map(|usage| ReportedContext {
@@ -144,7 +159,7 @@ impl NotificationMeta {
             .map(|s| s.to_string());
         let event_seq = event_id.as_deref().and_then(event_id_counter);
         Self {
-            total_tokens: m.get("totalTokens").and_then(|v| v.as_u64()),
+            total_tokens: json_u64(m.get("totalTokens")).or_else(|| json_u64(m.get("used"))),
             agent_timestamp_ms: m.get("agentTimestampMs").and_then(|v| v.as_i64()),
             stream_start_ms: m.get("streamStartMs").and_then(|v| v.as_i64()),
             turn_start_ms: m.get("turnStartMs").and_then(|v| v.as_i64()),
@@ -266,6 +281,26 @@ mod tests {
             reported_context(response.meta.as_ref(), response.usage.as_ref()).expect("usage");
         assert_eq!(reported.used, 54_000);
         assert_eq!(reported.window, None);
+    }
+
+    #[test]
+    fn notification_meta_reads_used_and_size_when_total_tokens_is_absent() {
+        let meta_json = json!({ "used": 42_000u64, "size": 200_000u64 });
+        let map = meta_json.as_object().unwrap();
+        let meta = NotificationMeta::from_json(Some(map));
+        assert_eq!(meta.total_tokens, Some(42_000));
+        assert_eq!(notification_context_size(Some(map)), Some(200_000));
+    }
+
+    #[test]
+    fn prompt_response_meta_used_and_size_fill_the_window() {
+        let response: acp::PromptResponse = serde_json::from_str(
+            r#"{"stopReason":"end_turn","_meta":{"used":54000,"size":200000}}"#,
+        )
+        .expect("meta shape");
+        let reported =
+            reported_context(response.meta.as_ref(), response.usage.as_ref()).expect("meta");
+        assert_eq!((reported.used, reported.window), (54_000, Some(200_000)));
     }
 
     #[test]
