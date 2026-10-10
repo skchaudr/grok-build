@@ -11,6 +11,7 @@
 //! - [`event_loop`] — biased tokio::select! loop
 pub mod actions;
 pub mod agent;
+pub mod agent_choice;
 pub mod agent_view;
 pub mod app_view;
 pub mod bundle;
@@ -999,7 +1000,7 @@ pub async fn run(
         ),
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
-        agent_cmd: args.agent_cmd.clone(),
+        agent_cmd: args.effective_agent_cmd(),
         status_line: false,
     };
     let mut config_watcher = crate::appearance::ConfigWatcher::start().await?;

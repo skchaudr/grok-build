@@ -459,6 +459,16 @@ pub struct PagerArgs {
     /// Headless (`-p` and the other one-shot flags) is allowed only with `--leader`.
     #[arg(long = "agent-cmd", value_name = "COMMAND", global = true)]
     pub agent_cmd: Option<String>,
+    /// Named machine this pager can start a session on. Repeat for each machine: `NAME=CMD`.
+    /// The first choice is the default. With two or more, a new session asks which name to use.
+    /// `--agent-cmd` alone is unchanged.
+    #[arg(
+        long = "agent-choice",
+        value_name = "NAME=CMD",
+        action = ArgAction::Append,
+        global = true
+    )]
+    pub agent_choices: Vec<String>,
     /// Trust this folder and persist the decision to the trust store.
     #[arg(long = "trust", alias = "trust-folder", hide = true)]
     pub trust: bool,
@@ -860,7 +870,7 @@ impl PagerArgs {
         }
         // One-shot delegation goes through the leader. Without `--leader` the
         // headless path would ignore `--agent-cmd` and start the native shell.
-        if self.agent_cmd.is_some()
+        if self.launches_external_agent()
             && !self.leader
             && (self.single.is_some()
                 || self.prompt_json.is_some()
@@ -869,15 +879,32 @@ impl PagerArgs {
         {
             anyhow::bail!("--agent-cmd is only supported in interactive mode, not headless mode");
         }
+        if self.launches_external_agent() {
+            super::agent_choice::parse_agent_choices(&self.agent_choices)
+                .map_err(anyhow::Error::msg)?;
+        }
         if let Some(ref cwd) = self.cwd {
-            super::working_directory::apply(Some(cwd), self.agent_cmd.is_some()).map_err(|e| {
-                anyhow::anyhow!("Failed to set working directory to {:?}: {}", cwd, e)
-            })?;
+            super::working_directory::apply(Some(cwd), self.launches_external_agent()).map_err(
+                |e| anyhow::anyhow!("Failed to set working directory to {:?}: {}", cwd, e),
+            )?;
         }
         Ok(self)
     }
+    /// True when this launch drives an external ACP agent (`--agent-cmd` or `--agent-choice`).
+    pub fn launches_external_agent(&self) -> bool {
+        self.agent_cmd.is_some() || !self.agent_choices.is_empty()
+    }
+    /// Command registered with the leader. `--agent-cmd` wins; otherwise the first choice.
+    pub fn effective_agent_cmd(&self) -> Option<String> {
+        if let Some(cmd) = &self.agent_cmd {
+            return Some(cmd.clone());
+        }
+        super::agent_choice::parse_agent_choices(&self.agent_choices)
+            .ok()
+            .and_then(|choices| choices.into_iter().next().map(|choice| choice.cmd))
+    }
     pub(crate) fn session_cwd(&self) -> std::io::Result<PathBuf> {
-        super::working_directory::session_cwd(self.cwd.as_deref(), self.agent_cmd.is_some())
+        super::working_directory::session_cwd(self.cwd.as_deref(), self.launches_external_agent())
     }
     /// Optional-flag accessor; always `false` in builds without the optional feature, so call sites need no `cfg` of their own.
     pub fn chat(&self) -> bool {
@@ -1321,6 +1348,35 @@ mod tests {
         assert_eq!(args.single.as_deref(), Some("hello"));
         assert!(args.leader_socket.is_some());
     }
+    #[test]
+    fn repeated_agent_choice_keeps_order_and_leaves_agent_cmd_unset() {
+        let args = PagerArgs::try_parse_from([
+            "grok",
+            "--agent-choice",
+            "mini=grok-mini",
+            "--agent-choice",
+            "khoj=ssh khoj worker",
+        ])
+        .unwrap();
+        assert!(args.agent_cmd.is_none());
+        let choices = crate::app::agent_choice::parse_agent_choices(&args.agent_choices).unwrap();
+        assert_eq!(choices.first().map(|choice| choice.name.as_str()), Some("mini"));
+        assert_eq!(choices.get(1).map(|choice| choice.name.as_str()), Some("khoj"));
+        assert_eq!(
+            choices.get(1).map(|choice| choice.cmd.as_str()),
+            Some("ssh khoj worker")
+        );
+        assert_eq!(args.effective_agent_cmd().as_deref(), Some("grok-mini"));
+    }
+
+    #[test]
+    fn agent_cmd_alone_still_parses_and_is_the_effective_command() {
+        let args = PagerArgs::try_parse_from(["grok", "--agent-cmd", "external-agent"]).unwrap();
+        assert!(args.agent_choices.is_empty());
+        assert_eq!(args.effective_agent_cmd().as_deref(), Some("external-agent"));
+        assert!(args.launches_external_agent());
+    }
+
     #[test]
     fn external_agent_headless_is_rejected_before_cwd_changes() {
         let launch = std::env::current_dir().unwrap();

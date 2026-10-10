@@ -2503,8 +2503,8 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                 ),
                 memory_flush,
                 memory_enabled_override,
-                external_agent: args.agent_cmd.is_some(),
-                agent_cmd: args.agent_cmd.clone(),
+                external_agent: args.launches_external_agent(),
+                agent_cmd: args.effective_agent_cmd(),
                 use_leader: args.leader,
             },
         )

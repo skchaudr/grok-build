@@ -131,10 +131,36 @@ pub(crate) fn apply_deferred_switch_outcome(
 /// `Always` skips the popup and creates a worktree, `Never` stays in-cwd, `Ask` opens the worktree question modal (as `/fork` does).
 /// Otherwise proceeds directly via [`dispatch_new_session_from_tab`].
 /// The persisted `Always` / `Never` modes therefore still take effect.
+pub(in crate::app::dispatch) fn machine_pick_blocks(
+    app: &mut AppView,
+    intent: crate::app::agent_choice::MachinePickIntent,
+) -> bool {
+    let pick = app
+        .machine_picker
+        .as_mut()
+        .map(|picker| picker.begin_new_session());
+    match pick {
+        None | Some(crate::app::agent_choice::NewSessionPick::Skip) => false,
+        Some(crate::app::agent_choice::NewSessionPick::Ask) => {
+            app.machine_pick_intent = Some(intent);
+            true
+        }
+        Some(crate::app::agent_choice::NewSessionPick::Use(choice)) => {
+            app.pending_session_agent = Some(choice);
+            false
+        }
+    }
+}
 pub(in crate::app::dispatch) fn dispatch_new_session(app: &mut AppView) -> Vec<Effect> {
     use crate::app::app_view::WorktreeMode;
     if !app.session_startup_allowed() {
         app.deferred_startup.new_session = true;
+        return vec![];
+    }
+    if machine_pick_blocks(
+        app,
+        crate::app::agent_choice::MachinePickIntent::NewSession,
+    ) {
         return vec![];
     }
     #[cfg(feature = "local-workspace")]
@@ -476,6 +502,12 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     }
     let preferred_session_id = app.deferred_startup.preferred_session_id.take();
     let session_id = assign_pending_session_id(app, agent_id, preferred_session_id);
+    let agent_choice = app.pending_session_agent.take();
+    if let Some(choice) = agent_choice.as_ref()
+        && let Some(agent) = app.agents.get_mut(&agent_id)
+    {
+        agent.machine_name = Some(choice.name.clone());
+    }
     effects.push(Effect::CreateSession {
         agent_id,
         cwd: effective_cwd,
@@ -483,6 +515,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
         permission_mode_override: None,
         preferred_session_id: Some(session_id),
         chat_kind,
+        agent_choice,
     });
     (agent_id, effects)
 }
@@ -774,6 +807,14 @@ pub(crate) fn maybe_create_home_session(app: &mut AppView) -> Vec<Effect> {
     }
     if app.chat_mode || welcome_always_isolates(app) {
         return vec![];
+    }
+    if app.pending_session_agent.is_none()
+        && let Some(choice) = app
+            .machine_picker
+            .as_ref()
+            .map(|picker| picker.default_choice().clone())
+    {
+        app.pending_session_agent = Some(choice);
     }
     let (_id, effects) = dispatch_new_session_inner_with_id(app, None, true);
     effects
@@ -1327,6 +1368,12 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
     } else {
         None
     };
+    let agent_choice = app.pending_session_agent.take();
+    if let Some(choice) = agent_choice.as_ref()
+        && let Some(agent) = app.agents.get_mut(&agent_id)
+    {
+        agent.machine_name = Some(choice.name.clone());
+    }
     effects.push(Effect::CreateWorktreeSession {
         agent_id,
         load_session_id,
@@ -1337,6 +1384,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
         preferred_session_id,
         minted_session_id,
         chat_kind,
+        agent_choice,
     });
     effects
 }

@@ -83,6 +83,17 @@ pub(crate) async fn discover_mcp_servers(
     );
     servers
 }
+fn stamp_agent_choice(
+    meta: &mut Option<acp::Meta>,
+    choice: Option<&crate::app::agent_choice::AgentChoice>,
+) {
+    let Some(choice) = choice else {
+        return;
+    };
+    let meta = meta.get_or_insert_with(acp::Meta::new);
+    meta.insert("x.ai/agentCmd".into(), serde_json::json!(choice.cmd));
+    meta.insert("x.ai/agentName".into(), serde_json::json!(choice.name));
+}
 fn apply_permission_mode_override(
     meta: &mut Option<acp::Meta>,
     permission_mode_override: Option<PermissionModeKind>,
@@ -233,6 +244,7 @@ pub(crate) fn execute(
             permission_mode_override,
             preferred_session_id,
             chat_kind,
+            agent_choice,
         } => {
             let tx = acp_tx.clone();
             #[allow(unused_mut)]
@@ -244,6 +256,7 @@ pub(crate) fn execute(
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("modelId".into(), serde_json::json!(mid.0));
             }
+            stamp_agent_choice(&mut meta, agent_choice.as_ref());
             if let Some(ref sid) = preferred_session_id {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("sessionId".into(), serde_json::json!(sid));
@@ -343,6 +356,7 @@ pub(crate) fn execute(
             preferred_session_id,
             minted_session_id,
             chat_kind,
+            agent_choice,
         } => {
             let tx = acp_tx.clone();
             let cwd = cwd.to_path_buf();
@@ -357,6 +371,7 @@ pub(crate) fn execute(
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("modelId".into(), serde_json::json!(mid.0));
             }
+            stamp_agent_choice(&mut meta, agent_choice.as_ref());
             let client_session_id = load_session_id
                 .is_none()
                 .then(|| preferred_session_id.clone().or(minted_session_id))

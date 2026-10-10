@@ -884,6 +884,12 @@ pub struct AppView {
     pub mouse_captured: bool,
     /// Active "New Worktree" dialog on the welcome screen.
     pub new_worktree_dialog: Option<NewWorktreeDialogState>,
+    /// Named machines from repeated `--agent-choice`. Absent when the pager has a single `--agent-cmd`.
+    pub machine_picker: Option<crate::app::agent_choice::MachinePicker>,
+    /// Machine chosen for the session that is about to be created.
+    pub pending_session_agent: Option<crate::app::agent_choice::AgentChoice>,
+    /// Which new-session path to resume after the machine picker confirms.
+    pub machine_pick_intent: Option<crate::app::agent_choice::MachinePickIntent>,
     /// Default all ON.
     /// Resolved at startup and on settings toggles.
     /// Precedence: `GROK_CONTEXTUAL_HINTS` (master) > `[ui.contextual_hints]` user config > remote tier > default.
@@ -1494,6 +1500,9 @@ impl AppView {
             welcome_history_load_as_build: false,
             mouse_captured: true,
             new_worktree_dialog: None,
+            machine_picker: None,
+            pending_session_agent: None,
+            machine_pick_intent: None,
             contextual_hints: Default::default(),
             remote_contextual_hints: None,
             tip_seen_counts: Default::default(),
@@ -2242,6 +2251,27 @@ impl AppView {
             Event::Key(k) if k.kind != KeyEventKind::Release => Some(k),
             _ => None,
         };
+        if self.machine_picker.as_ref().is_some_and(|picker| picker.is_open()) {
+            let Some(key) = key_event else {
+                return InputOutcome::Unchanged;
+            };
+            let outcome = self
+                .machine_picker
+                .as_mut()
+                .map(|picker| crate::app::agent_choice::handle_picker_key(picker, key));
+            return match outcome {
+                Some(crate::app::agent_choice::PickerKey::Confirmed) => {
+                    InputOutcome::Action(Action::ConfirmMachinePick)
+                }
+                Some(crate::app::agent_choice::PickerKey::Cancelled) => {
+                    self.machine_pick_intent = None;
+                    self.pending_session_agent = None;
+                    InputOutcome::Changed
+                }
+                Some(crate::app::agent_choice::PickerKey::Moved) => InputOutcome::Changed,
+                _ => InputOutcome::Unchanged,
+            };
+        }
         if let Event::Resize(_, rows) = ev {
             for agent in self.agents.values_mut() {
                 agent.note_terminal_resize();
@@ -4227,7 +4257,6 @@ impl AppView {
             }
         }
     }
-    /// Render the current view to the terminal.
     pub fn draw(&mut self, terminal: &mut PagerTerminal) {
         self.draw_inner(terminal);
         xai_grok_telemetry::startup::record_first_draw();
@@ -4295,6 +4324,10 @@ impl AppView {
         });
         let welcome_default_yolo = self.default_yolo;
         let welcome_auto_gate = self.auto_mode_gate;
+        let machine_picker_open = self
+            .machine_picker
+            .clone()
+            .filter(|picker| picker.is_open());
         let Self {
             active_view,
             agents,
@@ -4593,6 +4626,13 @@ impl AppView {
                             if let Some(fps) = &fps_overlay {
                                 fps.render(full_area, f.buffer_mut());
                             }
+                            if let Some(picker) = machine_picker_open.as_ref() {
+                                crate::app::agent_choice::paint_picker(
+                                    full_area,
+                                    f.buffer_mut(),
+                                    picker,
+                                );
+                            }
                             if let Some(panel) = &scroll_debug_panel {
                                 panel.render(full_area, f.buffer_mut());
                             }
@@ -4656,9 +4696,12 @@ impl AppView {
                             };
                             let overlay_title = overlay_active
                                 .then(|| {
-                                    agents
-                                        .get(&id)
-                                        .and_then(crate::views::session_title::named_title)
+                                    let agent = agents.get(&id)?;
+                                    let named = crate::views::session_title::named_title(agent);
+                                    crate::app::agent_choice::header_label(
+                                        agent.machine_name.as_deref(),
+                                        named.as_deref(),
+                                    )
                                 })
                                 .flatten();
                             let overlay_header = crate::app::agent_view::OverlayHeader {
@@ -4744,6 +4787,13 @@ impl AppView {
                                 }
                                 if let Some(fps) = &fps_overlay {
                                     fps.render(full_area, f.buffer_mut());
+                                }
+                                if let Some(picker) = machine_picker_open.as_ref() {
+                                    crate::app::agent_choice::paint_picker(
+                                        full_area,
+                                        f.buffer_mut(),
+                                        picker,
+                                    );
                                 }
                                 if let Some(panel) = &scroll_debug_panel {
                                     panel.render(full_area, f.buffer_mut());
@@ -4883,6 +4933,13 @@ impl AppView {
                                 if let Some(fps) = &fps_overlay {
                                     fps.render(full_area, f.buffer_mut());
                                 }
+                                if let Some(picker) = machine_picker_open.as_ref() {
+                                    crate::app::agent_choice::paint_picker(
+                                        full_area,
+                                        f.buffer_mut(),
+                                        picker,
+                                    );
+                                }
                                 if let Some(panel) = &scroll_debug_panel {
                                     panel.render(full_area, f.buffer_mut());
                                 }
@@ -4903,6 +4960,9 @@ impl AppView {
                 }
                 if let Some(fps) = &fps_overlay {
                     fps.render(full_area, f.buffer_mut());
+                }
+                if let Some(picker) = machine_picker_open.as_ref() {
+                    crate::app::agent_choice::paint_picker(full_area, f.buffer_mut(), picker);
                 }
                 if let Some(panel) = &scroll_debug_panel {
                     panel.render(full_area, f.buffer_mut());

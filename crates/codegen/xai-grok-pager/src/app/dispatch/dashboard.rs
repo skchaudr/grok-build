@@ -706,6 +706,12 @@ fn set_create_permission_mode(
 /// Mirrors `dispatch_dashboard_dispatch`'s new-session arm with `attach=true`, minus the prompt enqueue.
 pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView) -> Vec<Effect> {
     let _ = voice_stop_on_submit(app);
+    if super::session::lifecycle::machine_pick_blocks(
+        app,
+        crate::app::agent_choice::MachinePickIntent::DashboardNewAgent,
+    ) {
+        return vec![];
+    }
     if app.cwd_has_git_ancestor && app.dashboard.as_ref().is_some_and(|d| d.dispatch_worktree) {
         return open_dashboard_worktree_dialog(app, None, true);
     }
@@ -1069,6 +1075,15 @@ pub(super) fn dispatch_dashboard_dispatch(
                 text.len()
             ));
         }
+        return vec![];
+    }
+    if super::session::lifecycle::machine_pick_blocks(
+        app,
+        crate::app::agent_choice::MachinePickIntent::DashboardPrompt {
+            text: text.clone(),
+            attach,
+        },
+    ) {
         return vec![];
     }
     if app.cwd_has_git_ancestor && app.dashboard.as_ref().is_some_and(|d| d.dispatch_worktree) {

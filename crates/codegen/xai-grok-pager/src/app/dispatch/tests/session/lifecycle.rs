@@ -4104,6 +4104,7 @@ mod welcome_workspace_mode {
                 preferred_session_id: None,
                 minted_session_id: None,
                 chat_kind: false,
+                agent_choice: None,
             }],
             true
         ));
@@ -4119,6 +4120,7 @@ mod welcome_workspace_mode {
                     preferred_session_id: None,
                     minted_session_id: None,
                     chat_kind: false,
+                    agent_choice: None,
                 }],
                 true
             ),

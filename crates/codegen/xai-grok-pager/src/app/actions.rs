@@ -67,6 +67,8 @@ pub enum Action {
     QuitConfirmed,
     /// Create a new session from the welcome screen.
     NewSession,
+    /// The machine picker confirmed a choice. Resume the new-session path that opened it.
+    ConfirmMachinePick,
     /// Leave the welcome screen for the optimistic home session, or create one if none exists.
     LeaveHome,
     /// Ask whether the new session should use a git worktree.
@@ -1426,6 +1428,8 @@ pub enum Effect {
         /// Gateway light-frontend for **this** session only (`/chat` one-shot or CLI `--chat` via `SessionFlags.chat_mode`).
         /// Does not sticky-set process-wide mode.
         chat_kind: bool,
+        /// Named machine (`--agent-choice`) stamped into `session/new` `_meta`.
+        agent_choice: Option<crate::app::agent_choice::AgentChoice>,
     },
     /// Change the process working directory (dashboard location picker, `/cd`).
     SetWorkingDir { path: std::path::PathBuf },
@@ -1448,6 +1452,8 @@ pub enum Effect {
         minted_session_id: Option<String>,
         /// One-shot `/chat` or sticky `--chat`: stamp `_meta` kind=chat on fresh create (resume uses `LoadSession.chat_kind` instead).
         chat_kind: bool,
+        /// Named machine (`--agent-choice`) stamped into `session/new` `_meta`.
+        agent_choice: Option<crate::app::agent_choice::AgentChoice>,
     },
     /// Load (resume) an existing ACP session by ID.
     /// `session_cwd` overrides the CWD sent in the `LoadSessionRequest`.
