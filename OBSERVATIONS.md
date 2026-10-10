@@ -413,3 +413,17 @@ Headless mode answers every `session/request_permission` with `Cancelled` unless
 - Leader journal has no permission/cancel correlation for the Claude sessions.
 - Claude-agent-acp sources under Zed's `claude-agent-acp` and `/opt/homebrew/bin/claude-code-acp` were located and not read.
 - No failing test and no fix were written.
+
+## 2026-10-10 narrowed: aqua-stone-studio cwd only
+
+Air Grok sessions whose `summary.json` `cwd` is `/Users/sab-mini/repos/client_work/WATER_AND_STONE_WORKSPACE/aqua-stone-studio` live in one directory: `~/.grok/sessions/%2FUsers%2Fsab-mini%2Frepos%2Fclient_work%2FWATER_AND_STONE_WORKSPACE%2Faqua-stone-studio`. Nineteen session ids. Newest three are native Grok ("You are Grok 4.7"), not Claude:
+
+- `01a11e1c-b5ef-7912-be0e-46782d0c8508` updated 2026-10-09T21:11Z. Summary "Maintenance pitch preview and design summary". Air unified log (pager/shell 1.0.50) shows `turn.end_reconcile.armed` `stop_reason: end_turn` and `turn.complete` `ok: true` at 19:28Z, 19:52Z, 20:38Z, 20:40Z. No cancelled stop. `updates.jsonl` has no `stop_reason: cancelled`.
+- `01a11def-2a01-79a2-8ec2-07c99f8c6ce9` updated 2026-10-09T00:42Z. Summary "Premium frontend design skills for Grok and Claude". No `stop_reason: cancelled`.
+- `01a10d4c-63b6-7ae0-8214-05e7f82af42e` updated 2026-10-07T11:04Z. Eight `turn_completed` / `stop_reason: cancelled` rows in `updates.jsonl`, all `_x.ai/session/update`, no `_meta` keys: 2026-10-05T18:43:13Z elapsed 56072 (`b7eaa6fd-…`), 18:44:58Z elapsed 105059 (`c388edf4-…`), 18:45:00Z elapsed 1928 (`9c57a66b-…`), 18:45:49Z elapsed 48873, 18:46:35Z elapsed 46562, 18:58:35Z elapsed 124665, 18:58:53Z elapsed 17291, 2026-10-06T20:13:38Z elapsed 225390 (`2077bf89-…`).
+
+Older cancelled turns in the same cwd, also native `_x.ai/session/update`, no meta: `01a0994b-ded2-7492-b908-d6ac449af22f` (2, 2026-09-13), `01a0b6b0-81c2-7562-8c36-fb83b8c3ca54` (11, 2026-09-18/19), `01a0bb1c-b31b-74f3-bece-2b0bafb2f3c5` (1, 2026-09-19T20:57Z), `01a0bb20-87cd-7860-aefa-ad2681fd9c56` (2, including elapsed 10002 at 2026-09-19T19:42:36Z).
+
+Mini hub: `~/.grok/logs/unified.jsonl` has zero lines for any of those nineteen ids, zero for `743ab7c8-48e7-4f2f-91d5-2ef12119a3fa`, and zero for `aqua-stone`. `journalctl --user` since Oct 1 and `~/.grok/leader.log` are the same. No Mini session directory is named for that cwd. The Air shell logs for `01a11e1c` (`shell.turn.inference_start`, `src` shell, ver 1.0.50) mean that native session ran on the Air, not through the Mini hub.
+
+The Oct 9 Claude cancels are not in this Grok session store. Pager sid `743ab7c8-48e7-4f2f-91d5-2ef12119a3fa` (three `prompt.ack_timeout` at 120s, ver 1.0.45) is a Claude transcript at `~/.claude/projects/-Users-sab-mini-repos-client-work-WATER-AND-STONE-WORKSPACE-aqua-stone-studio/743ab7c8-48e7-4f2f-91d5-2ef12119a3fa.jsonl`. It appears in `~/.grok/logs/unified.jsonl` and nowhere under `~/.grok/sessions`.
