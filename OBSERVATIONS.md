@@ -427,3 +427,23 @@ Older cancelled turns in the same cwd, also native `_x.ai/session/update`, no me
 Mini hub: `~/.grok/logs/unified.jsonl` has zero lines for any of those nineteen ids, zero for `743ab7c8-48e7-4f2f-91d5-2ef12119a3fa`, and zero for `aqua-stone`. `journalctl --user` since Oct 1 and `~/.grok/leader.log` are the same. No Mini session directory is named for that cwd. The Air shell logs for `01a11e1c` (`shell.turn.inference_start`, `src` shell, ver 1.0.50) mean that native session ran on the Air, not through the Mini hub.
 
 The Oct 9 Claude cancels are not in this Grok session store. Pager sid `743ab7c8-48e7-4f2f-91d5-2ef12119a3fa` (three `prompt.ack_timeout` at 120s, ver 1.0.45) is a Claude transcript at `~/.claude/projects/-Users-sab-mini-repos-client-work-WATER-AND-STONE-WORKSPACE-aqua-stone-studio/743ab7c8-48e7-4f2f-91d5-2ef12119a3fa.jsonl`. It appears in `~/.grok/logs/unified.jsonl` and nowhere under `~/.grok/sessions`.
+
+## 2026-10-10 transcript correlation for `743ab7c8`
+
+The three logged `prompt.ack_timeout` lines and Claude's own transcript land on the same millisecond. Claude was mid-tool (Bash, Read, Edit, Write, ToolSearch). The transcript has no `session/request_permission`, elicitation, or `AskUserQuestion` on these turns. `was_cancelling` is false. `prompt_kind: skill` is the empty-stash branch, not a slash skill.
+
+| Pager | Claude transcript |
+|---|---|
+| `2026-10-09T19:30:24.203Z` `prompt.ack_timeout` `43b57af1-…` `waited_ms` 120006 | `L488` `19:30:24.212Z` user `[Request interrupted by user]` |
+| `2026-10-09T19:53:43.383Z` `prompt.ack_timeout` `9052f4d3-…` `waited_ms` 120028 | `L559` `19:53:43.389Z` `The user doesn't want to proceed with this tool use. The tool use was rejected` then `L560` `19:53:43.390Z` `[Request interrupted by user for tool use]` |
+| `2026-10-09T19:58:58.583Z` `prompt.ack_timeout` `a5b1f92b-…` `waited_ms` 120027 | `L650` `19:58:58.592Z` `[Request interrupted by user]` |
+
+Two earlier interrupts in the same file sit on a 120s boundary before this session id shows up in the pager log: user text `2026-10-09T01:00:03.582Z` then `L97` `01:02:03.563Z` `[Request interrupted by user]` (delta 119.981s); user text `01:15:12.088Z` then `L180` `01:17:12.105Z` (delta 120.017s). Same cutoff, no `prompt.ack_timeout` line yet.
+
+The tool-rejection sentence is what reads as a permission prompt. Claude's own earlier line in this file says none of its tool calls asked for approval. At `2026-10-09T03:49:34.258Z` the user typed `continue idk the permission prompt issues`. The next pager line for this session is the soft notice at `03:49:44.183Z`.
+
+Two short interrupts in the same transcript are not this watchdog: `01:20:50.607Z` is 4.7s after `Ok? so go?`, and `01:23:09.158Z` rejects a `gh api` Bash 2.5s after the tool call. No pager line ties those to `prompt.ack_timeout`.
+
+After the `ab82247f` processes were up (hub started `2026-10-10T01:19:37Z`, Air client `2026-10-10T02:09:32Z`), Air has no further `prompt.ack_timeout`. One later external-style session on the hub, `7995ac42-ad2a-4d15-b431-f331a92a53d3`, acked in 61ms via `session_update` and `turn.complete` `ok: true` at `2026-10-10T02:10:40.179Z`. This host's `~/.grok/logs/unified.jsonl` is not that hub log: the Air forward targets `sab-mini@100.66.99.64` (`~/.grok/leader-hub.sock`). That hub file also has no `request_permission`, `claude-acp`, or `ack_timeout` hits for Oct 9–10.
+
+Code edges that can still answer a permission with `Cancelled` without a click (`permissions.rs` unknown `session_id`; `drain_permission_queue` on turn end; replay-only updates leaving `PromptAckWatch` armed) did not show up on this transcript. The observed cancels are the pre-deploy 120s ack watch. No fix written: the deployed tree already disarms that watch on the first live `session/update`.
