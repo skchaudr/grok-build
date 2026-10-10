@@ -36,6 +36,23 @@ fn is_foreign_hook_batch(agent: &AgentView, batch_prompt_id: Option<&str>) -> bo
         (Some(batch), Some(current)) if batch != current
     )
 }
+/// Apply used tokens from a notification. A `_meta` size (`size` or `contextWindow`) is the
+/// window; without one, the model's catalog window is the denominator.
+pub(super) fn apply_reported_context(
+    view: &mut AgentView,
+    meta: &crate::acp::meta::NotificationMeta,
+    raw: Option<&acp::Meta>,
+) {
+    let Some(used) = meta.total_tokens else {
+        return;
+    };
+    if let Some(size) = crate::acp::meta::notification_context_size(raw) {
+        view.apply_context_used(used, size);
+        view.session.note_context_used(used);
+    } else {
+        confirm_context_used(view, used);
+    }
+}
 pub(super) fn refresh_context_used(view: &mut AgentView, used: u64) {
     let total = view.session.models.get_context_window().unwrap_or(0);
     view.apply_context_used(used, total);

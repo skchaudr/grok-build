@@ -109,6 +109,10 @@ impl CommandTrigger {
 /// extension method.
 const SHELL_GATED_COMMANDS: &[&str] = &["memory", "flush", "dream"];
 
+/// Native commands that call the Grok agent. An external ACP agent owns these names: the pager
+/// hides its own handler and sends the typed text (`/compact …`) to the agent, the way Zed does.
+const YIELDED_TO_EXTERNAL_AGENT: &[&str] = &["compact", "memory", "flush", "dream"];
+
 /// Owns the command objects and provides lookup by name/alias.
 /// Supports dynamic mutation via `set_acp_commands()` for runtime ACP command catalog updates.
 pub struct CommandRegistry {
@@ -134,6 +138,9 @@ pub struct CommandRegistry {
     saved_workflows: Vec<WorkflowChoice>,
     /// Names the last sync dropped: a sorted `reserved` run, then a sorted `duplicate` run.
     skipped_acp_names: Vec<String>,
+    /// This pager is driving an external ACP agent (`--agent-cmd`). Yielded builtins stay hidden
+    /// so an advertised command of the same name is sent to that agent as a prompt.
+    external_agent: bool,
 }
 
 impl CommandRegistry {
@@ -167,6 +174,7 @@ impl CommandRegistry {
             available_tools: None,
             saved_workflows: Vec::new(),
             skipped_acp_names: Vec::new(),
+            external_agent: false,
         };
         reg.rebuild_triggers();
         reg
@@ -401,9 +409,39 @@ impl CommandRegistry {
         self.rebuild_triggers();
     }
 
+    /// Hide Grok-agent commands when this pager is driving an external ACP agent.
+    /// Returns whether the flag changed. A later [`Self::set_acp_commands`] then lets the agent's
+    /// catalog claim those names.
+    pub fn set_external_agent(&mut self, enabled: bool) -> bool {
+        if self.external_agent == enabled {
+            return false;
+        }
+        self.external_agent = enabled;
+        if enabled {
+            // `hidden` is keyed by name, so it would hide the agent's command too.
+            // Rebuild skips the builtin; the advertised command keeps the name.
+            for name in YIELDED_TO_EXTERNAL_AGENT {
+                self.hidden.remove(*name);
+            }
+        } else {
+            for name in SHELL_GATED_COMMANDS {
+                self.hidden.insert((*name).to_string());
+            }
+        }
+        self.rebuild_triggers();
+        true
+    }
+
+    fn yields_to_external_agent(&self, name: &str) -> bool {
+        self.external_agent
+            && YIELDED_TO_EXTERNAL_AGENT
+                .iter()
+                .any(|yielded| yielded.eq_ignore_ascii_case(name))
+    }
+
     /// Replace all ACP-sourced commands with a new set. Builtin commands are preserved. ACP names that collide with a
     /// builtin trigger or blocked name are skipped. The shell advertises colliding skills already qualified
-    /// (`acme:login`). Triggers a full `rebuild_triggers()`.
+    /// (`acme:login`). An external agent may claim a yielded builtin (`/compact`). Triggers a full `rebuild_triggers()`.
     pub fn set_acp_commands(&mut self, commands: &[agent_client_protocol::AvailableCommand]) {
         self.apply_acp_commands(commands);
         self.rebuild_triggers();
@@ -424,13 +462,16 @@ impl CommandRegistry {
         self.saved_workflows = saved_workflows;
 
         for name in SHELL_GATED_COMMANDS {
+            if self.yields_to_external_agent(name) {
+                self.hidden.remove(*name);
+                continue;
+            }
             if commands.iter().any(|c| c.name.eq_ignore_ascii_case(name)) {
                 self.hidden.remove(*name);
             } else {
                 self.hidden.insert(name.to_string());
             }
         }
-
         // Remove old ACP-sourced commands.
         let mut i = 0;
         while i < self.commands.len() {
@@ -451,7 +492,15 @@ impl CommandRegistry {
             })
             .collect();
 
+        let external_agent = self.external_agent;
         let is_reserved = |name: &str| {
+            if external_agent
+                && YIELDED_TO_EXTERNAL_AGENT
+                    .iter()
+                    .any(|yielded| yielded.eq_ignore_ascii_case(name))
+            {
+                return false;
+            }
             builtin_keys.contains(name)
                 || BLOCKED_ACP_NAMES
                     .iter()
@@ -524,8 +573,11 @@ impl CommandRegistry {
                 continue;
             }
 
-            // Skip hidden commands; they don't get triggers or key_to_index entries
-            if self.hidden.contains(canonical) {
+            // Skip hidden commands; they don't get triggers or key_to_index entries.
+            // An external agent owns yielded builtins (`/compact`). The advertised command keeps the name.
+            if self.hidden.contains(canonical)
+                || (source == CommandSource::Builtin && self.yields_to_external_agent(canonical))
+            {
                 continue;
             }
 
@@ -699,6 +751,54 @@ mod tests {
         assert_eq!(registry.command_count(), 1);
         assert!(registry.get("exit").is_some());
         assert!(registry.get("flush").is_none());
+    }
+
+    #[test]
+    fn external_agent_advertised_compact_replaces_the_builtin() {
+        use crate::slash::command::CommandProvenance;
+        use crate::slash::commands::compact::CompactCommand;
+
+        let mut registry = CommandRegistry::new(vec![Arc::new(CompactCommand)]);
+        assert_eq!(
+            registry
+                .get_for_dispatch("compact")
+                .map(|cmd| cmd.provenance()),
+            Some(CommandProvenance::Builtin)
+        );
+
+        assert!(registry.set_external_agent(true));
+        assert!(
+            registry.get_for_dispatch("compact").is_none(),
+            "native /compact must not intercept an external agent"
+        );
+
+        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+            "compact".to_string(),
+            "Compact the conversation".to_string(),
+        )]);
+        let advertised = registry
+            .get_for_dispatch("compact")
+            .expect("the agent's /compact is offered");
+        assert_eq!(advertised.provenance(), CommandProvenance::Shell);
+        assert_eq!(advertised.description(), "Compact the conversation");
+    }
+
+    #[test]
+    fn native_session_keeps_builtin_compact_when_the_catalog_repeats_the_name() {
+        use crate::slash::command::CommandProvenance;
+        use crate::slash::commands::compact::CompactCommand;
+
+        let mut registry = CommandRegistry::new(vec![Arc::new(CompactCommand)]);
+        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+            "compact".to_string(),
+            "Compact the conversation".to_string(),
+        )]);
+        assert_eq!(
+            registry
+                .get_for_dispatch("compact")
+                .map(|cmd| cmd.provenance()),
+            Some(CommandProvenance::Builtin)
+        );
     }
 
     fn acp_workflow(

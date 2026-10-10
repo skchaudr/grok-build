@@ -424,6 +424,39 @@ async fn killing_the_agent_reports_an_error_and_the_next_session_respawns() {
     server.cancel.cancel();
 }
 
+/// An image content block in `session/prompt` must reach the external agent intact.
+/// The leader rewrites the request id; that re-serialization must keep non-text blocks.
+#[tokio::test]
+async fn external_prompt_forwards_image_content_blocks() {
+    let server = start_ready().await;
+    let mut client = connect(&server.sock, "ext", Some(&fake_cmd("fake-echo-prompt"))).await;
+    initialize(&mut client).await;
+    let created = session_new(&mut client, 2).await;
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_string();
+    client
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{{"sessionId":"{sid}","prompt":[{{"type":"text","text":"look"}},{{"type":"image","mimeType":"image/png","data":"aGVsbG8"}}]}}}}"#
+        ))
+        .unwrap();
+    let update = recv_where(&mut client, |j| {
+        j.pointer("/params/update/content/text")
+            .and_then(|v| v.as_str())
+            .is_some_and(|text| text.starts_with("blocks="))
+    })
+    .await;
+    let text = update
+        .pointer("/params/update/content/text")
+        .and_then(|v| v.as_str())
+        .unwrap();
+    assert!(
+        text.contains("image:image/png:7"),
+        "image block must survive the leader relay, got {text}"
+    );
+    assert!(text.contains("text"), "text block must survive too, got {text}");
+    client.cancel();
+    server.cancel.cancel();
+}
+
 #[tokio::test]
 async fn one_client_two_agent_cmds_spawn_two_backends_and_both_sessions_are_promptable() {
     let server = start_ready().await;

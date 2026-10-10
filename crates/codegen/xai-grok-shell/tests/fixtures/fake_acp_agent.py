@@ -58,6 +58,22 @@ def wait_release():
     return open(hold_release, encoding="utf-8").read().strip()
 
 
+def prompt_summary(prompt):
+    if not isinstance(prompt, list):
+        return "blocks="
+    parts = []
+    for block in prompt:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "image":
+            data = block.get("data") or ""
+            parts.append(f"image:{block.get('mimeType')}:{len(data)}")
+        else:
+            parts.append(str(kind))
+    return "blocks=" + ",".join(parts)
+
+
 def unknown_session(req_id):
     emit(
         {
@@ -153,6 +169,8 @@ for raw in sys.stdin:
                 )
                 continue
         text = f"pid={pid} hostname={host} command={command}"
+        if command == "fake-echo-prompt":
+            text = prompt_summary(params.get("prompt"))
         emit(
             {
                 "jsonrpc": "2.0",

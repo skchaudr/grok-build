@@ -20,6 +20,39 @@
     }
 
     #[test]
+    fn a_usage_update_on_the_wire_fills_the_context_bar_with_used_and_size() {
+        let raw = r#"{"sessionId":"sess-1","update":{"sessionUpdate":"usage_update","used":42000,"size":200000}}"#;
+        let request: acp::SessionNotification = serde_json::from_str(raw).expect("usage_update shape");
+        let mut app = make_app_with_agent("sess-1");
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let _ = handle(
+            AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs { request, response_tx: tx }),
+            &mut app,
+        );
+        let context = test_agent(&app, AgentId(0)).context_state.as_ref().expect("context state");
+        assert_eq!((42_000, 200_000), (context.used, context.total));
+    }
+
+    #[test]
+    fn meta_used_and_size_fill_the_context_bar_without_a_model_window() {
+        let mut app = make_app_with_agent("sess-1");
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = acp_fixtures::session_notification(
+            "sess-1",
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp_fixtures::text_block(
+                "hi",
+            ))),
+        )
+        .meta(serde_json::json!({ "used": 42_000u64, "size": 200_000u64 }).as_object().cloned());
+        let _ = handle(
+            AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs { request, response_tx: tx }),
+            &mut app,
+        );
+        let context = test_agent(&app, AgentId(0)).context_state.as_ref().expect("context state");
+        assert_eq!((42_000, 200_000), (context.used, context.total));
+    }
+
+    #[test]
     fn a_usage_update_fills_the_context_bar_with_used_and_size() {
         let mut app = make_app_with_agent("sess-1");
         let (tx, _rx) = tokio::sync::oneshot::channel();

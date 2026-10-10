@@ -2251,7 +2251,11 @@ impl AppView {
             Event::Key(k) if k.kind != KeyEventKind::Release => Some(k),
             _ => None,
         };
-        if self.machine_picker.as_ref().is_some_and(|picker| picker.is_open()) {
+        if self
+            .machine_picker
+            .as_ref()
+            .is_some_and(|picker| picker.is_open())
+        {
             let Some(key) = key_event else {
                 return InputOutcome::Unchanged;
             };
@@ -5387,7 +5391,14 @@ impl AppView {
                     })
                     .collect(),
             );
-            if agent.acp_synced_generation != agent.session.available_commands_generation {
+            let external_catalog_changed = agent
+                .prompt
+                .slash_controller
+                .registry_mut()
+                .set_external_agent(self.external_agent);
+            if external_catalog_changed
+                || agent.acp_synced_generation != agent.session.available_commands_generation
+            {
                 agent.prompt.sync_acp_commands(
                     &agent.session.available_commands,
                     agent.session.available_tools.as_ref(),

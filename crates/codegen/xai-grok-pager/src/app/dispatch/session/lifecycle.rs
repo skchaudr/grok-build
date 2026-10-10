@@ -157,10 +157,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session(app: &mut AppView) -> Vec<E
         app.deferred_startup.new_session = true;
         return vec![];
     }
-    if machine_pick_blocks(
-        app,
-        crate::app::agent_choice::MachinePickIntent::NewSession,
-    ) {
+    if machine_pick_blocks(app, crate::app::agent_choice::MachinePickIntent::NewSession) {
         return vec![];
     }
     #[cfg(feature = "local-workspace")]
@@ -1459,7 +1456,9 @@ pub(in crate::app::dispatch) fn handle_session_created(
         }
         agent.bind_session_id(session_id);
         if let Some(m) = new_models {
+            let prompt_images = app.models.agent_prompt_images();
             app.models = Some(m).into();
+            app.models.set_agent_prompt_images(prompt_images);
             agent.session.models = app.models.clone();
         }
         agent.apply_session_modes(modes);
@@ -1589,7 +1588,9 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
         agent.is_worktree = true;
         crate::git_info::populate_from_cwd_async(session_cwd.clone());
         if let Some(m) = new_models {
+            let prompt_images = app.models.agent_prompt_images();
             app.models = Some(m).into();
+            app.models.set_agent_prompt_images(prompt_images);
             agent.session.models = app.models.clone();
         }
         agent.apply_session_modes(modes);
