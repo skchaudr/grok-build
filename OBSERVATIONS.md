@@ -362,3 +362,88 @@ Cancelling a worktree question after a machine was confirmed leaves `pending_ses
 `gk all` reserves the worker name `all` (`add-worker` rejects it). A registry that already has a worker named `all` would enter all-mode instead of selecting that worker. `gk all` still requires the Mini hub socket check. It was not run against the live hub.
 
 `df /` stayed at 6.6G free. Nothing was deleted. Pager `app::agent_choice` plus the two CLI parses: 11 passed. `roster_row_uses_the_machine_name_and_keeps_it_beside_a_later_title` passed. `one_client_two_agent_cmds_spawn_two_backends_and_both_sessions_are_promptable` passed.
+
+## 2026-10-10 audit: Claude turns show "turn cancelled" (search stopped early)
+
+Search was stopped before a failing test or a fix. No cargo build. Disk at the start of the audit: 49G free on `/`. Live Mini hub is `grok agent leader` pid 1317 via `grok-leader.service`, socket `~/.grok/leader.sock` (not `leader-hub.sock`). Air client `~/.grok/bin/grok-team-client --version` prints `grok 1.0.45 (ab82247f714d)`. That binary's mtime is Oct 9 18:19 Air local. `grok-team-client.8baa33b7` is Oct 9 13:16 Air local. Nothing was restarted.
+
+### Ranked candidate causes
+
+1. **Verified, already fixed in tree, and it matches the pre-fix Air logs.** `PromptAckWatch` still sends `session/cancel` after 120s when an external agent never produces a live `session/update`. The 8baa33b7 change only treats a live non-replay `session/update` as the ack (`crates/codegen/xai-grok-pager/src/app/prompt_ack.rs` `session_update_acks`, lines 130–144). Expiry still calls `emit_cancel_turn` (`crates/codegen/xai-grok-pager/src/app/dispatch/prompt_ack.rs` `fire_fail_safe`, lines 133–210). A `session/request_permission` does not disarm the watch (`handle_permission_request` in `crates/codegen/xai-grok-pager/src/app/acp_handler/permissions.rs` never calls `note_prompt_ack`). Status line copy at 10s is "Waiting for the agent to accept the prompt…" (`crates/codegen/xai-grok-pager/src/views/turn_status.rs` line 768). That is the thing that looks like a prompt, then the fail-safe cancels the turn. `drain_permission_queue` then answers any open permission with `RequestPermissionOutcome::Cancelled` (`permissions.rs` lines 259–276, called from `dispatch/turn.rs`).
+
+2. **Inferred, code-clear, not seen in logs.** A `session/request_permission` whose `sessionId` matches no local agent is answered immediately with `outcome: cancelled`, which Claude treats as the user dismissing the prompt. `handle_permission_request` (`permissions.rs` lines 8–15 and `cancel_permission` lines 375–380). The test `permission_for_unknown_session_id_is_cancelled` locks that in (`crates/codegen/xai-grok-pager/src/app/acp_handler/tests/interactions.rs` lines 719–745). The sibling path for `x.ai/ask_user_question` deliberately does the opposite: it drops the request and does not send a result (`interactions.rs` `handle_ask_user_question` lines 114–124; test `ask_user_question_unknown_session_parks_without_error` lines 648–682). The leader broadcasts interaction reverse-requests to every session subscriber, first answer wins (`crates/codegen/xai-grok-shell/src/leader/server.rs` lines 526–537 and 3204–3278). A subscriber that has not loaded the session answers `Cancelled` before the client that would draw the modal. Banner copy if the prompt response carries no grok meta is "Turn cancelled" (`cancel_cause.rs` `CancelledBy::Unspecified`, lines 41–50). With `cancellationCategory` permission-cancelled it is "Turn cancelled because a permission prompt was dismissed".
+
+3. **Inferred, weaker.** Unknown client methods. Decode of a non-`_` method the ACP client does not implement returns method-not-found before the pager sees it (`agent-client-protocol-0.10.4` `src/lib.rs` `ClientSide::decode_request` lines 284–292). A `_…` method becomes `ExtMethod`; `handle_ext_method` answers anything other than `x.ai/ask_user_question`, `x.ai/exit_plan_mode`, and `x.ai/mcp/elicit` with JSON-RPC `-32601` (`acp_handler/mod.rs` lines 791–805). `fs/*` and `terminal/*` other than `terminal/wait_for_exit` hit the `_ => false` arm (`mod.rs` line 545) and drop the oneshot, which the connection turns into `RecvFailed` (`xai-acp-lib/src/channel.rs` lines 53–58). `terminal/wait_for_exit` is an explicit error (`mod.rs` lines 539–543). TUI flags `terminal`, `fs_read`, and `fs_write` default false (`app/cli.rs` lines 733–739), so Claude should not call those unless the client advertised them. Not tied to a log line.
+
+### Evidence
+
+Air `~/.grok/logs/unified.jsonl`, pager 1.0.45 pid 17940, session `743ab7c8-48e7-4f2f-91d5-2ef12119a3fa`. That id is a Claude transcript on the Air: `~/.claude/projects/-Users-sab-mini-repos-client-work-WATER-AND-STONE-WORKSPACE-aqua-stone-studio/743ab7c8-48e7-4f2f-91d5-2ef12119a3fa.jsonl`. The transcript was not read line-by-line for the cancel (search stopped). The pager lines:
+
+```
+2026-10-09T19:28:34.288Z prompt.ack_soft_notice prompt_id=43b57af1-2640-492c-9c1b-68742a87f78c waited_ms=10026 limit_ms=120000
+2026-10-09T19:30:24.203Z prompt.ack_timeout prompt_id=43b57af1-… waited_ms=120006 prompt_kind=skill disposition=not_restorable was_cancelling=false queue_depth=0
+2026-10-09T19:51:53.358Z prompt.ack_soft_notice prompt_id=9052f4d3-9a9b-4124-bce3-ed413fa81333 waited_ms=10002
+2026-10-09T19:53:43.383Z prompt.ack_timeout prompt_id=9052f4d3-… waited_ms=120028 prompt_kind=skill disposition=not_restorable
+2026-10-09T19:57:08.570Z prompt.ack_soft_notice prompt_id=a5b1f92b-b961-4308-9797-88d38c48f082 waited_ms=10013
+2026-10-09T19:58:58.583Z prompt.ack_timeout prompt_id=a5b1f92b-… waited_ms=120027 prompt_kind=skill disposition=not_restorable
+```
+
+Same session also soft-noticed at 03:49:44Z (`c6c75966-…`) and 19:25:40Z / 19:26:17Z / 20:10:08Z without a following timeout in the extract. `prompt_kind=skill` is the fail-safe branch when `in_flight_prompt` is empty (`prompt_ack.rs` `fire_fail_safe` lines 144–148), not proof the user invoked a skill.
+
+Those three timeouts are 12:30–12:58 Air local on Oct 9, before `grok-team-client.8baa33b7` (mtime 13:16 local). After `2026-10-09T20:16Z` the Air log has no `prompt.ack_timeout` and no `stop_reason: cancelled`. Later pager turns are stock grok 1.0.50 (pids 11137, 26633, 13585) and ack via `queue_changed` in a few milliseconds. Session ids there are grok ulids (`01a…`), not Claude UUIDs.
+
+Mini `~/.grok/logs/unified.jsonl`: 34 `stop_reason: cancelled`, all `turn.end_reconcile.armed` on session `01a10bea-bbf8-77f0-afe1-a8a46b48dba4`, 2026-10-05T20:11Z through 2026-10-06T08:51Z. Native pager, not the Air Claude UUID. No `request_permission` string in either unified log.
+
+Mini user journal since 2026-10-08: no `session/cancel`, no `request_permission`. Repeated stderr from a `grok` process (external agent stderr is inherited, `external_backend.rs` line 83):
+
+```
+Error handling notification { method: '_x.ai/log', … code: -32601, message: '"Method not found": _x.ai/log' }
+```
+
+Counts since Oct 7: `_x.ai/log` 635, `_x.ai/auth/check_subscription` 592, plus one-offs `_x.ai/billing` (3), `marketplace/list` (2), `suggestPrompt`, `session/info`, `prompt_history`, `internal/evict_sessions`, `commands/list`, `bundle/status` (1 each). Oct 8 samples are one pair per minute (`check_subscription` + `log`). Those are grok client methods forwarded at the external agent, which rejects them. They are notifications or periodic polls, not a turn-cancel by themselves. The leader is a raw stdio proxy (`external_backend.rs` `spawn_external_backend`); it does not invent `session/cancel`. A client `session/cancel` only marks the external roster row idle (`server_tests.rs` `external_prompt_error_and_cancel_return_to_idle`).
+
+`crates/codegen/xai-grok-shell/src/agent/subagent/external_acp.rs` lines 305–370 is a different path (a grok subagent hosting an ACP child). It rejects `session/request_permission` before publish, and answers any other reverse request with `-32601` "unsupported external ACP reverse request". Not the leader `--agent-cmd` proxy.
+
+Headless mode answers every `session/request_permission` with `Cancelled` unless yolo finds AllowOnce/AllowAlways (`headless.rs` lines 1880–1898). The reported UI is the TUI, so this is not the symptom. YOLO on the TUI auto-selects `AllowOnce` when that option exists (`permissions.rs` lines 25–40); it does not cancel.
+
+### Ruled out or not reached
+
+- Post-fix Air logs (after the 8baa33b7 binary mtime) do not contain another `prompt.ack_timeout` or a cancelled stop reason. The remaining bug, if it still happens on `ab82247f`, is not in the logs that were read.
+- No wire `session/request_permission` in Mini or Air unified logs, so cause 2 is code-only.
+- Leader journal has no permission/cancel correlation for the Claude sessions.
+- Claude-agent-acp sources under Zed's `claude-agent-acp` and `/opt/homebrew/bin/claude-code-acp` were located and not read.
+- No failing test and no fix were written.
+
+## 2026-10-10 narrowed: aqua-stone-studio cwd only
+
+Air Grok sessions whose `summary.json` `cwd` is `/Users/sab-mini/repos/client_work/WATER_AND_STONE_WORKSPACE/aqua-stone-studio` live in one directory: `~/.grok/sessions/%2FUsers%2Fsab-mini%2Frepos%2Fclient_work%2FWATER_AND_STONE_WORKSPACE%2Faqua-stone-studio`. Nineteen session ids. Newest three are native Grok ("You are Grok 4.7"), not Claude:
+
+- `01a11e1c-b5ef-7912-be0e-46782d0c8508` updated 2026-10-09T21:11Z. Summary "Maintenance pitch preview and design summary". Air unified log (pager/shell 1.0.50) shows `turn.end_reconcile.armed` `stop_reason: end_turn` and `turn.complete` `ok: true` at 19:28Z, 19:52Z, 20:38Z, 20:40Z. No cancelled stop. `updates.jsonl` has no `stop_reason: cancelled`.
+- `01a11def-2a01-79a2-8ec2-07c99f8c6ce9` updated 2026-10-09T00:42Z. Summary "Premium frontend design skills for Grok and Claude". No `stop_reason: cancelled`.
+- `01a10d4c-63b6-7ae0-8214-05e7f82af42e` updated 2026-10-07T11:04Z. Eight `turn_completed` / `stop_reason: cancelled` rows in `updates.jsonl`, all `_x.ai/session/update`, no `_meta` keys: 2026-10-05T18:43:13Z elapsed 56072 (`b7eaa6fd-…`), 18:44:58Z elapsed 105059 (`c388edf4-…`), 18:45:00Z elapsed 1928 (`9c57a66b-…`), 18:45:49Z elapsed 48873, 18:46:35Z elapsed 46562, 18:58:35Z elapsed 124665, 18:58:53Z elapsed 17291, 2026-10-06T20:13:38Z elapsed 225390 (`2077bf89-…`).
+
+Older cancelled turns in the same cwd, also native `_x.ai/session/update`, no meta: `01a0994b-ded2-7492-b908-d6ac449af22f` (2, 2026-09-13), `01a0b6b0-81c2-7562-8c36-fb83b8c3ca54` (11, 2026-09-18/19), `01a0bb1c-b31b-74f3-bece-2b0bafb2f3c5` (1, 2026-09-19T20:57Z), `01a0bb20-87cd-7860-aefa-ad2681fd9c56` (2, including elapsed 10002 at 2026-09-19T19:42:36Z).
+
+Mini hub: `~/.grok/logs/unified.jsonl` has zero lines for any of those nineteen ids, zero for `743ab7c8-48e7-4f2f-91d5-2ef12119a3fa`, and zero for `aqua-stone`. `journalctl --user` since Oct 1 and `~/.grok/leader.log` are the same. No Mini session directory is named for that cwd. The Air shell logs for `01a11e1c` (`shell.turn.inference_start`, `src` shell, ver 1.0.50) mean that native session ran on the Air, not through the Mini hub.
+
+The Oct 9 Claude cancels are not in this Grok session store. Pager sid `743ab7c8-48e7-4f2f-91d5-2ef12119a3fa` (three `prompt.ack_timeout` at 120s, ver 1.0.45) is a Claude transcript at `~/.claude/projects/-Users-sab-mini-repos-client-work-WATER-AND-STONE-WORKSPACE-aqua-stone-studio/743ab7c8-48e7-4f2f-91d5-2ef12119a3fa.jsonl`. It appears in `~/.grok/logs/unified.jsonl` and nowhere under `~/.grok/sessions`.
+
+## 2026-10-10 transcript correlation for `743ab7c8`
+
+The three logged `prompt.ack_timeout` lines and Claude's own transcript land on the same millisecond. Claude was mid-tool (Bash, Read, Edit, Write, ToolSearch). The transcript has no `session/request_permission`, elicitation, or `AskUserQuestion` on these turns. `was_cancelling` is false. `prompt_kind: skill` is the empty-stash branch, not a slash skill.
+
+| Pager | Claude transcript |
+|---|---|
+| `2026-10-09T19:30:24.203Z` `prompt.ack_timeout` `43b57af1-…` `waited_ms` 120006 | `L488` `19:30:24.212Z` user `[Request interrupted by user]` |
+| `2026-10-09T19:53:43.383Z` `prompt.ack_timeout` `9052f4d3-…` `waited_ms` 120028 | `L559` `19:53:43.389Z` `The user doesn't want to proceed with this tool use. The tool use was rejected` then `L560` `19:53:43.390Z` `[Request interrupted by user for tool use]` |
+| `2026-10-09T19:58:58.583Z` `prompt.ack_timeout` `a5b1f92b-…` `waited_ms` 120027 | `L650` `19:58:58.592Z` `[Request interrupted by user]` |
+
+Two earlier interrupts in the same file sit on a 120s boundary before this session id shows up in the pager log: user text `2026-10-09T01:00:03.582Z` then `L97` `01:02:03.563Z` `[Request interrupted by user]` (delta 119.981s); user text `01:15:12.088Z` then `L180` `01:17:12.105Z` (delta 120.017s). Same cutoff, no `prompt.ack_timeout` line yet.
+
+The tool-rejection sentence is what reads as a permission prompt. Claude's own earlier line in this file says none of its tool calls asked for approval. At `2026-10-09T03:49:34.258Z` the user typed `continue idk the permission prompt issues`. The next pager line for this session is the soft notice at `03:49:44.183Z`.
+
+Two short interrupts in the same transcript are not this watchdog: `01:20:50.607Z` is 4.7s after `Ok? so go?`, and `01:23:09.158Z` rejects a `gh api` Bash 2.5s after the tool call. No pager line ties those to `prompt.ack_timeout`.
+
+After the `ab82247f` processes were up (hub started `2026-10-10T01:19:37Z`, Air client `2026-10-10T02:09:32Z`), Air has no further `prompt.ack_timeout`. One later external-style session on the hub, `7995ac42-ad2a-4d15-b431-f331a92a53d3`, acked in 61ms via `session_update` and `turn.complete` `ok: true` at `2026-10-10T02:10:40.179Z`. This host's `~/.grok/logs/unified.jsonl` is not that hub log: the Air forward targets `sab-mini@100.66.99.64` (`~/.grok/leader-hub.sock`). That hub file also has no `request_permission`, `claude-acp`, or `ack_timeout` hits for Oct 9–10.
+
+Code edges that can still answer a permission with `Cancelled` without a click (`permissions.rs` unknown `session_id`; `drain_permission_queue` on turn end; replay-only updates leaving `PromptAckWatch` armed) did not show up on this transcript. The observed cancels are the pre-deploy 120s ack watch. No fix written: the deployed tree already disarms that watch on the first live `session/update`.
