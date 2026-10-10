@@ -23,6 +23,51 @@ pub fn listener_is_ready(path: &std::path::Path) -> bool {
     }
 }
 
+/// True when some process is accepting connections at `path`.
+/// A leftover socket node whose listener is gone returns false. A connect that
+/// does not finish in time is treated as in use, so the caller does not unlink it.
+/// The leader lock's pid is not consulted: on a forwarded socket that pid is remote.
+/// Synchronous form of [`socket_accepts_connections`] for the spawn path, which
+/// cannot await. A live listener returns true. A stale socket node returns false.
+pub(super) fn blocking_socket_accepts(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        if !path.exists() {
+            return false;
+        }
+        std::os::unix::net::UnixStream::connect(path).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        listener_is_ready(path)
+    }
+}
+
+pub(super) async fn socket_accepts_connections(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        if !path.exists() {
+            return false;
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            tokio::net::UnixStream::connect(path),
+        )
+        .await
+        {
+            Ok(Ok(_stream)) => true,
+            Ok(Err(_)) => false,
+            Err(_) => true,
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Named-pipe connect would be consumed as a phantom client. The
+        // non-connecting probe is the liveness check on Windows.
+        listener_is_ready(path)
+    }
+}
+
 #[cfg(windows)]
 pub(super) use windows_impl::{LeaderListener, LeaderStream};
 

@@ -441,7 +441,10 @@ async fn spawn_agent(
     }
     spawn_grok_shell(agent_config, cancel, memory_config).await
 }
-/// Attach to the named leader worker. `run_single_turn` still sends `initialize`.
+
+/// Attach a headless `-p` turn to the leader. `run_single_turn` still sends `initialize`.
+/// An explicit `--leader-socket` selects attach-only inside `connect_or_spawn`: a forwarded
+/// hub is adopted by connecting, never by checking the lock file's pid on this machine.
 async fn spawn_headless_via_leader(
     agent_config: AgentConfig,
     cancel: &CancellationToken,

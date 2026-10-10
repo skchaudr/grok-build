@@ -38,6 +38,14 @@ pub fn compute_ws_url_suffix(ws_url: &str) -> String {
 /// Both the client (`connect_or_spawn`) and the leader (`run_leader`) honor it, and the spawned leader subprocess inherits it. All parties therefore bind the same path. When set, the WS-URL-derived suffix (`compute_ws_url_suffix`) is bypassed entirely.
 pub const LEADER_SOCKET_ENV: &str = "GROK_LEADER_SOCKET";
 
+/// When set (not `0` or `false`), the client must not spawn a leader. Implied by [`LEADER_SOCKET_ENV`].
+pub const LEADER_NO_SPAWN_ENV: &str = "GROK_LEADER_NO_SPAWN";
+
+/// When set (not `0` or `false`), the client may spawn a leader even on an explicit socket.
+/// The electing client of a local `--leader-socket` cluster sets this. A client pointed at
+/// someone else's hub must leave it unset.
+pub const LEADER_SPAWN_ENV: &str = "GROK_LEADER_SPAWN";
+
 /// The explicit socket-path override, if [`LEADER_SOCKET_ENV`] is set and non-empty.
 fn leader_socket_override() -> Option<PathBuf> {
     std::env::var_os(LEADER_SOCKET_ENV)

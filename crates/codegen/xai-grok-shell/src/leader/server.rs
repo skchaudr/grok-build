@@ -10,12 +10,14 @@ const LEADER_VERSION: &str = match option_env!("VERSION_WITH_COMMIT") {
     None => "unknown",
 };
 use super::external_backend::{
-    AgentTraffic, BackendId, Inflight, LiveExternal, SessionRoute, backend_pid, send_to_backend,
+    AgentTraffic, BackendId, ExternalSessionBinding, Inflight, LiveExternal, SessionRoute,
+    backend_pid, external_session_store_path, forget_external_session, load_external_sessions,
+    remember_external_session, send_to_backend,
 };
 use super::protocol::{
     ClientCapabilities, ClientId, ClientMessage, ClientMode, ControlCommand, ControlPayload,
     FrameReader, InternalMethod, LEADER_PROTOCOL_VERSION, LeaderCapabilities, ProtocolError,
-    ServerMessage, internal_notification, write_message,
+    ServerMessage, internal_notification, session_reload_failure_message, write_message,
 };
 use super::transport::{LeaderListener, LeaderStream};
 use crate::agent::activity::AgentActivity;
@@ -878,6 +880,134 @@ fn request_method(json: &serde_json::Value) -> Option<&str> {
 
 fn is_session_prompt(json: &serde_json::Value) -> bool {
     request_method(json) == Some(AGENT_METHOD_NAMES.session_prompt)
+}
+
+/// A prompt the leader held back until `session/load` finishes on a fresh external process.
+struct DeferredExternalPrompt {
+    backend: BackendId,
+    payload: String,
+    original_id: serde_json::Value,
+    session_id: String,
+}
+
+enum ExternalPromptGate {
+    Forward,
+    Resume { session_id: String },
+    Reload { session_id: String, cwd: String },
+}
+
+fn load_session_advertised(slot: &LiveExternal) -> Option<bool> {
+    if !slot.alive {
+        return None;
+    }
+    slot.cached_initialize.as_ref().and_then(|result| {
+        result
+            .pointer("/agentCapabilities/loadSession")
+            .and_then(|v| v.as_bool())
+    })
+}
+
+/// A prompt for an external session whose process is gone must not be forwarded raw.
+/// Load it when the agent advertised `loadSession` and we still know the cwd.
+fn external_prompt_gate(
+    json: Option<&serde_json::Value>,
+    backend: &BackendId,
+    sessions: &HashMap<String, SessionRoute>,
+    externals: &HashMap<String, LiveExternal>,
+    bindings: &HashMap<String, ExternalSessionBinding>,
+) -> ExternalPromptGate {
+    let Some(json) = json else {
+        return ExternalPromptGate::Forward;
+    };
+    if !is_session_prompt(json) {
+        return ExternalPromptGate::Forward;
+    }
+    let Some(session_id) = extract_session_id(json) else {
+        return ExternalPromptGate::Forward;
+    };
+    let BackendId::External(cmd) = backend else {
+        return ExternalPromptGate::Forward;
+    };
+    if let Some(route) = sessions.get(&session_id) {
+        let live = matches!(&route.backend, BackendId::External(route_cmd) if route_cmd == cmd)
+            && externals
+                .get(cmd)
+                .is_some_and(|slot| slot.alive && route.pid == Some(slot.pid));
+        if live || route.backend.is_native() {
+            return ExternalPromptGate::Forward;
+        }
+    }
+    let binding = bindings
+        .get(&session_id)
+        .filter(|binding| &binding.cmd == cmd && !binding.cwd.is_empty());
+    match binding {
+        Some(binding) if load_session_advertised_for(cmd, externals) == Some(true) => {
+            ExternalPromptGate::Reload {
+                session_id,
+                cwd: binding.cwd.clone(),
+            }
+        }
+        _ => ExternalPromptGate::Resume { session_id },
+    }
+}
+
+fn load_session_advertised_for(
+    cmd: &str,
+    externals: &HashMap<String, LiveExternal>,
+) -> Option<bool> {
+    externals.get(cmd).and_then(load_session_advertised)
+}
+
+fn synthetic_session_load(session_id: &str, cwd: &str, client_id: ClientId) -> (String, String) {
+    let mut json = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": format!("x.ai/leader-reload/{session_id}"),
+        "method": "session/load",
+        "params": {
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": [],
+        }
+    });
+    let ns = rewrite_request_id(&mut json, client_id)
+        .map(|(ns, _)| ns)
+        .unwrap_or_else(|| format!("x.ai/leader-reload/{session_id}"));
+    (ns, json.to_string())
+}
+
+fn resume_error_line(id: &serde_json::Value, session_id: &str) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32602,
+            "message": "Invalid params",
+            "data": session_reload_failure_message(session_id),
+        }
+    })
+    .to_string()
+}
+
+fn rewrite_unknown_session_error(json: &mut serde_json::Value, session_id: &str) {
+    let is_unknown = json
+        .pointer("/error/data")
+        .and_then(|v| v.as_str())
+        .is_some_and(|data| data.contains("unknown session id"));
+    if !is_unknown {
+        return;
+    }
+    let Some(error) = json.get_mut("error").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    error.insert("code".into(), serde_json::json!(-32602));
+    error.insert(
+        "message".into(),
+        serde_json::Value::String("Invalid params".into()),
+    );
+    error.insert(
+        "data".into(),
+        serde_json::Value::String(session_reload_failure_message(session_id)),
+    );
 }
 
 fn is_session_cancel(json: &serde_json::Value) -> bool {
@@ -1888,6 +2018,25 @@ fn make_version_mismatch_notification(
         .to_string(),
     )
 }
+/// Bind `socket_path`, removing a stale node first.
+/// A path that still accepts connections is left in place. Unlinking it is how a
+/// spawned local leader stole an SSH forward whose lock pid was not local.
+async fn bind_leader_listener(
+    socket_path: &std::path::Path,
+) -> Result<LeaderListener, ServerError> {
+    if super::transport::socket_accepts_connections(socket_path).await {
+        return Err(ServerError::Io(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!(
+                "leader socket {} already accepts connections; not replacing it",
+                socket_path.display()
+            ),
+        )));
+    }
+    let _ = std::fs::remove_file(socket_path);
+    Ok(LeaderListener::bind(socket_path)?)
+}
+
 /// Caller is responsible for: Cleaning up any stale socket file before calling this Acquiring the leader lock AFTER this function creates the socket The lock acquisition happens after we're actually listening
 /// ACP requests (messages with an `id`) receive a structured `leader_starting` JSON-RPC error so the client can retry rather than hang.
 /// A leader serving only interactive clients (TUI dashboard, IDE) thus never duplicates its ACP stream onto the relay. The auto-update checker and the [`ControlCommand::RelaunchForUpdate`] handler send [`ShutdownReason::AutoUpdate`] before cancelling. Clients then see the real reason; senders must write before cancelling.
@@ -1906,9 +2055,8 @@ pub async fn run_leader_server(
     leader_version_override: Option<&'static str>,
     control_state: LeaderServerControlState,
 ) -> Result<(), ServerError> {
-    let _ = std::fs::remove_file(&socket_path);
+    let listener = bind_leader_listener(&socket_path).await?;
     let shutdown_reason_rx = shutdown_tx.subscribe();
-    let listener = LeaderListener::bind(&socket_path)?;
     info!("Leader server listening");
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let mut clients: HashMap<ClientId, ClientState> = HashMap::new();
@@ -1939,6 +2087,9 @@ pub async fn run_leader_server(
     let mut externals: HashMap<String, LiveExternal> = HashMap::new();
     let mut inflight: HashMap<String, Inflight> = HashMap::new();
     let mut pending_initialize: HashSet<String> = HashSet::new();
+    let external_session_store = external_session_store_path(&socket_path);
+    let mut external_bindings = load_external_sessions(&external_session_store);
+    let mut deferred_prompts: HashMap<String, DeferredExternalPrompt> = HashMap::new();
     let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel::<AgentTraffic>();
     let native_in = inbound_tx.clone();
     tokio::spawn(async move {
@@ -1984,7 +2135,6 @@ pub async fn run_leader_server(
             }
             LeaderServerPoll::Accept(accept_result) => match accept_result {
                 Ok(stream) => {
-                    had_clients = true;
                     let client_id = ClientId::new();
                     let (tx, rx) = mpsc::unbounded_channel();
                     clients.insert(
@@ -2022,6 +2172,7 @@ pub async fn run_leader_server(
                         client.capabilities = capabilities;
                         client.client_type = client_type;
                         client.registered = true;
+                        had_clients = true;
                         client_count.fetch_add(1, Ordering::Relaxed);
                         debug!(client_id = id.0, ?mode, yolo_mode = client.capabilities.yolo_mode, client_type = %client.client_type, "Client registered");
                         xai_grok_telemetry::unified_log::info(
@@ -2406,9 +2557,83 @@ pub async fn run_leader_server(
                         .and_then(|j| j.get("method"))
                         .and_then(|m| m.as_str())
                         == Some(AGENT_METHOD_NAMES.initialize);
+                    if let Some(original_id) =
+                        rewritten.as_ref().map(|(_, original)| original.clone())
+                    {
+                        match external_prompt_gate(
+                            json.as_ref(),
+                            &backend,
+                            &session_backend,
+                            &externals,
+                            &external_bindings,
+                        ) {
+                            ExternalPromptGate::Resume { session_id } => {
+                                if let Some(client) = clients.get(&id) {
+                                    let _ = client.tx.send(ClientOutbound::Acp(
+                                        resume_error_line(&original_id, &session_id).into(),
+                                    ));
+                                }
+                                continue;
+                            }
+                            ExternalPromptGate::Reload { session_id, cwd } => {
+                                let (ns_id, load_payload) =
+                                    synthetic_session_load(&session_id, &cwd, id);
+                                match send_to_backend(
+                                    &backend,
+                                    load_payload,
+                                    &acp_tx,
+                                    &mut externals,
+                                    &inbound_tx,
+                                ) {
+                                    Ok(()) => {
+                                        deferred_prompts.insert(
+                                            ns_id.clone(),
+                                            DeferredExternalPrompt {
+                                                backend: backend.clone(),
+                                                payload: outbound,
+                                                original_id,
+                                                session_id: session_id.clone(),
+                                            },
+                                        );
+                                        pending_load_by_req
+                                            .insert(ns_id.clone(), (id, session_id.clone()));
+                                        load_live_buffer.entry((id, session_id)).or_default();
+                                        pending_external_cwd.insert(ns_id.clone(), cwd);
+                                        inflight.insert(
+                                            ns_id,
+                                            Inflight {
+                                                pid: backend_pid(&backend, &externals),
+                                            },
+                                        );
+                                        pending_requests += 1;
+                                        agent_busy.store(true, Ordering::Relaxed);
+                                    }
+                                    Err(_) => {
+                                        if let Some(client) = clients.get(&id) {
+                                            let _ = client.tx.send(ClientOutbound::Acp(
+                                                resume_error_line(&original_id, &session_id).into(),
+                                            ));
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                            ExternalPromptGate::Forward => {}
+                        }
+                    }
                     match send_to_backend(&backend, outbound, &acp_tx, &mut externals, &inbound_tx)
                     {
                         Ok(()) => {
+                            if matches!(backend, BackendId::External(_))
+                                && json.as_ref().is_some_and(is_external_session_end)
+                                && let Some(sid) = json.as_ref().and_then(extract_session_id)
+                            {
+                                forget_external_session(
+                                    &external_session_store,
+                                    &mut external_bindings,
+                                    &sid,
+                                );
+                            }
                             if matches!(backend, BackendId::External(_))
                                 && let Some(json) = json.as_ref()
                                 && note_external_turn(
@@ -2508,6 +2733,7 @@ pub async fn run_leader_server(
                 let mut opened_cwd: Option<String> = None;
                 let mut pending_removed = false;
                 let mut pending_replaced = false;
+                let mut prompt_session_for_error: Option<String> = None;
                 if let Some((_, ref ns_id)) = parsed_response {
                     inflight.remove(ns_id);
                     opened_cwd = pending_external_cwd.remove(ns_id);
@@ -2515,6 +2741,7 @@ pub async fn run_leader_server(
                         pending_removed = external_rows.remove(&pending.provisional_id).is_some();
                     }
                     if let Some(session_id) = pending_external_prompt.remove(ns_id) {
+                        prompt_session_for_error = Some(session_id.clone());
                         let still_prompting = pending_external_prompt
                             .values()
                             .any(|pending| pending == &session_id);
@@ -2557,18 +2784,42 @@ pub async fn run_leader_server(
                         })),
                     );
                 }
+                let held_reload = parsed_response
+                    .as_ref()
+                    .and_then(|(_, ns)| deferred_prompts.remove(ns));
                 if let Some((client_id, ref raw_response_id)) = parsed_response
                     && let Some(client) = clients.get_mut(&client_id)
                     && let Some(json) = json.as_mut()
                 {
                     if let Some(session_id) = extract_session_id_from_result(json) {
                         let first_route = !session_backend.contains_key(&session_id);
-                        session_backend
-                            .entry(session_id.clone())
-                            .or_insert(SessionRoute {
-                                backend: backend.clone(),
-                                pid: backend_pid(&backend, &externals),
-                            });
+                        let pid = backend_pid(&backend, &externals);
+                        match session_backend.get_mut(&session_id) {
+                            Some(route) if route.backend == backend => {
+                                route.pid = pid;
+                            }
+                            Some(_) => {}
+                            None => {
+                                session_backend.insert(
+                                    session_id.clone(),
+                                    SessionRoute {
+                                        backend: backend.clone(),
+                                        pid,
+                                    },
+                                );
+                            }
+                        }
+                        if let BackendId::External(cmd) = &backend
+                            && let Some(cwd) = opened_cwd.as_deref().filter(|cwd| !cwd.is_empty())
+                        {
+                            remember_external_session(
+                                &external_session_store,
+                                &mut external_bindings,
+                                &session_id,
+                                cwd,
+                                cmd,
+                            );
+                        }
                         if first_route && let BackendId::External(cmd) = &backend {
                             let mut entry = external_roster_entry(
                                 session_id.clone(),
@@ -2617,21 +2868,27 @@ pub async fn run_leader_server(
                         client.patch_initialize_model = false;
                         patch_initialize_response_model(json, &client.capabilities.default_model);
                     }
-                    let restored_payload: Arc<str> = json.to_string().into();
-                    match client.tx.send(ClientOutbound::Acp(restored_payload)) {
-                        Ok(()) => {
-                            trace!(client_id = client_id.0, "Routed response via request ID");
+                    let reply_tx = client.tx.clone();
+                    if held_reload.is_none() {
+                        if let Some(session_id) = prompt_session_for_error.as_deref() {
+                            rewrite_unknown_session_error(json, session_id);
                         }
-                        Err(e) => {
-                            warn!(client_id = client_id.0, error = %e, "Failed to send response to client (channel closed)");
-                            xai_grok_telemetry::unified_log::warn(
-                                "leader.response.send_failed",
-                                None,
-                                Some(serde_json::json!({
-                                    "client_id": client_id.0,
-                                    "reason": "channel_closed",
-                                })),
-                            );
+                        let restored_payload: Arc<str> = json.to_string().into();
+                        match client.tx.send(ClientOutbound::Acp(restored_payload)) {
+                            Ok(()) => {
+                                trace!(client_id = client_id.0, "Routed response via request ID");
+                            }
+                            Err(e) => {
+                                warn!(client_id = client_id.0, error = %e, "Failed to send response to client (channel closed)");
+                                xai_grok_telemetry::unified_log::warn(
+                                    "leader.response.send_failed",
+                                    None,
+                                    Some(serde_json::json!({
+                                        "client_id": client_id.0,
+                                        "reason": "channel_closed",
+                                    })),
+                                );
+                            }
                         }
                     }
                     if let Some((buf_client, buf_sid)) = pending_load_by_req.remove(raw_response_id)
@@ -2690,6 +2947,61 @@ pub async fn run_leader_server(
                     }
                     if pending_removed && !pending_replaced {
                         republish_external_rows(&external_rows, &external_publisher);
+                    }
+                    if let Some(held) = held_reload {
+                        let load_ok = json.get("error").is_none()
+                            && extract_session_id_from_result(json).is_some();
+                        if !load_ok {
+                            let _ = reply_tx.send(ClientOutbound::Acp(
+                                resume_error_line(&held.original_id, &held.session_id).into(),
+                            ));
+                        } else if let Ok(prompt_json) =
+                            serde_json::from_str::<serde_json::Value>(&held.payload)
+                        {
+                            let ns = prompt_json.get("id").and_then(|id| id.as_str());
+                            match send_to_backend(
+                                &held.backend,
+                                held.payload,
+                                &acp_tx,
+                                &mut externals,
+                                &inbound_tx,
+                            ) {
+                                Ok(()) => {
+                                    if note_external_turn(
+                                        &prompt_json,
+                                        ns,
+                                        &mut external_rows,
+                                        &mut pending_external_prompt,
+                                        &mut external_titles,
+                                    ) {
+                                        republish_external_rows(
+                                            &external_rows,
+                                            &external_publisher,
+                                        );
+                                    }
+                                    if let Some(ns) = ns {
+                                        inflight.insert(
+                                            ns.to_string(),
+                                            Inflight {
+                                                pid: backend_pid(&held.backend, &externals),
+                                            },
+                                        );
+                                        pending_requests += 1;
+                                        agent_busy.store(true, Ordering::Relaxed);
+                                    }
+                                }
+                                Err(_) => {
+                                    let _ = reply_tx.send(ClientOutbound::Acp(
+                                        resume_error_line(&held.original_id, &held.session_id)
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        } else {
+                            let _ = reply_tx.send(ClientOutbound::Acp(
+                                resume_error_line(&held.original_id, &held.session_id).into(),
+                            ));
+                        }
                     }
                     continue;
                 }

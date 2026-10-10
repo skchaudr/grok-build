@@ -1,6 +1,7 @@
 //! One ACP stdio process per distinct `agent_cmd`, shared by every client that asks for it.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -55,8 +56,15 @@ pub(crate) struct Inflight {
 
 /// Lines and deaths from every backend, merged into the server loop.
 pub(crate) enum AgentTraffic {
-    FromAgent { backend: BackendId, payload: String },
-    Exited { cmd: String, pid: u32, message: String },
+    FromAgent {
+        backend: BackendId,
+        payload: String,
+    },
+    Exited {
+        cmd: String,
+        pid: u32,
+        message: String,
+    },
 }
 
 pub(crate) fn spawn_external_backend(
@@ -156,7 +164,10 @@ pub(crate) fn ensure_external<'a>(
         .ok_or_else(|| format!("external agent `{cmd}` was not spawned"))
 }
 
-pub(crate) fn backend_pid(backend: &BackendId, externals: &HashMap<String, LiveExternal>) -> Option<u32> {
+pub(crate) fn backend_pid(
+    backend: &BackendId,
+    externals: &HashMap<String, LiveExternal>,
+) -> Option<u32> {
     match backend {
         BackendId::Native => None,
         BackendId::External(cmd) => externals.get(cmd).map(|slot| slot.pid),
@@ -191,5 +202,119 @@ pub(crate) fn send_to_backend(
                 "External agent `{cmd}` exited: process closed its output"
             ))
         }
+    }
+}
+
+/// cwd + agent command for an external session, so a restarted leader can `session/load` it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalSessionBinding {
+    pub cwd: String,
+    pub cmd: String,
+}
+
+/// Sibling of the leader socket. The socket file itself is removed on shutdown.
+pub(crate) fn external_session_store_path(socket_path: &Path) -> PathBuf {
+    let mut name = socket_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "leader.sock".to_string());
+    name.push_str(".external-sessions.json");
+    socket_path.with_file_name(name)
+}
+
+pub(crate) fn load_external_sessions(path: &Path) -> HashMap<String, ExternalSessionBinding> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return HashMap::new();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        tracing::warn!(
+            path = %path.display(),
+            "external session store is not JSON; ignoring it"
+        );
+        return HashMap::new();
+    };
+    let Some(rows) = value.get("sessions").and_then(|v| v.as_array()) else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::new();
+    for row in rows {
+        let Some(id) = row.get("sessionId").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(cwd) = row.get("cwd").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(cmd) = row.get("cmd").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if id.is_empty() || cwd.is_empty() || cmd.is_empty() {
+            continue;
+        }
+        out.insert(
+            id.to_string(),
+            ExternalSessionBinding {
+                cwd: cwd.to_string(),
+                cmd: cmd.to_string(),
+            },
+        );
+    }
+    out
+}
+
+fn save_external_sessions(path: &Path, sessions: &HashMap<String, ExternalSessionBinding>) {
+    let rows: Vec<_> = sessions
+        .iter()
+        .map(|(id, binding)| {
+            serde_json::json!({
+                "sessionId": id,
+                "cwd": binding.cwd,
+                "cmd": binding.cmd,
+            })
+        })
+        .collect();
+    let Ok(body) = serde_json::to_vec_pretty(&serde_json::json!({ "sessions": rows })) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("tmp");
+    if let Err(error) = std::fs::write(&tmp, body) {
+        tracing::warn!(path = %tmp.display(), %error, "failed to write external session store");
+        return;
+    }
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        tracing::warn!(path = %path.display(), %error, "failed to replace external session store");
+    }
+}
+
+pub(crate) fn remember_external_session(
+    path: &Path,
+    sessions: &mut HashMap<String, ExternalSessionBinding>,
+    session_id: &str,
+    cwd: &str,
+    cmd: &str,
+) {
+    if session_id.is_empty() || cwd.is_empty() || cmd.is_empty() {
+        return;
+    }
+    let next = ExternalSessionBinding {
+        cwd: cwd.to_string(),
+        cmd: cmd.to_string(),
+    };
+    if sessions.get(session_id) == Some(&next) {
+        return;
+    }
+    sessions.insert(session_id.to_string(), next);
+    save_external_sessions(path, sessions);
+}
+
+pub(crate) fn forget_external_session(
+    path: &Path,
+    sessions: &mut HashMap<String, ExternalSessionBinding>,
+    session_id: &str,
+) {
+    if sessions.remove(session_id).is_some() {
+        save_external_sessions(path, sessions);
     }
 }

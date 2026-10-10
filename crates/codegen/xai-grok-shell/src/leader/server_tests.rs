@@ -6193,3 +6193,153 @@ async fn session_new_error_drops_the_roster_row() {
     wait_cwd_gone(&roster, cwd).await;
     cancel.cancel();
 }
+
+fn persist_roster_agent_cmd(dir: &std::path::Path) -> String {
+    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake_acp_agent.py");
+    format!(
+        "python3 {} fake-roster-persist {}",
+        script.display(),
+        dir.display()
+    )
+}
+
+fn noload_roster_agent_cmd() -> String {
+    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake_acp_agent.py");
+    format!("python3 {} fake-roster-noload", script.display())
+}
+
+async fn wait_socket_gone(path: &std::path::Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if !path.exists() {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("socket still present at {}", path.display());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A restarted leader must session/load an external session before the next prompt.
+/// The client does not send session/load itself.
+#[tokio::test]
+async fn external_session_prompt_after_leader_restart() {
+    let temp = TempDir::new().unwrap();
+    let persist = temp.path().join("agent-sessions");
+    std::fs::create_dir_all(&persist).unwrap();
+    let cmd = persist_roster_agent_cmd(&persist);
+    let (sock, cancel, _response_tx, _acp_rx, _roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    let (reader, writer, sid, old_pid) =
+        open_external_session_with(&sock, "/tmp/ext-reload", &cmd).await;
+    drop(reader);
+    drop(writer);
+    cancel.cancel();
+    wait_socket_gone(&sock).await;
+
+    let (sock, cancel, _response_tx, _acp_rx, _roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    let (mut reader, mut writer) = connect_and_register_caps(
+        &sock,
+        "ext-roster",
+        ClientCapabilities {
+            agent_cmd: Some(cmd),
+            ..ClientCapabilities::default()
+        },
+    )
+    .await;
+    send_acp(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+    )
+    .await;
+    let init = recv_response_id(&mut reader, 1).await;
+    let new_pid = init
+        .pointer("/result/meta/pid")
+        .and_then(|v| v.as_u64())
+        .expect("new backend reports its pid") as u32;
+    assert_ne!(new_pid, old_pid, "restart must spawn a fresh backend");
+    send_acp(
+        &mut writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{{"sessionId":"{sid}","prompt":[]}}}}"#
+        ),
+    )
+    .await;
+    let response = recv_response_id(&mut reader, 4).await;
+    assert_eq!(
+        response
+            .pointer("/result/stopReason")
+            .and_then(|v| v.as_str()),
+        Some("end_turn"),
+        "prompt after restart must succeed via session/load, got {response}"
+    );
+    assert_eq!(
+        response.pointer("/result/loaded").and_then(|v| v.as_bool()),
+        Some(true),
+        "prompt must run in the session session/load restored, got {response}"
+    );
+    assert_eq!(
+        response.pointer("/result/pid").and_then(|v| v.as_u64()),
+        Some(u64::from(new_pid)),
+        "prompt must hit the new backend, got {response}"
+    );
+    cancel.cancel();
+}
+
+/// An agent that does not advertise loadSession gets a resume command, not a raw unknown-session error.
+#[tokio::test]
+async fn external_session_without_load_session_tells_client_to_resume() {
+    let temp = TempDir::new().unwrap();
+    let cmd = noload_roster_agent_cmd();
+    let (sock, cancel, _response_tx, _acp_rx, _roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    let (reader, writer, sid, _pid) =
+        open_external_session_with(&sock, "/tmp/ext-noload", &cmd).await;
+    drop(reader);
+    drop(writer);
+    cancel.cancel();
+    wait_socket_gone(&sock).await;
+
+    let (sock, cancel, _response_tx, _acp_rx, _roster) =
+        setup_persistent_server_with_roster(&temp).await;
+    let (mut reader, mut writer) = connect_and_register_caps(
+        &sock,
+        "ext-roster",
+        ClientCapabilities {
+            agent_cmd: Some(cmd),
+            ..ClientCapabilities::default()
+        },
+    )
+    .await;
+    send_acp(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+    )
+    .await;
+    let _ = recv_response_id(&mut reader, 1).await;
+    send_acp(
+        &mut writer,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{{"sessionId":"{sid}","prompt":[]}}}}"#
+        ),
+    )
+    .await;
+    let response = recv_response_id(&mut reader, 4).await;
+    let data = response
+        .pointer("/error/data")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        data.contains("grok --resume") && data.contains(&sid),
+        "resume command must name the session, got {response}"
+    );
+    assert!(
+        !data.contains("unknown session id"),
+        "raw unknown-session text must not reach the client, got {response}"
+    );
+    cancel.cancel();
+}

@@ -310,3 +310,37 @@ xai-grok-pager --no-auto-update --leader --leader-socket /tmp/model-delegate.soc
 Claude's first tool call (streaming-json, tool id `toolu_01WVajR31ohu1MzV1LBCbUWV`) was that exact command. Description it supplied: "Delegate hostname query to Mini worker via Grok leader". Tool result: `hostname=sab-mini`. It then ran local `hostname` (tool id `toolu_0194NEUPg68NLf6tvPP5dUxK`) and got `khoj-38w`. Final text: the Mini's hostname is `sab-mini`, and this machine is `khoj-38w`. Session id `c8e4ab13-6dbd-4619-8d62-314198aeb017`.
 
 `~/.dsh` worktree `.worktrees/smoke-deep`, branch `fix/smoke-deep`, pushed. `deep_run` was already that `grok-team-client -p --leader --leader-socket --agent-cmd` line. `tests/test_gk_smoke.py` now requires it and rejects `leader_delegate.py`. `python3 -m pytest tests/test_gk_smoke.py -q`: 13 passed.
+
+## 2026-10-09 leader restart must not drop an open external session
+
+Live Air client pid 63504 had session `01a11fe3-fde2-7a82-981a-793dc4ce82ea` open through the Mini hub. At 10:37 UTC the hub was gone. The client logged `leader.ipc.reconnected` with that session still open. The next prompt, at 10:46, was `Invalid params: "unknown session id"`.
+
+The socket on the Air is an SSH forward of the Mini hub. `connect_or_spawn` took the local lock and started a leader on the Air bound to `leader-mini-hub.sock` (pid 98513, 10 CPUs, no child process). That process is not the Mini hub. Its log shows a native `session/load` (`Loading session data (without updates) from JSONL`) that never logged success, and the session id never appears. The prompt then hit the in-process agent, which did not have the session resident. The session files for the external `grok agent --no-leader` live on the Mini.
+
+Native sessions already survive a restart: the client replays `session/load` into the in-process agent, and that agent reads the session from disk. No native change. The SSH-forward hijack (a dead remote hub plus a local lock spawns a leader on the forward path) is recorded here and left alone. The Mini hub and the Mac binaries were not touched.
+
+External sessions are different because the ACP process dies with the leader. The leader now writes `{sessionId, cwd, cmd}` next to its socket (`<socket-filename>.external-sessions.json`). On a later `session/prompt`, if that session's process is not the live one and the new backend's `initialize` result has `agentCapabilities.loadSession: true`, the leader sends `session/load` and only then the held prompt. If load is not advertised, the cwd is unknown, or load fails, the client gets `Invalid params` data `Couldn't restore this session after the leader restarted. Resume it with: grok --resume <id>`. A raw `unknown session id` from an external prompt is rewritten to that same sentence. The pager uses it when the active tab's reconnect restore fails.
+
+`external_session_prompt_after_leader_restart` failed first with `data: "unknown session id"`, then passed. `external_session_without_load_session_tells_client_to_resume` passed with it. `cargo test -p xai-grok-shell --lib leader::server::tests::` : 177 passed. `cargo test -p xai-grok-shell --test test_leader_external_agents` : 8 passed, including the kill-and-respawn case. `df` after the debug test build was 8.4G free, then 6.6G. The pager crate was not rebuilt: the toast uses the same `SessionId.0` access the pager already compiles, and another debug build could have put `/` under 5G. Nothing was deleted.
+
+## 2026-10-09 correction: the Air client spawned the leader
+
+The unknown-session error was the local leader the Air client started, not a Mini hub that forgot to `session/load`. At 10:37:02 the forwarded socket `~/.grok/leader-mini-hub.sock` was briefly down. `connect_or_spawn` took the Air-local lock beside that path and ran `grok agent leader --no-exit-on-disconnect --relay-on-demand` (pid 98513, stock grok 1.0.50). The client's `reconnected` attached to that process. Its shell log is `prompt received` for `01a11fe3`, then `unknown session id`. The Mini hub's session was never in that process.
+
+`--leader-socket` / `GROK_LEADER_SOCKET` now attaches only. A down hub returns `leader hub at <path> is unreachable` and reconnect keeps retrying. It does not bind a leader on that path. `--leader-no-spawn` / `GROK_LEADER_NO_SPAWN=1` does the same for the default socket. `GROK_LEADER_SPAWN=1` is the opt-in for a client that is supposed to create the leader on an explicit socket (the pty harness's electing client). The `session/load` re-attach from the previous section still covers a leader that really did restart.
+
+## 2026-10-09 second repro: lock pid is local, the hub is not
+
+At 21:48:21 UTC a headless one-shot `grok-team-client --leader --leader-socket ~/.grok/leader-mini-hub.sock --agent-cmd <ssh worker> -p …` (built from `38430038`) ran on the Air while the Mini hub was stalled in `session_create` on a macOS permission prompt. At that second pid 26633 appeared: `~/.grok/bin/grok agent leader --no-exit-on-disconnect --relay-on-demand --grok-ws-url …`, stock grok 1.0.50, not the client binary. The spawner resolves `~/.grok/bin/grok` when the running client lives under grok_home. That process unlinked the forwarded socket and bound its own. The next one-shot attached to it, so stock grok ignored `agent_cmd` and answered on `sab-air.local`.
+
+The lock file next to the forward (`leader-mini-hub.lock`) holds a pid. `connect_or_spawn` treated a pid that is not alive on this machine as a dead leader and skipped the socket, even though the socket still accepted connections. The Air lock is not held by the Mini hub, so the client acquired it and spawned. A dead local pid is not evidence the hub is down.
+
+A socket that exists is now connected to. The lock pid is only a log line. Spawn is refused while that socket still accepts a connection, because the spawned stock binary unlinks the path before it binds. `run_leader_server` does the same check before `remove_file`. A connect that never registers no longer counts as "had a client", so the check itself does not shut a leader down and delete the socket. Headless `-p --leader --agent-cmd` goes through that same `connect_or_spawn` (`ClientMode::Stdio`). Without `--leader`, `-p --agent-cmd` is still rejected.
+
+`explicit_socket_adopts_when_lock_pid_is_not_local` and `headless_prompt_adopts_forwarded_socket_when_lock_pid_is_not_local` failed first with `leader hub … is unreachable`, then passed. `spawning_does_not_replace_a_socket_that_still_accepts` failed first because the second leader received the probe, then passed. A `cargo check` of the pager was stopped while disk was 5.8G free and still falling; the pager crate was not rebuilt. The Mini hub and the Mac binaries were not touched.
+
+## 2026-10-09 third repro: a successful one-shot still leaves the stock leader
+
+`gk ask mini` returned the Mini agent's answer through the hub, and afterwards stock `grok agent leader --no-exit-on-disconnect --relay-on-demand` was bound to `~/.grok/leader-mini-hub.sock` on the Air. The spawn is not only the stall path. `connect_or_spawn` can exec that child and then attach the one-shot to the forward that is still listening, so the prompt succeeds, and the child unlinks the socket once it binds and stays up.
+
+`spawn_leader_subprocess` now refuses to exec when that path already accepts a connection. `successful_oneshot_does_not_spawn_over_a_serving_hub` covers a serving socket whose lock pid is not local, including the spawn-if-needed policy the one-shot used before attach-only.
