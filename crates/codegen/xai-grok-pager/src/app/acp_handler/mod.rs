@@ -104,7 +104,7 @@ pub(crate) use session_notification::drop_unexpected_replay;
 #[allow(unused_imports)]
 use session_notification::*;
 use session_notification::{
-    PlanModeTransition, advance_reconnect_cursor, confirm_context_used,
+    PlanModeTransition, advance_reconnect_cursor, apply_reported_context, confirm_context_used,
     handle_session_notification, handle_session_notification_with_origin,
 };
 #[cfg(test)]
