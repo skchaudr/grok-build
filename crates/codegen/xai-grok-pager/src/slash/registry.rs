@@ -111,7 +111,17 @@ const SHELL_GATED_COMMANDS: &[&str] = &["memory", "flush", "dream"];
 
 /// Native commands that call the Grok agent. An external ACP agent owns these names: the pager
 /// hides its own handler and sends the typed text (`/compact …`) to the agent, the way Zed does.
-const YIELDED_TO_EXTERNAL_AGENT: &[&str] = &["compact", "memory", "flush", "dream"];
+const YIELDED_TO_EXTERNAL_AGENT: &[&str] = &[
+    "compact",
+    "memory",
+    "flush",
+    "dream",
+    "usage",
+    "context",
+];
+
+/// Yielded builtins that stay on the pager until the external agent advertises the same name.
+const YIELDED_WHEN_ADVERTISED: &[&str] = &["usage", "context"];
 
 /// Owns the command objects and provides lookup by name/alias.
 /// Supports dynamic mutation via `set_acp_commands()` for runtime ACP command catalog updates.
@@ -228,6 +238,13 @@ impl CommandRegistry {
         if self.restricted.is_empty() {
             return false;
         }
+        // Tier-gated Grok builtins (`/usage` billing). An external agent's advertised command is unrelated.
+        if self.external_agent
+            && cmd.provenance() != CommandProvenance::Builtin
+            && self.yields_to_external_agent(cmd.name())
+        {
+            return false;
+        }
         self.restricted.contains(&cmd.name().to_lowercase())
             || cmd
                 .aliases()
@@ -253,6 +270,9 @@ impl CommandRegistry {
             return false;
         }
         let key = Self::normalize_deny_name(key);
+        if self.get_for_dispatch(&key).is_some() {
+            return false;
+        }
         self.commands
             .iter()
             .filter(|cmd| self.restricted_match(cmd))
@@ -439,6 +459,28 @@ impl CommandRegistry {
                 .any(|yielded| yielded.eq_ignore_ascii_case(name))
     }
 
+    fn external_agent_advertises(&self, name: &str) -> bool {
+        self.commands.iter().zip(self.sources.iter()).any(
+            |(cmd, source)| {
+                *source == CommandSource::Acp && cmd.name().eq_ignore_ascii_case(name)
+            },
+        )
+    }
+
+    /// Whether a builtin is hidden so an external agent can own the name.
+    fn skips_yielded_builtin(&self, canonical: &str, source: CommandSource) -> bool {
+        if source != CommandSource::Builtin || !self.yields_to_external_agent(canonical) {
+            return false;
+        }
+        if YIELDED_WHEN_ADVERTISED
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(canonical))
+        {
+            return self.external_agent_advertises(canonical);
+        }
+        true
+    }
+
     /// Replace all ACP-sourced commands with a new set. Builtin commands are preserved. ACP names that collide with a
     /// builtin trigger or blocked name are skipped. The shell advertises colliding skills already qualified
     /// (`acme:login`). An external agent may claim a yielded builtin (`/compact`). Triggers a full `rebuild_triggers()`.
@@ -575,9 +617,7 @@ impl CommandRegistry {
 
             // Skip hidden commands; they don't get triggers or key_to_index entries.
             // An external agent owns yielded builtins (`/compact`). The advertised command keeps the name.
-            if self.hidden.contains(canonical)
-                || (source == CommandSource::Builtin && self.yields_to_external_agent(canonical))
-            {
+            if self.hidden.contains(canonical) || self.skips_yielded_builtin(canonical, source) {
                 continue;
             }
 
@@ -798,6 +838,128 @@ mod tests {
                 .get_for_dispatch("compact")
                 .map(|cmd| cmd.provenance()),
             Some(CommandProvenance::Builtin)
+        );
+    }
+
+    #[test]
+    fn external_agent_advertised_usage_replaces_the_builtin() {
+        use crate::slash::command::CommandProvenance;
+        use crate::slash::commands::usage::UsageCommand;
+
+        let mut registry = CommandRegistry::new(vec![Arc::new(UsageCommand)]);
+        assert_eq!(
+            registry
+                .get_for_dispatch("usage")
+                .map(|cmd| cmd.provenance()),
+            Some(CommandProvenance::Builtin)
+        );
+
+        assert!(registry.set_external_agent(true));
+        assert_eq!(
+            registry
+                .get_for_dispatch("usage")
+                .map(|cmd| cmd.provenance()),
+            Some(CommandProvenance::Builtin),
+            "without a catalog entry the pager keeps /usage"
+        );
+
+        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+            "usage".to_string(),
+            "Show token usage".to_string(),
+        )]);
+        let advertised = registry
+            .get_for_dispatch("usage")
+            .expect("the agent's /usage is offered");
+        assert_eq!(advertised.provenance(), CommandProvenance::Shell);
+        assert_eq!(advertised.description(), "Show token usage");
+    }
+
+    #[test]
+    fn native_session_keeps_builtin_usage_when_the_catalog_repeats_the_name() {
+        use crate::slash::command::CommandProvenance;
+        use crate::slash::commands::usage::UsageCommand;
+
+        let mut registry = CommandRegistry::new(vec![Arc::new(UsageCommand)]);
+        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+            "usage".to_string(),
+            "Show token usage".to_string(),
+        )]);
+        assert_eq!(
+            registry
+                .get_for_dispatch("usage")
+                .map(|cmd| cmd.provenance()),
+            Some(CommandProvenance::Builtin)
+        );
+    }
+
+    #[test]
+    fn external_agent_advertised_context_replaces_the_builtin() {
+        use crate::slash::command::CommandProvenance;
+        use crate::slash::commands::context::ContextCommand;
+
+        let mut registry = CommandRegistry::new(vec![Arc::new(ContextCommand)]);
+        assert!(registry.set_external_agent(true));
+        assert_eq!(
+            registry
+                .get_for_dispatch("context")
+                .map(|cmd| cmd.provenance()),
+            Some(CommandProvenance::Builtin),
+            "without a catalog entry the pager keeps /context"
+        );
+
+        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+            "context".to_string(),
+            "Show context window".to_string(),
+        )]);
+        let advertised = registry
+            .get_for_dispatch("context")
+            .expect("the agent's /context is offered");
+        assert_eq!(advertised.provenance(), CommandProvenance::Shell);
+        assert_eq!(advertised.description(), "Show context window");
+    }
+
+    #[test]
+    fn native_session_keeps_builtin_context_when_the_catalog_repeats_the_name() {
+        use crate::slash::command::CommandProvenance;
+        use crate::slash::commands::context::ContextCommand;
+
+        let mut registry = CommandRegistry::new(vec![Arc::new(ContextCommand)]);
+        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+            "context".to_string(),
+            "Show context window".to_string(),
+        )]);
+        assert_eq!(
+            registry
+                .get_for_dispatch("context")
+                .map(|cmd| cmd.provenance()),
+            Some(CommandProvenance::Builtin)
+        );
+    }
+
+    #[test]
+    fn tier_restricted_usage_yields_to_an_advertised_external_agent_command() {
+        use crate::slash::command::CommandProvenance;
+        use crate::slash::commands::usage::UsageCommand;
+
+        let mut registry = CommandRegistry::new(vec![Arc::new(UsageCommand)]);
+        registry.set_restricted_commands(&["usage".to_string()]);
+        assert!(registry.get_for_dispatch("usage").is_none());
+        assert!(registry.is_restricted("usage"));
+
+        assert!(registry.set_external_agent(true));
+        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+            "usage".to_string(),
+            "Claude usage".to_string(),
+        )]);
+        assert_eq!(
+            registry
+                .get_for_dispatch("usage")
+                .map(|cmd| cmd.provenance()),
+            Some(CommandProvenance::Shell)
+        );
+        assert!(
+            !registry.is_restricted("usage"),
+            "tier gate applies to Grok billing, not the agent's /usage"
         );
     }
 
