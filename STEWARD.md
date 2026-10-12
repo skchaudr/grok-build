@@ -7,7 +7,8 @@ Repos: ~/repos/grok-build (main), ~/repos/Pi-Coding-Agent (main, pi-acp-patched/
 Sab's words: "it's like been an instinct or a reflex for me to say that it has to visually verify. And technically, if there is one place to do that on, it would be here." and "why couldn't we have just batched all of their work into one build ... I could have visually tested it, and then go back have them all make changes if needed."
 
 ## Standing rules
-- One integration branch. Workers commit there; you build it once, verify once on screen (pty: `grok claude`, `grok pi` with the PATCHED pi-acp on PATH), send one round of fixes back, rebuild. Not one loop per branch.
+- Flow, in Sab's words: "batching all the changes made, skipping visual verification because that involves this heavy, heavy cycle of building, testing, rebuilding, testing. Just have the agents do a code review so that logical mistakes are caught, and then from there we do the one batch one build. I visually verify. If there's still issues, I report back the issues, and then we go from there."
+  So: workers commit to one integration branch; a reviewer agent (sonnet or opus, read-only) reviews the diff for logic errors and tests; fix findings; ONE build; run the unit tests; write `READY <commit> <binary path>` to STEWARD.log and stop. Sab verifies on screen. Issues come back as lines in STEWARD.inbox; fix, one rebuild, READY again. No pty loops unless Sab asks.
 - Per-worktree cargo targets (remove `[build] target-dir` from ~/.cargo/config.toml once gb-tui-controls has landed; keep debug=0, incremental=false). Never `cargo clean` while anything may be building. `df -h /` before every build.
 - You are the verifier. Verdict only from what you saw on screen plus tests. Merge --no-ff into main, pull before push, push.
 - Commit trailers on every commit: `Co-authored-by: claude-code <claude-code@anthropic.com>` and `Co-authored-by: DSH + Claude Opus 5.5`.
