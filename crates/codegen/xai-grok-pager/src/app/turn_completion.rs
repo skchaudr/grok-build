@@ -331,9 +331,11 @@ fn open_prompt_blocked_card(
 /// Push a turn-terminal marker ("Turn completed/cancelled/failed"); every marker rail routes through here, wake turns
 /// via `finish_wake_turn`. `event == None` (bash turns, rate-limit / re-auth UX that replaces the marker) pushes nothing.
 pub(super) fn push_turn_terminal_marker(agent: &mut AgentView, event: Option<SessionEvent>) {
+    let completed = matches!(event, Some(SessionEvent::TurnCompleted { .. }));
     if let Some(event) = event {
         agent.push_end_marker_block(event);
     }
+    agent.push_silent_forwarded_slash_notice(completed);
 }
 
 /// A turn-terminal signal's wire fields (`turn_completed` params and `_meta`, or the legacy `prompt_complete` payload).

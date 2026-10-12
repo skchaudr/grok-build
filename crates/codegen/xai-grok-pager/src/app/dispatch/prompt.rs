@@ -1239,6 +1239,7 @@ pub(super) fn dispatch_send_prompt_submission(
             // Self-originated: when this prompt becomes the running turn, the ACP gate must treat its deltas as ours, not another client's
             // Adoption happens via the `running_prompt_id` broadcast and the turn-start shim
             agent.note_self_originated_prompt(&prompt_id);
+            agent.session.note_turn_prompt(&text);
             // Plain image-free sends set no send-now cancel expectation: shell queue state and cancelTrigger decide the outcome
 
             if consume_input {

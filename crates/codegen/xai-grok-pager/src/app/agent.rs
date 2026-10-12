@@ -758,6 +758,11 @@ pub struct AgentSession {
     /// Used by `do_cancel_turn` to "rewind" a prompt back to the input box if the user cancels before any response arrives.
     /// `None` for skill-injected prompts (cannot be reversed) and bash/cron.
     pub in_flight_prompt: Option<InFlightPrompt>,
+    /// Name of the slash command (no `/`) at the head of the prompt now running, set at send time.
+    /// Lets turn end tell the user when an external agent swallowed a forwarded command's output.
+    pub forwarded_slash: Option<String>,
+    /// Whether this turn streamed any agent message text (live, not replay).
+    pub turn_saw_agent_text: bool,
     /// Prompt held across auto-compact for reauth resubmit after `/login`.
     /// `in_flight_prompt` is cleared on compact start so cancel cannot rewind.
     pub compact_held_prompt: Option<InFlightPrompt>,
@@ -852,7 +857,19 @@ impl AgentSession {
         scrollback: &mut ScrollbackState,
     ) -> bool {
         self.tracker.set_session_cwd(&self.cwd);
+        if !meta.is_replay
+            && let acp::SessionUpdate::AgentMessageChunk(chunk) = &update
+            && matches!(&chunk.content, acp::ContentBlock::Text(t) if !t.text.trim().is_empty())
+        {
+            self.turn_saw_agent_text = true;
+        }
         self.tracker.handle_update(update, meta, scrollback)
+    }
+    /// Record the prompt text about to run so turn end can detect a forwarded slash command that produced no output.
+    pub fn note_turn_prompt(&mut self, text: &str) {
+        self.turn_saw_agent_text = false;
+        self.forwarded_slash = crate::slash::parse_invocation(text.trim_start())
+            .map(|inv| inv.token.to_string());
     }
     /// Start a new turn: set state to TurnRunning, prepare tracker.
     ///
@@ -1132,6 +1149,8 @@ mod tests {
             bg_tool_call_to_task: HashMap::new(),
             scheduled_tasks: HashMap::new(),
             in_flight_prompt: None,
+            forwarded_slash: None,
+            turn_saw_agent_text: false,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,

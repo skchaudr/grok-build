@@ -607,6 +607,8 @@ pub struct AppView {
     pub tier_restricted_commands: Vec<String>,
     /// This pager was started with `--agent-cmd`. Every session it drives is an external ACP agent.
     pub external_agent: bool,
+    /// Agent name derived from `--agent-cmd` (e.g. `claude`, `pi`), used in notices when the session reports none.
+    pub external_agent_label: Option<String>,
     /// Whether the pager is connected via a leader (leader mode).
     /// The Agent Dashboard entry points (`/dashboard`, `Ctrl+\`, `grok dashboard`, the startup hook) are gated on this flag.
     /// They are only meaningful when a leader is coordinating a fleet of sessions.
@@ -1587,6 +1589,7 @@ impl AppView {
             backend_billed: false,
             tier_restricted_commands: Vec::new(),
             external_agent: false,
+            external_agent_label: None,
             leader_mode: false,
             credit_balance: None,
             auto_topup: None,
@@ -5397,6 +5400,7 @@ impl AppView {
                     .session_agent_name
                     .as_deref()
                     .filter(|s| !s.trim().is_empty())
+                    .or(self.external_agent_label.as_deref())
                     .unwrap_or("agent");
                 registry.set_external_agent_label(label);
             }

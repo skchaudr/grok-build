@@ -442,6 +442,8 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            forwarded_slash: None,
+            turn_saw_agent_text: false,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: true,
@@ -1278,6 +1280,8 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            forwarded_slash: None,
+            turn_saw_agent_text: false,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -2005,6 +2009,18 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                 return open_agent_type_mismatch_question(app, model_id, effort, &display_name);
             }
             Err(SwitchModelError::Other(msg)) => {
+                // Undo the optimistic update from `set_default_model_inner` so the footer stops showing a model the agent rejected
+                // Skipped when the current model already moved on (e.g. an ACP model update landed mid-switch)
+                // The persisted `default_model` is not reverted: `rollback_value` only applies to persist failures
+                if let Some(prev) = prev_model_id
+                    && agent.session.models.current.as_ref() == Some(&model_id)
+                {
+                    agent.session.models.set_current(prev.clone(), None);
+                    if app.models.available.contains_key(&prev) {
+                        app.models.set_current(prev, None);
+                    }
+                    agent.refresh_context_total();
+                }
                 let text = match context_window_selection {
                     Some(selection) => {
                         format!(

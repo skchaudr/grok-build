@@ -18,6 +18,22 @@ pub const COMMON_EXTERNAL_AGENT_COMMANDS: &[&str] = &[
 /// Commands that get an unsupported stub when the agent does not advertise them.
 pub const EXTERNAL_COMMON_STUB_COMMANDS: &[&str] = &["usage", "context", "compact", "login"];
 
+/// Short agent name from an `--agent-cmd` line, for notices when the session reports no agent name.
+/// Skips a leading `env` and its `VAR=value` pairs, takes the program's basename, and drops an `-acp` / `-code-acp` suffix.
+pub fn agent_label_from_cmd(cmd: &str) -> Option<String> {
+    let mut words = cmd.split_whitespace().peekable();
+    if words.peek() == Some(&"env") {
+        words.next();
+    }
+    let program = words.find(|w| !w.contains('=') && !w.starts_with('-'))?;
+    let base = program.rsplit('/').next().unwrap_or(program);
+    let label = base
+        .strip_suffix("-code-acp")
+        .or_else(|| base.strip_suffix("-acp"))
+        .unwrap_or(base);
+    (!label.is_empty()).then(|| label.to_string())
+}
+
 fn description_for(name: &str) -> &'static str {
     match name {
         "usage" => "View token and cost usage",
@@ -75,6 +91,22 @@ mod tests {
     use crate::acp::model_state::ModelState;
     use crate::app::bundle::BundleState;
     use crate::slash::command::CommandExecCtx;
+
+    #[test]
+    fn agent_label_from_cmd_names_the_program() {
+        assert_eq!(
+            agent_label_from_cmd("env CLAUDE_CODE_EXECUTABLE=/usr/bin/claude /home/u/.local/bin/claude-acp"),
+            Some("claude".to_string())
+        );
+        assert_eq!(agent_label_from_cmd("pi-acp"), Some("pi".to_string()));
+        assert_eq!(agent_label_from_cmd("claude-code-acp"), Some("claude".to_string()));
+        assert_eq!(
+            agent_label_from_cmd("env DSH_ACP_MODEL=x dsh --profile acp-enhanced"),
+            Some("dsh".to_string())
+        );
+        assert_eq!(agent_label_from_cmd("cursor-agent acp"), Some("cursor-agent".to_string()));
+        assert_eq!(agent_label_from_cmd("  "), None);
+    }
 
     #[test]
     fn unsupported_stub_message_names_the_agent() {

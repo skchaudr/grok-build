@@ -1643,6 +1643,63 @@ fn incompatible_agent_rollback_restores_previous_model() {
 }
 
 #[test]
+fn other_switch_failure_rolls_back_optimistic_model_and_reports() {
+    // SetDefaultModel optimistically updates models.current; a failed switch (e.g. ACP "Method not found") must not leave the footer on the new model
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_a = acp::ModelId::new(std::sync::Arc::from("model-a"));
+    let model_b = acp::ModelId::new(std::sync::Arc::from("model-b"));
+    for (m, name) in [(&model_a, "A"), (&model_b, "B")] {
+        app.models
+            .available
+            .insert(m.clone(), acp::ModelInfo::new(m.clone(), name.to_string()));
+        test_agent_mut(&mut app, id)
+            .session
+            .models
+            .available
+            .insert(m.clone(), acp::ModelInfo::new(m.clone(), name.to_string()));
+    }
+    test_agent_mut(&mut app, id)
+        .session
+        .models
+        .set_current(model_a.clone(), None);
+    app.models.set_current(model_a.clone(), None);
+
+    dispatch(Action::SetDefaultModel(model_b.clone()), &mut app);
+    assert_eq!(
+        expect_agent(&app, id).session.models.current,
+        Some(model_b.clone())
+    );
+
+    dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            choice: ModelChoice::new(model_b),
+            result: Err(SwitchModelError::Other(
+                "Method not found: session/set_model".into(),
+            )),
+            prev_model_id: Some(model_a.clone()),
+        }),
+        &mut app,
+    );
+
+    assert_eq!(
+        expect_agent(&app, id).session.models.current,
+        Some(model_a.clone()),
+        "models.current must be rolled back on a failed switch",
+    );
+    assert_eq!(app.models.current, Some(model_a));
+    let sb = &expect_agent(&app, id).scrollback;
+    assert!(
+        (0..sb.len()).any(|i| matches!(
+            &sb.get(i).unwrap().block,
+            RenderBlock::System(s) if s.text.contains("Couldn't switch model")
+        )),
+        "failure must be reported in scrollback",
+    );
+}
+
+#[test]
 fn incompatible_agent_closes_active_modal() {
     use crate::views::modal::ActiveModal;
 

@@ -319,6 +319,41 @@ impl AgentView {
             .push_block(crate::scrollback::block::RenderBlock::SessionEvent(block));
     }
 
+    /// An external agent (e.g. claude-acp) can end a forwarded `/usage` or `/context` turn without a word; never swallow that silently.
+    /// Consumes the turn's forwarded-slash state on every turn end, so a later turn never inherits it.
+    pub(crate) fn push_silent_forwarded_slash_notice(&mut self, completed: bool) {
+        let forwarded_slash = self.session.forwarded_slash.take();
+        let saw_agent_text = std::mem::take(&mut self.session.turn_saw_agent_text);
+        let Some(name) = forwarded_slash else {
+            return;
+        };
+        let label = self
+            .prompt
+            .slash_controller
+            .registry()
+            .external_agent_label()
+            .map(str::to_owned);
+        crate::unified_log::info(
+            "slash.forwarded_turn_ended",
+            self.session.session_id.as_ref().map(|s| s.0.as_ref()),
+            Some(serde_json::json!({
+                "command": name,
+                "external": label.is_some(),
+                "completed": completed,
+                "saw_agent_text": saw_agent_text,
+            })),
+        );
+        if let Some(label) = label
+            && completed
+            && !saw_agent_text
+        {
+            self.scrollback
+                .push_block(crate::scrollback::block::RenderBlock::system(format!(
+                    "/{name} returned no output from {label} (not supported through ACP)"
+                )));
+        }
+    }
+
     /// Same derivation as the pane's own rows (origin plus wire kind under its `QueueMutation`), so keys and clicks agree with what it renders.
     pub(in crate::app) fn server_row_capabilities(
         &self,

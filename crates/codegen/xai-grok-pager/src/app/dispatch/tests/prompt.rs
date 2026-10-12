@@ -3583,6 +3583,78 @@ fn external_agent_forwards_advertised_usage_as_a_prompt() {
     );
 }
 
+/// External agent advertising `/usage`, with a forwarded `/usage` turn running.
+fn external_usage_turn(app: &mut AppView, id: AgentId) {
+    app.external_agent = true;
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session_agent_name = Some("claude".into());
+        let registry = agent.prompt.slash_controller.registry_mut();
+        registry.set_external_agent_label("claude");
+        registry.set_external_agent(true);
+        let models = agent.session.models.clone();
+        agent.prompt.sync_acp_commands(
+            &[acp::AvailableCommand::new(
+                "usage".to_string(),
+                "Show usage".to_string(),
+            )],
+            None,
+            &models,
+        );
+    }
+    let effects = dispatch(Action::SendPrompt("/usage".into()), app);
+    assert!(
+        matches!(effects.first(), Some(Effect::SendPrompt { .. })),
+        "{effects:?}"
+    );
+}
+
+fn end_external_turn(app: &mut AppView, id: AgentId) {
+    let prompt_id = agent_ref(app, id).session.current_prompt_id.clone();
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            prompt_id,
+        }),
+        app,
+    );
+}
+
+#[test]
+fn external_forwarded_usage_with_no_agent_text_pushes_a_notice() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    external_usage_turn(&mut app, id);
+    end_external_turn(&mut app, id);
+    assert!(scrollback_has_system_text(
+        &app,
+        id,
+        "/usage returned no output from claude (not supported through ACP)"
+    ));
+}
+
+#[test]
+fn external_forwarded_usage_with_agent_text_pushes_no_notice() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    external_usage_turn(&mut app, id);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let meta = crate::acp::meta::NotificationMeta::default();
+        agent.session.handle_update(
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                acp::ContentBlock::Text(acp::TextContent::new("usage: 5%".to_string())),
+            )),
+            &meta,
+            &mut agent.scrollback,
+        );
+    }
+    end_external_turn(&mut app, id);
+    assert!(!scrollback_has_system_text(&app, id, "returned no output"));
+}
+
 /// Claude advertises `/compact`. The pager must send that text to the agent, including the
 /// argument the native command refuses.
 #[test]

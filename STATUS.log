@@ -1,0 +1,8 @@
+2026-10-12T21:14:56Z building: loop owner started, df 14G
+2026-10-12T21:16:37Z fixing: pi-acp session/set_model (extMethod) + pager rollback/claude notice (sonnet subagent)
+2026-10-12T21:19:13Z pty-run: grok pi with patched pi-acp (pre pager-fix binary)
+2026-10-12T21:20:38Z pty-run: grok pi PASS (popup, /model->deepseek-flash in session file, /usage); waiting pager fixes for claude
+2026-10-12T21:38:20Z testing: pager lib tests after subagent fixes
+2026-10-12T21:48:48Z pty-run: grok claude with fixed pager (run2)
+2026-10-12T21:54:33Z fixing: claude notice moved to shared turn-end marker; rebuilding
+2026-10-12T22:01:09Z building: xai-grok-pager-bin (earlier runs used other session's binary from shared target)

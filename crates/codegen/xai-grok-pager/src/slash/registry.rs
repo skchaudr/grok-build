@@ -435,6 +435,12 @@ impl CommandRegistry {
         self.rebuild_triggers();
     }
 
+    /// Agent name for notices when this registry serves an external ACP agent; `None` for native Grok.
+    pub fn external_agent_label(&self) -> Option<&str> {
+        self.external_agent
+            .then_some(self.external_agent_label.as_str())
+    }
+
     /// Human-readable agent name for unsupported-command notices.
     pub fn set_external_agent_label(&mut self, label: impl Into<String>) {
         self.external_agent_label = label.into();
