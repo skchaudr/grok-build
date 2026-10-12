@@ -1385,6 +1385,7 @@ impl AcpUpdateTracker {
             let defer_as_bg = if let Some(pending) = self.pending_tools.get_mut(&tc_id) {
                 let bash_output = extract_bash_output_from_value(&tcu.fields.raw_output);
                 pending.base.update(tcu.fields);
+                accumulate_terminal_output(&mut pending.base, tcu.meta.as_ref());
                 if pending.entry_id.is_none() && is_bg_tool(&pending.base) {
                     let desc = extract_raw_field(&pending.base, "description");
                     Some((tc_id.clone(), desc, false))
@@ -1453,6 +1454,8 @@ impl AcpUpdateTracker {
                         let output_str = String::from_utf8_lossy(&bash_output.output);
                         return scrollback.set_execute_output(entry_id, &output_str);
                     }
+                    // `_meta.terminal_output` deltas (pi-acp, Zed dialect) are accumulated on the
+                    // base, so the block rebuilt above already carries the full output.
                     return true;
                 }
             } else {
@@ -1472,7 +1475,8 @@ impl AcpUpdateTracker {
             }
             unreachable!("both branches above return");
         }
-        if let Some(pending) = self.pending_tools.remove(&tc_id) {
+        if let Some(mut pending) = self.pending_tools.remove(&tc_id) {
+            accumulate_terminal_output(&mut pending.base, tcu.meta.as_ref());
             let merged = merge_tool_call_update(pending.base, tcu);
             let block = tool_call_to_block(
                 &merged,
@@ -1844,43 +1848,13 @@ fn tool_call_to_block(
                 .and_then(|m| m.get("bash_mode"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if let Some(bash) = extract_bash_output_from_value(&tc.raw_output) {
-                let output_str = String::from_utf8_lossy(&bash.output);
-                let mut block = ExecuteToolCallBlock::new(command).with_output(output_str.as_ref());
-                block.bash_mode = is_bash_mode;
-                block.header_display = header_display;
-                if let Some(desc) = description {
-                    block = block.with_description(desc);
-                }
-                if !success || bash.exit_code != 0 {
-                    let error_msg = if let Some(sig) = &bash.signal {
-                        sig.clone()
-                    } else if bash.exit_code != 0 {
-                        format!("exit code {}", bash.exit_code)
-                    } else {
-                        "Command failed".into()
-                    };
-                    block = block.with_error(error_msg);
-                }
-                RenderBlock::ToolCall(ToolCallBlock::Execute(block))
-            } else {
-                let mut block = ExecuteToolCallBlock::new(command);
-                block.bash_mode = is_bash_mode;
-                block.header_display = header_display;
-                if let Some(desc) = description {
-                    block = block.with_description(desc);
-                }
-                if !success {
-                    let text = content_text(tc);
-                    let error_msg = if text.is_empty() {
-                        "Command failed".to_string()
-                    } else {
-                        text
-                    };
-                    block = block.with_error(error_msg);
-                }
-                RenderBlock::ToolCall(ToolCallBlock::Execute(block))
+            let mut block = ExecuteToolCallBlock::new(command);
+            block.bash_mode = is_bash_mode;
+            block.header_display = header_display;
+            if let Some(desc) = description {
+                block = block.with_description(desc);
             }
+            finish_execute_block(block, tc, success)
         }
         acp::ToolKind::Read => {
             let path = extract_raw_field(tc, "file_path")
@@ -2280,40 +2254,12 @@ fn tool_call_to_block(
             if is_execute_tool_function_name(&tc.title) {
                 let command = execute_command_from_tool_call(tc);
                 let header_display = peeled_if_changed(&command, session_cwd);
-                if let Some(bash) = extract_bash_output_from_value(&tc.raw_output) {
-                    let output_str = String::from_utf8_lossy(&bash.output);
-                    let mut block =
-                        ExecuteToolCallBlock::new(command).with_output(output_str.as_ref());
-                    block.header_display = header_display;
-                    if let Some(desc) = extract_raw_field(tc, "description") {
-                        block = block.with_description(desc);
-                    }
-                    if !success || bash.exit_code != 0 {
-                        let error_msg = if let Some(sig) = &bash.signal {
-                            sig.clone()
-                        } else if bash.exit_code != 0 {
-                            format!("exit code {}", bash.exit_code)
-                        } else {
-                            "Command failed".into()
-                        };
-                        block = block.with_error(error_msg);
-                    }
-                    return RenderBlock::ToolCall(ToolCallBlock::Execute(block));
-                }
                 let mut block = ExecuteToolCallBlock::new(command);
                 block.header_display = header_display;
                 if let Some(desc) = extract_raw_field(tc, "description") {
                     block = block.with_description(desc);
                 }
-                if !success {
-                    let text = content_text(tc);
-                    block = block.with_error(if text.is_empty() {
-                        "Command failed".to_string()
-                    } else {
-                        text
-                    });
-                }
-                return RenderBlock::ToolCall(ToolCallBlock::Execute(block));
+                return finish_execute_block(block, tc, success);
             }
             let name = tool_call_title(tc);
             let summary = if tc.title.is_empty() {
@@ -2717,6 +2663,57 @@ fn extract_bash_output_from_value(raw: &Option<serde_json::Value>) -> Option<Bas
         Ok(ToolOutput::Bash(bash)) => Some(bash),
         _ => None,
     }
+}
+/// `_meta.terminal_output.data` (Zed/pi-acp dialect).
+fn terminal_output_data(meta: Option<&acp::Meta>) -> Option<&str> {
+    meta?.get("terminal_output")?.get("data")?.as_str()
+}
+/// Append an update's `_meta.terminal_output` delta to the cumulative text kept in the base
+/// tool call's meta, so a rebuilt block always carries the full output.
+fn accumulate_terminal_output(base: &mut acp::ToolCall, update_meta: Option<&acp::Meta>) {
+    let Some(delta) = terminal_output_data(update_meta) else {
+        return;
+    };
+    let mut acc = terminal_output_data(base.meta.as_ref())
+        .unwrap_or_default()
+        .to_owned();
+    acc.push_str(delta);
+    base.meta
+        .get_or_insert_with(Default::default)
+        .insert("terminal_output".into(), serde_json::json!({ "data": acc }));
+}
+/// Execute output from xAI `ToolOutput::Bash`, then `_meta.terminal_output`, then ACP text content.
+fn extract_execute_output(tc: &acp::ToolCall) -> Option<String> {
+    if let Some(bash) = extract_bash_output_from_value(&tc.raw_output) {
+        return Some(String::from_utf8_lossy(&bash.output).into_owned());
+    }
+    if let Some(data) = terminal_output_data(tc.meta.as_ref()) {
+        return Some(data.to_owned());
+    }
+    let text = content_text(tc);
+    (!text.is_empty()).then_some(text)
+}
+fn finish_execute_block(
+    mut block: ExecuteToolCallBlock,
+    tc: &acp::ToolCall,
+    success: bool,
+) -> RenderBlock {
+    let bash = extract_bash_output_from_value(&tc.raw_output);
+    let output = extract_execute_output(tc);
+    if let Some(output) = &output {
+        block = block.with_output(output);
+    }
+    let bash_failed = bash.as_ref().is_some_and(|b| b.exit_code != 0);
+    if !success || bash_failed {
+        let error_msg = match &bash {
+            Some(b) if b.signal.is_some() => b.signal.clone().unwrap_or_default(),
+            Some(b) if b.exit_code != 0 => format!("exit code {}", b.exit_code),
+            // Any text output is already shown as the block's output.
+            _ => "Command failed".into(),
+        };
+        block = block.with_error(error_msg);
+    }
+    RenderBlock::ToolCall(ToolCallBlock::Execute(block))
 }
 /// Extracted grep search results.
 #[derive(Default)]
