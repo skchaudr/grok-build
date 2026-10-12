@@ -713,8 +713,31 @@ pub(crate) fn execute(
         } => {
             let tx = acp_tx.clone();
             let cwd = cwd_override.unwrap_or_else(|| cwd.to_path_buf());
+            let external_agent = session_flags.external_agent;
             tasks
                 .spawn(async move {
+                    let payload = if external_agent {
+                        if query.is_some() || kind_filter.is_some() {
+                            tracing::debug!(
+                                "external agent session list ignores query/kind filters"
+                            );
+                        }
+                        let list_req = acp::ListSessionsRequest::new()
+                            .cwd(cwd.clone());
+                        let listed = acp_send(list_req, &tx).await;
+                        match listed {
+                            Ok(resp) => session_list::agent_acp_list_to_unified_payload(&resp),
+                            Err(error) => {
+                                return TaskResult::SessionListFailed {
+                                    host,
+                                    generation,
+                                    error: error.to_string(),
+                                    seq,
+                                    query,
+                                };
+                            }
+                        }
+                    } else {
                     let limit = if host
                         == crate::views::session_picker_surface::SessionPickerHost::Dashboard
                     {
@@ -766,10 +789,7 @@ pub(crate) fn execute(
                     );
                     let result = acp_send(request, &tx).await;
                     match result {
-                        Ok(resp) => {
-                            let payload = match read_session_list_response(
-                                resp.0.get(),
-                            ) {
+                        Ok(resp) => match read_session_list_response(resp.0.get()) {
                                 Ok(payload) => payload,
                                 Err(error) => {
                                     return TaskResult::SessionListFailed {
@@ -780,45 +800,47 @@ pub(crate) fn execute(
                                         query,
                                     };
                                 }
-                            };
-                            let partial = parse_session_list_partial(&payload);
-                            let scope = parse_session_list_scope(&payload);
-                            let sessions = match parse_session_picker_entries_blocking(
-                                    payload,
-                                    LocalPresence::for_host(host),
-                                )
-                                .await
-                            {
-                                Ok(sessions) => sessions,
-                                Err(error) => {
-                                    return TaskResult::SessionListFailed {
-                                        host,
-                                        generation,
-                                        error: sanitize_user_error(&error),
-                                        seq,
-                                        query,
-                                    };
-                                }
-                            };
-                            TaskResult::SessionListLoaded {
+                            },
+                        Err(error) => {
+                            return TaskResult::SessionListFailed {
                                 host,
                                 generation,
-                                sessions,
-                                partial,
-                                scope,
+                                error: error.to_string(),
                                 seq,
                                 query,
-                            }
+                            };
                         }
-                        Err(e) => {
-                            TaskResult::SessionListFailed {
+                    }
+                    };
+                    let partial = parse_session_list_partial(&payload);
+                    let scope = parse_session_list_scope(&payload);
+                    let presence = if external_agent {
+                        LocalPresence::Relabel
+                    } else {
+                        LocalPresence::for_host(host)
+                    };
+                    let sessions = match parse_session_picker_entries_blocking(payload, presence)
+                        .await
+                    {
+                        Ok(sessions) => sessions,
+                        Err(error) => {
+                            return TaskResult::SessionListFailed {
                                 host,
                                 generation,
-                                error: sanitize_user_error(&format!("{e}")),
+                                error: sanitize_user_error(&error),
                                 seq,
                                 query,
-                            }
+                            };
                         }
+                    };
+                    TaskResult::SessionListLoaded {
+                        host,
+                        generation,
+                        sessions,
+                        partial,
+                        scope,
+                        seq,
+                        query,
                     }
                 });
         }

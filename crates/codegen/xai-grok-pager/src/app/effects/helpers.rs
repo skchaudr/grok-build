@@ -500,6 +500,8 @@ pub(crate) struct SessionFlags {
     /// Startup resume target deferred to the worktree handler after missing local id/title resolution.
     /// Worktree failure messages append the no-match hint only when the failing target equals this value.
     pub resume_local_miss: Option<String>,
+    /// External ACP agent (`--agent-cmd` / `grok pi`) owns session storage; list via `session/list`.
+    pub external_agent: bool,
 }
 impl SessionFlags {
     /// Resolve the agent profile name from the flags.

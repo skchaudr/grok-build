@@ -46,6 +46,27 @@ impl ConversationsPartial {
     }
 }
 /// `x.ai/session/list` answers arrive either as a JSON-RPC envelope (`result` or `error`) or as the bare list payload.
+/// Map an ACP `session/list` response into the `x.ai/session/list` sessions array shape.
+pub(super) fn agent_acp_list_to_unified_payload(
+    response: &acp::ListSessionsResponse,
+) -> serde_json::Value {
+    use serde_json::json;
+    let sessions: Vec<serde_json::Value> = response
+        .sessions
+        .iter()
+        .map(|session| {
+            json!({
+                "sessionId": session.session_id.0.to_string(),
+                "cwd": session.cwd.to_string_lossy(),
+                "summary": session.title.as_deref().unwrap_or("Untitled"),
+                "updatedAt": session.updated_at.as_deref().unwrap_or(""),
+                "source": "local",
+            })
+        })
+        .collect();
+    json!({ "sessions": sessions })
+}
+
 pub(super) fn read_session_list_response(raw: &str) -> Result<Value, String> {
     let mut wrapper: Value = serde_json::from_str(raw).unwrap_or_default();
     if let Some(err) = wrapper.get("error") {

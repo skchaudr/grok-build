@@ -437,3 +437,28 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert_eq!(roster.origin.kind, "local");
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
 }
+
+#[test]
+fn agent_acp_list_maps_id_title_cwd_and_updated_at() {
+    let response = acp::ListSessionsResponse::new(vec![
+        acp::SessionInfo::new(
+            acp::SessionId::new("pi-sess-1"),
+            std::path::PathBuf::from("/work/repo"),
+        )
+        .title("Fix session resume")
+        .updated_at("2026-10-12T10:00:00Z"),
+    ]);
+    let payload = agent_acp_list_to_unified_payload(&response);
+    let row = payload
+        .get("sessions")
+        .and_then(|s| s.as_array())
+        .and_then(|a| a.first())
+        .expect("one session row");
+    assert_eq!(row.get("sessionId").and_then(|v| v.as_str()), Some("pi-sess-1"));
+    assert_eq!(row.get("summary").and_then(|v| v.as_str()), Some("Fix session resume"));
+    assert_eq!(row.get("cwd").and_then(|v| v.as_str()), Some("/work/repo"));
+    assert_eq!(
+        row.get("updatedAt").and_then(|v| v.as_str()),
+        Some("2026-10-12T10:00:00Z")
+    );
+}

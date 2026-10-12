@@ -3933,6 +3933,7 @@ pub(crate) fn session_flags_for_effects(
         screen_mode_label: Some(app.screen_mode.meta_label()),
         is_api_key_auth: app.is_api_key_auth,
         resume_local_miss: app.resume_local_miss.clone(),
+        external_agent: app.external_agent,
     }
 }
 /// Dispatch `action`, re-process `event` through the updated view, return one combined effect list.

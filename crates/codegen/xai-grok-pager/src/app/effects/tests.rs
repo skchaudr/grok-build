@@ -1928,6 +1928,67 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         );
     assert_eq!(j(nth(&captured, 3), "query"), "fail-me");
 }
+
+#[tokio::test]
+async fn fetch_session_list_external_agent_uses_acp_session_list() {
+    use xai_acp_lib::AcpAgentMessage;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                AcpAgentMessage::ListSessions(args) => {
+                    let body = acp::ListSessionsResponse::new(vec![
+                        acp::SessionInfo::new(
+                            acp::SessionId::new("ext-1"),
+                            std::path::PathBuf::from("/tmp/wt"),
+                        )
+                        .title("Pi session")
+                        .updated_at("2026-10-12T10:00:00Z"),
+                    ]);
+                    let _ = args.response_tx.send(Ok(body));
+                }
+                AcpAgentMessage::ExtMethod(args) => {
+                    panic!(
+                        "external agent must not call x.ai/session/list, got {}",
+                        args.request.method
+                    );
+                }
+                _ => {}
+            }
+        }
+    });
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+    execute(
+        Effect::FetchSessionList {
+            host: crate::views::session_picker_surface::SessionPickerHost::Welcome,
+            cwd_override: Some(std::path::PathBuf::from("/tmp/wt")),
+            generation: 1,
+            query: None,
+            seq: 1,
+            kind_filter: None,
+            headless_policy: Default::default(),
+        },
+        &mut tasks,
+        &tx,
+        Path::new("/tmp/wt"),
+        &SessionFlags {
+            external_agent: true,
+            ..SessionFlags::default()
+        },
+        &progress_tx,
+    );
+    match tasks.join_next().await.expect("task").expect("no panic") {
+        TaskResult::SessionListLoaded { sessions, .. } => {
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0].id, "ext-1");
+            assert_eq!(sessions[0].summary, "Pi session");
+            assert_eq!(sessions[0].cwd, "/tmp/wt");
+        }
+        other => panic!("expected SessionListLoaded, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn fetch_dashboard_sessions_explicitly_excludes_headless() {
     use std::sync::{Arc, Mutex};
