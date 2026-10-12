@@ -5391,11 +5391,16 @@ impl AppView {
                     })
                     .collect(),
             );
-            let external_catalog_changed = agent
-                .prompt
-                .slash_controller
-                .registry_mut()
-                .set_external_agent(self.external_agent);
+            let mut registry = agent.prompt.slash_controller.registry_mut();
+            if self.external_agent {
+                let label = agent
+                    .session_agent_name
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("agent");
+                registry.set_external_agent_label(label);
+            }
+            let external_catalog_changed = registry.set_external_agent(self.external_agent);
             if external_catalog_changed
                 || agent.acp_synced_generation != agent.session.available_commands_generation
             {

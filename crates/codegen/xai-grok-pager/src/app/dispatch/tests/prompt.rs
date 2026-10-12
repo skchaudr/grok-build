@@ -3529,6 +3529,60 @@ fn slash_compact_enqueues_command() {
     assert!(agent_ref(&app, id).prompt.text().is_empty());
 }
 
+#[test]
+fn external_agent_usage_stub_shows_unsupported_in_scrollback() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.external_agent = true;
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .prompt
+            .slash_controller
+            .registry_mut()
+            .set_external_agent_with_label(true, Some("pi".into()));
+        let models = agent.session.models.clone();
+        agent.prompt.sync_acp_commands(&[], None, &models);
+    }
+
+    let before = agent_scrollback_len(&app);
+    let effects = dispatch(Action::SendPrompt("/usage".into()), &mut app);
+    assert!(effects.is_empty());
+    assert_eq!(agent_scrollback_len(&app), before + 1);
+    let text = last_system_text(&app, id);
+    assert_eq!(text, "/usage is not supported by pi");
+}
+
+#[test]
+fn external_agent_forwards_advertised_usage_as_a_prompt() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.external_agent = true;
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .prompt
+            .slash_controller
+            .registry_mut()
+            .set_external_agent(true);
+        let models = agent.session.models.clone();
+        agent.prompt.sync_acp_commands(
+            &[acp::AvailableCommand::new(
+                "usage".to_string(),
+                "Show usage".to_string(),
+            )],
+            None,
+            &models,
+        );
+    }
+
+    let effects = dispatch(Action::SendPrompt("/usage".into()), &mut app);
+    assert!(
+        matches!(effects.first(), Some(Effect::SendPrompt { text, .. }) if text == "/usage"),
+        "advertised /usage must pass through: {effects:?}"
+    );
+}
+
 /// Claude advertises `/compact`. The pager must send that text to the agent, including the
 /// argument the native command refuses.
 #[test]

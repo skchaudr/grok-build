@@ -11,6 +11,7 @@
 pub mod acp_command;
 pub mod command;
 pub mod commands;
+pub mod external_common;
 pub mod matcher;
 pub(crate) mod mid_text_hoist;
 pub mod mode_support;
