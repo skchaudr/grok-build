@@ -5382,3 +5382,66 @@ fn hook_gate_survives_a_text_chunk_stamped_before_the_batch() {
         Some(TurnActivity::Waiting(WaitingReason::Hooks { .. }))
     ));
 }
+
+fn execute_output(sb: &ScrollbackState) -> Option<String> {
+    match &sb.last()?.block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(exec)) => exec.output.clone(),
+        _ => None,
+    }
+}
+fn terminal_meta(data: &str) -> acp::Meta {
+    serde_json::json!({ "terminal_output": { "terminal_id": "tc1", "data": data } })
+        .as_object()
+        .cloned()
+        .unwrap()
+}
+
+/// claude-acp: Bash output arrives only as ACP text `content` on the completing update.
+#[test]
+fn external_execute_completion_uses_text_content_as_output() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(tool_call("tc1", acp::ToolKind::Execute, "ls"), &meta(), &mut sb);
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("tc1")),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Completed))
+                .content(vec![acp::ToolCallContent::from("a.txt\nb.txt")]),
+        )),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(execute_output(&sb).as_deref(), Some("a.txt\nb.txt"));
+}
+
+/// pi-acp / Zed dialect: output streams as `_meta.terminal_output` deltas; the final
+/// block must hold all of it, not just the last delta.
+#[test]
+fn external_execute_terminal_output_deltas_accumulate() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(tool_call("tc1", acp::ToolKind::Execute, "seq 3"), &meta(), &mut sb);
+    for (data, status) in [
+        ("1\n", acp::ToolCallStatus::InProgress),
+        ("2\n", acp::ToolCallStatus::InProgress),
+        ("3\n", acp::ToolCallStatus::Completed),
+    ] {
+        tracker.handle_update(
+            acp::SessionUpdate::ToolCallUpdate(
+                acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new(Arc::from("tc1")),
+                    acp::ToolCallUpdateFields::new().status(Some(status)),
+                )
+                .meta(terminal_meta(data)),
+            ),
+            &meta(),
+            &mut sb,
+        );
+        if status == acp::ToolCallStatus::InProgress {
+            assert!(execute_output(&sb).is_some(), "streams before completion");
+        }
+    }
+    assert_eq!(execute_output(&sb).as_deref(), Some("1\n2\n3\n"));
+    assert_eq!(sb.len(), 1);
+}
