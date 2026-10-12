@@ -43,7 +43,9 @@ impl AppView {
     }
     pub(crate) fn begin_foreign_resume_detection(&mut self) -> Option<Effect> {
         let compat = self.foreign_session_compat;
-        if self.foreign_resume_launch.is_some()
+        // `/resume-claude` etc. are Grok skills; an external agent host would receive them as plain text.
+        if self.external_agent
+            || self.foreign_resume_launch.is_some()
             || !(compat.claude || compat.codex || compat.cursor)
             || !self.pristine_foreign_resume_welcome()
         {

@@ -428,6 +428,19 @@ fn resume_foreign_session_consumes_hint_and_uses_each_tools_prompt() {
     }
 }
 #[test]
+fn external_agent_host_never_offers_foreign_resume_hint() {
+    let mut app = test_app();
+    app.external_agent = true;
+    app.foreign_session_compat = xai_grok_foreign_sessions::EnabledForeignSessionSources {
+        claude: true,
+        codex: true,
+        cursor: true,
+    };
+    assert!(app.begin_foreign_resume_detection().is_none());
+    assert!(app.foreign_resume_hint().is_none());
+    assert!(dispatch(Action::ResumeForeignSession, &mut app).is_empty());
+}
+#[test]
 fn resume_foreign_session_without_hint_is_noop() {
     let mut app = test_app();
     assert!(app.foreign_resume_hint().is_none());
