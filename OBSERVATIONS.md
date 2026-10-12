@@ -23,3 +23,13 @@ Evidence:
 - Not merged to main.
 
 Left in place (not deleted): `.worktrees/gb-session-resume/target` 36G.
+
+## 2026-10-12 Merger fixes (worker)
+
+1. Restored `sanitize_user_error` on native `FetchSessionList` parse/transport error paths (including `read_session_list_response` failures); rustfmt’d the non-external branch.
+2. Removed `xai-grok-shell/tests/test_external_acp_session_list.rs` (Python-only JSON-RPC loop, no pager/`FetchSessionList`). External list coverage: `xai-grok-pager` `fetch_session_list_external_agent_uses_acp_session_list` + `agent_acp_list_maps_id_title_cwd_and_updated_at`.
+3. pi-acp `loadSession` `usage_update`: `used` from `getSessionStats().contextUsage.tokens` (fallback `tokens.total`); `size` from `contextUsage.contextWindow` when Pi returns it — no `usage_update` if window unknown (avoids hardcoded `200000`).
+
+Not merged to main.
+
+WORKER DONE (pending commit)

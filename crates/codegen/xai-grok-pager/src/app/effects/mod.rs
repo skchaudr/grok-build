@@ -731,86 +731,86 @@ pub(crate) fn execute(
                                 return TaskResult::SessionListFailed {
                                     host,
                                     generation,
-                                    error: error.to_string(),
+                                    error: sanitize_user_error(&format!("{error}")),
                                     seq,
                                     query,
                                 };
                             }
                         }
                     } else {
-                    let limit = if host
-                        == crate::views::session_picker_surface::SessionPickerHost::Dashboard
-                    {
-                        DASHBOARD_SESSION_LIST_LIMIT
-                    } else {
-                        SESSION_LIST_LIMIT
-                    };
-                    let mut params = serde_json::json!({
-                    "cwd": cwd.to_string_lossy(),
-                    "limit": limit,
-                    "headless": headless_policy.as_wire_str(),
-                });
-                    if let Some(obj) = params.as_object_mut() {
-                        if let Some(q) = &query {
-                            obj.insert(
-                                "query".into(),
-                                serde_json::Value::String(q.clone()),
-                            );
+                        let limit = if host
+                            == crate::views::session_picker_surface::SessionPickerHost::Dashboard
+                        {
+                            DASHBOARD_SESSION_LIST_LIMIT
                         } else {
-                            obj.insert(
-                                "allowRelax".into(),
-                                serde_json::Value::Bool(true),
-                            );
+                            SESSION_LIST_LIMIT
+                        };
+                        let mut params = serde_json::json!({
+                            "cwd": cwd.to_string_lossy(),
+                            "limit": limit,
+                            "headless": headless_policy.as_wire_str(),
+                        });
+                        if let Some(obj) = params.as_object_mut() {
+                            if let Some(q) = &query {
+                                obj.insert(
+                                    "query".into(),
+                                    serde_json::Value::String(q.clone()),
+                                );
+                            } else {
+                                obj.insert(
+                                    "allowRelax".into(),
+                                    serde_json::Value::Bool(true),
+                                );
+                            }
+                            if let Some(kinds) = &kind_filter {
+                                obj.insert(
+                                    "_meta".into(),
+                                    serde_json::json!({
+                                        "x.ai/facetFilters": { "kind": kinds },
+                                    }),
+                                );
+                                tracing::info!(
+                                    target: "grok.pager.workspace_mode",
+                                    event = "session_list_fetch",
+                                    kind_filter = ?kinds,
+                                    query = ?query,
+                                    ?host,
+                                    generation,
+                                    seq,
+                                    "FetchSessionList with kind facet filter"
+                                );
+                            }
                         }
-                        if let Some(kinds) = &kind_filter {
-                            obj.insert(
-                                "_meta".into(),
-                                serde_json::json!({
-                                "x.ai/facetFilters": { "kind": kinds },
-                            }),
-                            );
-                            tracing::info!(
-                            target: "grok.pager.workspace_mode",
-                            event = "session_list_fetch",
-                            kind_filter = ?kinds,
-                            query = ?query,
-                            ?host,
-                            generation,
-                            seq,
-                            "FetchSessionList with kind facet filter"
+                        let request = acp::ExtRequest::new(
+                            "x.ai/session/list",
+                            serde_json::value::to_raw_value(&params)
+                                .expect("serialize session list params")
+                                .into(),
                         );
-                        }
-                    }
-                    let request = acp::ExtRequest::new(
-                        "x.ai/session/list",
-                        serde_json::value::to_raw_value(&params)
-                            .expect("serialize session list params")
-                            .into(),
-                    );
-                    let result = acp_send(request, &tx).await;
-                    match result {
-                        Ok(resp) => match read_session_list_response(resp.0.get()) {
+                        let result = acp_send(request, &tx).await;
+                        match result {
+                            Ok(resp) => match read_session_list_response(resp.0.get()) {
                                 Ok(payload) => payload,
                                 Err(error) => {
                                     return TaskResult::SessionListFailed {
                                         host,
                                         generation,
-                                        error,
+                                        error: sanitize_user_error(&error),
                                         seq,
                                         query,
                                     };
                                 }
                             },
-                        Err(error) => {
-                            return TaskResult::SessionListFailed {
-                                host,
-                                generation,
-                                error: error.to_string(),
-                                seq,
-                                query,
-                            };
+                            Err(error) => {
+                                return TaskResult::SessionListFailed {
+                                    host,
+                                    generation,
+                                    error: sanitize_user_error(&format!("{error}")),
+                                    seq,
+                                    query,
+                                };
+                            }
                         }
-                    }
                     };
                     let partial = parse_session_list_partial(&payload);
                     let scope = parse_session_list_scope(&payload);
