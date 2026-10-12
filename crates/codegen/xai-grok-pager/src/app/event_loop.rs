@@ -1712,6 +1712,15 @@ pub(crate) async fn run(
         return Ok(finish_run(&mut app));
     }
     use crate::app::session_startup::MaterializedStartup;
+    // External agents own their session store, so `--resume <id>` learns the original cwd from `session/list`.
+    let external_resume_cwd = match &materialized {
+        MaterializedStartup::Resume { session_id, .. }
+            if app.external_agent && session_cwd.is_none() && args.worktree.is_none() =>
+        {
+            crate::app::effects::resolve_external_session_cwd(&app.acp_tx, session_id).await
+        }
+        _ => None,
+    };
     let startup_action = match &materialized {
         MaterializedStartup::Resume {
             session_id,
@@ -1744,7 +1753,7 @@ pub(crate) async fn run(
             }
             Some(Action::LoadSession(
                 session_id.clone(),
-                session_cwd.clone(),
+                session_cwd.clone().or(external_resume_cwd),
                 false,
             ))
         }

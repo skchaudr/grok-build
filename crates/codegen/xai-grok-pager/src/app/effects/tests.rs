@@ -1937,6 +1937,10 @@ async fn fetch_session_list_external_agent_uses_acp_session_list() {
         while let Some(msg) = rx.recv().await {
             match msg {
                 AcpAgentMessage::ListSessions(args) => {
+                    assert_eq!(
+                        args.request.cwd, None,
+                        "external list must not filter by launch cwd"
+                    );
                     let body = acp::ListSessionsResponse::new(vec![
                         acp::SessionInfo::new(
                             acp::SessionId::new("ext-1"),
@@ -1989,6 +1993,54 @@ async fn fetch_session_list_external_agent_uses_acp_session_list() {
     }
 }
 
+/// Fake external agent: answers `session/list` from `pages`, keyed by cursor (`None` = first page).
+fn spawn_paged_session_list(
+    pages: Vec<(Option<&'static str>, Vec<(&'static str, &'static str)>, Option<&'static str>)>,
+) -> xai_acp_lib::AcpAgentTx {
+    use xai_acp_lib::AcpAgentMessage;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let AcpAgentMessage::ListSessions(args) = msg {
+                assert_eq!(args.request.cwd, None, "lookup must not filter by cwd");
+                let cursor = args.request.cursor.clone();
+                let (_, rows, next) = pages
+                    .iter()
+                    .find(|(c, _, _)| c.map(str::to_owned) == cursor)
+                    .expect("known cursor");
+                let mut body = acp::ListSessionsResponse::new(
+                    rows.iter()
+                        .map(|(id, cwd)| {
+                            acp::SessionInfo::new(
+                                acp::SessionId::new(*id),
+                                std::path::PathBuf::from(*cwd),
+                            )
+                        })
+                        .collect(),
+                );
+                body.next_cursor = next.map(str::to_owned);
+                let _ = args.response_tx.send(Ok(body));
+            }
+        }
+    });
+    tx
+}
+#[tokio::test]
+async fn resolve_external_session_cwd_follows_cursor_to_the_session() {
+    let tx = spawn_paged_session_list(vec![
+        (None, vec![("other", "/elsewhere")], Some("50")),
+        (Some("50"), vec![("pi-target", "/work/pi-repo")], None),
+    ]);
+    assert_eq!(
+        resolve_external_session_cwd(&tx, "pi-target").await,
+        Some(std::path::PathBuf::from("/work/pi-repo"))
+    );
+}
+#[tokio::test]
+async fn resolve_external_session_cwd_is_none_when_unlisted() {
+    let tx = spawn_paged_session_list(vec![(None, vec![("other", "/elsewhere")], None)]);
+    assert_eq!(resolve_external_session_cwd(&tx, "missing").await, None);
+}
 #[tokio::test]
 async fn fetch_dashboard_sessions_explicitly_excludes_headless() {
     use std::sync::{Arc, Mutex};

@@ -340,6 +340,9 @@ fn dispatch_dashboard_load_local_build(
     session_id: String,
     cwd_hint: Option<std::path::PathBuf>,
 ) -> Vec<Effect> {
+    if app.external_agent {
+        return dispatch_dashboard_load_session(app, session_id, cwd_hint);
+    }
     let resolved = cwd_hint
         .and_then(|cwd| {
             xai_grok_shell::session::resolve_local_session(&session_id, &cwd.to_string_lossy())

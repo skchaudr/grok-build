@@ -1,0 +1,4 @@
+2026-10-12T21:14:55Z building
+2026-10-12T21:22:42Z pty-run (build ok a2fc5e04, disk 7.8G)
+2026-10-12T21:28:09Z fixing picker-select 'Session not found locally' + external resume cwd (session-map cwd overwritten to ~)
+2026-10-12T21:30:23Z testing (picker-select + resume-cwd fix, uncommitted)

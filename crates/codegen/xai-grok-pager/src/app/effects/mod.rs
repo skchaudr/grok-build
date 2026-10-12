@@ -20,6 +20,7 @@ pub(crate) use helpers::{
 };
 #[cfg(feature = "local-workspace")]
 pub(crate) use helpers::reject_non_fs_only_advertised_tools;
+pub(crate) use session_list::resolve_external_session_cwd;
 use helpers::*;
 use session_list::{
     LocalPresence, parse_session_list_partial, parse_session_list_scope,
@@ -722,8 +723,8 @@ pub(crate) fn execute(
                                 "external agent session list ignores query/kind filters"
                             );
                         }
-                        let list_req = acp::ListSessionsRequest::new()
-                            .cwd(cwd.clone());
+                        // No cwd filter: the picker groups rows by cwd, and resuming a row loads it in its own cwd.
+                        let list_req = acp::ListSessionsRequest::new();
                         let listed = acp_send(list_req, &tx).await;
                         match listed {
                             Ok(resp) => session_list::agent_acp_list_to_unified_payload(&resp),

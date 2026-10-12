@@ -414,6 +414,11 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
     if chat_kind {
         return dispatch_load_session(app, session_id, None, true);
     }
+    if app.external_agent {
+        // External ACP agents own their sessions; the grok store never has them. Load in the row's cwd.
+        let session_cwd = (!cwd.is_empty()).then(|| std::path::PathBuf::from(&cwd));
+        return dispatch_load_session(app, session_id, session_cwd, false);
+    }
     let local_cwd = app.cwd.to_string_lossy().to_string();
     if xai_grok_shell::session::resolve_local_session(&session_id, &local_cwd).is_some() {
         return dispatch_load_session(app, session_id, None, false);
