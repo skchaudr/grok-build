@@ -13,6 +13,9 @@ use std::sync::Arc;
 
 use super::acp_command::{AcpSlashCommand, SkillMeta};
 use super::command::{CommandProvenance, SlashCommand, WorkflowChoice};
+use super::external_common::{
+    EXTERNAL_COMMON_STUB_COMMANDS, UnsupportedExternalSlashCommand,
+};
 use super::mode_support::ModeSupport;
 
 /// Shell ACP names the pager never offers (unified `/hooks` / `/plugins` UI, plus `/help`).
@@ -35,6 +38,8 @@ pub enum CommandSource {
     Builtin,
     /// Advertised by the shell/agent via ACP AvailableCommandsUpdate.
     Acp,
+    /// Unsupported placeholder for a common external-agent command the catalog lacks.
+    ExternalCommonStub,
 }
 
 /// A trigger entry in the registry, one per canonical name or alias.
@@ -118,10 +123,8 @@ const YIELDED_TO_EXTERNAL_AGENT: &[&str] = &[
     "dream",
     "usage",
     "context",
+    "login",
 ];
-
-/// Yielded builtins that stay on the pager until the external agent advertises the same name.
-const YIELDED_WHEN_ADVERTISED: &[&str] = &["usage", "context"];
 
 /// Owns the command objects and provides lookup by name/alias.
 /// Supports dynamic mutation via `set_acp_commands()` for runtime ACP command catalog updates.
@@ -151,6 +154,8 @@ pub struct CommandRegistry {
     /// This pager is driving an external ACP agent (`--agent-cmd`). Yielded builtins stay hidden
     /// so an advertised command of the same name is sent to that agent as a prompt.
     external_agent: bool,
+    /// Label for `not supported by <agent>` stubs (e.g. `pi`, `claude`).
+    external_agent_label: String,
 }
 
 impl CommandRegistry {
@@ -185,6 +190,7 @@ impl CommandRegistry {
             saved_workflows: Vec::new(),
             skipped_acp_names: Vec::new(),
             external_agent: false,
+            external_agent_label: "agent".to_string(),
         };
         reg.rebuild_triggers();
         reg
@@ -429,11 +435,39 @@ impl CommandRegistry {
         self.rebuild_triggers();
     }
 
+    /// Agent name for notices when this registry serves an external ACP agent; `None` for native Grok.
+    pub fn external_agent_label(&self) -> Option<&str> {
+        self.external_agent
+            .then_some(self.external_agent_label.as_str())
+    }
+
+    /// Human-readable agent name for unsupported-command notices.
+    pub fn set_external_agent_label(&mut self, label: impl Into<String>) {
+        self.external_agent_label = label.into();
+        if self.external_agent {
+            self.sync_external_common_stubs();
+            self.rebuild_triggers();
+        }
+    }
+
     /// Hide Grok-agent commands when this pager is driving an external ACP agent.
     /// Returns whether the flag changed. A later [`Self::set_acp_commands`] then lets the agent's
     /// catalog claim those names.
     pub fn set_external_agent(&mut self, enabled: bool) -> bool {
-        if self.external_agent == enabled {
+        self.set_external_agent_with_label(enabled, None)
+    }
+
+    /// Like [`Self::set_external_agent`], optionally updating the label used in unsupported notices.
+    pub fn set_external_agent_with_label(
+        &mut self,
+        enabled: bool,
+        label: Option<String>,
+    ) -> bool {
+        if let Some(label) = label {
+            self.external_agent_label = label;
+        }
+        let flag_changed = self.external_agent != enabled;
+        if !flag_changed && !enabled {
             return false;
         }
         self.external_agent = enabled;
@@ -447,7 +481,9 @@ impl CommandRegistry {
             for name in SHELL_GATED_COMMANDS {
                 self.hidden.insert((*name).to_string());
             }
+            self.remove_external_common_stubs();
         }
+        self.sync_external_common_stubs();
         self.rebuild_triggers();
         true
     }
@@ -469,16 +505,38 @@ impl CommandRegistry {
 
     /// Whether a builtin is hidden so an external agent can own the name.
     fn skips_yielded_builtin(&self, canonical: &str, source: CommandSource) -> bool {
-        if source != CommandSource::Builtin || !self.yields_to_external_agent(canonical) {
-            return false;
+        source == CommandSource::Builtin
+            && self.yields_to_external_agent(canonical)
+    }
+
+    fn remove_external_common_stubs(&mut self) {
+        let mut i = 0;
+        while i < self.commands.len() {
+            if self.sources.get(i) == Some(&CommandSource::ExternalCommonStub) {
+                self.commands.remove(i);
+                self.sources.remove(i);
+            } else {
+                i += 1;
+            }
         }
-        if YIELDED_WHEN_ADVERTISED
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(canonical))
-        {
-            return self.external_agent_advertises(canonical);
+    }
+
+    fn sync_external_common_stubs(&mut self) {
+        self.remove_external_common_stubs();
+        if !self.external_agent {
+            return;
         }
-        true
+        let label = self.external_agent_label.clone();
+        for name in EXTERNAL_COMMON_STUB_COMMANDS {
+            if self.external_agent_advertises(name) {
+                continue;
+            }
+            self.commands.push(Arc::new(UnsupportedExternalSlashCommand::new(
+                name,
+                &label,
+            )));
+            self.sources.push(CommandSource::ExternalCommonStub);
+        }
     }
 
     /// Replace all ACP-sourced commands with a new set. Builtin commands are preserved. ACP names that collide with a
@@ -595,6 +653,7 @@ impl CommandRegistry {
             reserved.extend(duplicate);
             self.skipped_acp_names = reserved;
         }
+        self.sync_external_common_stubs();
     }
 
     /// Regenerate trigger list and key-to-index map from the current commands.
@@ -807,9 +866,12 @@ mod tests {
         );
 
         assert!(registry.set_external_agent(true));
-        assert!(
-            registry.get_for_dispatch("compact").is_none(),
-            "native /compact must not intercept an external agent"
+        assert_eq!(
+            registry
+                .get_for_dispatch("compact")
+                .map(|cmd| cmd.provenance()),
+            Some(CommandProvenance::Shell),
+            "native /compact is replaced by an unsupported stub until the agent advertises it"
         );
 
         registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
@@ -855,13 +917,10 @@ mod tests {
         );
 
         assert!(registry.set_external_agent(true));
-        assert_eq!(
-            registry
-                .get_for_dispatch("usage")
-                .map(|cmd| cmd.provenance()),
-            Some(CommandProvenance::Builtin),
-            "without a catalog entry the pager keeps /usage"
-        );
+        let stub = registry
+            .get_for_dispatch("usage")
+            .expect("common /usage stub when the agent does not advertise it");
+        assert_eq!(stub.provenance(), CommandProvenance::Shell);
 
         registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
             "usage".to_string(),
@@ -899,13 +958,9 @@ mod tests {
 
         let mut registry = CommandRegistry::new(vec![Arc::new(ContextCommand)]);
         assert!(registry.set_external_agent(true));
-        assert_eq!(
-            registry
-                .get_for_dispatch("context")
-                .map(|cmd| cmd.provenance()),
-            Some(CommandProvenance::Builtin),
-            "without a catalog entry the pager keeps /context"
-        );
+        registry
+            .get_for_dispatch("context")
+            .expect("common /context stub when the agent does not advertise it");
 
         registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
             "context".to_string(),
@@ -1634,5 +1689,75 @@ mod tests {
         // Out-of-range returns None (boundary and far-out)
         assert!(registry.commands_by_index(2).is_none());
         assert!(registry.commands_by_index(usize::MAX).is_none());
+    }
+
+    #[test]
+    fn external_agent_menu_lists_project_commands_and_common_stubs() {
+        use crate::slash::commands::builtin_commands;
+
+        let mut registry = CommandRegistry::new(builtin_commands());
+        registry.set_external_agent_with_label(true, Some("pi".into()));
+        registry.set_acp_commands(&[
+            agent_client_protocol::AvailableCommand::new(
+                "deploy".to_string(),
+                "Deploy the app (project)".to_string(),
+            ),
+            agent_client_protocol::AvailableCommand::new(
+                "compact".to_string(),
+                "Compact via pi".to_string(),
+            ),
+            agent_client_protocol::AvailableCommand::new(
+                "usage".to_string(),
+                "Token usage".to_string(),
+            ),
+        ]);
+        let canonicals: HashSet<String> = registry
+            .triggers()
+            .iter()
+            .map(|t| t.canonical.clone())
+            .collect();
+        assert!(canonicals.contains("deploy"), "project command: {canonicals:?}");
+        assert!(canonicals.contains("usage"));
+        assert!(canonicals.contains("compact"));
+        assert!(
+            canonicals.contains("context"),
+            "common stub when not advertised: {canonicals:?}"
+        );
+        assert!(
+            canonicals.contains("login"),
+            "common stub when not advertised: {canonicals:?}"
+        );
+        assert!(
+            canonicals.contains("model"),
+            "pager /model stays available: {canonicals:?}"
+        );
+    }
+
+    #[test]
+    fn external_agent_usage_stub_surfaces_unsupported_notice() {
+        use crate::acp::model_state::ModelState;
+        use crate::app::bundle::BundleState;
+        use crate::slash::command::{CommandExecCtx, CommandResult};
+        use crate::slash::commands::usage::UsageCommand;
+
+        let mut registry = CommandRegistry::new(vec![Arc::new(UsageCommand)]);
+        registry.set_external_agent_with_label(true, Some("claude".into()));
+        let cmd = registry.get_for_dispatch("usage").expect("stub");
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        let mut ctx = CommandExecCtx {
+            models: &models,
+            session_id: None,
+            bundle_state: &bundle,
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+            billing_surface_visible: false,
+            usage_command_visible: true,
+            pager_state: crate::settings::PagerLocalSnapshot::default(),
+        };
+        let result = cmd.run(&mut ctx, "");
+        assert!(matches!(
+            result,
+            CommandResult::Message(msg) if msg == "/usage is not supported by claude"
+        ));
     }
 }

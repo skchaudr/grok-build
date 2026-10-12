@@ -479,6 +479,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
                 let id = agent.scrollback.push_block(block);
                 (agent.scrollback.len().saturating_sub(1), id, vec![id])
             };
+            agent.session.note_turn_prompt(&queued.text);
             // Stash for cancel-with-restore
             // Only plain (non-skill) prompts can be reversed back into the input box
             if queued.wire_blocks.is_none() {

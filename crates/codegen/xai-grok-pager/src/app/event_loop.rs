@@ -1068,6 +1068,10 @@ pub(crate) async fn run(
     app.last_known_terminal_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(0);
     app.leader_mode = connection.leader_status_rx.is_some();
     app.external_agent = args.launches_external_agent();
+    app.external_agent_label = args
+        .effective_agent_cmd()
+        .as_deref()
+        .and_then(crate::slash::external_common::agent_label_from_cmd);
     app.machine_picker = crate::app::agent_choice::parse_agent_choices(&args.agent_choices)
         .ok()
         .and_then(crate::app::agent_choice::MachinePicker::from_choices);
