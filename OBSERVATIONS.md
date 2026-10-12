@@ -33,3 +33,14 @@ Left in place (not deleted): `.worktrees/gb-session-resume/target` 36G.
 Not merged to main.
 
 WORKER DONE 2e25f334
+
+## 2026-10-12 Loop owner (Opus 5.5): first pty run, REJECTED
+
+Binary: pager built from 2e25f334 (`cargo build -p xai-grok-pager-bin`), copied out of the shared target. Adapter: a `pi-acp` shim on PATH that execs the patched `index.js` (shim log confirmed every launch). Two turns in tmux from `scratchpad/pirun`: `Reply with exactly: ALPHA-ONE`, then `Run the bash command: echo BETA-TWO — then reply DONE.`
+
+- `gb pi --resume <id>` from `~`: history replayed in order with no duplicates, token counter `20K / 1.0M`, but the header showed `~`, not the session cwd. Startup resume hard-codes `original_cwd: None` for external agents. pi-acp then wrote `~` into `~/.pi/pi-acp/session-map.json` for that session (`loadSession` upserts `params.cwd`).
+- Picker (Ctrl+R; F3 does nothing on the welcome screen), launched from the session's own cwd: the row is listed, but Enter shows the toast "Session not found locally" and nothing loads. External rows went through the grok session store.
+- Picker launched from `~`: the pirun session is not listed. External `session/list` was filtered to the launch cwd.
+- Replayed bash tool row read `◆ Run …` (live: `◆ Run echo BETA-TWO`). pi `toolResult` messages carry no args.
+
+Shared-target hazard: dep-info in `~/.cargo-target` stores workspace-relative paths and artifact hashes are identical across worktrees. A crate built from gb-tui-controls therefore looks fresh to this worktree when this worktree's files are older, so a build silently links the other branch's code. Seen as `ListSessions` "not found" in xai-acp-lib during this branch's lib-test build. Workaround used here: wait until no cargo runs, touch every file that differs between main, this branch and gb-tui-controls, then build. Also confirm branch-only strings are present in the binary.
