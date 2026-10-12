@@ -1373,6 +1373,39 @@ fn set_default_model_resolves_known_name() {
         Some(id)
     );
 }
+/// An external ACP agent's model switch must not persist `default_model`; the live SwitchModel still fires.
+#[test]
+fn set_default_model_external_agent_does_not_persist() {
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    let id = acp::ModelId::new(Arc::from("deepseek-flash"));
+    let agent_id = AgentId(0);
+    app.agents
+        .get_mut(&agent_id)
+        .unwrap()
+        .session
+        .models
+        .available
+        .insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "DeepSeek Flash".to_string()),
+        );
+    let effects = dispatch(Action::SetDefaultModel(id.clone()), &mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PersistSetting { .. })),
+        "external agent switch must not persist default_model, got {effects:?}",
+    );
+    assert!(
+        effects.iter().any(
+            |e| matches!(e, Effect::SwitchModel { choice, .. } if choice.model_id == id)
+        ),
+        "external agent switch must still emit SwitchModel",
+    );
+}
 /// Re-dispatching the same model id is idempotent: no PersistSetting, no SwitchModel, no reasoning_effort reset.
 #[test]
 fn set_default_model_idempotent_when_already_current() {
