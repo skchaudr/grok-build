@@ -10,3 +10,16 @@
 - Not merged to main.
 
 WORKER DONE 64c5abeb
+
+## 2026-10-12 Verifier
+
+REJECTED: required on-screen resume and tests were not run. Disk is under the build stop.
+
+Evidence:
+- `df -B1 /` avail `11483242496` bytes (~10.7 GiB). Brief says stop under 15 GB. No second cargo build or `cargo test`.
+- No pager from this worktree: `target/debug/xai-grok-pager` and `target/release/xai-grok-pager` are absent. `target/` is 36G. `~/.grok/bin/grok-fork` is dated 2026-10-08, before `64c5abeb`, so it cannot show this change.
+- Pty flow (two `grok pi` turns, quit, F3 resume, history + cwd + non-zero token counter on screen) was not executed.
+- Source only, not a screen pass: Pi `8fd2f2a` adds `usage_update` after replay when `tokens.total > 0` (`used` = total, `size` hardcoded `200000`). Grok `64c5abeb` maps ACP `session/list` into picker rows and uses `LocalPresence::Relabel`.
+- Not merged to main.
+
+Left in place (not deleted): `.worktrees/gb-session-resume/target` 36G.
