@@ -32,4 +32,4 @@ Left in place (not deleted): `.worktrees/gb-session-resume/target` 36G.
 
 Not merged to main.
 
-WORKER DONE (pending commit)
+WORKER DONE 2e25f334
