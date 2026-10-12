@@ -2,3 +2,10 @@
 2026-10-12T21:22:42Z pty-run (build ok a2fc5e04, disk 7.8G)
 2026-10-12T21:28:09Z fixing picker-select 'Session not found locally' + external resume cwd (session-map cwd overwritten to ~)
 2026-10-12T21:30:23Z testing (picker-select + resume-cwd fix, uncommitted)
+2026-10-12T21:34:35Z testing (rebuild with touch: shared-target cross-worktree staleness found)
+2026-10-12T21:36:30Z pi-acp: replay tool title fix + replay test committed 9fadf39
+2026-10-12T21:41:51Z building pager 0c5ca949 (lib tests 5/5 ok)
+2026-10-12T21:46:10Z pty-run #2 (0c5ca949 + pi-acp 9fadf39)
+2026-10-12T21:49:15Z fixing pi-acp session/list cwd fallback (96b25bc); --resume criteria PASS on screen
+2026-10-12T21:50:39Z testing full pager lib suite + xai-acp-lib (all 3 criteria PASS on screen: --resume, Ctrl+R picker, /resume)
+2026-10-12T21:55:36Z VERIFIED (3 entry points on screen; pager lib 19 pre-existing failures only)
