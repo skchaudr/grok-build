@@ -12,3 +12,6 @@ Loop:
 5. Append a one-line status to STATUS.log in this worktree at every step change (building / testing / pty-run / fixing <what> / VERIFIED / REJECTED / MERGED <hash>). This is how the parent watches you.
 
 Rules: no open -a/osascript/send-keys to desktops; never print or commit API keys; no deleting outside this worktree and the shared target; `git stash` off limits. Another Opus works gb-session-resume in the same shared target; the cargo lock serialises you, wait for it.
+
+# Delegation
+Sab: "feel free to have Opus using Haiku subagents or Sonnet 5.5 subagents so that it's not doing all the heavy lifting". Use the Agent tool with model haiku for reads, greps, log tailing, test-output triage, and sonnet for bounded code edits and test writing. Keep the judgment (what passed on screen, merge decision) yourself.
