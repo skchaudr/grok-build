@@ -45,6 +45,57 @@ impl ConversationsPartial {
         }
     }
 }
+/// Map an ACP `session/list` response into the `x.ai/session/list` sessions array shape.
+pub(super) fn agent_acp_list_to_unified_payload(
+    response: &acp::ListSessionsResponse,
+) -> serde_json::Value {
+    use serde_json::json;
+    let sessions: Vec<serde_json::Value> = response
+        .sessions
+        .iter()
+        .map(|session| {
+            json!({
+                "sessionId": session.session_id.0.to_string(),
+                "cwd": session.cwd.to_string_lossy(),
+                "summary": session.title.as_deref().unwrap_or("Untitled"),
+                "updatedAt": session.updated_at.as_deref().unwrap_or(""),
+                "source": "local",
+            })
+        })
+        .collect();
+    json!({ "sessions": sessions })
+}
+/// Pages walked by [`resolve_external_session_cwd`] before giving up.
+const EXTERNAL_SESSION_CWD_MAX_PAGES: usize = 20;
+/// Find the cwd an external ACP agent recorded for `session_id` by paging an unfiltered `session/list`.
+/// `None` when the agent does not list it (or the list fails), so callers keep their launch cwd.
+pub(crate) async fn resolve_external_session_cwd(
+    tx: &xai_acp_lib::AcpAgentTx,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    let mut cursor: Option<String> = None;
+    for _ in 0..EXTERNAL_SESSION_CWD_MAX_PAGES {
+        let mut request = acp::ListSessionsRequest::new();
+        request.cursor = cursor.take();
+        let response =
+            match super::helpers::acp_send_bounded(request, tx, "External session lookup").await {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(session_id, %error, "external session cwd lookup failed");
+                    return None;
+                }
+            };
+        if let Some(info) = response
+            .sessions
+            .iter()
+            .find(|s| s.session_id.0.as_ref() == session_id)
+        {
+            return Some(info.cwd.clone());
+        }
+        cursor = Some(response.next_cursor?);
+    }
+    None
+}
 /// `x.ai/session/list` answers arrive either as a JSON-RPC envelope (`result` or `error`) or as the bare list payload.
 pub(super) fn read_session_list_response(raw: &str) -> Result<Value, String> {
     let mut wrapper: Value = serde_json::from_str(raw).unwrap_or_default();

@@ -3855,3 +3855,43 @@ fn failed_load_lists_several_held_rows_as_not_sent() {
         "{listed:?}"
     );
 }
+/// External ACP agents (`grok pi`) own their sessions: a picked row loads in the row's cwd,
+/// never through the grok store (which would toast "Session not found locally").
+#[test]
+fn external_agent_pick_loads_row_in_its_own_cwd() {
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    open_session_picker_with(&mut app, vec![make_picker_entry("pi-sess-1", "/work/pi-repo")]);
+    let effects = dispatch(Action::PickSession(0), &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [.., Effect::LoadSession {
+                session_id,
+                session_cwd: Some(cwd),
+                chat_kind: false,
+                ..
+            }] if session_id == "pi-sess-1" && cwd == std::path::Path::new("/work/pi-repo")
+        ),
+        "expected LoadSession in the row cwd, got {effects:?}"
+    );
+}
+/// Welcome-screen variant: same direct load, no "Session not found locally" toast.
+#[test]
+fn external_agent_pick_from_welcome_loads_row_in_its_own_cwd() {
+    let mut app = test_app();
+    app.external_agent = true;
+    app.session_picker_entries = Some(vec![make_picker_entry("pi-sess-2", "/work/other")]);
+    let effects = dispatch(Action::PickSession(0), &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [.., Effect::LoadSession {
+                session_id,
+                session_cwd: Some(cwd),
+                ..
+            }] if session_id == "pi-sess-2" && cwd == std::path::Path::new("/work/other")
+        ),
+        "expected LoadSession in the row cwd, got {effects:?}"
+    );
+}

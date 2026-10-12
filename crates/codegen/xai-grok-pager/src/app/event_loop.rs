@@ -1712,6 +1712,15 @@ pub(crate) async fn run(
         return Ok(finish_run(&mut app));
     }
     use crate::app::session_startup::MaterializedStartup;
+    // External agents own their session store, so `--resume <id>` learns the original cwd from `session/list`.
+    let external_resume_cwd = match &materialized {
+        MaterializedStartup::Resume { session_id, .. }
+            if app.external_agent && session_cwd.is_none() && args.worktree.is_none() =>
+        {
+            crate::app::effects::resolve_external_session_cwd(&app.acp_tx, session_id).await
+        }
+        _ => None,
+    };
     let startup_action = match &materialized {
         MaterializedStartup::Resume {
             session_id,
@@ -1744,7 +1753,7 @@ pub(crate) async fn run(
             }
             Some(Action::LoadSession(
                 session_id.clone(),
-                session_cwd.clone(),
+                session_cwd.clone().or(external_resume_cwd),
                 false,
             ))
         }
@@ -3933,6 +3942,7 @@ pub(crate) fn session_flags_for_effects(
         screen_mode_label: Some(app.screen_mode.meta_label()),
         is_api_key_auth: app.is_api_key_auth,
         resume_local_miss: app.resume_local_miss.clone(),
+        external_agent: app.external_agent,
     }
 }
 /// Dispatch `action`, re-process `event` through the updated view, return one combined effect list.

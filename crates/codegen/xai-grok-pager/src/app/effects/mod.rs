@@ -20,6 +20,7 @@ pub(crate) use helpers::{
 };
 #[cfg(feature = "local-workspace")]
 pub(crate) use helpers::reject_non_fs_only_advertised_tools;
+pub(crate) use session_list::resolve_external_session_cwd;
 use helpers::*;
 use session_list::{
     LocalPresence, parse_session_list_partial, parse_session_list_scope,
@@ -713,83 +714,84 @@ pub(crate) fn execute(
         } => {
             let tx = acp_tx.clone();
             let cwd = cwd_override.unwrap_or_else(|| cwd.to_path_buf());
+            let external_agent = session_flags.external_agent;
             tasks
                 .spawn(async move {
-                    let limit = if host
-                        == crate::views::session_picker_surface::SessionPickerHost::Dashboard
-                    {
-                        DASHBOARD_SESSION_LIST_LIMIT
+                    let payload = if external_agent {
+                        if query.is_some() || kind_filter.is_some() {
+                            tracing::debug!(
+                                "external agent session list ignores query/kind filters"
+                            );
+                        }
+                        // No cwd filter: the picker groups rows by cwd, and resuming a row loads it in its own cwd.
+                        let list_req = acp::ListSessionsRequest::new();
+                        let listed = acp_send(list_req, &tx).await;
+                        match listed {
+                            Ok(resp) => session_list::agent_acp_list_to_unified_payload(&resp),
+                            Err(error) => {
+                                return TaskResult::SessionListFailed {
+                                    host,
+                                    generation,
+                                    error: sanitize_user_error(&format!("{error}")),
+                                    seq,
+                                    query,
+                                };
+                            }
+                        }
                     } else {
-                        SESSION_LIST_LIMIT
-                    };
-                    let mut params = serde_json::json!({
-                    "cwd": cwd.to_string_lossy(),
-                    "limit": limit,
-                    "headless": headless_policy.as_wire_str(),
-                });
-                    if let Some(obj) = params.as_object_mut() {
-                        if let Some(q) = &query {
-                            obj.insert(
-                                "query".into(),
-                                serde_json::Value::String(q.clone()),
-                            );
+                        let limit = if host
+                            == crate::views::session_picker_surface::SessionPickerHost::Dashboard
+                        {
+                            DASHBOARD_SESSION_LIST_LIMIT
                         } else {
-                            obj.insert(
-                                "allowRelax".into(),
-                                serde_json::Value::Bool(true),
-                            );
+                            SESSION_LIST_LIMIT
+                        };
+                        let mut params = serde_json::json!({
+                            "cwd": cwd.to_string_lossy(),
+                            "limit": limit,
+                            "headless": headless_policy.as_wire_str(),
+                        });
+                        if let Some(obj) = params.as_object_mut() {
+                            if let Some(q) = &query {
+                                obj.insert(
+                                    "query".into(),
+                                    serde_json::Value::String(q.clone()),
+                                );
+                            } else {
+                                obj.insert(
+                                    "allowRelax".into(),
+                                    serde_json::Value::Bool(true),
+                                );
+                            }
+                            if let Some(kinds) = &kind_filter {
+                                obj.insert(
+                                    "_meta".into(),
+                                    serde_json::json!({
+                                        "x.ai/facetFilters": { "kind": kinds },
+                                    }),
+                                );
+                                tracing::info!(
+                                    target: "grok.pager.workspace_mode",
+                                    event = "session_list_fetch",
+                                    kind_filter = ?kinds,
+                                    query = ?query,
+                                    ?host,
+                                    generation,
+                                    seq,
+                                    "FetchSessionList with kind facet filter"
+                                );
+                            }
                         }
-                        if let Some(kinds) = &kind_filter {
-                            obj.insert(
-                                "_meta".into(),
-                                serde_json::json!({
-                                "x.ai/facetFilters": { "kind": kinds },
-                            }),
-                            );
-                            tracing::info!(
-                            target: "grok.pager.workspace_mode",
-                            event = "session_list_fetch",
-                            kind_filter = ?kinds,
-                            query = ?query,
-                            ?host,
-                            generation,
-                            seq,
-                            "FetchSessionList with kind facet filter"
+                        let request = acp::ExtRequest::new(
+                            "x.ai/session/list",
+                            serde_json::value::to_raw_value(&params)
+                                .expect("serialize session list params")
+                                .into(),
                         );
-                        }
-                    }
-                    let request = acp::ExtRequest::new(
-                        "x.ai/session/list",
-                        serde_json::value::to_raw_value(&params)
-                            .expect("serialize session list params")
-                            .into(),
-                    );
-                    let result = acp_send(request, &tx).await;
-                    match result {
-                        Ok(resp) => {
-                            let payload = match read_session_list_response(
-                                resp.0.get(),
-                            ) {
+                        let result = acp_send(request, &tx).await;
+                        match result {
+                            Ok(resp) => match read_session_list_response(resp.0.get()) {
                                 Ok(payload) => payload,
-                                Err(error) => {
-                                    return TaskResult::SessionListFailed {
-                                        host,
-                                        generation,
-                                        error,
-                                        seq,
-                                        query,
-                                    };
-                                }
-                            };
-                            let partial = parse_session_list_partial(&payload);
-                            let scope = parse_session_list_scope(&payload);
-                            let sessions = match parse_session_picker_entries_blocking(
-                                    payload,
-                                    LocalPresence::for_host(host),
-                                )
-                                .await
-                            {
-                                Ok(sessions) => sessions,
                                 Err(error) => {
                                     return TaskResult::SessionListFailed {
                                         host,
@@ -799,26 +801,47 @@ pub(crate) fn execute(
                                         query,
                                     };
                                 }
+                            },
+                            Err(error) => {
+                                return TaskResult::SessionListFailed {
+                                    host,
+                                    generation,
+                                    error: sanitize_user_error(&format!("{error}")),
+                                    seq,
+                                    query,
+                                };
+                            }
+                        }
+                    };
+                    let partial = parse_session_list_partial(&payload);
+                    let scope = parse_session_list_scope(&payload);
+                    let presence = if external_agent {
+                        LocalPresence::Relabel
+                    } else {
+                        LocalPresence::for_host(host)
+                    };
+                    let sessions = match parse_session_picker_entries_blocking(payload, presence)
+                        .await
+                    {
+                        Ok(sessions) => sessions,
+                        Err(error) => {
+                            return TaskResult::SessionListFailed {
+                                host,
+                                generation,
+                                error: sanitize_user_error(&error),
+                                seq,
+                                query,
                             };
-                            TaskResult::SessionListLoaded {
-                                host,
-                                generation,
-                                sessions,
-                                partial,
-                                scope,
-                                seq,
-                                query,
-                            }
                         }
-                        Err(e) => {
-                            TaskResult::SessionListFailed {
-                                host,
-                                generation,
-                                error: sanitize_user_error(&format!("{e}")),
-                                seq,
-                                query,
-                            }
-                        }
+                    };
+                    TaskResult::SessionListLoaded {
+                        host,
+                        generation,
+                        sessions,
+                        partial,
+                        scope,
+                        seq,
+                        query,
                     }
                 });
         }

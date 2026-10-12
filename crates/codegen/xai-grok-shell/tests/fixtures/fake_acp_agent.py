@@ -19,6 +19,14 @@ persist_dir = (
     sys.argv[2] if command == "fake-roster-persist" and len(sys.argv) > 2 else None
 )
 load_session_cap = command != "fake-roster-noload"
+catalog_path = (
+    sys.argv[2] if command == "fake-pi-sessions" and len(sys.argv) > 2 else None
+)
+catalog = {}
+if catalog_path and os.path.isfile(catalog_path):
+    with open(catalog_path, encoding="utf-8") as fh:
+        catalog = json.load(fh)
+replay_emitted = {}
 pid = os.getpid()
 host = socket.gethostname()
 init_count = 0
@@ -136,8 +144,46 @@ for raw in sys.stdin:
         result(req_id, {"sessionId": sid, **identity()})
         if command == "fake-roster-title":
             session_info(sid, "Pong Game")
+    elif method == "session/list":
+        listed = catalog.get("sessions", [])
+        cwd = params.get("cwd")
+        if cwd:
+            listed = [row for row in listed if row.get("cwd") == cwd]
+        result(req_id, {"sessions": listed, "nextCursor": None})
     elif method in ("session/load", "session/resume"):
         sid = params.get("sessionId") or params.get("session_id")
+        if command == "fake-pi-sessions" and sid:
+            updates = catalog.get("replays", {}).get(sid, [])
+            if sid not in replay_emitted:
+                replay_emitted[sid] = []
+                for update in updates:
+                    emit(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {"sessionId": sid, "update": update},
+                        }
+                    )
+                    replay_emitted[sid].append(update.get("sessionUpdate"))
+                used = catalog.get("usage", {}).get(sid)
+                if isinstance(used, int) and used > 0:
+                    emit(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": sid,
+                                "update": {
+                                    "sessionUpdate": "usage_update",
+                                    "used": used,
+                                    "size": 200000,
+                                },
+                            },
+                        }
+                    )
+                    replay_emitted[sid].append("usage_update")
+            result(req_id, {"sessionId": sid})
+            continue
         if command == "fake-roster-persist":
             path = persist_path(sid)
             on_disk = path is not None and os.path.isfile(path)
