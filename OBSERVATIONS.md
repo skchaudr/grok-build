@@ -578,3 +578,10 @@ VERIFIED (pager-bin built at 98f97b77, binary checked for the notice string; pi-
   - `/usage` showed "Worked for 0.3s", then "/usage returned no output from claude (not supported through ACP)".
   - `/context` showed "Worked for 0.6s", then "/context returned no output from claude (not supported through ACP)".
 - `cargo test -p xai-grok-pager --lib`: 10288 passed, 19 failed. All 19 are paste_key_tests / scrollback_paste / doctor_cmd tests (pre-existing, untouched by this branch).
+
+## Steward: "tool calls don't expand in grok pi" (2026-10-13)
+
+- Root cause: `grok pi` runs `~/.grok/bin/grok-fork` (gb prefers it over the build tree). The installed copy was built 2026-10-08, before b23da2dd (external ACP execute output, Zed `_meta.terminal_output` dialect). pi-acp sends bash output only as `_meta.terminal_output` deltas, so the old pager stores no output, `ExecuteToolCallBlock::is_foldable` is false, and the card offers no `e:expand`. Thinking expanded because the patched pi-acp (now on gb's pi path) streams thinking normally.
+- Seen on screen, same prompt, pi `-ne`: old grok-fork shows no expand hint and `e` is a no-op; the steward-batch-1 build expands bash (`e`, `E`) and read cards.
+- Fix is deployment, not code: install the current build as grok-fork. Merged-and-verified pager work is not reachable from `grok` until someone runs gb-build.
+- Separate env break seen during repro (not grok-build): since 2026-10-13 06:44Z `pi --mode rpc` exits at startup because `@osolmaz/pi-workflows` and `pi-extensible-workflows@6.2.0` both register a `workflow` tool. Every `grok pi` session/new then fails with "Cannot call write after a stream was destroyed". `PI_ACP_PI_COMMAND` pointing at a `pi -ne` wrapper works around it.
