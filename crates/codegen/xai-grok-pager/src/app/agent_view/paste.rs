@@ -13,9 +13,9 @@ use crate::views::prompt_widget::{PromptEvent, PromptWidget};
 #[cfg(test)]
 use crossterm::event::{Event, KeyEvent};
 
-/// `Some(true)` forces the remote-session skip for one test.
-/// `None` classifies local drops. Unit tests create the files they paste, so they
-/// must not inherit ambient `SSH_CONNECTION` / `SSH_CLIENT` / `SSH_TTY`.
+// `Some(true)` forces the remote-session skip for one test.
+// `None` classifies local drops. Unit tests create the files they paste, so they
+// must not inherit ambient `SSH_CONNECTION` / `SSH_CLIENT` / `SSH_TTY`.
 #[cfg(test)]
 thread_local! {
     static DROP_CLASSIFIER_REMOTE: std::cell::Cell<Option<bool>> =
