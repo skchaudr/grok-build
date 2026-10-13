@@ -7,7 +7,7 @@ usage() {
   echo "Usage: scripts/upstream-sync.sh <check|start|verify|finish>" >&2
   echo "  check [--replay <a>..<b>]   fetch upstream; stat overlap with files touched since last sync" >&2
   echo "  start                       branch sync/upstream-<date> from main and merge upstream" >&2
-  echo "  verify                      release pager build and pager lib tests, or refuse under 20G free" >&2
+  echo "  verify [--dry-run] [--release]  debug cargo check and lib tests --no-run; --release refuses on khoj-38*" >&2
   echo "  finish                      merge --no-ff into main, pull before push, record the upstream hash" >&2
   exit 2
 }
@@ -298,21 +298,7 @@ EOF
   exit 1
 }
 
-cmd_verify() {
-  [[ $# -eq 0 ]] || usage
-  if [[ -n "$(unmerged_files)" ]]; then
-    die "unmerged files remain; resolve them before verify"
-  fi
-  df -h /
-  local avail_k free_gb
-  avail_k=$(df -Pk / | awk 'NR==2 { print $4 }')
-  [[ "$avail_k" =~ ^[0-9]+$ ]] || die "could not read free space on /"
-  free_gb=$((avail_k / 1024 / 1024))
-  if (( avail_k < MIN_FREE_KB )); then
-    echo "refuse: / has ${free_gb}G free, need 20G" >&2
-    exit 1
-  fi
-  echo "disk: ${free_gb}G free on / (floor 20G)"
+prepare_cargo_env() {
   export CARGO_TARGET_DIR="$ROOT/target"
   export CARGO_INCREMENTAL=0
   if [[ -x "${HOME}/.cargo/bin/dotslash" ]]; then
@@ -325,24 +311,84 @@ cmd_verify() {
     export PROTOC="${HOME}/.local/protoc-29.3/bin/protoc"
     export PATH="${HOME}/.local/protoc-29.3/bin:${PATH}"
   fi
+}
+
+cmd_verify() {
+  local dry=0 release=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry=1 ;;
+      --release) release=1 ;;
+      *) usage ;;
+    esac
+    shift
+  done
+  if [[ -n "$(unmerged_files)" ]]; then
+    die "unmerged files remain; resolve them before verify"
+  fi
+
+  local check_cmd="cargo check -p xai-grok-pager-bin"
+  local test_cmd="cargo test -p xai-grok-pager --lib --no-run"
+  if [[ $release -eq 1 ]]; then
+    echo "run gb-build sab-mini instead"
+    local hn
+    hn=$(hostname)
+    if [[ "$hn" == khoj-38* ]]; then
+      echo "refuse: release verify is not run on ${hn}" >&2
+      exit 1
+    fi
+    check_cmd="cargo build --release -p xai-grok-pager-bin"
+    test_cmd="cargo test -p xai-grok-pager --lib"
+  fi
+
+  if [[ $dry -eq 1 ]]; then
+    echo "df -h /"
+    echo "CARGO_TARGET_DIR=${ROOT}/target"
+    echo "$check_cmd"
+    echo "$test_cmd"
+    exit 0
+  fi
+
+  df -h /
+  local avail_k free_gb
+  avail_k=$(df -Pk / | awk 'NR==2 { print $4 }')
+  [[ "$avail_k" =~ ^[0-9]+$ ]] || die "could not read free space on /"
+  free_gb=$((avail_k / 1024 / 1024))
+  if (( avail_k < MIN_FREE_KB )); then
+    echo "refuse: / has ${free_gb}G free, need 20G" >&2
+    exit 1
+  fi
+  echo "disk: ${free_gb}G free on / (floor 20G)"
+  prepare_cargo_env
   echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
-  local build_log test_log build_rc test_rc
-  build_log=$(mktemp)
+  local check_log test_log check_rc test_rc
+  check_log=$(mktemp)
   test_log=$(mktemp)
   set +e
-  cargo build --release -p xai-grok-pager-bin 2>&1 | tee "$build_log"
-  build_rc=${PIPESTATUS[0]}
-  cargo test -p xai-grok-pager --lib 2>&1 | tee "$test_log"
-  test_rc=${PIPESTATUS[0]}
+  if [[ $release -eq 1 ]]; then
+    cargo build --release -p xai-grok-pager-bin 2>&1 | tee "$check_log"
+    check_rc=${PIPESTATUS[0]}
+    cargo test -p xai-grok-pager --lib 2>&1 | tee "$test_log"
+    test_rc=${PIPESTATUS[0]}
+  else
+    cargo check -p xai-grok-pager-bin 2>&1 | tee "$check_log"
+    check_rc=${PIPESTATUS[0]}
+    cargo test -p xai-grok-pager --lib --no-run 2>&1 | tee "$test_log"
+    test_rc=${PIPESTATUS[0]}
+  fi
   set -e
   local test_line
   test_line=$(grep -E '^test result:' "$test_log" | tail -n 1 || true)
-  echo "verify: build=${build_rc} test=${test_rc} free=${free_gb}G target=${CARGO_TARGET_DIR}"
+  if [[ $release -eq 1 ]]; then
+    echo "verify: release-build=${check_rc} test=${test_rc} free=${free_gb}G target=${CARGO_TARGET_DIR}"
+  else
+    echo "verify: check=${check_rc} test=${test_rc} free=${free_gb}G target=${CARGO_TARGET_DIR}"
+  fi
   if [[ -n "$test_line" ]]; then
     echo "$test_line"
   fi
-  rm -f "$build_log" "$test_log"
-  if [[ $build_rc -ne 0 || $test_rc -ne 0 ]]; then
+  rm -f "$check_log" "$test_log"
+  if [[ $check_rc -ne 0 || $test_rc -ne 0 ]]; then
     exit 1
   fi
 }
