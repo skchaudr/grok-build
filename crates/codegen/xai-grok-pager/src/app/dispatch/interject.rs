@@ -133,6 +133,7 @@ pub(super) fn dispatch_send_prompt_now(
         return vec![];
     };
     let reconnect_pending = app.reconnect_pending;
+    let external_agent = app.external_agent;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -164,6 +165,11 @@ pub(super) fn dispatch_send_prompt_now(
 
     // Submitting retires any edit-contextual ephemeral tip.
     agent.ephemeral_tip.clear_on_submit();
+
+    // External ACP agents (`grok claude`, pi) implement neither `_meta.sendNow` nor `x.ai/interject`, and a concurrent session/prompt races the running one
+    if external_agent {
+        return dispatch_external_steer(app, id, text, images);
+    }
 
     let Some(session_id) = agent.session.session_id.clone() else {
         agent.show_toast(NO_SESSION_NOTICE);
@@ -202,6 +208,69 @@ pub(super) fn dispatch_send_prompt_now(
         blocks,
         prompt_id,
     }]
+}
+
+/// External-agent send now (cancel-and-send).
+/// The steer goes to the FRONT of the local queue, flagged to drain alone, then the running turn gets a plain `session/cancel` (the Esc path).
+/// When the cancelled `session/prompt` resolves, the ordinary turn-end drain sends the steer first; other queued rows keep waiting their turn.
+/// Idle: the same front push drains straight away, i.e. a normal send.
+fn dispatch_external_steer(
+    app: &mut AppView,
+    id: AgentId,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
+    let ui_pref = super::turn::effective_cancel_subagents_preference(None, &app.current_ui);
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    if agent.session.session_id.is_none() {
+        agent.show_toast(NO_SESSION_NOTICE);
+        return vec![];
+    }
+    agent.record_prompt_in_history(&text);
+    let queue_id = agent.session.next_queue_id;
+    agent.session.next_queue_id += 1;
+    agent
+        .session
+        .pending_prompts
+        .push_front(crate::app::agent::QueuedPrompt {
+            images,
+            steer: true,
+            ..crate::app::agent::QueuedPrompt::plain(
+                queue_id,
+                &text,
+                crate::app::agent::QueueEntryKind::Prompt,
+            )
+        });
+    crate::unified_log::info(
+        "prompt.external_steer",
+        agent.session.session_id.as_ref().map(|s| s.0.as_ref()),
+        Some(serde_json::json!({
+            "len": text.len(),
+            "turn_running": agent.can_send_now(),
+            "already_cancelling": agent.session.state.is_cancelling(),
+        })),
+    );
+    if agent.session.state.is_cancelling() {
+        // A cancel is already in flight (Esc then chord): its turn end drains the steer
+        agent.show_toast("Steering: waiting for the current turn to stop");
+        return vec![];
+    }
+    if !agent.can_send_now() {
+        return super::queue::maybe_drain_queue_and_note_peek(app, id);
+    }
+    let cancel_subagents = agent
+        .cancel_subagents_preference
+        .or(ui_pref)
+        .unwrap_or(true);
+    agent.show_toast("Steering: cancelled current turn");
+    // The non-empty queue keeps cancel-rewind from pulling the running prompt back into the composer
+    super::turn::do_cancel_turn(
+        app,
+        cancel_subagents,
+        crate::app::cancel_latency::CancelOrigin::UserGesture,
+    )
 }
 
 #[cfg(test)]
@@ -262,6 +331,183 @@ mod tests {
             &mut app,
         );
         assert_eq!(app.agents.get(&id).unwrap().prompt.text(), "send me");
+    }
+
+    /// External agent (`grok claude`) mid-turn: an external app with a running turn and two plain local follow-ups queued.
+    fn external_running_app() -> crate::app::app_view::AppView {
+        let mut app = test_app_with_agent();
+        app.external_agent = true;
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("p1".into());
+        agent.front_message_committed = true;
+        agent.session.enqueue_prompt("queued one".into());
+        agent.session.enqueue_prompt("queued two".into());
+        app
+    }
+
+    fn queued_texts(app: &crate::app::app_view::AppView) -> Vec<(String, bool)> {
+        app.agents[&AgentId(0)]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| (p.text.clone(), p.steer))
+            .collect()
+    }
+
+    /// External send now = cancel-and-send: one plain `session/cancel`, the steer at the queue front, no `x.ai/interject` / `sendNow`.
+    #[test]
+    fn external_interject_chord_cancels_and_front_queues_steer() {
+        let mut app = external_running_app();
+        let effects = dispatch(
+            Action::SendPromptNow {
+                text: "steer here".into(),
+                images: vec![],
+                image_notice: None,
+            },
+            &mut app,
+        );
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::CancelTurn {
+                    rewind_prompt_id: None,
+                    ..
+                }]
+            ),
+            "expected exactly a plain cancel, got {effects:?}"
+        );
+        assert!(!effects.iter().any(|e| matches!(
+            e,
+            Effect::SendInterject { .. }
+                | Effect::SendPromptNow { .. }
+                | Effect::QueueInterject { .. }
+        )));
+        assert_eq!(
+            queued_texts(&app),
+            vec![
+                ("steer here".to_string(), true),
+                ("queued one".to_string(), false),
+                ("queued two".to_string(), false),
+            ]
+        );
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.session.state.is_cancelling());
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some("Steering: cancelled current turn")
+        );
+    }
+
+    /// The cancelled turn's response drains the steer first and alone (even with combine on); the other rows wait their turn.
+    #[test]
+    fn external_interject_steer_drains_first_after_cancelled_turn() {
+        let mut app = external_running_app();
+        let prev_combine = crate::appearance::cache::load_combine_queued_prompts();
+        crate::appearance::cache::set_combine_queued_prompts(true);
+        let _ = dispatch(
+            Action::SendPromptNow {
+                text: "steer here".into(),
+                images: vec![],
+                image_notice: None,
+            },
+            &mut app,
+        );
+        let effects = dispatch(
+            Action::TaskComplete(crate::app::actions::TaskResult::PromptResponse {
+                agent_id: AgentId(0),
+                result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
+                http_status: None,
+                prompt_id: Some("p1".into()),
+            }),
+            &mut app,
+        );
+        crate::appearance::cache::set_combine_queued_prompts(prev_combine);
+        let sent: Vec<String> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::SendPrompt { text, .. } => Some(text.clone()),
+                Effect::SendPromptBlocks { blocks, .. } => match blocks.first() {
+                    Some(acp::ContentBlock::Text(t)) => Some(t.text.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, vec!["steer here".to_string()], "effects: {effects:?}");
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPromptNow { .. }))
+        );
+        assert_eq!(
+            queued_texts(&app),
+            vec![
+                ("queued one".to_string(), false),
+                ("queued two".to_string(), false),
+            ]
+        );
+        let agent = &app.agents[&AgentId(0)];
+        assert!(
+            agent.session.state.is_turn_running(),
+            "steer runs as the next turn"
+        );
+        // Painted as a normal user prompt
+        let last_user = (0..agent.scrollback.len()).rev().find_map(|i| {
+            match &agent.scrollback.entry(i)?.block {
+                RenderBlock::UserPrompt(p) => Some((p.text.clone(), p.is_interjection)),
+                _ => None,
+            }
+        });
+        assert_eq!(last_user, Some(("steer here".to_string(), false)));
+    }
+
+    /// External, idle: send now is just a normal send (no cancel).
+    #[test]
+    fn external_interject_idle_is_a_normal_send() {
+        let mut app = test_app_with_agent();
+        app.external_agent = true;
+        let effects = dispatch(
+            Action::SendPromptNow {
+                text: "hello".into(),
+                images: vec![],
+                image_notice: None,
+            },
+            &mut app,
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::CancelTurn { .. } | Effect::SendPromptNow { .. }))
+        );
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+            )),
+            "got {effects:?}"
+        );
+        assert!(app.agents[&AgentId(0)].session.pending_prompts.is_empty());
+    }
+
+    /// Native (non-external) send now is unchanged: the `sendNow` prompt, no cancel, nothing front-queued.
+    #[test]
+    fn native_interject_send_now_unchanged() {
+        let mut app = external_running_app();
+        app.external_agent = false;
+        let effects = dispatch(
+            Action::SendPromptNow {
+                text: "steer here".into(),
+                images: vec![],
+                image_notice: None,
+            },
+            &mut app,
+        );
+        assert!(
+            matches!(effects.as_slice(), [Effect::SendPromptNow { .. }]),
+            "got {effects:?}"
+        );
+        assert_eq!(queued_texts(&app).len(), 2);
     }
 
     /// Interjecting is a submit: it retires the active ephemeral tip.

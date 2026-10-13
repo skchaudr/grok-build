@@ -391,7 +391,13 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
         PromptMode::EditingQueued { id, .. } => Some(*id),
         _ => None,
     };
-    let queued = match if combine_queued_prompts_enabled() {
+    // An external-agent steer row runs alone; followers keep their own turns.
+    let front_is_steer = agent
+        .session
+        .pending_prompts
+        .front()
+        .is_some_and(|p| p.steer);
+    let queued = match if combine_queued_prompts_enabled() && !front_is_steer {
         agent.session.dequeue_combined_prompt(editing_id)
     } else {
         agent.session.dequeue_prompt()
