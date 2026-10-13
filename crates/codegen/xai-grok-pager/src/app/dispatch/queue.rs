@@ -370,6 +370,20 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
         log_blocked("no_session_id", None);
         return QueueDrain::blocked();
     };
+    let session_id = if agent.claude_subagent_host {
+        agent
+            .active_subagent
+            .as_ref()
+            .and_then(|sid| {
+                agent
+                    .subagent_views
+                    .get(sid)
+                    .and_then(|child| child.session.session_id.clone())
+            })
+            .unwrap_or(session_id)
+    } else {
+        session_id
+    };
 
     // Block drain if the user is editing the front prompt.
     if let PromptMode::EditingQueued { id, .. } = &agent.prompt_mode

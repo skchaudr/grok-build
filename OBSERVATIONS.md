@@ -592,3 +592,34 @@ VERIFIED (pager-bin built at 98f97b77, binary checked for the notice string; pi-
 - Now: `dispatch_send_prompt_now` branches on `app.external_agent` to `dispatch_external_steer` (interject.rs). The text and images go to the FRONT of `pending_prompts` as a `steer` row. The cancel is a plain `do_cancel_turn` with no rewind, because the non-empty queue blocks the rewind. The toast reads "Steering: cancelled current turn". When the cancelled turn ends, the normal drain sends the steer first and alone: `maybe_drain_queue` skips combining when the front row is a steer. Other rows wait their turn. If the agent is idle, the steer drains immediately. If a cancel is already in flight, the steer waits for it. Native behavior is unchanged.
 - Host-config trap: `~/.grok/config.toml` sets `combine_queued_prompts = true`. Tests read it through the appearance cache, so `multiple_queued_prompts_drain_one_per_turn`, `cancel_with_multiple_queued_prompts_drains_only_front_prompt`, and `drain_after_editing_sends_correct_prompt` fail on this VM. All pass with `GROK_HOME=<empty dir>`.
 - Not changed: with `follow_up_behavior = steer`, a plain mid-turn Enter still takes the immediate server-send path, which is a concurrent `session/prompt`. That is unsafe for claude-acp. The default (`queue`) is fine.
+
+## T3-SUBAGENTS: claude-agent-acp 0.76.0 (2026-10-13)
+
+`grok claude` was launching `@zed-industries/claude-code-acp` 0.16.2 (`~/.local/bin/claude-acp` → `~/.local/share/claude-acp/current`), which has no subagent protocol. `@agentclientprotocol/claude-agent-acp` 0.76.0 is installed under Zed's npx registry and launches as `node <that>/dist/index.js` (Node 24, engines `>=22`). It resolves `@anthropic-ai/claude-agent-sdk` by walking up to the registry `node_modules`. `CLAUDE_CODE_EXECUTABLE` still selects the user's `claude` CLI; without it the adapter uses the SDK's bundled native binary.
+
+`~/.dsh/scripts/gb` `[claude]` now prefers that entry when the file exists. `GB_CLAUDE_ACP` replaces the whole command. Missing file falls back to `claude-acp` / `claude-code-acp`. Other agents are unchanged. `bash -n` passed. `node …/dist/index.js --version` prints `0.76.0`.
+
+Parity vs 0.16.2 + `0001-context-usage.patch`, from the adapter source plus one live turn (`docs/claude-agent-acp-subagent-trace.jsonl`):
+
+- `usage_update`: present. The live turn emitted `{sessionUpdate:"usage_update", used, size}` (size 200000, then corrected to 1000000). Same shape the pager already applies.
+- `/usage` and `/context`: 0.76.0 implements both (`usage-markdown.js`, `LOCAL_ONLY_COMMANDS` includes `/context`). Not re-fired live in this smoke; the one prompt was the Task delegation.
+- `session/list` and `loadSession`: initialize advertised `loadSession: true` and `sessionCapabilities` includes `list` / `resume` / `load`. Handlers are registered in `runAcp`.
+- `session/set_model`: regression. 0.16.2 handles it and calls `query.setModel`. 0.76.0 does not register `session/set_model`; model changes go through `session/set_config_option` (config id `model`), which does call `query.setModel`. The pager still sends `SetSessionModelRequest`. A model switch under 0.76.0 will get method-not-found until that is retargeted. Fallback `claude-acp` still has `session/set_model`.
+- Steering: initialize `_meta.steering.supported` is true. `_session/steering` injects into the in-flight turn (real mid-turn). A second `session/prompt` is enqueued on `turnQueue`, not raced on `query.next()` the way 0.16.2 did. Pager cancel-and-send steering was not changed.
+
+Live smoke (capability advertised as `clientCapabilities.subagents` and `_meta.jetbrains.air.capabilities: ["nativeSubagentSessions"]`, mode `bypassPermissions`): the adapter replied with `nativeSubagentSessions` and spawned one child.
+
+- Parent `session/update` `subagent_spawned` `{subagentSessionId, name, task, capabilities}`.
+- Child `session/update` `agent_message_chunk` on that child id, `_meta.claudeCode.parentToolUseId` set. This run's child did not call tools (`totalToolUseCount: 0`); the text was `pong`.
+- Parent `subagent_state_update` `{subagentSessionId, state:"completed"}`.
+- The Agent control `tool_call` is suppressed; a parent `tool_call_update` with `_meta.claudeCode.toolName:"Agent"` still arrives and is dropped by the bridge so it does not become an orphan tool row.
+
+The Rust ACP client (schema 0.11) has no `subagent_spawned` variant, so those notifications would be dropped at decode. `spawn_external_subprocess` line-bridges a Claude command and rewrites them to `_x.ai/session/update` as `subagent_spawned` / `subagent_progress` / `subagent_finished`. Child `session/update`s stay on the child session id, so the existing child view streams them. A first child message becomes `subagent_progress` (`turn_count`); a child `tool_call` increments `tool_call_count`. `session/cancel` for a known child becomes `_session/async_task/stop` `{sessionId: parent, asyncTaskId: child}` because 0.76.0's `cancel()` ignores unknown sessions and `query.stopTask` is the working stop (the child id is the SDK task id). `session/prompt` to the child is left as-is: that is the draft steer request. 0.76.0's `prompt()` only resolves root sessions and returns "Session not found".
+
+Initialize advertises `jetbrains.air.capabilities: ["nativeSubagentSessions"]` only when `--agent-cmd` is a Claude ACP command. Native Grok and pi/cursor do not get it.
+
+pi-acp (patched `pi-acp-patched/index.js`, package 0.0.33) emits `agent_message_chunk`, `tool_call`, `session_info_update`, and `available_commands_update`. It does not emit `subagent_spawned`, `subagent_state_update`, or `parentToolUseId`. No pi translation.
+
+Keys: dashboard is Ctrl+\ (Ctrl+4 when that chord is not taken by the queue). Enter on the subagent row opens the child takeover (same binding as open-block, also Ctrl+F). Ctrl+C in that takeover, with an empty composer, cancels the child. Enter on a Claude host (`external_agent_label == "claude"`, which `agent_label_from_cmd` now returns for the `node …/claude-agent-acp` command) sends `session/prompt` to the child session. Native takeover prompts still drain on the parent session.
+
+Tests: `GROK_HOME=$(mktemp -d) cargo test -p xai-grok-pager --lib claude_subagent` — 4 passed. `native_subagents_only_for_claude` passed. `agent_label_from_cmd` passed.

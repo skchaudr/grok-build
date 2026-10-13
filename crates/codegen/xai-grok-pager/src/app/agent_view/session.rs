@@ -370,6 +370,7 @@ impl AgentView {
             in_dashboard_overlay: false,
             workspace_dashboard_enabled: false,
             overlay_stop_label: None,
+            claude_subagent_host: false,
             overlay_can_cycle: false,
             mcp_init_progress: None,
             session_starting_since: None,
