@@ -404,13 +404,13 @@ pub async fn spawn_external_subprocess(
 
                 let child_stdin = child.stdin.take().expect("child stdin piped");
                 let child_stdout = child.stdout.take().expect("child stdout piped");
-                let translate_subagents = crate::acp::claude_subagents::command_is_claude_acp(
-                    &format!("{bin} {}", parts.join(" ")),
-                );
+                let translate_subagents =
+                    crate::acp::claude_subagents::subagent_bridge_gate();
                 let (incoming, outgoing) = crate::acp::claude_subagents::spawn_stdio_bridge(
                     child_stdin,
                     child_stdout,
                     translate_subagents,
+                    true,
                 );
 
                 let gw_tx = AcpGatewaySender::new(agent_channel.tx).with_tracing(true);
