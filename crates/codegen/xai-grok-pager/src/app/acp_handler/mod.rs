@@ -256,6 +256,7 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         is_active
                     } else if let acp::SessionUpdate::ConfigOptionUpdate(ref update) =
                         notif.request.update
+                        // Native explicit-model sessions use the generic handler below.
                         && (agent.session.models.model_config_id.is_some() || external_agent)
                     {
                         let models = &mut agent.session.models;
