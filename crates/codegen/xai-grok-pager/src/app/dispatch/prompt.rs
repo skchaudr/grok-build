@@ -282,9 +282,7 @@ pub(super) const PI_CHILD_FINISHED_STEER_NOTICE: &str = "subagent finished; mess
 
 fn external_agent_supports_child_steer(app: &AppView) -> bool {
     app.external_agent
-        && !crate::slash::external_common::external_agent_label_is_claude(
-            app.external_agent_label.as_deref(),
-        )
+        && !crate::slash::external_common::is_claude_label(app.external_agent_label.as_deref())
 }
 
 /// Mid-run steer for external Pi (and other non-Claude ACP subagent hosts): `session/prompt` on the child session only.
@@ -853,9 +851,7 @@ pub(super) fn dispatch_send_prompt_submission(
     let leader_mode = app.leader_mode;
     let screen_mode_is_minimal = app.screen_mode.is_minimal();
     let external_claude = app.external_agent
-        && crate::slash::external_common::external_agent_label_is_claude(
-            app.external_agent_label.as_deref(),
-        );
+        && crate::slash::external_common::is_claude_label(app.external_agent_label.as_deref());
     if consume_input && !literal && external_claude {
         let refused = app
             .agents

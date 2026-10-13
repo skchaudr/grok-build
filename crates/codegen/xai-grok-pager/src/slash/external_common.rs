@@ -35,7 +35,7 @@ pub fn agent_label_from_cmd(cmd: &str) -> Option<String> {
 }
 
 /// True when an external-agent label names a Claude ACP host (`claude`, `claude-agent`, `claude-code`, …).
-pub fn external_agent_label_is_claude(label: Option<&str>) -> bool {
+pub fn is_claude_label(label: Option<&str>) -> bool {
     label.is_some_and(|l| l.starts_with("claude"))
 }
 
@@ -98,12 +98,12 @@ mod tests {
     use crate::slash::command::CommandExecCtx;
 
     #[test]
-    fn external_agent_label_is_claude_covers_shipped_labels() {
-        assert!(external_agent_label_is_claude(Some("claude")));
-        assert!(external_agent_label_is_claude(Some("claude-agent")));
-        assert!(external_agent_label_is_claude(Some("claude-code")));
-        assert!(!external_agent_label_is_claude(Some("pi")));
-        assert!(!external_agent_label_is_claude(None));
+    fn is_claude_label_covers_shipped_labels() {
+        assert!(is_claude_label(Some("claude")));
+        assert!(is_claude_label(Some("claude-agent")));
+        assert!(is_claude_label(Some("claude-code")));
+        assert!(!is_claude_label(Some("pi")));
+        assert!(!is_claude_label(None));
     }
 
     #[test]
