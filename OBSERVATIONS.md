@@ -592,3 +592,14 @@ VERIFIED (pager-bin built at 98f97b77, binary checked for the notice string; pi-
 - Now: `dispatch_send_prompt_now` branches on `app.external_agent` to `dispatch_external_steer` (interject.rs). The text and images go to the FRONT of `pending_prompts` as a `steer` row. The cancel is a plain `do_cancel_turn` with no rewind, because the non-empty queue blocks the rewind. The toast reads "Steering: cancelled current turn". When the cancelled turn ends, the normal drain sends the steer first and alone: `maybe_drain_queue` skips combining when the front row is a steer. Other rows wait their turn. If the agent is idle, the steer drains immediately. If a cancel is already in flight, the steer waits for it. Native behavior is unchanged.
 - Host-config trap: `~/.grok/config.toml` sets `combine_queued_prompts = true`. Tests read it through the appearance cache, so `multiple_queued_prompts_drain_one_per_turn`, `cancel_with_multiple_queued_prompts_drains_only_front_prompt`, and `drain_after_editing_sends_correct_prompt` fail on this VM. All pass with `GROK_HOME=<empty dir>`.
 - Not changed: with `follow_up_behavior = steer`, a plain mid-turn Enter still takes the immediate server-send path, which is a concurrent `session/prompt`. That is unsafe for claude-acp. The default (`queue`) is fine.
+
+## 2026-10-13T10:32Z upstream-sync start
+
+Branch `sync/upstream-sim-proof` from `sim-main` (ec12b6d5).
+Merged `upstream-sim` (2690358542b05ed6e36f959c6d3a51ab3431d9bb).
+1 conflicted files, ours-hunks 1, theirs-hunks 1, conflict-hunks 1.
+ours-hunks and theirs-hunks are `git diff -U0` hunks of each side against the merge base. conflict-hunks are `<<<<<<<` regions.
+
+| file | ours-hunks | theirs-hunks | conflict-hunks |
+| --- | ---: | ---: | ---: |
+| crates/codegen/xai-grok-pager/src/views/welcome/mod.rs | 1 | 1 | 1 |
