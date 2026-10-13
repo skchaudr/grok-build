@@ -279,12 +279,22 @@ pub(super) fn format_acp_error_for(
     is_api_key_auth: bool,
     external_agent: Option<&str>,
 ) -> String {
+    format_acp_error_for_retry(err, is_api_key_auth, external_agent, true)
+}
+/// `prompt_retry` is false for MCP toggle/upsert, which are not a send the user can repeat.
+pub(super) fn format_acp_error_for_retry(
+    err: &acp::Error,
+    is_api_key_auth: bool,
+    external_agent: Option<&str>,
+    prompt_retry: bool,
+) -> String {
     if err.code == acp::ErrorCode::AuthRequired
         && let Some(agent) = external_agent.map(str::trim).filter(|s| !s.is_empty())
     {
-        return crate::app::error_display::format_external_agent_auth_failure(
+        return crate::app::error_display::format_external_agent_auth_failure_retry(
             agent,
             &external_auth_message(err),
+            prompt_retry,
         )
         .message();
     }

@@ -196,12 +196,17 @@ pub(crate) fn format_external_agent_auth_failure(
     agent: &str,
     raw_message: &str,
 ) -> FormattedRequestFailure {
-    let agent_name = {
-        let trimmed = agent.trim();
-        if trimmed.is_empty() { "agent" } else { trimmed }
-    };
-    let action =
-        format!("Log in to {agent_name} (run `{agent_name}`, then /login), then send again.");
+    format_external_agent_auth_failure_retry(agent, raw_message, true)
+}
+
+/// `prompt_retry` adds "then send again." Prompt failures need it. MCP and
+/// other non-prompt callers pass `false`.
+pub(crate) fn format_external_agent_auth_failure_retry(
+    agent: &str,
+    raw_message: &str,
+    prompt_retry: bool,
+) -> FormattedRequestFailure {
+    let action = external_agent_login_action(agent, prompt_retry);
     let detail = compose_detail(
         external_agent_auth_text(raw_message).as_deref(),
         Some(&action),
@@ -211,6 +216,28 @@ pub(crate) fn format_external_agent_auth_failure(
         headline: "Authentication required".to_string(),
         detail,
         wire: WireErrorType::Auth,
+    }
+}
+
+/// Known binaries get a real command. `claude-agent` is the label
+/// `claude-agent-acp` strips down to, and it is not a program you run.
+/// Anything else keeps the label and drops the parenthetical.
+fn external_agent_login_action(agent: &str, prompt_retry: bool) -> String {
+    let label = {
+        let trimmed = agent.trim();
+        if trimmed.is_empty() { "agent" } else { trimmed }
+    };
+    let how = match label {
+        "claude" | "claude-agent" => Some("run `claude`, then /login"),
+        "pi" => Some("run `pi`, then /login"),
+        "cursor-agent" => Some("run `cursor-agent login`"),
+        _ => None,
+    };
+    match (how, prompt_retry) {
+        (Some(how), true) => format!("Log in to {label} ({how}), then send again."),
+        (Some(how), false) => format!("Log in to {label} ({how})."),
+        (None, true) => format!("Log in to {label}, then send again."),
+        (None, false) => format!("Log in to {label}."),
     }
 }
 
@@ -1125,5 +1152,41 @@ mod tests {
             "Authentication required: Log in to claude (run `claude`, then /login), then send again."
         );
         assert!(!formatted.detail.contains("Try sending again"));
+    }
+
+    #[test]
+    fn external_agent_login_hint_maps_known_labels() {
+        let hint = |agent: &str| {
+            format_external_agent_auth_failure(agent, "Authentication required").detail
+        };
+        assert_eq!(
+            hint("claude-agent"),
+            "Log in to claude-agent (run `claude`, then /login), then send again."
+        );
+        assert_eq!(
+            hint("pi"),
+            "Log in to pi (run `pi`, then /login), then send again."
+        );
+        assert_eq!(
+            hint("cursor-agent"),
+            "Log in to cursor-agent (run `cursor-agent login`), then send again."
+        );
+        assert_eq!(hint("npx"), "Log in to npx, then send again.");
+        assert_eq!(hint("agent"), "Log in to agent, then send again.");
+        assert!(!hint("cursor-agent").contains("/login"));
+        assert!(!hint("npx").contains("run `"));
+    }
+
+    #[test]
+    fn external_agent_login_hint_off_prompt_omits_send_again() {
+        let formatted =
+            format_external_agent_auth_failure_retry("claude", "Authentication required", false);
+        assert_eq!(
+            formatted.detail,
+            "Log in to claude (run `claude`, then /login)."
+        );
+        let formatted =
+            format_external_agent_auth_failure_retry("npx", "Authentication required", false);
+        assert_eq!(formatted.detail, "Log in to npx.");
     }
 }

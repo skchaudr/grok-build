@@ -3096,6 +3096,15 @@ fn format_acp_error_for_external_auth_required_shows_agent_text() {
     assert!(!msg.contains("Try sending again"));
 }
 #[test]
+fn format_acp_error_for_external_auth_uses_data_when_message_is_bare() {
+    let err = acp::Error::auth_required().data("Not logged in · Please run /login");
+    let msg = format_acp_error_for(&err, false, Some("claude"));
+    assert_eq!(
+        msg,
+        "Authentication required: Not logged in · Please run /login. Log in to claude (run `claude`, then /login), then send again."
+    );
+}
+#[test]
 fn format_acp_error_native_auth_required_still_asks_to_retry() {
     let err = acp::Error::auth_required()
         .data("Login timed out after 10 minutes. Please try again.");

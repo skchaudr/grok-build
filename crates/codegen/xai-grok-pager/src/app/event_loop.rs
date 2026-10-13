@@ -6039,6 +6039,28 @@ mod tests {
             Event::Paste(r"C:\foo.png".to_string())
         );
     }
+    #[test]
+    fn session_flags_label_is_none_for_native_and_some_for_external() {
+        let mut native = crate::app::app_view::tests::test_app_with_agent();
+        native.external_agent = false;
+        native.external_agent_label = Some("claude".into());
+        let flags = session_flags_for_effects(&mut native, &[]);
+        assert!(!flags.external_agent);
+        assert_eq!(flags.external_agent_label, None);
+
+        let mut external = crate::app::app_view::tests::test_app_with_agent();
+        external.external_agent = true;
+        external.external_agent_label = Some("claude-agent".into());
+        let flags = session_flags_for_effects(&mut external, &[]);
+        assert!(flags.external_agent);
+        assert_eq!(flags.external_agent_label.as_deref(), Some("claude-agent"));
+
+        let mut unnamed = crate::app::app_view::tests::test_app_with_agent();
+        unnamed.external_agent = true;
+        unnamed.external_agent_label = None;
+        let flags = session_flags_for_effects(&mut unnamed, &[]);
+        assert_eq!(flags.external_agent_label.as_deref(), Some("agent"));
+    }
     /// App focused on an agent (session `test-session`) with a seeded prompt, prompt, response exchange in its scrollback.
     fn seeded_quit_app(screen_mode: crate::app::ScreenMode) -> AppView {
         use crate::scrollback::block::RenderBlock;

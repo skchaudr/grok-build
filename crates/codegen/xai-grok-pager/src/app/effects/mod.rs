@@ -3454,7 +3454,7 @@ pub(crate) fn execute(
                     );
                     let result = match acp_send(req, &tx).await {
                         Ok(_) => Ok(()),
-                        Err(e) => Err(format_acp_error_for(&e, is_api_key_auth, external_agent.as_deref())),
+                        Err(e) => Err(format_acp_error_for_retry(&e, is_api_key_auth, external_agent.as_deref(), false)),
                     };
                     TaskResult::McpToggleDone {
                         agent_id,
@@ -3514,7 +3514,7 @@ pub(crate) fn execute(
                     );
                     let result = match acp_send(req, &tx).await {
                         Ok(_) => Ok(()),
-                        Err(e) => Err(format_acp_error_for(&e, is_api_key_auth, external_agent.as_deref())),
+                        Err(e) => Err(format_acp_error_for_retry(&e, is_api_key_auth, external_agent.as_deref(), false)),
                     };
                     TaskResult::McpToggleDone {
                         agent_id,
