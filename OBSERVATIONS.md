@@ -599,8 +599,6 @@ VERIFIED (pager-bin built at 98f97b77, binary checked for the notice string; pi-
 
 Parity vs 0.16.2 + `0001-context-usage.patch` (source, plus `docs/claude-agent-acp-subagent-trace.jsonl` from the pinned binary):
 
-Parity vs 0.16.2 + `0001-context-usage.patch`, from the adapter source plus one live turn (`docs/claude-agent-acp-subagent-trace.jsonl`):
-
 - `usage_update`: present. The live turn emitted `{sessionUpdate:"usage_update", used, size}` (size 200000, then corrected to 1000000). Same shape the pager already applies.
 - `/usage` and `/context`: 0.76.0 implements both (`usage-markdown.js`, `LOCAL_ONLY_COMMANDS` includes `/context`). Not re-fired live in this smoke; the one prompt was the Task delegation.
 - `session/list` and `loadSession`: initialize advertised `loadSession: true` and `sessionCapabilities` includes `list` / `resume` / `load`. Handlers are registered in `runAcp`.
