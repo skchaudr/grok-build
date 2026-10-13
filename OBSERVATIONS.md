@@ -599,3 +599,14 @@ VERIFIED (pager-bin built at 98f97b77, binary checked for the notice string; pi-
 - After, external agent and code -32000: `Authentication required: Not logged in · Please run /login. Log in to claude (run `claude`, then /login), then send again.` Native Grok auth (`format_acp_error` with no agent label, message in `data`) still uses the generic banner, including `Try sending again.`
 - 0.16.2 patch `~/.dsh/patches/claude-code-acp/0002-auth-required-message.patch` passes `message.result` and the synthetic assistant text into `authRequired`. Applied to `~/.local/share/claude-acp/0.16.2`. The `newSession` throw when `.claude.json` is missing still has no CLI sentence; the pager then shows only the login hint. Headless check, `HOME` and `CLAUDE_CONFIG_DIR` on an empty temp dir: `session/prompt` returned `{"code":-32000,"message":"Authentication required: Not logged in · Please run /login"}`.
 - claude-agent-acp 0.76.0 does not already put that sentence on the JSON-RPC error. `failActiveWithSessionFailure("auth_required", RequestError.authRequired(), message.result)` keeps the text as AIR session-failure details and rejects the turn with a bare `authRequired()`. `hide-claude-auth.js` `claudeLoginRequiredError()` already passes its own message. Patch `~/.dsh/patches/claude-agent-acp/0001-auth-required-message.patch` passes `message.result` and `assistantMessageText(...)` as the `authRequired` additional message. Applied to the installed 0.76.0 dist. No updater script owns that tree.
+||||||| 3a71293b
+
+## 2026-10-13 upstream-sync verify
+
+Worktree `.worktrees/usync-e2e` (`sync/upstream-sim-proof`), `CARGO_TARGET_DIR` that worktree's `target/`. `df -h /` before the compile: 140G free. No `--release`.
+
+`cargo check -p xai-grok-pager-bin` — `Finished dev profile [unoptimized] target(s) in 8m 49s`, exit 0.
+
+`cargo build -p xai-grok-pager-bin` — `Finished dev profile [unoptimized] target(s) in 10m 03s`, exit 0. Binary `target/debug/xai-grok-pager` (484M).
+
+`verify --release` on `khoj-38w` prints `run gb-build sab-mini instead` and exits 1 without cargo.
