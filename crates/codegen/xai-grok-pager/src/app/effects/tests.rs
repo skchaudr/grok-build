@@ -3083,6 +3083,33 @@ fn compact_error_message_empty_data_renders_terse_and_no_data_uses_display() {
         );
 }
 #[test]
+fn format_acp_error_for_external_auth_required_shows_agent_text() {
+    let err = acp::Error::new(
+        i32::from(acp::ErrorCode::AuthRequired),
+        "Authentication required: Not logged in · Please run /login",
+    );
+    let msg = format_acp_error_for(&err, false, Some("claude"));
+    assert_eq!(
+        msg,
+        "Authentication required: Not logged in · Please run /login. Log in to claude (run `claude`, then /login), then send again."
+    );
+    assert!(!msg.contains("Try sending again"));
+}
+#[test]
+fn format_acp_error_native_auth_required_still_asks_to_retry() {
+    let err = acp::Error::auth_required()
+        .data("Login timed out after 10 minutes. Please try again.");
+    let msg = format_acp_error(&err, false);
+    assert!(
+        msg.contains("Try sending again"),
+        "native auth stays on the generic banner: {msg}"
+    );
+    assert!(
+        !msg.contains("run `claude`"),
+        "native auth must not use the external login hint: {msg}"
+    );
+}
+#[test]
 fn sanitize_user_error_strips_auth_prefixes() {
     assert_eq!(
             sanitize_user_error(

@@ -3947,6 +3947,12 @@ pub(crate) fn session_flags_for_effects(
         is_api_key_auth: app.is_api_key_auth,
         resume_local_miss: app.resume_local_miss.clone(),
         external_agent: app.external_agent,
+        external_agent_label: app.external_agent.then(|| {
+            app.external_agent_label
+                .clone()
+                .filter(|label| !label.trim().is_empty())
+                .unwrap_or_else(|| "agent".to_string())
+        }),
     }
 }
 /// Dispatch `action`, re-process `event` through the updated view, return one combined effect list.

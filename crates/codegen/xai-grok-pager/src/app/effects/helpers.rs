@@ -270,6 +270,24 @@ pub(super) async fn fetch_plugin_cta_mcps(
 /// Rate-limit errors render the free-usage paywall, else the server detail, else the auth-aware fallback (see [`format_rate_limited_user_message`]).
 /// The server detail is rewritten for API-key auth when the body pushes personal SuperGrok.
 pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> String {
+    format_acp_error_for(err, is_api_key_auth, None)
+}
+/// `external_agent` is the short agent name (`claude`, `pi`) when the error
+/// came from an external ACP agent. `None` keeps native Grok auth copy.
+pub(super) fn format_acp_error_for(
+    err: &acp::Error,
+    is_api_key_auth: bool,
+    external_agent: Option<&str>,
+) -> String {
+    if err.code == acp::ErrorCode::AuthRequired
+        && let Some(agent) = external_agent.map(str::trim).filter(|s| !s.is_empty())
+    {
+        return crate::app::error_display::format_external_agent_auth_failure(
+            agent,
+            &external_auth_message(err),
+        )
+        .message();
+    }
     if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
         let detail = error_data_detail(err);
         return sanitize_user_error(
@@ -288,6 +306,19 @@ pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> Strin
             &raw,
         )
         .message()
+}
+/// Agent sentence for an external `-32000`. The SDK puts it after
+/// `Authentication required:`; older agents may put it only in `data`.
+fn external_auth_message(err: &acp::Error) -> String {
+    let message = err.message.trim();
+    if let Some(rest) = message.strip_prefix("Authentication required:")
+        && !rest.trim().is_empty()
+    {
+        return err.message.clone();
+    }
+    error_data_detail(err)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| err.message.clone())
 }
 /// The sentence an invalid-params error carries for the user, if any
 pub(super) fn invalid_params_detail(err: &acp::Error) -> Option<String> {
@@ -502,6 +533,9 @@ pub(crate) struct SessionFlags {
     pub resume_local_miss: Option<String>,
     /// External ACP agent (`--agent-cmd` / `grok pi`) owns session storage; list via `session/list`.
     pub external_agent: bool,
+    /// Short name (`claude`, `pi`) when [`Self::external_agent`] is set.
+    /// Auth-required errors from that agent use it in the login hint.
+    pub external_agent_label: Option<String>,
 }
 impl SessionFlags {
     /// Resolve the agent profile name from the flags.

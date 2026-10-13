@@ -187,6 +187,48 @@ pub(crate) fn format_request_failure(
     }
 }
 
+/// External-agent JSON-RPC `-32000`.
+///
+/// The agent's own sentence is the detail. The action is a short login hint.
+/// The generic "Try sending again." action is for untyped request failures, and
+/// it hides a logged-out Claude behind a retry the user cannot complete.
+pub(crate) fn format_external_agent_auth_failure(
+    agent: &str,
+    raw_message: &str,
+) -> FormattedRequestFailure {
+    let agent_name = {
+        let trimmed = agent.trim();
+        if trimmed.is_empty() { "agent" } else { trimmed }
+    };
+    let action =
+        format!("Log in to {agent_name} (run `{agent_name}`, then /login), then send again.");
+    let detail = compose_detail(
+        external_agent_auth_text(raw_message).as_deref(),
+        Some(&action),
+    );
+    FormattedRequestFailure {
+        status: None,
+        headline: "Authentication required".to_string(),
+        detail,
+        wire: WireErrorType::Auth,
+    }
+}
+
+/// The text after the SDK's `Authentication required` prefix, kept verbatim.
+/// A bare `Authentication required` carries no agent sentence.
+fn external_agent_auth_text(raw_message: &str) -> Option<String> {
+    let trimmed = raw_message.trim();
+    let text = trimmed
+        .strip_prefix("Authentication required:")
+        .map(str::trim)
+        .unwrap_or(trimmed);
+    if text.is_empty() || text.eq_ignore_ascii_case("Authentication required") {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
 /// A present-but-unknown error type is a newer shell's kind and is never reclassified.
 /// TODO: error-kind-fallback-removal — this recovery is a version shim for terminals that predate the typed `errorKind`/`error_kind` fields.
 /// It is also the only truncation classifier for the exhausted-retry path, which passes no error type at all.
@@ -1039,5 +1081,49 @@ mod tests {
             .headline,
             "Request failed"
         );
+    }
+
+    /// Bare `authRequired()` (no additional message) is untyped text.
+    /// The catch-all arm headlines "Request failed" and appends "Try sending again."
+    #[test]
+    fn untyped_auth_required_message_appends_try_sending_again() {
+        let formatted = format_request_failure(None, None, "Authentication required");
+        assert_eq!(formatted.headline, "Request failed");
+        assert_eq!(
+            formatted.detail,
+            "Authentication required. Try sending again."
+        );
+        assert_eq!(
+            formatted.message(),
+            "Request failed: Authentication required. Try sending again."
+        );
+    }
+
+    #[test]
+    fn external_agent_auth_required_keeps_agent_text_and_login_hint() {
+        let formatted = format_external_agent_auth_failure(
+            "claude",
+            "Authentication required: Not logged in · Please run /login",
+        );
+        assert_eq!(formatted.headline, "Authentication required");
+        assert_eq!(
+            formatted.detail,
+            "Not logged in · Please run /login. Log in to claude (run `claude`, then /login), then send again."
+        );
+        assert!(!formatted.message().contains("Try sending again"));
+        assert_eq!(
+            formatted.message(),
+            "Authentication required: Not logged in · Please run /login. Log in to claude (run `claude`, then /login), then send again."
+        );
+    }
+
+    #[test]
+    fn external_agent_auth_required_without_agent_text_uses_login_hint_only() {
+        let formatted = format_external_agent_auth_failure("claude", "Authentication required");
+        assert_eq!(
+            formatted.message(),
+            "Authentication required: Log in to claude (run `claude`, then /login), then send again."
+        );
+        assert!(!formatted.detail.contains("Try sending again"));
     }
 }

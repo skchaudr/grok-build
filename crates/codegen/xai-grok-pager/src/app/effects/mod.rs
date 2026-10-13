@@ -1316,6 +1316,7 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
             let is_api_key_auth = session_flags.is_api_key_auth;
+            let external_agent = session_flags.external_agent_label.clone();
             tasks
                 .spawn(async move {
                     ulog::info(
@@ -1359,7 +1360,7 @@ pub(crate) fn execute(
                     TaskResult::PromptResponse {
                         agent_id,
                         result: result
-                            .map_err(|e| format_acp_error(&e, is_api_key_auth)),
+                            .map_err(|e| format_acp_error_for(&e, is_api_key_auth, external_agent.as_deref())),
                         http_status,
                         prompt_id: Some(prompt_id),
                     }
@@ -1375,6 +1376,7 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
             let is_api_key_auth = session_flags.is_api_key_auth;
+            let external_agent = session_flags.external_agent_label.clone();
             tasks
                 .spawn(async move {
                     let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new(String::new()))];
@@ -1411,7 +1413,7 @@ pub(crate) fn execute(
                     TaskResult::PromptResponse {
                         agent_id,
                         result: result
-                            .map_err(|e| format_acp_error(&e, is_api_key_auth)),
+                            .map_err(|e| format_acp_error_for(&e, is_api_key_auth, external_agent.as_deref())),
                         http_status,
                         prompt_id: Some(prompt_id),
                     }
@@ -1423,6 +1425,7 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
             let is_api_key_auth = session_flags.is_api_key_auth;
+            let external_agent = session_flags.external_agent_label.clone();
             tasks
                 .spawn(async move {
                     ulog::info(
@@ -1464,7 +1467,7 @@ pub(crate) fn execute(
                             agent_id,
                             session_id,
                             prompt_id,
-                            error: format_acp_error(e, is_api_key_auth),
+                            error: format_acp_error_for(e, is_api_key_auth, external_agent.as_deref()),
                             blocks,
                         };
                     }
@@ -1475,7 +1478,7 @@ pub(crate) fn execute(
                     TaskResult::PromptResponse {
                         agent_id,
                         result: result
-                            .map_err(|e| format_acp_error(&e, is_api_key_auth)),
+                            .map_err(|e| format_acp_error_for(&e, is_api_key_auth, external_agent.as_deref())),
                         http_status,
                         prompt_id: Some(prompt_id),
                     }
@@ -1485,6 +1488,7 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
             let is_api_key_auth = session_flags.is_api_key_auth;
+            let external_agent = session_flags.external_agent_label.clone();
             tasks
                 .spawn(async move {
                     use xai_grok_shell::extensions::prompt_meta::PromptBlockMeta;
@@ -1537,7 +1541,7 @@ pub(crate) fn execute(
                     TaskResult::PromptResponse {
                         agent_id,
                         result: result
-                            .map_err(|e| format_acp_error(&e, is_api_key_auth)),
+                            .map_err(|e| format_acp_error_for(&e, is_api_key_auth, external_agent.as_deref())),
                         http_status,
                         prompt_id: Some(prompt_id),
                     }
@@ -1763,6 +1767,7 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
             let is_api_key_auth = session_flags.is_api_key_auth;
+            let external_agent = session_flags.external_agent_label.clone();
             tasks
                 .spawn(async move {
                     let mode_req = acp::SetSessionModeRequest::new(
@@ -1793,7 +1798,7 @@ pub(crate) fn execute(
                     TaskResult::PromptResponse {
                         agent_id,
                         result: result
-                            .map_err(|e| format_acp_error(&e, is_api_key_auth)),
+                            .map_err(|e| format_acp_error_for(&e, is_api_key_auth, external_agent.as_deref())),
                         http_status,
                         prompt_id: Some(prompt_id),
                     }
@@ -3426,6 +3431,7 @@ pub(crate) fn execute(
         Effect::UpsertMcpServer { agent_id, session_id, name, config } => {
             let tx = acp_tx.clone();
             let is_api_key_auth = session_flags.is_api_key_auth;
+            let external_agent = session_flags.external_agent_label.clone();
             tasks
                 .spawn(async move {
                     #[derive(serde::Serialize)]
@@ -3448,7 +3454,7 @@ pub(crate) fn execute(
                     );
                     let result = match acp_send(req, &tx).await {
                         Ok(_) => Ok(()),
-                        Err(e) => Err(format_acp_error(&e, is_api_key_auth)),
+                        Err(e) => Err(format_acp_error_for(&e, is_api_key_auth, external_agent.as_deref())),
                     };
                     TaskResult::McpToggleDone {
                         agent_id,
@@ -3492,6 +3498,7 @@ pub(crate) fn execute(
         Effect::ToggleMcpServer { agent_id, session_id, server_name, enabled } => {
             let tx = acp_tx.clone();
             let is_api_key_auth = session_flags.is_api_key_auth;
+            let external_agent = session_flags.external_agent_label.clone();
             tasks
                 .spawn(async move {
                     let params = serde_json::json!({
@@ -3507,7 +3514,7 @@ pub(crate) fn execute(
                     );
                     let result = match acp_send(req, &tx).await {
                         Ok(_) => Ok(()),
-                        Err(e) => Err(format_acp_error(&e, is_api_key_auth)),
+                        Err(e) => Err(format_acp_error_for(&e, is_api_key_auth, external_agent.as_deref())),
                     };
                     TaskResult::McpToggleDone {
                         agent_id,
@@ -4459,6 +4466,7 @@ pub(crate) fn execute(
         } => {
             let tx = acp_tx.clone();
             let is_api_key_auth = session_flags.is_api_key_auth;
+            let external_agent = session_flags.external_agent_label.clone();
             tasks
                 .spawn(async move {
                     let attached = images.len();
@@ -4537,7 +4545,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::BtwResponse {
                                 agent_id,
-                                result: Err(format_acp_error(&e, is_api_key_auth)),
+                                result: Err(format_acp_error_for(&e, is_api_key_auth, external_agent.as_deref())),
                                 minimal_request_id,
                                 image_notice,
                                 skipped_image_numbers,
