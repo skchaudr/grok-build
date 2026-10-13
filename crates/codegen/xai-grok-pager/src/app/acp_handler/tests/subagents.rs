@@ -2467,9 +2467,9 @@
 
     /// After the prompt RPC returns, 0.76.0 still emits the background-subagent
     /// summary (`docs/claude-agent-acp-idle-subagent-trace.jsonl`). That text must
-    /// show while idle, and the next user send is one prompt and one scrollback row.
+    /// append while the pane stays idle; the next user send is one prompt and one row.
     #[test]
-    fn idle_background_summary_streams_and_the_next_send_is_once() {
+    fn late_chunks_after_prompt_end_leave_pane_idle_and_next_send_is_once() {
         use crate::app::actions::Action;
         use crate::app::agent::AgentState;
         use crate::scrollback::block::RenderBlock;
@@ -2499,8 +2499,8 @@
                 .unwrap()
                 .session
                 .state
-                .is_turn_running(),
-            "the idle summary must open a live continuation"
+                .is_idle(),
+            "post-prompt agent chunks must not flip TurnRunning"
         );
         let agent = app.agents.get(&AgentId(0)).unwrap();
         let joined = agent_message_text(agent);

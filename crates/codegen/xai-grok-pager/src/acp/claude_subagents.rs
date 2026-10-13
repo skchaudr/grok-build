@@ -78,7 +78,7 @@ impl ClaudeSubagentBridge {
             .unwrap_or("");
         match kind {
             "subagent_spawned" => self.spawned(&session_id, &update),
-            "subagent_state_update" => self.finished(&session_id, &update),
+            "subagent_state_update" => self.state_update(&session_id, &update),
             "tool_call" | "tool_call_update"
                 if is_control_tool(&update) && !self.is_child(&session_id) =>
             {
@@ -167,20 +167,27 @@ impl ClaudeSubagentBridge {
         vec![ext_session_update(parent_session_id, body)]
     }
 
-    fn finished(&mut self, parent_session_id: &str, update: &Value) -> Vec<String> {
+    fn state_update(&mut self, parent_session_id: &str, update: &Value) -> Vec<String> {
+        let state = update.get("state").and_then(Value::as_str).unwrap_or("");
+        match state {
+            "completed" | "failed" | "cancelled" => self.finished(parent_session_id, update, state),
+            "running" | "" => Vec::new(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn finished(&mut self, parent_session_id: &str, update: &Value, state: &str) -> Vec<String> {
         let Some(child_id) = update.get("subagentSessionId").and_then(Value::as_str) else {
             return Vec::new();
         };
-        let child = self.children.get(child_id);
-        let status = finish_status(update.get("state").and_then(Value::as_str).unwrap_or(""));
-        let tool_calls = child.map(|c| c.tool_calls).unwrap_or(0);
-        let turns = child.map(|c| c.turns).unwrap_or(0);
-        let duration_ms = child
-            .map(|c| c.started.elapsed().as_millis() as u64)
-            .unwrap_or(0);
-        let parent = child
-            .map(|c| c.parent_session_id.as_str())
-            .unwrap_or(parent_session_id);
+        let Some(child) = self.children.get(child_id) else {
+            return Vec::new();
+        };
+        let status = finish_status(state);
+        let tool_calls = child.tool_calls;
+        let turns = child.turns;
+        let duration_ms = child.started.elapsed().as_millis() as u64;
+        let parent = child.parent_session_id.as_str();
         let line = ext_session_update(
             parent,
             json!({
@@ -278,6 +285,7 @@ fn finish_status(state: &str) -> &'static str {
     match state {
         "completed" => "completed",
         "failed" => "failed",
+        "cancelled" => "cancelled",
         _ => "cancelled",
     }
 }
@@ -489,6 +497,12 @@ mod tests {
         )
     }
 
+    fn running_state_line() -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"{PARENT}","update":{{"sessionUpdate":"subagent_state_update","subagentSessionId":"{CHILD}","state":"running"}}}}}}"#
+        )
+    }
+
     fn control_tool_line() -> String {
         format!(
             r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"{PARENT}","update":{{"sessionUpdate":"tool_call_update","toolCallId":"toolu_01G38uAbC4mrCM8Mg6MEse7Q","_meta":{{"claudeCode":{{"toolName":"Agent"}}}}}}}}}}"#
@@ -557,6 +571,27 @@ mod tests {
         assert_eq!(finished_update["tool_calls"], 1);
         assert_eq!(finished_update["turns"], 1);
         assert_eq!(finished_update["child_session_id"], CHILD);
+    }
+
+    #[test]
+    fn running_state_update_does_not_finish_child() {
+        let mut bridge = ClaudeSubagentBridge::new();
+        bridge.translate_inbound(&spawned_line());
+        assert!(bridge.translate_inbound(&running_state_line()).is_empty());
+
+        let message = bridge.translate_inbound(&child_message_line());
+        assert_eq!(message.len(), 2, "child still streams after running tick");
+
+        let finished = bridge.translate_inbound(&finished_line());
+        assert_eq!(finished.len(), 1);
+        let finished_update = update_of(&finished[0]);
+        assert_eq!(finished_update["sessionUpdate"], "subagent_finished");
+        assert_eq!(finished_update["status"], "completed");
+
+        assert!(
+            bridge.translate_inbound(&finished_line()).is_empty(),
+            "second terminal update is ignored"
+        );
     }
 
     #[test]
