@@ -340,6 +340,18 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             ));
                         }
                         let had_activity_before = agent.session.tracker.activity().is_some();
+                        // claude-agent-acp emits the background-subagent summary after
+                        // session/prompt has already returned. Keep that text live.
+                        let idle_external_tail = !meta.is_replay
+                            && external_agent
+                            && agent.session.state.is_idle()
+                            && matches!(
+                                notif.request.update,
+                                acp::SessionUpdate::AgentMessageChunk(_)
+                                    | acp::SessionUpdate::AgentThoughtChunk(_)
+                                    | acp::SessionUpdate::ToolCall(_)
+                                    | acp::SessionUpdate::ToolCallUpdate(_)
+                            );
                         let update = notif.request.update;
                         let (is_visible_kind, is_bash) = if meta.is_replay {
                             (
@@ -362,6 +374,10 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                                 .session
                                 .handle_update(update, &meta, &mut agent.scrollback)
                         };
+                        if idle_external_tail && changed {
+                            agent.session.state = AgentState::TurnRunning;
+                            agent.turn_started_at.get_or_insert_with(std::time::Instant::now);
+                        }
                         if meta.is_replay
                             && let Some(pid) = meta.prompt_id.as_ref()
                         {

@@ -623,3 +623,13 @@ pi-acp (patched `pi-acp-patched/index.js`, package 0.0.33) emits `agent_message_
 Keys: dashboard is Ctrl+\ (Ctrl+4 when that chord is not taken by the queue). Enter on the subagent row opens the child takeover (same binding as open-block, also Ctrl+F). Ctrl+C in that takeover, with an empty composer, cancels the child. Enter on a Claude host (`external_agent_label == "claude"`, which `agent_label_from_cmd` now returns for the `node …/claude-agent-acp` command) sends `session/prompt` to the child session. Native takeover prompts still drain on the parent session.
 
 Tests: `GROK_HOME=$(mktemp -d) cargo test -p xai-grok-pager --lib claude_subagent` — 4 passed. `native_subagents_only_for_claude` passed. `agent_label_from_cmd` passed.
+
+## Idle background subagents (0.76.0, 2026-10-13)
+
+Trace: `docs/claude-agent-acp-idle-subagent-trace.jsonl`. Pinned launcher `~/.local/bin/claude-agent-acp` (`0.76.0`). Two Task subagents, `run_in_background`, each `sleep 8`.
+
+The adapter holds `session/prompt` until both children finish (`subagent_spawned` and `subagent_state_update` are inside the open prompt; the RPC returns `end_turn` at the same moment as the second `completed`). About 800ms later, with no prompt open, it still sends parent `agent_message_chunk`s: "Both subagents have finished…". The following `session/prompt` ("next") is one request and the reply is only `next`. No `user_message_chunk` on the wire.
+
+The pager already appends those chunks. It did not show them as a live turn, and a later send while `TurnRunning` with no prompt id would sit in the queue. An external-agent agent/tool update that arrives while idle now sets `TurnRunning` without a prompt id (`acp_handler/mod.rs`), and `maybe_drain_queue` still drains that tail as one `session/prompt` (`queue.rs`). The local user row plus a matching echo stays one row (`expect_user_echo`).
+
+Test: `idle_background_summary_streams_and_the_next_send_is_once` passed.

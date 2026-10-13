@@ -329,7 +329,12 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
         }
     };
 
-    if !agent.session.state.is_idle() {
+    // An external agent's post-prompt summary sets TurnRunning with no prompt id.
+    // That tail is not a user turn, so the next send still drains as one session/prompt.
+    let agent_initiated_tail = agent.session.state.is_turn_running()
+        && agent.session.current_prompt_id.is_none()
+        && agent.session.in_flight_prompt.is_none();
+    if !agent.session.state.is_idle() && !agent_initiated_tail {
         log_blocked("turn_running", sid);
         return QueueDrain::blocked();
     }

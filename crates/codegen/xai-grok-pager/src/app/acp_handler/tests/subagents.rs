@@ -2465,6 +2465,121 @@
         assert_eq!(steered, Some((CHILD, "also say ping")));
     }
 
+    /// After the prompt RPC returns, 0.76.0 still emits the background-subagent
+    /// summary (`docs/claude-agent-acp-idle-subagent-trace.jsonl`). That text must
+    /// show while idle, and the next user send is one prompt and one scrollback row.
+    #[test]
+    fn idle_background_summary_streams_and_the_next_send_is_once() {
+        use crate::app::actions::Action;
+        use crate::app::agent::AgentState;
+        use crate::scrollback::block::RenderBlock;
+
+        let mut app = make_app_with_agent("sess-idle");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("p1".into());
+        }
+        push_agent_text(&mut app, "sess-idle", "launched");
+        prompt_response(&mut app, "p1");
+        assert!(
+            app.agents
+                .get(&AgentId(0))
+                .unwrap()
+                .session
+                .state
+                .is_idle()
+        );
+        app.external_agent = true;
+        app.leader_mode = false;
+        push_agent_text(&mut app, "sess-idle", "Both subagents have finished.");
+        assert!(
+            app.agents
+                .get(&AgentId(0))
+                .unwrap()
+                .session
+                .state
+                .is_turn_running(),
+            "the idle summary must open a live continuation"
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let joined = agent_message_text(agent);
+        assert!(
+            joined.contains("Both subagents have finished."),
+            "idle summary must render, got {joined:?}"
+        );
+
+        let effects =
+            crate::app::dispatch::dispatch(Action::SendPrompt("next".into()), &mut app);
+        let prompts: Vec<_> = effects
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    crate::app::actions::Effect::SendPrompt { .. }
+                        | crate::app::actions::Effect::SendPromptNow { .. }
+                )
+            })
+            .collect();
+        assert_eq!(prompts.len(), 1, "one session/prompt per send, got {effects:?}");
+        push_user_text(&mut app, "sess-idle", "next");
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let user_rows = (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.entry(i))
+            .filter(|e| {
+                matches!(
+                    &e.block,
+                    RenderBlock::UserPrompt(b) if b.text.contains("next")
+                )
+            })
+            .count();
+        assert_eq!(user_rows, 1, "the follow-up must appear once");
+    }
+
+    fn push_agent_text(app: &mut AppView, session_id: &str, text: &str) {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        handle(
+            xai_acp_lib::AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+                request: acp::SessionNotification::new(
+                    acp::SessionId::new(session_id),
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new(text)),
+                    )),
+                ),
+                response_tx: tx,
+            }),
+            app,
+        );
+    }
+
+    fn push_user_text(app: &mut AppView, session_id: &str, text: &str) {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        handle(
+            xai_acp_lib::AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+                request: acp::SessionNotification::new(
+                    acp::SessionId::new(session_id),
+                    acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new(text)),
+                    )),
+                ),
+                response_tx: tx,
+            }),
+            app,
+        );
+    }
+
+    fn agent_message_text(agent: &AgentView) -> String {
+        use crate::scrollback::block::RenderBlock;
+        (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.entry(i))
+            .filter_map(|e| match &e.block {
+                RenderBlock::AgentMessage(m) => Some(m.text()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn apply_claude_bridge_line(app: &mut AppView, line: &str) {
         let value: serde_json::Value = serde_json::from_str(line).expect("bridge line");
         let method = value["method"].as_str().unwrap_or("");
