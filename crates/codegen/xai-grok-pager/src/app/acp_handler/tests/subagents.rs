@@ -2353,3 +2353,121 @@
             assert_eq!(Some(target), block.child_session_id(), "{sender} -> {target}");
         }
     }
+
+    /// Captured claude-agent-acp 0.76.0 lines: spawn, child text, child tool call, finish.
+    /// The child view streams the tool call; steer and cancel address that child session.
+    #[test]
+    fn claude_subagent_trace_streams_into_the_child_and_steer_cancel_target_it() {
+        use crate::acp::claude_subagents::ClaudeSubagentBridge;
+        use crate::app::actions::{Action, Effect};
+        use crate::app::agent::AgentState;
+        use crate::scrollback::block::RenderBlock;
+        use crate::scrollback::blocks::tool::ToolCallBlock;
+
+        const PARENT: &str = "12311b0f-d327-4e2b-b13f-c0fc60457f4a";
+        const CHILD: &str = "a974a7cffae9d40a3";
+        let spawned = format!(
+            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"{PARENT}","update":{{"sessionUpdate":"subagent_spawned","subagentSessionId":"{CHILD}","name":"Reply with pong","task":"Reply with the single word pong and nothing else.","capabilities":{{}}}}}}}}"#
+        );
+        let message = format!(
+            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"{CHILD}","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"pong"}},"_meta":{{"claudeCode":{{"parentToolUseId":"toolu_parent"}}}}}}}}}}"#
+        );
+        let tool = format!(
+            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"{CHILD}","update":{{"sessionUpdate":"tool_call","toolCallId":"toolu_child_read","title":"Read pong","kind":"read","status":"pending"}}}}}}"#
+        );
+        let finished = format!(
+            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"{PARENT}","update":{{"sessionUpdate":"subagent_state_update","subagentSessionId":"{CHILD}","state":"completed"}}}}}}"#
+        );
+
+        let mut app = make_app_with_agent(PARENT);
+        let mut bridge = ClaudeSubagentBridge::new();
+        for line in [&spawned, &message, &tool, &finished] {
+            for out in bridge.translate_inbound(line) {
+                apply_claude_bridge_line(&mut app, &out);
+            }
+        }
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let info = agent
+            .subagent_sessions
+            .get(CHILD)
+            .expect("spawn registers the child");
+        assert!(info.is_finished());
+        assert_eq!(info.attempt.status.as_deref(), Some("completed"));
+        assert_eq!(info.attempt.tool_call_count, Some(1));
+        assert_eq!(info.attempt.turn_count, Some(1));
+        let child = test_subagent(agent, CHILD);
+        let mut saw_tool = false;
+        let mut saw_pong = false;
+        for i in 0..child.scrollback.len() {
+            let Some(entry) = child.scrollback.entry(i) else {
+                continue;
+            };
+            match &entry.block {
+                RenderBlock::ToolCall(_) => saw_tool = true,
+                RenderBlock::AgentMessage(message) if message.text().contains("pong") => {
+                    saw_pong = true
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_tool, "child view must stream the child's tool call");
+        assert!(saw_pong, "child view must stream the child's text");
+
+        let mut app = make_app_with_agent(PARENT);
+        let mut bridge = ClaudeSubagentBridge::new();
+        for out in bridge.translate_inbound(&spawned) {
+            apply_claude_bridge_line(&mut app, &out);
+        }
+        {
+            let child = app
+                .agents
+                .get_mut(&AgentId(0))
+                .unwrap()
+                .subagent_views
+                .get_mut(CHILD)
+                .unwrap();
+            child.session.state = AgentState::Idle;
+        }
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .open_subagent_fullscreen(CHILD.to_owned());
+        let effects = crate::app::dispatch::dispatch(Action::SendPrompt("also say ping".into()), &mut app);
+        let steered = effects.iter().find_map(|effect| match effect {
+            Effect::SendPrompt { session_id, text, .. } => Some((session_id.0.as_ref(), text.as_str())),
+            _ => None,
+        });
+        assert_eq!(steered, Some((CHILD, "also say ping")));
+        let effects = crate::app::dispatch::dispatch(Action::CancelTurn, &mut app);
+        let cancelled = effects.iter().any(|effect| match effect {
+            Effect::CancelTurn { session_id, .. } => session_id.0.as_ref() == CHILD,
+            _ => false,
+        });
+        assert!(cancelled, "cancel from the child view must target the child session");
+    }
+
+    fn apply_claude_bridge_line(app: &mut AppView, line: &str) {
+        let value: serde_json::Value = serde_json::from_str(line).expect("bridge line");
+        let method = value["method"].as_str().unwrap_or("");
+        if method == "_x.ai/session/update" {
+            let params = serde_json::value::to_raw_value(&value["params"]).unwrap();
+            handle_ext_notification(
+                &acp::ExtNotification::new("x.ai/session/update", params.into()),
+                app,
+            );
+            return;
+        }
+        if method == "session/update" {
+            let request: acp::SessionNotification =
+                serde_json::from_value(value["params"].clone()).expect("session/update");
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            handle(
+                xai_acp_lib::AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+                    request,
+                    response_tx: tx,
+                }),
+                app,
+            );
+        }
+    }

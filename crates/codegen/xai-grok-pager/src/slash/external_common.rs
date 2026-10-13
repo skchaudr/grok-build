@@ -21,6 +21,9 @@ pub const EXTERNAL_COMMON_STUB_COMMANDS: &[&str] = &["usage", "context", "compac
 /// Short agent name from an `--agent-cmd` line, for notices when the session reports no agent name.
 /// Skips a leading `env` and its `VAR=value` pairs, takes the program's basename, and drops an `-acp` / `-code-acp` suffix.
 pub fn agent_label_from_cmd(cmd: &str) -> Option<String> {
+    if crate::acp::claude_subagents::command_is_claude_acp(cmd) {
+        return Some("claude".to_string());
+    }
     let mut words = cmd.split_whitespace().peekable();
     if words.peek() == Some(&"env") {
         words.next();
@@ -105,6 +108,12 @@ mod tests {
             Some("dsh".to_string())
         );
         assert_eq!(agent_label_from_cmd("cursor-agent acp"), Some("cursor-agent".to_string()));
+        assert_eq!(
+            agent_label_from_cmd(
+                "env CLAUDE_CODE_EXECUTABLE=/usr/bin/claude node /opt/claude-agent-acp/dist/index.js"
+            ),
+            Some("claude".to_string())
+        );
         assert_eq!(agent_label_from_cmd("  "), None);
     }
 

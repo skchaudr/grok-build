@@ -3,6 +3,7 @@
 //! This module spawns the agent process, initializes the protocol, authenticates, and provides the channel for communication.
 /// Shared plan-file size cap for the pager keep.
 pub(crate) const MAX_PLAN_FILE_BYTES: usize = 256 * 1024;
+pub(crate) mod claude_subagents;
 pub mod leader_bridge;
 pub mod meta;
 pub mod model_state;
@@ -475,6 +476,16 @@ fn client_capabilities_meta(flags: &ConnectFlags) -> serde_json::Value {
             xai_grok_status_line::STATUS_LINE_CAPABILITY.into(),
             flags.status_line.into(),
         );
+        if flags
+            .agent_cmd
+            .as_deref()
+            .is_some_and(claude_subagents::command_is_claude_acp)
+        {
+            obj.insert(
+                "jetbrains".into(),
+                claude_subagents::native_subagent_capability_meta(),
+            );
+        }
     }
     meta
 }
@@ -1180,6 +1191,32 @@ mod tests {
                 "status_line={wants_a_row}"
             );
         }
+    }
+    #[test]
+    fn client_capabilities_meta_advertises_native_subagents_only_for_claude() {
+        let absent = client_capabilities_meta(&ConnectFlags::default());
+        assert!(absent.get("jetbrains").is_none());
+        let pi = client_capabilities_meta(&ConnectFlags {
+            agent_cmd: Some("pi-acp".into()),
+            ..Default::default()
+        });
+        assert!(pi.get("jetbrains").is_none());
+        let claude = client_capabilities_meta(&ConnectFlags {
+            agent_cmd: Some(
+                "env CLAUDE_CODE_EXECUTABLE=/usr/bin/claude node /opt/claude-agent-acp/dist/index.js"
+                    .into(),
+            ),
+            ..Default::default()
+        });
+        let caps = claude
+            .pointer("/jetbrains/air/capabilities")
+            .and_then(|v| v.as_array())
+            .expect("claude initialize advertises AIR capabilities");
+        assert!(caps.iter().any(|v| v.as_str() == Some("nativeSubagentSessions")));
+        assert_eq!(
+            claude.pointer("/jetbrains/air/version").and_then(|v| v.as_u64()),
+            Some(1)
+        );
     }
     #[test]
     fn client_capabilities_meta_canonicalizes_off_and_mixed_case() {

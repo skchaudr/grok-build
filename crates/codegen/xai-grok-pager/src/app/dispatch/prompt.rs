@@ -746,6 +746,11 @@ pub(super) fn dispatch_send_prompt_submission(
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
     let leader_mode = app.leader_mode;
     let screen_mode_is_minimal = app.screen_mode.is_minimal();
+    // Claude child takeover: the composer text is a `session/prompt` for that child session.
+    // Native subagents keep the parent session. 0.76.0 rejects the child id today; the
+    // bridge still sends it, which is the draft steer request.
+    let claude_child_steer = app.external_agent
+        && app.external_agent_label.as_deref() == Some("claude");
     let Some(agent) = app.agents.get_mut(&id) else {
         return prelude;
     };
@@ -1229,10 +1234,8 @@ pub(super) fn dispatch_send_prompt_submission(
         }
 
         if immediate_server_send {
-            let session_id = agent
-                .session
-                .session_id
-                .clone()
+            let session_id = claude_takeover_session(agent, claude_child_steer)
+                .or_else(|| agent.session.session_id.clone())
                 .expect("session_id is_some checked");
             let agent_id = agent.session.id;
             let prompt_id = uuid::Uuid::new_v4().to_string();
