@@ -12,6 +12,48 @@ use crate::theme::Theme;
 use crate::views::prompt_widget::{PromptEvent, PromptWidget};
 #[cfg(test)]
 use crossterm::event::{Event, KeyEvent};
+
+/// `Some(true)` forces the remote-session skip for one test.
+/// `None` classifies local drops. Unit tests create the files they paste, so they
+/// must not inherit ambient `SSH_CONNECTION` / `SSH_CLIENT` / `SSH_TTY`.
+#[cfg(test)]
+thread_local! {
+    static DROP_CLASSIFIER_REMOTE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Clears the remote-drop override when the test ends.
+#[cfg(test)]
+struct DropClassifierRemoteGuard;
+
+#[cfg(test)]
+fn force_remote_drop_classifier() -> DropClassifierRemoteGuard {
+    DROP_CLASSIFIER_REMOTE.with(|cell| cell.set(Some(true)));
+    DropClassifierRemoteGuard
+}
+
+#[cfg(test)]
+impl Drop for DropClassifierRemoteGuard {
+    fn drop(&mut self) {
+        DROP_CLASSIFIER_REMOTE.with(|cell| cell.set(None));
+    }
+}
+
+/// A dragged `file://` over SSH is a path on the client, so the classifier must not
+/// attach whatever happens to exist at that path on this machine.
+/// Unit tests build those files in-process. They do not inherit the host SSH session
+/// unless a test opts into the remote guard.
+fn remote_session_skips_local_drops() -> bool {
+    #[cfg(test)]
+    {
+        return DROP_CLASSIFIER_REMOTE.with(|cell| cell.get()).unwrap_or(false);
+    }
+    #[cfg(not(test))]
+    {
+        crate::terminal::terminal_context().is_ssh
+    }
+}
+
 impl AgentView {
     /// Insert a plain-text (caption) clipboard paste into the prompt, matching the bracketed arm's whitespace policy and slash/suggestion refresh.
     /// The image/file-url portion of a paste is handled by the deferred probe.
@@ -423,7 +465,7 @@ impl AgentView {
         &mut self,
         text: &str,
     ) -> Option<(InputOutcome, crate::app::actions::ClipboardPasteCompletion)> {
-        if crate::terminal::terminal_context().is_ssh {
+        if remote_session_skips_local_drops() {
             return None;
         }
         /// Upper bound on the size of a paste payload the drop classifier will scan.
@@ -822,6 +864,26 @@ pub(super) mod paste_key_tests {
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(agent.prompt.images.is_empty());
         assert_eq!(agent.prompt.text(), "/tmp/not-an-image.txt");
+    }
+    /// The remote guard (present since `c68e39f6`) skips local classification when the
+    /// session is SSH, because a dragged `file://` is a client path. Unit tests do not
+    /// inherit ambient `SSH_*`; this opt-in checks the guard still leaves the URL as text.
+    #[test]
+    fn ssh_session_does_not_classify_a_local_file_drop() {
+        let _remote = super::force_remote_drop_classifier();
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        let dir = tempfile::tempdir().unwrap();
+        let txt = dir.path().join("notes.txt");
+        std::fs::write(&txt, b"hello").unwrap();
+        let url = format!("file://{}", txt.display());
+        let outcome = paste_cmd_v(&mut agent, Some(&url));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(
+            agent.prompt.images.is_empty(),
+            "a remote drop must not attach a local file that happens to share the path"
+        );
+        assert_eq!(agent.prompt.text(), url);
     }
     #[test]
     fn paste_key_non_image_file_url_with_clipboard_icon_uses_path_not_icon() {
