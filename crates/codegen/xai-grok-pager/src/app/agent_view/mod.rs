@@ -1303,9 +1303,6 @@ pub struct AgentView {
     /// A parent's resolved `Ctrl+X` label while this view is its subagent's fullscreen takeover; `None` when this view
     /// speaks for itself.
     pub(crate) overlay_stop_label: Option<&'static str>,
-    /// External Claude host. A takeover prompt is a `session/prompt` for the child session.
-    /// Native subagents leave this false, so their queue still drains on the parent session.
-    pub(crate) claude_subagent_host: bool,
     /// Whether that overlay's cycle order holds more than one agent, i.e.
     /// whether the header shows its `‹ i/n ›` switcher. Updated every frame by `draw` beside [`Self::in_dashboard_overlay`], and read from the same place: the shortcuts bar builds the pane's hints once for both the bar and the cheatsheet, neither of which can see `draw`'s arguments.
     pub(crate) overlay_can_cycle: bool,

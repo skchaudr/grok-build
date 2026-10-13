@@ -2438,16 +2438,6 @@
         for out in bridge.translate_inbound(&spawned) {
             apply_claude_bridge_line(&mut app, &out);
         }
-        {
-            let child = app
-                .agents
-                .get_mut(&AgentId(0))
-                .unwrap()
-                .subagent_views
-                .get_mut(CHILD)
-                .unwrap();
-            child.session.state = AgentState::Idle;
-        }
         app.external_agent = true;
         app.external_agent_label = Some("claude".into());
         app.agents
@@ -2456,13 +2446,25 @@
             .open_subagent_fullscreen(CHILD.to_owned());
         let effects =
             crate::app::dispatch::dispatch(Action::SendPrompt("also say ping".into()), &mut app);
-        let steered = effects.iter().find_map(|effect| match effect {
-            Effect::SendPrompt { session_id, text, .. } => {
-                Some((session_id.0.as_ref(), text.as_str()))
-            }
-            _ => None,
-        });
-        assert_eq!(steered, Some((CHILD, "also say ping")));
+        assert!(
+            effects.is_empty(),
+            "mid-run steer must not send, got {effects:?}"
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let notice = "can't take messages mid-run yet";
+        let saw_notice = agent
+            .toast
+            .as_ref()
+            .is_some_and(|(msg, _)| msg.contains(notice))
+            || (0..agent.scrollback.len()).any(|idx| {
+                agent.scrollback.get(idx).is_some_and(|entry| {
+                    matches!(
+                        &entry.block,
+                        RenderBlock::System(block) if block.text.contains(notice)
+                    )
+                })
+            });
+        assert!(saw_notice, "mid-run steer must surface the refusal notice");
     }
 
     /// After the prompt RPC returns, 0.76.0 still emits the background-subagent
