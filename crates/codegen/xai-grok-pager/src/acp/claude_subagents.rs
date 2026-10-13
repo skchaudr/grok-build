@@ -392,13 +392,14 @@ pub(crate) fn spawn_stdio_bridge(
     tokio::task::spawn_local(async move {
         use tokio::io::AsyncBufReadExt;
         let mut reader = tokio::io::BufReader::new(stdout);
-        let mut line = String::new();
+        let mut line_bytes = Vec::new();
         loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
+            line_bytes.clear();
+            match reader.read_until(b'\n', &mut line_bytes).await {
                 Ok(0) => break,
                 Ok(_) => {
-                    let raw = line.trim_end_matches(['\n', '\r']);
+                    let raw = String::from_utf8_lossy(&line_bytes);
+                    let raw = raw.trim_end_matches(['\n', '\r']);
                     let translated = if translate_in {
                         inbound_state.borrow_mut().translate_inbound(raw)
                     } else if raw.is_empty() {
@@ -497,6 +498,15 @@ mod tests {
 
     fn update_of(line: &str) -> Value {
         serde_json::from_str::<Value>(line).unwrap()["params"]["update"].clone()
+    }
+
+    #[test]
+    fn invalid_utf8_stdout_line_does_not_break_inbound_translation() {
+        let mut bridge = ClaudeSubagentBridge::new();
+        let bytes = [0xff, b'o', b'k'];
+        let raw = String::from_utf8_lossy(&bytes);
+        let out = bridge.translate_inbound(&raw);
+        assert_eq!(out, vec![raw.to_string()]);
     }
 
     #[test]
