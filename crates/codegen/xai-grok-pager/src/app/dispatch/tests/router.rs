@@ -988,6 +988,43 @@ fn switch_model_dispatch_produces_effect_and_sets_pending() {
     );
     assert!(agent_ref(&app, id).session.model_switch_pending);
     assert!(agent_ref(&app, id).session.state.is_idle());
+    assert!(
+        matches!(
+            effects.first(),
+            Some(Effect::SwitchModel {
+                model_config_id: None,
+                ..
+            })
+        ),
+        "no advertised model option keeps session/set_model"
+    );
+}
+#[test]
+fn advertised_model_option_switch_carries_config_id() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let fable = acp::ModelId::new(std::sync::Arc::from("fable"));
+    let sonnet = acp::ModelId::new(std::sync::Arc::from("sonnet"));
+    let agent = test_agent_mut(&mut app, id);
+    agent.session.models.available.insert(
+        fable.clone(),
+        acp::ModelInfo::new(fable.clone(), "Fable 5.1".to_string()),
+    );
+    agent.session.models.available.insert(
+        sonnet.clone(),
+        acp::ModelInfo::new(sonnet.clone(), "Sonnet 5.5".to_string()),
+    );
+    agent.session.models.current = Some(fable);
+    agent.session.models.model_config_id = Some("model".to_string());
+    let effects = dispatch(
+        Action::SwitchModel(ModelChoice::new(sonnet.clone())),
+        &mut app,
+    );
+    assert!(matches!(
+        effects.first(),
+        Some(Effect::SwitchModel { model_config_id: Some(id), choice, .. })
+            if id == "model" && choice.model_id == sonnet
+    ));
 }
 #[test]
 fn context_window_selection_is_refused_while_a_model_switch_is_pending() {

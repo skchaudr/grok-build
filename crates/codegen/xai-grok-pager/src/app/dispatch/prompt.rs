@@ -247,6 +247,20 @@ fn refuse_on_failed_tab(agent: &mut AgentView, minimal: bool) -> bool {
     true
 }
 
+fn claude_takeover_session(
+    agent: &crate::app::agent_view::AgentView,
+    claude_child_steer: bool,
+) -> Option<acp::SessionId> {
+    if !claude_child_steer {
+        return None;
+    }
+    let child_sid = agent.active_subagent.as_ref()?;
+    agent
+        .subagent_views
+        .get(child_sid)
+        .and_then(|child| child.session.session_id.clone())
+}
+
 pub(super) fn dispatch_send_prompt(app: &mut AppView, text: String) -> Vec<Effect> {
     crate::unified_log::info(
         "prompt.enqueue",
@@ -746,9 +760,15 @@ pub(super) fn dispatch_send_prompt_submission(
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
     let leader_mode = app.leader_mode;
     let screen_mode_is_minimal = app.screen_mode.is_minimal();
+    // Claude child takeover: the composer text is a `session/prompt` for that child session.
+    // Native subagents keep the parent session. 0.76.0 rejects the child id today; the
+    // bridge still sends it, which is the draft steer request.
+    let claude_child_steer =
+        app.external_agent && app.external_agent_label.as_deref() == Some("claude");
     let Some(agent) = app.agents.get_mut(&id) else {
         return prelude;
     };
+    agent.claude_subagent_host = claude_child_steer;
 
     // Paste-then-immediate-send: an image probe from a just-pasted Cmd+V is still off-thread
     // Stash this send and re-issue it once the probe completes so the image is never dropped from the built content blocks
@@ -1229,10 +1249,8 @@ pub(super) fn dispatch_send_prompt_submission(
         }
 
         if immediate_server_send {
-            let session_id = agent
-                .session
-                .session_id
-                .clone()
+            let session_id = claude_takeover_session(agent, claude_child_steer)
+                .or_else(|| agent.session.session_id.clone())
                 .expect("session_id is_some checked");
             let agent_id = agent.session.id;
             let prompt_id = uuid::Uuid::new_v4().to_string();

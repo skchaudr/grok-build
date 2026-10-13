@@ -1514,6 +1514,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
             nonce: Default::default(),
         });
         if let Some(switch) = deferred {
+            let model_config_id = agent.session.models.model_config_id.clone();
             effects.push(Effect::SwitchModel {
                 agent_id,
                 session_id: session_id_clone.clone(),
@@ -1522,6 +1523,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
                     ..ModelChoice::new(switch.model_id)
                 },
                 prev_model_id: switch.prev_model_id,
+                model_config_id,
             });
         }
         if std::mem::take(&mut agent.pending_extensions_fetch)
@@ -1654,6 +1656,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
             nonce: Default::default(),
         });
         if let Some(switch) = deferred {
+            let model_config_id = agent.session.models.model_config_id.clone();
             effects.push(Effect::SwitchModel {
                 agent_id,
                 session_id: session_id_clone.clone(),
@@ -1662,6 +1665,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                     ..ModelChoice::new(switch.model_id)
                 },
                 prev_model_id: switch.prev_model_id,
+                model_config_id,
             });
         }
         if std::mem::take(&mut agent.pending_extensions_fetch)

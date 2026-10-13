@@ -978,11 +978,16 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                             if let Some(agent) = app.agents.get_mut(&aid) {
                                 agent.session.model_switch_pending = true;
                             }
+                            let model_config_id = app
+                                .agents
+                                .get(&aid)
+                                .and_then(|agent| agent.session.models.model_config_id.clone());
                             companion_effects.push(Effect::SwitchModel {
                                 agent_id: aid,
                                 session_id: sid,
                                 choice: ModelChoice::new(id),
                                 prev_model_id: None,
+                                model_config_id,
                             });
                         }
                     }

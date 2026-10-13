@@ -1629,6 +1629,9 @@ pub enum Effect {
         /// `None` for `Action::SwitchModel` (no optimistic update).
         /// Threaded through to `SwitchModelComplete` so `IncompatibleAgent` can roll back.
         prev_model_id: Option<acp::ModelId>,
+        /// When set, the agent advertised a `model` config option and the switch is
+        /// `session/set_config_option` with this id. `None` sends `session/set_model`.
+        model_config_id: Option<String>,
     },
     /// Fetch changelog from CDN (both markdown and structured JSON).
     /// Runs off the render path via `spawn_blocking`.

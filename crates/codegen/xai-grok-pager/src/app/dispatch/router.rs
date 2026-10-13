@@ -1033,11 +1033,13 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                 };
             };
             agent.session.model_switch_pending = true;
+            let model_config_id = agent.session.models.model_config_id.clone();
             vec![Effect::SwitchModel {
                 agent_id: id,
                 session_id,
                 choice,
                 prev_model_id: None,
+                model_config_id,
             }]
         }
         Action::AnnouncementsHide => {

@@ -1700,6 +1700,77 @@ fn other_switch_failure_rolls_back_optimistic_model_and_reports() {
 }
 
 #[test]
+fn config_option_switch_failure_rolls_back_the_footer() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let fable = acp::ModelId::new(std::sync::Arc::from("fable"));
+    let sonnet = acp::ModelId::new(std::sync::Arc::from("sonnet"));
+    for (model, name) in [(&fable, "Fable 5.1"), (&sonnet, "Sonnet 5.5")] {
+        test_agent_mut(&mut app, id)
+            .session
+            .models
+            .available
+            .insert(
+                model.clone(),
+                acp::ModelInfo::new(model.clone(), name.to_string()),
+            );
+    }
+    test_agent_mut(&mut app, id)
+        .session
+        .models
+        .set_current(fable.clone(), None);
+    test_agent_mut(&mut app, id).session.models.model_config_id = Some("model".to_string());
+
+    let effects = dispatch(Action::SetDefaultModel(sonnet.clone()), &mut app);
+    assert!(
+        matches!(
+            effects.iter().find(|e| matches!(e, Effect::SwitchModel { .. })),
+            Some(Effect::SwitchModel { model_config_id: Some(config_id), .. })
+                if config_id == "model"
+        ),
+        "advertised model option must send set_config_option, got {effects:?}"
+    );
+    assert_eq!(
+        expect_agent(&app, id)
+            .session
+            .models
+            .footer_label()
+            .as_deref(),
+        Some("Sonnet 5.5")
+    );
+
+    dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            choice: ModelChoice::new(sonnet),
+            result: Err(SwitchModelError::Other(
+                "Method not found: session/set_config_option".into(),
+            )),
+            prev_model_id: Some(fable.clone()),
+        }),
+        &mut app,
+    );
+
+    assert_eq!(
+        expect_agent(&app, id)
+            .session
+            .models
+            .footer_label()
+            .as_deref(),
+        Some("Fable 5.1"),
+        "a rejected set_config_option must restore the previous footer"
+    );
+    assert_eq!(
+        expect_agent(&app, id)
+            .session
+            .models
+            .model_config_id
+            .as_deref(),
+        Some("model")
+    );
+}
+
+#[test]
 fn incompatible_agent_closes_active_modal() {
     use crate::views::modal::ActiveModal;
 

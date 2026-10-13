@@ -507,3 +507,56 @@
         );
     }
 
+    /// claude-agent-acp 0.76.0 pushes the live model as `config_option_update`, not `session/set_model`.
+    #[test]
+    fn config_option_update_moves_the_footer_to_the_agent_model() {
+        let mut app = make_app_with_agent("sess-1");
+        let initial = acp::SessionConfigOption::select(
+            "model",
+            "Model",
+            "fable",
+            vec![
+                acp::SessionConfigSelectOption::new("fable", "Fable 5.1"),
+                acp::SessionConfigSelectOption::new("sonnet", "Sonnet 5.5"),
+            ],
+        )
+        .category(acp::SessionConfigOptionCategory::Model);
+        app.agents.get_mut(&AgentId(0)).unwrap().session.models =
+            crate::acp::model_state::models_or_config_option(None, Some(&[initial])).into();
+
+        let updated = acp::SessionConfigOption::select(
+            "model",
+            "Model",
+            "sonnet",
+            vec![
+                acp::SessionConfigSelectOption::new("fable", "Fable 5.1"),
+                acp::SessionConfigSelectOption::new("sonnet", "Sonnet 5.5"),
+            ],
+        )
+        .category(acp::SessionConfigOptionCategory::Model);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let changed = handle(
+            AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+                request: acp_fixtures::session_notification(
+                    "sess-1",
+                    acp::SessionUpdate::ConfigOptionUpdate(acp::ConfigOptionUpdate::new(vec![
+                        updated,
+                    ])),
+                ),
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+        assert!(changed);
+        assert_eq!(
+            app.agents
+                .get(&AgentId(0))
+                .unwrap()
+                .session
+                .models
+                .footer_label()
+                .as_deref(),
+            Some("Sonnet 5.5")
+        );
+    }
+
