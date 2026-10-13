@@ -278,6 +278,79 @@ fn claude_child_steer_refused(
     true
 }
 
+pub(super) const PI_CHILD_FINISHED_STEER_NOTICE: &str = "subagent finished; message not sent";
+
+fn external_agent_supports_child_steer(app: &AppView) -> bool {
+    app.external_agent && app.external_agent_label.as_deref() != Some("claude")
+}
+
+/// Mid-run steer for external Pi (and other non-Claude ACP subagent hosts): `session/prompt` on the child session only.
+fn try_dispatch_external_pi_child_steer(
+    app: &mut AppView,
+    parent_id: AgentId,
+    text: String,
+    consume_input: bool,
+    screen_mode_is_minimal: bool,
+) -> Option<Vec<Effect>> {
+    if !consume_input || !external_agent_supports_child_steer(app) {
+        return None;
+    }
+    let parent = app.agents.get_mut(&parent_id)?;
+    let child_sid = parent.active_subagent.clone()?;
+    let info = parent.subagent_sessions.get(child_sid.as_str())?;
+    let _bridge_registered = info;
+
+    if info.is_finished() {
+        let notice = PI_CHILD_FINISHED_STEER_NOTICE.to_owned();
+        if screen_mode_is_minimal {
+            parent
+                .subagent_views
+                .get_mut(&child_sid)
+                .map(|child| child.scrollback.push_block(RenderBlock::system(notice.clone())));
+        } else if let Some(child) = parent.subagent_views.get_mut(&child_sid) {
+            child.show_toast(&notice);
+        } else {
+            parent.show_toast(&notice);
+        }
+        return Some(vec![]);
+    }
+
+    let child_session_id = parent
+        .subagent_views
+        .get(&child_sid)?
+        .session
+        .session_id
+        .clone()?;
+
+    let prompt_id = uuid::Uuid::new_v4().to_string();
+    let history_text = text.trim();
+
+    if let Some(child) = parent.subagent_views.get_mut(&child_sid) {
+        child
+            .scrollback
+            .push_block(RenderBlock::user_prompt(text.clone()));
+        child.prompt.set_text("");
+        child.note_draft_consumed();
+        if !history_text.is_empty() {
+            child.record_prompt_in_history(history_text);
+        }
+    }
+
+    crate::unified_log::info(
+        "prompt.pi_child_steer",
+        Some(child_session_id.0.as_ref()),
+        Some(serde_json::json!({ "len": text.len(), "prompt_id": prompt_id })),
+    );
+
+    Some(vec![Effect::SendPrompt {
+        agent_id: parent_id,
+        session_id: child_session_id,
+        text,
+        prompt_id,
+        skill_token_ranges: Vec::new(),
+    }])
+}
+
 pub(super) fn dispatch_send_prompt(app: &mut AppView, text: String) -> Vec<Effect> {
     crate::unified_log::info(
         "prompt.enqueue",
@@ -779,15 +852,30 @@ pub(super) fn dispatch_send_prompt_submission(
     let screen_mode_is_minimal = app.screen_mode.is_minimal();
     let external_claude =
         app.external_agent && app.external_agent_label.as_deref() == Some("claude");
+    if consume_input && !literal && external_claude {
+        let refused = app
+            .agents
+            .get_mut(&id)
+            .is_some_and(|agent| claude_child_steer_refused(true, agent, screen_mode_is_minimal));
+        if refused {
+            return prelude;
+        }
+    }
+    if !literal
+        && let Some(mut steer_effects) = try_dispatch_external_pi_child_steer(
+            app,
+            id,
+            text.clone(),
+            consume_input,
+            screen_mode_is_minimal,
+        )
+    {
+        steer_effects.splice(0..0, prelude);
+        return steer_effects;
+    }
     let Some(agent) = app.agents.get_mut(&id) else {
         return prelude;
     };
-    if consume_input
-        && !literal
-        && claude_child_steer_refused(external_claude, agent, screen_mode_is_minimal)
-    {
-        return prelude;
-    }
 
     // Paste-then-immediate-send: an image probe from a just-pasted Cmd+V is still off-thread
     // Stash this send and re-issue it once the probe completes so the image is never dropped from the built content blocks

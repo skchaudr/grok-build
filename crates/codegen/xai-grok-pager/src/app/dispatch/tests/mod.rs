@@ -9,6 +9,7 @@ mod mid_text_goal;
 mod modes;
 mod notes;
 mod permissions;
+mod pi_child_steer;
 mod prompt;
 mod prompt_ack;
 mod queue_release;
