@@ -624,6 +624,13 @@ fn render_source_to_png(
 /// The real out-of-process path is covered by the integration test against the built pager binary.
 #[cfg(test)]
 fn render_in_process_for_tests(job: &MermaidJob, _timeout: Duration) -> Result<(), &'static str> {
+    let use_mock = TEST_MOCK_RENDER.with(|m| m.get());
+    if use_mock {
+        // Dummy 1x1 PNG bytes
+        let dummy = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe\x02\xfe\xa7\x35\x81\x84\x00\x00\x00\x00IEND\xaeB`\x82";
+        return write_png_atomic(&job.out_path, dummy).map_err(|_| "write");
+    }
+
     match render_source_to_png(
         &job.source,
         job.theme_dark,
@@ -846,6 +853,10 @@ thread_local! {
     /// `GROK_HOME` (whose `grok_home()` value is cached first-write-wins, an isolation hazard under the full parallel suite; PNGs could land in the real `~/.grok`). Thread-local, so each parallel test is independent; the `TempDir` guard lives here so the dir outlives the view. Mirrors the `subagent::REPLAY_GROK_HOME` test override. Production never sets this.
     static TEST_MERMAID_DIR: std::cell::RefCell<Option<tempfile::TempDir>> =
         const { std::cell::RefCell::new(None) };
+
+    /// Per-test mock for the renderer to make tests deterministic under extreme CPU starvation.
+    /// When set to true, `render_in_process_for_tests` immediately writes a dummy PNG instead of invoking the heavy engine.
+    static TEST_MOCK_RENDER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl AgentView {
@@ -1957,6 +1968,7 @@ mod tests {
     /// The fixed width makes the render width bucket, hence the cache key, deterministic.
     fn agent_with_session(name: &str) -> AgentView {
         use_test_mermaid_dir();
+        TEST_MOCK_RENDER.with(|m| m.set(true));
         let cwd = PathBuf::from("/grok-mermaid-test").join(name);
         let mut agent = crate::app::agent_view::test_agent_view(Some(name), cwd);
         agent.last_terminal_size = (100, 40);

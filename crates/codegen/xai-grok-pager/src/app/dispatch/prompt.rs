@@ -2091,6 +2091,23 @@ pub(super) fn handle_prompt_response(
             None
         };
 
+        if app.external_agent {
+            let cleared_echoes = !agent.shared_queue.is_empty();
+            let cleared_expectation = agent.expect_send_now_cancel.is_some();
+            if cleared_echoes || cleared_expectation {
+                crate::unified_log::debug(
+                    "prompt.end_cleared_external_agent_echoes",
+                    agent.session.session_id.as_ref().map(|s| s.0.as_ref()),
+                    Some(serde_json::json!({
+                        "cleared_echoes": cleared_echoes,
+                        "cleared_expectation": cleared_expectation,
+                    })),
+                );
+                agent.shared_queue.clear();
+                agent.expect_send_now_cancel = None;
+            }
+        }
+
         let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);
         let mut effects = drain.effects;

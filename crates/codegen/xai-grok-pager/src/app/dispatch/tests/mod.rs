@@ -21,6 +21,7 @@ mod status;
 mod status_line;
 mod task_result;
 mod transcript;
+mod external_agent_stall;
 mod turn;
 mod voice;
 mod voice_clip;
