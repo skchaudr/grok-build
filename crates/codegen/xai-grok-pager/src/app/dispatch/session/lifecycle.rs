@@ -1990,7 +1990,7 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                         format_window(selection.get())
                     )));
                 }
-                if unchanged {
+                if unchanged || app.external_agent {
                     vec![]
                 } else {
                     vec![Effect::PersistPreferredModel {

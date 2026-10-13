@@ -1728,6 +1728,30 @@ fn deferred_switch_updates_display_and_persists() {
         "unchanged pre-session pick must not re-persist, got {effects:?}"
     );
 }
+
+#[test]
+fn deferred_switch_external_agent_does_not_persist() {
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    let id = AgentId(0);
+    let model_id = acp::ModelId::new(std::sync::Arc::from("default"));
+    app.agents.get_mut(&id).unwrap().session.session_id = None;
+    let effects = dispatch(
+        Action::SwitchModel(ModelChoice::new(model_id.clone())),
+        &mut app,
+    );
+    assert_eq!(
+        agent_ref(&app, id).session.models.current,
+        Some(model_id.clone())
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PersistPreferredModel { .. })),
+        "external agent pre-session switch must not persist Grok default model, got {effects:?}",
+    );
+}
+
 #[test]
 fn request_bundle_status_emits_effect() {
     let mut app = test_app();

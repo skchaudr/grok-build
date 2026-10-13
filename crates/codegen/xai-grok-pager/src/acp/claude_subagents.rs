@@ -223,6 +223,7 @@ impl ClaudeSubagentBridge {
                         "subagentSessionId": child_id,
                         "state": "cancelled",
                     }),
+                    "cancelled",
                 ));
                 lines
             }

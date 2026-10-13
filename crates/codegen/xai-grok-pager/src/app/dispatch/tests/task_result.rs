@@ -1307,6 +1307,51 @@ fn switch_model_complete_success_updates_model_and_pushes_message() {
 }
 
 #[test]
+fn switch_model_complete_external_agent_does_not_persist_preferred_model() {
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    let id = AgentId(0);
+    let model_id = acp::ModelId::new(std::sync::Arc::from("sonnet"));
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .models
+        .available
+        .insert(
+            model_id.clone(),
+            acp::ModelInfo::new(model_id.clone(), "Sonnet".to_string()),
+        );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .model_switch_pending = true;
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            choice: ModelChoice::new(model_id.clone()),
+            result: Ok(()),
+            prev_model_id: None,
+        }),
+        &mut app,
+    );
+
+    assert_eq!(
+        expect_agent(&app, id).session.models.current,
+        Some(model_id.clone())
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PersistPreferredModel { .. })),
+        "external agent switch must not persist Grok default model, got {effects:?}",
+    );
+}
+
+#[test]
 fn switch_model_complete_skips_message_and_persist_when_unchanged() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
