@@ -93,6 +93,26 @@ write_obs() {
   echo "wrote $(basename "$OBS")"
 }
 
+# git diff here rejects --pathspec-from-file (exit 129), so path lists travel as argv.
+read_nul_paths() {
+  local -n _out=$1
+  local file=$2
+  _out=()
+  local p
+  while IFS= read -r -d '' p; do
+    [[ -n "$p" ]] && _out+=("$p")
+  done <"$file"
+}
+
+diff_stat_restricted() {
+  local left=$1 right=$2
+  shift 2
+  if [[ $# -eq 0 ]]; then
+    return 0
+  fi
+  git diff --stat "$left" "$right" -- "$@"
+}
+
 overlap_stat() {
   local left=$1 right=$2 list_base=$3 list_tip=$4
   local zlist count
@@ -102,19 +122,20 @@ overlap_stat() {
   echo "touched-files: $count ($list_base..$list_tip)"
   git diff --name-only "$list_base" "$list_tip"
   echo "overlap-stat: git diff --stat ${left}..${right} restricted to those files"
-  if [[ ! -s "$zlist" ]]; then
+  local paths=()
+  read_nul_paths paths "$zlist"
+  rm -f "$zlist"
+  if [[ ${#paths[@]} -eq 0 ]]; then
     echo "(no touched files)"
-    rm -f "$zlist"
     return
   fi
   local stat_out
-  stat_out=$(git diff --stat "$left" "$right" --pathspec-from-file="$zlist" --pathspec-file-nul)
+  stat_out=$(diff_stat_restricted "$left" "$right" "${paths[@]}")
   if [[ -z "$stat_out" ]]; then
     echo "(empty)"
   else
     printf '%s\n' "$stat_out"
   fi
-  rm -f "$zlist"
 }
 
 cmd_check() {
@@ -161,23 +182,24 @@ cmd_check() {
     local zlist
     zlist=$(mktemp)
     git diff --name-only -z "$base" "$tip" >"$zlist"
-    local n_names
-    n_names=$(git diff --name-only "$base" "$tip" | grep -c . || true)
-    if [[ ! -s "$zlist" ]]; then
+    local paths=()
+    read_nul_paths paths "$zlist"
+    rm -f "$zlist"
+    local n_names=${#paths[@]}
+    if [[ $n_names -eq 0 ]]; then
       echo "---- replay ${base:0:12}..${tip:0:12} ----"
       echo "replay-touched-files: 0"
       echo "replay-restricted-files: 0"
       echo "replay-stat: match"
-      rm -f "$zlist"
       return
     fi
     local full restricted
     full=$(mktemp)
     restricted=$(mktemp)
     git diff --stat "$base" "$tip" >"$full"
-    git diff --stat "$base" "$tip" --pathspec-from-file="$zlist" --pathspec-file-nul >"$restricted"
+    diff_stat_restricted "$base" "$tip" "${paths[@]}" >"$restricted"
     local n_restricted
-    n_restricted=$(git diff --name-only "$base" "$tip" --pathspec-from-file="$zlist" --pathspec-file-nul | grep -c . || true)
+    n_restricted=$(git diff --name-only "$base" "$tip" -- "${paths[@]}" | grep -c . || true)
     echo "---- replay ${base:0:12}..${tip:0:12} ----"
     echo "replay-touched-files: $n_names"
     echo "replay-restricted-files: $n_restricted"
