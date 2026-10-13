@@ -595,9 +595,9 @@ VERIFIED (pager-bin built at 98f97b77, binary checked for the notice string; pi-
 
 ## T3-SUBAGENTS: claude-agent-acp 0.76.0 (2026-10-13)
 
-`grok claude` was launching `@zed-industries/claude-code-acp` 0.16.2 (`~/.local/bin/claude-acp` → `~/.local/share/claude-acp/current`), which has no subagent protocol. `@agentclientprotocol/claude-agent-acp` 0.76.0 is installed under Zed's npx registry and launches as `node <that>/dist/index.js` (Node 24, engines `>=22`). It resolves `@anthropic-ai/claude-agent-sdk` by walking up to the registry `node_modules`. `CLAUDE_CODE_EXECUTABLE` still selects the user's `claude` CLI; without it the adapter uses the SDK's bundled native binary.
+`grok claude` used to launch `@zed-industries/claude-code-acp` 0.16.2 (`~/.local/bin/claude-acp`), which has no subagent protocol. The pinned adapter is now `@agentclientprotocol/claude-agent-acp` 0.76.0 under `~/.local/share/claude-agent-acp/0.76.0`, launcher `~/.local/bin/claude-agent-acp` (`claude-agent-acp-update`, not Zed's npx tree). `0001-auth-required-message.patch` is applied. `--check` prints `installed: 0.76.0` and `patch: 0001-auth-required-message.patch applied`. npm latest on 2026-10-13 was 0.89.1; the installer stays on 0.76.0 unless given a version. `GB_CLAUDE_ACP` overrides the command. Missing launcher falls back to `claude-acp`. `CLAUDE_CODE_EXECUTABLE` still selects the user's `claude` CLI.
 
-`~/.dsh/scripts/gb` `[claude]` now prefers that entry when the file exists. `GB_CLAUDE_ACP` replaces the whole command. Missing file falls back to `claude-acp` / `claude-code-acp`. Other agents are unchanged. `bash -n` passed. `node …/dist/index.js --version` prints `0.76.0`.
+Parity vs 0.16.2 + `0001-context-usage.patch` (source, plus `docs/claude-agent-acp-subagent-trace.jsonl` from the pinned binary):
 
 Parity vs 0.16.2 + `0001-context-usage.patch`, from the adapter source plus one live turn (`docs/claude-agent-acp-subagent-trace.jsonl`):
 
