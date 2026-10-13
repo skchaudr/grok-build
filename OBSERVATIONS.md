@@ -592,3 +592,13 @@ VERIFIED (pager-bin built at 98f97b77, binary checked for the notice string; pi-
 - Now: `dispatch_send_prompt_now` branches on `app.external_agent` to `dispatch_external_steer` (interject.rs). The text and images go to the FRONT of `pending_prompts` as a `steer` row. The cancel is a plain `do_cancel_turn` with no rewind, because the non-empty queue blocks the rewind. The toast reads "Steering: cancelled current turn". When the cancelled turn ends, the normal drain sends the steer first and alone: `maybe_drain_queue` skips combining when the front row is a steer. Other rows wait their turn. If the agent is idle, the steer drains immediately. If a cancel is already in flight, the steer waits for it. Native behavior is unchanged.
 - Host-config trap: `~/.grok/config.toml` sets `combine_queued_prompts = true`. Tests read it through the appearance cache, so `multiple_queued_prompts_drain_one_per_turn`, `cancel_with_multiple_queued_prompts_drains_only_front_prompt`, and `drain_after_editing_sends_correct_prompt` fail on this VM. All pass with `GROK_HOME=<empty dir>`.
 - Not changed: with `follow_up_behavior = steer`, a plain mid-turn Enter still takes the immediate server-send path, which is a concurrent `session/prompt`. That is unsafe for claude-acp. The default (`queue`) is fine.
+
+## 2026-10-13 upstream-sync verify
+
+Worktree `.worktrees/usync-e2e` (`sync/upstream-sim-proof`), `CARGO_TARGET_DIR` that worktree's `target/`. `df -h /` before the compile: 140G free. No `--release`.
+
+`cargo check -p xai-grok-pager-bin` — `Finished dev profile [unoptimized] target(s) in 8m 49s`, exit 0.
+
+`cargo build -p xai-grok-pager-bin` — `Finished dev profile [unoptimized] target(s) in 10m 03s`, exit 0. Binary `target/debug/xai-grok-pager` (484M).
+
+`verify --release` on `khoj-38w` prints `run gb-build sab-mini instead` and exits 1 without cargo.
