@@ -59,6 +59,9 @@ pub(super) fn push_server_queue_echo(
     text: &str,
     kind: &str,
 ) {
+    if app.external_agent {
+        return;
+    }
     app.push_optimistic_prompt_echo(session_id, prompt_id, text, kind);
     let snapshot = app
         .shared_prompt_queue(session_id)
@@ -844,9 +847,13 @@ pub(super) fn arm_send_now_and_paint_dispatched(
     agent: &mut AgentView,
     prompt_id: &str,
     text: &str,
+    external_agent: bool,
 ) {
     if !paint_send_now_and_maybe_arm(agent, prompt_id) {
         return;
+    }
+    if external_agent {
+        agent.expect_send_now_cancel = None;
     }
     push_send_now_user_block(agent, prompt_id, "prompt", text, /* edited */ false);
 }
@@ -2372,7 +2379,7 @@ mod tests {
             }
             agent.front_message_committed = true;
 
-            arm_send_now_and_paint_dispatched(agent, "p-next", "flush me");
+            arm_send_now_and_paint_dispatched(agent, "p-next", "flush me", false);
 
             assert!(agent.expect_send_now_cancel.is_none());
             assert!(!agent.send_now_painted_blocks.contains_key("p-next"));

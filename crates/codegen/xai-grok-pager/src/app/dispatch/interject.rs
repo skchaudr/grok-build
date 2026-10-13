@@ -182,7 +182,7 @@ pub(super) fn dispatch_send_prompt_now(
     // Self-originated: the ACP gate must treat this prompt's deltas as ours.
     agent.note_self_originated_prompt(&prompt_id);
     // Expect the shell's send-now cancel so the turn-end handling suppresses its marker
-    super::queue::arm_send_now_and_paint_dispatched(agent, &prompt_id, &text);
+    super::queue::arm_send_now_and_paint_dispatched(agent, &prompt_id, &text, external_agent);
 
     let build = crate::prompt_images::build_content_blocks_with_workspace_report(
         text.clone(),

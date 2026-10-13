@@ -278,6 +278,79 @@ fn claude_child_steer_refused(
     true
 }
 
+pub(super) const PI_CHILD_FINISHED_STEER_NOTICE: &str = "subagent finished; message not sent";
+
+fn external_agent_supports_child_steer(app: &AppView) -> bool {
+    app.external_agent
+        && !crate::slash::external_common::is_claude_label(app.external_agent_label.as_deref())
+}
+
+/// Mid-run steer for external Pi (and other non-Claude ACP subagent hosts): `session/prompt` on the child session only.
+fn try_dispatch_external_pi_child_steer(
+    app: &mut AppView,
+    parent_id: AgentId,
+    text: String,
+    consume_input: bool,
+    screen_mode_is_minimal: bool,
+) -> Option<Vec<Effect>> {
+    if !consume_input || !external_agent_supports_child_steer(app) {
+        return None;
+    }
+    let parent = app.agents.get_mut(&parent_id)?;
+    let child_sid = parent.active_subagent.clone()?;
+    let info = parent.subagent_sessions.get(child_sid.as_str())?;
+    let _bridge_registered = info;
+
+    if info.is_finished() {
+        let notice = PI_CHILD_FINISHED_STEER_NOTICE.to_owned();
+        if screen_mode_is_minimal {
+            parent
+                .subagent_views
+                .get_mut(&child_sid)
+                .map(|child| child.scrollback.push_block(RenderBlock::system(notice.clone())));
+        } else if let Some(child) = parent.subagent_views.get_mut(&child_sid) {
+            child.show_toast(&notice);
+        } else {
+            parent.show_toast(&notice);
+        }
+        return Some(vec![]);
+    }
+
+    let child_session_id = parent
+        .subagent_views
+        .get(&child_sid)?
+        .session
+        .session_id
+        .clone()?;
+
+    let prompt_id = uuid::Uuid::new_v4().to_string();
+    let history_text = text.trim();
+
+    if let Some(child) = parent.subagent_views.get_mut(&child_sid) {
+        child
+            .scrollback
+            .push_block(RenderBlock::user_prompt(text.clone()));
+        child.prompt.set_text("");
+        child.note_draft_consumed();
+        if !history_text.is_empty() {
+            child.record_prompt_in_history(history_text);
+        }
+    }
+
+    crate::unified_log::info(
+        "prompt.pi_child_steer",
+        Some(child_session_id.0.as_ref()),
+        Some(serde_json::json!({ "len": text.len(), "prompt_id": prompt_id })),
+    );
+
+    Some(vec![Effect::SendChildPrompt {
+        parent_id,
+        child_session_id,
+        text,
+        prompt_id,
+    }])
+}
+
 pub(super) fn dispatch_send_prompt(app: &mut AppView, text: String) -> Vec<Effect> {
     crate::unified_log::info(
         "prompt.enqueue",
@@ -777,17 +850,32 @@ pub(super) fn dispatch_send_prompt_submission(
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
     let leader_mode = app.leader_mode;
     let screen_mode_is_minimal = app.screen_mode.is_minimal();
-    let external_claude =
-        app.external_agent && app.external_agent_label.as_deref() == Some("claude");
+    let external_claude = app.external_agent
+        && crate::slash::external_common::is_claude_label(app.external_agent_label.as_deref());
+    if consume_input && !literal && external_claude {
+        let refused = app
+            .agents
+            .get_mut(&id)
+            .is_some_and(|agent| claude_child_steer_refused(true, agent, screen_mode_is_minimal));
+        if refused {
+            return prelude;
+        }
+    }
+    if !literal
+        && let Some(mut steer_effects) = try_dispatch_external_pi_child_steer(
+            app,
+            id,
+            text.clone(),
+            consume_input,
+            screen_mode_is_minimal,
+        )
+    {
+        steer_effects.splice(0..0, prelude);
+        return steer_effects;
+    }
     let Some(agent) = app.agents.get_mut(&id) else {
         return prelude;
     };
-    if consume_input
-        && !literal
-        && claude_child_steer_refused(external_claude, agent, screen_mode_is_minimal)
-    {
-        return prelude;
-    }
 
     // Paste-then-immediate-send: an image probe from a just-pasted Cmd+V is still off-thread
     // Stash this send and re-issue it once the probe completes so the image is never dropped from the built content blocks
@@ -1500,6 +1588,50 @@ pub(super) fn supersede_open_reload_window(
 
 // TaskResult handlers.
 
+/// Pi child steer ack: errors surface in the child view only; success is a no-op for parent state.
+pub(super) fn handle_child_prompt_ack(
+    app: &mut AppView,
+    parent_id: AgentId,
+    child_session_id: acp::SessionId,
+    result: Result<acp::PromptResponse, String>,
+) -> Vec<Effect> {
+    let Err(error) = result else {
+        return vec![];
+    };
+    let screen_mode_is_minimal = app.screen_mode.is_minimal();
+    let Some(parent) = app.agents.get_mut(&parent_id) else {
+        return vec![];
+    };
+    let child_sid = parent
+        .subagent_views
+        .iter()
+        .find_map(|(sid, view)| {
+            view.session
+                .session_id
+                .as_ref()
+                .filter(|s| s.0 == child_session_id.0)
+                .map(|_| sid.clone())
+        })
+        .or_else(|| parent.active_subagent.clone());
+    let message = format!("Couldn't steer subagent: {error}");
+    if screen_mode_is_minimal {
+        if let Some(ref sid) = child_sid
+            && let Some(child) = parent.subagent_views.get_mut(sid)
+        {
+            child
+                .scrollback
+                .push_block(RenderBlock::system(message.clone()));
+        }
+    } else if let Some(ref sid) = child_sid
+        && let Some(child) = parent.subagent_views.get_mut(sid)
+    {
+        child.show_toast(&message);
+    } else {
+        parent.show_toast(&message);
+    }
+    vec![]
+}
+
 pub(super) fn handle_prompt_response(
     app: &mut AppView,
     agent_id: AgentId,
@@ -1958,6 +2090,23 @@ pub(super) fn handle_prompt_response(
         } else {
             None
         };
+
+        if app.external_agent {
+            let cleared_echoes = !agent.shared_queue.is_empty();
+            let cleared_expectation = agent.expect_send_now_cancel.is_some();
+            if cleared_echoes || cleared_expectation {
+                crate::unified_log::debug(
+                    "prompt.end_cleared_external_agent_echoes",
+                    agent.session.session_id.as_ref().map(|s| s.0.as_ref()),
+                    Some(serde_json::json!({
+                        "cleared_echoes": cleared_echoes,
+                        "cleared_expectation": cleared_expectation,
+                    })),
+                );
+                agent.shared_queue.clear();
+                agent.expect_send_now_cancel = None;
+            }
+        }
 
         let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);

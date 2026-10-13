@@ -1363,6 +1363,51 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::SendChildPrompt {
+            parent_id,
+            child_session_id,
+            text,
+            prompt_id,
+        } => {
+            let tx = acp_tx.clone();
+            let screen_mode = session_flags.screen_mode_label;
+            let is_api_key_auth = session_flags.is_api_key_auth;
+            let external_agent = session_flags.external_agent_label.clone();
+            tasks.spawn(async move {
+                ulog::info(
+                    "prompt.child_steer.acp_send.start",
+                    Some(&child_session_id.0),
+                    Some(serde_json::json!({
+                        "len": text.len(),
+                        "prompt_id": prompt_id,
+                        "parent_id": parent_id.0,
+                    })),
+                );
+                let prompt = vec![plain_prompt_content_block(text, &[])];
+                let req = acp::PromptRequest::new(child_session_id.clone(), prompt).meta(
+                    prompt_request_meta(&prompt_id, screen_mode)
+                        .as_object()
+                        .cloned(),
+                );
+                let result = acp_send(req, &tx).await;
+                ulog::info(
+                    "prompt.child_steer.acp_send.done",
+                    Some(&child_session_id.0),
+                    Some(serde_json::json!({
+                        "ok": result.is_ok(),
+                        "prompt_id": prompt_id,
+                    })),
+                );
+                log_prompt_result(&child_session_id, &result);
+                TaskResult::ChildPromptAck {
+                    parent_id,
+                    child_session_id,
+                    result: result.map_err(|e| {
+                        format_acp_error_for(&e, is_api_key_auth, external_agent.as_deref())
+                    }),
+                }
+            });
+        }
         Effect::ExecutePlan {
             agent_id,
             session_id,
