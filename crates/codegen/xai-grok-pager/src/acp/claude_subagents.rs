@@ -38,11 +38,21 @@ struct Child {
     started: Instant,
 }
 
+#[derive(Debug)]
+enum PendingStopReply {
+    SessionCancel,
+    SubagentCancel {
+        client_request_id: String,
+        child_id: String,
+    },
+}
+
 /// Connection-local map of Claude child sessions learned from `subagent_spawned`.
 #[derive(Debug, Default)]
 pub(crate) struct ClaudeSubagentBridge {
     children: HashMap<String, Child>,
     stop_seq: u64,
+    pending_stop_replies: HashMap<String, PendingStopReply>,
 }
 
 impl ClaudeSubagentBridge {
@@ -60,6 +70,12 @@ impl ClaudeSubagentBridge {
         let Ok(mut msg) = serde_json::from_str::<Value>(line) else {
             return vec![line.to_owned()];
         };
+        if msg.get("method").is_none()
+            && let Some(id) = json_rpc_id(msg.get("id"))
+            && let Some(pending) = self.pending_stop_replies.remove(&id)
+        {
+            return self.finish_stop_reply(pending);
+        }
         if msg.get("method").and_then(Value::as_str) != Some("session/update") {
             return vec![line.to_owned()];
         }
@@ -114,21 +130,103 @@ impl ClaudeSubagentBridge {
             .and_then(Value::as_str)
             .unwrap_or("");
         if method == "session/cancel"
-            && let Some(child) = self.children.get(session_id)
+            && let Some(parent_session_id) = self
+                .children
+                .get(session_id)
+                .map(|child| child.parent_session_id.clone())
         {
-            self.stop_seq += 1;
-            return json!({
-                "jsonrpc": "2.0",
-                "id": format!("grok-child-stop-{}", self.stop_seq),
-                "method": "_session/async_task/stop",
-                "params": {
-                    "sessionId": child.parent_session_id,
-                    "asyncTaskId": session_id,
-                }
-            })
-            .to_string();
+            return self.async_task_stop_outbound(
+                &parent_session_id,
+                session_id,
+                PendingStopReply::SessionCancel,
+            );
+        }
+        if method == "_x.ai/subagent/cancel" {
+            let subagent_id = msg
+                .pointer("/params/subagentId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let Some(parent_session_id) = self
+                .children
+                .get(subagent_id)
+                .map(|child| child.parent_session_id.clone())
+            else {
+                return line.to_owned();
+            };
+            let client_request_id = json_rpc_id(msg.get("id")).unwrap_or_default();
+            return self.async_task_stop_outbound(
+                &parent_session_id,
+                subagent_id,
+                PendingStopReply::SubagentCancel {
+                    client_request_id,
+                    child_id: subagent_id.to_owned(),
+                },
+            );
         }
         line.to_owned()
+    }
+
+    fn async_task_stop_outbound(
+        &mut self,
+        parent_session_id: &str,
+        async_task_id: &str,
+        reply: PendingStopReply,
+    ) -> String {
+        self.stop_seq += 1;
+        let stop_id = format!("grok-child-stop-{}", self.stop_seq);
+        self.pending_stop_replies.insert(stop_id.clone(), reply);
+        json!({
+            "jsonrpc": "2.0",
+            "id": stop_id,
+            "method": "_session/async_task/stop",
+            "params": {
+                "sessionId": parent_session_id,
+                "asyncTaskId": async_task_id,
+            }
+        })
+        .to_string()
+    }
+
+    fn finish_stop_reply(&mut self, pending: PendingStopReply) -> Vec<String> {
+        match pending {
+            PendingStopReply::SessionCancel => Vec::new(),
+            PendingStopReply::SubagentCancel {
+                client_request_id,
+                child_id,
+            } => {
+                let mut lines = Vec::new();
+                if !client_request_id.is_empty() {
+                    lines.push(
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": client_request_id,
+                            "result": {
+                                "result": {
+                                    "subagentId": child_id,
+                                    "cancelled": true,
+                                    "outcome": {"kind": "cancelled"},
+                                },
+                                "error": null,
+                            }
+                        })
+                        .to_string(),
+                    );
+                }
+                let parent = self
+                    .children
+                    .get(&child_id)
+                    .map(|child| child.parent_session_id.clone())
+                    .unwrap_or_default();
+                lines.extend(self.finished(
+                    &parent,
+                    &json!({
+                        "subagentSessionId": child_id,
+                        "state": "cancelled",
+                    }),
+                ));
+                lines
+            }
+        }
     }
 
     fn is_child(&self, session_id: &str) -> bool {
@@ -289,6 +387,14 @@ fn finish_status(state: &str) -> &'static str {
         "failed" => "failed",
         "cancelled" => "cancelled",
         _ => "cancelled",
+    }
+}
+
+fn json_rpc_id(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
     }
 }
 
@@ -687,7 +793,13 @@ mod tests {
         assert_eq!(stopped["method"], "_session/async_task/stop");
         assert_eq!(stopped["params"]["sessionId"], PARENT);
         assert_eq!(stopped["params"]["asyncTaskId"], CHILD);
-        assert!(stopped.get("id").is_some());
+        let stop_id = stopped["id"].as_str().expect("stop id").to_owned();
+        assert!(
+            bridge
+                .translate_inbound(&json!({"jsonrpc":"2.0","id":stop_id,"result":{"stopped":true}}).to_string())
+                .is_empty(),
+            "adapter stop responses must not reach the client"
+        );
 
         let parent_cancel = format!(
             r#"{{"jsonrpc":"2.0","method":"session/cancel","params":{{"sessionId":"{PARENT}"}}}}"#
@@ -695,5 +807,32 @@ mod tests {
         let kept = bridge.translate_outbound(&parent_cancel);
         assert!(kept.contains("\"method\":\"session/cancel\""));
         assert!(kept.contains(PARENT));
+    }
+
+    #[test]
+    fn dashboard_subagent_cancel_becomes_stop_and_finishes() {
+        let mut bridge = ClaudeSubagentBridge::new();
+        bridge.translate_inbound(&spawned_line());
+        let cancel = format!(
+            r#"{{"jsonrpc":"2.0","id":42,"method":"_x.ai/subagent/cancel","params":{{"sessionId":"{PARENT}","subagentId":"{CHILD}"}}}}"#
+        );
+        let stopped: Value = serde_json::from_str(&bridge.translate_outbound(&cancel)).unwrap();
+        assert_eq!(stopped["method"], "_session/async_task/stop");
+        assert_eq!(stopped["params"]["sessionId"], PARENT);
+        assert_eq!(stopped["params"]["asyncTaskId"], CHILD);
+        let stop_id = stopped["id"].as_str().expect("stop id").to_owned();
+
+        let lines = bridge.translate_inbound(
+            &json!({"jsonrpc":"2.0","id":stop_id,"result":{"stopped":true}}).to_string(),
+        );
+        assert_eq!(lines.len(), 2, "cancelled finish plus ext response");
+        let ext: Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(ext["id"].as_str(), Some("42"));
+        assert_eq!(ext["result"]["result"]["subagentId"], CHILD);
+        assert_eq!(ext["result"]["result"]["outcome"]["kind"], "cancelled");
+        let finished_update = update_of(&lines[1]);
+        assert_eq!(finished_update["sessionUpdate"], "subagent_finished");
+        assert_eq!(finished_update["status"], "cancelled");
+        assert_eq!(finished_update["child_session_id"], CHILD);
     }
 }

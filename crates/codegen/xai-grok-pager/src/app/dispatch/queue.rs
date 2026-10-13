@@ -370,20 +370,6 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
         log_blocked("no_session_id", None);
         return QueueDrain::blocked();
     };
-    let session_id = if agent.claude_subagent_host {
-        agent
-            .active_subagent
-            .as_ref()
-            .and_then(|sid| {
-                agent
-                    .subagent_views
-                    .get(sid)
-                    .and_then(|child| child.session.session_id.clone())
-            })
-            .unwrap_or(session_id)
-    } else {
-        session_id
-    };
 
     // Block drain if the user is editing the front prompt.
     if let PromptMode::EditingQueued { id, .. } = &agent.prompt_mode
@@ -1331,8 +1317,11 @@ mod tests {
     };
     use crate::app::dispatch::router::dispatch;
     use crate::app::dispatch::tests::{
-        end_turn, enqueue_local, last_system_text, test_agent, test_app_with_agent,
+        end_turn, enqueue_local, last_system_text, make_test_agent_session, test_agent,
+        test_app_with_agent,
     };
+    use crate::app::agent_view::AgentView;
+    use crate::scrollback::state::ScrollbackState;
 
     /// A running background bash task for the work-count fixtures.
     fn running_bg_task(task_id: &str) -> crate::app::agent::BgTaskState {
@@ -1357,6 +1346,45 @@ mod tests {
             is_monitor: false,
             restored_from_replay: false,
         }
+    }
+
+    #[test]
+    fn claude_child_overlay_drain_targets_parent_session() {
+        let mut app = test_app_with_agent();
+        let parent_id = AgentId(0);
+        let parent_sid = app
+            .agents
+            .get(&parent_id)
+            .unwrap()
+            .session
+            .session_id
+            .clone()
+            .expect("parent session");
+        let child_sid = "claude-child-drain";
+        let child = AgentView::new(
+            make_test_agent_session(&app, AgentId(1), child_sid),
+            ScrollbackState::new(),
+        );
+        {
+            let parent = app.agents.get_mut(&parent_id).unwrap();
+            parent.insert_test_child(child_sid.to_string(), Box::new(child));
+            parent.active_subagent = Some(child_sid.to_string());
+            parent.session.enqueue_prompt("queued for parent".into());
+        }
+
+        let drain = maybe_drain_queue(
+            app.agents.get_mut(&parent_id).unwrap(),
+            &mut app.pending_image_notices,
+        );
+        assert!(
+            matches!(
+                drain.effects.as_slice(),
+                [Effect::SendPrompt { session_id, text, .. }]
+                    if session_id == &parent_sid && text == "queued for parent"
+            ),
+            "queue drain must stay on the parent session, got {:?}",
+            drain.effects
+        );
     }
 
     #[test]
