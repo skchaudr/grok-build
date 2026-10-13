@@ -1023,7 +1023,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                         effort,
                         prev_model_id: rollback_prev,
                     });
-                return if unchanged {
+                return if unchanged || app.external_agent {
                     vec![]
                 } else {
                     vec![Effect::PersistPreferredModel {
