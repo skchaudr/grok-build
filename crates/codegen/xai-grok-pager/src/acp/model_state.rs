@@ -433,7 +433,7 @@ impl ModelState {
 const MODEL_CONFIG_ID_META: &str = "x.ai/modelConfigId";
 
 /// Standard ACP agents may advertise models only as a `model`-category select config option (Codex, DSH, claude-agent-acp).
-/// Use the explicit `models` state when present; otherwise build one from the option whose id is `model`.
+/// Use the explicit `models` state when present; otherwise build one from the first model-category option (id may differ).
 pub fn models_or_config_option(
     models: Option<acp::SessionModelState>,
     config_options: Option<&[acp::SessionConfigOption]>,
@@ -477,11 +477,10 @@ fn advertised_model_option(
     options: &[acp::SessionConfigOption],
 ) -> Option<&acp::SessionConfigOption> {
     options.iter().find(|option| {
-        option.id.0.as_ref() == "model"
-            && matches!(
-                option.category,
-                Some(acp::SessionConfigOptionCategory::Model)
-            )
+        matches!(
+            option.category,
+            Some(acp::SessionConfigOptionCategory::Model)
+        )
     })
 }
 
@@ -659,15 +658,33 @@ mod tests {
     }
 
     #[test]
-    fn model_category_with_a_different_id_is_not_the_model_option() {
+    fn model_category_option_with_a_nonstandard_id_builds_catalog_and_switch_route() {
         let option = acp::SessionConfigOption::select(
             "persona",
-            "Persona",
-            "a",
-            vec![acp::SessionConfigSelectOption::new("a", "A")],
+            "Model",
+            "m2",
+            vec![
+                acp::SessionConfigSelectOption::new("m1", "Model One"),
+                acp::SessionConfigSelectOption::new("m2", "Model Two"),
+            ],
         )
         .category(acp::SessionConfigOptionCategory::Model);
-        assert!(models_or_config_option(None, Some(&[option])).is_none());
+        let state = models_or_config_option(None, Some(&[option]))
+            .expect("model-category option should yield model state");
+        let model_state: ModelState = Some(state).into();
+        assert_eq!(model_state.model_config_id.as_deref(), Some("persona"));
+        assert_eq!(model_state.footer_label().as_deref(), Some("Model Two"));
+        let wire = model_switch_wire(
+            acp::SessionId::new("sess-1"),
+            &acp::ModelId::new(Arc::from("m1")),
+            None,
+            None,
+            model_state.model_config_id.as_deref(),
+        );
+        let ModelSwitchWire::SetConfigOption(req) = wire else {
+            panic!("expected set_config_option");
+        };
+        assert_eq!(req.config_id.0.as_ref(), "persona");
     }
 
     #[test]
