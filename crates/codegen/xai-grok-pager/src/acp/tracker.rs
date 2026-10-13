@@ -2850,6 +2850,9 @@ fn update_summary(update: &acp::SessionUpdate) -> String {
         acp::SessionUpdate::UsageUpdate(u) => {
             format!("usage_update used={} size={}", u.used, u.size)
         }
+        acp::SessionUpdate::ConfigOptionUpdate(u) => {
+            format!("config_option_update options={}", u.config_options.len())
+        }
         _ => "unknown_update".to_string(),
     }
 }

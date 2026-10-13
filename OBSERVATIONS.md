@@ -599,14 +599,44 @@ VERIFIED (pager-bin built at 98f97b77, binary checked for the notice string; pi-
 - After, external agent and code -32000: `Authentication required: Not logged in · Please run /login. Log in to claude (run `claude`, then /login), then send again.` Native Grok auth (`format_acp_error` with no agent label, message in `data`) still uses the generic banner, including `Try sending again.`
 - 0.16.2 patch `~/.dsh/patches/claude-code-acp/0002-auth-required-message.patch` passes `message.result` and the synthetic assistant text into `authRequired`. Applied to `~/.local/share/claude-acp/0.16.2`. The `newSession` throw when `.claude.json` is missing still has no CLI sentence; the pager then shows only the login hint. Headless check, `HOME` and `CLAUDE_CONFIG_DIR` on an empty temp dir: `session/prompt` returned `{"code":-32000,"message":"Authentication required: Not logged in · Please run /login"}`.
 - claude-agent-acp 0.76.0 does not already put that sentence on the JSON-RPC error. `failActiveWithSessionFailure("auth_required", RequestError.authRequired(), message.result)` keeps the text as AIR session-failure details and rejects the turn with a bare `authRequired()`. `hide-claude-auth.js` `claudeLoginRequiredError()` already passes its own message. Patch `~/.dsh/patches/claude-agent-acp/0001-auth-required-message.patch` passes `message.result` and `assistantMessageText(...)` as the `authRequired` additional message. Applied to the installed 0.76.0 dist. No updater script owns that tree.
-||||||| 3a71293b
 
-## 2026-10-13 upstream-sync verify
+## T3-SUBAGENTS: claude-agent-acp 0.76.0 (2026-10-13)
 
-Worktree `.worktrees/usync-e2e` (`sync/upstream-sim-proof`), `CARGO_TARGET_DIR` that worktree's `target/`. `df -h /` before the compile: 140G free. No `--release`.
+`grok claude` used to launch `@zed-industries/claude-code-acp` 0.16.2 (`~/.local/bin/claude-acp`), which has no subagent protocol. The pinned adapter is now `@agentclientprotocol/claude-agent-acp` 0.76.0 under `~/.local/share/claude-agent-acp/0.76.0`, launcher `~/.local/bin/claude-agent-acp` (`claude-agent-acp-update`, not Zed's npx tree). `0001-auth-required-message.patch` is applied. `--check` prints `installed: 0.76.0` and `patch: 0001-auth-required-message.patch applied`. npm latest on 2026-10-13 was 0.89.1; the installer stays on 0.76.0 unless given a version. `GB_CLAUDE_ACP` overrides the command. Missing launcher falls back to `claude-acp`. `CLAUDE_CODE_EXECUTABLE` still selects the user's `claude` CLI.
 
-`cargo check -p xai-grok-pager-bin` — `Finished dev profile [unoptimized] target(s) in 8m 49s`, exit 0.
+Parity vs 0.16.2 + `0001-context-usage.patch` (source, plus `docs/claude-agent-acp-subagent-trace.jsonl` from the pinned binary):
 
-`cargo build -p xai-grok-pager-bin` — `Finished dev profile [unoptimized] target(s) in 10m 03s`, exit 0. Binary `target/debug/xai-grok-pager` (484M).
+- `usage_update`: present. The live turn emitted `{sessionUpdate:"usage_update", used, size}` (size 200000, then corrected to 1000000). Same shape the pager already applies.
+- `/usage` and `/context`: 0.76.0 implements both (`usage-markdown.js`, `LOCAL_ONLY_COMMANDS` includes `/context`). Not re-fired live in this smoke; the one prompt was the Task delegation.
+- `session/list` and `loadSession`: initialize advertised `loadSession: true` and `sessionCapabilities` includes `list` / `resume` / `load`. Handlers are registered in `runAcp`.
+- `session/set_model`: fixed. 0.16.2 handles `session/set_model` and calls `query.setModel`. 0.76.0 does not register that method; model changes go through `session/set_config_option` (config id `model`), which does call `query.setModel`. When `session/new` has no explicit `models` and advertises a category-`model` select with id `model`, `/model` lists that option and sends `session/set_config_option`. Otherwise the pager still sends `session/set_model`, so pi-acp and fallback `claude-acp` 0.16.2 keep working. `config_option_update` moves the footer to the option's current value, and a failed switch still rolls the footer back. Live check against pinned 0.76.0: `docs/claude-agent-acp-set-model-trace.jsonl` (`session/new` current `fable`, `set_config_option` value `default`, response `currentValue` `default`).
+- Steering: initialize `_meta.steering.supported` is true. `_session/steering` injects into the in-flight turn (real mid-turn). A second `session/prompt` is enqueued on `turnQueue`, not raced on `query.next()` the way 0.16.2 did. Pager cancel-and-send steering was not changed.
 
-`verify --release` on `khoj-38w` prints `run gb-build sab-mini instead` and exits 1 without cargo.
+Live smoke (capability advertised as `clientCapabilities.subagents` and `_meta.jetbrains.air.capabilities: ["nativeSubagentSessions"]`, mode `bypassPermissions`): the adapter replied with `nativeSubagentSessions` and spawned one child.
+
+- Parent `session/update` `subagent_spawned` `{subagentSessionId, name, task, capabilities}`.
+- Child `session/update` `agent_message_chunk` on that child id, `_meta.claudeCode.parentToolUseId` set. This run's child did not call tools (`totalToolUseCount: 0`); the text was `pong`.
+- Parent `subagent_state_update` `{subagentSessionId, state:"completed"}`.
+- The Agent control `tool_call` is suppressed; a parent `tool_call_update` with `_meta.claudeCode.toolName:"Agent"` still arrives and is dropped by the bridge so it does not become an orphan tool row.
+
+The Rust ACP client (schema 0.11) has no `subagent_spawned` variant, so those notifications would be dropped at decode. `spawn_external_subprocess` line-bridges a Claude command and rewrites them to `_x.ai/session/update` as `subagent_spawned` / `subagent_progress` / `subagent_finished`. Child `session/update`s stay on the child session id, so the existing child view streams them. A first child message becomes `subagent_progress` (`turn_count`); a child `tool_call` increments `tool_call_count`. `session/cancel` for a known child becomes `_session/async_task/stop` `{sessionId: parent, asyncTaskId: child}` because 0.76.0's `cancel()` ignores unknown sessions and `query.stopTask` is the working stop (the child id is the SDK task id). `session/prompt` to the child is left as-is: that is the draft steer request. 0.76.0's `prompt()` only resolves root sessions and returns "Session not found".
+
+Initialize advertises `jetbrains.air.capabilities: ["nativeSubagentSessions"]` only when `--agent-cmd` is a Claude ACP command. Native Grok and pi/cursor do not get it.
+
+pi-acp (patched `pi-acp-patched/index.js`, package 0.0.33) emits `agent_message_chunk`, `tool_call`, `session_info_update`, and `available_commands_update`. It does not emit `subagent_spawned`, `subagent_state_update`, or `parentToolUseId`. No pi translation.
+
+Keys: dashboard is Ctrl+\ (Ctrl+4 when that chord is not taken by the queue). Enter on the subagent row opens the child takeover (same binding as open-block, also Ctrl+F). Ctrl+C in that takeover, with an empty composer, cancels the child. Enter on a Claude host (`external_agent_label == "claude"`, which `agent_label_from_cmd` now returns for the `node …/claude-agent-acp` command) sends `session/prompt` to the child session. Native takeover prompts still drain on the parent session.
+
+Tests: `GROK_HOME=$(mktemp -d) cargo test -p xai-grok-pager --lib claude_subagent` — 4 passed. `native_subagents_only_for_claude` passed. `agent_label_from_cmd` passed.
+
+## Idle background subagents (0.76.0, 2026-10-13)
+
+Trace: `docs/claude-agent-acp-idle-subagent-trace.jsonl`. Pinned launcher `~/.local/bin/claude-agent-acp` (`0.76.0`). Two Task subagents, `run_in_background`, each `sleep 8`.
+
+The adapter holds `session/prompt` until both children finish (`subagent_spawned` and `subagent_state_update` are inside the open prompt; the RPC returns `end_turn` at the same moment as the second `completed`). About 800ms later, with no prompt open, it still sends parent `agent_message_chunk`s: "Both subagents have finished…". The following `session/prompt` ("next") is one request and the reply is only `next`. No `user_message_chunk` on the wire.
+
+The pager appends those chunks while the pane stays `Idle`; agent-initiated output must not set `TurnRunning` or bypass queue drain. Trace evidence: one `session/prompt` for "next", no `user_message_chunk` echo on the wire (`docs/claude-agent-acp-idle-subagent-trace.jsonl`).
+
+The Zed duplicate-send bug did **not** reproduce on grok claude + claude-agent-acp 0.76.0 with this trace (one request, no echo).
+
+Test: `late_chunks_after_prompt_end_leave_pane_idle_and_next_send_is_once`.

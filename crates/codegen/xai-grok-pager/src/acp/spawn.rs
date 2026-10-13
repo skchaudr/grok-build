@@ -404,13 +404,20 @@ pub async fn spawn_external_subprocess(
 
                 let child_stdin = child.stdin.take().expect("child stdin piped");
                 let child_stdout = child.stdout.take().expect("child stdout piped");
+                let translate_subagents =
+                    crate::acp::claude_subagents::subagent_bridge_gate();
+                let (incoming, outgoing) = crate::acp::claude_subagents::spawn_stdio_bridge(
+                    child_stdin,
+                    child_stdout,
+                    translate_subagents,
+                    true,
+                );
 
                 let gw_tx = AcpGatewaySender::new(agent_channel.tx).with_tracing(true);
-                let incoming = LineBufferedRead::spawn_local(child_stdout.compat());
                 let (conn, handle_io) = agent_client_protocol::ClientSideConnection::new(
                     gw_tx,
-                    child_stdin.compat_write(),
-                    incoming,
+                    outgoing.compat_write(),
+                    LineBufferedRead::spawn_local(incoming.compat()),
                     |fut| {
                         tokio::task::spawn_local(fut);
                     },

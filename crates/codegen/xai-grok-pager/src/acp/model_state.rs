@@ -1,9 +1,11 @@
 use agent_client_protocol as acp;
 use indexmap::IndexMap;
 use xai_grok_shell::sampling::types::{
-    ModelNotice, ReasoningEffort, ReasoningEffortOption, parse_canonical_effort_token,
+    CONTEXT_WINDOW_META_KEY, ModelNotice, REASONING_EFFORT_META_KEY, ReasoningEffort,
+    ReasoningEffortOption, context_window_meta_value, parse_canonical_effort_token,
     parse_context_window_meta, parse_context_windows_meta, parse_model_notice_meta,
-    parse_reasoning_effort_meta, parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
+    parse_reasoning_effort_meta, parse_reasoning_efforts_meta, reasoning_effort_meta_value,
+    supports_reasoning_effort_meta,
 };
 
 use crate::slash::commands::effort_levels::legacy_effort_options;
@@ -69,6 +71,10 @@ pub struct ModelState {
     /// `initialize` reported `agentCapabilities.promptCapabilities.image`.
     /// External agents (Claude) advertise this instead of per-model `acceptsImages`.
     agent_prompt_images: bool,
+    /// Config id of a category-`model` select the agent advertised in place of `models`.
+    /// `/model` then sends `session/set_config_option`. `None` keeps `session/set_model`
+    /// (native Grok, pi-acp, claude-acp 0.16.2).
+    pub model_config_id: Option<String>,
 }
 
 impl ModelState {
@@ -211,6 +217,45 @@ impl ModelState {
     /// Leaves `current` and `reasoning_effort` alone; those change only via `/model`, create, or load.
     pub fn update_catalog(&mut self, new_available: IndexMap<acp::ModelId, acp::ModelInfo>) {
         self.available = new_available;
+    }
+
+    /// Apply a `config_option_update` (or the options from `session/set_config_option`).
+    /// Native catalogs that came from explicit `models` are left alone: those sessions keep
+    /// `session/set_model`, and a config-option list would drop effort and context-window meta.
+    /// Returns whether the footer or the picker list changed.
+    pub fn apply_config_options(&mut self, options: &[acp::SessionConfigOption]) -> bool {
+        if self.model_config_id.is_none() && !self.available.is_empty() {
+            return false;
+        }
+        let Some(resolved) = models_or_config_option(None, Some(options)) else {
+            return false;
+        };
+        let incoming: ModelState = Some(resolved).into();
+        if incoming.model_config_id.is_none() {
+            return false;
+        }
+        let same_selection = self.current == incoming.current;
+        let changed = self.model_config_id != incoming.model_config_id
+            || !same_selection
+            || catalog_names_differ(&self.available, &incoming.available);
+        let effort = self.reasoning_effort;
+        let window_sel = self.context_window_selection;
+        let window_over = self.context_window_override;
+        let served = same_selection
+            .then(|| self.served_model_name.clone())
+            .flatten();
+        let images = self.agent_prompt_images;
+        let during = self.model_changed_during_switch;
+        *self = incoming;
+        self.agent_prompt_images = images;
+        self.model_changed_during_switch = during;
+        self.context_window_override = window_over;
+        if same_selection {
+            self.reasoning_effort = effort;
+            self.context_window_selection = window_sel;
+            self.served_model_name = served;
+        }
+        changed
     }
 
     /// Set the current model and resolve reasoning effort from catalog meta.
@@ -383,8 +428,12 @@ impl ModelState {
     }
 }
 
-/// Standard ACP agents may advertise models only as a `model`-category select config option (Codex, DSH).
-/// Use the explicit `models` state when present; otherwise build one from that option so the footer and picker work.
+/// Stamped on a catalog synthesized from a `model` config option so the pager sends
+/// `session/set_config_option` instead of `session/set_model`.
+const MODEL_CONFIG_ID_META: &str = "x.ai/modelConfigId";
+
+/// Standard ACP agents may advertise models only as a `model`-category select config option (Codex, DSH, claude-agent-acp).
+/// Use the explicit `models` state when present; otherwise build one from the first model-category option (id may differ).
 pub fn models_or_config_option(
     models: Option<acp::SessionModelState>,
     config_options: Option<&[acp::SessionConfigOption]>,
@@ -392,9 +441,7 @@ pub fn models_or_config_option(
     if models.is_some() {
         return models;
     }
-    let option = config_options?
-        .iter()
-        .find(|o| matches!(o.category, Some(acp::SessionConfigOptionCategory::Model)))?;
+    let option = config_options.and_then(advertised_model_option)?;
     let acp::SessionConfigKind::Select(select) = &option.kind else {
         return None;
     };
@@ -418,7 +465,83 @@ pub fn models_or_config_option(
     if !available.iter().any(|m| m.model_id.0.as_ref() == current) {
         available.insert(0, acp::ModelInfo::new(current.clone(), current.clone()));
     }
-    Some(acp::SessionModelState::new(current, available))
+    let mut meta = acp::Meta::new();
+    meta.insert(
+        MODEL_CONFIG_ID_META.to_string(),
+        serde_json::Value::String(option.id.0.to_string()),
+    );
+    Some(acp::SessionModelState::new(current, available).meta(meta))
+}
+
+fn advertised_model_option(
+    options: &[acp::SessionConfigOption],
+) -> Option<&acp::SessionConfigOption> {
+    options.iter().find(|option| {
+        matches!(
+            option.category,
+            Some(acp::SessionConfigOptionCategory::Model)
+        )
+    })
+}
+
+fn catalog_names_differ(
+    left: &IndexMap<acp::ModelId, acp::ModelInfo>,
+    right: &IndexMap<acp::ModelId, acp::ModelInfo>,
+) -> bool {
+    if left.len() != right.len() {
+        return true;
+    }
+    left.iter()
+        .zip(right.iter())
+        .any(|((id_a, info_a), (id_b, info_b))| id_a != id_b || info_a.name != info_b.name)
+}
+
+fn model_config_id_from_meta(meta: Option<&acp::Meta>) -> Option<String> {
+    meta?
+        .get(MODEL_CONFIG_ID_META)
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+}
+
+/// Which ACP method a `/model` pick sends.
+pub(crate) enum ModelSwitchWire {
+    SetModel(acp::SetSessionModelRequest),
+    SetConfigOption(acp::SetSessionConfigOptionRequest),
+}
+
+/// `session/set_config_option` when `model_config_id` is set; otherwise `session/set_model`
+/// (effort and context-window meta stay on the set_model path).
+pub(crate) fn model_switch_wire(
+    session_id: acp::SessionId,
+    model_id: &acp::ModelId,
+    effort: Option<ReasoningEffort>,
+    context_window: Option<std::num::NonZeroU64>,
+    model_config_id: Option<&str>,
+) -> ModelSwitchWire {
+    if let Some(config_id) = model_config_id {
+        return ModelSwitchWire::SetConfigOption(acp::SetSessionConfigOptionRequest::new(
+            session_id,
+            config_id.to_owned(),
+            acp::SessionConfigValueId::new(model_id.0.to_string()),
+        ));
+    }
+    let mut meta = effort.map(|eff| {
+        let mut m = acp::Meta::new();
+        m.insert(
+            REASONING_EFFORT_META_KEY.to_string(),
+            reasoning_effort_meta_value(eff),
+        );
+        m
+    });
+    if let Some(window) = context_window {
+        meta.get_or_insert_default().insert(
+            CONTEXT_WINDOW_META_KEY.to_owned(),
+            context_window_meta_value(window),
+        );
+    }
+    ModelSwitchWire::SetModel(
+        acp::SetSessionModelRequest::new(session_id, model_id.clone()).meta(meta),
+    )
 }
 
 impl From<Option<acp::SessionModelState>> for ModelState {
@@ -441,6 +564,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     .and_then(|id| models.get(id))
                     .and_then(|info| parse_context_window_meta(info.meta.as_ref()))
                     .map(std::num::NonZeroU64::get);
+                let model_config_id = model_config_id_from_meta(state.meta.as_ref());
                 Self {
                     available: models,
                     current: current_model,
@@ -450,6 +574,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     model_changed_during_switch: false,
                     served_model_name: None,
                     agent_prompt_images: false,
+                    model_config_id,
                 }
             })
             .unwrap_or_default()
@@ -479,6 +604,7 @@ mod tests {
         assert_eq!(state.available_models.len(), 2);
         let model_state: ModelState = Some(state).into();
         assert_eq!(model_state.footer_label(), Some("Model Two".to_owned()));
+        assert_eq!(model_state.model_config_id.as_deref(), Some("model"));
     }
 
     #[test]
@@ -529,6 +655,114 @@ mod tests {
         )
         .category(acp::SessionConfigOptionCategory::Mode);
         assert!(models_or_config_option(None, Some(&[other])).is_none());
+    }
+
+    #[test]
+    fn model_category_option_with_a_nonstandard_id_builds_catalog_and_switch_route() {
+        let option = acp::SessionConfigOption::select(
+            "persona",
+            "Model",
+            "m2",
+            vec![
+                acp::SessionConfigSelectOption::new("m1", "Model One"),
+                acp::SessionConfigSelectOption::new("m2", "Model Two"),
+            ],
+        )
+        .category(acp::SessionConfigOptionCategory::Model);
+        let state = models_or_config_option(None, Some(&[option]))
+            .expect("model-category option should yield model state");
+        let model_state: ModelState = Some(state).into();
+        assert_eq!(model_state.model_config_id.as_deref(), Some("persona"));
+        assert_eq!(model_state.footer_label().as_deref(), Some("Model Two"));
+        let wire = model_switch_wire(
+            acp::SessionId::new("sess-1"),
+            &acp::ModelId::new(Arc::from("m1")),
+            None,
+            None,
+            model_state.model_config_id.as_deref(),
+        );
+        let ModelSwitchWire::SetConfigOption(req) = wire else {
+            panic!("expected set_config_option");
+        };
+        assert_eq!(req.config_id.0.as_ref(), "persona");
+    }
+
+    #[test]
+    fn advertised_model_option_serializes_set_config_option() {
+        let session_id = acp::SessionId::new("sess-1");
+        let model_id = acp::ModelId::new(Arc::from("sonnet"));
+        let wire = model_switch_wire(session_id, &model_id, None, None, Some("model"));
+        let ModelSwitchWire::SetConfigOption(req) = wire else {
+            panic!("expected set_config_option");
+        };
+        let json = serde_json::to_value(&req).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "sessionId": "sess-1",
+                "configId": "model",
+                "value": "sonnet",
+            })
+        );
+    }
+
+    #[test]
+    fn absent_model_option_serializes_set_model() {
+        let session_id = acp::SessionId::new("sess-1");
+        let model_id = acp::ModelId::new(Arc::from("grok-4"));
+        let wire = model_switch_wire(session_id, &model_id, None, None, None);
+        let ModelSwitchWire::SetModel(req) = wire else {
+            panic!("expected set_model");
+        };
+        let json = serde_json::to_value(&req).expect("serialize");
+        assert_eq!(json["sessionId"], "sess-1");
+        assert_eq!(json["modelId"], "grok-4");
+        assert!(json.get("configId").is_none());
+    }
+
+    #[test]
+    fn config_option_update_moves_the_footer() {
+        let option = acp::SessionConfigOption::select(
+            "model",
+            "Model",
+            "fable",
+            vec![
+                acp::SessionConfigSelectOption::new("fable", "Fable 5.1"),
+                acp::SessionConfigSelectOption::new("sonnet", "Sonnet 5.5"),
+            ],
+        )
+        .category(acp::SessionConfigOptionCategory::Model);
+        let mut state: ModelState = models_or_config_option(None, Some(&[option])).into();
+        assert_eq!(state.footer_label().as_deref(), Some("Fable 5.1"));
+        let updated = acp::SessionConfigOption::select(
+            "model",
+            "Model",
+            "sonnet",
+            vec![
+                acp::SessionConfigSelectOption::new("fable", "Fable 5.1"),
+                acp::SessionConfigSelectOption::new("sonnet", "Sonnet 5.5"),
+            ],
+        )
+        .category(acp::SessionConfigOptionCategory::Model);
+        assert!(state.apply_config_options(&[updated]));
+        assert_eq!(state.footer_label().as_deref(), Some("Sonnet 5.5"));
+        assert_eq!(state.model_config_id.as_deref(), Some("model"));
+    }
+
+    #[test]
+    fn explicit_catalog_ignores_config_option_update() {
+        let mut state = sample_models();
+        assert!(state.model_config_id.is_none());
+        let option = acp::SessionConfigOption::select(
+            "model",
+            "Model",
+            "sonnet",
+            vec![acp::SessionConfigSelectOption::new("sonnet", "Sonnet")],
+        )
+        .category(acp::SessionConfigOptionCategory::Model);
+        assert!(!state.apply_config_options(&[option]));
+        assert_eq!(state.footer_label().as_deref(), Some("Model A"));
+        assert!(state.model_config_id.is_none());
     }
 
     fn sample_models() -> ModelState {

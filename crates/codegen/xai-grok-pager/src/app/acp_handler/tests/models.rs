@@ -507,3 +507,176 @@
         );
     }
 
+    /// claude-agent-acp 0.76.0 pushes the live model as `config_option_update`, not `session/set_model`.
+    #[test]
+    fn config_option_update_moves_the_footer_to_the_agent_model() {
+        let mut app = make_app_with_agent("sess-1");
+        let initial = acp::SessionConfigOption::select(
+            "model",
+            "Model",
+            "fable",
+            vec![
+                acp::SessionConfigSelectOption::new("fable", "Fable 5.1"),
+                acp::SessionConfigSelectOption::new("sonnet", "Sonnet 5.5"),
+            ],
+        )
+        .category(acp::SessionConfigOptionCategory::Model);
+        app.agents.get_mut(&AgentId(0)).unwrap().session.models =
+            crate::acp::model_state::models_or_config_option(None, Some(&[initial])).into();
+
+        let updated = acp::SessionConfigOption::select(
+            "model",
+            "Model",
+            "sonnet",
+            vec![
+                acp::SessionConfigSelectOption::new("fable", "Fable 5.1"),
+                acp::SessionConfigSelectOption::new("sonnet", "Sonnet 5.5"),
+            ],
+        )
+        .category(acp::SessionConfigOptionCategory::Model);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let changed = handle(
+            AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+                request: acp_fixtures::session_notification(
+                    "sess-1",
+                    acp::SessionUpdate::ConfigOptionUpdate(acp::ConfigOptionUpdate::new(vec![
+                        updated,
+                    ])),
+                ),
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+        assert!(changed);
+        assert_eq!(
+            app.agents
+                .get(&AgentId(0))
+                .unwrap()
+                .session
+                .models
+                .footer_label()
+                .as_deref(),
+            Some("Sonnet 5.5")
+        );
+    }
+
+    #[test]
+    fn config_option_update_during_pending_switch_is_applied_and_flagged() {
+        let mut app = make_app_with_agent("sess-1");
+        let initial = acp::SessionConfigOption::select(
+            "model",
+            "Model",
+            "fable",
+            vec![
+                acp::SessionConfigSelectOption::new("fable", "Fable 5.1"),
+                acp::SessionConfigSelectOption::new("sonnet", "Sonnet 5.5"),
+                acp::SessionConfigSelectOption::new("opus", "Opus 4.6"),
+            ],
+        )
+        .category(acp::SessionConfigOptionCategory::Model);
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.models =
+                crate::acp::model_state::models_or_config_option(None, Some(&[initial])).into();
+            agent.session.models.set_current(
+                acp_fixtures::model_id("sonnet"),
+                None,
+            );
+            agent.session.model_switch_pending = true;
+        }
+
+        let updated = acp::SessionConfigOption::select(
+            "model",
+            "Model",
+            "opus",
+            vec![
+                acp::SessionConfigSelectOption::new("fable", "Fable 5.1"),
+                acp::SessionConfigSelectOption::new("sonnet", "Sonnet 5.5"),
+                acp::SessionConfigSelectOption::new("opus", "Opus 4.6"),
+            ],
+        )
+        .category(acp::SessionConfigOptionCategory::Model);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        handle(
+            AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+                request: acp_fixtures::session_notification(
+                    "sess-1",
+                    acp::SessionUpdate::ConfigOptionUpdate(acp::ConfigOptionUpdate::new(vec![
+                        updated,
+                    ])),
+                ),
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.session.models.model_changed_during_switch);
+        assert_eq!(
+            agent.session.models.footer_label().as_deref(),
+            Some("Opus 4.6")
+        );
+
+        dispatch(
+            Action::TaskComplete(TaskResult::SwitchModelComplete {
+                agent_id: AgentId(0),
+                choice: ModelChoice::new(acp_fixtures::model_id("sonnet")),
+                result: Err(crate::app::actions::SwitchModelError::Other(
+                    "Method not found: session/set_config_option".into(),
+                )),
+                prev_model_id: Some(acp_fixtures::model_id("fable")),
+            }),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.session.models.current.as_ref().map(|id| id.0.as_ref()),
+            Some("opus"),
+            "agent config_option_update must survive a failed local switch rollback"
+        );
+    }
+
+    #[test]
+    fn native_session_config_option_update_uses_the_generic_session_path() {
+        let mut app = make_app_with_agent("sess-1");
+        seed_models(&mut app.agents.get_mut(&AgentId(0)).unwrap(), "grok-3", &["grok-3", "grok-4"]);
+        assert!(app.agents.get(&AgentId(0)).unwrap().session.models.model_config_id.is_none());
+
+        let mode_option = acp::SessionConfigOption::select(
+            "mode",
+            "Mode",
+            "code",
+            vec![acp::SessionConfigSelectOption::new("code", "Code")],
+        )
+        .category(acp::SessionConfigOptionCategory::Mode);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let mutated = handle(
+            AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+                request: acp_fixtures::session_notification(
+                    "sess-1",
+                    acp::SessionUpdate::ConfigOptionUpdate(acp::ConfigOptionUpdate::new(vec![
+                        mode_option,
+                    ])),
+                ),
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+        assert!(
+            mutated,
+            "native catalog sessions must not short-circuit config_option_update before the generic handler"
+        );
+        assert_eq!(
+            app.agents
+                .get(&AgentId(0))
+                .unwrap()
+                .session
+                .models
+                .footer_label()
+                .as_deref(),
+            Some("grok-3"),
+            "explicit native model catalog must ignore unrelated config options"
+        );
+    }
+

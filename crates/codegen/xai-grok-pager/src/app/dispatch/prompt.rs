@@ -247,6 +247,37 @@ fn refuse_on_failed_tab(agent: &mut AgentView, minimal: bool) -> bool {
     true
 }
 
+pub(super) const CLAUDE_CHILD_MID_RUN_STEER_NOTICE: &str =
+    "Claude subagents can't take messages mid-run yet";
+
+fn claude_child_steer_refused(
+    external_claude: bool,
+    agent: &mut AgentView,
+    screen_mode_is_minimal: bool,
+) -> bool {
+    if !external_claude {
+        return false;
+    }
+    let Some(child_sid) = agent.active_subagent.as_ref() else {
+        return false;
+    };
+    let running = agent
+        .subagent_sessions
+        .get(child_sid.as_str())
+        .is_some_and(|info| !info.is_finished());
+    if !running {
+        return false;
+    }
+    if screen_mode_is_minimal {
+        agent.scrollback.push_block(RenderBlock::system(
+            CLAUDE_CHILD_MID_RUN_STEER_NOTICE.to_owned(),
+        ));
+    } else {
+        agent.show_toast(CLAUDE_CHILD_MID_RUN_STEER_NOTICE);
+    }
+    true
+}
+
 pub(super) fn dispatch_send_prompt(app: &mut AppView, text: String) -> Vec<Effect> {
     crate::unified_log::info(
         "prompt.enqueue",
@@ -746,9 +777,17 @@ pub(super) fn dispatch_send_prompt_submission(
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
     let leader_mode = app.leader_mode;
     let screen_mode_is_minimal = app.screen_mode.is_minimal();
+    let external_claude =
+        app.external_agent && app.external_agent_label.as_deref() == Some("claude");
     let Some(agent) = app.agents.get_mut(&id) else {
         return prelude;
     };
+    if consume_input
+        && !literal
+        && claude_child_steer_refused(external_claude, agent, screen_mode_is_minimal)
+    {
+        return prelude;
+    }
 
     // Paste-then-immediate-send: an image probe from a just-pasted Cmd+V is still off-thread
     // Stash this send and re-issue it once the probe completes so the image is never dropped from the built content blocks
