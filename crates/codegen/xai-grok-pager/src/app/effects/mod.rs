@@ -44,9 +44,6 @@ use actions::PermissionModePersist;
 use agent::AgentId;
 use crate::unified_log as ulog;
 use xai_grok_shell::sampling::error::http_status_from_error;
-use xai_grok_shell::sampling::types::{
-    CONTEXT_WINDOW_META_KEY, context_window_meta_value,
-};
 use xai_grok_shell::session::{ExtMethodResult, SessionInfoResponse};
 /// The shell's `x.ai/feedback/upload-trace` params. `intent` is omitted (not null) when absent, so a legacy upload's request stays byte-identical to the pre-intent shape.
 /// absent, so a legacy upload's request stays byte-identical to the pre-intent shape.
@@ -1968,39 +1965,38 @@ pub(crate) fn execute(
                     TaskResult::CancelComplete
                 });
         }
-        Effect::SwitchModel { agent_id, session_id, choice, prev_model_id } => {
+        Effect::SwitchModel { agent_id, session_id, choice, prev_model_id, model_config_id } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let mut meta = choice
-                        .effort
-                        .map(|eff| {
-                            use xai_grok_shell::sampling::types::{
-                                REASONING_EFFORT_META_KEY, reasoning_effort_meta_value,
-                            };
-                            let mut m = acp::Meta::new();
-                            m.insert(
-                                REASONING_EFFORT_META_KEY.to_string(),
-                                reasoning_effort_meta_value(eff),
-                            );
-                            m
-                        });
-                    if let Some(window) = choice.context_window_selection {
-                        meta.get_or_insert_default()
-                            .insert(
-                                CONTEXT_WINDOW_META_KEY.to_owned(),
-                                context_window_meta_value(window),
-                            );
-                    }
-                    let req = acp::SetSessionModelRequest::new(
-                            session_id,
-                            choice.model_id.clone(),
-                        )
-                        .meta(meta);
-                    let result = acp_send(req, &tx)
-                        .await
-                        .map(|_| ())
-                        .map_err(|e| {
+                    let mut choice = choice;
+                    let wire = crate::acp::model_state::model_switch_wire(
+                        session_id,
+                        &choice.model_id,
+                        choice.effort,
+                        choice.context_window_selection,
+                        model_config_id.as_deref(),
+                    );
+                    let sent = match wire {
+                        crate::acp::model_state::ModelSwitchWire::SetConfigOption(req) => {
+                            match acp_send(req, &tx).await {
+                                Ok(resp) => {
+                                    if let Some(resolved) = crate::acp::model_state::models_or_config_option(
+                                        None,
+                                        Some(&resp.config_options),
+                                    ) {
+                                        choice.model_id = resolved.current_model_id;
+                                    }
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        crate::acp::model_state::ModelSwitchWire::SetModel(req) => {
+                            acp_send(req, &tx).await.map(|_| ())
+                        }
+                    };
+                    let result = sent.map_err(|e| {
                             use xai_grok_shell::agent::config::ModelSwitchIncompatibleAgentError;
                             if let Some(typed) = ModelSwitchIncompatibleAgentError::from_acp_error(
                                 &e,

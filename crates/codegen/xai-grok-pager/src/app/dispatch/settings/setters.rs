@@ -1805,11 +1805,16 @@ pub(in crate::app::dispatch) fn set_default_model(
         if let Some(agent) = app.agents.get_mut(&aid) {
             agent.session.model_switch_pending = true;
         }
+        let model_config_id = app
+            .agents
+            .get(&aid)
+            .and_then(|agent| agent.session.models.model_config_id.clone());
         effects.push(Effect::SwitchModel {
             agent_id: aid,
             session_id: sid,
             choice: ModelChoice::new(new_id),
             prev_model_id: prev_id.clone(),
+            model_config_id,
         });
     } else if let Some(agent) = app.agents.get_mut(&aid) {
         // No session id yet: stash for `EventLoop::on_session_created` to apply once the session id arrives
