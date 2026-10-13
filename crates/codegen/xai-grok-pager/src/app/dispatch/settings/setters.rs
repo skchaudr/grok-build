@@ -1784,7 +1784,8 @@ pub(in crate::app::dispatch) fn set_default_model(
     // would silently fail to resolve on the next startup.
     // slugs that must not become the global Build `default_model`.
     let mut effects: Vec<Effect> = Vec::new();
-    if !xai_grok_shell::agent::chat_modes::process_chat_mode_enabled() {
+    // External ACP agents (e.g. Pi) have their own model catalog; their ids must never become Grok's global `default_model`
+    if !xai_grok_shell::agent::chat_modes::process_chat_mode_enabled() && !app.external_agent {
         let new_id_str = new_id.0.to_string();
         let prev_id_str = prev_id
             .as_ref()
