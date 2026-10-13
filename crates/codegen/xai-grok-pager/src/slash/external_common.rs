@@ -34,6 +34,11 @@ pub fn agent_label_from_cmd(cmd: &str) -> Option<String> {
     (!label.is_empty()).then(|| label.to_string())
 }
 
+/// True when an external-agent label names a Claude ACP host (`claude`, `claude-agent`, `claude-code`, …).
+pub fn external_agent_label_is_claude(label: Option<&str>) -> bool {
+    label.is_some_and(|l| l.starts_with("claude"))
+}
+
 fn description_for(name: &str) -> &'static str {
     match name {
         "usage" => "View token and cost usage",
@@ -91,6 +96,15 @@ mod tests {
     use crate::acp::model_state::ModelState;
     use crate::app::bundle::BundleState;
     use crate::slash::command::CommandExecCtx;
+
+    #[test]
+    fn external_agent_label_is_claude_covers_shipped_labels() {
+        assert!(external_agent_label_is_claude(Some("claude")));
+        assert!(external_agent_label_is_claude(Some("claude-agent")));
+        assert!(external_agent_label_is_claude(Some("claude-code")));
+        assert!(!external_agent_label_is_claude(Some("pi")));
+        assert!(!external_agent_label_is_claude(None));
+    }
 
     #[test]
     fn agent_label_from_cmd_names_the_program() {

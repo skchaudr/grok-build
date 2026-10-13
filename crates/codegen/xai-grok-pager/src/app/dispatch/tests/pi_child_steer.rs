@@ -164,24 +164,29 @@ fn pi_child_steer_ack_does_not_finish_parent_turn() {
 
 #[test]
 fn claude_child_mid_run_steer_refusal_unchanged() {
-    let mut app = test_app_with_agent();
-    let child_sid = "claude-child-steer-refused";
-    let (_parent_id, _) = pi_child_overlay(&mut app, child_sid, true);
-    app.external_agent_label = Some("claude".into());
+    for label in ["claude", "claude-agent", "claude-code"] {
+        let mut app = test_app_with_agent();
+        let child_sid = format!("claude-child-steer-{label}");
+        let (_parent_id, _) = pi_child_overlay(&mut app, &child_sid, true);
+        app.external_agent_label = Some(label.into());
 
-    let effects = dispatch(Action::SendPrompt("nope".into()), &mut app);
+        let effects = dispatch(Action::SendPrompt("nope".into()), &mut app);
 
-    assert!(effects.is_empty(), "Claude child steer must refuse, got {effects:?}");
-    let parent = app.agents.get(&AgentId(0)).unwrap();
-    let notice = parent
-        .toast
-        .as_ref()
-        .map(|(m, _)| m.as_str())
-        .unwrap_or("");
-    assert!(
-        notice.contains("mid-run") || notice.contains("can't take"),
-        "expected {CLAUDE_CHILD_MID_RUN_STEER_NOTICE}, got {notice:?}"
-    );
+        assert!(
+            effects.is_empty(),
+            "Claude ({label}) child steer must refuse, got {effects:?}"
+        );
+        let parent = app.agents.get(&AgentId(0)).unwrap();
+        let notice = parent
+            .toast
+            .as_ref()
+            .map(|(m, _)| m.as_str())
+            .unwrap_or("");
+        assert!(
+            notice.contains("mid-run") || notice.contains("can't take"),
+            "label {label}: expected {CLAUDE_CHILD_MID_RUN_STEER_NOTICE}, got {notice:?}"
+        );
+    }
 }
 
 #[test]
