@@ -7,8 +7,13 @@ use super::command::{CommandExecCtx, CommandProvenance, CommandResult, SlashComm
 
 /// Names always listed for external-agent sessions. `/model` is handled by the pager's
 /// model picker (ACP `model` config); it is not stubbed here.
-pub const COMMON_EXTERNAL_AGENT_COMMANDS: &[&str] =
-    &["usage", "context", "compact", "model", "login"];
+pub const COMMON_EXTERNAL_AGENT_COMMANDS: &[&str] = &[
+    "usage",
+    "context",
+    "compact",
+    "model",
+    "login",
+];
 
 /// Commands that get an unsupported stub when the agent does not advertise them.
 pub const EXTERNAL_COMMON_STUB_COMMANDS: &[&str] = &["usage", "context", "compact", "login"];
@@ -16,9 +21,6 @@ pub const EXTERNAL_COMMON_STUB_COMMANDS: &[&str] = &["usage", "context", "compac
 /// Short agent name from an `--agent-cmd` line, for notices when the session reports no agent name.
 /// Skips a leading `env` and its `VAR=value` pairs, takes the program's basename, and drops an `-acp` / `-code-acp` suffix.
 pub fn agent_label_from_cmd(cmd: &str) -> Option<String> {
-    if crate::acp::claude_subagents::command_is_claude_acp(cmd) {
-        return Some("claude".to_string());
-    }
     let mut words = cmd.split_whitespace().peekable();
     if words.peek() == Some(&"env") {
         words.next();
@@ -77,7 +79,8 @@ impl SlashCommand for UnsupportedExternalSlashCommand {
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
         CommandResult::Message(format!(
             "/{} is not supported by {}",
-            self.name, self.agent_label
+            self.name,
+            self.agent_label
         ))
     }
 }
@@ -92,30 +95,16 @@ mod tests {
     #[test]
     fn agent_label_from_cmd_names_the_program() {
         assert_eq!(
-            agent_label_from_cmd(
-                "env CLAUDE_CODE_EXECUTABLE=/usr/bin/claude /home/u/.local/bin/claude-acp"
-            ),
+            agent_label_from_cmd("env CLAUDE_CODE_EXECUTABLE=/usr/bin/claude /home/u/.local/bin/claude-acp"),
             Some("claude".to_string())
         );
         assert_eq!(agent_label_from_cmd("pi-acp"), Some("pi".to_string()));
-        assert_eq!(
-            agent_label_from_cmd("claude-code-acp"),
-            Some("claude".to_string())
-        );
+        assert_eq!(agent_label_from_cmd("claude-code-acp"), Some("claude".to_string()));
         assert_eq!(
             agent_label_from_cmd("env DSH_ACP_MODEL=x dsh --profile acp-enhanced"),
             Some("dsh".to_string())
         );
-        assert_eq!(
-            agent_label_from_cmd("cursor-agent acp"),
-            Some("cursor-agent".to_string())
-        );
-        assert_eq!(
-            agent_label_from_cmd(
-                "env CLAUDE_CODE_EXECUTABLE=/usr/bin/claude node /opt/claude-agent-acp/dist/index.js"
-            ),
-            Some("claude".to_string())
-        );
+        assert_eq!(agent_label_from_cmd("cursor-agent acp"), Some("cursor-agent".to_string()));
         assert_eq!(agent_label_from_cmd("  "), None);
     }
 

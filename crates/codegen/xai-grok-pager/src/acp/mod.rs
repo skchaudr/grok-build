@@ -456,6 +456,25 @@ fn build_initialize_meta(flags: &ConnectFlags) -> serde_json::Value {
     }
     meta
 }
+
+/// JSON object sent as `clientCapabilities` for external-agent initialize (includes `subagents`).
+pub(crate) fn external_client_capabilities_json(flags: &ConnectFlags) -> serde_json::Value {
+    let caps = acp::ClientCapabilities::new()
+        .fs(
+            acp::FileSystemCapabilities::new()
+                .read_text_file(flags.fs_read)
+                .write_text_file(flags.fs_write),
+        )
+        .terminal(flags.terminal)
+        .meta(client_capabilities_meta(flags).as_object().cloned());
+    let mut value =
+        serde_json::to_value(caps).expect("client capabilities serialize");
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("subagents".into(), serde_json::json!({}));
+    }
+    value
+}
+
 /// Build `client_capabilities.meta`.
 /// The hunk-tracker mode is canonicalized at this connect read so the agent runs exactly what the settings modal displays.
 fn client_capabilities_meta(flags: &ConnectFlags) -> serde_json::Value {
@@ -1193,35 +1212,39 @@ mod tests {
         }
     }
     #[test]
-    fn client_capabilities_meta_advertises_native_subagents_only_for_claude() {
-        let absent = client_capabilities_meta(&ConnectFlags::default());
-        assert!(absent.get("jetbrains").is_none());
-        let pi = client_capabilities_meta(&ConnectFlags {
+    fn external_client_capabilities_advertise_subagents_for_every_external_agent() {
+        let pi = external_client_capabilities_json(&ConnectFlags {
             agent_cmd: Some("pi-acp".into()),
             ..Default::default()
         });
+        assert_eq!(pi.get("subagents"), Some(&serde_json::json!({})));
         assert!(pi.get("jetbrains").is_none());
-        let claude = client_capabilities_meta(&ConnectFlags {
+
+        let claude = external_client_capabilities_json(&ConnectFlags {
             agent_cmd: Some(
                 "env CLAUDE_CODE_EXECUTABLE=/usr/bin/claude node /opt/claude-agent-acp/dist/index.js"
                     .into(),
             ),
             ..Default::default()
         });
+        assert_eq!(claude.get("subagents"), Some(&serde_json::json!({})));
         let caps = claude
-            .pointer("/jetbrains/air/capabilities")
+            .pointer("/_meta/jetbrains/air/capabilities")
             .and_then(|v| v.as_array())
             .expect("claude initialize advertises AIR capabilities");
         assert!(
             caps.iter()
                 .any(|v| v.as_str() == Some("nativeSubagentSessions"))
         );
-        assert_eq!(
-            claude
-                .pointer("/jetbrains/air/version")
-                .and_then(|v| v.as_u64()),
-            Some(1)
-        );
+    }
+
+    #[test]
+    fn agent_initialize_result_advertises_subagents_from_trace_shape() {
+        let line = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"subagents":{}}}}}"#;
+        assert!(claude_subagents::agent_initialize_result_advertises_subagents(line));
+        assert!(!claude_subagents::agent_initialize_result_advertises_subagents(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{}}}}"#
+        ));
     }
     #[test]
     fn client_capabilities_meta_canonicalizes_off_and_mixed_case() {

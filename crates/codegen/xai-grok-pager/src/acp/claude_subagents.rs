@@ -16,6 +16,8 @@
 use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -308,6 +310,47 @@ pub(crate) fn native_subagent_capability_meta() -> Value {
     })
 }
 
+pub(crate) type SubagentBridgeGate = Arc<AtomicBool>;
+
+pub(crate) fn subagent_bridge_gate() -> SubagentBridgeGate {
+    Arc::new(AtomicBool::new(false))
+}
+
+/// Merge `clientCapabilities.subagents: {}` into an initialize request line.
+pub(crate) fn patch_initialize_client_subagents_line(line: &str) -> Option<String> {
+    let Ok(mut msg) = serde_json::from_str::<Value>(line) else {
+        return None;
+    };
+    if msg.get("method").and_then(Value::as_str) != Some("initialize") {
+        return None;
+    }
+    let Some(params) = msg.get_mut("params").and_then(Value::as_object_mut) else {
+        return None;
+    };
+    let caps = params
+        .entry("clientCapabilities")
+        .or_insert_with(|| json!({}));
+    if !caps.is_object() {
+        *caps = json!({});
+    }
+    caps.as_object_mut()
+        .expect("clientCapabilities object")
+        .insert("subagents".into(), json!({}));
+    serde_json::to_string(&msg).ok()
+}
+
+/// True when an initialize *response* advertises `agentCapabilities.sessionCapabilities.subagents`.
+pub(crate) fn agent_initialize_result_advertises_subagents(line: &str) -> bool {
+    let Ok(msg) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    if !msg.get("result").is_some() {
+        return false;
+    }
+    msg.pointer("/result/agentCapabilities/sessionCapabilities/subagents")
+        .is_some()
+}
+
 pub(crate) struct ByteChanRead {
     rx: mpsc::UnboundedReceiver<Vec<u8>>,
     current: Vec<u8>,
@@ -390,24 +433,29 @@ impl AsyncWrite for LineChanWrite {
 pub(crate) fn spawn_stdio_bridge(
     stdin: ChildStdin,
     stdout: ChildStdout,
-    translate: bool,
+    translate: SubagentBridgeGate,
+    patch_initialize_subagents: bool,
 ) -> (ByteChanRead, LineChanWrite) {
     let state = std::rc::Rc::new(std::cell::RefCell::new(ClaudeSubagentBridge::new()));
     let (in_tx, in_rx) = mpsc::unbounded_channel();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let inbound_state = state.clone();
-    let translate_in = translate;
+    let translate_in = translate.clone();
     tokio::task::spawn_local(async move {
         use tokio::io::AsyncBufReadExt;
         let mut reader = tokio::io::BufReader::new(stdout);
-        let mut line = String::new();
+        let mut line_bytes = Vec::new();
         loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
+            line_bytes.clear();
+            match reader.read_until(b'\n', &mut line_bytes).await {
                 Ok(0) => break,
                 Ok(_) => {
-                    let raw = line.trim_end_matches(['\n', '\r']);
-                    let translated = if translate_in {
+                    let raw = String::from_utf8_lossy(&line_bytes);
+                    let raw = raw.trim_end_matches(['\n', '\r']);
+                    if agent_initialize_result_advertises_subagents(raw) {
+                        translate_in.store(true, Ordering::Release);
+                    }
+                    let translated = if translate_in.load(Ordering::Acquire) {
                         inbound_state.borrow_mut().translate_inbound(raw)
                     } else if raw.is_empty() {
                         Vec::new()
@@ -436,11 +484,16 @@ pub(crate) fn spawn_stdio_bridge(
         let mut writer = stdin;
         while let Some(line) = out_rx.recv().await {
             let text = String::from_utf8_lossy(&line);
-            let raw = text.trim_end_matches(['\n', '\r']);
-            let out = if translate_out {
-                outbound_state.borrow_mut().translate_outbound(raw)
+            let mut raw = text.trim_end_matches(['\n', '\r']).to_owned();
+            if patch_initialize_subagents
+                && let Some(patched) = patch_initialize_client_subagents_line(&raw)
+            {
+                raw = patched;
+            }
+            let out = if translate_out.load(Ordering::Acquire) {
+                outbound_state.borrow_mut().translate_outbound(&raw)
             } else {
-                raw.to_owned()
+                raw
             };
             if out.is_empty() {
                 continue;
@@ -511,6 +564,26 @@ mod tests {
 
     fn update_of(line: &str) -> Value {
         serde_json::from_str::<Value>(line).unwrap()["params"]["update"].clone()
+    }
+
+    #[test]
+    fn patch_initialize_injects_subagents_capability() {
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"terminal":false}}}"#;
+        let patched = patch_initialize_client_subagents_line(line).expect("initialize line");
+        let v: Value = serde_json::from_str(&patched).unwrap();
+        assert_eq!(
+            v.pointer("/params/clientCapabilities/subagents"),
+            Some(&json!({}))
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_stdout_line_does_not_break_inbound_translation() {
+        let mut bridge = ClaudeSubagentBridge::new();
+        let bytes = [0xff, b'o', b'k'];
+        let raw = String::from_utf8_lossy(&bytes);
+        let out = bridge.translate_inbound(&raw);
+        assert_eq!(out, vec![raw.to_string()]);
     }
 
     #[test]
