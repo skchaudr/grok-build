@@ -1,0 +1,48 @@
+2026-10-12T22:04:49Z idle steward started; B (gb-tui-controls) not MERGED yet, waiting; starting step 2 investigation
+2026-10-12T22:06:36Z testing step2: gb pi -> patched pi-acp run (Linux-portable); pi-acp tests 2/2 pass via launch dir; reviewer agent on diff
+2026-10-12T22:07:32Z READY step2 Pi-Coding-Agent@b119cea dsh-home@eaebd22 ~/.dsh/scripts/gb (grok pi -> ~/repos/Pi-Coding-Agent/pi-acp-patched/run; reviewed, initialize + 2/2 pi-acp tests pass; Sab: run 'grok pi', check /dirs is harness-handled and Ctrl+R resume shows bash command titles)
+2026-10-12T22:22:12Z idle B MERGED e5149fc1; steward taking over step 1 cleanup
+2026-10-12T22:22:48Z MERGED step1 teardown: main e5149fc1 pushed; removed worktrees+local/remote branches acp-exec-output gb-session-resume gb-tui-controls (grok-build) and gb-session-resume gb-tui-controls pi-empty-summary (Pi-Coding-Agent); OBSERVATIONS already consolidated in main (worktree copies had no extra content); dropped [build] target-dir from ~/.cargo/config.toml (backup .pre-steward.bak; ~/.cargo-target 26G left on disk)
+2026-10-12T22:22:59Z fixing inbox 1+2 on integration branch steward-batch-1 (.worktrees/steward-batch-1)
+2026-10-12T22:32:20Z testing inbox1 9d346a79 (7 tests pass) inbox2 527843e3 (74 tests pass, queue-drain still unexplained); reviewer agent on main..steward-batch-1
+2026-10-12T22:32:32Z building xai-grok-pager-bin release at 527843e3 (worktree target)
+2026-10-12T22:38:02Z testing pager lib suite at 527843e3
+2026-10-12T22:40:53Z READY 527843e3 /home/sab-mini/repos/grok-build/.worktrees/steward-batch-1/target/debug/xai-grok-pager (steward-batch-1: inbox1 no default_model persist under external agent; inbox2 no foreign-resume Ctrl+U hint under external agent, queue-drain unexplained; review clean; lib 10298 pass / 19 fail = known pre-existing paste+doctor set. Verify: GB_PAGER=/home/sab-mini/repos/grok-build/.worktrees/steward-batch-1/target/debug/xai-grok-pager grok pi -> /model pick, check ~/.grok config default_model unchanged; GB_PAGER=/home/sab-mini/repos/grok-build/.worktrees/steward-batch-1/target/debug/xai-grok-pager grok claude in a dir with claude sessions -> no resume hint on welcome)
+2026-10-13T06:46:54Z fixing ISSUE tool-card expand (grok pi). ENV: pi --mode rpc exits since 06:44Z: @osolmaz/pi-workflows and pi-extensible-workflows@6.2.0 both register tool 'workflow' (reinstalled 06:44:15) -> every grok pi session/new fails 'write after a stream was destroyed'. Not grok-build code; diagnosing with pi -ne
+2026-10-13T06:50:56Z building release xai-grok-pager-bin at 527843e3 to install as grok-fork. ROOT CAUSE tool-card expand: ~/.grok/bin/grok-fork is a 2026-10-08 build, predates b23da2dd (external execute output + expandable); reproduced on screen with old binary (no e:expand), batch build expands bash+read cards with e/E/double-click path. No pager code change needed.
+2026-10-13T06:58:17Z MERGED steward-batch-1 -> main f1eea1fa (9d346a79, 527843e3 + docs 819523f6), pushed; worktree+branch removed; VM release build stopped per Sab (Mini build ships)
+2026-10-13T06:58:17Z idle
+2026-10-13T07:55:38Z fixing ISSUE steer-now for external agents on steward-batch-2
+2026-10-13T07:56:38Z fixing steer: native = InterjectPrompt chord (Ctrl+Enter / alt Ctrl+I; Apple Terminal Ctrl+O; VS Code Ctrl+L) via Grok-only x.ai/interject or sendNow; claude-acp 0.16.2 concurrent prompt is racy -> implementing cancel-and-send for external agents (worker on steward-batch-2)
+2026-10-13T08:14:02Z testing steer e6b17ed6 (unit tests pass; reviewer next)
+2026-10-13T08:14:13Z building debug xai-grok-pager-bin at e6b17ed6 (VM, tests only; ship = gb-build sab-mini)
+2026-10-13T08:21:03Z MERGED steward-batch-2 -> main 40c9d15c (e6b17ed6 steer, 9f211630 combine barrier; review: no blockers; lib 10303 pass / 19 known paste+doctor fail)
+2026-10-13T08:21:08Z building gb-build sab-mini at 40c9d15c (deploys grok-fork to sab-air)
+2026-10-13T08:24:29Z READY 40c9d15c sab-air:~/.grok/bin/grok-fork (gb-build sab-mini, deployed to Air). Steer in grok claude/pi: type msg then Ctrl+Enter (Ghostty/iTerm2; iTerm2 alt Ctrl+I) | Ctrl+O (Apple Terminal) | Ctrl+L (VS Code/Cursor/Zed) | any terminal: Enter to queue, then Enter on empty prompt. Expect toast 'Steering: cancelled current turn' and the msg runs next.
+2026-10-13T08:24:29Z idle
+2026-10-13T09:16:25Z T2 building worktrees pager-tests-paste, pager-tests-doctor from main d940a55f
+2026-10-13T09:16:25Z T1 worktrees gdad-slice in gddp-config + gddp-runtime
+2026-10-13T09:17:56Z T1 dispatched grok-4.7 proposer (herdr wN:p1T, tab T1-gdad) for PROPOSAL.md round 1
+2026-10-13T09:17:56Z T2 dispatched cursor-agents paste (wN:p1R) + doctor (wN:p1S)
+2026-10-13T09:18:27Z idle auth-error scoped (queued after T2): claude-acp 0.16.2 throws RequestError.authRequired() with no message at acp-agent.js:91/394/478, dropping 'Not logged in · Please run /login'; plan = claude-acp patch 0002 passing message.result + pager error_display keeps agent text and drops 'Try sending again' for external auth errors
+2026-10-13T09:28:14Z T1 Review 1 written (8 findings, REVISE) and proposer re-dispatched for round 2
+2026-10-13T09:33:55Z T1 Review 2 = BUILD; proposer dispatched to implement slice + demo
+2026-10-13T09:34:46Z T2 doctor done 580d0f58: snapshot composer no longer runs live mic probe (VM has no recorder -> voice.no-input-device); prod callers keep probe via collect_live_report_with; lib 10304 pass / 18 fail (paste only). Waiting on paste worker
+2026-10-13T09:40:09Z T3-SUBAGENTS dispatched cursor-agent grok-4.7 (herdr wN:p1Y) on worktree subagents-claude. Note: grok claude runs claude-code-acp 0.16.2 (no subagent code); step 0 = switch gb to claude-agent-acp 0.76.0 + parity check
+2026-10-13T09:41:25Z T1 Review 3 (North star): build held; decision packet + 3 replies (resume/redispatch/next) + Fable decider + bb host eval; proposer re-dispatched for round 3
+2026-10-13T09:45:49Z T1 Review 4 = BUILD (decision packet + --decider fable); builder dispatched
+2026-10-13T09:46:51Z T2 paste done 682248b8+c3f4b0fc: all 18 = SSH env (is_ssh) skipping local drops in tests; cfg(test) seam, prod unchanged, +1 guard test; lib 10322 pass / 1 fail (doctor). Reviewer on both branches
+2026-10-13T09:47:36Z T2 testing merged main 3a71293b (local, not pushed) in paste worktree
+2026-10-13T09:49:26Z T2 MERGED pager-tests-doctor + pager-tests-paste -> main 3a71293b, pushed; worktrees/branches removed
+2026-10-13T09:49:26Z T2 READY 3a71293b lib 10323 pass / 0 fail (GROK_HOME empty)
+2026-10-13T09:50:04Z fixing auth-error passthrough: cursor-agent (wN:p1Z) on worktree auth-error-passthrough
+2026-10-13T10:07:33Z T3-SUBAGENTS addendum (idle background-subagent completion freezes stream + duplicates next user msg) added to worker brief as required repro+fix
+2026-10-13T10:19:14Z T7-PI-SUBAGENTS dispatched cursor-agent (wN:p27) on Pi-Coding-Agent worktree pi-subagent-parity; wire shape pinned in ~/.dsh/briefs/subagent-wire.md (from T3's real 0.76.0 trace); all workers told to push WIP before ~11:30Z reboot
+2026-10-13T10:35:36Z testing auth-error 07ad70ac (+ dsh b0e6afa adapter patches 0002 claude-code-acp, 0001 claude-agent-acp); reviewer running; will ship with T3 in one Mini build
+2026-10-13T10:36:41Z fixing auth-error: review mediums -> worker (known-label login hints; tests); T3 told to install standalone patched claude-agent-acp (Zed copy drops patches)
+2026-10-13T10:38:57Z T3-SUBAGENTS steward WIP snapshot b668572d pushed to origin wip/subagents-claude (worker had no commits; 7 files, +802)
+2026-10-13T10:48:07Z T1 Review 5: substrate -> pinned pi 1.0.4 (~/.local/pi-1.0.4) + pi-durable-subagents CLI (resume_handle {wid,qid,rev}); builder had been shimming pi 0.87.1; re-dispatched
+2026-10-13T10:49:28Z T7 steward WIP snapshot 37176040 pushed to Pi-Coding-Agent wip/pi-subagent-parity
+2026-10-13T10:55:32Z testing merged main b050d1d8 (auth-error) lib suite
+2026-10-13T10:59:54Z MERGED auth-error-passthrough -> main b050d1d8, pushed; lib 10330 pass / 2 fail = mermaid_worker timing flakes under load 19 (38/38 pass x3 when rerun alone); ships with T3 Mini build
+2026-10-13T11:07:10Z CHECKPOINT: told T1 (wN:p1T), T3 (wN:p1Y), T7 (wN:p27) to WIP-commit+push and stop
