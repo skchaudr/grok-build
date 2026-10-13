@@ -1053,7 +1053,8 @@ impl AgentSession {
             .map(|(p, id)| CombineGate {
                 id: id.as_str(),
                 is_plain_prompt: p.kind == QueueEntryKind::Prompt,
-                is_synthetic: false,
+                // A steer row is a combine barrier both ways: it never absorbs followers and is never absorbed
+                is_synthetic: p.steer,
                 is_expanded_skill: !p.wire_matches_display(),
                 is_bash: p.kind == QueueEntryKind::BashCommand,
                 has_images: !p.images.is_empty(),
@@ -1757,6 +1758,23 @@ mod tests {
         let remaining = s.dequeue_prompt().unwrap();
         assert_eq!(remaining.kind, QueueEntryKind::Command);
         assert_eq!(remaining.text, "/compact");
+    }
+    #[test]
+    fn dequeue_combined_prompt_never_absorbs_a_steer_row() {
+        let mut s = test_session();
+        s.enqueue_prompt("first".into());
+        let id = s.next_queue_id;
+        s.next_queue_id += 1;
+        s.pending_prompts.push_back(QueuedPrompt {
+            steer: true,
+            ..QueuedPrompt::plain(id, "steer", QueueEntryKind::Prompt)
+        });
+        s.enqueue_prompt("third".into());
+        let front = s.dequeue_combined_prompt(None).unwrap();
+        assert_eq!(front.text, "first", "a steer row moved behind a plain row must not be merged into it");
+        let steer = s.dequeue_combined_prompt(None).unwrap();
+        assert_eq!(steer.text, "steer", "a steer row must not absorb followers");
+        assert_eq!(s.queue_len(), 1);
     }
     #[test]
     fn dequeue_combined_prompt_single_leading_prompt_returns_unchanged() {
