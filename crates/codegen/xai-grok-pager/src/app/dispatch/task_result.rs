@@ -2092,6 +2092,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                             chip_elements: Vec::new(),
                             skill_token_ranges: Vec::new(),
                             combined_texts: Vec::new(),
+                            steer: false,
                         });
                 }
                 agent.show_toast(&format!("Interjection failed. Requeued: {error}"));

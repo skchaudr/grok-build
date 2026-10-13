@@ -64,6 +64,8 @@ pub struct QueuedPrompt {
     pub chip_elements: Vec<ChipElement>,
     /// Combined-turn display segments (always at least two); drain paints one bubble each.
     pub combined_texts: Vec<String>,
+    /// External-agent steer (cancel-and-send): drains alone, never merged with followers.
+    pub steer: bool,
 }
 impl QueuedPrompt {
     /// Base row with every optional field at its default.
@@ -80,6 +82,7 @@ impl QueuedPrompt {
             skill_token_ranges: Vec::new(),
             chip_elements: Vec::new(),
             combined_texts: Vec::new(),
+            steer: false,
         }
     }
     /// Whether the wire payload is exactly the display text.

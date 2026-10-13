@@ -15,7 +15,7 @@ use xai_grok_telemetry::events::CancellationScope;
 
 /// Map `[ui].cancel_subagents_on_turn_cancel` / in-memory agent preference to `cancel_subagents` for the cancel wire payload.
 /// `None` means prompt.
-fn effective_cancel_subagents_preference(
+pub(super) fn effective_cancel_subagents_preference(
     agent_pref: Option<bool>,
     ui: &xai_grok_shell::agent::config::UiConfig,
 ) -> Option<bool> {
