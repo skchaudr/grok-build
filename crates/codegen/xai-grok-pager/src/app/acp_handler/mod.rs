@@ -254,18 +254,15 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         agent.apply_context_used(usage.used, usage.size);
                         advance_reconnect_cursor(agent, &mut meta);
                         is_active
-                    } else if let acp::SessionUpdate::ConfigOptionUpdate(update) =
+                    } else if let acp::SessionUpdate::ConfigOptionUpdate(ref update) =
                         notif.request.update
+                        && (agent.session.models.model_config_id.is_some() || external_agent)
                     {
-                        // A local switch owns the footer until it completes, same as ModelChanged.
-                        let changed = if agent.session.model_switch_pending {
-                            false
-                        } else {
-                            agent
-                                .session
-                                .models
-                                .apply_config_options(&update.config_options)
-                        };
+                        let models = &mut agent.session.models;
+                        if agent.session.model_switch_pending {
+                            models.model_changed_during_switch = true;
+                        }
+                        let changed = models.apply_config_options(&update.config_options);
                         advance_reconnect_cursor(agent, &mut meta);
                         changed && is_active
                     } else if let acp::SessionUpdate::ToolCallUpdate(ref tcu) = notif.request.update
