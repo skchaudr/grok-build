@@ -1565,6 +1565,13 @@ pub enum Effect {
         /// Contract: the offsets index the block's `text` displayed verbatim, never combined with a `displayText` override.
         skill_token_ranges: Vec<std::ops::Range<usize>>,
     },
+    /// Mid-run steer to an external subagent child session. Never starts or ends a parent turn.
+    SendChildPrompt {
+        parent_id: AgentId,
+        child_session_id: acp::SessionId,
+        text: String,
+        prompt_id: String,
+    },
     /// `session/prompt` with `_meta.executePlan` after a post-turn plan approve
     ExecutePlan {
         agent_id: AgentId,
@@ -2628,6 +2635,12 @@ pub enum TaskResult {
         /// The dispatch gate uses it to discard errors from queued/stale prompts instead of painting them onto the running turn.
         /// `None` for synthetic/test constructions that don't need gating.
         prompt_id: Option<String>,
+    },
+    /// Ack-only result for [`Effect::SendChildPrompt`]; must not touch the parent turn.
+    ChildPromptAck {
+        parent_id: AgentId,
+        child_session_id: acp::SessionId,
+        result: Result<acp::PromptResponse, String>,
     },
     /// A send-now `session/prompt` RPC failed at the transport/RPC layer; the prompt never reached the shell's queue.
     /// Carries the payload so dispatch can requeue it locally.

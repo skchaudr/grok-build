@@ -65,10 +65,13 @@ fn pi_child_view_enter_targets_child_session_and_leaves_parent_queue() {
     assert!(
         matches!(
             effects.as_slice(),
-            [Effect::SendPrompt { session_id, text, .. }]
-                if session_id.0.as_ref() == child_sid && text == "steer the child"
+            [Effect::SendChildPrompt {
+                child_session_id,
+                text,
+                ..
+            }] if child_session_id.0.as_ref() == child_sid && text == "steer the child"
         ),
-        "steer must target the child session, got {effects:?}"
+        "steer must emit SendChildPrompt for the child session, got {effects:?}"
     );
     let parent = app.agents.get(&parent_id).unwrap();
     assert_eq!(
@@ -82,10 +85,9 @@ fn pi_child_view_enter_targets_child_session_and_leaves_parent_queue() {
         "parent queue must be untouched"
     );
     assert!(
-        !matches!(
-            effects.as_slice(),
-            [Effect::SendPrompt { session_id, .. }] if session_id == &parent_sid
-        ),
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { session_id, .. } if session_id == &parent_sid)),
         "must not send on the parent session"
     );
     let child = parent.subagent_views.get(child_sid).unwrap();
@@ -118,6 +120,46 @@ fn pi_child_view_finished_subagent_shows_notice_and_sends_nothing() {
             )
         });
     assert!(saw_notice, "expected {PI_CHILD_FINISHED_STEER_NOTICE}");
+}
+
+#[test]
+fn pi_child_steer_ack_does_not_finish_parent_turn() {
+    let mut app = test_app_with_agent();
+    let child_sid = "pi-child-ack-parent";
+    let (parent_id, _) = pi_child_overlay(&mut app, child_sid, true);
+    let parent_pid = "parent-running-pid".to_string();
+    {
+        let parent = app.agents.get_mut(&parent_id).unwrap();
+        parent.session.current_prompt_id = Some(parent_pid.clone());
+        assert!(parent.session.state.is_turn_running());
+    }
+
+    let steer = dispatch(Action::SendPrompt("steer the child".into()), &mut app);
+    assert!(
+        matches!(steer.as_slice(), [Effect::SendChildPrompt { .. }]),
+        "expected SendChildPrompt, got {steer:?}"
+    );
+
+    let ack = dispatch(
+        Action::TaskComplete(crate::app::actions::TaskResult::ChildPromptAck {
+            parent_id,
+            child_session_id: child_sid.into(),
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+        }),
+        &mut app,
+    );
+    assert!(ack.is_empty(), "child ack must not dispatch follow-on effects");
+
+    let parent = app.agents.get(&parent_id).unwrap();
+    assert!(
+        parent.session.state.is_turn_running(),
+        "parent turn must stay running after child steer ack"
+    );
+    assert_eq!(
+        parent.session.current_prompt_id.as_deref(),
+        Some(parent_pid.as_str()),
+        "parent current_prompt_id must be unchanged"
+    );
 }
 
 #[test]

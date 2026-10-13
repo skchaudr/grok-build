@@ -856,6 +856,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.refresh_status_line_for(agent_id);
             effects
         }
+        TaskResult::ChildPromptAck {
+            parent_id,
+            child_session_id,
+            result,
+        } => super::prompt::handle_child_prompt_ack(
+            app,
+            parent_id,
+            child_session_id,
+            result,
+        ),
         TaskResult::SendPromptNowFailed {
             agent_id,
             session_id,

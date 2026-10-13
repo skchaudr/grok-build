@@ -342,12 +342,11 @@ fn try_dispatch_external_pi_child_steer(
         Some(serde_json::json!({ "len": text.len(), "prompt_id": prompt_id })),
     );
 
-    Some(vec![Effect::SendPrompt {
-        agent_id: parent_id,
-        session_id: child_session_id,
+    Some(vec![Effect::SendChildPrompt {
+        parent_id,
+        child_session_id,
         text,
         prompt_id,
-        skill_token_ranges: Vec::new(),
     }])
 }
 
@@ -1587,6 +1586,50 @@ pub(super) fn supersede_open_reload_window(
 }
 
 // TaskResult handlers.
+
+/// Pi child steer ack: errors surface in the child view only; success is a no-op for parent state.
+pub(super) fn handle_child_prompt_ack(
+    app: &mut AppView,
+    parent_id: AgentId,
+    child_session_id: acp::SessionId,
+    result: Result<acp::PromptResponse, String>,
+) -> Vec<Effect> {
+    let Err(error) = result else {
+        return vec![];
+    };
+    let screen_mode_is_minimal = app.screen_mode.is_minimal();
+    let Some(parent) = app.agents.get_mut(&parent_id) else {
+        return vec![];
+    };
+    let child_sid = parent
+        .subagent_views
+        .iter()
+        .find_map(|(sid, view)| {
+            view.session
+                .session_id
+                .as_ref()
+                .filter(|s| s.0 == child_session_id.0)
+                .map(|_| sid.clone())
+        })
+        .or_else(|| parent.active_subagent.clone());
+    let message = format!("Couldn't steer subagent: {error}");
+    if screen_mode_is_minimal {
+        if let Some(ref sid) = child_sid
+            && let Some(child) = parent.subagent_views.get_mut(sid)
+        {
+            child
+                .scrollback
+                .push_block(RenderBlock::system(message.clone()));
+        }
+    } else if let Some(ref sid) = child_sid
+        && let Some(child) = parent.subagent_views.get_mut(sid)
+    {
+        child.show_toast(&message);
+    } else {
+        parent.show_toast(&message);
+    }
+    vec![]
+}
 
 pub(super) fn handle_prompt_response(
     app: &mut AppView,
