@@ -1,0 +1,35 @@
+--- a/dist/acp-agent.js
++++ b/dist/acp-agent.js
+@@ -2275,8 +2275,19 @@
+             // for the idle lane (see Turn.steeredEchoes); later cycles overwrite it,
+             // so the last result and its usage win.
+             if (isSteering(session.activeTurn)) {
+-                session.activeTurn.steeredSettle = outcome;
+-                return;
++                if (session.activeTurn.steeredEchoes.size > 0) {
++                    session.activeTurn.steeredSettle = outcome;
++                    return;
++                }
++                // DSH patch 0002: every steered echo has been seen, so this is the
++                // steered cycle's own terminal result. Leave the steer lane and
++                // settle (or hold for subagents) like a normal turn. Waiting for the
++                // idle instead hangs the turn whenever an autonomous followup cycle
++                // (task-notification) runs back-to-back before that idle: the CLI
++                // emits ONE idle for both, the followup's owed-idle debt absorbs it,
++                // and every later cycle brings its own debt+idle pair.
++                session.activeTurn.steeredEchoes = undefined;
++                session.activeTurn.steeredSettle = undefined;
+             }
+             if (session.activeTurn &&
+                 !session.activeTurn.settled &&
+@@ -3405,7 +3416,9 @@
+                             // steered sequence and that idle settles the turn, so counting
+                             // either result would leave a debt that swallows it. Autonomous
+                             // results inside a steered turn keep their own trailers.
+-                            const owesTrailingIdle = isAutonomousResult || !isSteering(session.activeTurn);
++                            const owesTrailingIdle = isAutonomousResult ||
++                                !isSteering(session.activeTurn) ||
++                                session.activeTurn.steeredEchoes.size === 0;
+                             if (owesTrailingIdle &&
+                                 (isAutonomousResult || !session.cancelled || !session.activeTurn)) {
+                                 session.owedTrailingIdles++;
