@@ -192,6 +192,42 @@ fn synthesize_replay_turn_marker(
         })
     })
 }
+/// Claude's bridge stamps `run_in_background` on spawn or progress when the Agent
+/// tool update says `async_launched`. The typed session update has no such field.
+fn ext_update_run_in_background(notif: &acp::ExtNotification) -> bool {
+    serde_json::from_str::<serde_json::Value>(notif.params.get())
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/update/run_in_background")
+                .and_then(serde_json::Value::as_bool)
+        })
+        .unwrap_or(false)
+}
+
+/// Flip a still-running child to background and retarget its started row.
+/// A later finish then appends a live completed row instead of repainting the
+/// in-turn started block, and the child view is kept (background children are not evicted).
+fn mark_subagent_background(agent: &mut AgentView, child_session_id: &str) {
+    let entry_id = {
+        let Some(info) = agent.subagent_sessions.get_mut(child_session_id) else {
+            return;
+        };
+        if info.attempt.is_background || info.is_finished() {
+            return;
+        }
+        info.attempt.is_background = true;
+        info.attempt.scrollback_entry_id
+    };
+    if let Some(entry_id) = entry_id
+        && let Some(entry) = agent.scrollback.get_by_id_mut(entry_id)
+        && let crate::scrollback::block::RenderBlock::Subagent(block) = &mut entry.block
+    {
+        block.is_background = true;
+        entry.invalidate_cache();
+    }
+}
+
 /// Handle `x.ai/session_notification` and replay-path `x.ai/session/update`.
 /// Routes by `session_id` so events for an inactive agent still mutate that agent's state.
 /// The redraw decision is gated on whether the matched agent is the currently visible one.
@@ -515,7 +551,8 @@ pub(super) fn handle_session_notification_with_origin(
                 .task_tool_background
                 .remove(&subagent_id)
                 .or(prior_background)
-                .unwrap_or(is_wake);
+                .unwrap_or(is_wake)
+                || ext_update_run_in_background(notif);
             let persona_display = persona.clone();
             let role_display = role.clone();
             let model_display = model.clone();
@@ -770,6 +807,9 @@ pub(super) fn handle_session_notification_with_origin(
                 .get(&child_session_id)
                 .and_then(|cv| subagent_activity_label(cv));
             sync_subagent_activity(agent, &child_session_id, activity_label);
+            if ext_update_run_in_background(notif) {
+                mark_subagent_background(agent, &child_session_id);
+            }
             true
         }
         XaiSessionUpdate::SubagentFinished {

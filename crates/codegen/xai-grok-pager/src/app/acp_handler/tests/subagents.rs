@@ -2538,6 +2538,171 @@
         assert_eq!(user_rows, 1, "the follow-up must appear once");
     }
 
+    /// True idle completion: the parent `session/prompt` returns `end_turn` while the
+    /// child is still running, and `subagent_state_update completed` arrives afterward.
+    /// The captured trace (`docs/claude-agent-acp-idle-subagent-trace.jsonl:38-57`)
+    /// finishes both children inside the held prompt (`duringPrompt: true`), so this
+    /// order was never exercised. `late_chunks_after_prompt_end_leave_pane_idle_and_next_send_is_once`
+    /// only covers the post-prompt summary text.
+    ///
+    /// The async launch (`isAsync` / `async_launched` on the Agent tool update) is a
+    /// background child. Its completion must show up live: the dashboard drops the
+    /// running-subagent count, the parent scrollback gains a background completed row,
+    /// and the child view keeps the late "done" text plus a turn footer. The completion
+    /// itself must not send, and the next user send is exactly one prompt and one row.
+    #[test]
+    fn idle_completion_after_parent_end_turn_renders_live_and_sends_once() {
+        use crate::acp::claude_subagents::ClaudeSubagentBridge;
+        use crate::app::actions::Action;
+        use crate::app::agent::AgentState;
+        use crate::scrollback::block::RenderBlock;
+        use crate::scrollback::blocks::SubagentBlockKind;
+
+        const PARENT: &str = "532cfd08-b746-4039-ae7a-c19511cd55f3";
+        const CHILD: &str = "a145c5a83dcba2ce1";
+        let spawned = format!(
+            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"{PARENT}","update":{{"sessionUpdate":"subagent_spawned","subagentSessionId":"{CHILD}","name":"Sleep 8 then reply done","task":"Run sleep 8, then reply with the single word done.","capabilities":{{}}}}}}}}"#
+        );
+        let async_launch = format!(
+            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"{PARENT}","update":{{"sessionUpdate":"tool_call_update","toolCallId":"toolu_async","_meta":{{"claudeCode":{{"toolName":"Agent","toolResponse":{{"isAsync":true,"status":"async_launched","agentId":"{CHILD}","description":"Sleep 8 then reply done"}}}}}}}}}}}}"#
+        );
+        let child_done = format!(
+            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"{CHILD}","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"done"}}}}}}}}"#
+        );
+        let completed = format!(
+            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"{PARENT}","update":{{"sessionUpdate":"subagent_state_update","subagentSessionId":"{CHILD}","state":"completed"}}}}}}"#
+        );
+
+        let mut app = make_app_with_agent(PARENT);
+        app.external_agent = true;
+        app.external_agent_label = Some("claude".into());
+        app.leader_mode = false;
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("p1".into());
+        }
+        let mut bridge = ClaudeSubagentBridge::new();
+        for line in [&spawned, &async_launch] {
+            for out in bridge.translate_inbound(line) {
+                apply_claude_bridge_line(&mut app, &out);
+            }
+        }
+        push_agent_text(&mut app, PARENT, "launched");
+        prompt_response(&mut app, "p1");
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.session.state.is_idle(),
+            "parent end_turn must idle the pane while the child is still running"
+        );
+        assert!(
+            agent
+                .subagent_sessions
+                .get(CHILD)
+                .is_some_and(|info| info.is_running()),
+            "the child must still be running after the parent turn ends"
+        );
+        assert_eq!(
+            agent.watchers().subagents, 1,
+            "the dashboard must show the still-running child after end_turn"
+        );
+        assert!(
+            app.pending_effects.iter().all(|effect| !is_prompt_send(effect)),
+            "ending the parent turn must not send, got {:?}",
+            app.pending_effects
+        );
+
+        for line in [&child_done, &completed] {
+            for out in bridge.translate_inbound(line) {
+                apply_claude_bridge_line(&mut app, &out);
+            }
+        }
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.session.state.is_idle(),
+            "a child completion after end_turn must leave the parent idle"
+        );
+        let info = agent
+            .subagent_sessions
+            .get(CHILD)
+            .expect("completion keeps the child registered");
+        assert!(info.is_finished(), "child completion must mark the child finished");
+        assert!(
+            info.attempt.is_background,
+            "an async_launched child is background; the live completed row depends on it"
+        );
+        assert_eq!(
+            agent.watchers().subagents, 0,
+            "the dashboard running-subagent count must drop when the child completes"
+        );
+        let subagent_blocks: Vec<_> = (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.entry(i))
+            .filter_map(|entry| match &entry.block {
+                RenderBlock::Subagent(block) if block.child_session_id == CHILD => Some(block),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            subagent_blocks.iter().any(|block| {
+                block.is_background && matches!(block.kind, SubagentBlockKind::Started)
+            }),
+            "the background started row must stay, got {subagent_blocks:?}"
+        );
+        assert!(
+            subagent_blocks.iter().any(|block| {
+                block.is_background && matches!(block.kind, SubagentBlockKind::Completed { .. })
+            }),
+            "completion after end_turn must append a live completed row, got {subagent_blocks:?}"
+        );
+        let child = test_subagent(agent, CHILD);
+        let saw_done = (0..child.scrollback.len()).any(|i| {
+            child.scrollback.entry(i).is_some_and(|entry| {
+                matches!(&entry.block, RenderBlock::AgentMessage(message) if message.text().contains("done"))
+            })
+        });
+        assert!(saw_done, "the child view must keep the late completion text");
+        assert!(
+            matches!(
+                last_session_event(&child.scrollback),
+                Some(crate::scrollback::blocks::SessionEvent::TurnCompleted { .. })
+            ),
+            "the child view must show a completed footer, got {:?}",
+            last_session_event(&child.scrollback)
+        );
+        assert!(
+            app.pending_effects.iter().all(|effect| !is_prompt_send(effect)),
+            "child completion must not send a prompt, got {:?}",
+            app.pending_effects
+        );
+
+        let effects = crate::app::dispatch::dispatch(Action::SendPrompt("next".into()), &mut app);
+        let prompts: Vec<_> = effects.iter().filter(|effect| is_prompt_send(effect)).collect();
+        assert_eq!(prompts.len(), 1, "one session/prompt per send, got {effects:?}");
+        push_user_text(&mut app, PARENT, "next");
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let user_rows = (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.entry(i))
+            .filter(|entry| {
+                matches!(
+                    &entry.block,
+                    RenderBlock::UserPrompt(block) if block.text.contains("next")
+                )
+            })
+            .count();
+        assert_eq!(user_rows, 1, "the follow-up must appear once");
+    }
+
+    fn is_prompt_send(effect: &crate::app::actions::Effect) -> bool {
+        matches!(
+            effect,
+            crate::app::actions::Effect::SendPrompt { .. }
+                | crate::app::actions::Effect::SendPromptNow { .. }
+                | crate::app::actions::Effect::SendChildPrompt { .. }
+        )
+    }
+
     fn push_agent_text(app: &mut AppView, session_id: &str, text: &str) {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         handle(
