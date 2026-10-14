@@ -13,7 +13,7 @@
 //! (that id is the SDK task id). `session/prompt` to the child is the draft
 //! steer request; 0.76.0's `prompt()` still rejects unknown session ids.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -35,6 +35,8 @@ struct Child {
     turns: u32,
     tools_used: Vec<String>,
     saw_message: bool,
+    /// Claude `toolResponse.isAsync` / `async_launched`: the child outlives the parent prompt.
+    background: bool,
     started: Instant,
 }
 
@@ -51,6 +53,8 @@ enum PendingStopReply {
 #[derive(Debug, Default)]
 pub(crate) struct ClaudeSubagentBridge {
     children: HashMap<String, Child>,
+    /// `async_launched` seen before `subagent_spawned` for that child.
+    pending_background: HashSet<String>,
     stop_seq: u64,
     pending_stop_replies: HashMap<String, PendingStopReply>,
 }
@@ -100,7 +104,14 @@ impl ClaudeSubagentBridge {
             "tool_call" | "tool_call_update"
                 if is_control_tool(&update) && !self.is_child(&session_id) =>
             {
-                Vec::new()
+                // The Agent row is not a pager tool call. `async_launched` is the
+                // background bit the spawn notification does not carry; without it
+                // a child that finishes after the parent `end_turn` stays a blocking
+                // row and never appends a live completed line.
+                match async_launched_child(&update) {
+                    Some(child_id) => self.mark_background(&session_id, child_id),
+                    None => Vec::new(),
+                }
             }
             "tool_call" | "tool_call_update" | "agent_message_chunk"
                 if self.is_child(&session_id) =>
@@ -241,6 +252,7 @@ impl ClaudeSubagentBridge {
         let name = non_empty(update.get("name"));
         let task = non_empty(update.get("task"));
         let description = task.or(name).unwrap_or("Delegated task").to_owned();
+        let background = self.pending_background.remove(child_id);
         self.children.insert(
             child_id.to_owned(),
             Child {
@@ -249,6 +261,7 @@ impl ClaudeSubagentBridge {
                 turns: 0,
                 tools_used: Vec::new(),
                 saw_message: false,
+                background,
                 started: Instant::now(),
             },
         );
@@ -265,7 +278,52 @@ impl ClaudeSubagentBridge {
                 .expect("spawn object")
                 .insert("persona".into(), Value::String(name.to_owned()));
         }
+        if background {
+            body.as_object_mut()
+                .expect("spawn object")
+                .insert("run_in_background".into(), Value::Bool(true));
+        }
         vec![ext_session_update(parent_session_id, body)]
+    }
+
+    /// Tell the pager this child is background. A child that is not registered yet
+    /// is remembered so the following spawn carries `run_in_background`.
+    fn mark_background(&mut self, parent_session_id: &str, child_id: &str) -> Vec<String> {
+        let Some(child) = self.children.get_mut(child_id) else {
+            self.pending_background.insert(child_id.to_owned());
+            return Vec::new();
+        };
+        if child.background {
+            return Vec::new();
+        }
+        child.background = true;
+        let turns = child.turns;
+        let tool_calls = child.tool_calls;
+        let tools_used = child.tools_used.clone();
+        let duration_ms = child.started.elapsed().as_millis() as u64;
+        let parent = if parent_session_id.is_empty() {
+            child.parent_session_id.clone()
+        } else {
+            parent_session_id.to_owned()
+        };
+        vec![ext_session_update(
+            &parent,
+            json!({
+                "sessionUpdate": "subagent_progress",
+                "subagent_id": child_id,
+                "parent_session_id": parent,
+                "child_session_id": child_id,
+                "duration_ms": duration_ms,
+                "turn_count": turns,
+                "tool_call_count": tool_calls,
+                "tokens_used": 0,
+                "context_window_tokens": 0,
+                "context_usage_pct": 0,
+                "tools_used": tools_used,
+                "error_count": 0,
+                "run_in_background": true,
+            }),
+        )]
     }
 
     fn state_update(&mut self, parent_session_id: &str, update: &Value) -> Vec<String> {
@@ -373,6 +431,17 @@ fn non_empty(value: Option<&Value>) -> Option<&str> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
+}
+
+/// Claude's Agent tool update for a background task: `isAsync` or `status: async_launched`.
+fn async_launched_child(update: &Value) -> Option<&str> {
+    let response = update.pointer("/_meta/claudeCode/toolResponse")?;
+    let is_async = response.get("isAsync").and_then(Value::as_bool) == Some(true)
+        || response.get("status").and_then(Value::as_str) == Some("async_launched");
+    if !is_async {
+        return None;
+    }
+    response.get("agentId").and_then(Value::as_str)
 }
 
 fn is_control_tool(update: &Value) -> bool {

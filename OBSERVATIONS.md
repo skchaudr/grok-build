@@ -640,3 +640,23 @@ The pager appends those chunks while the pane stays `Idle`; agent-initiated outp
 The Zed duplicate-send bug did **not** reproduce on grok claude + claude-agent-acp 0.76.0 with this trace (one request, no echo).
 
 Test: `late_chunks_after_prompt_end_leave_pane_idle_and_next_send_is_once`.
+
+## True idle completion (parent `end_turn` before `subagent_state_update completed`)
+
+The captured trace never exercises this. Lines 35 and 37 are `subagent_state_update` `completed` (40.940 / 40.950); the prompt result `stopReason: end_turn` is line 39 (40.977). Summary line 58 records both children `duringPrompt: true`. The idle window (lines 41–51) is only parent `agent_message_chunk`s. `late_chunks_after_prompt_end_leave_pane_idle_and_next_send_is_once` covers those chunks, not a child completion after the parent turn has ended.
+
+Trace order inside the held prompt: `subagent_spawned`, then the parent Agent `tool_call_update` (`_meta.claudeCode.toolName: "Agent"`, `toolResponse.isAsync: true`, `status: "async_launched"`, `agentId`). The bridge used to drop every Agent/Task control tool, so `task_tool_background` stayed unset and the spawn handler treated the child as foreground (`is_background` defaults false unless the child is a wake). A foreground finish mutates the in-turn Started row in place and the child view can be evicted. A background finish keeps the Started row, appends a separate Completed row, and retains the child view.
+
+The typed `subagent_spawned` / `subagent_progress` payloads have no `run_in_background` field (unknown JSON is dropped). A second spawn is also dropped by the lifecycle, so restamping spawn after `async_launched` does not flip an already-created child. The bridge now emits `subagent_progress` with `run_in_background: true` when `async_launched` arrives after spawn, and stamps the same flag on spawn when `async_launched` arrived first (`pending_background`). The handler reads the raw flag and sets `attempt.is_background` plus the Started block before finish.
+
+Test: `idle_completion_after_parent_end_turn_renders_live_and_sends_once`. Sequence: spawn, `async_launched`, parent text, `end_turn`, then child `agent_message_chunk` "done" and `subagent_state_update` `completed`. After `end_turn` the parent is idle, the child is still running, the dashboard watcher count is 1, and no prompt is sent. After completion the parent stays idle, the child is finished and background, the watcher count is 0, scrollback has a background Started row and a background Completed row, the child view contains "done" and ends on `TurnCompleted`, completion itself sends nothing, and `SendPrompt("next")` is exactly one send and one user row.
+
+Edge cases:
+
+- `async_launched` before `subagent_spawned`: remembered on the bridge; the spawn line carries `run_in_background`.
+- `async_launched` after the child has already finished: `mark_subagent_background` no-ops. The row was already mutated to Completed on the foreground path.
+- Agent/Task tool update without `isAsync` or `async_launched`: still dropped. The child stays foreground. `control_tool_line` in the bridge tests still yields an empty vec.
+- `isAsync` / `async_launched` with no `agentId`: dropped. The child stays foreground.
+- A second `async_launched` for a child already marked background emits nothing.
+- Sync children that finish during the prompt stay foreground. `a_spawn_then_finish_updates_the_parent_row` still mutates the Started block in place.
+- Progress or finish while idle with a non-empty `pending_prompts` still drains the local queue once (existing handler). Completion itself does not send when that queue is empty. `will_wake` on `subagent_finished` is unread by the TUI.
