@@ -2015,3 +2015,10 @@ evidence/steer-hang/). settleOrDefer (~L2277): once steeredEchoes is empty, the 
 terminal result -> clear steer lane, settle/hold like a normal turn; owesTrailingIdle (~L3408) counts that result.
 Next: `~/.dsh/scripts/claude-agent-acp-update` (re-applies patches), rerun repro, check stopReason on wire,
 `pgrep -fx 'sleep 300'` survives, and that a plain steer (no autonomous cycle) still settles.
+
+### W4 live verify (07:47 UTC, patch 0002 installed via claude-agent-acp-update, 0.76.0)
+- steer injected: PASS (`{"outcome":"injected"}`)
+- turn ends on its own: PASS (`stopReason:"end_turn"` ~7s after steer; prompt box back)
+- child survives steer: PASS-ish — `sleep 300` (pid 588342) alive after settle, but it started 07:47:16, same second
+  as the steer, so "running at steer time" is marginal. Re-run with a longer gap before steering to be strict.
+- Not yet checked: plain steer with no autonomous cycle still settles; held-turn (subagent live at steered result) path.
