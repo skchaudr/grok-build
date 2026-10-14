@@ -1995,3 +1995,23 @@ Edge cases:
 - W2 PASS (`gb claude`, Opus 5.5 parent): background Haiku Agent `sleep 151` outlived parent end_turn; on completion a live "Ran 1 subagent" row + CHILD-DONE appended.
 - W3 NOT VERIFIED: herdr cannot deliver Ctrl+Enter (send-keys ctrl+enter and CSI-u both landed as plain queue); steer only queued. Sab to test by hand.
 - Tests: pager lib 10376 pass; `registered_features_are_documented` fails (backend_tools row missing in 25-enterprise.md) — also missing on main, pre-existing.
+
+## 2026-10-14 07:45 UTC — W4: turn stuck "Responding…" after a steer (claude-agent-acp 0.76.0) — ADAPTER bug, not pager
+
+Repro (pane wT:p3, /tmp/w-steer, grok-steerfix + wire tee + instrumented adapter copy): bg Haiku child `sleep 300`,
+parent foreground `sleep 90`, steer while busy. Wire: `_session/steering` -> `{"outcome":"injected"}`, then NO
+`session/prompt` response (no stopReason) for 6+ min; only Ctrl+C produced `stopReason:"cancelled"`. Pager is innocent.
+
+Root cause (dist/acp-agent.js, 0.76.0): steered turns settle only at an SDK `idle` (idle handler ~L2862), but the
+owed-idle branch (~L2833) runs first. Sequence seen (evidence/steer-hang/adapter-dbg-074344.log):
+interrupted result (echoes=1, owes 0) -> steered echo (echoes=[]) -> steered-cycle result (owes 0, ~L3408) ->
+autonomous task-notification cycle result (owes 1) -> ONE idle with owed=1. The owed branch eats it; steer lane never
+runs; every later notification cycle brings its own debt+idle pair, so the turn never settles.
+Note: priority "now" did not abort — the CLI moved the foreground Bash to background ("Command was moved to the
+background") and the child's own `sleep 300` shell survived.
+
+Fix (UNVERIFIED LIVE): ~/.dsh/patches/claude-agent-acp/0002-steer-settle-at-steered-result.patch (copy in
+evidence/steer-hang/). settleOrDefer (~L2277): once steeredEchoes is empty, the result is the steered cycle's own
+terminal result -> clear steer lane, settle/hold like a normal turn; owesTrailingIdle (~L3408) counts that result.
+Next: `~/.dsh/scripts/claude-agent-acp-update` (re-applies patches), rerun repro, check stopReason on wire,
+`pgrep -fx 'sleep 300'` survives, and that a plain steer (no autonomous cycle) still settles.
