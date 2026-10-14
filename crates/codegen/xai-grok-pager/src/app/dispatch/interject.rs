@@ -210,10 +210,11 @@ pub(super) fn dispatch_send_prompt_now(
     }]
 }
 
-/// External-agent send now (cancel-and-send).
-/// The steer goes to the FRONT of the local queue, flagged to drain alone, then the running turn gets a plain `session/cancel` (the Esc path).
+/// External-agent send now.
+/// When initialize advertised `_meta.steering.supported` and a turn is running, inject `_session/steering` and leave the turn and its children alone.
+/// Otherwise cancel-and-send: the steer goes to the FRONT of the local queue, flagged to drain alone, then the running turn gets a plain `session/cancel` (the Esc path).
 /// When the cancelled `session/prompt` resolves, the ordinary turn-end drain sends the steer first; other queued rows keep waiting their turn.
-/// Idle: the same front push drains straight away, i.e. a normal send.
+/// Idle: the same front push drains straight away, i.e. a normal send. Steering is not used while idle.
 fn dispatch_external_steer(
     app: &mut AppView,
     id: AgentId,
@@ -221,6 +222,15 @@ fn dispatch_external_steer(
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
     let ui_pref = super::turn::effective_cancel_subagents_preference(None, &app.current_ui);
+    let inject = app.session_steering_supported
+        && app.agents.get(&id).is_some_and(|agent| {
+            agent.session.session_id.is_some()
+                && agent.can_send_now()
+                && !agent.session.state.is_cancelling()
+        });
+    if inject {
+        return dispatch_session_steer(app, id, text, images);
+    }
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -271,6 +281,44 @@ fn dispatch_external_steer(
         cancel_subagents,
         crate::app::cancel_latency::CancelOrigin::UserGesture,
     )
+}
+
+/// Inject the steer into the running turn. The adapter drops the steered user echo, so the settle handler paints it.
+fn dispatch_session_steer(
+    app: &mut AppView,
+    id: AgentId,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        agent.show_toast(NO_SESSION_NOTICE);
+        return vec![];
+    };
+    agent.record_prompt_in_history(&text);
+    let build = crate::prompt_images::build_content_blocks_with_workspace_report(
+        text.clone(),
+        images,
+        Some(std::path::Path::new(&agent.session.cwd)),
+    );
+    app.pending_image_notices
+        .extend(agent.skipped_image_send_notice(&build.skipped_display_numbers));
+    agent.show_toast("Steering current turn");
+    crate::unified_log::info(
+        "prompt.session_steer",
+        Some(session_id.0.as_ref()),
+        Some(serde_json::json!({
+            "len": text.len(),
+            "blocks": build.blocks.len(),
+        })),
+    );
+    vec![Effect::SteerSession {
+        agent_id: id,
+        session_id,
+        blocks: build.blocks,
+    }]
 }
 
 #[cfg(test)]
@@ -396,6 +444,162 @@ mod tests {
         assert_eq!(
             agent.toast.as_ref().map(|(m, _)| m.as_str()),
             Some("Steering: cancelled current turn")
+        );
+    }
+
+    /// Claude parent steer, when initialize advertised `_meta.steering.supported`, injects into the running turn.
+    /// It does not cancel, so background children stay up, and it does not front-queue a second send.
+    #[test]
+    fn external_parent_steer_uses_session_steering_when_adapter_supports_it() {
+        let mut app = external_running_app();
+        app.session_steering_supported = true;
+        let effects = dispatch(
+            Action::SendPromptNow {
+                text: "steer here".into(),
+                images: vec![],
+                image_notice: None,
+            },
+            &mut app,
+        );
+        match effects.as_slice() {
+            [Effect::SteerSession {
+                agent_id,
+                session_id,
+                blocks,
+            }] => {
+                assert_eq!(*agent_id, AgentId(0));
+                assert_eq!(session_id.0.as_ref(), "test-session");
+                match blocks.first() {
+                    Some(acp::ContentBlock::Text(t)) => assert_eq!(t.text, "steer here"),
+                    other => panic!("expected a text block, got {other:?}"),
+                }
+            }
+            other => panic!("expected SteerSession, got {other:?}"),
+        }
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::CancelTurn { .. }))
+        );
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.session.state.is_turn_running());
+        assert!(!agent.session.state.is_cancelling());
+        assert_eq!(
+            queued_texts(&app),
+            vec![
+                ("queued one".to_string(), false),
+                ("queued two".to_string(), false),
+            ]
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some("Steering current turn")
+        );
+    }
+
+    /// Idle external send-now stays a normal prompt even when the adapter can steer. Steering is for an in-flight turn.
+    #[test]
+    fn external_steer_idle_stays_a_normal_send_when_steering_supported() {
+        let mut app = test_app_with_agent();
+        app.external_agent = true;
+        app.session_steering_supported = true;
+        let effects = dispatch(
+            Action::SendPromptNow {
+                text: "hello".into(),
+                images: vec![],
+                image_notice: None,
+            },
+            &mut app,
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::CancelTurn { .. } | Effect::SteerSession { .. }
+            ))
+        );
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+            )),
+            "got {effects:?}"
+        );
+    }
+
+    /// A cancel already in flight keeps the wait-and-drain path. Injecting into a turn that is stopping would race the cancel.
+    #[test]
+    fn external_steer_while_cancelling_waits_even_when_steering_supported() {
+        let mut app = external_running_app();
+        app.session_steering_supported = true;
+        app.agents.get_mut(&AgentId(0)).unwrap().session.state =
+            crate::app::agent::AgentState::TurnCancelling;
+        let effects = dispatch(
+            Action::SendPromptNow {
+                text: "steer here".into(),
+                images: vec![],
+                image_notice: None,
+            },
+            &mut app,
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SteerSession { .. } | Effect::CancelTurn { .. }))
+        );
+        assert_eq!(
+            queued_texts(&app).first().map(|(t, steer)| (t.as_str(), *steer)),
+            Some(("steer here", true))
+        );
+    }
+
+    /// The adapter drops the steered user echo, so the host paints the line and leaves the turn running.
+    #[test]
+    fn session_steer_injected_paints_user_line_without_cancelling() {
+        let mut app = external_running_app();
+        let effects = dispatch(
+            Action::TaskComplete(crate::app::actions::TaskResult::SessionSteerSettled {
+                agent_id: AgentId(0),
+                text: "steer here".into(),
+                blocks: vec![acp::ContentBlock::Text(acp::TextContent::new("steer here"))],
+                outcome: crate::app::actions::SessionSteerOutcome::Injected,
+            }),
+            &mut app,
+        );
+        assert!(effects.is_empty(), "got {effects:?}");
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.session.state.is_turn_running());
+        assert_eq!(queued_texts(&app).len(), 2);
+        let last_user = (0..agent.scrollback.len()).rev().find_map(|i| {
+            match &agent.scrollback.entry(i)?.block {
+                RenderBlock::UserPrompt(p) => Some(p.text.clone()),
+                _ => None,
+            }
+        });
+        assert_eq!(last_user.as_deref(), Some("steer here"));
+    }
+
+    /// `promptRequired` while the pane still shows a running turn queues the text and does not cancel children.
+    #[test]
+    fn session_steer_prompt_required_queues_without_cancelling_when_turn_running() {
+        let mut app = external_running_app();
+        let effects = dispatch(
+            Action::TaskComplete(crate::app::actions::TaskResult::SessionSteerSettled {
+                agent_id: AgentId(0),
+                text: "steer here".into(),
+                blocks: vec![acp::ContentBlock::Text(acp::TextContent::new("steer here"))],
+                outcome: crate::app::actions::SessionSteerOutcome::PromptRequired,
+            }),
+            &mut app,
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::CancelTurn { .. } | Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }))
+        );
+        assert!(app.agents[&AgentId(0)].session.state.is_turn_running());
+        assert_eq!(
+            queued_texts(&app).first().map(|(t, steer)| (t.as_str(), *steer)),
+            Some(("steer here", false))
         );
     }
 

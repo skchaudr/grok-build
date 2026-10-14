@@ -316,6 +316,7 @@ pub(crate) fn test_app() -> AppView {
         session_picker_grouped: false,
         cancel_rewind_enabled: true,
         session_recap_available: false,
+        session_steering_supported: false,
         shell_feedback_trace_offer: false,
         feedback_trace_choice_latched: false,
         tutorial: None,

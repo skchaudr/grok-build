@@ -8,12 +8,16 @@
 //! so the existing child-view path streams them.
 //!
 //! `session/cancel` aimed at a child is a no-op in 0.76.0 (`cancel` only
-//! knows root sessions). The adapter's working stop is `_session/async_task/stop`
+//! knows root sessions). When the adapter's initialize result advertises the
+//! AIR `asyncTasks` capability, the working stop is `_session/async_task/stop`
 //! with the parent session and `asyncTaskId` equal to the child session id
-//! (that id is the SDK task id). `session/prompt` to the child is the draft
-//! steer request; 0.76.0's `prompt()` still rejects unknown session ids.
+//! (that id is the SDK task id). Agents that advertise subagents without
+//! `asyncTasks` (pi-acp) keep the raw `session/cancel`. An error reply to the
+//! stop is not turned into a cancelled success or `subagent_finished`.
+//! `session/prompt` to the child is the draft steer request; 0.76.0's
+//! `prompt()` still rejects unknown session ids.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -35,6 +39,8 @@ struct Child {
     turns: u32,
     tools_used: Vec<String>,
     saw_message: bool,
+    /// Claude `toolResponse.isAsync` / `async_launched`: the child outlives the parent prompt.
+    background: bool,
     started: Instant,
 }
 
@@ -51,8 +57,12 @@ enum PendingStopReply {
 #[derive(Debug, Default)]
 pub(crate) struct ClaudeSubagentBridge {
     children: HashMap<String, Child>,
+    /// `async_launched` seen before `subagent_spawned` for that child.
+    pending_background: HashSet<String>,
     stop_seq: u64,
     pending_stop_replies: HashMap<String, PendingStopReply>,
+    /// Set when initialize advertises AIR `asyncTasks` (`_session/async_task/stop`).
+    async_tasks: bool,
 }
 
 impl ClaudeSubagentBridge {
@@ -70,11 +80,12 @@ impl ClaudeSubagentBridge {
         let Ok(mut msg) = serde_json::from_str::<Value>(line) else {
             return vec![line.to_owned()];
         };
+        self.note_async_tasks(&msg);
         if msg.get("method").is_none()
             && let Some(id) = json_rpc_id(msg.get("id"))
             && let Some(pending) = self.pending_stop_replies.remove(&id)
         {
-            return self.finish_stop_reply(pending);
+            return self.finish_stop_reply(pending, &msg);
         }
         if msg.get("method").and_then(Value::as_str) != Some("session/update") {
             return vec![line.to_owned()];
@@ -100,7 +111,14 @@ impl ClaudeSubagentBridge {
             "tool_call" | "tool_call_update"
                 if is_control_tool(&update) && !self.is_child(&session_id) =>
             {
-                Vec::new()
+                // The Agent row is not a pager tool call. `async_launched` is the
+                // background bit the spawn notification does not carry; without it
+                // a child that finishes after the parent `end_turn` stays a blocking
+                // row and never appends a live completed line.
+                match async_launched_child(&update) {
+                    Some(child_id) => self.mark_background(&session_id, child_id),
+                    None => Vec::new(),
+                }
             }
             "tool_call" | "tool_call_update" | "agent_message_chunk"
                 if self.is_child(&session_id) =>
@@ -129,7 +147,8 @@ impl ClaudeSubagentBridge {
             .pointer("/params/sessionId")
             .and_then(Value::as_str)
             .unwrap_or("");
-        if method == "session/cancel"
+        if self.async_tasks
+            && method == "session/cancel"
             && let Some(parent_session_id) = self
                 .children
                 .get(session_id)
@@ -141,7 +160,7 @@ impl ClaudeSubagentBridge {
                 PendingStopReply::SessionCancel,
             );
         }
-        if method == "_x.ai/subagent/cancel" {
+        if self.async_tasks && method == "_x.ai/subagent/cancel" {
             let subagent_id = msg
                 .pointer("/params/subagentId")
                 .and_then(Value::as_str)
@@ -187,7 +206,25 @@ impl ClaudeSubagentBridge {
         .to_string()
     }
 
-    fn finish_stop_reply(&mut self, pending: PendingStopReply) -> Vec<String> {
+    fn note_async_tasks(&mut self, msg: &Value) {
+        if msg.get("method").is_some() {
+            return;
+        }
+        let Some(caps) = msg
+            .pointer("/result/_meta/jetbrains/air/capabilities")
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        if caps.iter().any(|cap| cap.as_str() == Some("asyncTasks")) {
+            self.async_tasks = true;
+        }
+    }
+
+    fn finish_stop_reply(&mut self, pending: PendingStopReply, msg: &Value) -> Vec<String> {
+        if let Some(error) = jsonrpc_error(msg) {
+            return self.forward_stop_error(pending, error);
+        }
         match pending {
             PendingStopReply::SessionCancel => Vec::new(),
             PendingStopReply::SubagentCancel {
@@ -230,6 +267,30 @@ impl ClaudeSubagentBridge {
         }
     }
 
+    /// A failed stop leaves the child in the map. Dashboard cancels are
+    /// answered with the agent's error so the pager keeps the row running.
+    /// `session/cancel` is a notification and has no client id to answer.
+    fn forward_stop_error(&self, pending: PendingStopReply, error: &Value) -> Vec<String> {
+        match pending {
+            PendingStopReply::SessionCancel => Vec::new(),
+            PendingStopReply::SubagentCancel {
+                client_request_id, ..
+            } => {
+                if client_request_id.is_empty() {
+                    return Vec::new();
+                }
+                vec![
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": client_request_id,
+                        "error": error,
+                    })
+                    .to_string(),
+                ]
+            }
+        }
+    }
+
     fn is_child(&self, session_id: &str) -> bool {
         self.children.contains_key(session_id)
     }
@@ -241,6 +302,7 @@ impl ClaudeSubagentBridge {
         let name = non_empty(update.get("name"));
         let task = non_empty(update.get("task"));
         let description = task.or(name).unwrap_or("Delegated task").to_owned();
+        let background = self.pending_background.remove(child_id);
         self.children.insert(
             child_id.to_owned(),
             Child {
@@ -249,6 +311,7 @@ impl ClaudeSubagentBridge {
                 turns: 0,
                 tools_used: Vec::new(),
                 saw_message: false,
+                background,
                 started: Instant::now(),
             },
         );
@@ -265,7 +328,52 @@ impl ClaudeSubagentBridge {
                 .expect("spawn object")
                 .insert("persona".into(), Value::String(name.to_owned()));
         }
+        if background {
+            body.as_object_mut()
+                .expect("spawn object")
+                .insert("run_in_background".into(), Value::Bool(true));
+        }
         vec![ext_session_update(parent_session_id, body)]
+    }
+
+    /// Tell the pager this child is background. A child that is not registered yet
+    /// is remembered so the following spawn carries `run_in_background`.
+    fn mark_background(&mut self, parent_session_id: &str, child_id: &str) -> Vec<String> {
+        let Some(child) = self.children.get_mut(child_id) else {
+            self.pending_background.insert(child_id.to_owned());
+            return Vec::new();
+        };
+        if child.background {
+            return Vec::new();
+        }
+        child.background = true;
+        let turns = child.turns;
+        let tool_calls = child.tool_calls;
+        let tools_used = child.tools_used.clone();
+        let duration_ms = child.started.elapsed().as_millis() as u64;
+        let parent = if parent_session_id.is_empty() {
+            child.parent_session_id.clone()
+        } else {
+            parent_session_id.to_owned()
+        };
+        vec![ext_session_update(
+            &parent,
+            json!({
+                "sessionUpdate": "subagent_progress",
+                "subagent_id": child_id,
+                "parent_session_id": parent,
+                "child_session_id": child_id,
+                "duration_ms": duration_ms,
+                "turn_count": turns,
+                "tool_call_count": tool_calls,
+                "tokens_used": 0,
+                "context_window_tokens": 0,
+                "context_usage_pct": 0,
+                "tools_used": tools_used,
+                "error_count": 0,
+                "run_in_background": true,
+            }),
+        )]
     }
 
     fn state_update(&mut self, parent_session_id: &str, update: &Value) -> Vec<String> {
@@ -375,6 +483,17 @@ fn non_empty(value: Option<&Value>) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// Claude's Agent tool update for a background task: `isAsync` or `status: async_launched`.
+fn async_launched_child(update: &Value) -> Option<&str> {
+    let response = update.pointer("/_meta/claudeCode/toolResponse")?;
+    let is_async = response.get("isAsync").and_then(Value::as_bool) == Some(true)
+        || response.get("status").and_then(Value::as_str) == Some("async_launched");
+    if !is_async {
+        return None;
+    }
+    response.get("agentId").and_then(Value::as_str)
+}
+
 fn is_control_tool(update: &Value) -> bool {
     update
         .pointer("/_meta/claudeCode/toolName")
@@ -388,6 +507,13 @@ fn finish_status(state: &str) -> &'static str {
         "failed" => "failed",
         "cancelled" => "cancelled",
         _ => "cancelled",
+    }
+}
+
+fn jsonrpc_error(msg: &Value) -> Option<&Value> {
+    match msg.get("error") {
+        Some(error) if !error.is_null() => Some(error),
+        _ => None,
     }
 }
 
@@ -774,9 +900,123 @@ mod tests {
         );
     }
 
+    fn initialize_advertising_async_tasks() -> String {
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"subagents":{}}},"_meta":{"jetbrains":{"air":{"version":1,"capabilities":["nativeSubagentSessions","asyncTasks"]}}}}}"#.to_owned()
+    }
+
+    fn initialize_without_async_tasks() -> String {
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"subagents":{}}}}}"#.to_owned()
+    }
+
+    #[test]
+    fn child_cancel_without_async_tasks_passes_session_cancel_through() {
+        let mut bridge = ClaudeSubagentBridge::new();
+        let init = bridge.translate_inbound(&initialize_without_async_tasks());
+        assert_eq!(init.len(), 1, "initialize result still reaches the client");
+        bridge.translate_inbound(&spawned_line());
+
+        let cancel = format!(
+            r#"{{"jsonrpc":"2.0","method":"session/cancel","params":{{"sessionId":"{CHILD}"}}}}"#
+        );
+        let kept: Value = serde_json::from_str(&bridge.translate_outbound(&cancel)).unwrap();
+        assert_eq!(kept["method"], "session/cancel");
+        assert_eq!(kept["params"]["sessionId"], CHILD);
+        assert!(kept.pointer("/params/asyncTaskId").is_none());
+    }
+
+    #[test]
+    fn dashboard_cancel_without_async_tasks_passes_subagent_cancel_through() {
+        let mut bridge = ClaudeSubagentBridge::new();
+        bridge.translate_inbound(&initialize_without_async_tasks());
+        bridge.translate_inbound(&spawned_line());
+
+        let cancel = format!(
+            r#"{{"jsonrpc":"2.0","id":42,"method":"_x.ai/subagent/cancel","params":{{"sessionId":"{PARENT}","subagentId":"{CHILD}"}}}}"#
+        );
+        let kept: Value = serde_json::from_str(&bridge.translate_outbound(&cancel)).unwrap();
+        assert_eq!(kept["method"], "_x.ai/subagent/cancel");
+        assert_eq!(kept["id"], 42);
+        assert_eq!(kept["params"]["subagentId"], CHILD);
+    }
+
+    #[test]
+    fn async_task_stop_error_does_not_synthesize_cancelled_success() {
+        let mut bridge = ClaudeSubagentBridge::new();
+        let init = bridge.translate_inbound(&initialize_advertising_async_tasks());
+        assert_eq!(init.len(), 1, "initialize result still reaches the client");
+        bridge.translate_inbound(&spawned_line());
+
+        let cancel = format!(
+            r#"{{"jsonrpc":"2.0","id":42,"method":"_x.ai/subagent/cancel","params":{{"sessionId":"{PARENT}","subagentId":"{CHILD}"}}}}"#
+        );
+        let stopped: Value = serde_json::from_str(&bridge.translate_outbound(&cancel)).unwrap();
+        assert_eq!(stopped["method"], "_session/async_task/stop");
+        let stop_id = stopped["id"].as_str().expect("stop id").to_owned();
+
+        let lines = bridge.translate_inbound(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": stop_id,
+                "error": {"code": -32601, "message": "Method not found"}
+            })
+            .to_string(),
+        );
+        let blob = lines.join("\n");
+        assert!(
+            !blob.contains("subagent_finished"),
+            "error stop must not finish the child: {blob}"
+        );
+        assert!(
+            !blob.contains("\"cancelled\":true"),
+            "error stop must not report cancelled: {blob}"
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "client should see the stop error, got {lines:?}"
+        );
+        let err: Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(err["id"], "42");
+        assert_eq!(err["error"]["code"], -32601);
+        assert!(err.get("result").is_none());
+
+        let finished = bridge.translate_inbound(&finished_line());
+        assert_eq!(finished.len(), 1, "child stays live after a failed stop");
+        assert_eq!(update_of(&finished[0])["status"], "completed");
+    }
+
+    #[test]
+    fn session_cancel_stop_error_does_not_finish_child() {
+        let mut bridge = ClaudeSubagentBridge::new();
+        bridge.translate_inbound(&initialize_advertising_async_tasks());
+        bridge.translate_inbound(&spawned_line());
+        let cancel = format!(
+            r#"{{"jsonrpc":"2.0","method":"session/cancel","params":{{"sessionId":"{CHILD}"}}}}"#
+        );
+        let stopped: Value = serde_json::from_str(&bridge.translate_outbound(&cancel)).unwrap();
+        assert_eq!(stopped["method"], "_session/async_task/stop");
+        let stop_id = stopped["id"].as_str().expect("stop id").to_owned();
+        let lines = bridge.translate_inbound(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": stop_id,
+                "error": {"code": -32601, "message": "Method not found"}
+            })
+            .to_string(),
+        );
+        assert!(
+            lines.is_empty(),
+            "session/cancel has no client id to answer: {lines:?}"
+        );
+        let finished = bridge.translate_inbound(&finished_line());
+        assert_eq!(finished.len(), 1, "child stays live after a failed stop");
+        assert_eq!(update_of(&finished[0])["status"], "completed");
+    }
+
     #[test]
     fn child_cancel_becomes_async_task_stop_and_prompt_stays() {
         let mut bridge = ClaudeSubagentBridge::new();
+        bridge.translate_inbound(&initialize_advertising_async_tasks());
         bridge.translate_inbound(&spawned_line());
         let prompt = format!(
             r#"{{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{{"sessionId":"{CHILD}","prompt":[{{"type":"text","text":"also say ping"}}]}}}}"#
@@ -797,7 +1037,9 @@ mod tests {
         let stop_id = stopped["id"].as_str().expect("stop id").to_owned();
         assert!(
             bridge
-                .translate_inbound(&json!({"jsonrpc":"2.0","id":stop_id,"result":{"stopped":true}}).to_string())
+                .translate_inbound(
+                    &json!({"jsonrpc":"2.0","id":stop_id,"result":{"stopped":true}}).to_string()
+                )
                 .is_empty(),
             "adapter stop responses must not reach the client"
         );
@@ -813,6 +1055,7 @@ mod tests {
     #[test]
     fn dashboard_subagent_cancel_becomes_stop_and_finishes() {
         let mut bridge = ClaudeSubagentBridge::new();
+        bridge.translate_inbound(&initialize_advertising_async_tasks());
         bridge.translate_inbound(&spawned_line());
         let cancel = format!(
             r#"{{"jsonrpc":"2.0","id":42,"method":"_x.ai/subagent/cancel","params":{{"sessionId":"{PARENT}","subagentId":"{CHILD}"}}}}"#

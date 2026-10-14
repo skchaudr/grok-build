@@ -1241,6 +1241,7 @@ pub(crate) async fn run(
         })
         .unwrap_or(true);
     app.cancel_rewind_enabled = connection.cancel_rewind_enabled;
+    app.session_steering_supported = connection.session_steering_supported;
     apply_session_recap_available(&mut app, connection.session_recap_available);
     app.shell_feedback_trace_offer = connection.feedback_trace_offer;
     app.auth_methods = connection.auth_methods.clone();

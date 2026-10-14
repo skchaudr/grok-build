@@ -1094,6 +1094,14 @@ impl AcpUpdateTracker {
             self.current_thinking = Some(entry_id);
         }
     }
+    /// Close the open assistant or thinking block so a steered user line lands after it.
+    /// The next chunk then starts a new block instead of appending above the steer.
+    pub fn close_open_message_for_steer(&mut self, scrollback: &mut ScrollbackState) {
+        self.finish_thinking(scrollback);
+        if let Some(agent_id) = self.current_agent_msg.take() {
+            scrollback.finish_running(agent_id);
+        }
+    }
     /// Mark that the next UserMessageChunk should be silently dropped.
     ///
     /// Call this from `dispatch_send_prompt` after pushing the user entry directly, so the ACP echo doesn't produce a duplicate.

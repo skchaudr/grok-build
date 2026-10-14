@@ -56,8 +56,9 @@ use crate::app::acp_handler::task_view_by_session_id;
 use crate::app::actions::{
     Action, ClipboardPasteCompletion, ClipboardPasteContext, ClipboardPasteFailure,
     ClipboardPasteTarget, DoctorFixTarget, DoctorPlanningOutcome, Effect, ProbedAttachment,
-    SubagentKillOutcome, TaskResult,
+    SessionSteerOutcome, SubagentKillOutcome, TaskResult,
 };
+use crate::app::agent::{QueueEntryKind, QueuedPrompt};
 use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentDeferredSend;
 use crate::app::app_view::{ActiveView, AppView, AuthState};
@@ -927,6 +928,61 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             tracing::trace!("Cancel notification sent successfully");
             vec![]
         }
+        TaskResult::SessionSteerSettled {
+            agent_id,
+            text,
+            blocks,
+            outcome,
+        } => match outcome {
+            SessionSteerOutcome::Injected => {
+                if let Some(agent) = app.agents.get_mut(&agent_id) {
+                    let crate::app::agent_view::AgentView {
+                        session,
+                        scrollback,
+                        ..
+                    } = agent;
+                    session
+                        .tracker
+                        .close_open_message_for_steer(scrollback);
+                    if !text.is_empty() {
+                        scrollback.push_block(RenderBlock::user_prompt(text));
+                        scrollback.enable_follow_mode();
+                    }
+                }
+                vec![]
+            }
+            SessionSteerOutcome::PromptRequired | SessionSteerOutcome::Failed(_) => {
+                let running = app
+                    .agents
+                    .get(&agent_id)
+                    .is_some_and(|agent| !agent.session.state.is_idle());
+                let toast = match &outcome {
+                    SessionSteerOutcome::Failed(error) if running => {
+                        format!("Couldn't steer this turn ({error}). Queued until it ends")
+                    }
+                    SessionSteerOutcome::Failed(error) => {
+                        format!("Couldn't steer this turn ({error}). Sending it now")
+                    }
+                    SessionSteerOutcome::PromptRequired if running => {
+                        "Steering missed the running turn; queued until it ends".to_string()
+                    }
+                    SessionSteerOutcome::PromptRequired => {
+                        "Turn already finished; sending the steer as a new prompt".to_string()
+                    }
+                    SessionSteerOutcome::Injected => unreachable!("handled above"),
+                };
+                if let Some(agent) = app.agents.get_mut(&agent_id) {
+                    let queue_id = agent.session.next_queue_id;
+                    agent.session.next_queue_id += 1;
+                    agent.session.pending_prompts.push_front(QueuedPrompt {
+                        wire_blocks: Some(blocks),
+                        ..QueuedPrompt::plain(queue_id, &text, QueueEntryKind::Prompt)
+                    });
+                    agent.show_toast(&toast);
+                }
+                super::queue::maybe_drain_queue_and_note_peek(app, agent_id)
+            }
+        },
         TaskResult::SetSessionModeFailed { session_id } => {
             if let Some(agent) = find_agent_by_session_id(&mut app.agents, session_id.0.as_ref()) {
                 agent.plan_mode_pending = None;

@@ -33,8 +33,8 @@ use tokio::task::JoinSet;
 use xai_acp_lib::{AcpAgentTx, acp_send};
 use xai_grok_telemetry::startup::{self, StartupPhase};
 use actions::{
-    ClipboardPasteTarget, Effect, SubagentKillOutcome, SwitchModelError, TaskResult,
-    WorkspaceMutation, WorkspaceMutationFailure, WorkspaceWriteCompletion,
+    ClipboardPasteTarget, Effect, SessionSteerOutcome, SubagentKillOutcome, SwitchModelError,
+    TaskResult, WorkspaceMutation, WorkspaceMutationFailure, WorkspaceWriteCompletion,
 };
 use actions::PermissionModeKind;
 use crate::app::session_startup::stamp_span_traceparent;
@@ -1588,6 +1588,55 @@ pub(crate) fn execute(
                         prompt_id: Some(prompt_id),
                     }
                 });
+        }
+        Effect::SteerSession {
+            agent_id,
+            session_id,
+            blocks,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let text = blocks
+                    .iter()
+                    .find_map(|block| match block {
+                        acp::ContentBlock::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let request =
+                    crate::acp::session_steer_request(session_id.0.as_ref(), &blocks);
+                match acp_send(request, &tx).await {
+                    Ok(resp) => {
+                        let outcome = match crate::acp::steer_response_outcome(resp.0.get())
+                            .as_deref()
+                        {
+                            // `startedNewTurn` means the adapter already started a turn. Do not send a second prompt.
+                            Some("injected") | Some("startedNewTurn") => {
+                                SessionSteerOutcome::Injected
+                            }
+                            Some("promptRequired") => SessionSteerOutcome::PromptRequired,
+                            Some(other) => SessionSteerOutcome::Failed(format!(
+                                "unexpected steer outcome: {other}"
+                            )),
+                            None => SessionSteerOutcome::Failed(
+                                "steer response had no outcome".into(),
+                            ),
+                        };
+                        TaskResult::SessionSteerSettled {
+                            agent_id,
+                            text,
+                            blocks,
+                            outcome,
+                        }
+                    }
+                    Err(error) => TaskResult::SessionSteerSettled {
+                        agent_id,
+                        text,
+                        blocks,
+                        outcome: SessionSteerOutcome::Failed(error.to_string()),
+                    },
+                }
+            });
         }
         Effect::CancelTurn {
             session_id,
