@@ -1327,3 +1327,664 @@ Edge cases:
 - A second `async_launched` for a child already marked background emits nothing.
 - Sync children that finish during the prompt stay foreground. `a_spawn_then_finish_updates_the_parent_row` still mutates the Started block in place.
 - Progress or finish while idle with a non-empty `pending_prompts` still drains the local queue once (existing handler). Completion itself does not send when that queue is empty. `will_wake` on `subagent_finished` is unread by the TUI.
+
+# Observations — sync/upstream-2026-10
+
+## Merge
+
+Merged `upstream/main` (`2bdd1d6a`) into `sync/upstream-2026-10`. Five content conflicts, 13 hunks. `acp/spawn.rs` and `app/cli.rs` auto-merged.
+
+## Auth
+
+`initialize_connection` takes `external_agent: bool`.
+
+- `connect()` passes `flags.agent_cmd.is_some()`.
+- `connect_via_leader()` passes `false`.
+
+Empty auth methods skip client auth only on the external-agent path. The built-in agent, including leader mode, still fail-closes to login. `app/mod.rs` still forces `use_leader = false` when `--agent-cmd` is set.
+
+## Headless session load
+
+Our `--agent-cmd` commit replaced headless `open_session`'s `"Session does not exist"` bail with `"Session load failed over ACP: {e}"`. Upstream later removed that bail and falls through to `NewSession` when `LoadSession` fails, and added `OpenedSession.cwd`.
+
+Resolution keeps upstream's fallthrough and the `cwd` field. The ACP error bail is gone, so a failed headless load creates a new session. That matches current upstream built-in behavior.
+
+## Struct fields kept from both sides
+
+`ConnectFlags` has upstream `status_line` and our `agent_cmd`.
+
+`MaterializeCtx` has our `has_agent_cmd` plus upstream `restore_code`, `recent_session_selection`, and `restore_progress_on_stdout`. `remote_miss_ctx` was upstream-only and needed `has_agent_cmd: false` added by hand; it was not a conflict hunk.
+
+The external-agent early return in `resolve_existing_session` also omitted upstream's new `ResolvedExisting.suppress_code_restore` field. Set it to `false`, matching the local-hit path.
+
+## Missing internal docs
+
+`cargo test -p xai-grok-pager` compiles `tests/registered_features_are_documented.rs`, which `include_str!`s `docs/internal/25-enterprise.md` and `docs/internal/22-environment-variables.md`. Those paths are not in `upstream/main` either. Added both as tables generated from `xai_grok_config_types::FEATURES` (20 rows) so the test can compile and still checks every registered key.
+
+## External-agent AuthManager
+
+`AuthManager::new` is `cfg(any(test, feature = "test-support"))` after the upstream login split. `cargo test` compiled `spawn_external_subprocess`; `cargo build --release` did not. The external spawn now calls `new_with_proxy_base_url` with `CLI_CHAT_PROXY_BASE_URL_DEFAULT`, which is what `new` did.
+
+## Upstream tests that fail here
+
+`cargo test -p xai-grok-pager` ran 10213 passed, 19 failed, 4 ignored. The three external-agent auth tests passed. The 19 failures are paste/`file://` tests and `doctor_cmd::fake_standalone_facts_compose_through_shared_view`. `paste.rs`, `input.rs`, and `doctor_cmd/tests.rs` have no diff against `upstream/main`.
+
+## Disk
+
+The shared `target/` dir filled the 99 GB volume during the debug build (linker bus error, os error 28). Removed `target/debug/incremental` and `target/release/incremental` (rebuild caches, not the release binaries) to free about 13 GB. Tests were rerun with `CARGO_INCREMENTAL=0`.
+
+---
+
+# Observations
+
+## 2026-10-02 Task A
+
+- `profiles/acp-enhanced` reads `DSH_ACP_PROVIDER` / `DSH_ACP_MODEL`, but its dumped config does not register a `cliproxy` provider (no base URL). The `:8317` provider block lives on the `web`, `acp`, `tui`, `headless`, and `pi-host` patches, not on `acp-enhanced`. The matrix still sets the env vars the brief names (`cliproxy` / `grok-4.7`).
+- An in-flight `cargo build --release -p xai-grok-pager-bin` was already running in `/home/sab-mini/repos/grok-build` (the dirty main checkout). `acp/mod.rs` there differs from this worktree. That binary is not a clean `b6a12331` build. This task will rebuild from the worktree into the shared target dir after that cargo exits.
+- Leftover drafts `acp-matrix.leftover.sh` and `docs-acp-matrix.leftover.md` were read and deleted.
+- The shell already exports `PAGER=less`. The matrix script uses `ACP_PAGER` so it does not launch `less` as the pager binary.
+- A clean `cargo build --release -p xai-grok-pager-bin` from this worktree recompiled the workspace and died at `linking with cc failed: exit status: 1` while producing `xai-grok-pager-minimal`. The captured log was truncated before the linker diagnostic. Root filesystem was at 4.5G free (target dir 23G: release 17G including 8.5G `release/incremental`). `rm -rf` of that incremental cache was blocked by the sandbox. The release binary still on disk is the 10:27 link from the dirty main checkout (`acp/mod.rs` there is 1135 lines; this branch's file is 1198). It is not a clean `b6a12331` pager.
+- Another `cargo test -p xai-grok-pager` (toolchain 1.94, debug) started in the shared target dir while the release link was failing. This task waited, then rebuilt with `CARGO_INCREMENTAL=0`. The clean binary is `/home/sab-mini/repos/grok-build/target/release/xai-grok-pager` (2026-10-02 11:06, `Finished release`).
+- `:8317` does not list `grok-4.7`. `grok-4.6` returns HTTP 426 ("Grok CLI version 0.2.120 is outdated"). `gpt-6-astra` returned a completed response with no content. `gemini-3.8-flash-high` ran `ls` and replied `done`.
+- DSH `session/new` sometimes dies with `server shut down unexpectedly` before a turn. A later session on gemini stayed up.
+- `--continue` after a successful turn did not log `session/load` for dsh, pi, or cursor, and the resume capture was empty.
+- `codex-acp` reaches the composer and echoes the prompt, then fails the turn: `gpt-5.6-sol` requires a newer Codex. No tool card.
+- `grok agent stdio` closes the ACP channel during `initialize` (`recv_failed`). The pager exits 1 before the composer is drawn. With stdin closed and no pager, `grok agent stdio` exits 0 and prints nothing.
+- The home screen has no "Type a message" placeholder. Ready is the `❯` composer plus `always-approve`. The first submit opens "Run Grok Build in a project directory?"; option 1 is the throwaway cwd.
+
+## 2026-10-04 leader external agents
+
+1. The handoff's second forced-off site is stale. `headless.rs` around the cited line sets `has_agent_cmd: false` on a `MaterializeCtx`. It does not set `use_leader = false`. The only forced `use_leader = false` for `--agent-cmd` was `app/mod.rs`.
+
+2. "No Grok login" is not a leader startup failure. `run_leader` marks the server ready after bounded auth even when that auth returns `None`. The gate an external client skips is the pre-ready `leader_starting` error. An external registration is reported `ready: true`, so `LeaderClient::connect` does not wait out the native auth timeout. A native client still gets `Registered { ready: false }` and `leader_starting` until auth finishes. There is no post-ready "no credentials" rejection to add.
+
+3. A failed send on the native agent channel must stay best-effort (`let _ = acp_tx.send`). Several leader tests drop `acp_rx` and inject responses on `response_tx`. Turning that closed channel into a client-visible JSON-RPC error delivered a stray message ahead of the notification those tests assert on. External backends still return a visible error when their process is dead.
+
+4. `cargo test -p xai-grok-shell --lib` did not compile on this branch before the external-agent work. `tool_layer_images_bridge_tests.rs` calls `base64::engine::general_purpose::STANDARD.encode` without `use base64::Engine`. That import was added so `--lib leader::` could run (287 passed).
+
+5. The shared `target/` filled the disk (debug incremental was about 28G) while the pager tests compiled. Incremental was removed. Later builds used `CARGO_INCREMENTAL=0`.
+
+6. `dsh acp` is `dsh --profile acp`. The `gb` picker does not use that command for DSH. It runs `dsh --profile acp-enhanced` with `DSH_ACP_PROVIDER` and `DSH_ACP_MODEL`.
+
+## 2026-10-05 real Air → khoj DSH session and resume
+
+- Passed on existing `89cae842` binaries, with live OpenRouter Mercury 2.5: Air pager → forwarded socket → khoj leader → DSH. Session `6b31df5c-91d6-4f31-80c0-392d8eda1767` produced raw tool output `khoj-38w`, survived client exit, loaded from a fresh client, remembered ORBIT-6274, and ran hostname/uname again. Full reproduction/evidence: `docs/leader-external-agents-proof.md`.
+- `grok agent stdio` still sets `agent_cmd: None`; it is not a substitute for the actual pager acceptance test. The tested pager logged `use_leader=true embedded_fallback=false`.
+- Mercury's summary dropped the trailing `w` twice; the DSH tool-result events retained the exact hostname. Inspect tool results, not model paraphrases.
+- Darwin binary is stamped 1.0.45 while the VM build is stamped 1.0.46; both identify `89cae842`. Air default uses a tiny `--no-auto-update` launcher to preserve the local build; stock binary remains available.
+- Existing test executables rerun without rebuilding: external agents 8 passed; stdio integration 47 passed/1 ignored; leader unit tests 287 passed. Local MCP paths and optional native `_x.ai/*` methods remain distinct compatibility concerns; neither prevented the tested DSH turns or explicit-ID resume.
+
+## 2026-10-09 resume hint launcher
+
+Quit hints take an optional launcher (`GROK_RESUME_CMD`) instead of a hardcoded leading `grok`. The quit path reads the env var once and passes it into `print_exit_resume_hint` and `print_relaunch_failure_hint`. Formatting tests pass the string directly, so they do not mutate process env. Unset, empty, and whitespace-only stay `grok`. A trimmed non-empty value replaces that token, including inside the relaunch fallback (`GROK_SCREEN_MODE=fullscreen grok cursor --fullscreen --resume …`). `~/.dsh/scripts/gb` was not edited.
+
+`session_title_resolve` still prints `Resume by session id instead: grok --resume <session-id>`. The brief named plain quit, the `--minimal` variant, and the relaunch-failure fallback, so that other line was left alone.
+
+The root volume had 2.4G free. Removed `target/debug/incremental` (7.6G, rebuild cache) before compiling. Builds used `CARGO_TARGET_DIR=$HOME/repos/grok-build/target` and `CARGO_INCREMENTAL=0`. `bin/protoc` is a dotslash wrapper and `dotslash` is not installed; `PROTOC=$HOME/.local/protoc-29.3/bin/protoc` is what made the build scripts run.
+
+Hint tests were extended before the formatter accepted the new argument. That compile failed with 19× `E0061` (unexpected `resume_cmd` argument). After the parameter was wired through:
+
+```
+CARGO_TARGET_DIR=$HOME/repos/grok-build/target CARGO_INCREMENTAL=0 \
+  PROTOC=$HOME/.local/protoc-29.3/bin/protoc \
+  cargo test -p xai-grok-pager --lib -- \
+  print_exit_resume_hint print_relaunch_failure_hint failed_relaunch_hint print_hints_survive
+```
+
+```
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 10248 filtered out; finished in 0.00s
+```
+
+```
+CARGO_TARGET_DIR=$HOME/repos/grok-build/target CARGO_INCREMENTAL=0 \
+  PROTOC=$HOME/.local/protoc-29.3/bin/protoc \
+  cargo check -p xai-grok-pager
+```
+
+```
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 00s
+```
+
+Exit code 0. No pager warnings on that check.
+||||||| e6568d65
+## 2026-10-09 external roster publish
+
+`bin/protoc` needs `dotslash`, which this VM does not have. Tests and the release build used `PROTOC=$HOME/.local/protoc-29.3/bin/protoc` and that directory on `PATH`. `CARGO_TARGET_DIR=$HOME/repos/grok-build/target`.
+
+The debug compile filled the volume. `rm -rf $HOME/repos/grok-build/target/release/incremental` freed about 11 GB. Release incremental is a rebuild cache.
+
+`cargo test -p xai-grok-shell --lib leader::` — 293 passed, 0 failed.
+`cargo test -p xai-grok-shell --test test_leader_external_agents` — 8 passed.
+
+`-p xai-grok-pager` builds the library. The pager binary is package `xai-grok-pager-bin` (artifact name still `xai-grok-pager`). `cargo build --release -p xai-grok-pager-bin` produced `$HOME/repos/grok-build/target/release/xai-grok-pager`, `grok 1.0.45 (240a0045b45e) [stable]`, mtime 2026-10-09 02:22:04.
+
+Live probe, tmux session `roster-probe`, socket `$HOME/.grok/leader-roster-test.sock` (torn down after):
+
+```
+$BIN agent leader --leader-socket $SOCK --no-auto-update --no-exit-on-disconnect --debug-file /tmp/roster-probe/leader.log
+$BIN --leader --leader-socket $SOCK --cwd /tmp/ext-roster-live --always-approve
+$BIN --leader --leader-socket $SOCK --cwd /tmp/ext-roster-live --always-approve --agent-cmd 'cursor-agent acp'
+```
+
+Client B prompt `reply with the single word pong` returned `pong` (Worked for 2.7s). Leader log: `spawned external ACP backend cmd=cursor-agent acp pid=192840`. Native Grok relay auth failed; left as-is.
+
+A direct ACP `sessions/list` on the test socket (length-prefixed `register` then `_x.ai/sessions/list`) returned 66 sessions, one external:
+
+`sessionId=abf16d53-dc97-4da2-bb86-fd1ace76f2c3 title=cursor-agent cwd=/tmp/ext-roster-live sessionKind=external activity=idle resident=true`.
+
+Remote settings turn on the workspace dashboard. That view (`Open Previous /resume`, `Idle N`) does not read `leader_roster`, so the first `Ctrl+\` on A did not show the Cursor row. `GROK_WORKSPACE_DASHBOARD=0` on a fresh native client opens the fleet dashboard. Inactive starts collapsed (`Idle` roster activity maps to `Inactive`). Expanding it showed `◇ cursor-agent` (12m) under `▾ Inactive 40`.
+
+Opening that row on A loaded B's transcript (`pong`). Prompt from A, `reply with the single word roster-bridge`, returned `roster-bridge` on A (Worked for 3.3s). B's pane updated at the same time; the capture drew the new reply against the previous `pong` line as `pongroster-bridge`. The prompt reached the Cursor agent.
+
+Follow-up, not done: `session/prompt` does not flip the row between working and idle. `session/close` while the client stays connected does not drop the route, so the row stays until the last subscriber disconnects or the backend process exits. Workspace-dashboard mode still ignores leader roster rows.
+
+## 2026-10-09 roster hardening
+
+`df` before the builds: 6.8G free on `/`. `target/release/incremental` and `target/debug/incremental` were each 4K, so nothing was removed.
+
+`RosterActivity::Idle` means resident and no turn in flight. The pager's `roster_activity_to_state` maps both `Idle` and `Dormant` to `RowState::Inactive`, and no activity value maps to `RowState::Idle`, so the leader cannot ask for the Idle group by itself. The fleet row builder now paints `RowState::Idle` only when the row is `resident`, `activity == idle`, and `session_kind == "external"`. A native idle row stays Inactive.
+
+`session/prompt` routed to an external backend sets that row to working and broadcasts it. The prompt response, including an error, sets it back to idle. `session/cancel` sets it back to idle immediately. `session/close` and a routed `session/delete` / `x.ai/session/delete` (bare or `_x.ai` wrapped) drop the row while the client stays connected. Native prompts and native sessions still publish nothing.
+
+`cargo test -p xai-grok-shell --lib leader::` — 297 passed, 0 failed.
+`cargo test -p xai-grok-pager --lib resident_external_idle_row_renders_idle` — 1 passed.
+
+`cargo build --release -p xai-grok-pager-bin` finished in 5m 26s. The binary reports `grok 1.0.45 (20c62ebbb360)` because the version stamp was taken before commit `19b78e4d`; the compile included the pager and shell changes from that commit.
+
+Live probe, same socket `$HOME/.grok/leader-roster-test.sock`, torn down after. Native client A was started with `GROK_WORKSPACE_DASHBOARD=0`. Client B was `--agent-cmd 'cursor-agent acp'`. `sessions/list` returned `caef6db9-7ae6-474f-aaec-ea9f0ed11eb7`, title `cursor-agent`, idle, resident, `sessionKind=external`. A's fleet dashboard showed `▾ Idle 1` / `◇ cursor-agent` above a collapsed `▸ Inactive 39`. B's prompt `Run sleep 4 in the shell, then reply with the single word bridge` moved the row to `▾ Working 1` for the whole turn, then back to Idle. B printed `bridge` (Worked for 10s). A third client sent `session/close` for that id while B's pager stayed up. cursor-agent replied `-32601` `"Method not found": session/close`. The row was already removed on route: the dashboard dropped to `Inactive 39` only, and `sessions/list` had no external row.
+
+Fleet dashboard switch: `GROK_WORKSPACE_DASHBOARD=0` (also `false` / `off` / `no` / `disabled`). `app/event_loop.rs` reads that env first, then remote settings `workspace_dashboard_enabled`, then `false`. There is no `config.toml` key. The remote field is `RemoteSettings.workspace_dashboard_enabled` in `xai-grok-config`. Workspace-dashboard code was not changed; that view still ignores `leader_roster`.
+
+## 2026-10-09 external prompt ack
+
+External ACP agents never stamp a prompt id and never send `x.ai/queue/changed`, so the 120s ack watch aborted turns that were already streaming. A session is treated as external when this pager was started with `--agent-cmd`, or when the leader roster row for that session has `sessionKind: external` (a dashboard open of another client's external session). The first live non-replay `session/update` disarms the watch. A replay does not. A native session still requires the stamped prompt id, and an unstamped update still expires the watch. Headless uses the same rule through `HeadlessOptions.external_agent`. The CLI still rejects `--agent-cmd` in headless mode, so that flag stays false on the `-p` path.
+
+`df` before the builds: 6.6G free on `/`. `target/release/incremental` was 4K. Builds used `CARGO_TARGET_DIR=$HOME/repos/grok-build/target`, `CARGO_INCREMENTAL=0`, and `PROTOC=$HOME/.local/protoc-29.3/bin/protoc`.
+
+Failing tests first (watch still armed / headless classifier returned `None`), then the same filters after the disarm:
+
+```
+CARGO_TARGET_DIR=$HOME/repos/grok-build/target CARGO_INCREMENTAL=0 \
+  PROTOC=$HOME/.local/protoc-29.3/bin/protoc \
+  cargo test -p xai-grok-pager --lib -- \
+  external_unstamped_update_disarms native_unstamped_update_leaves \
+  external_replay_update_does_not leader_attached_external_session \
+  headless_external_unstamped headless_ack_signal_classifies prompt_ack
+```
+
+```
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 10251 filtered out; finished in 0.20s
+```
+
+`disarms_the_child` and `disarms_the_watch` on the same binary: 6 passed.
+
+Live, tmux, `GROK_PROMPT_ACK_TIMEOUT_SECS=10`, `--agent-cmd 'cursor-agent acp' --always-approve --trust --no-alt-screen --no-auto-update`, prompt `Run sleep 30 in the shell, then reply done`. Both tmux sessions were killed after the capture. `~/.grok/bin` was not touched.
+
+Before: copied `$HOME/repos/grok-build/target/release/xai-grok-pager` (mtime 2026-10-09 04:26, before this release link) to `/tmp/xai-grok-pager-before-ack`. cwd `/tmp/epa-before`, tmux `epa-before`. The pane showed `◆ Run sleep 30` and `I'll run sleep 30 and reply once it finishes.`, then at 12.8s after send:
+
+`The agent did not accept your prompt within 10s. The turn was stopped; send the prompt again to retry.`
+
+`Turn cancelled.` Toast: `Prompt not accepted, turn stopped`.
+
+After: `cargo build --release -p xai-grok-pager-bin` finished in 2m 30s. Binary `$HOME/repos/grok-build/target/release/xai-grok-pager`, mtime 2026-10-09 04:33, commit `a73fac48`. cwd `/tmp/epa-after`, tmux `epa-after`. At about 22s the pane still showed `⠴ Run sleep 30 22s`. The turn ended with `Done.` and `Worked for 35s` (39.3s after send). The timeout notice was not on the pane.
+||||||| 19a5f94e
+## 2026-10-09 external context indicator (before code)
+
+The token readout the user means is the top status-bar row (`AgentViewLayout` lays `status_bar` down first). `draw` pushes `context_bar_line_for_session` into that row. Default text is `used / total` (`fmt_tokens`), which is the `54K / 500K` shape. Hover swaps in a bar and a percentage. Gateway/chat sessions suppress it.
+
+Two inputs fill `context_state`:
+
+- `session/update` with `sessionUpdate: "usage_update"` (`UsageUpdate`, feature `unstable_session_usage`): `used` and `size` go to `apply_context_used`.
+- `_meta.totalTokens` on any session notification: `confirm_context_used` stores `used` and takes the denominator from the current model's `meta.totalContextTokens` (`get_context_window`). Missing window becomes `0`.
+
+`session/prompt` `PromptResponse.usage` (`totalTokens` / `inputTokens` / `outputTokens`) is deserialized and then ignored. The boxed prompt border (`chrome: true`, session title on `╭─╮`, model on `╰─╯`) has no token slot. Compact mode (`appearance.prompt.compact`) only drops padding and the prompt gap. It does not gate the status-bar readout. The earlier note that only compact chrome reads `token_usage` is stale: both chromes call the same `draw` path. A missing numerator, or a numerator with total `0` and no model window, makes `context_bar_line_for_session` return `None`, so the slot is absent.
+
+`claude-code-acp` 0.16.2 is `~/.local/lib/node_modules/@zed-industries/claude-code-acp` (`dist/acp-agent.js`). npm latest is the same version. It has no usage hook. `streamEventToAcpNotifications` returns `[]` for `message_start` and `message_delta` (where the SDK puts per-message usage). The `result` arm returns `{ stopReason }` and drops `message.usage` and `message.modelUsage` (`contextWindow` lives on that SDK type). `/context` text that contains `Context Usage` is forwarded as a normal agent message, not as `usage_update`.
+
+Live capture, one short turn each, probe in `/tmp/ctx-probe` (not committed). Prompt: `Reply with the single word pong. Do not use tools.`
+
+Claude (`CLAUDE_CODE_EXECUTABLE=$(command -v claude) claude-code-acp`), session `72c10895-4b90-4f41-9860-3b56e3277fd7`:
+
+- `session/new` models have `modelId` / `name` / `description` only. No `totalContextTokens`, no `_meta`.
+- Updates: `available_commands_update`, then `agent_message_chunk` text `""`, `"p"`, `"ong"`. No `_meta`, no `usage_update`.
+- Prompt result: `{"stopReason":"end_turn"}`.
+- stderr: adapter logged `Unexpected case` for an SDK `rate_limit_event` (utilization fractions, not a context count) and did not put it on the wire.
+
+The Claude transcript on disk (`~/.claude/projects/-tmp-ctx-probe/72c10895-….jsonl`) does have assistant `message.usage`: `input_tokens` 2, `cache_creation_input_tokens` 26347, `cache_read_input_tokens` 0, `output_tokens` 4. `cost-state.modelUsage` has no `contextWindow`. That file is not ACP traffic. The pager does not read it, and these numbers are not invented into the header.
+
+Cursor (`cursor-agent acp`), session `c2551294-f753-4aaf-a658-877ba10d5ee7`:
+
+- Updates: `available_commands_update`, `agent_thought_chunk`, `agent_message_chunk` `"pong"`, `session_info_update` `{"title":"Pong Game"}`. No `_meta`, no `usage_update`.
+- Prompt result: `{"stopReason":"end_turn"}`.
+- `session/new` model ids embed a window in the id string, e.g. `grok-4.7[context=256k,reasoning_effort=high,fast=true]`. There is no used-token field. That string is not a numerator.
+
+Neither agent sent a usable context count. The header stays empty until one of them sends `usage_update`, `_meta.totalTokens`, or `PromptResponse.usage`. A window parsed out of a Cursor model id, with no used count, would be a fake denominator and is not shown.
+
+## 2026-10-09 external context indicator (after the pager change)
+
+`df` before the release build: 6.6G free on `/`. No other `cargo` was running. `CARGO_INCREMENTAL=0`, `CARGO_TARGET_DIR=$HOME/repos/grok-build/target`, `PROTOC=$HOME/.local/protoc-29.3/bin/protoc`.
+
+`cargo test -p xai-grok-pager --lib` filtered to the new cases: 9 passed, 0 failed. The four new assertions failed first (context bar and both headers omitted `54K`; prompt-response `usage` and `_meta.totalTokens` were ignored). The captured `{"stopReason":"end_turn"}` case passed before the change and still passes.
+
+`cargo build --release -p xai-grok-pager-bin` finished in 11m 01s. Binary `$HOME/repos/grok-build/target/release/xai-grok-pager`, `grok 1.0.45 (9343c5af84ed) [stable]`.
+
+Live, tmux `ctx-live` 140×40, then torn down:
+
+```
+$BIN --cwd /tmp/ctx-probe --trust --always-approve --no-auto-update \
+  --agent-cmd 'env CLAUDE_CODE_EXECUTABLE=$HOME/.local/bin/claude claude-code-acp'
+```
+
+Prompt `Reply with the single word pong. Do not use tools.` returned `pong` (Worked for 1.0s). The default header row was:
+
+` /tmp/ctx-probe                                                                                                                 [Dashboard]`
+
+No used count and no ` / ` denominator. The boxed prompt chrome was the one on screen (`╭─ ❯ ─╮`, `Opus 5.5 · always-approve`). Compact mode was not on. That matches the wire capture: this adapter still sends `{"stopReason":"end_turn"}` and nothing else, so the pager has no number to print.
+
+## 2026-10-09 roster titles for external sessions
+
+`external_agent_title` only kept the executable basename, so `ssh … user@host /path/grok-khoj-worker` was `ssh`. The fallback is now `host: script` (user stripped at the last `@`, last non-flag remote token's basename). The live khoj command therefore reads `100.75.255.75: grok-khoj-worker`, not a nickname. `<bin> agent … stdio` stays the bin name (`grok-team-hub`).
+
+An ACP `session_info_update` title replaces that label, including one that arrives before the roster row exists. Otherwise the first `session/prompt` text is used: first line, whitespace collapsed, 60 characters. A later prompt does not replace it. Cursor's captured update `{"sessionUpdate":"session_info_update","title":"Pong Game"}` is the shape the row follows.
+
+An unanswered external `session/new` is published immediately as `pending:{namespaced request id}` so a hung start is visible. That row is removed when the owning client disconnects, when `session/new` returns an error, or when that in-flight request's process exits. A success that arrives after the client is gone does not put the row back.
+
+Publishing that provisional row makes `_x.ai/sessions/changed` show up on the external client before `session/new`'s result. The changed line is injected on the native response channel and then broadcast to every client. The second-session helper already skipped those lines; the first-session helper had to as well.
+
+`cargo test -p xai-grok-shell --lib leader::` : 305 passed. `df` was not tight enough to stop; nothing was deleted.
+
+## 2026-10-09 cross-machine delegation
+
+Stock `grok` 1.0.50 (`~/.grok/bin/grok`) has no `--agent-cmd`. `grok leader` is `list` / `info` / `kill`. `grok agent` is `stdio`, `headless`, `serve`, `leader`. This branch's debug `xai-grok-pager` accepts `--agent-cmd` and then refuses the one-shot:
+
+```
+$ xai-grok-pager -p hi --leader --leader-socket /tmp/delegate-does-not-exist.sock --agent-cmd 'python3 -c true'
+grok: --agent-cmd is only supported in interactive mode, not headless mode
+```
+
+A leader started with the test helper's default (`no_exit_on_disconnect = false`) unlinks the socket when the readiness probe disconnects. `scripts/leader_delegate.py` then fails with `FileNotFoundError` on connect. `spawn_leader_server_persistent` and `grok agent leader --no-exit-on-disconnect` stay up. External clients are marked ready even when the native backend is not.
+
+`ssh` is spawned by shlex, then OpenSSH joins argv for the remote shell. A `-c` script whose quotes were consumed by shlex is word-split, and zsh globs the parentheses (`no matches found: exec(base64...)`). The argv that reaches `ssh` has to still contain the remote single quotes.
+
+Live private leader, khoj `khoj-38w`, binary `target/debug/xai-grok-pager` (debug, not release). Mini hub was not restarted. Worker B was `ssh -T -o BatchMode=yes sab-mini@100.66.99.64 env WORKER_MODE=hostname python3 -u -c '<base64 of scripts/delegate_acp_worker.py>'` (no file written on the Mini). Worker A was `env DELEGATE_SOCKET=... DELEGATE_TARGET=<that ssh command> python3 scripts/delegate_acp_worker.py delegate`.
+
+```
+$ python3 scripts/leader_delegate.py --leader-socket /tmp/delegate-spike.sock \
+    --agent-cmd "$A_CMD" --prompt "run hostname and report it" --timeout 90
+worker-a delegated; worker-b said: hostname=sab-mini
+```
+
+Debug log: `Leader server listening`; client 1 spawned the local delegate worker (pid 183875); client 2 spawned the ssh command (pid 183877). `df` after the debug pager build: 13G free. Nothing deleted.
+
+Live follow-up, same day: `grok-team-client -p … --leader --leader-socket … --agent-cmd …` prints `grok: --agent-cmd is only supported in interactive mode, not headless mode`. That is the core gap. `~/.dsh/scripts/gk-smoke --deep` (`deep_run`) is the caller: from Air it runs that `grok-team-client -p` against `~/.grok/leader-mini-hub.sock` for the mini and khoj workers. When the delegate one-shot lands, `--deep` should switch to it.
+
+Tests, both ok:
+
+```
+cargo test -p xai-grok-shell --features test-support --test test_leader_external_agents delegate_cli_prints_the_named_workers_final_answer
+cargo test -p xai-grok-shell --features test-support --test test_leader_external_agents session_on_worker_a_delegates_to_worker_b
+```
+
+## 2026-10-09 headless one-shot and a model that chose it
+
+`grok -p --leader --leader-socket S --agent-cmd C` is the binary path. Without `--leader` the old bail remains. With `--leader`, headless connects `ClientMode::Stdio`, passes `capabilities.agent_cmd`, and sets `has_agent_cmd`. An external worker with an empty `authMethods` does not fail closed. `cargo test -p xai-grok-pager-bin --test headless_leader_agent_cmd` printed `command=headless-worker` and passed. `app::cli::tests::leader_headless_agent_cmd_is_accepted` passed.
+
+Native `grok` 1.0.50 `-p` against the same question returned 401 from `cli-chat-proxy.grok.com` (`auth_kind=bearer`, `reason=no auth context`, provider cliproxy). The model session was therefore `claude-code-acp`, started by this debug binary on a private leader (`/tmp/model-delegate.sock`, `--no-exit-on-disconnect`). Prompt, from `/tmp`, in plain words: find the Mini's hostname by running the one-shot, do not ssh, do not guess. The command named in the prompt was:
+
+```
+xai-grok-pager --no-auto-update --leader --leader-socket /tmp/model-delegate.sock --agent-cmd 'python3 /tmp/mini-hostname-acp.py' -p 'Report the hostname of the machine you are running on.'
+```
+
+`/tmp/mini-hostname-acp.py` is an ACP worker that runs `ssh -T -o BatchMode=yes sab-mini@100.66.99.64 hostname` and answers `hostname=<host>`. No file was written on the Mini. The Mini hub was not restarted.
+
+Claude's first tool call (streaming-json, tool id `toolu_01WVajR31ohu1MzV1LBCbUWV`) was that exact command. Description it supplied: "Delegate hostname query to Mini worker via Grok leader". Tool result: `hostname=sab-mini`. It then ran local `hostname` (tool id `toolu_0194NEUPg68NLf6tvPP5dUxK`) and got `khoj-38w`. Final text: the Mini's hostname is `sab-mini`, and this machine is `khoj-38w`. Session id `c8e4ab13-6dbd-4619-8d62-314198aeb017`.
+
+`~/.dsh` worktree `.worktrees/smoke-deep`, branch `fix/smoke-deep`, pushed. `deep_run` was already that `grok-team-client -p --leader --leader-socket --agent-cmd` line. `tests/test_gk_smoke.py` now requires it and rejects `leader_delegate.py`. `python3 -m pytest tests/test_gk_smoke.py -q`: 13 passed.
+
+## 2026-10-09 leader restart must not drop an open external session
+
+Live Air client pid 63504 had session `01a11fe3-fde2-7a82-981a-793dc4ce82ea` open through the Mini hub. At 10:37 UTC the hub was gone. The client logged `leader.ipc.reconnected` with that session still open. The next prompt, at 10:46, was `Invalid params: "unknown session id"`.
+
+The socket on the Air is an SSH forward of the Mini hub. `connect_or_spawn` took the local lock and started a leader on the Air bound to `leader-mini-hub.sock` (pid 98513, 10 CPUs, no child process). That process is not the Mini hub. Its log shows a native `session/load` (`Loading session data (without updates) from JSONL`) that never logged success, and the session id never appears. The prompt then hit the in-process agent, which did not have the session resident. The session files for the external `grok agent --no-leader` live on the Mini.
+
+Native sessions already survive a restart: the client replays `session/load` into the in-process agent, and that agent reads the session from disk. No native change. The SSH-forward hijack (a dead remote hub plus a local lock spawns a leader on the forward path) is recorded here and left alone. The Mini hub and the Mac binaries were not touched.
+
+External sessions are different because the ACP process dies with the leader. The leader now writes `{sessionId, cwd, cmd}` next to its socket (`<socket-filename>.external-sessions.json`). On a later `session/prompt`, if that session's process is not the live one and the new backend's `initialize` result has `agentCapabilities.loadSession: true`, the leader sends `session/load` and only then the held prompt. If load is not advertised, the cwd is unknown, or load fails, the client gets `Invalid params` data `Couldn't restore this session after the leader restarted. Resume it with: grok --resume <id>`. A raw `unknown session id` from an external prompt is rewritten to that same sentence. The pager uses it when the active tab's reconnect restore fails.
+
+`external_session_prompt_after_leader_restart` failed first with `data: "unknown session id"`, then passed. `external_session_without_load_session_tells_client_to_resume` passed with it. `cargo test -p xai-grok-shell --lib leader::server::tests::` : 177 passed. `cargo test -p xai-grok-shell --test test_leader_external_agents` : 8 passed, including the kill-and-respawn case. `df` after the debug test build was 8.4G free, then 6.6G. The pager crate was not rebuilt: the toast uses the same `SessionId.0` access the pager already compiles, and another debug build could have put `/` under 5G. Nothing was deleted.
+
+## 2026-10-09 correction: the Air client spawned the leader
+
+The unknown-session error was the local leader the Air client started, not a Mini hub that forgot to `session/load`. At 10:37:02 the forwarded socket `~/.grok/leader-mini-hub.sock` was briefly down. `connect_or_spawn` took the Air-local lock beside that path and ran `grok agent leader --no-exit-on-disconnect --relay-on-demand` (pid 98513, stock grok 1.0.50). The client's `reconnected` attached to that process. Its shell log is `prompt received` for `01a11fe3`, then `unknown session id`. The Mini hub's session was never in that process.
+
+`--leader-socket` / `GROK_LEADER_SOCKET` now attaches only. A down hub returns `leader hub at <path> is unreachable` and reconnect keeps retrying. It does not bind a leader on that path. `--leader-no-spawn` / `GROK_LEADER_NO_SPAWN=1` does the same for the default socket. `GROK_LEADER_SPAWN=1` is the opt-in for a client that is supposed to create the leader on an explicit socket (the pty harness's electing client). The `session/load` re-attach from the previous section still covers a leader that really did restart.
+
+## 2026-10-09 second repro: lock pid is local, the hub is not
+
+At 21:48:21 UTC a headless one-shot `grok-team-client --leader --leader-socket ~/.grok/leader-mini-hub.sock --agent-cmd <ssh worker> -p …` (built from `38430038`) ran on the Air while the Mini hub was stalled in `session_create` on a macOS permission prompt. At that second pid 26633 appeared: `~/.grok/bin/grok agent leader --no-exit-on-disconnect --relay-on-demand --grok-ws-url …`, stock grok 1.0.50, not the client binary. The spawner resolves `~/.grok/bin/grok` when the running client lives under grok_home. That process unlinked the forwarded socket and bound its own. The next one-shot attached to it, so stock grok ignored `agent_cmd` and answered on `sab-air.local`.
+
+The lock file next to the forward (`leader-mini-hub.lock`) holds a pid. `connect_or_spawn` treated a pid that is not alive on this machine as a dead leader and skipped the socket, even though the socket still accepted connections. The Air lock is not held by the Mini hub, so the client acquired it and spawned. A dead local pid is not evidence the hub is down.
+
+A socket that exists is now connected to. The lock pid is only a log line. Spawn is refused while that socket still accepts a connection, because the spawned stock binary unlinks the path before it binds. `run_leader_server` does the same check before `remove_file`. A connect that never registers no longer counts as "had a client", so the check itself does not shut a leader down and delete the socket. Headless `-p --leader --agent-cmd` goes through that same `connect_or_spawn` (`ClientMode::Stdio`). Without `--leader`, `-p --agent-cmd` is still rejected.
+
+`explicit_socket_adopts_when_lock_pid_is_not_local` and `headless_prompt_adopts_forwarded_socket_when_lock_pid_is_not_local` failed first with `leader hub … is unreachable`, then passed. `spawning_does_not_replace_a_socket_that_still_accepts` failed first because the second leader received the probe, then passed. A `cargo check` of the pager was stopped while disk was 5.8G free and still falling; the pager crate was not rebuilt. The Mini hub and the Mac binaries were not touched.
+
+## 2026-10-09 third repro: a successful one-shot still leaves the stock leader
+
+`gk ask mini` returned the Mini agent's answer through the hub, and afterwards stock `grok agent leader --no-exit-on-disconnect --relay-on-demand` was bound to `~/.grok/leader-mini-hub.sock` on the Air. The spawn is not only the stall path. `connect_or_spawn` can exec that child and then attach the one-shot to the forward that is still listening, so the prompt succeeds, and the child unlinks the socket once it binds and stays up.
+
+`spawn_leader_subprocess` now refuses to exec when that path already accepts a connection. `successful_oneshot_does_not_spawn_over_a_serving_hub` covers a serving socket whose lock pid is not local, including the spawn-if-needed policy the one-shot used before attach-only.
+
+## 2026-10-09 session machine picker
+
+Repeated `--agent-choice NAME=CMD` is the picker. `--agent-cmd` alone is unchanged. When both are set, registration still uses `--agent-cmd`, and a chosen session stamps its own command in `session/new` `_meta` (`x.ai/agentCmd`, `x.ai/agentName`).
+
+Zero choices: no picker. One choice: used without asking. Two or more: `/new`, dashboard `+ New Agent`, and a dashboard prompt open the picker, cursor on the first name, reset each time it opens. j/k and arrows move, Enter confirms, Esc cancels. The home session takes the first choice without asking, so the first row can already show that machine.
+
+The machine name is the roster title until an agent or prompt title arrives, then `name · title` (still truncated to 60 characters). No name leaves the old titles alone. The session header paints the same name.
+
+A cold external backend gets a synthetic `initialize` (`protocolVersion: 1`, id `leader-ext-init:…`) immediately before `session/new`. That response is swallowed and cached. It is not a replay of the client's initialize, so an agent that requires client capabilities there may still be incomplete. A later session on the same command reuses the cache.
+
+`client_on_backend` still filters machine-wide broadcasts by the command the client registered with. Session RPC and `session/update` follow the session route, which is how one client prompts two backends.
+
+Cancelling a worktree question after a machine was confirmed leaves `pending_session_agent` set until the next confirm or a picker cancel. A later create can consume that stale choice. The fork worktree path stamps no choice.
+
+`gk all` reserves the worker name `all` (`add-worker` rejects it). A registry that already has a worker named `all` would enter all-mode instead of selecting that worker. `gk all` still requires the Mini hub socket check. It was not run against the live hub.
+
+`df /` stayed at 6.6G free. Nothing was deleted. Pager `app::agent_choice` plus the two CLI parses: 11 passed. `roster_row_uses_the_machine_name_and_keeps_it_beside_a_later_title` passed. `one_client_two_agent_cmds_spawn_two_backends_and_both_sessions_are_promptable` passed.
+
+## 2026-10-10 audit: Claude turns show "turn cancelled" (search stopped early)
+
+Search was stopped before a failing test or a fix. No cargo build. Disk at the start of the audit: 49G free on `/`. Live Mini hub is `grok agent leader` pid 1317 via `grok-leader.service`, socket `~/.grok/leader.sock` (not `leader-hub.sock`). Air client `~/.grok/bin/grok-team-client --version` prints `grok 1.0.45 (ab82247f714d)`. That binary's mtime is Oct 9 18:19 Air local. `grok-team-client.8baa33b7` is Oct 9 13:16 Air local. Nothing was restarted.
+
+### Ranked candidate causes
+
+1. **Verified, already fixed in tree, and it matches the pre-fix Air logs.** `PromptAckWatch` still sends `session/cancel` after 120s when an external agent never produces a live `session/update`. The 8baa33b7 change only treats a live non-replay `session/update` as the ack (`crates/codegen/xai-grok-pager/src/app/prompt_ack.rs` `session_update_acks`, lines 130–144). Expiry still calls `emit_cancel_turn` (`crates/codegen/xai-grok-pager/src/app/dispatch/prompt_ack.rs` `fire_fail_safe`, lines 133–210). A `session/request_permission` does not disarm the watch (`handle_permission_request` in `crates/codegen/xai-grok-pager/src/app/acp_handler/permissions.rs` never calls `note_prompt_ack`). Status line copy at 10s is "Waiting for the agent to accept the prompt…" (`crates/codegen/xai-grok-pager/src/views/turn_status.rs` line 768). That is the thing that looks like a prompt, then the fail-safe cancels the turn. `drain_permission_queue` then answers any open permission with `RequestPermissionOutcome::Cancelled` (`permissions.rs` lines 259–276, called from `dispatch/turn.rs`).
+
+2. **Inferred, code-clear, not seen in logs.** A `session/request_permission` whose `sessionId` matches no local agent is answered immediately with `outcome: cancelled`, which Claude treats as the user dismissing the prompt. `handle_permission_request` (`permissions.rs` lines 8–15 and `cancel_permission` lines 375–380). The test `permission_for_unknown_session_id_is_cancelled` locks that in (`crates/codegen/xai-grok-pager/src/app/acp_handler/tests/interactions.rs` lines 719–745). The sibling path for `x.ai/ask_user_question` deliberately does the opposite: it drops the request and does not send a result (`interactions.rs` `handle_ask_user_question` lines 114–124; test `ask_user_question_unknown_session_parks_without_error` lines 648–682). The leader broadcasts interaction reverse-requests to every session subscriber, first answer wins (`crates/codegen/xai-grok-shell/src/leader/server.rs` lines 526–537 and 3204–3278). A subscriber that has not loaded the session answers `Cancelled` before the client that would draw the modal. Banner copy if the prompt response carries no grok meta is "Turn cancelled" (`cancel_cause.rs` `CancelledBy::Unspecified`, lines 41–50). With `cancellationCategory` permission-cancelled it is "Turn cancelled because a permission prompt was dismissed".
+
+3. **Inferred, weaker.** Unknown client methods. Decode of a non-`_` method the ACP client does not implement returns method-not-found before the pager sees it (`agent-client-protocol-0.10.4` `src/lib.rs` `ClientSide::decode_request` lines 284–292). A `_…` method becomes `ExtMethod`; `handle_ext_method` answers anything other than `x.ai/ask_user_question`, `x.ai/exit_plan_mode`, and `x.ai/mcp/elicit` with JSON-RPC `-32601` (`acp_handler/mod.rs` lines 791–805). `fs/*` and `terminal/*` other than `terminal/wait_for_exit` hit the `_ => false` arm (`mod.rs` line 545) and drop the oneshot, which the connection turns into `RecvFailed` (`xai-acp-lib/src/channel.rs` lines 53–58). `terminal/wait_for_exit` is an explicit error (`mod.rs` lines 539–543). TUI flags `terminal`, `fs_read`, and `fs_write` default false (`app/cli.rs` lines 733–739), so Claude should not call those unless the client advertised them. Not tied to a log line.
+
+### Evidence
+
+Air `~/.grok/logs/unified.jsonl`, pager 1.0.45 pid 17940, session `743ab7c8-48e7-4f2f-91d5-2ef12119a3fa`. That id is a Claude transcript on the Air: `~/.claude/projects/-Users-sab-mini-repos-client-work-WATER-AND-STONE-WORKSPACE-aqua-stone-studio/743ab7c8-48e7-4f2f-91d5-2ef12119a3fa.jsonl`. The transcript was not read line-by-line for the cancel (search stopped). The pager lines:
+
+```
+2026-10-09T19:28:34.288Z prompt.ack_soft_notice prompt_id=43b57af1-2640-492c-9c1b-68742a87f78c waited_ms=10026 limit_ms=120000
+2026-10-09T19:30:24.203Z prompt.ack_timeout prompt_id=43b57af1-… waited_ms=120006 prompt_kind=skill disposition=not_restorable was_cancelling=false queue_depth=0
+2026-10-09T19:51:53.358Z prompt.ack_soft_notice prompt_id=9052f4d3-9a9b-4124-bce3-ed413fa81333 waited_ms=10002
+2026-10-09T19:53:43.383Z prompt.ack_timeout prompt_id=9052f4d3-… waited_ms=120028 prompt_kind=skill disposition=not_restorable
+2026-10-09T19:57:08.570Z prompt.ack_soft_notice prompt_id=a5b1f92b-b961-4308-9797-88d38c48f082 waited_ms=10013
+2026-10-09T19:58:58.583Z prompt.ack_timeout prompt_id=a5b1f92b-… waited_ms=120027 prompt_kind=skill disposition=not_restorable
+```
+
+Same session also soft-noticed at 03:49:44Z (`c6c75966-…`) and 19:25:40Z / 19:26:17Z / 20:10:08Z without a following timeout in the extract. `prompt_kind=skill` is the fail-safe branch when `in_flight_prompt` is empty (`prompt_ack.rs` `fire_fail_safe` lines 144–148), not proof the user invoked a skill.
+
+Those three timeouts are 12:30–12:58 Air local on Oct 9, before `grok-team-client.8baa33b7` (mtime 13:16 local). After `2026-10-09T20:16Z` the Air log has no `prompt.ack_timeout` and no `stop_reason: cancelled`. Later pager turns are stock grok 1.0.50 (pids 11137, 26633, 13585) and ack via `queue_changed` in a few milliseconds. Session ids there are grok ulids (`01a…`), not Claude UUIDs.
+
+Mini `~/.grok/logs/unified.jsonl`: 34 `stop_reason: cancelled`, all `turn.end_reconcile.armed` on session `01a10bea-bbf8-77f0-afe1-a8a46b48dba4`, 2026-10-05T20:11Z through 2026-10-06T08:51Z. Native pager, not the Air Claude UUID. No `request_permission` string in either unified log.
+
+Mini user journal since 2026-10-08: no `session/cancel`, no `request_permission`. Repeated stderr from a `grok` process (external agent stderr is inherited, `external_backend.rs` line 83):
+
+```
+Error handling notification { method: '_x.ai/log', … code: -32601, message: '"Method not found": _x.ai/log' }
+```
+
+Counts since Oct 7: `_x.ai/log` 635, `_x.ai/auth/check_subscription` 592, plus one-offs `_x.ai/billing` (3), `marketplace/list` (2), `suggestPrompt`, `session/info`, `prompt_history`, `internal/evict_sessions`, `commands/list`, `bundle/status` (1 each). Oct 8 samples are one pair per minute (`check_subscription` + `log`). Those are grok client methods forwarded at the external agent, which rejects them. They are notifications or periodic polls, not a turn-cancel by themselves. The leader is a raw stdio proxy (`external_backend.rs` `spawn_external_backend`); it does not invent `session/cancel`. A client `session/cancel` only marks the external roster row idle (`server_tests.rs` `external_prompt_error_and_cancel_return_to_idle`).
+
+`crates/codegen/xai-grok-shell/src/agent/subagent/external_acp.rs` lines 305–370 is a different path (a grok subagent hosting an ACP child). It rejects `session/request_permission` before publish, and answers any other reverse request with `-32601` "unsupported external ACP reverse request". Not the leader `--agent-cmd` proxy.
+
+Headless mode answers every `session/request_permission` with `Cancelled` unless yolo finds AllowOnce/AllowAlways (`headless.rs` lines 1880–1898). The reported UI is the TUI, so this is not the symptom. YOLO on the TUI auto-selects `AllowOnce` when that option exists (`permissions.rs` lines 25–40); it does not cancel.
+
+### Ruled out or not reached
+
+- Post-fix Air logs (after the 8baa33b7 binary mtime) do not contain another `prompt.ack_timeout` or a cancelled stop reason. The remaining bug, if it still happens on `ab82247f`, is not in the logs that were read.
+- No wire `session/request_permission` in Mini or Air unified logs, so cause 2 is code-only.
+- Leader journal has no permission/cancel correlation for the Claude sessions.
+- Claude-agent-acp sources under Zed's `claude-agent-acp` and `/opt/homebrew/bin/claude-code-acp` were located and not read.
+- No failing test and no fix were written.
+
+## 2026-10-10 narrowed: aqua-stone-studio cwd only
+
+Air Grok sessions whose `summary.json` `cwd` is `/Users/sab-mini/repos/client_work/WATER_AND_STONE_WORKSPACE/aqua-stone-studio` live in one directory: `~/.grok/sessions/%2FUsers%2Fsab-mini%2Frepos%2Fclient_work%2FWATER_AND_STONE_WORKSPACE%2Faqua-stone-studio`. Nineteen session ids. Newest three are native Grok ("You are Grok 4.7"), not Claude:
+
+- `01a11e1c-b5ef-7912-be0e-46782d0c8508` updated 2026-10-09T21:11Z. Summary "Maintenance pitch preview and design summary". Air unified log (pager/shell 1.0.50) shows `turn.end_reconcile.armed` `stop_reason: end_turn` and `turn.complete` `ok: true` at 19:28Z, 19:52Z, 20:38Z, 20:40Z. No cancelled stop. `updates.jsonl` has no `stop_reason: cancelled`.
+- `01a11def-2a01-79a2-8ec2-07c99f8c6ce9` updated 2026-10-09T00:42Z. Summary "Premium frontend design skills for Grok and Claude". No `stop_reason: cancelled`.
+- `01a10d4c-63b6-7ae0-8214-05e7f82af42e` updated 2026-10-07T11:04Z. Eight `turn_completed` / `stop_reason: cancelled` rows in `updates.jsonl`, all `_x.ai/session/update`, no `_meta` keys: 2026-10-05T18:43:13Z elapsed 56072 (`b7eaa6fd-…`), 18:44:58Z elapsed 105059 (`c388edf4-…`), 18:45:00Z elapsed 1928 (`9c57a66b-…`), 18:45:49Z elapsed 48873, 18:46:35Z elapsed 46562, 18:58:35Z elapsed 124665, 18:58:53Z elapsed 17291, 2026-10-06T20:13:38Z elapsed 225390 (`2077bf89-…`).
+
+Older cancelled turns in the same cwd, also native `_x.ai/session/update`, no meta: `01a0994b-ded2-7492-b908-d6ac449af22f` (2, 2026-09-13), `01a0b6b0-81c2-7562-8c36-fb83b8c3ca54` (11, 2026-09-18/19), `01a0bb1c-b31b-74f3-bece-2b0bafb2f3c5` (1, 2026-09-19T20:57Z), `01a0bb20-87cd-7860-aefa-ad2681fd9c56` (2, including elapsed 10002 at 2026-09-19T19:42:36Z).
+
+Mini hub: `~/.grok/logs/unified.jsonl` has zero lines for any of those nineteen ids, zero for `743ab7c8-48e7-4f2f-91d5-2ef12119a3fa`, and zero for `aqua-stone`. `journalctl --user` since Oct 1 and `~/.grok/leader.log` are the same. No Mini session directory is named for that cwd. The Air shell logs for `01a11e1c` (`shell.turn.inference_start`, `src` shell, ver 1.0.50) mean that native session ran on the Air, not through the Mini hub.
+
+The Oct 9 Claude cancels are not in this Grok session store. Pager sid `743ab7c8-48e7-4f2f-91d5-2ef12119a3fa` (three `prompt.ack_timeout` at 120s, ver 1.0.45) is a Claude transcript at `~/.claude/projects/-Users-sab-mini-repos-client-work-WATER-AND-STONE-WORKSPACE-aqua-stone-studio/743ab7c8-48e7-4f2f-91d5-2ef12119a3fa.jsonl`. It appears in `~/.grok/logs/unified.jsonl` and nowhere under `~/.grok/sessions`.
+
+## 2026-10-10 transcript correlation for `743ab7c8`
+
+The three logged `prompt.ack_timeout` lines and Claude's own transcript land on the same millisecond. Claude was mid-tool (Bash, Read, Edit, Write, ToolSearch). The transcript has no `session/request_permission`, elicitation, or `AskUserQuestion` on these turns. `was_cancelling` is false. `prompt_kind: skill` is the empty-stash branch, not a slash skill.
+
+| Pager | Claude transcript |
+|---|---|
+| `2026-10-09T19:30:24.203Z` `prompt.ack_timeout` `43b57af1-…` `waited_ms` 120006 | `L488` `19:30:24.212Z` user `[Request interrupted by user]` |
+| `2026-10-09T19:53:43.383Z` `prompt.ack_timeout` `9052f4d3-…` `waited_ms` 120028 | `L559` `19:53:43.389Z` `The user doesn't want to proceed with this tool use. The tool use was rejected` then `L560` `19:53:43.390Z` `[Request interrupted by user for tool use]` |
+| `2026-10-09T19:58:58.583Z` `prompt.ack_timeout` `a5b1f92b-…` `waited_ms` 120027 | `L650` `19:58:58.592Z` `[Request interrupted by user]` |
+
+Two earlier interrupts in the same file sit on a 120s boundary before this session id shows up in the pager log: user text `2026-10-09T01:00:03.582Z` then `L97` `01:02:03.563Z` `[Request interrupted by user]` (delta 119.981s); user text `01:15:12.088Z` then `L180` `01:17:12.105Z` (delta 120.017s). Same cutoff, no `prompt.ack_timeout` line yet.
+
+The tool-rejection sentence is what reads as a permission prompt. Claude's own earlier line in this file says none of its tool calls asked for approval. At `2026-10-09T03:49:34.258Z` the user typed `continue idk the permission prompt issues`. The next pager line for this session is the soft notice at `03:49:44.183Z`.
+
+Two short interrupts in the same transcript are not this watchdog: `01:20:50.607Z` is 4.7s after `Ok? so go?`, and `01:23:09.158Z` rejects a `gh api` Bash 2.5s after the tool call. No pager line ties those to `prompt.ack_timeout`.
+
+After the `ab82247f` processes were up (hub started `2026-10-10T01:19:37Z`, Air client `2026-10-10T02:09:32Z`), Air has no further `prompt.ack_timeout`. One later external-style session on the hub, `7995ac42-ad2a-4d15-b431-f331a92a53d3`, acked in 61ms via `session_update` and `turn.complete` `ok: true` at `2026-10-10T02:10:40.179Z`. This host's `~/.grok/logs/unified.jsonl` is not that hub log: the Air forward targets `sab-mini@100.66.99.64` (`~/.grok/leader-hub.sock`). That hub file also has no `request_permission`, `claude-acp`, or `ack_timeout` hits for Oct 9–10.
+
+Code edges that can still answer a permission with `Cancelled` without a click (`permissions.rs` unknown `session_id`; `drain_permission_queue` on turn end; replay-only updates leaving `PromptAckWatch` armed) did not show up on this transcript. The observed cancels are the pre-deploy 120s ack watch. No fix written: the deployed tree already disarms that watch on the first live `session/update`.
+
+## 2026-10-10 Claude ACP parity (`/compact`, images, context window)
+
+Reference: `@zed-industries/claude-code-acp` 0.16.2 at `~/.local/lib/node_modules/@zed-industries/claude-code-acp`, plus `~/.dsh/patches/claude-code-acp/0001-context-usage.patch`.
+
+### `/compact` — verified, fixed
+
+`CompactCommand` returns `QueueCommand("/compact")`. The queue drain turns every non-flush, non-dream command into `Effect::Compact`, which calls `x.ai/compact_conversation`. Claude does not implement that method. `apply_acp_commands` also skipped advertised names that collided with a builtin, so Claude's `available_commands_update` for `compact` never replaced the pager command. Claude advertises `/compact` from `supportedCommands()` and accepts trailing text; the native command refuses arguments.
+
+With an external agent, `compact`, `memory`, `flush`, and `dream` yield to the agent. The typed text (`/compact …`) is the prompt. A native Grok session still runs `Effect::Compact`.
+
+### Images — verified, fixed
+
+Paste and path-drop become `PastedImage` chips. The idle drain builds `ContentBlock::Image` with base64 `data` and `mimeType`. Claude's `promptToClaude` reads `type: "image"`, `data`, and `mimeType`. The leader rewrites the JSON-RPC id and re-serializes the value; that path does not drop non-text blocks. `prompt_text` only reads text for the roster title.
+
+`initialize` from claude-code-acp sets `agentCapabilities.promptCapabilities.image: true`. The pager ignored that and only looked at per-model `acceptsImages` / `inputModalities`. A model marked `acceptsImages: false` hid image affordances even when the agent had opted into image prompts. Native Grok does not advertise `promptCapabilities.image` and still uses the model flag. Session create/load keeps the initialize flag when the catalog is replaced.
+
+### Context window — verified, fixed
+
+The context bar prints `used / size` only when the denominator is greater than zero. `usage_update` (`used`, `size`) was already applied. Stock claude-code-acp 0.16.2 does not emit it; the local patch does, as `{sessionUpdate:"usage_update", used, size}`. A notification `_meta` of `{used, size}` (or `totalTokens` plus `contextWindow` / `size`) was only half-read: `totalTokens` updated the numerator and the missing model window left the denominator at 0. Claude models do not carry `totalContextTokens`. Meta now treats `used` as the count and `size` / `contextWindow` as the window. Native sessions that only send `totalTokens` still use the catalog window.
+
+### Tests
+
+Pager: `external_agent_advertised_compact_replaces_the_builtin`, `native_session_keeps_builtin_compact_when_the_catalog_repeats_the_name`, `external_agent_forwards_compact_with_args_as_a_prompt`, `slash_compact_enqueues_command`, `yanked_image_chip_is_sent_as_image_block`, `agent_prompt_image_capability_overrides_a_model_that_refuses_images`, `a_usage_update_on_the_wire_fills_the_context_bar_with_used_and_size`, `a_usage_update_fills_the_context_bar_with_used_and_size`, `meta_used_and_size_fill_the_context_bar_without_a_model_window`, `notification_meta_reads_used_and_size_when_total_tokens_is_absent`, `prompt_response_meta_used_and_size_fill_the_window`.
+
+Shell: `external_prompt_forwards_image_content_blocks`.
+
+# gb-session-resume (Task A: pi-acp session continuity)
+
+## 2026-10-12 Worker
+
+- pi-acp already exposed `listSessions` / `loadSession`; Grok pager still used `x.ai/session/list` for external agents until `SessionFlags.external_agent` routes `FetchSessionList` through ACP `session/list` (`64c5abeb`).
+- `xai-acp-lib`: `ListSessions` request/response + gateway forward.
+- Tests: `fetch_session_list_external_agent_uses_acp_session_list`, `agent_acp_list_maps_*`, `test_external_acp_session_list` (`fake-pi-sessions` fixture).
+- pi-acp worktree: `loadSession` emits `usage_update` from `getSessionStats().tokens.total` when > 0 (`Pi-Coding-Agent` `8fd2f2a`).
+- Build environment: disk hit 100% twice; freed with `cargo clean` on worktree + main `target/` (~40GB). Re-check `df -h /` before large builds (brief: stop if <15GB free).
+- Not merged to main.
+
+WORKER DONE 64c5abeb
+
+## 2026-10-12 Verifier
+
+REJECTED: required on-screen resume and tests were not run. Disk is under the build stop.
+
+Evidence:
+- `df -B1 /` avail `11483242496` bytes (~10.7 GiB). Brief says stop under 15 GB. No second cargo build or `cargo test`.
+- No pager from this worktree: `target/debug/xai-grok-pager` and `target/release/xai-grok-pager` are absent. `target/` is 36G. `~/.grok/bin/grok-fork` is dated 2026-10-08, before `64c5abeb`, so it cannot show this change.
+- Pty flow (two `grok pi` turns, quit, F3 resume, history + cwd + non-zero token counter on screen) was not executed.
+- Source only, not a screen pass: Pi `8fd2f2a` adds `usage_update` after replay when `tokens.total > 0` (`used` = total, `size` hardcoded `200000`). Grok `64c5abeb` maps ACP `session/list` into picker rows and uses `LocalPresence::Relabel`.
+- Not merged to main.
+
+Left in place (not deleted): `.worktrees/gb-session-resume/target` 36G.
+
+## 2026-10-12 Merger fixes (worker)
+
+1. Restored `sanitize_user_error` on native `FetchSessionList` parse/transport error paths (including `read_session_list_response` failures); rustfmt’d the non-external branch.
+2. Removed `xai-grok-shell/tests/test_external_acp_session_list.rs` (Python-only JSON-RPC loop, no pager/`FetchSessionList`). External list coverage: `xai-grok-pager` `fetch_session_list_external_agent_uses_acp_session_list` + `agent_acp_list_maps_id_title_cwd_and_updated_at`.
+3. pi-acp `loadSession` `usage_update`: `used` from `getSessionStats().contextUsage.tokens` (fallback `tokens.total`); `size` from `contextUsage.contextWindow` when Pi returns it — no `usage_update` if window unknown (avoids hardcoded `200000`).
+
+Not merged to main.
+
+WORKER DONE 2e25f334
+
+## 2026-10-12 Loop owner (Opus 5.5): first pty run, REJECTED
+
+Binary: pager built from 2e25f334 (`cargo build -p xai-grok-pager-bin`), copied out of the shared target. Adapter: a `pi-acp` shim on PATH that execs the patched `index.js` (shim log confirmed every launch). Two turns in tmux from `scratchpad/pirun`: `Reply with exactly: ALPHA-ONE`, then `Run the bash command: echo BETA-TWO — then reply DONE.`
+
+- `gb pi --resume <id>` from `~`: history replayed in order with no duplicates, token counter `20K / 1.0M`, but the header showed `~`, not the session cwd. Startup resume hard-codes `original_cwd: None` for external agents. pi-acp then wrote `~` into `~/.pi/pi-acp/session-map.json` for that session (`loadSession` upserts `params.cwd`).
+- Picker (Ctrl+R; F3 does nothing on the welcome screen), launched from the session's own cwd: the row is listed, but Enter shows the toast "Session not found locally" and nothing loads. External rows went through the grok session store.
+- Picker launched from `~`: the pirun session is not listed. External `session/list` was filtered to the launch cwd.
+- Replayed bash tool row read `◆ Run …` (live: `◆ Run echo BETA-TWO`). pi `toolResult` messages carry no args.
+
+Shared-target hazard: dep-info in `~/.cargo-target` stores workspace-relative paths and artifact hashes are identical across worktrees. A crate built from gb-tui-controls therefore looks fresh to this worktree when this worktree's files are older, so a build silently links the other branch's code. Seen as `ListSessions` "not found" in xai-acp-lib during this branch's lib-test build. Workaround used here: wait until no cargo runs, touch every file that differs between main, this branch and gb-tui-controls, then build. Also confirm branch-only strings are present in the binary.
+
+## 2026-10-12 Loop owner (Opus 5.5): VERIFIED
+
+Fixes after the first run: grok-build `8148f1be` (picker select for external rows, unfiltered external `session/list`, startup `--resume` cwd lookup via `session/list`). pi-acp `9fadf39` (replayed bash calls carry their command) and `96b25bc` (`session/list` without cwd lists every session; it used to fall back to the last loaded cwd, so the picker still showed one folder).
+
+Binary: built from this tree after touching every file that differs between main, this branch and gb-tui-controls, with no other cargo running. Copied to `scratchpad/pager2`, which contains the branch-only string `External session lookup`. Adapter: patched `index.js` via the PATH shim. The shim log shows every launch.
+
+Flow: `gb pi` in `scratchpad/pirun2`, two turns (`Reply with exactly: GAMMA-ONE`, `Run the bash command: echo DELTA-TWO — then reply DONE.`), `/quit`. All resumes were launched from `~`.
+
+| Entry | Header cwd | Token counter | History |
+|---|---|---|---|
+| `gb pi --resume 01a13214-…` | `/t/c/-/7/scratchpad/pirun2` | `20K / 1.0M` | GAMMA-ONE, DELTA-TWO turn with `◆ Run echo DELTA-TWO`, DONE. In order, once each |
+| Ctrl+R picker, search `GAMMA`, Enter | `…/pirun2` | `20K / 1.0M` | same, plus the later `pwd` turn |
+| `/resume` inside that session, search `ALPHA`, Enter (first-run session) | `…/scratchpad/pirun` | `20K / 1.0M` | ALPHA-ONE, `◆ Run echo BETA-TWO`, DONE |
+
+- The picker from `~` now lists every folder, grouped (home-sab-mini, .config-nvim, repos-Pi-Coding-Agent, …). The expanded row shows ID and CWD.
+- After the `--resume`, `pwd` in the resumed session returned `…/scratchpad/pirun2` (pi session log toolResult). The agent runs in the original folder.
+- `~/.pi/pi-acp/session-map.json`: `01a131ff` is back to `pirun` (the first run had overwritten it to `~`), and `01a13214` = `pirun2`.
+- F3 is not bound anywhere in the pager (`grep KeyCode::F(3)` finds nothing). The brief's "F3" comes from the Gemini quote. The picker is Ctrl+R on the welcome screen and `/resume` in a session. Both were verified above.
+
+Tests: `cargo test -p xai-grok-pager -p xai-acp-lib --lib`. xai-acp-lib 19/19. xai-grok-pager 10285 passed, 19 failed, all in `agent_view::paste` / scrollback image drag plus `doctor_cmd::tests::fake_standalone_facts_compose_through_shared_view`. That is the count LOOP.md gives as pre-existing on main, with none in session load/list code. New tests pass: `external_agent_pick_loads_row_in_its_own_cwd`, `external_agent_pick_from_welcome_loads_row_in_its_own_cwd`, `resolve_external_session_cwd_follows_cursor_to_the_session`, `resolve_external_session_cwd_is_none_when_unlisted`, `fetch_session_list_external_agent_uses_acp_session_list` (now asserts no cwd filter). pi-acp: `node --test pi-acp-patched/test/*.test.mjs` 2/2. Both fail on the old adapter (`tool:bash` title; list missing the other folder).
+
+VERIFIED
+
+
+# Task B (gb-tui-controls) observations, merged from branch
+
+
+- `COMMON.md` referenced in BRIEF is not in this worktree; implemented from BRIEF acceptance criteria directly.
+- First `cargo test` failed: `bin/protoc` needs `dotslash` on PATH (`cargo install dotslash`).
+- pi-acp changes are in `~/repos/Pi-Coding-Agent/pi-acp-patched/index.js` (bundled output; no separate `.ts` source in repo).
+
+WORKER DONE 26eeb31e
+
+REJECTED: on-screen proof was not run. `df -h /` showed Avail 8.8G (under the 15G cargo-build stop), and this worktree has no `target/debug` pager/`grok` binary (`grok`, `xai-grok-pager`, `xai-grok-pager-bin` all missing). Did not start a build. Did not launch `grok pi` or `grok claude` in a pty, so the slash popup, `/model` selection, and `/usage` were not seen. The pager unit-test objects under `target/debug/deps/xai_grok_pager-*` are from 10:57, before `registry.rs` (11:02) and commit `26eeb31e` (11:06), so they were not re-run. Disk hogs to clear before a retry, not deleted: `~/repos/grok-build/target` 15G, `~/repos/grok-build/.worktrees/gb-session-resume/target` 15G, `~/repos/grok-build/.worktrees/gb-tui-controls/target` 7.8G. Not merged to main.
+
+## Loop owner (Opus 5.5), 2026-10-12
+
+- Shared-target trap: `cargo build -p xai-grok-pager` only builds the lib. The `xai-grok-pager` binary comes from `xai-grok-pager-bin`. Until that package is built, `~/.cargo-target/debug/xai-grok-pager` is whatever another worktree last linked. The first pty runs here used gb-session-resume's binary. Build `-p xai-grok-pager-bin`, copy the binary out, and `grep -a` the copy for a string from your change.
+- pi-acp SDK 0.26 has no `session/set_model` route, so Grok's `/model` pick got "Method not found". Fixed in pi-acp via `extMethod` (Pi-Coding-Agent e3dd9ed); `pi-acp-patched/test/set-model.integration.mjs` failed first, then passed.
+- claude-acp 0.16.2 logs `/usage` output and drops it. It only forwards `/context` output when the text contains "Context Usage", which current Claude output does not. The pager now pushes `/<cmd> returned no output from <agent> (not supported through ACP)` on every turn-end path when a forwarded slash turn completes with no agent text.
+- In the tmux run, putting a `pi-acp` PATH shim first made the embedded shell's ACP initialize fail ("server shut down unexpectedly") before the shim ran. Launching the pager with `--agent-cmd 'node …/pi-acp-patched/index.js'` worked. Not investigated further.
+- Fixed: `/model` under an external agent used to persist `default_model` globally, so a Pi model id became Grok's default. `set_default_model` (pager `app/dispatch/settings/setters.rs`) now skips `Effect::PersistSetting` when `app.external_agent` is set; the live `SwitchModel` and footer rollback are unchanged, and native behavior is unchanged. This also removes the unrolled-back persisted value on a failed switch. Test: `set_default_model_external_agent_does_not_persist` (native: `set_default_model_resolves_known_name`).
+- Open: in one claude run a stray `/resume-claude <id>` prompt was sent at startup, and two prompts queued behind it never drained after "Turn completed." It did not reproduce in a fresh directory. Possibly pre-existing; not investigated.
+- Likely cause of the stray `/resume-claude <id>` (fixed): the only startup path is the welcome foreign-resume hint (`foreign_sessions.rs` `begin_foreign_resume_detection`, scans for claude/codex/cursor sessions in the cwd). Ctrl+U on Welcome (`app_view.rs:3656`) sends `Action::ResumeForeignSession`, and `router.rs:175` submits `/resume-claude <id>`. Nothing gated this on `external_agent`, so under `grok claude` the hint appeared and Ctrl+U (also the readline kill-line key) fed a Grok-only skill to claude-code. A fresh dir has no sessions, so no hint, which fits the report. Detection now returns None when `app.external_agent`. Test: `external_agent_host_never_offers_foreign_resume_hint`. Still open: the picker's foreign rows (`session/foreign.rs:98`, `session/load.rs:374`) are not gated for external agents, and the undrained queue was not reproduced from code (a user-initiated prompt goes through the normal drain path; no code path found that stalls it).
+- `minimal_slash_dropdown_still_consumes_tab` and `drain_after_editing_sends_correct_prompt` fail when run alone but pass in the full lib run (order-dependent).
+
+VERIFIED (pager-bin built at 98f97b77, binary checked for the notice string; pi-acp e3dd9ed)
+- `grok pi` (patched pi-acp), tmux 160x45:
+  - The slash popup lists /usage /context /compact /login /model plus Pi-advertised /dirs /add-dir /suggest-dirs.
+  - `/model` lists Pi's models. Picking "deepseek/DeepSeek V4 Pro" changed the footer. The session file `~/.pi/agent/sessions/*pi2*/2026-10-12T22-13-15-329Z_*.jsonl` shows `model_change deepseek deepseek-v4-pro`, then `assistant deepseek deepseek-v4-pro ['PONG']`.
+  - `/usage` rendered "Cost: 0.03583404 Tokens: in 27138, out 3, total 27141".
+- Failed switch (stock /usr/bin/pi-acp): the screen shows `Couldn't switch model: "Method not found": session/set_model` and the footer stays on "google-antigravity/Gemini 3.6 Flash (Antigravity)".
+- `grok claude` via gb:
+  - The popup lists /usage /context /compact /login /model.
+  - `/usage` showed "Worked for 0.3s", then "/usage returned no output from claude (not supported through ACP)".
+  - `/context` showed "Worked for 0.6s", then "/context returned no output from claude (not supported through ACP)".
+- `cargo test -p xai-grok-pager --lib`: 10288 passed, 19 failed. All 19 are paste_key_tests / scrollback_paste / doctor_cmd tests (pre-existing, untouched by this branch).
+
+## Steward: "tool calls don't expand in grok pi" (2026-10-13)
+
+- Root cause: `grok pi` runs `~/.grok/bin/grok-fork` (gb prefers it over the build tree). The installed copy was built 2026-10-08, before b23da2dd (external ACP execute output, Zed `_meta.terminal_output` dialect). pi-acp sends bash output only as `_meta.terminal_output` deltas, so the old pager stores no output, `ExecuteToolCallBlock::is_foldable` is false, and the card offers no `e:expand`. Thinking expanded because the patched pi-acp (now on gb's pi path) streams thinking normally.
+- Seen on screen, same prompt, pi `-ne`: old grok-fork shows no expand hint and `e` is a no-op; the steward-batch-1 build expands bash (`e`, `E`) and read cards.
+- Fix is deployment, not code: install the current build as grok-fork. Merged-and-verified pager work is not reachable from `grok` until someone runs gb-build.
+- Separate env break seen during repro (not grok-build): since 2026-10-13 06:44Z `pi --mode rpc` exits at startup because `@osolmaz/pi-workflows` and `pi-extensible-workflows@6.2.0` both register a `workflow` tool. Every `grok pi` session/new then fails with "Cannot call write after a stream was destroyed". `PI_ACP_PI_COMMAND` pointing at a `pi -ne` wrapper works around it.
+
+## Steward batch 2: steering a running turn under external agents (2026-10-13)
+
+- Before: under `grok claude` / `grok pi`, the send-now chord (Ctrl+Enter, or Ctrl+O in Apple Terminal, or Ctrl+L in VS Code) and the empty-composer Enter / queue-pane force-send all became `Action::SendPromptNow`. That fired a second, concurrent `session/prompt` carrying `_meta.sendNow`. External agents ignore that meta. claude-code-acp 0.16.2 pushes the second prompt into the same SDK input stream, and both prompt() loops race on `query.next()`. pi-acp parks it in `turnQueue`, so it just queues. The pager also painted the block right away and pushed an optimistic shared-queue echo. No `x.ai/queue/changed` broadcast ever confirms that echo, and the agent's response carries no `promptId` to retire it. The leftover echo can make `maybe_drain_queue` block with `server_queue_owns_next_turn`, which may explain the "queued prompts never drained" note above. Not reproduced.
+- Now: `dispatch_send_prompt_now` branches on `app.external_agent` to `dispatch_external_steer` (interject.rs). The text and images go to the FRONT of `pending_prompts` as a `steer` row. The cancel is a plain `do_cancel_turn` with no rewind, because the non-empty queue blocks the rewind. The toast reads "Steering: cancelled current turn". When the cancelled turn ends, the normal drain sends the steer first and alone: `maybe_drain_queue` skips combining when the front row is a steer. Other rows wait their turn. If the agent is idle, the steer drains immediately. If a cancel is already in flight, the steer waits for it. Native behavior is unchanged.
+- Host-config trap: `~/.grok/config.toml` sets `combine_queued_prompts = true`. Tests read it through the appearance cache, so `multiple_queued_prompts_drain_one_per_turn`, `cancel_with_multiple_queued_prompts_drains_only_front_prompt`, and `drain_after_editing_sends_correct_prompt` fail on this VM. All pass with `GROK_HOME=<empty dir>`.
+- Not changed: with `follow_up_behavior = steer`, a plain mid-turn Enter still takes the immediate server-send path, which is a concurrent `session/prompt`. That is unsafe for claude-acp. The default (`queue`) is fine.
+
+## Auth-error passthrough (2026-10-13)
+
+- Before: claude-code-acp 0.16.2 `RequestError.authRequired()` with no args. The SDK message is exactly `Authentication required` (code -32000). `sanitize_user_error` only strips the prefix `Authentication required: ` (with colon and space), so the bare sentence survives. `classify`'s catch-all (`WireErrorType::Other`, `error_display.rs`) headlines `Request failed` and sets the action `Try sending again.` `compose_detail` then produces the detail `Authentication required. Try sending again.` The banner is `Request failed: Authentication required. Try sending again.` A turn with no elapsed time renders `Turn failed: ` plus that banner.
+- After, external agent and code -32000: `Authentication required: Not logged in · Please run /login. Log in to claude (run `claude`, then /login), then send again.` Native Grok auth (`format_acp_error` with no agent label, message in `data`) still uses the generic banner, including `Try sending again.`
+- 0.16.2 patch `~/.dsh/patches/claude-code-acp/0002-auth-required-message.patch` passes `message.result` and the synthetic assistant text into `authRequired`. Applied to `~/.local/share/claude-acp/0.16.2`. The `newSession` throw when `.claude.json` is missing still has no CLI sentence; the pager then shows only the login hint. Headless check, `HOME` and `CLAUDE_CONFIG_DIR` on an empty temp dir: `session/prompt` returned `{"code":-32000,"message":"Authentication required: Not logged in · Please run /login"}`.
+- claude-agent-acp 0.76.0 does not already put that sentence on the JSON-RPC error. `failActiveWithSessionFailure("auth_required", RequestError.authRequired(), message.result)` keeps the text as AIR session-failure details and rejects the turn with a bare `authRequired()`. `hide-claude-auth.js` `claudeLoginRequiredError()` already passes its own message. Patch `~/.dsh/patches/claude-agent-acp/0001-auth-required-message.patch` passes `message.result` and `assistantMessageText(...)` as the `authRequired` additional message. Applied to the installed 0.76.0 dist. No updater script owns that tree.
+
+## T3-SUBAGENTS: claude-agent-acp 0.76.0 (2026-10-13)
+
+`grok claude` used to launch `@zed-industries/claude-code-acp` 0.16.2 (`~/.local/bin/claude-acp`), which has no subagent protocol. The pinned adapter is now `@agentclientprotocol/claude-agent-acp` 0.76.0 under `~/.local/share/claude-agent-acp/0.76.0`, launcher `~/.local/bin/claude-agent-acp` (`claude-agent-acp-update`, not Zed's npx tree). `0001-auth-required-message.patch` is applied. `--check` prints `installed: 0.76.0` and `patch: 0001-auth-required-message.patch applied`. npm latest on 2026-10-13 was 0.89.1; the installer stays on 0.76.0 unless given a version. `GB_CLAUDE_ACP` overrides the command. Missing launcher falls back to `claude-acp`. `CLAUDE_CODE_EXECUTABLE` still selects the user's `claude` CLI.
+
+Parity vs 0.16.2 + `0001-context-usage.patch` (source, plus `docs/claude-agent-acp-subagent-trace.jsonl` from the pinned binary):
+
+- `usage_update`: present. The live turn emitted `{sessionUpdate:"usage_update", used, size}` (size 200000, then corrected to 1000000). Same shape the pager already applies.
+- `/usage` and `/context`: 0.76.0 implements both (`usage-markdown.js`, `LOCAL_ONLY_COMMANDS` includes `/context`). Not re-fired live in this smoke; the one prompt was the Task delegation.
+- `session/list` and `loadSession`: initialize advertised `loadSession: true` and `sessionCapabilities` includes `list` / `resume` / `load`. Handlers are registered in `runAcp`.
+- `session/set_model`: fixed. 0.16.2 handles `session/set_model` and calls `query.setModel`. 0.76.0 does not register that method; model changes go through `session/set_config_option` (config id `model`), which does call `query.setModel`. When `session/new` has no explicit `models` and advertises a category-`model` select with id `model`, `/model` lists that option and sends `session/set_config_option`. Otherwise the pager still sends `session/set_model`, so pi-acp and fallback `claude-acp` 0.16.2 keep working. `config_option_update` moves the footer to the option's current value, and a failed switch still rolls the footer back. Live check against pinned 0.76.0: `docs/claude-agent-acp-set-model-trace.jsonl` (`session/new` current `fable`, `set_config_option` value `default`, response `currentValue` `default`).
+- Steering: initialize `_meta.steering.supported` is true. `_session/steering` injects into the in-flight turn (real mid-turn). A second `session/prompt` is enqueued on `turnQueue`, not raced on `query.next()` the way 0.16.2 did. Pager cancel-and-send steering was not changed.
+
+Live smoke (capability advertised as `clientCapabilities.subagents` and `_meta.jetbrains.air.capabilities: ["nativeSubagentSessions"]`, mode `bypassPermissions`): the adapter replied with `nativeSubagentSessions` and spawned one child.
+
+- Parent `session/update` `subagent_spawned` `{subagentSessionId, name, task, capabilities}`.
+- Child `session/update` `agent_message_chunk` on that child id, `_meta.claudeCode.parentToolUseId` set. This run's child did not call tools (`totalToolUseCount: 0`); the text was `pong`.
+- Parent `subagent_state_update` `{subagentSessionId, state:"completed"}`.
+- The Agent control `tool_call` is suppressed; a parent `tool_call_update` with `_meta.claudeCode.toolName:"Agent"` still arrives and is dropped by the bridge so it does not become an orphan tool row.
+
+The Rust ACP client (schema 0.11) has no `subagent_spawned` variant, so those notifications would be dropped at decode. `spawn_external_subprocess` line-bridges a Claude command and rewrites them to `_x.ai/session/update` as `subagent_spawned` / `subagent_progress` / `subagent_finished`. Child `session/update`s stay on the child session id, so the existing child view streams them. A first child message becomes `subagent_progress` (`turn_count`); a child `tool_call` increments `tool_call_count`. `session/cancel` for a known child becomes `_session/async_task/stop` `{sessionId: parent, asyncTaskId: child}` because 0.76.0's `cancel()` ignores unknown sessions and `query.stopTask` is the working stop (the child id is the SDK task id). `session/prompt` to the child is left as-is: that is the draft steer request. 0.76.0's `prompt()` only resolves root sessions and returns "Session not found".
+
+Initialize advertises `jetbrains.air.capabilities: ["nativeSubagentSessions"]` only when `--agent-cmd` is a Claude ACP command. Native Grok and pi/cursor do not get it.
+
+pi-acp (patched `pi-acp-patched/index.js`, package 0.0.33) emits `agent_message_chunk`, `tool_call`, `session_info_update`, and `available_commands_update`. It does not emit `subagent_spawned`, `subagent_state_update`, or `parentToolUseId`. No pi translation.
+
+Keys: dashboard is Ctrl+\ (Ctrl+4 when that chord is not taken by the queue). Enter on the subagent row opens the child takeover (same binding as open-block, also Ctrl+F). Ctrl+C in that takeover, with an empty composer, cancels the child. Enter on a Claude host (`external_agent_label == "claude"`, which `agent_label_from_cmd` now returns for the `node …/claude-agent-acp` command) sends `session/prompt` to the child session. Native takeover prompts still drain on the parent session.
+
+Tests: `GROK_HOME=$(mktemp -d) cargo test -p xai-grok-pager --lib claude_subagent` — 4 passed. `native_subagents_only_for_claude` passed. `agent_label_from_cmd` passed.
+
+## Idle background subagents (0.76.0, 2026-10-13)
+
+Trace: `docs/claude-agent-acp-idle-subagent-trace.jsonl`. Pinned launcher `~/.local/bin/claude-agent-acp` (`0.76.0`). Two Task subagents, `run_in_background`, each `sleep 8`.
+
+The adapter holds `session/prompt` until both children finish (`subagent_spawned` and `subagent_state_update` are inside the open prompt; the RPC returns `end_turn` at the same moment as the second `completed`). About 800ms later, with no prompt open, it still sends parent `agent_message_chunk`s: "Both subagents have finished…". The following `session/prompt` ("next") is one request and the reply is only `next`. No `user_message_chunk` on the wire.
+
+The pager appends those chunks while the pane stays `Idle`; agent-initiated output must not set `TurnRunning` or bypass queue drain. Trace evidence: one `session/prompt` for "next", no `user_message_chunk` echo on the wire (`docs/claude-agent-acp-idle-subagent-trace.jsonl`).
+
+The Zed duplicate-send bug did **not** reproduce on grok claude + claude-agent-acp 0.76.0 with this trace (one request, no echo).
+
+Test: `late_chunks_after_prompt_end_leave_pane_idle_and_next_send_is_once`.
+
+## Parent steer via `_session/steering` (2026-10-14)
+
+`dispatch_external_steer` used to cancel the running turn with `cancel_subagents` defaulting true, which stops background children. When `InitializeResponse._meta.steering.supported` is true, a running parent send-now now sends `_session/steering` and does not cancel. The flag is copied from initialize onto `AppView.session_steering_supported`. Missing, false, or non-bool stays on cancel-and-resend, so pi and other agents are unchanged. Native send-now is unchanged.
+
+Wire, matching claude-agent-acp 0.76.0 `parseSteerRequest` / `steer()`: params are `{ sessionId, prompt, _meta: { steering: { idleBehavior: "promptRequired" } } }`. `prompt` is the same content-block array as `session/prompt`. `promptRequired` means the adapter had no in-flight turn and did not start one; the host queues a normal prompt (`steer: false`) and drains only if the pane is idle. `injected` paints the user line. `startedNewTurn` is treated like `injected` (no second `session/prompt`); the request opts into `promptRequired`, so a conforming 0.76.0 should not return `startedNewTurn` for this host.
+
+Edge cases:
+
+- Idle send-now does not call `_session/steering`. It drains as a normal prompt. A steer RPC would only come back `promptRequired` and then send the same prompt.
+- A cancel already in flight still front-queues the steer and waits. Injecting into a turn that is stopping would race `session/cancel`.
+- The adapter drops the steered user echo (`steeredEchoes`, then `break` on `isReplay` in `acp-agent.js`). The host paints on `injected` and does not arm `expect_user_echo`, because that skip would swallow the next real user echo.
+- `close_open_message_for_steer` finishes the open assistant/thinking block before that paint, so the next chunk starts a new block under the user line. Not exercised against a live adapter.
+- A failed steer or an unrecognized outcome queues the blocks and does not cancel, so method-not-found does not kill children.
+- Images go out in the prompt array through the existing content-block builder. No separate image assertion.
+- Live `_session/steering` against the pinned 0.76.0 binary was not run. Unit tests cover dispatch, the wire request, outcome parsing, and the settle handler.
+- `GROK_HOME=$(mktemp -d) cargo test -p xai-grok-pager --lib -- steer`: 22 passed, 0 failed.
+- `GROK_HOME=$(mktemp -d) cargo test -p xai-grok-pager --lib`: 10371 passed, 0 failed, 4 ignored.

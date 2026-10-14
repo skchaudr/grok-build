@@ -1723,6 +1723,12 @@ pub enum Effect {
         /// See [`Effect::SendPrompt::prompt_id`].
         prompt_id: String,
     },
+    /// Inject into the running turn with `_session/steering`. Does not cancel the turn or its children.
+    SteerSession {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        blocks: Vec<acp::ContentBlock>,
+    },
     /// Toggle plan mode: fire-and-forget signal to the shell.
     TogglePlanMode { session_id: acp::SessionId },
     /// Remove a server-owned queued prompt: fire-and-forget `x.ai/queue/remove`.
@@ -2397,6 +2403,16 @@ pub enum WorkspaceWriteCompletion {
         outcome: xai_grok_dashboard_store::LayoutApplyOutcome,
     },
 }
+/// How a `_session/steering` round-trip ended, from the host's point of view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionSteerOutcome {
+    /// The follow-up was injected into the in-flight turn. The adapter drops the steered user echo.
+    Injected,
+    /// No turn was in flight. The host owns the retry as a normal `session/prompt`.
+    PromptRequired,
+    /// The request failed or the outcome was not one the host understands.
+    Failed(String),
+}
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
@@ -2655,6 +2671,14 @@ pub enum TaskResult {
     /// Cancel notification was sent (fire-and-forget).
     /// The real turn end comes via PromptResponse.
     CancelComplete,
+    /// `_session/steering` finished. `Injected` paints the user line on the still-running turn.
+    /// `PromptRequired` and `Failed` queue a normal prompt and do not cancel children.
+    SessionSteerSettled {
+        agent_id: AgentId,
+        text: String,
+        blocks: Vec<acp::ContentBlock>,
+        outcome: SessionSteerOutcome,
+    },
     /// `session/set_mode` failed. Clear optimistic `plan_mode_pending` and
     /// `pending_post_turn_commit` so abandon/leave can retry; keep and review stay mounted.
     SetSessionModeFailed {
