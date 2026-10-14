@@ -1988,3 +1988,10 @@ Edge cases:
 - Live `_session/steering` against the pinned 0.76.0 binary was not run. Unit tests cover dispatch, the wire request, outcome parsing, and the settle handler.
 - `GROK_HOME=$(mktemp -d) cargo test -p xai-grok-pager --lib -- steer`: 22 passed, 0 failed.
 - `GROK_HOME=$(mktemp -d) cargo test -p xai-grok-pager --lib`: 10371 passed, 0 failed, 4 ignored.
+
+## 2026-10-14 live checks, hard/combined (W1+W2+W3) on khoj, binary ~/.grok/bin/grok-hard-combined
+- W1 PASS (`gb pi`, DeepSeek V4.1 Flash parent): Pi `subagent` child running `sleep 247` (pid 544004); Ctrl+C → "Stop running" → pid gone within 1s, "Turn cancelled", no error row.
+  - khoj Pi `delegate` agent pins `grok-cli/grok-composer-2.5-fast:low` (provider gone) → first child failed; default Antigravity Gemini 3.6 Flash returned nothing after 3 retries. Config issue, not pager.
+- W2 PASS (`gb claude`, Opus 5.5 parent): background Haiku Agent `sleep 151` outlived parent end_turn; on completion a live "Ran 1 subagent" row + CHILD-DONE appended.
+- W3 NOT VERIFIED: herdr cannot deliver Ctrl+Enter (send-keys ctrl+enter and CSI-u both landed as plain queue); steer only queued. Sab to test by hand.
+- Tests: pager lib 10376 pass; `registered_features_are_documented` fails (backend_tools row missing in 25-enterprise.md) — also missing on main, pre-existing.
