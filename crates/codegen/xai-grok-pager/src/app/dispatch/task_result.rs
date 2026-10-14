@@ -978,6 +978,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         wire_blocks: Some(blocks),
                         ..QueuedPrompt::plain(queue_id, &text, QueueEntryKind::Prompt)
                     });
+                    // A failed steer must stay readable: the toast alone vanishes before it can be read.
+                    if matches!(outcome, SessionSteerOutcome::Failed(_)) {
+                        tracing::warn!(%toast, "session steer failed");
+                        agent.scrollback.push_block(RenderBlock::system(toast.clone()));
+                    }
                     agent.show_toast(&toast);
                 }
                 super::queue::maybe_drain_queue_and_note_peek(app, agent_id)

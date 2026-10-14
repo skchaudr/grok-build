@@ -621,7 +621,7 @@ pub fn session_steer_request(session_id: &str, prompt: &[acp::ContentBlock]) -> 
         "_meta": { "steering": { "idleBehavior": "promptRequired" } },
     });
     let raw = serde_json::value::to_raw_value(&params).expect("steer params serialize");
-    acp::ExtRequest::new("_session/steering", raw.into())
+    acp::ExtRequest::new("session/steering", raw.into())
 }
 /// Outcome string from a `_session/steering` result. Accepts the adapter's bare object and a `{ result: { outcome } }` envelope.
 pub fn steer_response_outcome(raw: &str) -> Option<String> {
@@ -948,7 +948,8 @@ mod tests {
     fn session_steer_request_injects_with_host_owned_idle_fallback() {
         let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new("steer here"))];
         let req = session_steer_request("sess-1", &prompt);
-        assert_eq!(req.method.as_ref(), "_session/steering");
+        // The ACP crate prefixes ext methods with `_`, so this goes on the wire as `_session/steering`.
+        assert_eq!(req.method.as_ref(), "session/steering");
         let params: serde_json::Value = serde_json::from_str(req.params.get()).unwrap();
         assert_eq!(params["sessionId"], "sess-1");
         assert_eq!(params["prompt"][0]["type"], "text");
