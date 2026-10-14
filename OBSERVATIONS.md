@@ -640,3 +640,21 @@ The pager appends those chunks while the pane stays `Idle`; agent-initiated outp
 The Zed duplicate-send bug did **not** reproduce on grok claude + claude-agent-acp 0.76.0 with this trace (one request, no echo).
 
 Test: `late_chunks_after_prompt_end_leave_pane_idle_and_next_send_is_once`.
+
+## Parent steer via `_session/steering` (2026-10-14)
+
+`dispatch_external_steer` used to cancel the running turn with `cancel_subagents` defaulting true, which stops background children. When `InitializeResponse._meta.steering.supported` is true, a running parent send-now now sends `_session/steering` and does not cancel. The flag is copied from initialize onto `AppView.session_steering_supported`. Missing, false, or non-bool stays on cancel-and-resend, so pi and other agents are unchanged. Native send-now is unchanged.
+
+Wire, matching claude-agent-acp 0.76.0 `parseSteerRequest` / `steer()`: params are `{ sessionId, prompt, _meta: { steering: { idleBehavior: "promptRequired" } } }`. `prompt` is the same content-block array as `session/prompt`. `promptRequired` means the adapter had no in-flight turn and did not start one; the host queues a normal prompt (`steer: false`) and drains only if the pane is idle. `injected` paints the user line. `startedNewTurn` is treated like `injected` (no second `session/prompt`); the request opts into `promptRequired`, so a conforming 0.76.0 should not return `startedNewTurn` for this host.
+
+Edge cases:
+
+- Idle send-now does not call `_session/steering`. It drains as a normal prompt. A steer RPC would only come back `promptRequired` and then send the same prompt.
+- A cancel already in flight still front-queues the steer and waits. Injecting into a turn that is stopping would race `session/cancel`.
+- The adapter drops the steered user echo (`steeredEchoes`, then `break` on `isReplay` in `acp-agent.js`). The host paints on `injected` and does not arm `expect_user_echo`, because that skip would swallow the next real user echo.
+- `close_open_message_for_steer` finishes the open assistant/thinking block before that paint, so the next chunk starts a new block under the user line. Not exercised against a live adapter.
+- A failed steer or an unrecognized outcome queues the blocks and does not cancel, so method-not-found does not kill children.
+- Images go out in the prompt array through the existing content-block builder. No separate image assertion.
+- Live `_session/steering` against the pinned 0.76.0 binary was not run. Unit tests cover dispatch, the wire request, outcome parsing, and the settle handler.
+- `GROK_HOME=$(mktemp -d) cargo test -p xai-grok-pager --lib -- steer`: 22 passed, 0 failed.
+- `GROK_HOME=$(mktemp -d) cargo test -p xai-grok-pager --lib`: 10371 passed, 0 failed, 4 ignored.

@@ -116,6 +116,8 @@ pub struct AcpConnection {
     pub leader_status_rx: Option<tokio::sync::watch::Receiver<leader_bridge::ConnectionStatus>>,
     /// Whether cancel-rewind is enabled (resolved by shell from config layers).
     pub cancel_rewind_enabled: bool,
+    /// `InitializeResponse._meta.steering.supported`. Parent send-now uses `_session/steering` only when this is true.
+    pub session_steering_supported: bool,
     /// Whether the session-recap feature is rolled out for this connection. The client gates its automatic away-recap
     /// poll and the manual `/recap` on this so a disabled feature produces zero `x.ai/recap` traffic.
     pub session_recap_available: bool,
@@ -287,6 +289,7 @@ pub(in crate::acp) async fn initialize_connection(
         auth_meta,
         leader_status_rx,
         cancel_rewind_enabled: agent.cancel_rewind_enabled,
+        session_steering_supported: agent.session_steering_supported,
         session_recap_available: agent.session_recap_available,
         feedback_trace_offer: agent.feedback_trace_offer,
         auth_manager,
@@ -524,6 +527,7 @@ pub(crate) struct InitializedAgent {
     pub(crate) default_auth_method_id: Option<acp::AuthMethodId>,
     pub(crate) available_commands: Vec<acp::AvailableCommand>,
     pub(crate) cancel_rewind_enabled: bool,
+    pub(crate) session_steering_supported: bool,
     pub(crate) session_recap_available: bool,
     pub(crate) feedback_trace_offer: bool,
 }
@@ -566,6 +570,7 @@ async fn initialize(tx: &AcpAgentTx, flags: &ConnectFlags) -> Result<Initialized
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     let session_recap_available = parse_session_recap_available(resp.meta.as_ref());
+    let session_steering_supported = parse_session_steering_supported(resp.meta.as_ref());
     let feedback_trace_offer = parse_feedback_trace_offer(resp.meta.as_ref());
     let default_auth_method_id = parse_default_auth_method_id(resp.meta.as_ref());
     Ok(InitializedAgent {
@@ -575,6 +580,7 @@ async fn initialize(tx: &AcpAgentTx, flags: &ConnectFlags) -> Result<Initialized
         default_auth_method_id,
         available_commands,
         cancel_rewind_enabled,
+        session_steering_supported,
         session_recap_available,
         feedback_trace_offer,
     })
@@ -599,6 +605,36 @@ pub fn parse_feedback_trace_offer(meta: Option<&acp::Meta>) -> bool {
     meta.and_then(|m| m.get("feedbackTraceOffer"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
+}
+/// `_meta.steering.supported` from `InitializeResponse`. Missing or non-bool is off, so other agents stay on cancel-and-resend.
+pub fn parse_session_steering_supported(meta: Option<&acp::Meta>) -> bool {
+    meta.and_then(|m| m.get("steering"))
+        .and_then(|v| v.get("supported"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+/// Wire request for `_session/steering`. `idleBehavior: promptRequired` keeps an idle session from starting a detached turn the host does not own.
+pub fn session_steer_request(session_id: &str, prompt: &[acp::ContentBlock]) -> acp::ExtRequest {
+    let params = serde_json::json!({
+        "sessionId": session_id,
+        "prompt": prompt,
+        "_meta": { "steering": { "idleBehavior": "promptRequired" } },
+    });
+    let raw = serde_json::value::to_raw_value(&params).expect("steer params serialize");
+    acp::ExtRequest::new("_session/steering", raw.into())
+}
+/// Outcome string from a `_session/steering` result. Accepts the adapter's bare object and a `{ result: { outcome } }` envelope.
+pub fn steer_response_outcome(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    value
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            value
+                .pointer("/result/outcome")
+                .and_then(|v| v.as_str())
+        })
+        .map(str::to_owned)
 }
 /// Determine whether interactive login is needed based on the advertised auth methods. Otherwise, authenticate
 /// eagerly.
@@ -893,6 +929,47 @@ mod tests {
     fn parse_session_recap_available_non_bool_defaults_off() {
         let meta = serde_json::json!({ "sessionRecap": "yes" });
         assert!(!parse_session_recap_available(meta.as_object()));
+    }
+    #[test]
+    fn parse_session_steering_supported_reads_initialize_meta() {
+        let meta = serde_json::json!({ "steering": { "supported": true } });
+        assert!(parse_session_steering_supported(meta.as_object()));
+        let off = serde_json::json!({ "steering": { "supported": false } });
+        assert!(!parse_session_steering_supported(off.as_object()));
+        let missing = serde_json::json!({ "grokShell": true });
+        assert!(!parse_session_steering_supported(missing.as_object()));
+        assert!(!parse_session_steering_supported(None));
+        let non_bool = serde_json::json!({ "steering": { "supported": "yes" } });
+        assert!(!parse_session_steering_supported(non_bool.as_object()));
+        let no_flag = serde_json::json!({ "steering": {} });
+        assert!(!parse_session_steering_supported(no_flag.as_object()));
+    }
+    #[test]
+    fn session_steer_request_injects_with_host_owned_idle_fallback() {
+        let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new("steer here"))];
+        let req = session_steer_request("sess-1", &prompt);
+        assert_eq!(req.method.as_ref(), "_session/steering");
+        let params: serde_json::Value = serde_json::from_str(req.params.get()).unwrap();
+        assert_eq!(params["sessionId"], "sess-1");
+        assert_eq!(params["prompt"][0]["type"], "text");
+        assert_eq!(params["prompt"][0]["text"], "steer here");
+        assert_eq!(
+            params["_meta"]["steering"]["idleBehavior"],
+            "promptRequired"
+        );
+    }
+    #[test]
+    fn steer_response_outcome_reads_bare_and_enveloped_results() {
+        assert_eq!(
+            steer_response_outcome(r#"{"outcome":"injected"}"#).as_deref(),
+            Some("injected")
+        );
+        assert_eq!(
+            steer_response_outcome(r#"{"result":{"outcome":"promptRequired","reason":"noRunningTurn"}}"#)
+                .as_deref(),
+            Some("promptRequired")
+        );
+        assert_eq!(steer_response_outcome("not-json"), None);
     }
     fn make_auth_method(id: &str, name: &str, meta: Option<serde_json::Value>) -> acp::AuthMethod {
         let mut agent = acp::AuthMethodAgent::new(acp::AuthMethodId::new(id), name.to_string());
