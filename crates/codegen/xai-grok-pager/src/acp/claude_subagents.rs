@@ -8,10 +8,14 @@
 //! so the existing child-view path streams them.
 //!
 //! `session/cancel` aimed at a child is a no-op in 0.76.0 (`cancel` only
-//! knows root sessions). The adapter's working stop is `_session/async_task/stop`
+//! knows root sessions). When the adapter's initialize result advertises the
+//! AIR `asyncTasks` capability, the working stop is `_session/async_task/stop`
 //! with the parent session and `asyncTaskId` equal to the child session id
-//! (that id is the SDK task id). `session/prompt` to the child is the draft
-//! steer request; 0.76.0's `prompt()` still rejects unknown session ids.
+//! (that id is the SDK task id). Agents that advertise subagents without
+//! `asyncTasks` (pi-acp) keep the raw `session/cancel`. An error reply to the
+//! stop is not turned into a cancelled success or `subagent_finished`.
+//! `session/prompt` to the child is the draft steer request; 0.76.0's
+//! `prompt()` still rejects unknown session ids.
 
 use std::collections::HashMap;
 use std::io;
@@ -53,6 +57,8 @@ pub(crate) struct ClaudeSubagentBridge {
     children: HashMap<String, Child>,
     stop_seq: u64,
     pending_stop_replies: HashMap<String, PendingStopReply>,
+    /// Set when initialize advertises AIR `asyncTasks` (`_session/async_task/stop`).
+    async_tasks: bool,
 }
 
 impl ClaudeSubagentBridge {
@@ -70,11 +76,12 @@ impl ClaudeSubagentBridge {
         let Ok(mut msg) = serde_json::from_str::<Value>(line) else {
             return vec![line.to_owned()];
         };
+        self.note_async_tasks(&msg);
         if msg.get("method").is_none()
             && let Some(id) = json_rpc_id(msg.get("id"))
             && let Some(pending) = self.pending_stop_replies.remove(&id)
         {
-            return self.finish_stop_reply(pending);
+            return self.finish_stop_reply(pending, &msg);
         }
         if msg.get("method").and_then(Value::as_str) != Some("session/update") {
             return vec![line.to_owned()];
@@ -129,7 +136,8 @@ impl ClaudeSubagentBridge {
             .pointer("/params/sessionId")
             .and_then(Value::as_str)
             .unwrap_or("");
-        if method == "session/cancel"
+        if self.async_tasks
+            && method == "session/cancel"
             && let Some(parent_session_id) = self
                 .children
                 .get(session_id)
@@ -141,7 +149,7 @@ impl ClaudeSubagentBridge {
                 PendingStopReply::SessionCancel,
             );
         }
-        if method == "_x.ai/subagent/cancel" {
+        if self.async_tasks && method == "_x.ai/subagent/cancel" {
             let subagent_id = msg
                 .pointer("/params/subagentId")
                 .and_then(Value::as_str)
@@ -187,7 +195,25 @@ impl ClaudeSubagentBridge {
         .to_string()
     }
 
-    fn finish_stop_reply(&mut self, pending: PendingStopReply) -> Vec<String> {
+    fn note_async_tasks(&mut self, msg: &Value) {
+        if msg.get("method").is_some() {
+            return;
+        }
+        let Some(caps) = msg
+            .pointer("/result/_meta/jetbrains/air/capabilities")
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        if caps.iter().any(|cap| cap.as_str() == Some("asyncTasks")) {
+            self.async_tasks = true;
+        }
+    }
+
+    fn finish_stop_reply(&mut self, pending: PendingStopReply, msg: &Value) -> Vec<String> {
+        if let Some(error) = jsonrpc_error(msg) {
+            return self.forward_stop_error(pending, error);
+        }
         match pending {
             PendingStopReply::SessionCancel => Vec::new(),
             PendingStopReply::SubagentCancel {
@@ -226,6 +252,30 @@ impl ClaudeSubagentBridge {
                     "cancelled",
                 ));
                 lines
+            }
+        }
+    }
+
+    /// A failed stop leaves the child in the map. Dashboard cancels are
+    /// answered with the agent's error so the pager keeps the row running.
+    /// `session/cancel` is a notification and has no client id to answer.
+    fn forward_stop_error(&self, pending: PendingStopReply, error: &Value) -> Vec<String> {
+        match pending {
+            PendingStopReply::SessionCancel => Vec::new(),
+            PendingStopReply::SubagentCancel {
+                client_request_id, ..
+            } => {
+                if client_request_id.is_empty() {
+                    return Vec::new();
+                }
+                vec![
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": client_request_id,
+                        "error": error,
+                    })
+                    .to_string(),
+                ]
             }
         }
     }
@@ -388,6 +438,13 @@ fn finish_status(state: &str) -> &'static str {
         "failed" => "failed",
         "cancelled" => "cancelled",
         _ => "cancelled",
+    }
+}
+
+fn jsonrpc_error(msg: &Value) -> Option<&Value> {
+    match msg.get("error") {
+        Some(error) if !error.is_null() => Some(error),
+        _ => None,
     }
 }
 
@@ -774,9 +831,123 @@ mod tests {
         );
     }
 
+    fn initialize_advertising_async_tasks() -> String {
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"subagents":{}}},"_meta":{"jetbrains":{"air":{"version":1,"capabilities":["nativeSubagentSessions","asyncTasks"]}}}}}"#.to_owned()
+    }
+
+    fn initialize_without_async_tasks() -> String {
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"subagents":{}}}}}"#.to_owned()
+    }
+
+    #[test]
+    fn child_cancel_without_async_tasks_passes_session_cancel_through() {
+        let mut bridge = ClaudeSubagentBridge::new();
+        let init = bridge.translate_inbound(&initialize_without_async_tasks());
+        assert_eq!(init.len(), 1, "initialize result still reaches the client");
+        bridge.translate_inbound(&spawned_line());
+
+        let cancel = format!(
+            r#"{{"jsonrpc":"2.0","method":"session/cancel","params":{{"sessionId":"{CHILD}"}}}}"#
+        );
+        let kept: Value = serde_json::from_str(&bridge.translate_outbound(&cancel)).unwrap();
+        assert_eq!(kept["method"], "session/cancel");
+        assert_eq!(kept["params"]["sessionId"], CHILD);
+        assert!(kept.pointer("/params/asyncTaskId").is_none());
+    }
+
+    #[test]
+    fn dashboard_cancel_without_async_tasks_passes_subagent_cancel_through() {
+        let mut bridge = ClaudeSubagentBridge::new();
+        bridge.translate_inbound(&initialize_without_async_tasks());
+        bridge.translate_inbound(&spawned_line());
+
+        let cancel = format!(
+            r#"{{"jsonrpc":"2.0","id":42,"method":"_x.ai/subagent/cancel","params":{{"sessionId":"{PARENT}","subagentId":"{CHILD}"}}}}"#
+        );
+        let kept: Value = serde_json::from_str(&bridge.translate_outbound(&cancel)).unwrap();
+        assert_eq!(kept["method"], "_x.ai/subagent/cancel");
+        assert_eq!(kept["id"], 42);
+        assert_eq!(kept["params"]["subagentId"], CHILD);
+    }
+
+    #[test]
+    fn async_task_stop_error_does_not_synthesize_cancelled_success() {
+        let mut bridge = ClaudeSubagentBridge::new();
+        let init = bridge.translate_inbound(&initialize_advertising_async_tasks());
+        assert_eq!(init.len(), 1, "initialize result still reaches the client");
+        bridge.translate_inbound(&spawned_line());
+
+        let cancel = format!(
+            r#"{{"jsonrpc":"2.0","id":42,"method":"_x.ai/subagent/cancel","params":{{"sessionId":"{PARENT}","subagentId":"{CHILD}"}}}}"#
+        );
+        let stopped: Value = serde_json::from_str(&bridge.translate_outbound(&cancel)).unwrap();
+        assert_eq!(stopped["method"], "_session/async_task/stop");
+        let stop_id = stopped["id"].as_str().expect("stop id").to_owned();
+
+        let lines = bridge.translate_inbound(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": stop_id,
+                "error": {"code": -32601, "message": "Method not found"}
+            })
+            .to_string(),
+        );
+        let blob = lines.join("\n");
+        assert!(
+            !blob.contains("subagent_finished"),
+            "error stop must not finish the child: {blob}"
+        );
+        assert!(
+            !blob.contains("\"cancelled\":true"),
+            "error stop must not report cancelled: {blob}"
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "client should see the stop error, got {lines:?}"
+        );
+        let err: Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(err["id"], "42");
+        assert_eq!(err["error"]["code"], -32601);
+        assert!(err.get("result").is_none());
+
+        let finished = bridge.translate_inbound(&finished_line());
+        assert_eq!(finished.len(), 1, "child stays live after a failed stop");
+        assert_eq!(update_of(&finished[0])["status"], "completed");
+    }
+
+    #[test]
+    fn session_cancel_stop_error_does_not_finish_child() {
+        let mut bridge = ClaudeSubagentBridge::new();
+        bridge.translate_inbound(&initialize_advertising_async_tasks());
+        bridge.translate_inbound(&spawned_line());
+        let cancel = format!(
+            r#"{{"jsonrpc":"2.0","method":"session/cancel","params":{{"sessionId":"{CHILD}"}}}}"#
+        );
+        let stopped: Value = serde_json::from_str(&bridge.translate_outbound(&cancel)).unwrap();
+        assert_eq!(stopped["method"], "_session/async_task/stop");
+        let stop_id = stopped["id"].as_str().expect("stop id").to_owned();
+        let lines = bridge.translate_inbound(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": stop_id,
+                "error": {"code": -32601, "message": "Method not found"}
+            })
+            .to_string(),
+        );
+        assert!(
+            lines.is_empty(),
+            "session/cancel has no client id to answer: {lines:?}"
+        );
+        let finished = bridge.translate_inbound(&finished_line());
+        assert_eq!(finished.len(), 1, "child stays live after a failed stop");
+        assert_eq!(update_of(&finished[0])["status"], "completed");
+    }
+
     #[test]
     fn child_cancel_becomes_async_task_stop_and_prompt_stays() {
         let mut bridge = ClaudeSubagentBridge::new();
+        bridge.translate_inbound(&initialize_advertising_async_tasks());
         bridge.translate_inbound(&spawned_line());
         let prompt = format!(
             r#"{{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{{"sessionId":"{CHILD}","prompt":[{{"type":"text","text":"also say ping"}}]}}}}"#
@@ -797,7 +968,9 @@ mod tests {
         let stop_id = stopped["id"].as_str().expect("stop id").to_owned();
         assert!(
             bridge
-                .translate_inbound(&json!({"jsonrpc":"2.0","id":stop_id,"result":{"stopped":true}}).to_string())
+                .translate_inbound(
+                    &json!({"jsonrpc":"2.0","id":stop_id,"result":{"stopped":true}}).to_string()
+                )
                 .is_empty(),
             "adapter stop responses must not reach the client"
         );
@@ -813,6 +986,7 @@ mod tests {
     #[test]
     fn dashboard_subagent_cancel_becomes_stop_and_finishes() {
         let mut bridge = ClaudeSubagentBridge::new();
+        bridge.translate_inbound(&initialize_advertising_async_tasks());
         bridge.translate_inbound(&spawned_line());
         let cancel = format!(
             r#"{{"jsonrpc":"2.0","id":42,"method":"_x.ai/subagent/cancel","params":{{"sessionId":"{PARENT}","subagentId":"{CHILD}"}}}}"#

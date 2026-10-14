@@ -116,7 +116,7 @@ Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 00s
 ```
 
 Exit code 0. No pager warnings on that check.
-||||||| e6568d65
+
 ## 2026-10-09 external roster publish
 
 `bin/protoc` needs `dotslash`, which this VM does not have. Tests and the release build used `PROTOC=$HOME/.local/protoc-29.3/bin/protoc` and that directory on `PATH`. `CARGO_TARGET_DIR=$HOME/repos/grok-build/target`.
@@ -197,7 +197,7 @@ Before: copied `$HOME/repos/grok-build/target/release/xai-grok-pager` (mtime 202
 `Turn cancelled.` Toast: `Prompt not accepted, turn stopped`.
 
 After: `cargo build --release -p xai-grok-pager-bin` finished in 2m 30s. Binary `$HOME/repos/grok-build/target/release/xai-grok-pager`, mtime 2026-10-09 04:33, commit `a73fac48`. cwd `/tmp/epa-after`, tmux `epa-after`. At about 22s the pane still showed `⠴ Run sleep 30 22s`. The turn ended with `Done.` and `Worked for 35s` (39.3s after send). The timeout notice was not on the pane.
-||||||| 19a5f94e
+
 ## 2026-10-09 external context indicator (before code)
 
 The token readout the user means is the top status-bar row (`AgentViewLayout` lays `status_bar` down first). `draw` pushes `context_bar_line_for_session` into that row. Default text is `used / total` (`fmt_tokens`), which is the `54K / 500K` shape. Hover swaps in a bar and a percentage. Gateway/chat sessions suppress it.
@@ -640,3 +640,27 @@ The pager appends those chunks while the pane stays `Idle`; agent-initiated outp
 The Zed duplicate-send bug did **not** reproduce on grok claude + claude-agent-acp 0.76.0 with this trace (one request, no echo).
 
 Test: `late_chunks_after_prompt_end_leave_pane_idle_and_next_send_is_once`.
+
+## Child cancel is agent-aware (2026-10-14)
+
+`_session/async_task/stop` is now gated on AIR `asyncTasks` in the initialize result, at `result._meta.jetbrains.air.capabilities` (the 0.76.0 traces under `docs/claude-agent-acp-*-trace.jsonl`). The string must match exactly. A missing array leaves the rewrite off. Once the string is seen, the flag stays on for the connection; a later result that omits the array does not clear it.
+
+`spawn_stdio_bridge` turns the subagent gate on for the initialize line that advertises `sessionCapabilities.subagents`, then feeds that same line to `translate_inbound`, so the bridge can read `asyncTasks` and still forward the result. A child `session/cancel` or `_x.ai/subagent/cancel` that arrives before that line is passed through raw, because the flag is still false. For Claude that early cancel is a no-op (`cancel()` ignores unknown sessions). Not exercised live.
+
+pi-shaped initialize (subagents, no `asyncTasks`) keeps both cancels raw, including the child session id. Claude-shaped initialize still rewrites a known child to `{sessionId: parent, asyncTaskId: child}`. Parent `session/cancel` is never rewritten.
+
+A stop reply with a top-level `error` (null does not count) does not synthesize `cancelled: true` or `subagent_finished`, and the child stays in the map so a later real `subagent_state_update` can finish it. Dashboard `_x.ai/subagent/cancel` remaps that error onto the original client id. `session/cancel` is a notification, so its stop error has no client id to answer and the bridge emits nothing. The pager's local Ctrl+C state is outside this bridge. Numeric client ids are still stringified (`42` → `"42"`), same as the success synthesis. `Effect::KillSubagent` maps an `acp_send` error to `SubagentKillOutcome::RpcFailed`, which leaves the row running; that the ACP client accepts this JSON-RPC error line is UNVERIFIED beyond the bridge unit test.
+
+Stale conflict markers `||||||| e6568d65` and `||||||| 19a5f94e` in this file had no paired `<<<<<<<` / `=======` / `>>>>>>>` hunks. Only those two lines were removed.
+
+Tests (worktree `target/`, `PROTOC=$HOME/.local/protoc-29.3/bin/protoc`, 87G free):
+
+```
+cargo test -p xai-grok-pager --lib -- acp::claude_subagents:: claude_subagent_trace_streams
+```
+
+```
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 10359 filtered out; finished in 0.18s
+```
+
+Before the gate, the three new acceptance tests failed (2 passed, 3 failed): both cancels were still rewritten to `_session/async_task/stop`, and the error reply still became a cancelled finish. Live `grok pi` Ctrl+C and dashboard kill were not run.
