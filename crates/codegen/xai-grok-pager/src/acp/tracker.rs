@@ -1023,6 +1023,24 @@ impl AcpUpdateTracker {
                 true
             }
             acp::SessionUpdate::Plan(_) | acp::SessionUpdate::CurrentModeUpdate(_) => false,
+            acp::SessionUpdate::SessionInfoUpdate(info) => {
+                // Pi stamps `_meta.pi.runState` (for example `agent_settled`) on
+                // session_info_update. The title fields stay untouched; the state
+                // string is the fact a capture has to show.
+                let state = info
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("pi"))
+                    .and_then(|pi| pi.get("runState"))
+                    .and_then(|value| value.as_str())
+                    .filter(|state| !state.is_empty());
+                if let Some(state) = state {
+                    scrollback.push_block(RenderBlock::system(state.to_string()));
+                    true
+                } else {
+                    false
+                }
+            }
             _ => false,
         };
         if is_agent_output && changed && !meta.is_replay {
@@ -1783,8 +1801,24 @@ fn merge_tool_call_update(base: acp::ToolCall, update: acp::ToolCallUpdate) -> a
     .raw_input(update.fields.raw_input.or(base.raw_input))
     .raw_output(update.fields.raw_output.or(base.raw_output))
     .locations(update.fields.locations.unwrap_or(base.locations))
-    .meta(base.meta)
+    // Later updates often carry a new `_meta` object (terminal_exit) that omits
+    // keys from the previous one (terminal_output, parentToolCallId). Keep both.
+    .meta(merge_tool_meta(base.meta, update.meta))
 }
+
+fn merge_tool_meta(base: Option<acp::Meta>, update: Option<acp::Meta>) -> Option<acp::Meta> {
+    match (base, update) {
+        (None, update) => update,
+        (base, None) => base,
+        (Some(mut base), Some(update)) => {
+            for (key, value) in update {
+                base.insert(key, value);
+            }
+            Some(base)
+        }
+    }
+}
+
 /// Peeled display form when a redundant leading `cd <cwd>` was stripped, else None.
 fn peeled_if_changed(command: &str, session_cwd: Option<&Path>) -> Option<String> {
     let cwd = session_cwd?;
@@ -1835,11 +1869,80 @@ fn execute_command_from_tool_call(tc: &acp::ToolCall) -> String {
     }
     String::new()
 }
+/// `_meta.pi.parentToolCallId` from a codemode nested tool call.
+fn parent_tool_call_id(tc: &acp::ToolCall) -> Option<&str> {
+    tc.meta
+        .as_ref()?
+        .get("pi")?
+        .get("parentToolCallId")?
+        .as_str()
+        .filter(|id| !id.is_empty())
+}
+
+fn tool_status_label(status: acp::ToolCallStatus) -> &'static str {
+    match status {
+        acp::ToolCallStatus::Pending => "pending",
+        acp::ToolCallStatus::InProgress => "in_progress",
+        acp::ToolCallStatus::Completed => "completed",
+        acp::ToolCallStatus::Failed => "failed",
+        _ => "unknown",
+    }
+}
+
+/// Pi's renderer prints `Model calls: $x` from codemode `details.calls`.
+/// The adapter puts that line in the parent tool's content text.
+fn model_calls_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("Model calls:"))
+        .map(str::to_owned)
+}
+
+/// Indent a nested tool under its parent. The row keeps its own block; the header
+/// carries a nest marker, the parent id, and the status so a pane capture can
+/// show the link without a second store.
+fn apply_parent_nest(block: RenderBlock, tc: &acp::ToolCall) -> RenderBlock {
+    let Some(parent) = parent_tool_call_id(tc) else {
+        return block;
+    };
+    let status = tool_status_label(tc.status);
+    let id = tc.tool_call_id.0.as_ref();
+    match block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(mut block)) => {
+            let cmd = block
+                .header_display
+                .clone()
+                .unwrap_or_else(|| block.command.clone());
+            let stdout = terminal_output_data(tc.meta.as_ref()).unwrap_or_default();
+            let stdout = if stdout.is_empty() {
+                String::new()
+            } else {
+                format!(" {stdout}")
+            };
+            block.header_display = Some(format!("↳ {parent} {status} {id} {cmd}{stdout}"));
+            RenderBlock::ToolCall(ToolCallBlock::Execute(block))
+        }
+        RenderBlock::ToolCall(ToolCallBlock::Other(mut block)) => {
+            block.name = format!("↳ {parent} {status} {id} {}", block.name);
+            RenderBlock::ToolCall(ToolCallBlock::Other(block))
+        }
+        other => other,
+    }
+}
+
 /// Convert an ACP ToolCall to a RenderBlock.
 /// Parses `tool_call.kind` to create the appropriate block type, extracting fields from `raw_input` JSON when available.
 /// `session_cwd` sets execute `header_display` when a leading `cd <cwd>` is redundant.
 /// `labels` names the target of a `send_subagent_message` row.
 fn tool_call_to_block(
+    tc: &acp::ToolCall,
+    session_cwd: Option<&Path>,
+    labels: &SubagentLabelRegistry,
+) -> RenderBlock {
+    apply_parent_nest(tool_call_to_block_inner(tc, session_cwd, labels), tc)
+}
+
+fn tool_call_to_block_inner(
     tc: &acp::ToolCall,
     session_cwd: Option<&Path>,
     labels: &SubagentLabelRegistry,
@@ -2299,6 +2402,9 @@ fn tool_call_to_block(
                 && let Some(extracted) = extract_use_tool_output(&tc.raw_output)
             {
                 ct = extracted;
+            }
+            if let Some(line) = model_calls_line(&ct) {
+                block.summary = line;
             }
             if !success {
                 block.error = Some(if ct.is_empty() { "Failed".into() } else { ct });

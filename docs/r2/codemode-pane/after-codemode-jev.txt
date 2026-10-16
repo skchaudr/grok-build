@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-after-codemode-jev-334555                                                                [Dashboard]
+
+
+     ❯ replay after-codemode-jev                                                                             1:22 PM
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ codemode  Model calls: $0.009                                                                                  │
+ │┃                                                                                                                   │
+ │┃  codemode cm-2 completed                                                                                          │
+ │┃  const r = await models.getModelOfType("classifier","typesafe","jev-latest").classify(["red","blue","green"])     │
+ │┃  return r                                                                                                         │
+ │┃                                                                                                                   │
+ │┃  jev-latest completed $0.003                                                                                      │
+ │┃  jev-latest completed $0.003                                                                                      │
+ │┃  jev-latest completed $0.003                                                                                      │
+ │┃                                                                                                                   │
+ │┃  Script completed                                                                                                 │
+ │┃  Wall time 80ms                                                                                                   │
+ │┃  Output:                                                                                                          │
+ │┃  warm                                                                                                             │
+ │┃  cool                                                                                                             │
+ │┃  cool                                                                                                             │
+ │┃  Model calls: $0.009                                                                                              │
+ └                                                                                                                    ┘
+     Worked for 0.0s
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

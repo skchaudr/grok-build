@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-after-codemode-nested-bash-333730                                                        [Dashboard]
+
+
+     ❯ replay after-codemode-nested-bash                                                                     1:22 PM
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ [1mcodemode[0;2m  Model calls: $0.00[0m                                                                                   │
+ │┃                                                                                                                   │
+ │┃  [2mcodemode cm-1 completed[0m                                                                                          │
+ │┃  [2mconst a = await tools.bash("echo one")[0m                                                                           │
+ │┃  [2mconst b = await tools.bash("echo two")[0m                                                                           │
+ │┃  [2mreturn a + b[0m                                                                                                     │
+ │┃                                                                                                                   │
+ │┃  [2mbash completed[0m                                                                                                   │
+ │┃  [2mbash completed[0m                                                                                                   │
+ │┃                                                                                                                   │
+ │┃  [2mScript completed[0m                                                                                                 │
+ │┃  [2mWall time 40ms[0m                                                                                                   │
+ │┃  [2mOutput:[0m                                                                                                          │
+ │┃  [2mone[0m                                                                                                              │
+ │┃  [2mtwo[0m                                                                                                              │
+ │┃  [2mModel calls: $0.00[0m                                                                                               │
+ └                                                                                                                    ┘
+     ◆ [1;2mRun [0;2m↳ cm-1 completed bash-1 echo one[0m
+     ◆ [1;2mRun [0;2m↳ cm-1 completed bash-2 echo two[0m
+
+     [2mWorked for 0.0s[0m
+
+
+
+
+   Run [1m/doctor[0m for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │[2m ❯ Build anything                                                                                                 [0m│
+  ╰─────────────────────────────────────────────────────────────────────────────────────── [2munknown[0m · [2malways-approve[0m ─╯
+
+  [1m←[0;2m:collapse  │  [0;1mCtrl+e[0;2m:collapse thinking  │  [0;1mCtrl+x[0;2m:shortcuts[0m
+

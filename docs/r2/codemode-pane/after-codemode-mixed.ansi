@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-after-codemode-mixed-334923                                                              [Dashboard]
+
+                                                                                                                       █
+     ❯ replay after-codemode-mixed                                                                           1:22 PM   █
+                                                                                                                       █
+ ┌                                                                                                                    ┐█
+ │┃  ◆ [1mcodemode[0;2m  Model calls: $0.002[0m                                                                                  │█
+ │┃                                                                                                                   │█
+ │┃  [2mcodemode cm-3 completed[0m                                                                                          │█
+ │┃  [2mconst n = await tools.bash("echo 7")[0m                                                                             │█
+ │┃  [2mawait store.set("n", n)[0m                                                                                          │█
+ │┃  [2mconst back = await store.get("n")[0m                                                                                │█
+ │┃  [2mconst c = await models.getModelOfType("classifier","typesafe","jev-latest").classify([back])[0m                     │█
+ │┃  [2mreturn c[0m                                                                                                         │█
+ │┃                                                                                                                   │█
+ │┃  [2mbash completed[0m                                                                                                   │█
+ │┃  [2mstore.set completed[0m                                                                                              │█
+ │┃  [2mstore.get completed[0m                                                                                              │█
+ │┃  [2mjev-latest completed $0.002[0m                                                                                      │█
+ │┃                                                                                                                   │█
+ │┃  [2mScript completed[0m                                                                                                 │█
+ │┃  [2mWall time 90ms[0m                                                                                                   │█
+ │┃  [2mOutput:[0m                                                                                                          │█
+ │┃  [2m7[0m                                                                                                                │█
+ │┃  [2mseven[0m                                                                                                            │█
+ │┃  [2mModel calls: $0.002[0m                                                                                              │█
+ └                                                                                                                    ┘█
+     ◆ [1;2mRun [0;2m↳ cm-3 completed bash-3 echo 7[0m                                                                              █
+     ◆ [1;2m↳ cm-3 completed store-1 store.set[0m
+     ◆ [1;2m↳ cm-3 completed store-2 store.get[0m
+                                                            ▼
+   Run [1m/doctor[0m for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │[2m ❯ Build anything                                                                                                 [0m│
+  ╰─────────────────────────────────────────────────────────────────────────────────────── [2munknown[0m · [2malways-approve[0m ─╯
+
+  [1m←[0;2m:collapse  │  [0;1mCtrl+e[0;2m:collapse thinking  │  [0;1mCtrl+x[0;2m:shortcuts[0m
+

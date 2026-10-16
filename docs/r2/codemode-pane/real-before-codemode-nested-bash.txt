@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-real-before-codemode-nested-bash-357504                                                  [Dashboard]
+
+
+     ❯ replay real-before-codemode-nested-bash                                                               1:32 PM
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ codemode                                                                                                       │
+ │┃                                                                                                                   │
+ │┃  Script completed                                                                                                 │
+ │┃  Wall time 0.5 seconds                                                                                            │
+ │┃  Output:                                                                                                          │
+ │┃  R2NESTED1                                                                                                        │
+ │┃  R2NESTED2                                                                                                        │
+ └                                                                                                                    ┘
+     ◆ Run printf '%s%s%s' R2 NES TED1
+     ◆ Run printf '%s%s%s' R2 NES TED2
+
+     R2NESTED1 R2NESTED2                                                                                     1:32 PM
+
+     Worked for 0.0s
+
+
+
+
+
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰────────────────────────────────────────────────────── openrouter/Google: Gemini 3.1 Flash Lite · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

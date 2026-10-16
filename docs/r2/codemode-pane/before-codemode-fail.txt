@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-before-codemode-fail-332567                                                              [Dashboard]
+
+
+     ❯ replay before-codemode-fail                                                                           1:21 PM
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ codemode                                                                                                       │
+ │┃                                                                                                                   │
+ │┃    Script failed                                                                                                  │
+ │┃    Output:                                                                                                        │
+ │┃    Error: boom                                                                                                    │
+ └                                                                                                                    ┘
+     ◆ Run echo went
+
+     Worked for 0.0s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

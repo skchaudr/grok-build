@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-probe-long-content-192553                                                                [Dashboard]
+
+
+     ❯ replay probe-long-content                                                                            12:50 PM
+
+
+ ┆┃  [2mscript-line-067[0m                                                                                                  ┆
+ │┃  [2mscript-line-068[0m                                                                                                  │
+ │┃  [2mscript-line-069[0m                                                                                                  │
+ │┃  [2mscript-line-070[0m                                                                                                  │
+ │┃  [2mscript-line-071[0m                                                                                                  │
+ │┃  [2mscript-line-072[0m                                                                                                  │
+ │┃  [2mscript-line-073[0m                                                                                                  │
+ │┃  [2mscript-line-074[0m                                                                                                  │
+ │┃  [2mscript-line-075[0m                                                                                                  │
+ │┃  [2mscript-line-076[0m                                                                                                  │
+ │┃  [2mscript-line-077[0m                                                                                                  │
+ │┃  [2mscript-line-078[0m                                                                                                  │
+ │┃  [2mscript-line-079[0m                                                                                                  │
+ │┃  [2mSCRIPT-TAIL-ZZZ[0m                                                                                                  │
+ │┃                                                                                                                   │
+ │┃  [2mScript completed[0m                                                                                                 │█
+ │┃  [2mWall time 12ms[0m                                                                                                   │█
+ │┃  [2mOutput:[0m                                                                                                          │█
+ │┃  [2mone[0m                                                                                                              │█
+ │┃  [2mtwo[0m                                                                                                              │█
+ │┃  [2mOUTPUT-TAIL-YYY[0m                                                                                                  │█
+ └                                                                                                                    ┘█
+     [2mWorked for 0.0s[0m                                                                                                   █
+                                                                                                                       █
+
+   Run [1m/doctor[0m for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │[2m ❯ Build anything                                                                                                 [0m│
+  ╰─────────────────────────────────────────────────────────────────────────────────────── [2munknown[0m · [2malways-approve[0m ─╯
+
+  [1m←[0;2m:collapse  │  [0;1mCtrl+e[0;2m:collapse thinking  │  [0;1mCtrl+x[0;2m:shortcuts[0m
+

@@ -1,0 +1,33 @@
+{
+  "synthetic": true,
+  "script": "const a = await tools.bash(\"echo one\")\nconst b = await tools.bash(\"echo two\")\nreturn a + b",
+  "output": "one\ntwo",
+  "parent_ids": [
+    "cm-1"
+  ],
+  "tools": [
+    {
+      "id": "cm-1",
+      "name": "codemode",
+      "status": "completed"
+    },
+    {
+      "id": "bash-1",
+      "name": "echo one",
+      "status": "completed",
+      "parent": "cm-1"
+    },
+    {
+      "id": "bash-2",
+      "name": "echo two",
+      "status": "completed",
+      "parent": "cm-1"
+    }
+  ],
+  "model_calls": [
+    {
+      "name": "none",
+      "cost": "$0.00"
+    }
+  ]
+}

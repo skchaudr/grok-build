@@ -1,0 +1,328 @@
+
+/tmp/acp-replay-real-after-codemode-fail-396532                                                          [Dashboard]
+
+
+❯ replay real-after-codemode-fail                                                                       1:55 PM
+
+
+throw new Error("boom-after-bash");
+```
+
+Script failed
+Wall time 0.1 seconds
+Output:
+Script error:
+Error: boom-after-bash
+at <anonymous> (codemode.js:2:11)
+
+Tool calls made before the failure (they are not undone): bash (ok)
+
+✓ bash ok {"command":"printf '%s%s' FAIL OK1"} 13ms
+
+◆ Run ↳ call_36707 completed call_36707/1 printf '%s%s' FAIL OK1 FAILOK1
+
+FAILOK1
+
+Error: boom-after-bash                                                                                  1:55 PM
+
+agent_settled
+
+Worked for 0.0s
+
+
+Run /doctor for details and fixes.
+
+
+❯ Build anything
+unknown · always-approve ─╯
+
+Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+
+--- page 1 ---
+
+/tmp/acp-replay-real-after-codemode-fail-396532                                                          [Dashboard]
+
+
+❯ replay real-after-codemode-fail                                                                       1:55 PM
+
+
+throw new Error("boom-after-bash");
+```
+
+Script failed
+Wall time 0.1 seconds
+Output:
+Script error:
+Error: boom-after-bash
+at <anonymous> (codemode.js:2:11)
+
+Tool calls made before the failure (they are not undone): bash (ok)
+
+✓ bash ok {"command":"printf '%s%s' FAIL OK1"} 13ms
+
+◆ Run ↳ call_36707 completed call_36707/1 printf '%s%s' FAIL OK1 FAILOK1
+
+FAILOK1
+
+Error: boom-after-bash                                                                                  1:55 PM
+
+agent_settled
+
+Worked for 0.0s
+
+
+Run /doctor for details and fixes.
+
+
+❯ Build anything
+unknown · always-approve ─╯
+
+Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+
+--- page 2 ---
+
+/tmp/acp-replay-real-after-codemode-fail-396532                                                          [Dashboard]
+
+
+❯ replay real-after-codemode-fail                                                                       1:55 PM
+
+
+throw new Error("boom-after-bash");
+```
+
+Script failed
+Wall time 0.1 seconds
+Output:
+Script error:
+Error: boom-after-bash
+at <anonymous> (codemode.js:2:11)
+
+Tool calls made before the failure (they are not undone): bash (ok)
+
+✓ bash ok {"command":"printf '%s%s' FAIL OK1"} 13ms
+
+◆ Run ↳ call_36707 completed call_36707/1 printf '%s%s' FAIL OK1 FAILOK1
+
+FAILOK1
+
+Error: boom-after-bash                                                                                  1:55 PM
+
+agent_settled
+
+Worked for 0.0s
+
+
+Run /doctor for details and fixes.
+
+
+❯ Build anything
+unknown · always-approve ─╯
+
+Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+
+--- page 3 ---
+
+/tmp/acp-replay-real-after-codemode-fail-396532                                                          [Dashboard]
+
+
+❯ replay real-after-codemode-fail                                                                       1:55 PM
+
+
+throw new Error("boom-after-bash");
+```
+
+Script failed
+Wall time 0.1 seconds
+Output:
+Script error:
+Error: boom-after-bash
+at <anonymous> (codemode.js:2:11)
+
+Tool calls made before the failure (they are not undone): bash (ok)
+
+✓ bash ok {"command":"printf '%s%s' FAIL OK1"} 13ms
+
+◆ Run ↳ call_36707 completed call_36707/1 printf '%s%s' FAIL OK1 FAILOK1
+
+FAILOK1
+
+Error: boom-after-bash                                                                                  1:55 PM
+
+agent_settled
+
+Worked for 0.0s
+
+
+Run /doctor for details and fixes.
+
+
+❯ Build anything
+unknown · always-approve ─╯
+
+Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+
+--- page 4 ---
+
+/tmp/acp-replay-real-after-codemode-fail-396532                                                          [Dashboard]
+
+
+❯ replay real-after-codemode-fail                                                                       1:55 PM
+
+
+throw new Error("boom-after-bash");
+```
+
+Script failed
+Wall time 0.1 seconds
+Output:
+Script error:
+Error: boom-after-bash
+at <anonymous> (codemode.js:2:11)
+
+Tool calls made before the failure (they are not undone): bash (ok)
+
+✓ bash ok {"command":"printf '%s%s' FAIL OK1"} 13ms
+
+◆ Run ↳ call_36707 completed call_36707/1 printf '%s%s' FAIL OK1 FAILOK1
+
+FAILOK1
+
+Error: boom-after-bash                                                                                  1:55 PM
+
+agent_settled
+
+Worked for 0.0s
+
+
+Run /doctor for details and fixes.
+
+
+❯ Build anything
+unknown · always-approve ─╯
+
+Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+
+--- page 5 ---
+
+/tmp/acp-replay-real-after-codemode-fail-396532                                                          [Dashboard]
+
+
+❯ replay real-after-codemode-fail                                                                       1:55 PM
+
+
+throw new Error("boom-after-bash");
+```
+
+Script failed
+Wall time 0.1 seconds
+Output:
+Script error:
+Error: boom-after-bash
+at <anonymous> (codemode.js:2:11)
+
+Tool calls made before the failure (they are not undone): bash (ok)
+
+✓ bash ok {"command":"printf '%s%s' FAIL OK1"} 13ms
+
+◆ Run ↳ call_36707 completed call_36707/1 printf '%s%s' FAIL OK1 FAILOK1
+
+FAILOK1
+
+Error: boom-after-bash                                                                                  1:55 PM
+
+agent_settled
+
+Worked for 0.0s
+
+
+Run /doctor for details and fixes.
+
+
+❯ Build anything
+unknown · always-approve ─╯
+
+Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+
+--- page 6 ---
+
+/tmp/acp-replay-real-after-codemode-fail-396532                                                          [Dashboard]
+
+
+❯ replay real-after-codemode-fail                                                                       1:55 PM
+
+
+throw new Error("boom-after-bash");
+```
+
+Script failed
+Wall time 0.1 seconds
+Output:
+Script error:
+Error: boom-after-bash
+at <anonymous> (codemode.js:2:11)
+
+Tool calls made before the failure (they are not undone): bash (ok)
+
+✓ bash ok {"command":"printf '%s%s' FAIL OK1"} 13ms
+
+◆ Run ↳ call_36707 completed call_36707/1 printf '%s%s' FAIL OK1 FAILOK1
+
+FAILOK1
+
+Error: boom-after-bash                                                                                  1:55 PM
+
+agent_settled
+
+Worked for 0.0s
+
+
+Run /doctor for details and fixes.
+
+
+❯ Build anything
+unknown · always-approve ─╯
+
+Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+
+--- page 7 ---
+
+/tmp/acp-replay-real-after-codemode-fail-396532                                                          [Dashboard]
+
+
+❯ replay real-after-codemode-fail                                                                       1:55 PM
+
+
+throw new Error("boom-after-bash");
+```
+
+Script failed
+Wall time 0.1 seconds
+Output:
+Script error:
+Error: boom-after-bash
+at <anonymous> (codemode.js:2:11)
+
+Tool calls made before the failure (they are not undone): bash (ok)
+
+✓ bash ok {"command":"printf '%s%s' FAIL OK1"} 13ms
+
+◆ Run ↳ call_36707 completed call_36707/1 printf '%s%s' FAIL OK1 FAILOK1
+
+FAILOK1
+
+Error: boom-after-bash                                                                                  1:55 PM
+
+agent_settled
+
+Worked for 0.0s
+
+
+Run /doctor for details and fixes.
+
+
+❯ Build anything
+unknown · always-approve ─╯
+
+Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+
+--- page 8 ---

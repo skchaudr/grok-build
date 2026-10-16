@@ -1,0 +1,43 @@
+{
+  "synthetic": true,
+  "script": "const n = await tools.bash(\"echo 7\")\nawait store.set(\"n\", n)\nconst back = await store.get(\"n\")\nconst c = await models.getModelOfType(\"classifier\",\"typesafe\",\"jev-latest\").classify([back])\nreturn c",
+  "output": "7\nseven",
+  "parent_ids": [
+    "cm-3"
+  ],
+  "tools": [
+    {
+      "id": "cm-3",
+      "name": "codemode",
+      "status": "completed"
+    },
+    {
+      "id": "bash-3",
+      "name": "echo 7",
+      "status": "completed",
+      "parent": "cm-3"
+    },
+    {
+      "id": "store-1",
+      "name": "store.set",
+      "status": "completed",
+      "parent": "cm-3"
+    },
+    {
+      "id": "store-2",
+      "name": "store.get",
+      "status": "completed",
+      "parent": "cm-3"
+    }
+  ],
+  "model_calls": [
+    {
+      "name": "jev-latest",
+      "cost": "$0.002"
+    },
+    {
+      "name": "roll-up",
+      "cost": "$0.002"
+    }
+  ]
+}

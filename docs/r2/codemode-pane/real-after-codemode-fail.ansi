@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-real-after-codemode-fail-396532                                                          [Dashboard]
+
+                                                                                                                       █
+     ❯ replay real-after-codemode-fail                                                                       1:55 PM   █
+                                                                                                                       █
+                                                                                                                       █
+     [1mpi v1.3.0[0m                                                                                               1:55 PM   █
+     ---                                                                                                               █
+ ┌                                                                                                                    ┐█
+ │┃  ◆ [1mcodemode[0m                                                                                                       │█
+ │┃                                                                                                                   │█
+ │┃    ```javascript                                                                                                  │█
+ │┃    const a = await tools.bash({ command: "printf '%s%s' FAIL OK1" });                                             │█
+ │┃    throw new Error("boom-after-bash");                                                                            │█
+ │┃    ```                                                                                                            │█
+ │┃                                                                                                                   │█
+ │┃    Script failed                                                                                                  │█
+ │┃    Wall time 0.1 seconds                                                                                          │█
+ │┃    Output:                                                                                                        │█
+ │┃    Script error:                                                                                                  │█
+ │┃    Error: boom-after-bash                                                                                         │█
+ │┃        at <anonymous> (codemode.js:2:11)                                                                          │█
+ │┃                                                                                                                   │█
+ │┃    Tool calls made before the failure (they are not undone): bash (ok)                                            │█
+ │┃                                                                                                                   │█
+ │┃    ✓ bash ok {"command":"printf '%s%s' FAIL OK1"} 13ms                                                            │█
+ └                                                                                                                    ┘
+     ◆ [1;2mRun [0;2m↳ call_36707 completed call_36707/1 printf '%s%s' FAIL OK1 FAILOK1[0m
+
+     Error: boom-after-bash                                                                                  1:55 PM
+                                                            ▼
+   Run [1m/doctor[0m for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │[2m ❯ Build anything                                                                                                 [0m│
+  ╰─────────────────────────────────────────────────────────────────────────────────────── [2munknown[0m · [2malways-approve[0m ─╯
+
+  [1m←[0;2m:collapse  │  [0;1mCtrl+e[0;2m:collapse thinking  │  [0;1mCtrl+x[0;2m:shortcuts[0m
+

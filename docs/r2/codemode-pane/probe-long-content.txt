@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-probe-long-content-192553                                                                [Dashboard]
+
+
+     ❯ replay probe-long-content                                                                            12:50 PM
+
+
+ ┆┃  script-line-067                                                                                                  ┆
+ │┃  script-line-068                                                                                                  │
+ │┃  script-line-069                                                                                                  │
+ │┃  script-line-070                                                                                                  │
+ │┃  script-line-071                                                                                                  │
+ │┃  script-line-072                                                                                                  │
+ │┃  script-line-073                                                                                                  │
+ │┃  script-line-074                                                                                                  │
+ │┃  script-line-075                                                                                                  │
+ │┃  script-line-076                                                                                                  │
+ │┃  script-line-077                                                                                                  │
+ │┃  script-line-078                                                                                                  │
+ │┃  script-line-079                                                                                                  │
+ │┃  SCRIPT-TAIL-ZZZ                                                                                                  │
+ │┃                                                                                                                   │
+ │┃  Script completed                                                                                                 │█
+ │┃  Wall time 12ms                                                                                                   │█
+ │┃  Output:                                                                                                          │█
+ │┃  one                                                                                                              │█
+ │┃  two                                                                                                              │█
+ │┃  OUTPUT-TAIL-YYY                                                                                                  │█
+ └                                                                                                                    ┘█
+     Worked for 0.0s                                                                                                   █
+                                                                                                                       █
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

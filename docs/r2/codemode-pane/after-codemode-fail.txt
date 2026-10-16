@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-after-codemode-fail-335336                                                               [Dashboard]
+
+
+     ❯ replay after-codemode-fail                                                                            1:22 PM
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ codemode  Model calls: $0.00                                                                                   │
+ │┃                                                                                                                   │
+ │┃    codemode cm-4 failed                                                                                           │
+ │┃    await tools.bash("echo went")                                                                                  │
+ │┃    throw new Error("boom")                                                                                        │
+ │┃                                                                                                                   │
+ │┃    bash completed                                                                                                 │
+ │┃                                                                                                                   │
+ │┃    Script failed                                                                                                  │
+ │┃    Output:                                                                                                        │
+ │┃    Error: boom                                                                                                    │
+ │┃    Model calls: $0.00                                                                                             │
+ └                                                                                                                    ┘
+     ◆ Run ↳ cm-4 completed bash-4 echo went
+
+     Worked for 0.0s
+
+
+
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

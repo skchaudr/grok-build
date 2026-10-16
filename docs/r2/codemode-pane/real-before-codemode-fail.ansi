@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-real-before-codemode-fail-358620                                                         [Dashboard]
+
+
+     ❯ replay real-before-codemode-fail                                                                      1:32 PM
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ [1mcodemode[0m                                                                                                       │
+ │┃                                                                                                                   │
+ │┃    Script failed                                                                                                  │
+ │┃    Wall time 0.1 seconds                                                                                          │
+ │┃    Output:                                                                                                        │
+ │┃    Script error:                                                                                                  │
+ │┃    Error: boom-after-bash                                                                                         │
+ │┃        at <anonymous> (codemode.js:2:11)                                                                          │
+ │┃                                                                                                                   │
+ │┃    Tool calls made before the failure (they are not undone): bash (ok)                                            │
+ └                                                                                                                    ┘
+     ◆ [1;2mRun [0;2mprintf '%s%s' FAIL OK1[0m
+
+     Error: boom-after-bash                                                                                  1:32 PM
+
+     [2mWorked for 0.0s[0m
+
+
+
+
+
+
+
+
+
+   Run [1m/doctor[0m for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │[2m ❯ Build anything                                                                                                 [0m│
+  ╰────────────────────────────────────────────────────── [2mopenrouter/Google: Gemini 3.1 Flash Lite[0m · [2malways-approve[0m ─╯
+
+  [1m←[0;2m:collapse  │  [0;1mCtrl+e[0;2m:collapse thinking  │  [0;1mCtrl+x[0;2m:shortcuts[0m
+

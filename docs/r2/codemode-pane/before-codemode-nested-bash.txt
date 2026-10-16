@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-before-codemode-nested-bash-331534                                                       [Dashboard]
+
+
+     ❯ replay before-codemode-nested-bash                                                                    1:21 PM
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ codemode                                                                                                       │
+ │┃                                                                                                                   │
+ │┃  Script completed                                                                                                 │
+ │┃  Wall time 40ms                                                                                                   │
+ │┃  Output:                                                                                                          │
+ │┃  one                                                                                                              │
+ │┃  two                                                                                                              │
+ └                                                                                                                    ┘
+     ◆ Run echo one
+     ◆ Run echo two
+
+     Worked for 0.0s
+
+
+
+
+
+
+
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

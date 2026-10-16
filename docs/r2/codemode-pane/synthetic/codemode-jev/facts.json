@@ -1,0 +1,31 @@
+{
+  "synthetic": true,
+  "script": "const r = await models.getModelOfType(\"classifier\",\"typesafe\",\"jev-latest\").classify([\"red\",\"blue\",\"green\"])\nreturn r",
+  "output": "warm\ncool\ncool",
+  "parent_ids": [],
+  "tools": [
+    {
+      "id": "cm-2",
+      "name": "codemode",
+      "status": "completed"
+    }
+  ],
+  "model_calls": [
+    {
+      "name": "jev-latest",
+      "cost": "$0.003"
+    },
+    {
+      "name": "jev-latest",
+      "cost": "$0.003"
+    },
+    {
+      "name": "jev-latest",
+      "cost": "$0.003"
+    },
+    {
+      "name": "roll-up",
+      "cost": "$0.009"
+    }
+  ]
+}

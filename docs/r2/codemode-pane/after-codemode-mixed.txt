@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-after-codemode-mixed-334923                                                              [Dashboard]
+
+                                                                                                                       █
+     ❯ replay after-codemode-mixed                                                                           1:22 PM   █
+                                                                                                                       █
+ ┌                                                                                                                    ┐█
+ │┃  ◆ codemode  Model calls: $0.002                                                                                  │█
+ │┃                                                                                                                   │█
+ │┃  codemode cm-3 completed                                                                                          │█
+ │┃  const n = await tools.bash("echo 7")                                                                             │█
+ │┃  await store.set("n", n)                                                                                          │█
+ │┃  const back = await store.get("n")                                                                                │█
+ │┃  const c = await models.getModelOfType("classifier","typesafe","jev-latest").classify([back])                     │█
+ │┃  return c                                                                                                         │█
+ │┃                                                                                                                   │█
+ │┃  bash completed                                                                                                   │█
+ │┃  store.set completed                                                                                              │█
+ │┃  store.get completed                                                                                              │█
+ │┃  jev-latest completed $0.002                                                                                      │█
+ │┃                                                                                                                   │█
+ │┃  Script completed                                                                                                 │█
+ │┃  Wall time 90ms                                                                                                   │█
+ │┃  Output:                                                                                                          │█
+ │┃  7                                                                                                                │█
+ │┃  seven                                                                                                            │█
+ │┃  Model calls: $0.002                                                                                              │█
+ └                                                                                                                    ┘█
+     ◆ Run ↳ cm-3 completed bash-3 echo 7                                                                              █
+     ◆ ↳ cm-3 completed store-1 store.set
+     ◆ ↳ cm-3 completed store-2 store.get
+                                                            ▼
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

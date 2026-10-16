@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-after-codemode-nested-bash-333730                                                        [Dashboard]
+
+
+     ❯ replay after-codemode-nested-bash                                                                     1:22 PM
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ codemode  Model calls: $0.00                                                                                   │
+ │┃                                                                                                                   │
+ │┃  codemode cm-1 completed                                                                                          │
+ │┃  const a = await tools.bash("echo one")                                                                           │
+ │┃  const b = await tools.bash("echo two")                                                                           │
+ │┃  return a + b                                                                                                     │
+ │┃                                                                                                                   │
+ │┃  bash completed                                                                                                   │
+ │┃  bash completed                                                                                                   │
+ │┃                                                                                                                   │
+ │┃  Script completed                                                                                                 │
+ │┃  Wall time 40ms                                                                                                   │
+ │┃  Output:                                                                                                          │
+ │┃  one                                                                                                              │
+ │┃  two                                                                                                              │
+ │┃  Model calls: $0.00                                                                                               │
+ └                                                                                                                    ┘
+     ◆ Run ↳ cm-1 completed bash-1 echo one
+     ◆ Run ↳ cm-1 completed bash-2 echo two
+
+     Worked for 0.0s
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

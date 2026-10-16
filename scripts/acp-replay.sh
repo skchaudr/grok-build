@@ -11,17 +11,17 @@
 # does not write the user's ~/.grok. The script still diffs ~/.grok/sessions
 # before and after and prints the result.
 #
-# Scroll keys, sent only when ACP_REPLAY_NEEDLE is off the visible pane
-# (defaults.rs, prompt focused vs scrollback focused):
-#   Tab          focus scrollback (When::PromptFocused)
-#   g            go to top        (When::ScrollbackFocused, GotoTop)
-#   G            go to bottom     (GotoBottom)
-#   PageUp       one page up      (PageUp)
-#   PageDown     one page down    (PageDown)
-#   Ctrl-u       half page up
-#   Ctrl-d       half page down
-#   Ctrl-k/Ctrl-j one line
-# No terminal screenshot tool is required; the .ansi file is the picture.
+# Scroll keys. The pinned pager boots with vim mode off, so bare letters
+# (g/G/h/l/j/k/e) do not reach scrollback actions; they type into the prompt.
+# Keys that work in that mode (actions/defaults.rs):
+#   Escape       dismiss an overlay
+#   Tab          focus scrollback when the prompt is focused
+#   Space        focus the prompt when scrollback is focused
+#   Down / Up    select next / previous entry
+#   Right        expand the selected entry (Left collapses)
+#   PageDown / PageUp, Ctrl-d / Ctrl-u   move the viewport
+# A second Tab while scrollback is focused returns to the prompt.
+# No terminal screenshot tool is on this host; the .ansi file is the picture.
 set -euo pipefail
 
 usage() {
@@ -103,7 +103,9 @@ tmux set-option -t "$SESSION" history-limit 50000
 tmux resize-window -t "$SESSION" -x 120 -y 40
 
 cleanup() {
-  tmux kill-session -t "$SESSION" 2>/dev/null || true
+  if [[ -z "${ACP_REPLAY_KEEP:-}" ]]; then
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 
@@ -193,6 +195,31 @@ fi
 # Let the last chunks paint.
 sleep 1
 
+# Focus scrollback without a second Tab (that one returns to the prompt).
+focus_scrollback() {
+  tmux send-keys -t "$SESSION" Escape
+  sleep 0.15
+  tmux send-keys -t "$SESSION" Tab
+  sleep 0.3
+}
+
+scrollback_focused=0
+
+# Other-tool rows default to collapsed (title only). Right expands the
+# selected entry. The user prompt is the first selected row, so Down once
+# lands on the first tool. ACP_REPLAY_SELECT_DOWN overrides that count.
+if [[ -n "${ACP_REPLAY_EXPAND:-}" ]]; then
+  focus_scrollback
+  scrollback_focused=1
+  downs="${ACP_REPLAY_SELECT_DOWN:-1}"
+  for _ in $(seq 1 "$downs"); do
+    tmux send-keys -t "$SESSION" Down
+    sleep 0.12
+  done
+  tmux send-keys -t "$SESSION" Right
+  sleep 0.4
+fi
+
 scroll_needle() {
   local needle="$1"
   [[ -n "$needle" ]] || return 0
@@ -203,12 +230,10 @@ scroll_needle() {
     return 0
   fi
   echo "scrolling to needle: ${needle}"
-  # Tab focuses scrollback when the prompt is focused.
-  tmux send-keys -t "$SESSION" Tab
-  sleep 0.3
-  # g is GotoTop while scrollback is focused.
-  tmux send-keys -t "$SESSION" g
-  sleep 0.4
+  if [[ "$scrollback_focused" -ne 1 ]]; then
+    focus_scrollback
+    scrollback_focused=1
+  fi
   local i
   for i in $(seq 1 50); do
     cap="$(capture_visible)"

@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-before-codemode-mixed-332151                                                             [Dashboard]
+
+
+     ❯ replay before-codemode-mixed                                                                          1:21 PM
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ codemode                                                                                                       │
+ │┃                                                                                                                   │
+ │┃  Script completed                                                                                                 │
+ │┃  Wall time 90ms                                                                                                   │
+ │┃  Output:                                                                                                          │
+ │┃  7                                                                                                                │
+ │┃  seven                                                                                                            │
+ └                                                                                                                    ┘
+     ◆ Run echo 7
+
+     Worked for 0.0s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

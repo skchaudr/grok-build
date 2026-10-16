@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-real-before-codemode-fail-358620                                                         [Dashboard]
+
+
+     ❯ replay real-before-codemode-fail                                                                      1:32 PM
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ codemode                                                                                                       │
+ │┃                                                                                                                   │
+ │┃    Script failed                                                                                                  │
+ │┃    Wall time 0.1 seconds                                                                                          │
+ │┃    Output:                                                                                                        │
+ │┃    Script error:                                                                                                  │
+ │┃    Error: boom-after-bash                                                                                         │
+ │┃        at <anonymous> (codemode.js:2:11)                                                                          │
+ │┃                                                                                                                   │
+ │┃    Tool calls made before the failure (they are not undone): bash (ok)                                            │
+ └                                                                                                                    ┘
+     ◆ Run printf '%s%s' FAIL OK1
+
+     Error: boom-after-bash                                                                                  1:32 PM
+
+     Worked for 0.0s
+
+
+
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰────────────────────────────────────────────────────── openrouter/Google: Gemini 3.1 Flash Lite · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

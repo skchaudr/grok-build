@@ -1,0 +1,27 @@
+{
+  "synthetic": true,
+  "script": "await tools.bash(\"echo went\")\nthrow new Error(\"boom\")",
+  "output": "Error: boom",
+  "parent_ids": [
+    "cm-4"
+  ],
+  "tools": [
+    {
+      "id": "cm-4",
+      "name": "codemode",
+      "status": "failed"
+    },
+    {
+      "id": "bash-4",
+      "name": "echo went",
+      "status": "completed",
+      "parent": "cm-4"
+    }
+  ],
+  "model_calls": [
+    {
+      "name": "roll-up",
+      "cost": "$0.00"
+    }
+  ]
+}

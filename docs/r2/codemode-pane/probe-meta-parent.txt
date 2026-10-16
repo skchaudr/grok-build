@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-probe-meta-parent-193188                                                                 [Dashboard]
+
+
+     ❯ replay probe-meta-parent                                                                             12:50 PM
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ codemode                                                                                                       │
+ │┃                                                                                                                   │
+ │┃  PARENT-BODY                                                                                                      │
+ │┃  Output:                                                                                                          │
+ │┃  nested ran                                                                                                       │
+ └                                                                                                                    ┘
+     ◆ Run echo nested
+
+     Worked for 0.0s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

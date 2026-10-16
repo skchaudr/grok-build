@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-probe-update-replaces-192835                                                             [Dashboard]
+
+
+     ❯ replay probe-update-replaces                                                                         12:50 PM
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ codemode                                                                                                       │
+ │┃                                                                                                                   │
+ │┃  AFTER-TEXT-REPLACED                                                                                              │
+ │┃  Model calls: $0.02                                                                                               │
+ └                                                                                                                    ┘
+     Worked for 0.0s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

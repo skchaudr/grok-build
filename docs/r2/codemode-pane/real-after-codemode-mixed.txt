@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-real-after-codemode-mixed-396194                                                         [Dashboard]
+
+                                                                                                                       █
+     ❯ replay real-after-codemode-mixed                                                                      1:55 PM   █
+                                                                                                                       █
+                                                                                                                       █
+     pi v1.3.0                                                                                               1:55 PM   █
+     ---                                                                                                               █
+ ┌                                                                                                                    ┐█
+ │┃  ◆ codemode  Model calls: $0.0                                                                                    │█
+ │┃                                                                                                                   │█
+ │┃  ```javascript                                                                                                    │█
+ │┃  const bash = await tools.bash({ command: "printf '%s%s' MX BASH1" });                                            │█
+ │┃  let jev = await models.getModelOfType("classifier", "typesafe", "jev-latest");                                   │█
+ │┃  if (!jev) throw new Error("no jev");                                                                             │█
+ │┃  const result = await models.classify(jev, {                                                                      │█
+ │┃    state: { text: "alpha" },                                                                                      │█
+ │┃    questions: {                                                                                                   │█
+ │┃      bucket: {                                                                                                    │█
+ │┃        type: "choice",                                                                                            │
+ │┃        instructions: "Which word is this?",                                                                       │
+ │┃        criteria: { first: "the word alpha", second: "anything else" }                                             │
+ │┃      }                                                                                                            │
+ │┃    }                                                                                                              │
+ │┃  });                                                                                                              │
+ │┃  if (result.stopReason !== "stop") throw new Error(result.errorMessage || result.stopReason);                     │
+ │┃  store("mix", bash.output + ":" + result.answers.bucket.choice);                                                  │
+ │┃  return load("mix");                                                                                              │
+ │┃  ```                                                                                                              │
+ ┆┃                                                                                                                   ┆
+                                                            ▼
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-real-after-codemode-jev-366870                                                           [Dashboard]
+
+                                                                                                                       █
+     ❯ replay real-after-codemode-jev                                                                        1:35 PM   █
+                                                                                                                       █
+                                                                                                                       █
+     pi v1.3.0                                                                                               1:35 PM   █
+     ---                                                                                                               █
+ ┌                                                                                                                    ┐█
+ │┃  ◆ codemode  Model calls: $0.0                                                                                    │█
+ │┃                                                                                                                   │█
+ │┃  ```javascript                                                                                                    │█
+ │┃  let jev = await models.getModelOfType("classifier", "typesafe", "jev-latest");                                   │█
+ │┃  if (!jev) jev = await models.getModelOfType("classifier", "openrouter", "typesafe/jev-1.13");                    │█
+ │┃  if (!jev) throw new Error("no jev model");                                                                       │█
+ │┃  const items = ["alpha", "beta", "gamma"];                                                                        │█
+ │┃  const results = await Promise.all(items.map(async (item) => {                                                    │█
+ │┃    const result = await models.classify(jev, {                                                                    │█
+ │┃      state: { text: item },                                                                                       │
+ │┃      questions: {                                                                                                 │
+ │┃        bucket: {                                                                                                  │
+ │┃          type: "choice",                                                                                          │
+ │┃          instructions: "Which bucket is this label?",                                                             │
+ │┃          criteria: { first: "the word alpha", second: "the word beta", third: "the word gamma" }                  │
+ │┃        }                                                                                                          │
+ │┃      }                                                                                                            │
+ │┃    });                                                                                                            │
+ │┃    if (result.stopReason !== "stop") throw new Error(result.errorMessage || result.stopReason);                   │
+ │┃    return item + "=" + result.answers.bucket.choice;                                                              │
+ ┆┃  }));                                                                                                             ┆
+                                                            ▼
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

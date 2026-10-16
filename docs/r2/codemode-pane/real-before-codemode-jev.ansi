@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-real-before-codemode-jev-357903                                                          [Dashboard]
+
+
+     ❯ replay real-before-codemode-jev                                                                       1:32 PM
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ [1mcodemode[0m                                                                                                       │
+ │┃                                                                                                                   │
+ │┃  [2mScript completed[0m                                                                                                 │
+ │┃  [2mWall time 0.5 seconds[0m                                                                                            │
+ │┃  [2mOutput:[0m                                                                                                          │
+ │┃  [2malpha=first[0m                                                                                                      │
+ │┃  [2mbeta=second[0m                                                                                                      │
+ │┃  [2mgamma=third[0m                                                                                                      │
+ └                                                                                                                    ┘
+     alpha=first beta=second gamma=third                                                                     1:32 PM
+
+     [2mWorked for 0.0s[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+   Run [1m/doctor[0m for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │[2m ❯ Build anything                                                                                                 [0m│
+  ╰────────────────────────────────────────────────────── [2mopenrouter/Google: Gemini 3.1 Flash Lite[0m · [2malways-approve[0m ─╯
+
+  [1m←[0;2m:collapse  │  [0;1mCtrl+e[0;2m:collapse thinking  │  [0;1mCtrl+x[0;2m:shortcuts[0m
+

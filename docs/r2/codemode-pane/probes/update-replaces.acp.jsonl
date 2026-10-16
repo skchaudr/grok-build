@@ -1,0 +1,2 @@
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "old", "update": {"sessionUpdate": "tool_call", "toolCallId": "c1", "title": "codemode", "kind": "other", "status": "in_progress", "content": [{"type": "content", "content": {"type": "text", "text": "BEFORE-TEXT"}}]}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "old", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "completed", "content": [{"type": "content", "content": {"type": "text", "text": "AFTER-TEXT-REPLACED\nModel calls: $0.02"}}]}}}

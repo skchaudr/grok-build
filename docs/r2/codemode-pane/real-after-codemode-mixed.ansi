@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-real-after-codemode-mixed-396194                                                         [Dashboard]
+
+                                                                                                                       █
+     ❯ replay real-after-codemode-mixed                                                                      1:55 PM   █
+                                                                                                                       █
+                                                                                                                       █
+     [1mpi v1.3.0[0m                                                                                               1:55 PM   █
+     ---                                                                                                               █
+ ┌                                                                                                                    ┐█
+ │┃  ◆ [1mcodemode[0;2m  Model calls: $0.0[0m                                                                                    │█
+ │┃                                                                                                                   │█
+ │┃  [2m```javascript[0m                                                                                                    │█
+ │┃  [2mconst bash = await tools.bash({ command: "printf '%s%s' MX BASH1" });[0m                                            │█
+ │┃  [2mlet jev = await models.getModelOfType("classifier", "typesafe", "jev-latest");[0m                                   │█
+ │┃  [2mif (!jev) throw new Error("no jev");[0m                                                                             │█
+ │┃  [2mconst result = await models.classify(jev, {[0m                                                                      │█
+ │┃  [2m  state: { text: "alpha" },[0m                                                                                      │█
+ │┃  [2m  questions: {[0m                                                                                                   │█
+ │┃  [2m    bucket: {[0m                                                                                                    │█
+ │┃  [2m      type: "choice",[0m                                                                                            │
+ │┃  [2m      instructions: "Which word is this?",[0m                                                                       │
+ │┃  [2m      criteria: { first: "the word alpha", second: "anything else" }[0m                                             │
+ │┃  [2m    }[0m                                                                                                            │
+ │┃  [2m  }[0m                                                                                                              │
+ │┃  [2m});[0m                                                                                                              │
+ │┃  [2mif (result.stopReason !== "stop") throw new Error(result.errorMessage || result.stopReason);[0m                     │
+ │┃  [2mstore("mix", bash.output + ":" + result.answers.bucket.choice);[0m                                                  │
+ │┃  [2mreturn load("mix");[0m                                                                                              │
+ │┃  [2m```[0m                                                                                                              │
+ ┆┃                                                                                                                   ┆
+                                                            ▼
+   Run [1m/doctor[0m for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │[2m ❯ Build anything                                                                                                 [0m│
+  ╰─────────────────────────────────────────────────────────────────────────────────────── [2munknown[0m · [2malways-approve[0m ─╯
+
+  [1m←[0;2m:collapse  │  [0;1mCtrl+e[0;2m:collapse thinking  │  [0;1mCtrl+x[0;2m:shortcuts[0m
+
