@@ -19,7 +19,9 @@ case "$AGENT" in
 esac
 
 # Not $PAGER: that variable is the system pager (often `less`).
-ACP_PAGER="${ACP_PAGER:-/home/sab-mini/repos/grok-build/target/release/xai-grok-pager}"
+# Pinned Oct 14 binary. The previous default pointed at a worktree
+# target/release that is not the pager this fleet replays against.
+ACP_PAGER="${ACP_PAGER:-${HOME}/.grok/bin/grok-fork}"
 SESSION="acp-matrix-${AGENT}"
 WORKDIR="/tmp/acp-matrix-${AGENT}"
 OUT_DIR="/tmp/acp-matrix-out/${AGENT}"

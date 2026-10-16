@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-acp-subagents-parent-e2e-176046                                                          [Dashboard]
+
+
+     ❯ replay acp-subagents-parent-e2e                                                                      12:45 PM
+
+
+     ◆ Thought for 3.0s
+
+     PONG-B-STEEREDPONG-A                                                                                   12:45 PM
+
+     ◆ Thought for 5.4s
+
+     Worked for 8.6s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+x:shortcuts
+
