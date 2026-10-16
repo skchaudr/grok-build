@@ -1812,11 +1812,56 @@ fn merge_tool_meta(base: Option<acp::Meta>, update: Option<acp::Meta>) -> Option
         (base, None) => base,
         (Some(mut base), Some(update)) => {
             for (key, value) in update {
-                base.insert(key, value);
+                if key == "terminal_output" {
+                    // A later `_meta` often replaces `terminal_output` with only the newest
+                    // delta. `accumulate_terminal_output` has already appended that delta, so
+                    // keep the accumulated `data` and still take new sibling fields
+                    // (`terminal_id`). Other top-level keys, including `pi.parentToolCallId`,
+                    // stay a shallow merge.
+                    let merged = merge_terminal_output(base.get("terminal_output"), &value);
+                    base.insert(key, merged);
+                } else {
+                    base.insert(key, value);
+                }
             }
             Some(base)
         }
     }
+}
+
+/// Merge one `_meta.terminal_output` object. `data` is a streamed delta: append it unless
+/// the base text already ends with it (the completion path accumulates before this merge).
+fn merge_terminal_output(
+    base: Option<&serde_json::Value>,
+    update: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(update_obj) = update.as_object() else {
+        return update.clone();
+    };
+    let base_obj = base.and_then(serde_json::Value::as_object);
+    let mut merged = base_obj.cloned().unwrap_or_default();
+    let base_data = base_obj
+        .and_then(|obj| obj.get("data"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let update_data = update_obj.get("data").and_then(serde_json::Value::as_str);
+    for (key, value) in update_obj {
+        if key == "data" {
+            continue;
+        }
+        merged.insert(key.clone(), value.clone());
+    }
+    if let Some(delta) = update_data {
+        let data = if !base_data.is_empty() && base_data.ends_with(delta) {
+            base_data.to_owned()
+        } else {
+            let mut acc = base_data.to_owned();
+            acc.push_str(delta);
+            acc
+        };
+        merged.insert("data".to_owned(), serde_json::Value::String(data));
+    }
+    serde_json::Value::Object(merged)
 }
 
 /// Peeled display form when a redundant leading `cd <cwd>` was stripped, else None.
@@ -1891,10 +1936,13 @@ fn tool_status_label(status: acp::ToolCallStatus) -> &'static str {
 
 /// Pi's renderer prints `Model calls: $x` from codemode `details.calls`.
 /// The adapter puts that line in the parent tool's content text.
+/// The last matching line wins: a `tool_call_update` replaces the content, and the
+/// header is rebuilt from that text (see `tool_call_to_block_inner`).
 fn model_calls_line(text: &str) -> Option<String> {
     text.lines()
         .map(str::trim)
-        .find(|line| line.starts_with("Model calls:"))
+        .filter(|line| line.starts_with("Model calls:"))
+        .next_back()
         .map(str::to_owned)
 }
 
@@ -2403,6 +2451,8 @@ fn tool_call_to_block_inner(
             {
                 ct = extracted;
             }
+            // Every rebuild, including an in-flight `tool_call_update`, copies the
+            // current line onto the header. The first value must not stick.
             if let Some(line) = model_calls_line(&ct) {
                 block.summary = line;
             }

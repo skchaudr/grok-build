@@ -1,11 +1,11 @@
 
-  /tmp/acp-replay-real-after-codemode-mixed-396194                                                         [Dashboard]
+  /tmp/acp-replay-real-after-codemode-mixed-489661                                                         [Dashboard]
 
                                                                                                                        █
-     ❯ replay real-after-codemode-mixed                                                                      1:55 PM   █
+     ❯ replay real-after-codemode-mixed                                                                      2:31 PM   █
                                                                                                                        █
                                                                                                                        █
-     pi v1.3.0                                                                                               1:55 PM   █
+     pi v1.3.0                                                                                               2:31 PM   █
      ---                                                                                                               █
  ┌                                                                                                                    ┐█
  │┃  ◆ codemode  Model calls: $0.0                                                                                    │█

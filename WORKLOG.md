@@ -59,3 +59,67 @@ Replayed R's `acp.jsonl` on `grok-fork` and A's `acp-after.jsonl` on `target/rel
 - codemode-fail 3/5 → 5/5
 
 Read the after panes (nested script + `R2NESTED1`/`R2NESTED2`, jev `Model calls: $0.0`, mixed second script `MXBASH1:first` / `MXBASH2`, fail `FAILOK1` on the nested bash header and `agent_settled`). `sessions_delta=none` on every replay.
+
+## 2026-10-16 14:20 UTC — decided
+
+Host: khoj-38w. User: sab-mini. Review `docs/r2/REVIEW-gb-P.md` at `5f8b99be`: accept with fixes. In scope: P-1, P-3, P-2. Not in scope: slices R/A, codemode-cancel. Untracked `review-*` and `mut-*` under `docs/r2/codemode-pane` stay untracked.
+
+P-1: `merge_tool_call_update` calls `accumulate_terminal_output` and then `merge_tool_meta`. The shallow insert replaces `terminal_output` with the latest delta (`3\n`), so `external_execute_terminal_output_deltas_accumulate` fails. Fix: when merging that key, keep `data` if the base text already ends with the delta, otherwise append; copy the update's other fields (`terminal_id`). Other top-level keys, including `pi`, stay a shallow merge so `parentToolCallId` survives a `terminal_exit` that omits it.
+
+P-3: `model_calls_line` runs on every `tool_call_to_block` rebuild, including in-flight updates. The header was the first matching line, so a later line in the same text stayed off the header. Take the last `Model calls:` line. Lock it with `model_calls_header_refreshes_on_tool_call_update` (`$0.0`, then in-flight `$999`, then the completed text).
+
+## 2026-10-16 14:28 UTC — ran
+
+```
+cargo test -p xai-grok-pager acp::tracker --lib -j 4
+```
+
+`201 passed; 0 failed` (was 198 passed, 1 failed). Includes `external_execute_terminal_output_deltas_accumulate`, `terminal_output_merge_keeps_parent_and_accumulates`, and `model_calls_header_refreshes_on_tool_call_update`.
+
+## 2026-10-16 14:29 UTC — ran
+
+Host: khoj-38w. Structural fidelity on A's `acp-after.jsonl` (`8ca225c1`) with R `origin/r2/pi-recordings` `0e9b3c87` facts and fidelity blob `57262ee5c1f9d073002ad712c3ef69733819e7a3` `--strict`. Each exited 0.
+
+```
+===== codemode-nested-bash =====
+old-score: 6/6
+missing:
+new-score: 2/2
+missing:
+===== codemode-jev =====
+old-score: 7/7
+missing:
+new-score: 3/3
+missing:
+===== codemode-mixed =====
+old-score: 9/9
+missing:
+new-score: 3/3
+missing:
+===== codemode-fail =====
+old-score: 5/5
+missing:
+new-score: 1/1
+missing:
+```
+
+## 2026-10-16 14:31 UTC — ran
+
+Host: khoj-38w.
+
+```
+cargo build -j 4 -p xai-grok-pager-bin --release
+```
+
+Finished in 1m 43s. Binary `target/release/xai-grok-pager`.
+
+Replayed A's four `acp-after.jsonl` with `ACP_REPLAY_DELAY_MS=0 ACP_REPLAY_EXPAND=1 ACP_REPLAY_SELECT_DOWN=2 ACP_PAGER=target/release/xai-grok-pager`. `sessions_delta=none` and `isolated_grok_home_session_files=0` on each. Read the panes: jev header `◆ codemode  Model calls: $0.0`; nested-bash `↳ call_28131 completed call_28131/1` with `R2NESTED1`; fail script `Script failed` / `Error: boom-after-bash` and `↳ call_36707 completed call_36707/1` with `FAILOK1`; mixed header `Model calls: $0.0` and `↳ call_917984 completed call_917984/1` with `MXBASH2`.
+
+Needle `old-score` with blob `57262ee5` (before = existing pinned-pager plains, re-scored; after = this rebuild):
+
+- codemode-nested-bash 4/6 → 6/6
+- codemode-jev 2/7 → 7/7
+- codemode-mixed 4/9 → 9/9
+- codemode-fail 3/5 → 5/5
+
+Pane `new-score` is 0/N. `parent_link` and `call_cost` are proven on the JSONL `--strict` run above. The pane proves the nest marker and the `Model calls:` header, which are not needles.

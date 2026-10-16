@@ -1,245 +1,245 @@
 
-/tmp/acp-replay-real-after-codemode-nested-bash-366479                                                   [Dashboard]
+/tmp/acp-replay-real-after-codemode-nested-bash-489041                                                   [Dashboard]
 
 
-❯ replay real-after-codemode-nested-bash                                                                1:35 PM   █
+❯ replay real-after-codemode-nested-bash                                                                2:31 PM
 
 
-pi v1.3.0                                                                                               1:35 PM   █
----                                                                                                               █
+pi v1.3.0                                                                                               2:31 PM
+---
 
-◆ codemode                                                                                                       │█
+◆ codemode
 
-```javascript                                                                                                    │█
-const a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });                                          │█
-const b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });                                          │█
-return a.output + "\n" + b.output;                                                                               │█
-```                                                                                                              │█
+```javascript
+const a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });
+const b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });
+return a.output + "\n" + b.output;
+```
 
-Script completed                                                                                                 │█
-Wall time 0.1 seconds                                                                                            │█
-Output:                                                                                                          │█
-R2NESTED1                                                                                                        │█
-R2NESTED2                                                                                                        │█
+Script completed
+Wall time 0.1 seconds
+Output:
+R2NESTED1
+R2NESTED2
 
-✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms                                                         │█
-✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms                                                          │█
+✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms
+✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms
 
-◆ Run ↳ call_28131 completed call_28131/1 printf '%s%s%s' R2 NES TED1
-◆ Run ↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2
+◆ Run ↳ call_28131 completed call_28131/1 printf '%s%s%s' R2 NES TED1 R2NESTED1
+◆ Run ↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2 R2NESTED2
 
-R2NESTED1 R2NESTED2                                                                                     1:35 PM
+R2NESTED1 R2NESTED2                                                                                     2:31 PM
 
 Run /doctor for details and fixes.
 
-╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-❯ Build anything                                                                                                 │
-╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+❯ Build anything
+unknown · always-approve ─╯
 
 ←:collapse  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
 
 --- page 1 ---
 
-/tmp/acp-replay-real-after-codemode-nested-bash-366479                                                   [Dashboard]
+/tmp/acp-replay-real-after-codemode-nested-bash-489041                                                   [Dashboard]
 
 
-❯ replay real-after-codemode-nested-bash                                                                1:35 PM
+❯ replay real-after-codemode-nested-bash                                                                2:31 PM
 
 
-```javascript                                                                                                     █
-const a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });                                           █
-const b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });                                           █
-return a.output + "\n" + b.output;                                                                                █
-```                                                                                                               █
+```javascript
+const a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });
+const b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });
+return a.output + "\n" + b.output;
+```
 
-Script completed                                                                                                  █
-Wall time 0.1 seconds                                                                                             █
-Output:                                                                                                           █
-R2NESTED1                                                                                                         █
-R2NESTED2                                                                                                         █
+Script completed
+Wall time 0.1 seconds
+Output:
+R2NESTED1
+R2NESTED2
 
-✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms                                                          █
-✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms                                                           █
+✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms
+✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms
 
-◆ Run ↳ call_28131 completed call_28131/1 printf '%s%s%s' R2 NES TED1                                             █
-◆ Run ↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2                                             █
+◆ Run ↳ call_28131 completed call_28131/1 printf '%s%s%s' R2 NES TED1 R2NESTED1
+◆ Run ↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2 R2NESTED2
 
-R2NESTED1 R2NESTED2                                                                                     1:35 PM  │█
+R2NESTED1 R2NESTED2                                                                                     2:31 PM
 
-agent_settled                                                                                                     █
+agent_settled
 
-Worked for 0.0s                                                                                                   █
+Worked for 0.0s
 
 
 Run /doctor for details and fixes.
 
-╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-❯ Build anything                                                                                                 │
-╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+❯ Build anything
+unknown · always-approve ─╯
 
 Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
 
 --- page 2 ---
 
-/tmp/acp-replay-real-after-codemode-nested-bash-366479                                                   [Dashboard]
+/tmp/acp-replay-real-after-codemode-nested-bash-489041                                                   [Dashboard]
 
 
-❯ replay real-after-codemode-nested-bash                                                                1:35 PM
+❯ replay real-after-codemode-nested-bash                                                                2:31 PM
 
 
-```javascript                                                                                                     █
-const a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });                                           █
-const b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });                                           █
-return a.output + "\n" + b.output;                                                                                █
-```                                                                                                               █
+```javascript
+const a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });
+const b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });
+return a.output + "\n" + b.output;
+```
 
-Script completed                                                                                                  █
-Wall time 0.1 seconds                                                                                             █
-Output:                                                                                                           █
-R2NESTED1                                                                                                         █
-R2NESTED2                                                                                                         █
+Script completed
+Wall time 0.1 seconds
+Output:
+R2NESTED1
+R2NESTED2
 
-✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms                                                          █
-✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms                                                           █
+✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms
+✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms
 
-◆ Run ↳ call_28131 completed call_28131/1 printf '%s%s%s' R2 NES TED1                                             █
-◆ Run ↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2                                             █
+◆ Run ↳ call_28131 completed call_28131/1 printf '%s%s%s' R2 NES TED1 R2NESTED1
+◆ Run ↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2 R2NESTED2
 
-R2NESTED1 R2NESTED2                                                                                     1:35 PM  │█
+R2NESTED1 R2NESTED2                                                                                     2:31 PM
 
-agent_settled                                                                                                     █
+agent_settled
 
-Worked for 0.0s                                                                                                   █
+Worked for 0.0s
 
 
 Run /doctor for details and fixes.
 
-╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-❯ Build anything                                                                                                 │
-╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+❯ Build anything
+unknown · always-approve ─╯
 
 Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
 
 --- page 3 ---
 
-/tmp/acp-replay-real-after-codemode-nested-bash-366479                                                   [Dashboard]
+/tmp/acp-replay-real-after-codemode-nested-bash-489041                                                   [Dashboard]
 
 
-❯ replay real-after-codemode-nested-bash                                                                1:35 PM
+❯ replay real-after-codemode-nested-bash                                                                2:31 PM
 
 
-```javascript                                                                                                     █
-const a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });                                           █
-const b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });                                           █
-return a.output + "\n" + b.output;                                                                                █
-```                                                                                                               █
+```javascript
+const a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });
+const b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });
+return a.output + "\n" + b.output;
+```
 
-Script completed                                                                                                  █
-Wall time 0.1 seconds                                                                                             █
-Output:                                                                                                           █
-R2NESTED1                                                                                                         █
-R2NESTED2                                                                                                         █
+Script completed
+Wall time 0.1 seconds
+Output:
+R2NESTED1
+R2NESTED2
 
-✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms                                                          █
-✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms                                                           █
+✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms
+✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms
 
-◆ Run ↳ call_28131 completed call_28131/1 printf '%s%s%s' R2 NES TED1                                             █
-◆ Run ↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2                                             █
+◆ Run ↳ call_28131 completed call_28131/1 printf '%s%s%s' R2 NES TED1 R2NESTED1
+◆ Run ↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2 R2NESTED2
 
-R2NESTED1 R2NESTED2                                                                                     1:35 PM  │█
+R2NESTED1 R2NESTED2                                                                                     2:31 PM
 
-agent_settled                                                                                                     █
+agent_settled
 
-Worked for 0.0s                                                                                                   █
+Worked for 0.0s
 
 
 Run /doctor for details and fixes.
 
-╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-❯ Build anything                                                                                                 │
-╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+❯ Build anything
+unknown · always-approve ─╯
 
 Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
 
 --- page 4 ---
 
-/tmp/acp-replay-real-after-codemode-nested-bash-366479                                                   [Dashboard]
+/tmp/acp-replay-real-after-codemode-nested-bash-489041                                                   [Dashboard]
 
 
-❯ replay real-after-codemode-nested-bash                                                                1:35 PM
+❯ replay real-after-codemode-nested-bash                                                                2:31 PM
 
 
-```javascript                                                                                                     █
-const a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });                                           █
-const b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });                                           █
-return a.output + "\n" + b.output;                                                                                █
-```                                                                                                               █
+```javascript
+const a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });
+const b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });
+return a.output + "\n" + b.output;
+```
 
-Script completed                                                                                                  █
-Wall time 0.1 seconds                                                                                             █
-Output:                                                                                                           █
-R2NESTED1                                                                                                         █
-R2NESTED2                                                                                                         █
+Script completed
+Wall time 0.1 seconds
+Output:
+R2NESTED1
+R2NESTED2
 
-✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms                                                          █
-✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms                                                           █
+✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms
+✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms
 
-◆ Run ↳ call_28131 completed call_28131/1 printf '%s%s%s' R2 NES TED1                                             █
-◆ Run ↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2                                             █
+◆ Run ↳ call_28131 completed call_28131/1 printf '%s%s%s' R2 NES TED1 R2NESTED1
+◆ Run ↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2 R2NESTED2
 
-R2NESTED1 R2NESTED2                                                                                     1:35 PM  │█
+R2NESTED1 R2NESTED2                                                                                     2:31 PM
 
-agent_settled                                                                                                     █
+agent_settled
 
-Worked for 0.0s                                                                                                   █
+Worked for 0.0s
 
 
 Run /doctor for details and fixes.
 
-╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-❯ Build anything                                                                                                 │
-╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+❯ Build anything
+unknown · always-approve ─╯
 
 Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
 
 --- page 5 ---
 
-/tmp/acp-replay-real-after-codemode-nested-bash-366479                                                   [Dashboard]
+/tmp/acp-replay-real-after-codemode-nested-bash-489041                                                   [Dashboard]
 
 
-❯ replay real-after-codemode-nested-bash                                                                1:35 PM
+❯ replay real-after-codemode-nested-bash                                                                2:31 PM
 
 
-```javascript                                                                                                     █
-const a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });                                           █
-const b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });                                           █
-return a.output + "\n" + b.output;                                                                                █
-```                                                                                                               █
+```javascript
+const a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });
+const b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });
+return a.output + "\n" + b.output;
+```
 
-Script completed                                                                                                  █
-Wall time 0.1 seconds                                                                                             █
-Output:                                                                                                           █
-R2NESTED1                                                                                                         █
-R2NESTED2                                                                                                         █
+Script completed
+Wall time 0.1 seconds
+Output:
+R2NESTED1
+R2NESTED2
 
-✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms                                                          █
-✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms                                                           █
+✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms
+✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms
 
-◆ Run ↳ call_28131 completed call_28131/1 printf '%s%s%s' R2 NES TED1                                             █
-◆ Run ↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2                                             █
+◆ Run ↳ call_28131 completed call_28131/1 printf '%s%s%s' R2 NES TED1 R2NESTED1
+◆ Run ↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2 R2NESTED2
 
-R2NESTED1 R2NESTED2                                                                                     1:35 PM  │█
+R2NESTED1 R2NESTED2                                                                                     2:31 PM
 
-agent_settled                                                                                                     █
+agent_settled
 
-Worked for 0.0s                                                                                                   █
+Worked for 0.0s
 
 
 Run /doctor for details and fixes.
 
-╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-❯ Build anything                                                                                                 │
-╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+❯ Build anything
+unknown · always-approve ─╯
 
 Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
 

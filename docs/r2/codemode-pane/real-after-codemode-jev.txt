@@ -1,11 +1,11 @@
 
-  /tmp/acp-replay-real-after-codemode-jev-366870                                                           [Dashboard]
+  /tmp/acp-replay-real-after-codemode-jev-489355                                                           [Dashboard]
 
                                                                                                                        █
-     ❯ replay real-after-codemode-jev                                                                        1:35 PM   █
+     ❯ replay real-after-codemode-jev                                                                        2:31 PM   █
                                                                                                                        █
                                                                                                                        █
-     pi v1.3.0                                                                                               1:35 PM   █
+     pi v1.3.0                                                                                               2:31 PM   █
      ---                                                                                                               █
  ┌                                                                                                                    ┐█
  │┃  ◆ codemode  Model calls: $0.0                                                                                    │█

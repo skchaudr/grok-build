@@ -1,11 +1,11 @@
 
-  /tmp/acp-replay-real-after-codemode-fail-396532                                                          [Dashboard]
+  /tmp/acp-replay-real-after-codemode-fail-490030                                                          [Dashboard]
 
                                                                                                                        █
-     ❯ replay real-after-codemode-fail                                                                       1:55 PM   █
+     ❯ replay real-after-codemode-fail                                                                       2:32 PM   █
                                                                                                                        █
                                                                                                                        █
-     [1mpi v1.3.0[0m                                                                                               1:55 PM   █
+     [1mpi v1.3.0[0m                                                                                               2:32 PM   █
      ---                                                                                                               █
  ┌                                                                                                                    ┐█
  │┃  ◆ [1mcodemode[0m                                                                                                       │█
@@ -28,7 +28,7 @@
  └                                                                                                                    ┘
      ◆ [1;2mRun [0;2m↳ call_36707 completed call_36707/1 printf '%s%s' FAIL OK1 FAILOK1[0m
 
-     Error: boom-after-bash                                                                                  1:55 PM
+     Error: boom-after-bash                                                                                  2:32 PM
                                                             ▼
    Run [1m/doctor[0m for details and fixes.
 

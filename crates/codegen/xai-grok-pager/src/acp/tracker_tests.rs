@@ -262,8 +262,16 @@ fn tool_call_lifecycle() {
 fn repeated_tool_call_same_id_upserts_one_card() {
     let mut sb = ScrollbackState::new();
     let mut tracker = AcpUpdateTracker::new();
-    tracker.handle_update(tool_call("tc1", acp::ToolKind::Execute, "Terminal"), &meta(), &mut sb);
-    tracker.handle_update(tool_call("tc1", acp::ToolKind::Execute, "`hostname`"), &meta(), &mut sb);
+    tracker.handle_update(
+        tool_call("tc1", acp::ToolKind::Execute, "Terminal"),
+        &meta(),
+        &mut sb,
+    );
+    tracker.handle_update(
+        tool_call("tc1", acp::ToolKind::Execute, "`hostname`"),
+        &meta(),
+        &mut sb,
+    );
     assert_eq!(sb.len(), 1);
     assert_eq!(tracker.pending_tools.len(), 1);
     tracker.handle_update(tool_update_completed("tc1"), &meta(), &mut sb);
@@ -5401,7 +5409,11 @@ fn terminal_meta(data: &str) -> acp::Meta {
 fn external_execute_completion_uses_text_content_as_output() {
     let mut sb = ScrollbackState::new();
     let mut tracker = AcpUpdateTracker::new();
-    tracker.handle_update(tool_call("tc1", acp::ToolKind::Execute, "ls"), &meta(), &mut sb);
+    tracker.handle_update(
+        tool_call("tc1", acp::ToolKind::Execute, "ls"),
+        &meta(),
+        &mut sb,
+    );
     tracker.handle_update(
         acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from("tc1")),
@@ -5421,7 +5433,11 @@ fn external_execute_completion_uses_text_content_as_output() {
 fn external_execute_terminal_output_deltas_accumulate() {
     let mut sb = ScrollbackState::new();
     let mut tracker = AcpUpdateTracker::new();
-    tracker.handle_update(tool_call("tc1", acp::ToolKind::Execute, "seq 3"), &meta(), &mut sb);
+    tracker.handle_update(
+        tool_call("tc1", acp::ToolKind::Execute, "seq 3"),
+        &meta(),
+        &mut sb,
+    );
     for (data, status) in [
         ("1\n", acp::ToolCallStatus::InProgress),
         ("2\n", acp::ToolCallStatus::InProgress),
@@ -5444,4 +5460,130 @@ fn external_execute_terminal_output_deltas_accumulate() {
     }
     assert_eq!(execute_output(&sb).as_deref(), Some("1\n2\n3\n"));
     assert_eq!(sb.len(), 1);
+}
+
+/// A later terminal delta must not wipe stdout, and a `_meta` that omits `pi` must
+/// not drop `parentToolCallId` that an earlier event carried.
+#[test]
+fn terminal_output_merge_keeps_parent_and_accumulates() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let parent_meta = serde_json::json!({ "pi": { "parentToolCallId": "parent-1" } })
+        .as_object()
+        .cloned()
+        .unwrap();
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc1")), "seq 3")
+                .kind(acp::ToolKind::Execute)
+                .status(acp::ToolCallStatus::Pending)
+                .meta(Some(parent_meta)),
+        ),
+        &meta(),
+        &mut sb,
+    );
+    for (data, status) in [
+        ("1\n", acp::ToolCallStatus::InProgress),
+        ("2\n", acp::ToolCallStatus::InProgress),
+        ("3\n", acp::ToolCallStatus::Completed),
+    ] {
+        let mut meta_obj = terminal_meta(data);
+        if status == acp::ToolCallStatus::Completed {
+            meta_obj.insert("terminal_exit".into(), serde_json::json!({ "exitCode": 0 }));
+        }
+        tracker.handle_update(
+            acp::SessionUpdate::ToolCallUpdate(
+                acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new(Arc::from("tc1")),
+                    acp::ToolCallUpdateFields::new().status(Some(status)),
+                )
+                .meta(Some(meta_obj)),
+            ),
+            &meta(),
+            &mut sb,
+        );
+    }
+    assert_eq!(execute_output(&sb).as_deref(), Some("1\n2\n3\n"));
+    let header = match &sb.get(0).unwrap().block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(exec)) => {
+            exec.header_display.clone().unwrap_or_default()
+        }
+        other => panic!("expected execute block, got {other:?}"),
+    };
+    assert!(
+        header.contains("↳ parent-1"),
+        "parent meta must survive terminal updates, header={header:?}"
+    );
+    assert!(
+        header.contains("completed"),
+        "header must show the latest status, header={header:?}"
+    );
+}
+
+fn tool_text(text: &str) -> Vec<acp::ToolCallContent> {
+    vec![acp::ToolCallContent::from(text)]
+}
+
+fn other_summary_at(sb: &ScrollbackState, index: usize) -> String {
+    match &sb.get(index).unwrap().block {
+        RenderBlock::ToolCall(ToolCallBlock::Other(other)) => other.summary.clone(),
+        other => panic!("expected Other block, got {other:?}"),
+    }
+}
+
+/// The codemode header copies `Model calls:` out of the tool text. A later
+/// `tool_call_update` that changes that line must replace the header, not leave
+/// the first amount on screen.
+#[test]
+fn model_calls_header_refreshes_on_tool_call_update() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(acp::ToolCallId::new(Arc::from("jev")), "codemode")
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending),
+        ),
+        &meta(),
+        &mut sb,
+    );
+    let update = |text: &str, status: acp::ToolCallStatus| {
+        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("jev")),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(status))
+                .content(Some(tool_text(text))),
+        ))
+    };
+    tracker.handle_update(
+        update("script\nModel calls: $0.0", acp::ToolCallStatus::InProgress),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(other_summary_at(&sb, 0), "Model calls: $0.0");
+    tracker.handle_update(
+        update(
+            "script\nModel calls: $0.0\nModel calls: $999",
+            acp::ToolCallStatus::InProgress,
+        ),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(
+        other_summary_at(&sb, 0),
+        "Model calls: $999",
+        "an in-flight update must replace the header with the latest line"
+    );
+    tracker.handle_update(
+        update("script\nModel calls: $999", acp::ToolCallStatus::Completed),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(other_summary_at(&sb, 0), "Model calls: $999");
+    match &sb.get(0).unwrap().block {
+        RenderBlock::ToolCall(ToolCallBlock::Other(other)) => {
+            assert_eq!(other.output.as_deref(), Some("script\nModel calls: $999"));
+        }
+        other => panic!("expected Other block, got {other:?}"),
+    }
 }

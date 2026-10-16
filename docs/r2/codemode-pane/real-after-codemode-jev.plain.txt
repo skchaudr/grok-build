@@ -1,11 +1,11 @@
 
-/tmp/acp-replay-real-after-codemode-jev-366870                                                           [Dashboard]
+/tmp/acp-replay-real-after-codemode-jev-489355                                                           [Dashboard]
 
 
-❯ replay real-after-codemode-jev                                                                        1:35 PM
+❯ replay real-after-codemode-jev                                                                        2:31 PM
 
 
-pi v1.3.0                                                                                               1:35 PM
+pi v1.3.0                                                                                               2:31 PM
 ---
 
 ◆ codemode  Model calls: $0.0
@@ -40,10 +40,10 @@ unknown · always-approve ─╯
 
 --- page 1 ---
 
-/tmp/acp-replay-real-after-codemode-jev-366870                                                           [Dashboard]
+/tmp/acp-replay-real-after-codemode-jev-489355                                                           [Dashboard]
 
 
-❯ replay real-after-codemode-jev                                                                        1:35 PM
+❯ replay real-after-codemode-jev                                                                        2:31 PM
 
 
 return item + "=" + result.answers.bucket.choice;
@@ -64,7 +64,7 @@ gamma=third
 
 Model calls: $0.0
 
-alpha=first beta=second gamma=third                                                                     1:35 PM
+alpha=first beta=second gamma=third                                                                     2:31 PM
 
 agent_settled
 
@@ -81,10 +81,10 @@ Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortc
 
 --- page 2 ---
 
-/tmp/acp-replay-real-after-codemode-jev-366870                                                           [Dashboard]
+/tmp/acp-replay-real-after-codemode-jev-489355                                                           [Dashboard]
 
 
-❯ replay real-after-codemode-jev                                                                        1:35 PM
+❯ replay real-after-codemode-jev                                                                        2:31 PM
 
 
 return item + "=" + result.answers.bucket.choice;
@@ -105,7 +105,7 @@ gamma=third
 
 Model calls: $0.0
 
-alpha=first beta=second gamma=third                                                                     1:35 PM
+alpha=first beta=second gamma=third                                                                     2:31 PM
 
 agent_settled
 
@@ -122,10 +122,10 @@ Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortc
 
 --- page 3 ---
 
-/tmp/acp-replay-real-after-codemode-jev-366870                                                           [Dashboard]
+/tmp/acp-replay-real-after-codemode-jev-489355                                                           [Dashboard]
 
 
-❯ replay real-after-codemode-jev                                                                        1:35 PM
+❯ replay real-after-codemode-jev                                                                        2:31 PM
 
 
 return item + "=" + result.answers.bucket.choice;
@@ -146,7 +146,7 @@ gamma=third
 
 Model calls: $0.0
 
-alpha=first beta=second gamma=third                                                                     1:35 PM
+alpha=first beta=second gamma=third                                                                     2:31 PM
 
 agent_settled
 
@@ -163,10 +163,10 @@ Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortc
 
 --- page 4 ---
 
-/tmp/acp-replay-real-after-codemode-jev-366870                                                           [Dashboard]
+/tmp/acp-replay-real-after-codemode-jev-489355                                                           [Dashboard]
 
 
-❯ replay real-after-codemode-jev                                                                        1:35 PM
+❯ replay real-after-codemode-jev                                                                        2:31 PM
 
 
 return item + "=" + result.answers.bucket.choice;
@@ -187,7 +187,7 @@ gamma=third
 
 Model calls: $0.0
 
-alpha=first beta=second gamma=third                                                                     1:35 PM
+alpha=first beta=second gamma=third                                                                     2:31 PM
 
 agent_settled
 
@@ -204,10 +204,10 @@ Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortc
 
 --- page 5 ---
 
-/tmp/acp-replay-real-after-codemode-jev-366870                                                           [Dashboard]
+/tmp/acp-replay-real-after-codemode-jev-489355                                                           [Dashboard]
 
 
-❯ replay real-after-codemode-jev                                                                        1:35 PM
+❯ replay real-after-codemode-jev                                                                        2:31 PM
 
 
 return item + "=" + result.answers.bucket.choice;
@@ -228,7 +228,7 @@ gamma=third
 
 Model calls: $0.0
 
-alpha=first beta=second gamma=third                                                                     1:35 PM
+alpha=first beta=second gamma=third                                                                     2:31 PM
 
 agent_settled
 

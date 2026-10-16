@@ -1,11 +1,11 @@
 
-/tmp/acp-replay-real-after-codemode-fail-396532                                                          [Dashboard]
+/tmp/acp-replay-real-after-codemode-fail-490030                                                          [Dashboard]
 
 
-❯ replay real-after-codemode-fail                                                                       1:55 PM
+❯ replay real-after-codemode-fail                                                                       2:32 PM
 
 
-pi v1.3.0                                                                                               1:55 PM
+pi v1.3.0                                                                                               2:32 PM
 ---
 
 ◆ codemode
@@ -28,7 +28,7 @@ Tool calls made before the failure (they are not undone): bash (ok)
 
 ◆ Run ↳ call_36707 completed call_36707/1 printf '%s%s' FAIL OK1 FAILOK1
 
-Error: boom-after-bash                                                                                  1:55 PM
+Error: boom-after-bash                                                                                  2:32 PM
 
 Run /doctor for details and fixes.
 

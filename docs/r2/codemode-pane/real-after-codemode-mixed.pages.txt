@@ -1,8 +1,8 @@
 
-/tmp/acp-replay-real-after-codemode-mixed-396194                                                         [Dashboard]
+/tmp/acp-replay-real-after-codemode-mixed-489661                                                         [Dashboard]
 
 
-❯ replay real-after-codemode-mixed                                                                      1:55 PM
+❯ replay real-after-codemode-mixed                                                                      2:31 PM
 
 
 ```javascript
@@ -23,7 +23,7 @@ MXBASH2
 
 MXBASH2
 
-MXBASH1:first MXBASH2                                                                                   1:55 PM
+MXBASH1:first MXBASH2                                                                                   2:31 PM
 
 agent_settled
 
@@ -40,10 +40,10 @@ Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortc
 
 --- page 1 ---
 
-/tmp/acp-replay-real-after-codemode-mixed-396194                                                         [Dashboard]
+/tmp/acp-replay-real-after-codemode-mixed-489661                                                         [Dashboard]
 
 
-❯ replay real-after-codemode-mixed                                                                      1:55 PM
+❯ replay real-after-codemode-mixed                                                                      2:31 PM
 
 
 ```javascript
@@ -64,7 +64,7 @@ MXBASH2
 
 MXBASH2
 
-MXBASH1:first MXBASH2                                                                                   1:55 PM
+MXBASH1:first MXBASH2                                                                                   2:31 PM
 
 agent_settled
 
@@ -81,10 +81,10 @@ Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortc
 
 --- page 2 ---
 
-/tmp/acp-replay-real-after-codemode-mixed-396194                                                         [Dashboard]
+/tmp/acp-replay-real-after-codemode-mixed-489661                                                         [Dashboard]
 
 
-❯ replay real-after-codemode-mixed                                                                      1:55 PM
+❯ replay real-after-codemode-mixed                                                                      2:31 PM
 
 
 ```javascript
@@ -105,7 +105,7 @@ MXBASH2
 
 MXBASH2
 
-MXBASH1:first MXBASH2                                                                                   1:55 PM
+MXBASH1:first MXBASH2                                                                                   2:31 PM
 
 agent_settled
 
@@ -122,10 +122,10 @@ Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortc
 
 --- page 3 ---
 
-/tmp/acp-replay-real-after-codemode-mixed-396194                                                         [Dashboard]
+/tmp/acp-replay-real-after-codemode-mixed-489661                                                         [Dashboard]
 
 
-❯ replay real-after-codemode-mixed                                                                      1:55 PM
+❯ replay real-after-codemode-mixed                                                                      2:31 PM
 
 
 ```javascript
@@ -146,7 +146,7 @@ MXBASH2
 
 MXBASH2
 
-MXBASH1:first MXBASH2                                                                                   1:55 PM
+MXBASH1:first MXBASH2                                                                                   2:31 PM
 
 agent_settled
 
@@ -163,10 +163,10 @@ Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortc
 
 --- page 4 ---
 
-/tmp/acp-replay-real-after-codemode-mixed-396194                                                         [Dashboard]
+/tmp/acp-replay-real-after-codemode-mixed-489661                                                         [Dashboard]
 
 
-❯ replay real-after-codemode-mixed                                                                      1:55 PM
+❯ replay real-after-codemode-mixed                                                                      2:31 PM
 
 
 ```javascript
@@ -187,7 +187,7 @@ MXBASH2
 
 MXBASH2
 
-MXBASH1:first MXBASH2                                                                                   1:55 PM
+MXBASH1:first MXBASH2                                                                                   2:31 PM
 
 agent_settled
 
@@ -204,10 +204,10 @@ Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortc
 
 --- page 5 ---
 
-/tmp/acp-replay-real-after-codemode-mixed-396194                                                         [Dashboard]
+/tmp/acp-replay-real-after-codemode-mixed-489661                                                         [Dashboard]
 
 
-❯ replay real-after-codemode-mixed                                                                      1:55 PM
+❯ replay real-after-codemode-mixed                                                                      2:31 PM
 
 
 ```javascript
@@ -228,7 +228,7 @@ MXBASH2
 
 MXBASH2
 
-MXBASH1:first MXBASH2                                                                                   1:55 PM
+MXBASH1:first MXBASH2                                                                                   2:31 PM
 
 agent_settled
 
@@ -245,10 +245,10 @@ Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortc
 
 --- page 6 ---
 
-/tmp/acp-replay-real-after-codemode-mixed-396194                                                         [Dashboard]
+/tmp/acp-replay-real-after-codemode-mixed-489661                                                         [Dashboard]
 
 
-❯ replay real-after-codemode-mixed                                                                      1:55 PM
+❯ replay real-after-codemode-mixed                                                                      2:31 PM
 
 
 ```javascript
@@ -269,7 +269,7 @@ MXBASH2
 
 MXBASH2
 
-MXBASH1:first MXBASH2                                                                                   1:55 PM
+MXBASH1:first MXBASH2                                                                                   2:31 PM
 
 agent_settled
 
@@ -286,10 +286,10 @@ Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortc
 
 --- page 7 ---
 
-/tmp/acp-replay-real-after-codemode-mixed-396194                                                         [Dashboard]
+/tmp/acp-replay-real-after-codemode-mixed-489661                                                         [Dashboard]
 
 
-❯ replay real-after-codemode-mixed                                                                      1:55 PM
+❯ replay real-after-codemode-mixed                                                                      2:31 PM
 
 
 ```javascript
@@ -310,7 +310,7 @@ MXBASH2
 
 MXBASH2
 
-MXBASH1:first MXBASH2                                                                                   1:55 PM
+MXBASH1:first MXBASH2                                                                                   2:31 PM
 
 agent_settled
 
