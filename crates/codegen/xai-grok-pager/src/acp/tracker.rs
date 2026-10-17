@@ -385,6 +385,8 @@ pub struct AcpUpdateTracker {
     /// Tool-call ids that were still pending or in progress when cancel was sent.
     /// Only these may be labelled cancelled if they later close as `Failed`.
     cancel_inflight: HashSet<String>,
+    /// Rows a user cancel closed while their call was in flight, so the late ACP close still lands on its row.
+    cancel_drained: HashMap<String, (EntryId, acp::ToolCall)>,
     /// Updates merge into the stashed call and are otherwise dropped — except a Failed terminal status, which renders
     /// the stashed call: the surface that justified suppression (todo pane, subagent block, tasks pane) never appears
     /// for a call that failed.
@@ -527,6 +529,24 @@ impl AcpUpdateTracker {
     pub fn clear_user_cancel(&mut self) {
         self.cancel_requested = false;
         self.cancel_inflight.clear();
+        self.cancel_drained.clear();
+    }
+    /// User cancel. Calls still in flight read as cancelled before the turn drain closes their rows.
+    /// The ids stay armed, so a late `Completed` restores the real result and a late `Failed` stays cancelled.
+    pub fn cancel_turn(&mut self, scrollback: &mut ScrollbackState) {
+        self.note_user_cancel();
+        for (id, pending) in &self.pending_tools {
+            let Some(entry_id) = pending.entry_id else {
+                continue;
+            };
+            let Some(block) = scrollback.get_by_id(entry_id).map(|e| mark_cancelled(e.block.clone())) else {
+                continue;
+            };
+            scrollback.replace_tool_block(entry_id, block, pending.started_at);
+            self.cancel_drained
+                .insert(id.clone(), (entry_id, pending.base.clone()));
+        }
+        self.finish_turn(scrollback);
     }
     /// Build the scrollback block for a tool call. A `Failed` close is cancelled
     /// only when this call was still in flight at `session/cancel`.
@@ -1548,6 +1568,10 @@ impl AcpUpdateTracker {
             } else {
                 self.finish_completed_tool(block, scrollback, is_replay);
             }
+            true
+        } else if let Some((entry_id, base)) = self.cancel_drained.remove(&tc_id) {
+            let block = self.tool_block(&merge_tool_call_update(base, tcu));
+            scrollback.replace_tool_block(entry_id, block, None);
             true
         } else {
             self.orphan_updates.insert(tc_id, tcu);

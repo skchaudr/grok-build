@@ -637,9 +637,6 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         );
 
         // Before `finish_turn`: the blocked-prompt requeue reads `in_flight_prompt`, which finish_turn clears
-        if was_cancelling {
-            agent.scrollback.relabel_cancelled_tools();
-        }
         crate::app::turn_completion::note_hook_blocked_turn(
             agent,
             Some(pending.prompt_id.as_str()),

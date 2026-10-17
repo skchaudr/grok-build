@@ -145,3 +145,14 @@ Opus, 07:10 UTC, binding. Acknowledged here; it was not in the worklog before th
 5. A line that fakes, stubs, mocks, or replays in place of the real Pi run is an instant reject. Deadline 10:00 UTC.
 
 Checkpoint `9c0390e6` is the live captures plus a cancel label that still walks every Failed row. That walk is the thing item 2 forbids. Two Composer subagents are on the renderer and the recorder redaction. The pager fix stays here.
+
+## 2026-10-17 09:35 UTC — Opus finisher (cancel fix live)
+
+Root cause of the ineffective `d012abbb` fix: `AgentSession::cancel_turn` ran `tracker.finish_turn` before `emit_cancel_turn` → `note_user_cancel`. That drained the parent codemode and the sleep from `pending_tools` and closed their rows. The armed set was empty, and the late `Failed` updates became orphans. `relabel_cancelled_tools` (which only touched rows still running) never matched anything.
+
+Fix: `AcpUpdateTracker::cancel_turn` arms from `pending_tools`, marks those rows cancelled, and keeps `(entry, base)` for each one before the drain. A late update for an armed id lands on its row through `tool_block`: `Failed` stays cancelled, `Completed` restores the real result. `clear_user_cancel` empties the map at the next turn start. `relabel_cancelled_tools` and its two call sites are removed.
+
+Live, stock `/usr/bin/pi-acp` 0.0.33 → Pi 1.3.0, `gemini-3.8-flash`, agent dir `mktemp -d` mode 700 in `/tmp`. Wire order is the same at both sizes: read `/2` Failed → `session/cancel` → parent Failed → `stopReason:"cancelled"` → sleep `/3` Failed.
+- before (`pager-before`, r2 sources, sha256 `fd25a975…`): `Run sleep 25` reads as success; codemode is unmarked.
+- after (sha256 `7fb3b40d…`): 120×40 shows `codemode cancelled`, `Cancelled sleep 25`, and `Read 1 file · 1 failed` still failed. 80×24 shows `Cancelled sleep 25` and `Read 1 file · 1 failed`.
+- 80×24 shows no codemode parent row in either the before or the after capture. This predates the fix and is not a blocker.

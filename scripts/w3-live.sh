@@ -19,7 +19,7 @@ esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PAGER="${ACP_PAGER:-$ROOT/target/release/xai-grok-pager}"
 PI_CLI="${PI_ACP_PI_COMMAND:-$HOME/wt/pi-acp-r2-recorder/.pi13/package/dist/bundle/cli.js}"
-AGENT_DIR="${PI_CODING_AGENT_DIR:-/tmp/pi-w3-agent}"
+AGENT_DIR="${PI_CODING_AGENT_DIR:?set PI_CODING_AGENT_DIR to a mktemp -d dir outside every worktree}"
 WORK="${W3_WORKDIR:-$ROOT/docs/w3/codemode-real-pi/sandbox}"
 OUT="$ROOT/docs/w3/codemode-real-pi"
 SESSION="w3-gb-${NAME}"
@@ -37,7 +37,10 @@ if [[ ! -x "$PI_CLI" ]]; then
   exit 1
 fi
 
+rm -rf "$GROK_HOME_DIR"
 mkdir -p "$WORK" "$OUT" "$GROK_HOME_DIR"
+# A stale capture from an earlier run must never stand in for this one.
+rm -f "$STREAM_ANSI" "$DONE_ANSI" "${STREAM_ANSI%.ansi}.png" "${DONE_ANSI%.ansi}.png"
 : >"$DEBUG_FILE"
 
 if [[ "$MODE" == "baseline" ]]; then
@@ -45,7 +48,7 @@ if [[ "$MODE" == "baseline" ]]; then
   PROMPT=$'Use the codemode tool exactly once. Do not call bash, read, edit, or write yourself.\n\nPass this script as the code argument, unchanged:\n\nconst a = await tools.bash({ command: "printf \'%s%s%s\' W3 NES TED1" });\nawait tools.bash({ command: "sleep 6" });\nconst b = await tools.bash({ command: "printf \'%s%s%s\' W3 NES TED2" });\nreturn a.output + "\\n" + b.output;\n\nAfter the tool returns, reply with only the script output. If the tool returns an error, stop and quote the error. Do not retry. No other tools.'
   FINISH_NEEDLE="W3NESTED2"
 else
-  PROMPT=$'Use the codemode tool exactly once. Do not call bash, read, edit, or write yourself.\n\nPass this script as the code argument, unchanged:\n\nconst a = await tools.bash({ command: "printf \'%s%s\' W3 CAN" });\nawait tools.bash({ command: "sleep 25" });\nreturn "not-the-cancel-marker";\n\nDo not retry if the tool is cancelled.'
+  PROMPT=$'Use the codemode tool exactly once. Do not call bash, read, edit, or write yourself.\n\nPass this script as the code argument, unchanged:\n\nconst a = await tools.bash({ command: "printf \'%s%s\' W3 CAN" });\nlet r = "none";\ntry { await tools.read({ path: "/nonexistent/w3-missing.txt" }); } catch (e) { r = "read-failed"; }\nawait tools.bash({ command: "sleep 25" });\nreturn "not-the-cancel-marker";\n\nDo not retry if the tool is cancelled.'
   FINISH_NEEDLE="cancelled"
 fi
 
@@ -80,6 +83,10 @@ trap cleanup EXIT
 
 capture() {
   tmux capture-pane -e -p -t "$SESSION" 2>/dev/null || true
+}
+# Text only, for matching: SGR codes split words like "Run" and "sleep".
+plain() {
+  tmux capture-pane -p -t "$SESSION" 2>/dev/null || true
 }
 
 ready=0
@@ -131,17 +138,28 @@ while ((SECONDS < deadline)); do
     fi
   fi
   if [[ "$MODE" == "cancel" && "$cancelled" -eq 0 ]]; then
-    if [[ "$cap" == *"Run sleep"* ]]; then
-      printf '%s\n' "$cap" >"$STREAM_ANSI"
+    if [[ "$(plain)" == *"Run sleep"* ]]; then
+      capture >"$STREAM_ANSI"
       # Pager cancel key is Ctrl+C when the composer is empty.
       tmux send-keys -t "$SESSION" C-c
       sleep 0.6
-      cap2="$(capture)"
+      cap2="$(plain)"
       if [[ "$cap2" == *"Stop running"* ]]; then
         tmux send-keys -t "$SESSION" Enter
       fi
       cancelled=1
-      sleep 3
+      # Wait for the turn to end: the [stop] chip leaves the status bar.
+      idle=0
+      wait_end=$((SECONDS + 60))
+      while ((SECONDS < wait_end)); do
+        sleep 0.5
+        if [[ "$(plain)" != *"[stop]"* ]]; then
+          idle=$((idle + 1))
+          ((idle >= 2)) && break
+        else
+          idle=0
+        fi
+      done
     fi
   fi
   if [[ "$MODE" == "baseline" && "$cap" == *"$FINISH_NEEDLE"* ]]; then
