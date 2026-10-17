@@ -156,3 +156,7 @@ Live, stock `/usr/bin/pi-acp` 0.0.33 → Pi 1.3.0, `gemini-3.8-flash`, agent dir
 - before (`pager-before`, r2 sources, sha256 `fd25a975…`): `Run sleep 25` reads as success; codemode is unmarked.
 - after (sha256 `7fb3b40d…`): 120×40 shows `codemode cancelled`, `Cancelled sleep 25`, and `Read 1 file · 1 failed` still failed. 80×24 shows `Cancelled sleep 25` and `Read 1 file · 1 failed`.
 - 80×24 shows no codemode parent row in either the before or the after capture. This predates the fix and is not a blocker.
+
+## 2026-10-17 11:05 UTC — review fixes
+
+Follow mode on a short viewport was pinning the tail and hiding the codemode parent above its children. `reveal_clipped_parent_tool` pulls that one- or two-line parent back on screen. Agent message text replaces `$HOME` with `~` before it is painted. Live 80×24 (`fix80-done.png`): `codemode cancelled`, `Cancelled sleep 25`, `Read 1 file · 1 failed`, no `/home/`. Committed before-captures now show `~/.pi/agent/extensions/…`.

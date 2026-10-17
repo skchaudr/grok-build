@@ -1079,6 +1079,47 @@ impl ScrollbackState {
             // Normal follow: scroll to bottom, unconditionally
             // max_scroll_offset() is 0 when the content fits, which also heals an offset left wedged past the end by a shrink
             self.scroll_offset = self.max_scroll_offset();
+            // A short viewport pins the tail and hides the codemode parent that sits one row above its children.
+            self.reveal_clipped_parent_tool();
+        }
+    }
+
+    /// If follow mode clipped a one- or two-line tool row and the next row is also a tool, pull that parent back on screen.
+    fn reveal_clipped_parent_tool(&mut self) {
+        let top = self.scroll_offset;
+        if top == 0 {
+            return;
+        }
+        let Some(cache) = self.layout_cache.as_ref() else {
+            return;
+        };
+        let n = cache.virtual_y.len().min(cache.entries.len());
+        let mut found: Option<(usize, usize)> = None;
+        for i in 0..n {
+            let y = cache.virtual_y[i];
+            let height = cache.entries[i].height;
+            if height == 0 || height > 2 {
+                continue;
+            }
+            let bottom = y + height as usize;
+            if y < top && bottom >= top && top - y <= 2 {
+                found = Some((i, y));
+                break;
+            }
+        }
+        let Some((i, y)) = found else {
+            return;
+        };
+        let is_tool = self
+            .entries
+            .get_index(i)
+            .is_some_and(|(_, entry)| matches!(entry.block, RenderBlock::ToolCall(_)));
+        let next_is_tool = self
+            .entries
+            .get_index(i + 1)
+            .is_some_and(|(_, entry)| matches!(entry.block, RenderBlock::ToolCall(_)));
+        if is_tool && next_is_tool {
+            self.scroll_offset = y;
         }
     }
 }
@@ -1088,6 +1129,31 @@ mod tests {
     use super::super::test_util::*;
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn follow_keeps_a_clipped_parent_tool_on_a_short_viewport() {
+        let mut state = ScrollbackState::new();
+        for i in 0..40 {
+            state.push_block(agent_block(&format!("startup line {i}")));
+        }
+        state.push_block(user_block("do the thing"));
+        state.push_block(tool_block("codemode"));
+        state.push_block(tool_block("printf"));
+        state.push_block(tool_block("sleep 25"));
+        let parent = state.len() - 3;
+        state.enable_follow();
+        state.prepare_layout(80, 10);
+        let y = state
+            .layout_cache
+            .as_ref()
+            .and_then(|cache| cache.virtual_y.get(parent).copied())
+            .expect("parent y");
+        assert!(
+            state.scroll_offset() <= y,
+            "parent row scrolled off: y={y} scroll={}",
+            state.scroll_offset()
+        );
+    }
 
     #[test]
     fn follow_new_turn_scroll_policies() {

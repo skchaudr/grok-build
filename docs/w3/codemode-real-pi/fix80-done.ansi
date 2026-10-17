@@ -1,0 +1,24 @@
+
+  /t/w3-cursor-review/work                                         [Dashboard]
+
+
+     ❯ Use the codemode tool exactly once. Do not call bash, read,  11:03 AM
+       edit, or write yourself.                                                █
+        …                                                                      █
+                                                                               █
+                                                                               █
+                                                                               █
+     ◆ [1;2mcodemode cancelled[0m                                                      █
+     ◆ [1;2mRun [0;2mprintf '%s%s' W3 CAN[0m                                                █
+     ◈ [1mRead 1 file[0m · 1 failed                                                  █
+     ◆ [1;2mCancelled [0;2msleep 25[0m                                                      █
+                                                                               █
+     [2mTurn cancelled in 2.2s.[0m                                                   █
+                                                                               █
+
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                        │
+  ╰───── [2mgoogle-antigravity/Gemini 3.8 Flash (Antigravity)[0m · [2malways-approve[0m ─╯
+
+  [1mShift+Tab[0;2m:mode  │  [0;1mCtrl+x[0;2m:shortcuts[0m
+
