@@ -123,3 +123,7 @@ Needle `old-score` with blob `57262ee5` (before = existing pinned-pager plains, 
 - codemode-fail 3/5 → 5/5
 
 Pane `new-score` is 0/N. `parent_link` and `call_cost` are proven on the JSONL `--strict` run above. The pane proves the nest marker and the `Model calls:` header, which are not needles.
+
+## 2026-10-17 07:11 UTC — vision canary
+
+Opened `/tmp/claude-1001/-home-sab-mini-sab-orchestrate/d1bace19-a6df-4543-a24b-9b8a119ebe99/scratchpad/canary.png` before any live pane capture. Dark field, white "VISION CANARY", blue block. Token: `4TWNESYT`.

@@ -1,0 +1,7 @@
+KNOWN-SCREEN-W3
+[31mRED[0m [32mGREEN[0m [34mBLUE[0m [33mYELLOW[0m
+[38;5;196m████ 256-RED[0m  [38;5;46m████ 256-GREEN[0m  [38;5;21m████ 256-BLUE[0m
+[38;2;255;128;0m████ TRUECOLOR-ORANGE[0m  [38;2;0;180;160m████ TRUECOLOR-TEAL[0m
+[1mBOLD[0m  [2mDIM[0m  [7mREVERSE[0m
+[48;5;22m[97m  256-BG dark green  [0m
+[48;2;40;40;120m[38;2;255;220;80m  truecolor bg navy / fg gold  [0m
