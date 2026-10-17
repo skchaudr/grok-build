@@ -7,20 +7,20 @@
 [48;2;20;20;20m  [48;2;36;36;36m   [38;2;200;200;200m  [38;2;225;225;225mPass this script as the code argument, unchanged: …[39m                                                            [48;2;20;20;20m [48;2;17;17;17m
 [48;2;20;20;20m  [48;2;36;36;36m                                                                                                                    [48;2;20;20;20m [48;2;17;17;17m
 [48;2;20;20;20m                                                                                                                       [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/orca-agent-status.ts[39m                                                        [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/orca-prefill.ts[39m                                                             [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/orca-titlebar-spinner.ts[39m                                                    [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/paste-markers.ts[39m                                                            [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/pi-instance-registry.ts[39m                                                     [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/recoverability-coverage.ts[39m                                                  [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/recoverability-gate.ts[39m                                                      [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/sentry-observe.ts[39m                                                           [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/session-recap.ts[39m                                                            [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/session-tagger.ts[39m                                                           [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/session-viewer-stats.ts[39m                                                     [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/stop-and-checkpoint.ts[39m                                                      [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/task-packet.ts[39m                                                              [48;2;17;17;17m
-[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m/home/sab-mini/.pi/agent/extensions/workmux-status.ts[39m                                                           [38;2;25;25;25m[48;2;25;25;25m█
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/orca-agent-status.ts[39m                                                        [48;2;17;17;17m
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/orca-prefill.ts[39m                                                             [48;2;17;17;17m
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/orca-titlebar-spinner.ts[39m                                                    [48;2;17;17;17m
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/paste-markers.ts[39m                                                            [48;2;17;17;17m
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/pi-instance-registry.ts[39m                                                     [48;2;17;17;17m
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/recoverability-coverage.ts[39m                                                  [48;2;17;17;17m
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/recoverability-gate.ts[39m                                                      [48;2;17;17;17m
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/sentry-observe.ts[39m                                                           [48;2;17;17;17m
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/session-recap.ts[39m                                                            [48;2;17;17;17m
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/session-tagger.ts[39m                                                           [48;2;17;17;17m
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/session-viewer-stats.ts[39m                                                     [48;2;17;17;17m
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/stop-and-checkpoint.ts[39m                                                      [48;2;17;17;17m
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/task-packet.ts[39m                                                              [48;2;17;17;17m
+[48;2;20;20;20m     [38;2;108;108;108m• [38;2;200;200;200m~/.pi/agent/extensions/workmux-status.ts[39m                                                           [38;2;25;25;25m[48;2;25;25;25m█
 [39m[48;2;20;20;20m                                                                                                                       [38;2;25;25;25m[48;2;25;25;25m█
 [39m[48;2;20;20;20m     [38;2;108;108;108m◆ [1mcodemode[0m[48;2;20;20;20m                                                                                                        [38;2;25;25;25m[48;2;25;25;25m█
 [39m[48;2;20;20;20m     [38;2;89;113;63m◆[38;2;158;206;106m [1m[38;2;108;108;108mRun [0m[38;2;108;108;108m[48;2;20;20;20mprintf '%s%s' W3 CAN[39m                                                                                        [38;2;25;25;25m[48;2;25;25;25m█

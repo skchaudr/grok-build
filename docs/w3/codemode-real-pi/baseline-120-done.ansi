@@ -7,19 +7,19 @@
        Pass this script as the code argument, unchanged: …
 
 
-     • /home/sab-mini/.pi/agent/extensions/paste-markers.ts
-     • /home/sab-mini/.pi/agent/extensions/pi-instance-registry.ts
-     • /home/sab-mini/.pi/agent/extensions/recoverability-coverage.ts
-     • /home/sab-mini/.pi/agent/extensions/recoverability-gate.ts
-     • /home/sab-mini/.pi/agent/extensions/sentry-observe.ts
-     • /home/sab-mini/.pi/agent/extensions/session-recap.ts
-     • /home/sab-mini/.pi/agent/extensions/session-tagger.ts
-     • /home/sab-mini/.pi/agent/extensions/session-viewer-stats.ts
-     • /home/sab-mini/.pi/agent/extensions/stop-and-checkpoint.ts
-     • /home/sab-mini/.pi/agent/extensions/task-packet.ts
-     • /home/sab-mini/.pi/agent/extensions/workmux-status.ts
-     • /home/sab-mini/.pi/extensions/pi-provider-antigravity
-     • /home/sab-mini/.pi/extensions/pi-antigravity-gemini36
+     • ~/.pi/agent/extensions/paste-markers.ts
+     • ~/.pi/agent/extensions/pi-instance-registry.ts
+     • ~/.pi/agent/extensions/recoverability-coverage.ts
+     • ~/.pi/agent/extensions/recoverability-gate.ts
+     • ~/.pi/agent/extensions/sentry-observe.ts
+     • ~/.pi/agent/extensions/session-recap.ts
+     • ~/.pi/agent/extensions/session-tagger.ts
+     • ~/.pi/agent/extensions/session-viewer-stats.ts
+     • ~/.pi/agent/extensions/stop-and-checkpoint.ts
+     • ~/.pi/agent/extensions/task-packet.ts
+     • ~/.pi/agent/extensions/workmux-status.ts
+     • ~/.pi/extensions/pi-provider-antigravity
+     • ~/.pi/extensions/pi-antigravity-gemini36
                                                                                                                        █
      ◆ [1;2mcodemode[0m                                                                                                        █
      ◆ [1;2mRun [0;2mprintf '%s%s%s' W3 NES TED1[0m                                                                                 █

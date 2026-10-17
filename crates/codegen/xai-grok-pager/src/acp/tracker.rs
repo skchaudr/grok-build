@@ -1197,7 +1197,9 @@ impl AcpUpdateTracker {
         scrollback: &mut ScrollbackState,
     ) -> bool {
         self.finish_thinking(scrollback);
-        let text = extract_text_from_content(&chunk.content);
+        let raw = extract_text_from_content(&chunk.content);
+        let home = home_dir();
+        let text = redact_display_home(&raw, &home);
         if text.is_empty() {
             return false;
         }
@@ -1974,6 +1976,19 @@ fn parent_tool_call_id(tc: &acp::ToolCall) -> Option<&str> {
         .get("parentToolCallId")?
         .as_str()
         .filter(|id| !id.is_empty())
+}
+
+fn home_dir() -> String {
+    std::env::var("HOME").unwrap_or_default()
+}
+
+/// The pane must not paint `/home/<user>/…`. A startup listing of extension files is the case that
+/// showed up in the wave-3 captures. `~` keeps the rest of the path.
+fn redact_display_home<'a>(text: &'a str, home: &str) -> std::borrow::Cow<'a, str> {
+    if home.len() <= 1 || !text.contains(home) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(text.replace(home, "~"))
 }
 
 /// ACP `Failed` after a user cancel is not a tool failure. The collapsed title has to say cancelled.
@@ -3266,6 +3281,19 @@ fn make_relative_path(path: &str) -> String {
     }
     path.to_string()
 }
+#[cfg(test)]
+mod home_redact_tests {
+    use super::redact_display_home;
+
+    #[test]
+    fn home_prefix_becomes_tilde() {
+        let text = "/home/someone/.pi/agent/extensions/paste-markers.ts";
+        let out = redact_display_home(text, "/home/someone");
+        assert_eq!(out, "~/.pi/agent/extensions/paste-markers.ts");
+        assert!(!out.contains("/home/someone"));
+    }
+}
+
 #[cfg(test)]
 #[path = "tracker_tests.rs"]
 mod tests;
