@@ -160,3 +160,19 @@ Live, stock `/usr/bin/pi-acp` 0.0.33 → Pi 1.3.0, `gemini-3.8-flash`, agent dir
 ## 2026-10-17 11:05 UTC — review fixes
 
 Follow mode on a short viewport was pinning the tail and hiding the codemode parent above its children. `reveal_clipped_parent_tool` pulls that one- or two-line parent back on screen. Agent message text replaces `$HOME` with `~` before it is painted. Live 80×24 (`fix80-done.png`): `codemode cancelled`, `Cancelled sleep 25`, `Read 1 file · 1 failed`, no `/home/`. Committed before-captures now show `~/.pi/agent/extensions/…`.
+
+# WORKLOG — r2/fleet-session
+
+Host: `khoj-38w` (unix user `sab-mini`). Worktree `/home/sab-mini/wt/grok-build-r2`, branch `r2/fleet-session` at `541561c3` when the session started.
+
+## 2026-10-16 read map
+
+- Read `~/.dsh/briefs/SCOUT-grok-build-pi-2026-10-16.md`.
+- Decided: follow the three milestones in order. Do not re-survey. Correct the map where it is wrong.
+
+## 2026-10-16 merge W1–W3
+
+- Ran `hostname` → `khoj-38w`.
+- Ran `git merge --no-edit` of `hard/w1-cancel-agentaware`, `hard/w2-idle-completion`, `hard/w3-steer-gb`.
+- Output: `Already up to date.` for each (exit 0). Tips `83937867`, `e4658698`, `6bb370bd` are ancestors of HEAD via `0b38d531` Merge hard/combined.
+- Assumption: no OBSERVATIONS.md conflict is left to resolve because the combined merge already landed on this history. Corrected that row in the scout brief in place. Moving on to build and the three live checks.
