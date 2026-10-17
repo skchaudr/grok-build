@@ -1,0 +1,23 @@
+
+  [2mw3/codemode-cancel[0m [2mworktree [0m~/w/g/d/w/codemode-real-pi/sandbox   [Dashboard]
+
+
+     ❯ Use the codemode tool exactly once. Do not call bash, read,   7:46 AM
+       edit, or write yourself.
+        …
+
+
+     ◆ [1;2mcodemode[0m
+     ◆ [1;2mRun [0;2mprintf '%s%s' W3 CAN[0m
+     ◆ [1;2mRun [0;2msleep 25[0m
+                                                                               █
+
+    ⠋ Run codemode 0.1s                                         1.6s [↓][stop]
+
+   Tight on space? Try [1m/compact-mode[0m
+
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                        │
+  ╰───── [2mgoogle-antigravity/Gemini 3.8 Flash (Antigravity)[0m · [2malways-approve[0m ─╯
+
+  [1mShift+Tab[0;2m:mode  │  [0;1mCtrl+c[0;2m:cancel  │  [0;1mCtrl+b[0;2m:send to bg  │  [0;1mCtrl+x[0;2m:shortcuts[0m

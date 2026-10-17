@@ -101,6 +101,14 @@ impl ExecuteToolCallBlock {
     pub fn is_success(&self) -> bool {
         self.error.is_none()
     }
+    /// Collapsed title verb. A cancel closes the tool as `Failed` on the wire; the row says cancelled.
+    fn run_prefix(&self) -> &'static str {
+        if self.error.as_deref() == Some("cancelled") {
+            "Cancelled "
+        } else {
+            "Run "
+        }
+    }
 
     /// Get elapsed time in ms. Returns current elapsed if still running, or stored value if finished.
     pub fn elapsed_ms(&self) -> Option<i64> {
@@ -195,8 +203,9 @@ impl ExecuteToolCallBlock {
                 } else {
                     theme.primary().add_modifier(Modifier::BOLD)
                 };
-                let mut spans = vec![Span::styled("Run ".to_string(), label_style)];
-                let mut hang = UnicodeWidthStr::width("Run ");
+                let run = self.run_prefix();
+                let mut spans = vec![Span::styled(run.to_string(), label_style)];
+                let mut hang = UnicodeWidthStr::width(run);
                 if self.bash_mode {
                     spans.push(Span::styled("(user) ".to_string(), theme.muted()));
                     hang += UnicodeWidthStr::width("(user) ");
@@ -288,7 +297,7 @@ impl ExecuteToolCallBlock {
         } else {
             theme.primary().add_modifier(Modifier::BOLD)
         };
-        let mut spans = vec![Span::styled("Run ", label_style)];
+        let mut spans = vec![Span::styled(self.run_prefix().to_string(), label_style)];
         if self.bash_mode {
             // Same style as session event messages (e.g. "Worked for 2.3s")
             spans.push(Span::styled("(user) ", theme.muted()));

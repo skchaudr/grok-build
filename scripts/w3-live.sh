@@ -41,7 +41,8 @@ mkdir -p "$WORK" "$OUT" "$GROK_HOME_DIR"
 : >"$DEBUG_FILE"
 
 if [[ "$MODE" == "baseline" ]]; then
-  PROMPT=$'Use the codemode tool exactly once. Do not call bash, read, edit, or write yourself.\n\nPass this script as the code argument, unchanged:\n\nconst a = await tools.bash({ command: "printf \'%s%s%s\' W3 NES TED1" });\nconst b = await tools.bash({ command: "printf \'%s%s%s\' W3 NES TED2" });\nreturn a.output + "\\n" + b.output;\n\nAfter the tool returns, reply with only the script output. If the tool returns an error, stop and quote the error. Do not retry. No other tools.'
+  # sleep holds the nested bash row in progress long enough to capture.
+  PROMPT=$'Use the codemode tool exactly once. Do not call bash, read, edit, or write yourself.\n\nPass this script as the code argument, unchanged:\n\nconst a = await tools.bash({ command: "printf \'%s%s%s\' W3 NES TED1" });\nawait tools.bash({ command: "sleep 6" });\nconst b = await tools.bash({ command: "printf \'%s%s%s\' W3 NES TED2" });\nreturn a.output + "\\n" + b.output;\n\nAfter the tool returns, reply with only the script output. If the tool returns an error, stop and quote the error. Do not retry. No other tools.'
   FINISH_NEEDLE="W3NESTED2"
 else
   PROMPT=$'Use the codemode tool exactly once. Do not call bash, read, edit, or write yourself.\n\nPass this script as the code argument, unchanged:\n\nconst a = await tools.bash({ command: "printf \'%s%s\' W3 CAN" });\nawait tools.bash({ command: "sleep 25" });\nreturn "not-the-cancel-marker";\n\nDo not retry if the tool is cancelled.'
@@ -123,13 +124,14 @@ while ((SECONDS < deadline)); do
     continue
   fi
   if [[ "$MODE" == "baseline" && "$stream_saved" -eq 0 ]]; then
-    if [[ "$cap" == *"codemode"* || "$cap" == *"W3NESTED1"* ]]; then
+    # The composer draft also contains the word codemode. A tool row is the diamond.
+    if [[ "$cap" == *"◆"* && "$cap" != *"$FINISH_NEEDLE"* ]]; then
       printf '%s\n' "$cap" >"$STREAM_ANSI"
       stream_saved=1
     fi
   fi
   if [[ "$MODE" == "cancel" && "$cancelled" -eq 0 ]]; then
-    if [[ "$cap" == *"codemode"* || "$cap" == *"sleep"* || "$cap" == *"W3CAN"* ]]; then
+    if [[ "$cap" == *"Run sleep"* ]]; then
       printf '%s\n' "$cap" >"$STREAM_ANSI"
       # Pager cancel key is Ctrl+C when the composer is empty.
       tmux send-keys -t "$SESSION" C-c
@@ -139,6 +141,7 @@ while ((SECONDS < deadline)); do
         tmux send-keys -t "$SESSION" Enter
       fi
       cancelled=1
+      sleep 3
     fi
   fi
   if [[ "$MODE" == "baseline" && "$cap" == *"$FINISH_NEEDLE"* ]]; then
@@ -147,7 +150,7 @@ while ((SECONDS < deadline)); do
     break
   fi
   if [[ "$MODE" == "cancel" && "$cancelled" -eq 1 ]]; then
-    sleep 2
+    sleep 1
     capture >"$DONE_ANSI"
     break
   fi

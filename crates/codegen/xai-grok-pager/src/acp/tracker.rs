@@ -380,6 +380,9 @@ pub struct AcpUpdateTracker {
     /// When true, the next UserMessageChunk is a skill body that follows a skill metadata chunk.
     /// It should be silently absorbed so the raw skill instructions don't appear in scrollback.
     skip_next_skill_body: bool,
+    /// The user already sent `session/cancel` for this turn. A tool that then ends `Failed`
+    /// was cut off; the row must read as cancelled. ACP has no cancelled tool status.
+    cancel_requested: bool,
     /// Updates merge into the stashed call and are otherwise dropped — except a Failed terminal status, which renders
     /// the stashed call: the surface that justified suppression (todo pane, subagent block, tasks pane) never appears
     /// for a call that failed.
@@ -510,6 +513,29 @@ impl AcpUpdateTracker {
     }
     fn bump_agent_output_epoch(&mut self) {
         self.agent_output_epoch = self.agent_output_epoch.wrapping_add(1);
+    }
+    /// Arm cancel labelling for tools that close after the user hits the cancel key.
+    pub fn note_user_cancel(&mut self) {
+        self.cancel_requested = true;
+    }
+    /// A new turn must not inherit the previous cancel.
+    pub fn clear_user_cancel(&mut self) {
+        self.cancel_requested = false;
+    }
+    /// Build the scrollback block for a tool call. A `Failed` status after the user
+    /// cancelled the turn is labelled cancelled, not failed.
+    fn tool_block(&self, tc: &acp::ToolCall) -> RenderBlock {
+        let block = tool_call_to_block(
+            tc,
+            self.session_cwd.as_deref(),
+            &self.subagent_labels.borrow(),
+        );
+        let aborted = tool_text_says_aborted(tc);
+        if matches!(tc.status, acp::ToolCallStatus::Failed) && (self.cancel_requested || aborted) {
+            mark_cancelled(block)
+        } else {
+            block
+        }
     }
     /// Record session cwd used when stripping redundant `cd` prefixes in chrome.
     /// No-op when the path is already stored (avoids cloning on every update).
@@ -1504,11 +1530,7 @@ impl AcpUpdateTracker {
         if let Some(mut pending) = self.pending_tools.remove(&tc_id) {
             accumulate_terminal_output(&mut pending.base, tcu.meta.as_ref());
             let merged = merge_tool_call_update(pending.base, tcu);
-            let block = tool_call_to_block(
-                &merged,
-                self.session_cwd.as_deref(),
-                &self.subagent_labels.borrow(),
-            );
+            let block = self.tool_block(&merged);
             if let Some(entry_id) = pending.entry_id {
                 if scrollback.replace_tool_block(entry_id, block, pending.started_at)
                     && let Some(entry) = scrollback.get_by_id(entry_id)
@@ -1922,6 +1944,46 @@ fn parent_tool_call_id(tc: &acp::ToolCall) -> Option<&str> {
         .get("parentToolCallId")?
         .as_str()
         .filter(|id| !id.is_empty())
+}
+
+/// ACP `Failed` after a user cancel is not a tool failure. The collapsed title has to say cancelled.
+fn mark_cancelled(block: RenderBlock) -> RenderBlock {
+    match block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(mut block)) => {
+            block.error = Some("cancelled".to_string());
+            if let Some(header) = block.header_display.as_mut()
+                && let Some(rest) = header.strip_prefix("↳ ")
+                && let Some(idx) = rest.find(" failed ")
+            {
+                let mut next = String::from("↳ ");
+                next.push_str(&rest[..idx]);
+                next.push_str(" cancelled ");
+                next.push_str(&rest[idx + " failed ".len()..]);
+                *header = next;
+            }
+            RenderBlock::ToolCall(ToolCallBlock::Execute(block))
+        }
+        RenderBlock::ToolCall(ToolCallBlock::Other(mut block)) => {
+            if let Some(idx) = block.name.find(" failed ") {
+                block.name.replace_range(idx..idx + " failed ".len(), " cancelled ");
+            } else if !block.name.contains("cancelled") {
+                block.name = format!("{} cancelled", block.name.trim());
+            }
+            block.error = Some("cancelled".to_string());
+            RenderBlock::ToolCall(ToolCallBlock::Other(block))
+        }
+        other => other,
+    }
+}
+
+fn tool_text_says_aborted(tc: &acp::ToolCall) -> bool {
+    let mut blob = content_text(tc);
+    if let Some(raw) = &tc.raw_output {
+        blob.push(' ');
+        blob.push_str(&raw.to_string());
+    }
+    let lower = blob.to_ascii_lowercase();
+    lower.contains("aborted") || lower.contains("cancelled") || lower.contains("canceled")
 }
 
 fn tool_status_label(status: acp::ToolCallStatus) -> &'static str {

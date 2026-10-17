@@ -977,6 +977,51 @@ impl ScrollbackState {
     /// The escalation fires only on that rising edge, so a user's collapse of an already-untrusted block sticks. A row
     /// already awaiting a permission then opens once if the new Edit has hunks, unless the fold is pinned. Stamps
     /// `started_at` on the new block and invalidates the entry's render cache.
+    /// A user cancel closes in-flight tools as ACP `Failed`. The collapsed title still
+    /// says `Run` unless the error is exactly `cancelled`.
+    pub(crate) fn relabel_cancelled_tools(&mut self) {
+        for entry in self.entries.values_mut() {
+            let mark = match &entry.block {
+                RenderBlock::ToolCall(ToolCallBlock::Execute(ex)) => {
+                    entry.is_running || ex.error.is_some()
+                }
+                RenderBlock::ToolCall(ToolCallBlock::Other(other)) => {
+                    entry.is_running || other.error.is_some()
+                }
+                _ => false,
+            };
+            if !mark {
+                continue;
+            }
+            match &mut entry.block {
+                RenderBlock::ToolCall(ToolCallBlock::Execute(ex)) => {
+                    ex.error = Some("cancelled".to_string());
+                    if let Some(header) = ex.header_display.as_mut()
+                        && let Some(rest) = header.strip_prefix("↳ ")
+                        && let Some(idx) = rest.find(" failed ")
+                    {
+                        let mut next = String::from("↳ ");
+                        next.push_str(&rest[..idx]);
+                        next.push_str(" cancelled ");
+                        next.push_str(&rest[idx + " failed ".len()..]);
+                        *header = next;
+                    }
+                }
+                RenderBlock::ToolCall(ToolCallBlock::Other(other)) => {
+                    if let Some(idx) = other.name.find(" failed ") {
+                        other.name.replace_range(idx..idx + " failed ".len(), " cancelled ");
+                    } else if !other.name.contains("cancelled") {
+                        other.name = format!("{} cancelled", other.name.trim());
+                    }
+                    other.error = Some("cancelled".to_string());
+                }
+                _ => {}
+            }
+            entry.is_running = false;
+            entry.invalidate_cache();
+        }
+    }
+
     pub(crate) fn replace_tool_block(
         &mut self,
         entry_id: EntryId,

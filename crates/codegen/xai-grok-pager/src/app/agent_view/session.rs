@@ -747,6 +747,7 @@ impl AgentView {
         self.pending_cancel_resend = None;
         self.prompt_ack = None;
         self.cancel_latency = None;
+        self.session.tracker.clear_user_cancel();
         self.session.start_turn(&mut self.scrollback);
     }
     /// Locally originated prompt or ExecutePlan turn. `note_self` is idempotent.

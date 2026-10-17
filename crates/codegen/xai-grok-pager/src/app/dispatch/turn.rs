@@ -439,6 +439,7 @@ pub(super) fn emit_cancel_turn(
     cancel_subagents: bool,
     rewind_prompt_id: Option<String>,
 ) -> Effect {
+    agent.session.tracker.note_user_cancel();
     let rewind_if_no_output = rewind_prompt_id.is_some();
     let target_prompt_id = if agent.session.state.is_compact_running()
         || matches!(
@@ -636,6 +637,9 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         );
 
         // Before `finish_turn`: the blocked-prompt requeue reads `in_flight_prompt`, which finish_turn clears
+        if was_cancelling {
+            agent.scrollback.relabel_cancelled_tools();
+        }
         crate::app::turn_completion::note_hook_blocked_turn(
             agent,
             Some(pending.prompt_id.as_str()),

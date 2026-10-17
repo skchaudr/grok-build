@@ -1,0 +1,40 @@
+
+  [2mw3/codemode-cancel[0m [2mworktree [0m~/w/g/d/w/codemode-real-pi/sandbox                                           [Dashboard]
+
+
+     ❯ Use the codemode tool exactly once. Do not call bash, read, edit, or write yourself.                  7:16 AM
+
+       Pass this script as the code argument, unchanged: …
+
+
+     • /home/sab-mini/.pi/agent/extensions/paste-markers.ts
+     • /home/sab-mini/.pi/agent/extensions/pi-instance-registry.ts
+     • /home/sab-mini/.pi/agent/extensions/recoverability-coverage.ts
+     • /home/sab-mini/.pi/agent/extensions/recoverability-gate.ts
+     • /home/sab-mini/.pi/agent/extensions/sentry-observe.ts
+     • /home/sab-mini/.pi/agent/extensions/session-recap.ts
+     • /home/sab-mini/.pi/agent/extensions/session-tagger.ts
+     • /home/sab-mini/.pi/agent/extensions/session-viewer-stats.ts
+     • /home/sab-mini/.pi/agent/extensions/stop-and-checkpoint.ts
+     • /home/sab-mini/.pi/agent/extensions/task-packet.ts
+     • /home/sab-mini/.pi/agent/extensions/workmux-status.ts
+     • /home/sab-mini/.pi/extensions/pi-provider-antigravity
+     • /home/sab-mini/.pi/extensions/pi-antigravity-gemini36
+                                                                                                                       █
+     ◆ [1;2mcodemode[0m                                                                                                        █
+     ◆ [1;2mRun [0;2mprintf '%s%s%s' W3 NES TED1[0m                                                                                 █
+     ◆ [1;2mRun [0;2mprintf '%s%s%s' W3 NES TED2[0m                                                                                 █
+                                                                                                                       █
+     W3NESTED1 W3NESTED2                                                                                     7:16 AM   █
+                                                                                                                       █
+     [2mWorked for 3.8s[0m                                                                                                   █
+                                                                                                                       █
+
+   Run [1m/doctor[0m for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰───────────────────────────────────────────── [2mgoogle-antigravity/Gemini 3.8 Flash (Antigravity)[0m · [2malways-approve[0m ─╯
+
+  [1mShift+Tab[0;2m:mode  │  [0;1mCtrl+x[0;2m:shortcuts[0m
+
