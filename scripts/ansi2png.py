@@ -11,7 +11,10 @@ applied when present; a plain capture is just styled lines.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import sys
+import unicodedata
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -23,6 +26,82 @@ FONT_SIZE = 16
 # Default terminal: dark bg, light fg. Captures often leave these implicit.
 DEFAULT_FG = (230, 230, 230)
 DEFAULT_BG = (28, 28, 28)
+
+def display_width(ch: str) -> int:
+    if not ch or ch == " ":
+        return 1
+    if len(ch) != 1:
+        return max(1, sum(display_width(c) for c in ch))
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def is_braille(ch: str) -> bool:
+    return len(ch) == 1 and 0x2800 <= ord(ch) <= 0x28FF
+
+
+def _char_label(ch: str) -> str:
+    cp = ord(ch)
+    try:
+        name = unicodedata.name(ch)
+    except ValueError:
+        name = "?"
+    return f"U+{cp:04X} {name}"
+
+
+class _GlyphIndex:
+    """FreeType cmap lookup for missing-glyph detection."""
+
+    def __init__(self, path: str) -> None:
+        libname = ctypes.util.find_library("freetype")
+        if not libname:
+            raise RuntimeError("libfreetype not found")
+        self._ft = ctypes.CDLL(libname)
+
+        class _FT_LibraryRec(ctypes.Structure):
+            pass
+
+        class _FT_FaceRec(ctypes.Structure):
+            pass
+
+        self._FT_Library = ctypes.POINTER(_FT_LibraryRec)
+        self._FT_Face = ctypes.POINTER(_FT_FaceRec)
+
+        self._ft.FT_Init_FreeType.argtypes = [ctypes.POINTER(self._FT_Library)]
+        self._ft.FT_Init_FreeType.restype = ctypes.c_int
+        self._ft.FT_New_Face.argtypes = [
+            self._FT_Library,
+            ctypes.c_char_p,
+            ctypes.c_long,
+            ctypes.POINTER(self._FT_Face),
+        ]
+        self._ft.FT_New_Face.restype = ctypes.c_int
+        self._ft.FT_Done_Face.argtypes = [self._FT_Face]
+        self._ft.FT_Done_Face.restype = ctypes.c_int
+        self._ft.FT_Done_FreeType.argtypes = [self._FT_Library]
+        self._ft.FT_Done_FreeType.restype = ctypes.c_int
+        self._ft.FT_Get_Char_Index.argtypes = [self._FT_Face, ctypes.c_ulong]
+        self._ft.FT_Get_Char_Index.restype = ctypes.c_uint
+
+        self._library = self._FT_Library()
+        err = self._ft.FT_Init_FreeType(ctypes.byref(self._library))
+        if err:
+            raise RuntimeError(f"FT_Init_FreeType failed: {err}")
+        self._face = self._FT_Face()
+        err = self._ft.FT_New_Face(
+            self._library, path.encode(), 0, ctypes.byref(self._face)
+        )
+        if err:
+            raise RuntimeError(f"FT_New_Face failed for {path}: {err}")
+
+    def has_glyph(self, ch: str) -> bool:
+        if len(ch) != 1:
+            return all(self.has_glyph(c) for c in ch)
+        return self._ft.FT_Get_Char_Index(self._face, ord(ch)) != 0
+
+    def close(self) -> None:
+        self._ft.FT_Done_Face(self._face)
+        self._ft.FT_Done_FreeType(self._library)
+
 
 ANSI16 = [
     (0, 0, 0),
@@ -62,7 +141,17 @@ def dim(color: tuple[int, int, int]) -> tuple[int, int, int]:
 
 
 class Cell:
-    __slots__ = ("ch", "fg", "bg", "bold", "dim", "italic", "underline", "reverse")
+    __slots__ = (
+        "ch",
+        "fg",
+        "bg",
+        "bold",
+        "dim",
+        "italic",
+        "underline",
+        "reverse",
+        "wide_cont",
+    )
 
     def __init__(self) -> None:
         self.ch = " "
@@ -73,6 +162,7 @@ class Cell:
         self.italic = False
         self.underline = False
         self.reverse = False
+        self.wide_cont = False
 
 
 class Pen:
@@ -199,9 +289,17 @@ def parse(text: str) -> list[list[Cell]]:
 
     def put(ch: str) -> None:
         nonlocal col
+        w = display_width(ch)
         ensure(row, col)
         pen.apply_cell(rows[row][col], ch)
-        col += 1
+        if w == 2:
+            ensure(row, col + 1)
+            cont = Cell()
+            pen.apply_cell(cont, " ")
+            cont.ch = " "
+            cont.wide_cont = True
+            rows[row][col + 1] = cont
+        col += w
 
     i = 0
     n = len(text)
@@ -288,6 +386,66 @@ def parse(text: str) -> list[list[Cell]]:
     return rows
 
 
+def collect_chars(rows: list[list[Cell]]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in rows:
+        for cell in line:
+            if cell.wide_cont or cell.ch in ("", " "):
+                continue
+            if cell.ch not in seen:
+                seen.add(cell.ch)
+                out.append(cell.ch)
+    return out
+
+
+def draw_braille(
+    draw: ImageDraw.ImageDraw,
+    x0: int,
+    y0: int,
+    cell_w: int,
+    cell_h: int,
+    fg: tuple[int, int, int],
+    ch: str,
+) -> None:
+    bits = ord(ch) - 0x2800
+    dot_r = max(1, cell_w // 8)
+    anchors = (
+        (0.25, 0.22),
+        (0.25, 0.48),
+        (0.25, 0.74),
+        (0.75, 0.22),
+        (0.75, 0.48),
+        (0.75, 0.74),
+        (0.25, 0.92),
+        (0.75, 0.92),
+    )
+    for i, (ax, ay) in enumerate(anchors):
+        if bits & (1 << i):
+            cx = x0 + int(cell_w * ax)
+            cy = y0 + int(cell_h * ay)
+            draw.ellipse(
+                [cx - dot_r, cy - dot_r, cx + dot_r, cy + dot_r],
+                fill=fg,
+            )
+
+
+def verify_font_glyphs(rows: list[list[Cell]]) -> None:
+    glyph_index = _GlyphIndex(FONT_PATH)
+    try:
+        for ch in collect_chars(rows):
+            if is_braille(ch):
+                continue
+            if not glyph_index.has_glyph(ch):
+                print(
+                    f"missing glyph in {FONT_PATH}: {_char_label(ch)}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+    finally:
+        glyph_index.close()
+
+
 def render(rows: list[list[Cell]], out_path: Path) -> None:
     font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
     bold_font = (
@@ -306,19 +464,27 @@ def render(rows: list[list[Cell]], out_path: Path) -> None:
     draw = ImageDraw.Draw(img)
     for y, line in enumerate(rows):
         for x, cell in enumerate(line):
+            if cell.wide_cont:
+                continue
             fg, bg = cell.fg, cell.bg
             if cell.reverse:
                 fg, bg = bg, fg
             if cell.dim:
                 fg = dim(fg)
+            span = display_width(cell.ch)
             x0, y0 = x * cell_w, y * cell_h
+            span_w = cell_w * span
             if bg != DEFAULT_BG:
-                draw.rectangle([x0, y0, x0 + cell_w, y0 + cell_h], fill=bg)
-            face = bold_font if cell.bold else font
-            draw.text((x0, y0), cell.ch, font=face, fill=fg)
+                draw.rectangle([x0, y0, x0 + span_w, y0 + cell_h], fill=bg)
+            if cell.ch != " ":
+                if is_braille(cell.ch):
+                    draw_braille(draw, x0, y0, cell_w, cell_h, fg, cell.ch)
+                else:
+                    face = bold_font if cell.bold else font
+                    draw.text((x0, y0), cell.ch, font=face, fill=fg)
             if cell.underline:
                 draw.line(
-                    [x0, y0 + cell_h - 3, x0 + cell_w - 1, y0 + cell_h - 3],
+                    [x0, y0 + cell_h - 3, x0 + span_w - 1, y0 + cell_h - 3],
                     fill=fg,
                 )
     img.save(out_path)
@@ -332,6 +498,7 @@ def main() -> None:
     dst = Path(sys.argv[2])
     text = src.read_text(encoding="utf-8", errors="replace")
     rows = parse(text)
+    verify_font_glyphs(rows)
     dst.parent.mkdir(parents=True, exist_ok=True)
     render(rows, dst)
     print(f"wrote {dst} ({max(len(r) for r in rows)}x{len(rows)} cells)")

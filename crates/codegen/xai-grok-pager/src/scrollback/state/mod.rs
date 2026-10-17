@@ -977,20 +977,18 @@ impl ScrollbackState {
     /// The escalation fires only on that rising edge, so a user's collapse of an already-untrusted block sticks. A row
     /// already awaiting a permission then opens once if the new Edit has hunks, unless the fold is pinned. Stamps
     /// `started_at` on the new block and invalidates the entry's render cache.
-    /// A user cancel closes in-flight tools as ACP `Failed`. The collapsed title still
-    /// says `Run` unless the error is exactly `cancelled`.
+    /// Label only rows that are still running. A tool that already closed, including
+    /// a real `Failed`, is left alone. ACP has no Cancelled status.
     pub(crate) fn relabel_cancelled_tools(&mut self) {
         for entry in self.entries.values_mut() {
-            let mark = match &entry.block {
-                RenderBlock::ToolCall(ToolCallBlock::Execute(ex)) => {
-                    entry.is_running || ex.error.is_some()
-                }
-                RenderBlock::ToolCall(ToolCallBlock::Other(other)) => {
-                    entry.is_running || other.error.is_some()
-                }
-                _ => false,
-            };
-            if !mark {
+            if !entry.is_running {
+                continue;
+            }
+            let is_tool = matches!(
+                &entry.block,
+                RenderBlock::ToolCall(ToolCallBlock::Execute(_) | ToolCallBlock::Other(_))
+            );
+            if !is_tool {
                 continue;
             }
             match &mut entry.block {
@@ -1008,9 +1006,7 @@ impl ScrollbackState {
                     }
                 }
                 RenderBlock::ToolCall(ToolCallBlock::Other(other)) => {
-                    if let Some(idx) = other.name.find(" failed ") {
-                        other.name.replace_range(idx..idx + " failed ".len(), " cancelled ");
-                    } else if !other.name.contains("cancelled") {
+                    if !other.name.contains("cancelled") {
                         other.name = format!("{} cancelled", other.name.trim());
                     }
                     other.error = Some("cancelled".to_string());

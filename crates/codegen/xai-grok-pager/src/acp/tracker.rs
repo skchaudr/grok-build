@@ -24,7 +24,7 @@ use agent_client_protocol as acp;
 use chrono::{DateTime, Local, TimeZone};
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tracing::debug;
@@ -380,9 +380,11 @@ pub struct AcpUpdateTracker {
     /// When true, the next UserMessageChunk is a skill body that follows a skill metadata chunk.
     /// It should be silently absorbed so the raw skill instructions don't appear in scrollback.
     skip_next_skill_body: bool,
-    /// The user already sent `session/cancel` for this turn. A tool that then ends `Failed`
-    /// was cut off; the row must read as cancelled. ACP has no cancelled tool status.
+    /// The user already sent `session/cancel` for this turn.
     cancel_requested: bool,
+    /// Tool-call ids that were still pending or in progress when cancel was sent.
+    /// Only these may be labelled cancelled if they later close as `Failed`.
+    cancel_inflight: HashSet<String>,
     /// Updates merge into the stashed call and are otherwise dropped — except a Failed terminal status, which renders
     /// the stashed call: the surface that justified suppression (todo pane, subagent block, tasks pane) never appears
     /// for a call that failed.
@@ -514,24 +516,28 @@ impl AcpUpdateTracker {
     fn bump_agent_output_epoch(&mut self) {
         self.agent_output_epoch = self.agent_output_epoch.wrapping_add(1);
     }
-    /// Arm cancel labelling for tools that close after the user hits the cancel key.
+    /// Arm cancel labelling for tools that are still pending or in progress.
+    /// A call that has already closed stays as it was. ACP has no Cancelled status.
     pub fn note_user_cancel(&mut self) {
         self.cancel_requested = true;
+        self.cancel_inflight
+            .extend(self.pending_tools.keys().cloned());
     }
     /// A new turn must not inherit the previous cancel.
     pub fn clear_user_cancel(&mut self) {
         self.cancel_requested = false;
+        self.cancel_inflight.clear();
     }
-    /// Build the scrollback block for a tool call. A `Failed` status after the user
-    /// cancelled the turn is labelled cancelled, not failed.
+    /// Build the scrollback block for a tool call. A `Failed` close is cancelled
+    /// only when this call was still in flight at `session/cancel`.
     fn tool_block(&self, tc: &acp::ToolCall) -> RenderBlock {
         let block = tool_call_to_block(
             tc,
             self.session_cwd.as_deref(),
             &self.subagent_labels.borrow(),
         );
-        let aborted = tool_text_says_aborted(tc);
-        if matches!(tc.status, acp::ToolCallStatus::Failed) && (self.cancel_requested || aborted) {
+        let id = tc.tool_call_id.0.to_string();
+        if self.cancel_inflight.contains(&id) && matches!(tc.status, acp::ToolCallStatus::Failed) {
             mark_cancelled(block)
         } else {
             block
@@ -1974,16 +1980,6 @@ fn mark_cancelled(block: RenderBlock) -> RenderBlock {
         }
         other => other,
     }
-}
-
-fn tool_text_says_aborted(tc: &acp::ToolCall) -> bool {
-    let mut blob = content_text(tc);
-    if let Some(raw) = &tc.raw_output {
-        blob.push(' ');
-        blob.push_str(&raw.to_string());
-    }
-    let lower = blob.to_ascii_lowercase();
-    lower.contains("aborted") || lower.contains("cancelled") || lower.contains("canceled")
 }
 
 fn tool_status_label(status: acp::ToolCallStatus) -> &'static str {

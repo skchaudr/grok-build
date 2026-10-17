@@ -133,3 +133,15 @@ Opened `/tmp/claude-1001/-home-sab-mini-sab-orchestrate/d1bace19-a6df-4543-a24b-
 Host: khoj-38w. Branch `w3/codemode-cancel` from `r2/codemode-pane` @ `4c7c5636`. Login `pi` is 0.87.1 and its package has no codemode. Live Pi is `@earendil-works/pi-coding-agent` 1.3.0 (`~/wt/pi-acp-r2-recorder/.pi13/package/dist/bundle/cli.js`), spawned by stock `/usr/bin/pi-acp` via `PI_ACP_PI_COMMAND`. Agent dir is a private copy (`/tmp/pi-w3-agent`); `~/.pi` and `~/.grok` are not edited. `GROK_HOME` for the pager is a temp dir.
 
 `google-antigravity/gemini-3.6-flash` answers `Cloud Code Assist API error (429): Resource has been exhausted`. Next enabled model that answered is `google-antigravity/gemini-3.8-flash`. A direct RPC preflight on that model ran one codemode script with two nested bash calls (`parentToolCallId` set) and returned `W3NESTED1` / `W3NESTED2`. Renderer `scripts/ansi2png.py` known screen shows red/green/blue, 256-color blocks, truecolor orange and teal, bold, dim, reverse, a 256-color green background, and a navy/gold truecolor band.
+
+## 2026-10-17 08:00 UTC — amendment acknowledged
+
+Opus, 07:10 UTC, binding. Acknowledged here; it was not in the worklog before this entry.
+
+1. The Pi agent dir leaves `/tmp/pi-w3-agent`. It will be `mktemp -d` with mode 700, outside every worktree, prefer `--model` and `--tools` on the Pi command, and be deleted at the end. Before every push, `git diff --cached --name-only` must not list `auth.json` or `settings.json`.
+2. ACP has no Cancelled tool status (`agent-client-protocol-schema` 0.11.4 `tool_call.rs:420`, variants Pending, InProgress, Completed, Failed). A cancelled row is derived from `StopReason::Cancelled` or this pager's own `session/cancel`, and applied only to calls that were still pending or in progress. A `Failed` close that was already terminal is not relabelled.
+3. `known-screen` must include the pager glyphs (↳ ◆ ✓ ✗ ⊘, box drawing, braille spinner). `ansi2png.py` exits non-zero when a glyph is missing from the font, and a wide character takes two cells.
+4. The report names the Pi path, `--version` output, the `.pi13` tarball sha, and the ACP adapter. Captures are 120×40 and 80×24.
+5. A line that fakes, stubs, mocks, or replays in place of the real Pi run is an instant reject. Deadline 10:00 UTC.
+
+Checkpoint `9c0390e6` is the live captures plus a cancel label that still walks every Failed row. That walk is the thing item 2 forbids. Two Composer subagents are on the renderer and the recorder redaction. The pager fix stays here.

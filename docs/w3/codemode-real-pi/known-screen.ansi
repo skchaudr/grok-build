@@ -5,3 +5,14 @@ KNOWN-SCREEN-W3
 [1mBOLD[0m  [2mDIM[0m  [7mREVERSE[0m
 [48;5;22m[97m  256-BG dark green  [0m
 [48;2;40;40;120m[38;2;255;220;80m  truecolor bg navy / fg gold  [0m
+nest-arrow: ↳
+diamond: ◆
+check: ✓
+ballot-x: ✗
+cancelled: ⊘
+box: ┌┐└┘│─├┤
+braille-spinner: ⣿
+braille-spinner: ⢳
+braille-spinner: ⣋
+braille-spinner: ⣙
+wide-two-cells: ◾A
