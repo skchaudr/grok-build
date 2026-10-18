@@ -226,14 +226,13 @@ if [[ -z "$LSOCK" ]]; then
 fi
 LEADER_STARTED=0
 stop_leader() {
+  # Only a leader this script started (PICKER_START_LEADER=1) is stopped, by
+  # closing its own tmux session; never a pattern kill, which would also hit
+  # the launchd/systemd leader. Closing the ssh pty hangs up the leader.
   if ((LEADER_STARTED)); then
     T kill-session -t picker-leader 2>/dev/null || true
     sleep 2
-    if R 'pgrep -f "grok-fork agent leader"' >/dev/null 2>&1; then
-      R 'pkill -f "grok-fork agent leader"' >/dev/null 2>&1 || true
-    fi
-    R 'pgrep -f "grok-fork agent leader"' >"$OUT/leader-after-stop.txt" 2>&1 || echo "no leader process left on target" >"$OUT/leader-after-stop.txt"
-    log "leader stopped: $(cat "$OUT/leader-after-stop.txt")"
+    log "leader session closed (processes on target, for the record): $(R 'pgrep -f "grok-fork agent leader"' 2>&1 | tr '\n' ' ')"
     LEADER_STARTED=0
   fi
 }
