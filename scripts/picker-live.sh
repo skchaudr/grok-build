@@ -44,9 +44,13 @@ rm -f "$OUT"/pane-*.txt "$OUT"/result.env
 : >"$OUT/steps.log"
 
 # Agent commands are resolved ON THE TARGET, so the leader there spawns them.
+# PICKER_CLAUDE_CMD: full claude --agent-choice command on the target (e.g. a
+# named API-key wrapper such as ~/.local/bin/claude-agent-acp-api); used as is.
+# PICKER_PI_BIN: pi binary the Pi pin wrapper execs (default: `command -v pi`).
 CLAUDE_ACP="$(R 'command -v claude-agent-acp || command -v claude-acp || command -v claude-code-acp')"
 CLAUDE_BIN="$(R 'command -v claude')"
 PI_ACP="$(R 'command -v pi-acp')"
+[[ -n "${PICKER_CLAUDE_CMD:-}" ]] && { CLAUDE_ACP="${PICKER_CLAUDE_CMD}"; CLAUDE_BIN="${CLAUDE_BIN:-none}"; }
 [[ -n "$CLAUDE_ACP" && -n "$CLAUDE_BIN" && -n "$PI_ACP" ]] || { echo "agent binaries missing on target: claude-acp='$CLAUDE_ACP' claude='$CLAUDE_BIN' pi-acp='$PI_ACP'" >&2; exit 1; }
 # Pi's default model (google-antigravity Gemini) was out of quota on 2026-10-18
 # (429), so pin a working one through pi-acp's PI_ACP_PI_COMMAND. Set
@@ -54,10 +58,10 @@ PI_ACP="$(R 'command -v pi-acp')"
 PI_MODEL="${PICKER_PI_MODEL-deepseek/deepseek-flash}"
 if [[ -n "$PI_MODEL" ]]; then
   PI_WRAP="/tmp/picker-live-pi-$LABEL.sh"
-  R "PIBIN=\$(command -v pi); printf '#!/bin/sh\\nexec %s --model %s \"\$@\"\\n' \"\$PIBIN\" $PI_MODEL > $PI_WRAP; chmod +x $PI_WRAP"
+  R "PIBIN=${PICKER_PI_BIN:-\$(command -v pi)}; printf '#!/bin/sh\\nexec %s --model %s \"\$@\"\\n' \"\$PIBIN\" $PI_MODEL > $PI_WRAP; chmod +x $PI_WRAP"
   PI_ACP="env PI_ACP_PI_COMMAND=$PI_WRAP $PI_ACP"
 fi
-CLAUDE_CMD="env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=$CLAUDE_BIN $CLAUDE_ACP"
+if [[ -n "${PICKER_CLAUDE_CMD:-}" ]]; then CLAUDE_CMD="env -u CLAUDECODE $CLAUDE_ACP"; else CLAUDE_CMD="env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=$CLAUDE_BIN $CLAUDE_ACP"; fi
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$OUT/steps.log" >&2; }
 vis() { T capture-pane -p -t "$SESS" 2>/dev/null || true; }
