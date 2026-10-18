@@ -15,6 +15,8 @@
 #        e.g. picker-live.sh mini sab-mini@sab-mini ; picker-live.sh air sab-mini@sab-air
 # Env:   PICKER_PAGER    pager binary ON THE TARGET (default ~/.grok/bin/grok-fork)
 #        PICKER_PI_MODEL Pi model to pin ("" = Pi's own default; default deepseek/deepseek-flash)
+#        PICKER_START_LEADER=1 (default) starts a FOREGROUND fork leader on the target
+#                        when none is running, and stops it at the end; 0 uses a leader already running
 #        PICKER_OUT      evidence dir (default /tmp/picker-proof-out/<label>)
 set -uo pipefail
 
@@ -36,7 +38,6 @@ TMUX_BIN="$(command -v tmux)"
 T() { "$TMUX_BIN" -L "$SOCK" "$@"; }
 
 R "test -x $(printf %q "$PAGER_BIN")" || { echo "pager missing on target: $PAGER_BIN" >&2; exit 1; }
-R 'test -S "$HOME/.grok/leader.sock"' || { echo "no leader socket on target ($CLIENT:~/.grok/leader.sock)" >&2; exit 1; }
 mkdir -p "$OUT" "$WORK"
 rm -f "$OUT"/pane-*.txt "$OUT"/result.env
 : >"$OUT/steps.log"
@@ -213,8 +214,38 @@ reenter_and_ask() {
   all >"$OUT/scrollback-$name.txt"
 }
 
+LEADER_STARTED=0
+stop_leader() {
+  if ((LEADER_STARTED)); then
+    T kill-session -t picker-leader 2>/dev/null || true
+    sleep 2
+    if R 'pgrep -f "grok-fork agent leader"' >/dev/null 2>&1; then
+      R 'pkill -f "grok-fork agent leader"' >/dev/null 2>&1 || true
+    fi
+    R 'pgrep -f "grok-fork agent leader"' >"$OUT/leader-after-stop.txt" 2>&1 || echo "no leader process left on target" >"$OUT/leader-after-stop.txt"
+    log "leader stopped: $(cat "$OUT/leader-after-stop.txt")"
+    LEADER_STARTED=0
+  fi
+}
+trap stop_leader EXIT
+if [[ "${PICKER_START_LEADER:-1}" == 1 ]]; then
+  if R 'pgrep -f "grok-fork agent leader"' >/dev/null 2>&1; then
+    log "using the leader already running on the target (not started or stopped by this script)"
+  else
+  R 'rm -f "$HOME/.grok/leader.sock"'
+  # Foreground process under tmux; the process is named by its real binary.
+  LEADER_LINE="exec $(printf %q "$PAGER_BIN") agent leader --no-exit-on-disconnect --no-auto-update"
+  if [[ "$CLIENT" == local ]]; then LL="$LEADER_LINE"; else LL="exec ssh -tt $CLIENT $(printf %q "export PATH=$TPATH:\$PATH; $LEADER_LINE")"; fi
+  T -f /dev/null new-session -d -s picker-leader "$LL"
+  LEADER_STARTED=1
+  for _ in $(seq 30); do R 'test -S "$HOME/.grok/leader.sock"' && break; sleep 1; done
+  R 'test -S "$HOME/.grok/leader.sock"' || { echo "BLOCKER leader socket never appeared" >&2; exit 1; }
+  log "foreground leader started"
+  fi
+fi
+R 'test -S "$HOME/.grok/leader.sock"' || { echo "no leader socket on target" >&2; exit 1; }
 START_TS="$(date "+%Y-%m-%d %H:%M:%S")"
-T kill-server 2>/dev/null || true
+T kill-session -t "$SESS" 2>/dev/null || true
 log "launch pager=$PAGER_BIN label=$LABEL"
 PAGER_ARGS="--leader --always-approve --trust --fullscreen --no-alt-screen --cwd $WORK --agent-choice $(printf %q "claude=$CLAUDE_CMD") --agent-choice $(printf %q "pi=$PI_ACP")"
 PAGER_LINE="env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 $(printf %q "$PAGER_BIN") $PAGER_ARGS"
@@ -269,5 +300,6 @@ all >"$OUT/scrollback.txt"
   echo "all_ok=$ok"
 } >"$OUT/result.env"
 cat "$OUT/result.env"
-T kill-server 2>/dev/null || true
+T kill-session -t "$SESS" 2>/dev/null || true
+stop_leader
 ((ok)) || exit 1
