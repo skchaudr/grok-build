@@ -122,6 +122,22 @@ fn outbound_payload_non_json_passthrough() {
 }
 
 #[test]
+fn relaunch_requester_rejection_blocks_probes_and_foreign_builds() {
+    // Probes are refused by name, whatever version they report.
+    for probe in ["grok-pager-update", "grok-leader-discovery"] {
+        assert!(relaunch_requester_rejection(probe, Some("1.0.45"), "1.0.45", true).is_some());
+        assert!(relaunch_requester_rejection(probe, None, "1.0.45", false).is_some());
+    }
+    // A stock release client (different build) is refused by a from-source leader.
+    assert!(relaunch_requester_rejection("grok-tui", Some("1.0.62"), "1.0.45", true).is_some());
+    // A real fork client (same build) and a versionless client may proceed.
+    assert!(relaunch_requester_rejection("grok-tui", Some("1.0.45"), "1.0.45", true).is_none());
+    assert!(relaunch_requester_rejection("grok-tui", None, "1.0.45", true).is_none());
+    // A release leader keeps the stock behaviour for non-probe clients.
+    assert!(relaunch_requester_rejection("grok-tui", Some("1.0.62"), "1.0.45", false).is_none());
+}
+
+#[test]
 fn decide_relaunch_is_idempotent_and_directional() {
     let temp = TempDir::new().unwrap();
     let sock = temp.path().join("leader.sock");

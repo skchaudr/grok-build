@@ -1942,6 +1942,30 @@ const RELAUNCH_TOTAL_GRACE: Duration =
     Duration::from_millis((RELAUNCH_GRACE.as_millis() + RELAUNCH_FLUSH_GRACE.as_millis()) as u64);
 /// Poll cadence while waiting for the agent to go idle during the grace period.
 const RELAUNCH_GRACE_POLL: Duration = Duration::from_millis(100);
+/// Client types that only probe or update; a relaunch they request must never take the leader down.
+const RELAUNCH_PROBE_CLIENTS: &[&str] = &["grok-pager-update", "grok-leader-discovery"];
+/// Why a client may not ask this leader to relaunch, or `None` when the request may proceed to [`decide_relaunch_for_update`].
+/// A from-source (fork) leader serves sessions a stock release `grok` would lose, so it refuses probes by name and any client reporting a different build version than its own.
+/// A client reporting no version is accepted; a real fork client reports the leader's own version.
+fn relaunch_requester_rejection(
+    client_type: &str,
+    client_version: Option<&str>,
+    leader_version: &str,
+    leader_is_dev_build: bool,
+) -> Option<String> {
+    if RELAUNCH_PROBE_CLIENTS.contains(&client_type) {
+        return Some(format!("{client_type} is an update/discovery probe"));
+    }
+    if leader_is_dev_build
+        && let Some(cv) = client_version
+        && cv != leader_version
+    {
+        return Some(format!(
+            "client build {cv} is not this fork build {leader_version}"
+        ));
+    }
+    None
+}
 /// Decide whether a [`ControlCommand::RelaunchForUpdate`] is accepted (the synchronous half). Kept separate from starting the drain so the caller can send the `Relaunching` ack BEFORE the leader begins shutting down.
 /// Otherwise an idle leader can race the ack and the client sees a dropped control response.
 /// Declines unless the target is strictly newer (directional guard) and no relaunch is already in progress (idempotent across multiple clients). On accept it sets `relaunching` so duplicate requests are declined.
@@ -2356,6 +2380,8 @@ pub async fn run_leader_server(
                 ) => {
                     if let Some(client) = clients.get(&id) {
                         let client_tx = client.tx.clone();
+                        let requester_type = client.client_type.clone();
+                        let requester_version = client.capabilities.client_version.clone();
                         let control_state = control_state.clone();
                         let cancel = cancel.clone();
                         let shutdown_tx = shutdown_tx.clone();
@@ -2407,11 +2433,28 @@ pub async fn run_leader_server(
                                         .await
                                 }
                                 ControlCommand::RelaunchForUpdate { to_version } => {
-                                    decide_relaunch_for_update(
-                                        &control_state,
-                                        to_version,
-                                        &relaunching,
-                                    )
+                                    if let Some(reason) = relaunch_requester_rejection(
+                                        &requester_type,
+                                        requester_version.as_deref(),
+                                        &control_state.metadata.leader_binary_version,
+                                        xai_grok_version::IS_DEV_BUILD,
+                                    ) {
+                                        info!(
+                                            client_id = id.0,
+                                            client_type = %requester_type,
+                                            client_version = ?requester_version,
+                                            %to_version,
+                                            %reason,
+                                            "RelaunchForUpdate ignored"
+                                        );
+                                        Ok(ControlPayload::RelaunchDeclined { reason })
+                                    } else {
+                                        decide_relaunch_for_update(
+                                            &control_state,
+                                            to_version,
+                                            &relaunching,
+                                        )
+                                    }
                                 }
                                 other => handle_control_command(&control_state, other),
                             };
