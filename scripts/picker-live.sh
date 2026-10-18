@@ -159,6 +159,7 @@ open_session() {
     # title both start with other words.
     n=$(all | grep -cE "^[[:space:]]*$token([[:space:]]|\.|$)" || true)
     ((n >= 1)) && break
+    if [[ "$(vis)" == *"Turn failed"* ]]; then log "BLOCKER $name turn failed: $(vis | grep -m1 -E 'Failed to|Turn failed' | sed 's/^[^A-Za-z]*//')"; break; fi
     alive || return 1
     sleep 2
   done
