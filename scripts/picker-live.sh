@@ -155,9 +155,9 @@ open_session() {
   # The reply echoes the token a second time (prompt line + reply line).
   local end=$((SECONDS + 150)) n
   while ((SECONDS < end)); do
-    # A reply is a line that STARTS with the token; the prompt and the header
+    # A reply is a line that ENDS with the token (plus the pager's clock); the prompt and the header
     # title both start with other words.
-    n=$(all | grep -cE "^[[:space:]]*$token([[:space:]]|\.|$)" || true)
+    n=$(all | grep -cE "$token\\.?[[:space:]]*([0-9]+:[0-9]+ [AP]M)?[[:space:]]*$" || true)
     ((n >= 1)) && break
     if [[ "$(vis)" == *"Turn failed"* ]]; then log "BLOCKER $name turn failed: $(vis | grep -m1 -E 'Failed to|Turn failed' | sed 's/^[^A-Za-z]*//')"; break; fi
     alive || return 1
