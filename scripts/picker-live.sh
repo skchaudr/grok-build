@@ -8,6 +8,7 @@
 # Usage: scripts/picker-live.sh <machine-label>      e.g. mini | air
 # Env:   PICKER_PAGER   pager binary (default ~/.grok/bin/grok-fork)
 #        PICKER_OUT     evidence dir (default /tmp/picker-proof-out/<label>)
+#        PICKER_LEADER_SOCKET  private leader socket (default: the shared one)
 #        PICKER_LEADER_LOG  leader log to excerpt (default ~/.grok/leader.log)
 set -uo pipefail
 
@@ -194,7 +195,7 @@ reenter_and_ask() {
 T kill-server 2>/dev/null || true
 log "launch pager=$PAGER_BIN label=$LABEL"
 T -f /dev/null new-session -d -s "$SESS" -x 120 -y 40 \
-  "cd $WORK && exec env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 $PAGER_BIN --cwd $WORK --leader --always-approve --trust --fullscreen --no-alt-screen --debug-file $OUT/pager-debug.log --agent-choice 'claude=$CLAUDE_CMD' --agent-choice 'pi=$PI_ACP'"
+  "cd $WORK && exec env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 $PAGER_BIN --cwd $WORK --leader ${PICKER_LEADER_SOCKET:+--leader-socket $PICKER_LEADER_SOCKET} --always-approve --trust --fullscreen --no-alt-screen --debug-file $OUT/pager-debug.log --agent-choice 'claude=$CLAUDE_CMD' --agent-choice 'pi=$PI_ACP'"
 T set-option -t "$SESS" history-limit 20000
 T resize-window -t "$SESS" -x 120 -y 40
 
