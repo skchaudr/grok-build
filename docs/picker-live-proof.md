@@ -2,14 +2,16 @@
 
 ## Verdict
 
-**PASS on the Air. PASS on khoj (Linux), once. Mac mini: UNPROVEN.**
+**PASS on the Air. PASS on khoj (Linux), once. Mac mini: NOT PROVEN, and the rerun against the durable leader still failed, with two different errors.**
 
-- **Correction (02:39 UTC, lead):** an earlier version of this doc called the Mac mini "BLOCKED on Claude OAuth" and asked for a `/login`. That claim was **wrong**. The "Not logged in" failures came from a leader that my script started over ssh. An ssh-started leader runs in the Background launchd domain and cannot read the login keychain, so the failure says nothing about Sab's login. The gui-domain leader reached Claude fine at 02:26 UTC (`/tmp/grok-leader.err`: `sdk-initialize` and `register`, no auth error). No `/login` is needed.
-- **Why the Mac run happened on my own leader:** the Mac's `~/.grok/leader.log` shows `Leader socket removed and no client attached; shutting down path=/Users/sab-mini/.grok/leader.sock` at 02:29:33 UTC, and `com.sab.grok-leader` was left exited (status 0). My script's default `PICKER_START_LEADER=1` ran `rm -f $LSOCK` (`scripts/picker-live.sh:244`) at about 02:29:27, because `leader-fork.sock` did not exist and it fell back to `leader.sock`. Evidence for the script as the cause: it is the only actor known to have removed exactly that path in that window, and the shutdown line names that path about six seconds later. Evidence against being certain: the script only reaches line 244 after `pgrep -f "grok-fork agent leader"` finds nothing, and `pgrep -f` does work over ssh on the Mac (checked), so the leader that shut down was either not matching that pattern or was already exiting. The `com.sab.grok-hub` restart (pid 44253 to 47036) is a different socket (`leader-hub.sock`). I cannot decide between these from the data, and I do not claim to.
-- **Fix:** `PICKER_START_LEADER` now defaults to **0**. By default the script never starts, stops or removes a leader or its socket; it requires a leader already listening. Starting one is opt-in (`PICKER_START_LEADER=1`).
-- **Mac Pi half:** two Pi sessions opened and replied on the Mac (status line `deepseek/DeepSeek V4.1 Flash`), but only against my ssh-started leader. Re-entry was not reached. The Mac needs a rerun against S1's durable gui-domain leader: `PICKER_START_LEADER=0 scripts/picker-live.sh mini sab-mini@sab-mini`.
-- The **Air** (own pager, own leader, local agents) passed the full sequence: two Claude and two Pi sessions, each re-entered from the dashboard, each answering a fresh nonce-tagged question with its token.
-- **khoj** (optional) passed once (`khojlocal`). A rerun failed on `claude1` with "The agent did not accept your prompt within 120s"; cause not diagnosed.
+- **Mac rerun (02:45 to 02:53 UTC), `PICKER_START_LEADER=0`, against S1's launchd leader (pid 50705, `~/.grok/leader-fork.sock`, gui domain):** all four sessions failed. Evidence `/tmp/picker-proof-out/mini/`, log `/tmp/picker-mini2.log`.
+  - **Claude (claude1 and claude2):** the session was created (`sdk-initialize` and `register` in `/tmp/grok-leader.err`), then the first turn failed after 29s with `Failed to authenticate: OAuth session expired and could not be refreshed` (`errorKind: authentication_failed`). This is a different message from the ssh-leader run, which failed in 0.1s with `Not logged in`. So the gui-domain leader does get as far as trying to refresh the Claude token, and the refresh fails. I cannot tell from here whether the Claude credential is genuinely expired or the refresh is blocked: `security show-keychain-info` on the login keychain over ssh says "User interaction is not allowed", and `claude auth status` over ssh says `loggedIn: false`, but ssh is the Background domain, so neither is conclusive for the gui domain. The earlier "Claude OAuth expired" suspicion is therefore **not ruled out**, even though the first Mac run's "Not logged in" was an artifact of the ssh-started leader.
+  - **Pi (pi1 and pi2):** `Session creation timed out after 180s`. `pi-acp` (pid 51191) and `pi` children were running, but no `register` line for a Pi session appears in `/tmp/grok-leader.err`. Pi replied in about 8s on the ssh-started leader, so what differs is the leader's environment or domain. Not diagnosed. One candidate: the Pi pin, `env PI_ACP_PI_COMMAND=/tmp/picker-live-pi-mini.sh pi-acp`, is the agent command the pager sends and the process listing shows `pi` children whose arguments I could not confirm were the wrapper. I did not verify that the pin reaches `pi-acp` under the launchd leader.
+- **First Mac run (02:29 UTC) retracted, as before:** the "Not logged in" came from a leader my script started over ssh (Background launchd domain, no keychain). The "ask Sab to `/login`" call was premature.
+- **Cause of the 02:29:33 shutdown (S1, 02:45 UTC):** the "socket removed and no client attached" line came from the **stock 1.0.62 relay leader** on `leader.sock`, not the fork. The fork leader exited 0 via the client-requested relaunch path at `crates/codegen/xai-grok-shell/src/leader/server.rs:1982-2009`, which fires when a **newer** client attaches (stock 1.0.62 pager against fork 1.0.45). My earlier reading that my script's `rm -f` caused it is superseded.
+- **Script fixes (committed):** `PICKER_START_LEADER` defaults to 0 (never starts or removes a leader); `stop_leader` no longer runs `pkill -f "grok-fork agent leader"`, which also matched the launchd leader. It closes only its own tmux session.
+- **Air:** passed the full sequence with two Claude and two Pi sessions, each re-entered from the dashboard and answering a fresh nonce-tagged question with its token.
+- **khoj (optional):** passed once (`khojlocal`); a rerun failed on `claude1` with "The agent did not accept your prompt within 120s", cause undiagnosed.
 - The bonus (`khoj=ssh ...` entry) was **not run**.
 
 ## How the proof works
@@ -44,7 +46,7 @@ Pager: `/Users/sab-mini/.grok/bin/grok-fork` against the Air's own leader `~/.gr
 - Processes while live (`air/pgrep-claude-live.txt`, `air/pgrep-pi-live.txt`): `node .../claude-agent-acp/current/dist/index.js` (pid 75964) and two `node /opt/homebrew/bin/pi-acp` (pids 76112, 77157), all local to the Air. The Claude backend is one process serving both Claude sessions. The listing also shows an unrelated Zed `claude-acp` process (pid 4030), which is not ours.
 - The leader was started by S1 as the named launchd job `com.sab.grok-leader`. I started no foreground leader on the Air.
 
-## Mac mini: UNPROVEN (my ssh-started leader could not use the keychain)
+## Mac mini: NOT PROVEN (two runs, two different failures)
 
 Pager `/Users/sab-mini/.grok/bin/grok-fork`. Evidence: `/tmp/picker-proof-out/mini/`.
 
@@ -67,12 +69,14 @@ Evidence: `/tmp/picker-proof-out/khojlocal/` (local pager, systemd `grok-leader`
 
 | # | Issue | Location | Blocks? |
 |---|---|---|---|
-| 1 | My script started a leader over ssh (Background domain, no keychain), so Claude said "Not logged in"; the earlier OAuth-expired claim was wrong | `scripts/picker-live.sh:240-253` | Blocks the Mac mini proof until rerun against S1's durable leader. Fixed: leader start is now opt-in |
+| 1 | Mac, gui-domain leader: Claude turn fails `OAuth session expired and could not be refreshed`; Pi session creation times out at 180s | environment / unknown; leader log `/tmp/grok-leader.err` | **Blocks the Mac mini proof.** Cause open (see Verdict) |
+| 1b | The first Mac run's "Not logged in" was an artifact of my ssh-started leader | `scripts/picker-live.sh:240-253` | Fixed: leader start is opt-in |
 | 2 | Embedded pager hosts only the first `--agent-choice`; picker needs a leader | `app/cli.rs:898`, `app/mod.rs:572`; multi-backend routing at `leader/server.rs:3394` (`AGENT_CMD_META`), `:3412` (`resolve_backend`) | No. Works as designed with `--leader`; a pager without a fork leader shows no machine picker |
 | 3 | `synthetic_session_load` fires only if the agent advertises `loadSession`, so `session/load` may never fire for external agents (`docs/acp-matrix.md` suspicion) | `leader/server.rs:936-1000` | No for this proof: re-entry from the dashboard attached the live session and gave fresh correct replies. I did not observe whether `session/load` was sent; the question stays open for a cold restart |
 | 4 | khoj rerun: "The agent did not accept your prompt within 120s" on claude1 | khoj leader (systemd `grok-leader`), cause undiagnosed | No for the required proof (khoj is optional); unexplained |
 | 5 | Pi default model returns 429 | Pi provider config, not source | No; pinned `deepseek/deepseek-flash` via `PICKER_PI_MODEL` |
-| 6 | `rm -f $LSOCK` ran against `leader.sock` while a leader may have been serving it, and the Mac leader shut down six seconds later (see Verdict) | `scripts/picker-live.sh:244` | Was the likely cause of the Mac run going wrong; default now 0 so it cannot happen unless opted in |
+| 6 | `stop_leader` ran `pkill -f "grok-fork agent leader"`, which also matches the launchd leader | `scripts/picker-live.sh:233` | Fixed (commit f2e51cfc): own tmux session only |
+| 6c | The Mac `leader-route.txt` is taken from the shared `~/.grok/leader.log` (stock 1.0.62 lines), not the fork leader's `/tmp/grok-leader.err` | `scripts/picker-live.sh` leader-evidence step | No; evidence for the Mac must be read from `/tmp/grok-leader.err` |
 | 6b | After the dashboard-open failure my leader and pager were left running on the Mac; I stopped them by pid | `scripts/picker-live.sh:227`, `:239`, `:176` | No; cause not confirmed |
 | 7 | The attached view does not always show the session title; the script only warns | `scripts/picker-live.sh` ("WARN attached view does not show the title") | No |
 
