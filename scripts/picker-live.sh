@@ -50,6 +50,15 @@ PI_ACP="${GB_PI_ACP:-pi-acp}"
 if [[ -z "${GB_PI_ACP:-}" && -x "$HOME/repos/Pi-Coding-Agent/pi-acp-patched/run" ]]; then
   PI_ACP="$HOME/repos/Pi-Coding-Agent/pi-acp-patched/run"
 fi
+# Pi's default model (google-antigravity Gemini) was out of quota on 2026-10-18
+# (429), so pin a working one through pi-acp's PI_ACP_PI_COMMAND. Set
+# PICKER_PI_MODEL="" to use Pi's own default.
+PI_MODEL="${PICKER_PI_MODEL-deepseek/deepseek-flash}"
+if [[ -n "$PI_MODEL" ]]; then
+  PI_WRAP="/tmp/picker-live-pi-$LABEL.sh"
+  printf '#!/bin/sh\nexec pi --model %s "$@"\n' "$PI_MODEL" >"$PI_WRAP"; chmod +x "$PI_WRAP"
+  PI_ACP="env PI_ACP_PI_COMMAND=$PI_WRAP $PI_ACP"
+fi
 CLAUDE_CMD="env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=$(command -v claude) $CLAUDE_ACP"
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$OUT/steps.log" >&2; }
@@ -76,13 +85,8 @@ send_line() { keys -l -- "$1"; sleep 0.5; keys Enter; }
 # pick_machine <name>: answer the "New session / Machine" picker.
 pick_machine() {
   wait_for "enter select" 30 || { log "FAIL machine picker did not open for $1"; return 1; }
-  local want="$1" i row idx=0 n=0
-  while IFS= read -r row; do
-    [[ "$row" == *"New session"* || "$row" == *"enter select"* || "$row" == *"Machine"* ]] && continue
-    [[ "$row" =~ ^[^[:alnum:]]*(\>)?[[:space:]]*([a-z0-9._-]+)[[:space:]]*[^[:alnum:]]*$ ]] || continue
-    [[ "${BASH_REMATCH[2]}" == "$want" ]] && idx=$n
-    n=$((n + 1))
-  done < <(vis | sed -n '/New session/,/enter select/p')
+  local i idx=0
+  [[ "$1" == pi ]] && idx=1   # --agent-choice order: claude, pi
   for ((i = 0; i < idx; i++)); do keys Down; sleep 0.2; done
   keys Enter
 }
@@ -124,7 +128,7 @@ declare -A SID MODEL ANSWERED BACKEND_LINE
 
 # status_model: the pager status/header lines naming the model, from the pane.
 status_model() {
-  vis | grep -m1 -E 'Claude|Fable|Opus|Sonnet|Haiku|Gemini|gemini|gpt|grok-|Pi|antigravity' | sed 's/^[[:space:]]*//' || true
+  vis | grep -E 'always-approve' | tail -1 | sed -E 's/^[^A-Za-z]*//; s/ · always-approve.*//; s/[─╯╰]//g'
 }
 session_id() {
   # The pager prints the session id on /status-like surfaces; fall back to the
@@ -143,23 +147,28 @@ open_session() {
     # Dashboard: focus + New Agent and press Enter on it.
     keys Enter
   fi
-  pick_machine "$machine" || return 1
   if [[ "$via" == dash ]]; then
-    wait_for "Type a message" 60 || wait_for "❯" 30 || true
+    pick_machine "$machine" || return 1
+    wait_for "Starting session" 10 || true
+    local e=$((SECONDS + 90))
+    while ((SECONDS < e)) && [[ "$(vis)" == *"Starting session"* ]]; do sleep 1; done
+    sleep 2
     send_line "remember the token $token and reply only with it"
   fi
   # The reply echoes the token a second time (prompt line + reply line).
   local end=$((SECONDS + 150)) n
   while ((SECONDS < end)); do
-    n=$(all | grep -c "$token" || true)
-    ((n >= 2)) && break
+    # A reply is a line that STARTS with the token; the prompt and the header
+    # title both start with other words.
+    n=$(all | grep -cE "^[[:space:]]*$token([[:space:]]|\.|$)" || true)
+    ((n >= 1)) && break
     alive || return 1
     sleep 2
   done
   snap "$name-opened"
   SID[$name]="$(session_id)"
   MODEL[$name]="$(status_model)"
-  ((n >= 2)) || { log "FAIL $name never replied with $token"; return 1; }
+  ((n >= 1)) || { log "FAIL $name never replied with $token"; return 1; }
   log "$name replied; model='${MODEL[$name]}' sid='${SID[$name]}'"
 }
 
@@ -167,6 +176,9 @@ open_session() {
 open_dashboard() {
   keys 'C-\'
   wait_for "+ New Agent" 20 || { log "FAIL dashboard did not open"; snap dashboard-fail; return 1; }
+  # Re-opening lands on the last attached row; Up clamps at the + New Agent button.
+  local i
+  for ((i = 0; i < 15; i++)); do keys Up; sleep 0.12; done
 }
 
 # Dashboard row order, top to bottom, by which token each session row shows.
@@ -174,7 +186,7 @@ open_dashboard() {
 row_for() {
   local token="$1" n=0 line
   while IFS= read -r line; do
-    if [[ "$line" == *ALPHA-* || "$line" == *BRAVO-* ]]; then
+    if [[ "$line" == *"remember the token"* ]]; then
       n=$((n + 1))
       [[ "$line" == *"$token"* ]] && { echo "$n"; return 0; }
     fi
@@ -184,15 +196,16 @@ row_for() {
 
 # Re-enter <name> from the dashboard, ask for its token, require a fresh reply.
 reenter_and_ask() {
-  local name="$1" token="$2" nonce="Q${RUN}${name//[^A-Za-z0-9]/}" down i
+  local name="$1" token="$2" down i nonce
+  nonce="Q${RUN}${name//[^A-Za-z0-9]/}"
   open_dashboard || return 1
   snap "dash-before-$name"
   down="$(row_for "$token")" || { log "FAIL no dashboard row shows $token"; ANSWERED[$name]=no; return 1; }
-  for ((i = 0; i < down; i++)); do keys Down; sleep 0.25; done
+  for ((i = 0; i <= down; i++)); do keys Down; sleep 0.25; done
   keys Right
   sleep 3
   T clear-history -t "$SESS" 2>/dev/null || true
-  wait_for "Type a message" 30 || true
+  wait_for "❯" 30 || true
   send_line "$nonce what token did I give you earlier in this session? Reply with only the token."
   if wait_reply "$token" "$nonce" 150; then
     ANSWERED[$name]=yes; log "$name RESUMED: fresh reply carried $token"
@@ -204,6 +217,7 @@ reenter_and_ask() {
   all >"$OUT/scrollback-$name.txt"
 }
 
+START_TS="$(date "+%Y-%m-%d %H:%M:%S")"
 T kill-server 2>/dev/null || true
 log "launch pager=$PAGER_BIN label=$LABEL"
 PAGER_ARGS="--leader --leader-socket $CLIENT_SOCK --always-approve --trust --fullscreen --no-alt-screen --cwd $WORK --agent-choice $(printf %q "claude=$CLAUDE_CMD") --agent-choice $(printf %q "pi=$PI_ACP")"
@@ -218,7 +232,7 @@ T -f /dev/null new-session -d -s "$SESS" -x 120 -y 40 "$LAUNCH"
 T set-option -t "$SESS" history-limit 20000
 T resize-window -t "$SESS" -x 120 -y 40
 
-if ! { wait_for "Type a message" 120 || wait_for "❯" 30; }; then
+if ! wait_for "❯" 60; then
   snap launch-fail; log "BLOCKER pager never showed a composer"; exit 1
 fi
 snap launch
@@ -238,6 +252,7 @@ for pair in "claude1:ALPHA-1" "pi2:BRAVO-2" "pi1:BRAVO-1" "claude2:ALPHA-2" "cla
 done
 
 # Leader route evidence (paths only, no secrets: grep route/session lines).
+journalctl --user -u grok-leader --since "$START_TS" --no-pager 2>/dev/null | grep -aiE 'route|backend|external|agentCmd|session/new|session/load|client|spawn' | cut -c1-400 >"$OUT/leader-journal.txt" || true
 if [[ -r "$LEADER_LOG" ]]; then
   grep -aiE 'route|backend|external|agentCmd|session/new|session/load|client' "$LEADER_LOG" | tail -120 >"$OUT/leader-route.txt" || true
 fi
