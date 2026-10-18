@@ -214,6 +214,12 @@ reenter_and_ask() {
   all >"$OUT/scrollback-$name.txt"
 }
 
+# The fork leader socket: ~/.grok/leader-fork.sock where S1 installed a named
+# launchd leader beside a stock one, else the default ~/.grok/leader.sock.
+LSOCK="${PICKER_LEADER_SOCK:-}"
+if [[ -z "$LSOCK" ]]; then
+  if R 'test -S "$HOME/.grok/leader-fork.sock"'; then LSOCK="$CLIENT_HOME/.grok/leader-fork.sock"; else LSOCK="$CLIENT_HOME/.grok/leader.sock"; fi
+fi
 LEADER_STARTED=0
 stop_leader() {
   if ((LEADER_STARTED)); then
@@ -232,22 +238,22 @@ if [[ "${PICKER_START_LEADER:-1}" == 1 ]]; then
   if R 'pgrep -f "grok-fork agent leader"' >/dev/null 2>&1; then
     log "using the leader already running on the target (not started or stopped by this script)"
   else
-  R 'rm -f "$HOME/.grok/leader.sock"'
+  R "rm -f $LSOCK"
   # Foreground process under tmux; the process is named by its real binary.
-  LEADER_LINE="exec $(printf %q "$PAGER_BIN") agent leader --no-exit-on-disconnect --no-auto-update"
+  LEADER_LINE="exec $(printf %q "$PAGER_BIN") agent leader --no-exit-on-disconnect --no-auto-update --leader-socket $LSOCK"
   if [[ "$CLIENT" == local ]]; then LL="$LEADER_LINE"; else LL="exec ssh -tt $CLIENT $(printf %q "export PATH=$TPATH:\$PATH; $LEADER_LINE")"; fi
   T -f /dev/null new-session -d -s picker-leader "$LL"
   LEADER_STARTED=1
-  for _ in $(seq 30); do R 'test -S "$HOME/.grok/leader.sock"' && break; sleep 1; done
-  R 'test -S "$HOME/.grok/leader.sock"' || { echo "BLOCKER leader socket never appeared" >&2; exit 1; }
+  for _ in $(seq 30); do R "test -S $LSOCK" && break; sleep 1; done
+  R "test -S $LSOCK" || { echo "BLOCKER leader socket never appeared" >&2; exit 1; }
   log "foreground leader started"
   fi
 fi
-R 'test -S "$HOME/.grok/leader.sock"' || { echo "no leader socket on target" >&2; exit 1; }
+R "test -S $LSOCK" || { echo "no leader socket on target" >&2; exit 1; }
 START_TS="$(date "+%Y-%m-%d %H:%M:%S")"
 T kill-session -t "$SESS" 2>/dev/null || true
 log "launch pager=$PAGER_BIN label=$LABEL"
-PAGER_ARGS="--leader --always-approve --trust --fullscreen --no-alt-screen --cwd $WORK --agent-choice $(printf %q "claude=$CLAUDE_CMD") --agent-choice $(printf %q "pi=$PI_ACP")"
+PAGER_ARGS="--leader --leader-socket $LSOCK --always-approve --trust --fullscreen --no-alt-screen --cwd $WORK --agent-choice $(printf %q "claude=$CLAUDE_CMD") --agent-choice $(printf %q "pi=$PI_ACP")"
 PAGER_LINE="env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 $(printf %q "$PAGER_BIN") $PAGER_ARGS"
 if [[ "$CLIENT" == local ]]; then
   LAUNCH="exec $PAGER_LINE"
