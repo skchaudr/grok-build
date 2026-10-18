@@ -5,28 +5,29 @@
 # (own socket: tmux -L picker). Nothing is faked: a session counts as resumed
 # only when a NEW reply, produced after re-entering it, contains its token.
 #
-# Topology: ONE leader on khoj (this host) running the Linux fork; every Claude
-# and Pi agent process runs here. This script runs on khoj and drives a thin-
-# client pager on <client-host> (Darwin) through ssh, with the khoj leader
-# socket reverse-forwarded to the client (ssh -R). Agent commands are khoj paths.
+# Topology: each machine runs its OWN fork leader and its OWN agents (the
+# pager talks to the default ~/.grok/leader.sock on that machine). This script
+# can run on any host; for a Darwin box it drives that box's pager through
+# `ssh -tt`, so the pager, leader and every claude-agent-acp / pi-acp process
+# are on the target machine. No tunnel, no cross-machine agent paths.
 #
-# Usage: scripts/picker-live.sh <label> <client-ssh-target|local>
+# Usage: scripts/picker-live.sh <label> <ssh-target|local>
 #        e.g. picker-live.sh mini sab-mini@sab-mini ; picker-live.sh air sab-mini@sab-air
-# Env:   PICKER_PAGER   pager binary ON THE CLIENT (default ~/.grok/bin/grok-fork)
-#        PICKER_LEADER_SOCK  khoj leader socket (default ~/.grok/leader.sock)
-#        PICKER_OUT     evidence dir (default /tmp/picker-proof-out/<label>)
-#        PICKER_LEADER_LOG  leader log to excerpt (default ~/.grok/leader.log)
+# Env:   PICKER_PAGER    pager binary ON THE TARGET (default ~/.grok/bin/grok-fork)
+#        PICKER_PI_MODEL Pi model to pin ("" = Pi's own default; default deepseek/deepseek-flash)
+#        PICKER_OUT      evidence dir (default /tmp/picker-proof-out/<label>)
 set -uo pipefail
 
 [[ $# -eq 2 ]] || { echo "Usage: $0 <label> <client-ssh-target|local>" >&2; exit 2; }
 LABEL="$1"
 CLIENT="$2"
-KHOJ_SOCK="${PICKER_LEADER_SOCK:-$HOME/.grok/leader.sock}"
-if [[ "$CLIENT" == local ]]; then CLIENT_HOME="$HOME"; else CLIENT_HOME="$(ssh -o BatchMode=yes "$CLIENT" 'printf %s "$HOME"')"; fi
+# R <cmd>: run a shell command on the target machine (login PATH + the dirs
+# the leader's launchd/systemd environment also has).
+TPATH='$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
+R() { if [[ "$CLIENT" == local ]]; then sh -c "export PATH=$TPATH:\$PATH; $1"; else ssh -o BatchMode=yes "$CLIENT" "export PATH=$TPATH:\$PATH; $1"; fi; }
+CLIENT_HOME="$(R 'printf %s "$HOME"')"
 PAGER_BIN="${PICKER_PAGER:-$CLIENT_HOME/.grok/bin/grok-fork}"
-CLIENT_SOCK="$CLIENT_HOME/.grok/leader-picker.sock"
 OUT="${PICKER_OUT:-/tmp/picker-proof-out/$LABEL}"
-LEADER_LOG="${PICKER_LEADER_LOG:-$HOME/.grok/leader.log}"
 WORK=/tmp
 SOCK=picker
 SESS=picker-live
@@ -34,32 +35,27 @@ RUN="$RANDOM$RANDOM"
 TMUX_BIN="$(command -v tmux)"
 T() { "$TMUX_BIN" -L "$SOCK" "$@"; }
 
-if [[ "$CLIENT" == local ]]; then [[ -x "$PAGER_BIN" ]] || { echo "pager missing: $PAGER_BIN" >&2; exit 1; }
-else ssh -o BatchMode=yes "$CLIENT" "test -x $(printf %q "$PAGER_BIN")" || { echo "client pager missing: $CLIENT:$PAGER_BIN" >&2; exit 1; }; fi
-[[ -S "$KHOJ_SOCK" ]] || { echo "khoj leader socket missing: $KHOJ_SOCK" >&2; exit 1; }
+R "test -x $(printf %q "$PAGER_BIN")" || { echo "pager missing on target: $PAGER_BIN" >&2; exit 1; }
+R 'test -S "$HOME/.grok/leader.sock"' || { echo "no leader socket on target ($CLIENT:~/.grok/leader.sock)" >&2; exit 1; }
 mkdir -p "$OUT" "$WORK"
 rm -f "$OUT"/pane-*.txt "$OUT"/result.env
 : >"$OUT/steps.log"
 
-# Same adapter selection as ~/.dsh/scripts/gb.
-if [[ -x "$HOME/.local/bin/claude-agent-acp" ]]; then CLAUDE_ACP=$HOME/.local/bin/claude-agent-acp
-elif command -v claude-agent-acp >/dev/null 2>&1; then CLAUDE_ACP=claude-agent-acp
-elif command -v claude-acp >/dev/null 2>&1; then CLAUDE_ACP=claude-acp
-else CLAUDE_ACP=claude-code-acp; fi
-PI_ACP="${GB_PI_ACP:-pi-acp}"
-if [[ -z "${GB_PI_ACP:-}" && -x "$HOME/repos/Pi-Coding-Agent/pi-acp-patched/run" ]]; then
-  PI_ACP="$HOME/repos/Pi-Coding-Agent/pi-acp-patched/run"
-fi
+# Agent commands are resolved ON THE TARGET, so the leader there spawns them.
+CLAUDE_ACP="$(R 'command -v claude-agent-acp || command -v claude-acp || command -v claude-code-acp')"
+CLAUDE_BIN="$(R 'command -v claude')"
+PI_ACP="$(R 'command -v pi-acp')"
+[[ -n "$CLAUDE_ACP" && -n "$CLAUDE_BIN" && -n "$PI_ACP" ]] || { echo "agent binaries missing on target: claude-acp='$CLAUDE_ACP' claude='$CLAUDE_BIN' pi-acp='$PI_ACP'" >&2; exit 1; }
 # Pi's default model (google-antigravity Gemini) was out of quota on 2026-10-18
 # (429), so pin a working one through pi-acp's PI_ACP_PI_COMMAND. Set
 # PICKER_PI_MODEL="" to use Pi's own default.
 PI_MODEL="${PICKER_PI_MODEL-deepseek/deepseek-flash}"
 if [[ -n "$PI_MODEL" ]]; then
   PI_WRAP="/tmp/picker-live-pi-$LABEL.sh"
-  printf '#!/bin/sh\nexec pi --model %s "$@"\n' "$PI_MODEL" >"$PI_WRAP"; chmod +x "$PI_WRAP"
+  R "PIBIN=\$(command -v pi); printf '#!/bin/sh\\nexec %s --model %s \"\$@\"\\n' \"\$PIBIN\" $PI_MODEL > $PI_WRAP; chmod +x $PI_WRAP"
   PI_ACP="env PI_ACP_PI_COMMAND=$PI_WRAP $PI_ACP"
 fi
-CLAUDE_CMD="env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=$(command -v claude) $CLAUDE_ACP"
+CLAUDE_CMD="env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=$CLAUDE_BIN $CLAUDE_ACP"
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$OUT/steps.log" >&2; }
 vis() { T capture-pane -p -t "$SESS" 2>/dev/null || true; }
@@ -220,12 +216,12 @@ reenter_and_ask() {
 START_TS="$(date "+%Y-%m-%d %H:%M:%S")"
 T kill-server 2>/dev/null || true
 log "launch pager=$PAGER_BIN label=$LABEL"
-PAGER_ARGS="--leader --leader-socket $CLIENT_SOCK --always-approve --trust --fullscreen --no-alt-screen --cwd $WORK --agent-choice $(printf %q "claude=$CLAUDE_CMD") --agent-choice $(printf %q "pi=$PI_ACP")"
+PAGER_ARGS="--leader --always-approve --trust --fullscreen --no-alt-screen --cwd $WORK --agent-choice $(printf %q "claude=$CLAUDE_CMD") --agent-choice $(printf %q "pi=$PI_ACP")"
+PAGER_LINE="env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 $(printf %q "$PAGER_BIN") $PAGER_ARGS"
 if [[ "$CLIENT" == local ]]; then
-  LAUNCH="exec env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 $PAGER_BIN ${PAGER_ARGS//--leader-socket $CLIENT_SOCK/--leader-socket $KHOJ_SOCK}"
+  LAUNCH="exec $PAGER_LINE"
 else
-  REMOTE="rm -f $CLIENT_SOCK; exec env GROK_AGENT_DASHBOARD=1 $(printf %q "$PAGER_BIN") $PAGER_ARGS"
-  LAUNCH="exec ssh -tt -o ExitOnForwardFailure=yes -o StreamLocalBindUnlink=yes -R $CLIENT_SOCK:$KHOJ_SOCK $CLIENT $(printf %q "$REMOTE")"
+  LAUNCH="exec ssh -tt $CLIENT $(printf %q "export PATH=$TPATH:\$PATH; exec $PAGER_LINE")"
 fi
 echo "$LAUNCH" | sed -E 's/(KEY|TOKEN)=[^ ]+/\1=<redacted>/g' >"$OUT/launch-cmd.txt"
 T -f /dev/null new-session -d -s "$SESS" -x 120 -y 40 "$LAUNCH"
@@ -243,22 +239,23 @@ open_dashboard && open_session pi1 pi BRAVO-1 dash || ok=0
 open_dashboard && open_session claude2 claude ALPHA-2 dash || ok=0
 open_dashboard && open_session pi2 pi BRAVO-2 dash || ok=0
 
-pgrep -af claude-agent-acp >"$OUT/khoj-pgrep-claude.txt" 2>&1 || true
-pgrep -af pi-acp >"$OUT/khoj-pgrep-pi.txt" 2>&1 || true
-hostname >"$OUT/khoj-hostname.txt"
+# Agents live on the target while the four sessions are open.
+R 'hostname; uname -sm' >"$OUT/host.txt" 2>&1 || true
+R 'pgrep -af claude-agent-acp' >"$OUT/pgrep-claude-live.txt" 2>&1 || true
+R 'pgrep -af pi-acp' >"$OUT/pgrep-pi-live.txt" 2>&1 || true
+R 'pgrep -af grok-fork' >"$OUT/pgrep-leader.txt" 2>&1 || true
 # Cycle through all four from the dashboard, in an order that never stays put.
 for pair in "claude1:ALPHA-1" "pi2:BRAVO-2" "pi1:BRAVO-1" "claude2:ALPHA-2" "claude1:ALPHA-1"; do
   reenter_and_ask "${pair%%:*}" "${pair##*:}" || ok=0
 done
 
-# Leader route evidence (paths only, no secrets: grep route/session lines).
-journalctl --user -u grok-leader --since "$START_TS" --no-pager 2>/dev/null | grep -aiE 'route|backend|external|agentCmd|session/new|session/load|client|spawn' | cut -c1-400 >"$OUT/leader-journal.txt" || true
-if [[ -r "$LEADER_LOG" ]]; then
-  grep -aiE 'route|backend|external|agentCmd|session/new|session/load|client' "$LEADER_LOG" | tail -120 >"$OUT/leader-route.txt" || true
-fi
-pgrep -af claude-agent-acp >>"$OUT/khoj-pgrep-claude.txt" 2>&1 || true
-pgrep -af pi-acp >>"$OUT/khoj-pgrep-pi.txt" 2>&1 || true
-grep -a 'session/load' "$OUT/pager-debug.log" >"$OUT/session-load.txt" 2>/dev/null || true
+# Leader route evidence from the target's OWN leader (route/spawn lines only).
+case "$(R 'uname -s')" in
+  Linux) R "journalctl --user -u grok-leader --since '$START_TS' --no-pager" ;;
+  *) R 'cat /tmp/grok-leader.out /tmp/grok-leader.err 2>/dev/null; tail -n 600 ~/.grok/logs/unified.jsonl 2>/dev/null' ;;
+esac 2>/dev/null | grep -aiE 'route|backend|external|agentCmd|session/new|session/load|client|spawn' | cut -c1-400 | tail -150 >"$OUT/leader-route.txt" || true
+R 'pgrep -af claude-agent-acp' >"$OUT/pgrep-claude-end.txt" 2>&1 || true
+R 'pgrep -af pi-acp' >"$OUT/pgrep-pi-end.txt" 2>&1 || true
 all >"$OUT/scrollback.txt"
 
 {
