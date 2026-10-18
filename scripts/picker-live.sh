@@ -296,6 +296,7 @@ case "$(R 'uname -s')" in
 esac 2>/dev/null | grep -aE 'phase=register|phase=sdk-initialize|route|agentCmd|session/new|session/load|spawn|load_session' | cut -c1-300 | tail -150 >"$OUT/leader-route.txt" || true
 R 'ps -axo pid,args | grep -E "[c]laude-agent-acp" | cut -c1-200' >"$OUT/pgrep-claude-end.txt" 2>&1 || true
 R 'ps -axo pid,args | grep -E "[p]i-acp" | cut -c1-200' >"$OUT/pgrep-pi-end.txt" 2>&1 || true
+R 'ps -axo pid,ppid,etime,command | grep -E "[p]i-acp|[c]laude-agent-acp|[a]gent leader|^ *[0-9]+ +[0-9]+ +[^ ]+ +pi *$" | cut -c1-200' >"$OUT/proc-tree-end.txt" 2>&1 || true
 all >"$OUT/scrollback.txt"
 
 {
