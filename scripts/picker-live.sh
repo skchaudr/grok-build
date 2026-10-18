@@ -5,26 +5,38 @@
 # (own socket: tmux -L picker). Nothing is faked: a session counts as resumed
 # only when a NEW reply, produced after re-entering it, contains its token.
 #
-# Usage: scripts/picker-live.sh <machine-label>      e.g. mini | air
-# Env:   PICKER_PAGER   pager binary (default ~/.grok/bin/grok-fork)
+# Topology: ONE leader on khoj (this host) running the Linux fork; every Claude
+# and Pi agent process runs here. This script runs on khoj and drives a thin-
+# client pager on <client-host> (Darwin) through ssh, with the khoj leader
+# socket reverse-forwarded to the client (ssh -R). Agent commands are khoj paths.
+#
+# Usage: scripts/picker-live.sh <label> <client-ssh-target|local>
+#        e.g. picker-live.sh mini sab-mini@sab-mini ; picker-live.sh air sab-mini@sab-air
+# Env:   PICKER_PAGER   pager binary ON THE CLIENT (default ~/.grok/bin/grok-fork)
+#        PICKER_LEADER_SOCK  khoj leader socket (default ~/.grok/leader.sock)
 #        PICKER_OUT     evidence dir (default /tmp/picker-proof-out/<label>)
-#        PICKER_LEADER_SOCKET  private leader socket (default: the shared one)
 #        PICKER_LEADER_LOG  leader log to excerpt (default ~/.grok/leader.log)
 set -uo pipefail
 
-[[ $# -eq 1 ]] || { echo "Usage: $0 <machine-label>" >&2; exit 2; }
+[[ $# -eq 2 ]] || { echo "Usage: $0 <label> <client-ssh-target|local>" >&2; exit 2; }
 LABEL="$1"
-PAGER_BIN="${PICKER_PAGER:-$HOME/.grok/bin/grok-fork}"
+CLIENT="$2"
+KHOJ_SOCK="${PICKER_LEADER_SOCK:-$HOME/.grok/leader.sock}"
+if [[ "$CLIENT" == local ]]; then CLIENT_HOME="$HOME"; else CLIENT_HOME="$(ssh -o BatchMode=yes "$CLIENT" 'printf %s "$HOME"')"; fi
+PAGER_BIN="${PICKER_PAGER:-$CLIENT_HOME/.grok/bin/grok-fork}"
+CLIENT_SOCK="$CLIENT_HOME/.grok/leader-picker.sock"
 OUT="${PICKER_OUT:-/tmp/picker-proof-out/$LABEL}"
 LEADER_LOG="${PICKER_LEADER_LOG:-$HOME/.grok/leader.log}"
-WORK="/tmp/picker-live-work-$LABEL"
+WORK=/tmp
 SOCK=picker
 SESS=picker-live
 RUN="$RANDOM$RANDOM"
 TMUX_BIN="$(command -v tmux)"
 T() { "$TMUX_BIN" -L "$SOCK" "$@"; }
 
-[[ -x "$PAGER_BIN" ]] || { echo "pager missing: $PAGER_BIN" >&2; exit 1; }
+if [[ "$CLIENT" == local ]]; then [[ -x "$PAGER_BIN" ]] || { echo "pager missing: $PAGER_BIN" >&2; exit 1; }
+else ssh -o BatchMode=yes "$CLIENT" "test -x $(printf %q "$PAGER_BIN")" || { echo "client pager missing: $CLIENT:$PAGER_BIN" >&2; exit 1; }; fi
+[[ -S "$KHOJ_SOCK" ]] || { echo "khoj leader socket missing: $KHOJ_SOCK" >&2; exit 1; }
 mkdir -p "$OUT" "$WORK"
 rm -f "$OUT"/pane-*.txt "$OUT"/result.env
 : >"$OUT/steps.log"
@@ -194,8 +206,15 @@ reenter_and_ask() {
 
 T kill-server 2>/dev/null || true
 log "launch pager=$PAGER_BIN label=$LABEL"
-T -f /dev/null new-session -d -s "$SESS" -x 120 -y 40 \
-  "cd $WORK && exec env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 $PAGER_BIN --cwd $WORK --leader ${PICKER_LEADER_SOCKET:+--leader-socket $PICKER_LEADER_SOCKET} --always-approve --trust --fullscreen --no-alt-screen --debug-file $OUT/pager-debug.log --agent-choice 'claude=$CLAUDE_CMD' --agent-choice 'pi=$PI_ACP'"
+PAGER_ARGS="--leader --leader-socket $CLIENT_SOCK --always-approve --trust --fullscreen --no-alt-screen --cwd $WORK --agent-choice $(printf %q "claude=$CLAUDE_CMD") --agent-choice $(printf %q "pi=$PI_ACP")"
+if [[ "$CLIENT" == local ]]; then
+  LAUNCH="exec env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 $PAGER_BIN ${PAGER_ARGS//--leader-socket $CLIENT_SOCK/--leader-socket $KHOJ_SOCK}"
+else
+  REMOTE="rm -f $CLIENT_SOCK; exec env GROK_AGENT_DASHBOARD=1 $(printf %q "$PAGER_BIN") $PAGER_ARGS"
+  LAUNCH="exec ssh -tt -o ExitOnForwardFailure=yes -o StreamLocalBindUnlink=yes -R $CLIENT_SOCK:$KHOJ_SOCK $CLIENT $(printf %q "$REMOTE")"
+fi
+echo "$LAUNCH" | sed -E 's/(KEY|TOKEN)=[^ ]+/\1=<redacted>/g' >"$OUT/launch-cmd.txt"
+T -f /dev/null new-session -d -s "$SESS" -x 120 -y 40 "$LAUNCH"
 T set-option -t "$SESS" history-limit 20000
 T resize-window -t "$SESS" -x 120 -y 40
 
@@ -210,6 +229,9 @@ open_dashboard && open_session pi1 pi BRAVO-1 dash || ok=0
 open_dashboard && open_session claude2 claude ALPHA-2 dash || ok=0
 open_dashboard && open_session pi2 pi BRAVO-2 dash || ok=0
 
+pgrep -af claude-agent-acp >"$OUT/khoj-pgrep-claude.txt" 2>&1 || true
+pgrep -af pi-acp >"$OUT/khoj-pgrep-pi.txt" 2>&1 || true
+hostname >"$OUT/khoj-hostname.txt"
 # Cycle through all four from the dashboard, in an order that never stays put.
 for pair in "claude1:ALPHA-1" "pi2:BRAVO-2" "pi1:BRAVO-1" "claude2:ALPHA-2" "claude1:ALPHA-1"; do
   reenter_and_ask "${pair%%:*}" "${pair##*:}" || ok=0
@@ -217,14 +239,16 @@ done
 
 # Leader route evidence (paths only, no secrets: grep route/session lines).
 if [[ -r "$LEADER_LOG" ]]; then
-  grep -aiE 'route|backend|external|agentCmd|session/new|session/load' "$LEADER_LOG" | tail -80 >"$OUT/leader-route.txt" || true
+  grep -aiE 'route|backend|external|agentCmd|session/new|session/load|client' "$LEADER_LOG" | tail -120 >"$OUT/leader-route.txt" || true
 fi
+pgrep -af claude-agent-acp >>"$OUT/khoj-pgrep-claude.txt" 2>&1 || true
+pgrep -af pi-acp >>"$OUT/khoj-pgrep-pi.txt" 2>&1 || true
 grep -a 'session/load' "$OUT/pager-debug.log" >"$OUT/session-load.txt" 2>/dev/null || true
 all >"$OUT/scrollback.txt"
 
 {
   echo "label=$LABEL"
-  echo "pager=$PAGER_BIN"
+  echo "pager=$CLIENT:$PAGER_BIN"
   for k in claude1 pi1 claude2 pi2; do
     echo "$k.resumed=${ANSWERED[$k]:-not-run}"
     echo "$k.model=${MODEL[$k]:-}"
