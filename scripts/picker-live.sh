@@ -194,7 +194,7 @@ row_for() {
 # Re-enter <name> from the dashboard, ask for its token, require a fresh reply.
 reenter_and_ask() {
   local name="$1" token="$2" down i nonce
-  nonce="Q${RUN}${name//[^A-Za-z0-9]/}"
+  NCOUNT=$((${NCOUNT:-0}+1)); nonce="Q${RUN}${name//[^A-Za-z0-9]/}n$NCOUNT"
   open_dashboard || return 1
   snap "dash-before-$name"
   down="$(row_for "$token")" || { log "FAIL no dashboard row shows $token"; ANSWERED[$name]=no; return 1; }
@@ -284,7 +284,7 @@ done
 case "$(R 'uname -s')" in
   Linux) R "journalctl --user -u grok-leader --since '$START_TS' --no-pager" ;;
   *) R 'cat /tmp/grok-leader.out /tmp/grok-leader.err 2>/dev/null; tail -n 600 ~/.grok/logs/unified.jsonl 2>/dev/null' ;;
-esac 2>/dev/null | grep -aiE 'route|backend|external|agentCmd|session/new|session/load|client|spawn' | cut -c1-400 | tail -150 >"$OUT/leader-route.txt" || true
+esac 2>/dev/null | grep -aE 'phase=register|phase=sdk-initialize|route|agentCmd|session/new|session/load|spawn|load_session' | cut -c1-300 | tail -150 >"$OUT/leader-route.txt" || true
 R 'pgrep -af claude-agent-acp' >"$OUT/pgrep-claude-end.txt" 2>&1 || true
 R 'pgrep -af pi-acp' >"$OUT/pgrep-pi-end.txt" 2>&1 || true
 all >"$OUT/scrollback.txt"
