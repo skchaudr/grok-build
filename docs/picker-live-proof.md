@@ -2,9 +2,32 @@
 
 ## Verdict
 
-**PASS on the Air. PASS on khoj (Linux), once. Mac mini: NOT PROVEN (0/4 sessions answered, in two runs against the durable launchd leader).** The Pi choice **does** reach `pi-acp` on the Mac; the stall is inside `pi`, which is a separate problem from routing.
+**Air: PASS for both agents. khoj: PASS once. Mac mini: Claude PASS via API key; Pi BLOCKED pending Sab at the Mac screen.** The Mac mini four-session proof (two Claude, two Pi, with re-entry) is therefore **not complete**.
 
-### Why the Mac Pi choice looked misrouted, and was not
+### Mac mini run 4 (05:00 to 05:15 UTC), launchd leader, `PICKER_START_LEADER=0`
+
+Claude command `claude-agent-acp-api` (S1's named wrapper: OpenRouter via `ANTHROPIC_BASE_URL`, key in a mode-600 env file, never printed); Pi pin on `~/.local/bin/pi` 1.3.0. Evidence `/tmp/picker-proof-out/mini/`, log `/tmp/picker-mini4.log`.
+
+| Session | Token | Opened | Fresh reply carrying token | Status-line model | Session id | Cause |
+|---|---|---|---|---|---|---|
+| claude1 | ALPHA-1 | yes | **no** | deepseek/deepseek-v4-flash-0731 | none | prompt lost to a leader relaunch (item 2) |
+| pi1 | BRAVO-1 | session creation timed out | **no** | (Claude view still shown) | none | Pi hang (item 3) |
+| claude2 | ALPHA-2 | yes, from the dashboard | **yes, 05:07:45** | deepseek/deepseek-v4-flash-0731 | c7decfd8-e53f-40e2-b810-9d3da63c386b | none |
+| pi2 | BRAVO-2 | session creation timed out | **no** | (Claude view still shown) | none | Pi hang (item 3) |
+
+Re-entry from the dashboard was not meaningfully exercised on the Mac: only claude2 answered, and the later re-entry steps failed because the Pi sessions never existed. I did not rerun Pi (lead's instruction).
+
+1. **Claude on the Mac works without a login (Sab's decision 1 proven).** claude2 was opened from the dashboard, went through the launchd leader, and answered with its token at 05:07:45. The acp child (pid 60136) environment, as confirmed by the overseer, had `ANTHROPIC_BASE_URL` at OpenRouter and model `deepseek/deepseek-v4-flash-0731`. The status line shows that model name for every row because the pager stayed on the Claude view (see item 3).
+2. **claude1 failed because the pager updated itself, not because of the API key.** The fork pager (1.0.45), started by my proof at 05:00:11, ran its own auto-update at 05:00:13 (`~/.grok/config.toml` `auto_update=true`, `version.json` `checked_at` 05:00:13.89). It installed stock 1.0.62 (`~/.grok/bin/grok` linked to `grok-1.0.62`) and registered `grok-leader-discovery` and `grok-pager-update` clients on both leaders (fork pid 53520, hub pid 52991; `unified.jsonl` 05:00:14). Both leaders exited 0 at 05:00:21 and launchd restarted them (the fork leader is now pid 59975, runs=4). Session claude1 (`cf621850`) was created at 05:00:12 under the dead leader and resumed under the new one with `messages=0`, so the prompt was lost. This is the same stock-client eviction as at 03:26 (the relaunch path at `crates/codegen/xai-grok-shell/src/leader/server.rs:1982-2009`), self-inflicted this time by the pager's own update probe. The Air passed only because 1.0.62 was already installed there at 02:01 UTC, so no relaunch signal fired.
+3. **Pi hangs under the launchd GUI domain, and it is not the Pi version.** Pi 1.3.0 (node@22 pid 60917 under `pi-acp` 60916) sits at 0 CPU with no network, its main thread blocked in `uv_fs_scandir` to `__opendir2` to `__open_nocancel`, with fds 6, 8 and 10 open on the directory `/`. The identical command and cwd `/tmp` answer `get_state` instantly over ssh, and S1's Aqua probe hung too. Strongest hypothesis (unconfirmed): a macOS TCC permission prompt for `node` that nobody can answer (the Mac has a display, the console owner is sab-mini, `UserNotificationCenter` has been alive since 01:53 UTC). Only Sab at the Mac screen can confirm it. This also supersedes the earlier "Pi version 1.2.0 vs 1.3.0" idea, which is disproven.
+
+### Proposed fixes (PROPOSED, not applied)
+
+1. Set `auto_update=false` in `~/.grok/config.toml` on both Macs, so the fork pager cannot install stock 1.0.62 and evict the fork leader.
+2. Make the fork leader ignore relaunch requests that come from update probes (`grok-pager-update`, `grok-leader-discovery`) in the relaunch path at `leader/server.rs:1982-2009`.
+3. Grant Full Disk Access (or answer the pending prompt) for the `node` binary Pi uses on the Mac mini.
+
+### Earlier diagnosis (03:17 UTC): the Pi choice is routed correctly
 
 The lead read `result.env` (`pi1.model = pi2.model = "Default (recommended)"`, empty sids, a Claude error on pi2) as the `pi` choice going to the wrong backend. The evidence says otherwise:
 
@@ -88,7 +111,9 @@ Evidence: `/tmp/picker-proof-out/khojlocal/` (local pager, systemd `grok-leader`
 
 | # | Issue | Location | Blocks? |
 |---|---|---|---|
-| 1 | Mac, launchd leader: Claude turn fails `OAuth session expired and could not be refreshed` (S1's lane); `pi` starts under `pi-acp` but never creates a session (180s timeout), while the same `pi-acp` works from ssh | launchd context; leader log `/tmp/grok-leader.err`, `proc-tree-end.txt` | **Blocks the Mac mini proof.** Cause open |
+| 1 | (superseded by run 4: Claude works via API key) Mac, launchd leader: Claude turn fails `OAuth session expired and could not be refreshed` (S1's lane); `pi` starts under `pi-acp` but never creates a session (180s timeout), while the same `pi-acp` works from ssh | launchd context; leader log `/tmp/grok-leader.err`, `proc-tree-end.txt` | **Blocks the Mac mini proof.** Cause open |
+| 1c | Pi blocks in `open()` under the launchd GUI domain; suspected TCC prompt | macOS, node under launchd | **Blocks the Mac Pi proof**, needs Sab at the screen |
+| 1d | The fork pager's auto-update installs stock 1.0.62 and relaunches both leaders, losing the first prompt | `~/.grok/config.toml` `auto_update`; `leader/server.rs:1982-2009` | Blocks a clean first session on the Mac until `auto_update=false` (proposed) |
 | 1b | The first Mac run's "Not logged in" was an artifact of my ssh-started leader | `scripts/picker-live.sh:240-253` | Fixed: leader start is opt-in |
 | 2 | Embedded pager hosts only the first `--agent-choice`; picker needs a leader | `app/cli.rs:898`, `app/mod.rs:572`; multi-backend routing at `leader/server.rs:3394` (`AGENT_CMD_META`), `:3412` (`resolve_backend`) | No. Works as designed with `--leader`; a pager without a fork leader shows no machine picker |
 | 3 | `synthetic_session_load` fires only if the agent advertises `loadSession`, so `session/load` may never fire for external agents (`docs/acp-matrix.md` suspicion) | `leader/server.rs:936-1000` | No for this proof: re-entry from the dashboard attached the live session and gave fresh correct replies. I did not observe whether `session/load` was sent; the question stays open for a cold restart |
