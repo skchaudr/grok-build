@@ -15,8 +15,9 @@
 #        e.g. picker-live.sh mini sab-mini@sab-mini ; picker-live.sh air sab-mini@sab-air
 # Env:   PICKER_PAGER    pager binary ON THE TARGET (default ~/.grok/bin/grok-fork)
 #        PICKER_PI_MODEL Pi model to pin ("" = Pi's own default; default deepseek/deepseek-flash)
-#        PICKER_START_LEADER=1 (default) starts a FOREGROUND fork leader on the target
-#                        when none is running, and stops it at the end; 0 uses a leader already running
+#        PICKER_START_LEADER=0 (default) never starts, stops or touches a leader or its socket;
+#                        it requires one already listening. 1 starts a FOREGROUND fork leader on
+#                        the target when none is running, and stops it at the end
 #        PICKER_OUT      evidence dir (default /tmp/picker-proof-out/<label>)
 set -uo pipefail
 
@@ -237,7 +238,7 @@ stop_leader() {
   fi
 }
 trap stop_leader EXIT
-if [[ "${PICKER_START_LEADER:-1}" == 1 ]]; then
+if [[ "${PICKER_START_LEADER:-0}" == 1 ]]; then
   if R 'pgrep -f "grok-fork agent leader"' >/dev/null 2>&1; then
     log "using the leader already running on the target (not started or stopped by this script)"
   else
