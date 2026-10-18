@@ -179,29 +179,31 @@ open_dashboard() {
   for ((i = 0; i < 15; i++)); do keys Up; sleep 0.12; done
 }
 
-# Dashboard row order, top to bottom, by which token each session row shows.
-# Echo "<down-count>" to reach the row for <token> from the + New Agent button.
-row_for() {
-  local token="$1" n=0 line
-  while IFS= read -r line; do
-    if [[ "$line" == *"remember the token"* ]]; then
-      n=$((n + 1))
-      [[ "$line" == *"$token"* ]] && { echo "$n"; return 0; }
-    fi
-  done <<<"$(vis)"
+# goto_row <token>: walk the dashboard one row at a time from the top. The
+# focused row is the one drawn with a leading "▏"; stop when it shows the token,
+# and open any collapsed ("▸") section the cursor lands on. This does not
+# assume how many other sessions or pinned rows the machine already has.
+goto_row() {
+  local token="$1" i f
+  for ((i = 0; i < 80; i++)); do
+    keys Down; sleep 0.3
+    f="$(vis | grep -m1 '▏')"
+    [[ "$f" == *"remember the token $token"* ]] && return 0
+    [[ "$f" == *"▸"* ]] && { keys Enter; sleep 0.4; }
+  done
   return 1
 }
 
 # Re-enter <name> from the dashboard, ask for its token, require a fresh reply.
 reenter_and_ask() {
-  local name="$1" token="$2" down i nonce
+  local name="$1" token="$2" i nonce
   NCOUNT=$((${NCOUNT:-0}+1)); nonce="Q${RUN}${name//[^A-Za-z0-9]/}n$NCOUNT"
   open_dashboard || return 1
   snap "dash-before-$name"
-  down="$(row_for "$token")" || { log "FAIL no dashboard row shows $token"; ANSWERED[$name]=no; return 1; }
-  for ((i = 0; i <= down; i++)); do keys Down; sleep 0.25; done
+  goto_row "$token" || { log "FAIL no dashboard row reached for $token"; snap "dash-fail-$name"; ANSWERED[$name]=no; keys Escape; return 1; }
   keys Right
   sleep 3
+  [[ "$(vis)" == *"remember the token $token"* ]] || log "WARN attached view does not show the $token title"
   T clear-history -t "$SESS" 2>/dev/null || true
   wait_for "❯" 30 || true
   send_line "$nonce what token did I give you earlier in this session? Reply with only the token."
