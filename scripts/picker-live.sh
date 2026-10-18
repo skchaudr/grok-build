@@ -281,9 +281,9 @@ open_dashboard && open_session pi2 pi BRAVO-2 dash || ok=0
 
 # Agents live on the target while the four sessions are open.
 R 'hostname; uname -sm' >"$OUT/host.txt" 2>&1 || true
-R 'pgrep -af claude-agent-acp' >"$OUT/pgrep-claude-live.txt" 2>&1 || true
-R 'pgrep -af pi-acp' >"$OUT/pgrep-pi-live.txt" 2>&1 || true
-R 'pgrep -af grok-fork' >"$OUT/pgrep-leader.txt" 2>&1 || true
+R 'ps -axo pid,args | grep -E "[c]laude-agent-acp" | cut -c1-200' >"$OUT/pgrep-claude-live.txt" 2>&1 || true
+R 'ps -axo pid,args | grep -E "[p]i-acp" | cut -c1-200' >"$OUT/pgrep-pi-live.txt" 2>&1 || true
+R 'ps -axo pid,args | grep -E "[g]rok-fork agent leader" | cut -c1-200' >"$OUT/pgrep-leader.txt" 2>&1 || true
 # Cycle through all four from the dashboard, in an order that never stays put.
 for pair in "claude1:ALPHA-1" "pi2:BRAVO-2" "pi1:BRAVO-1" "claude2:ALPHA-2" "claude1:ALPHA-1"; do
   reenter_and_ask "${pair%%:*}" "${pair##*:}" || ok=0
@@ -294,8 +294,8 @@ case "$(R 'uname -s')" in
   Linux) R "journalctl --user -u grok-leader --since '$START_TS' --no-pager" ;;
   *) R 'cat /tmp/grok-leader.out /tmp/grok-leader.err 2>/dev/null; tail -n 600 ~/.grok/logs/unified.jsonl 2>/dev/null' ;;
 esac 2>/dev/null | grep -aE 'phase=register|phase=sdk-initialize|route|agentCmd|session/new|session/load|spawn|load_session' | cut -c1-300 | tail -150 >"$OUT/leader-route.txt" || true
-R 'pgrep -af claude-agent-acp' >"$OUT/pgrep-claude-end.txt" 2>&1 || true
-R 'pgrep -af pi-acp' >"$OUT/pgrep-pi-end.txt" 2>&1 || true
+R 'ps -axo pid,args | grep -E "[c]laude-agent-acp" | cut -c1-200' >"$OUT/pgrep-claude-end.txt" 2>&1 || true
+R 'ps -axo pid,args | grep -E "[p]i-acp" | cut -c1-200' >"$OUT/pgrep-pi-end.txt" 2>&1 || true
 all >"$OUT/scrollback.txt"
 
 {
