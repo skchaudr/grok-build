@@ -1,0 +1,40 @@
+
+  /tmp [Choose Ctrl+l]                                                                                        ◇ 9 idle
+
+  + New Agent                                                                  Open Previous /resume │ Worktree Ctrl+w
+
+  ▾ Idle 9 ─────────────────────────────────────────────────────────────────────────────────────────────────────────── █
+                                                                                                                       █
+    ◇ remember the token BRAVO-2 and · tmp                                                                         2m  █
+      Pi error: API key auth failed for provider inception: Failed to resolve API key for provider "inception" from …  █
+                                                                                                                       █
+    ◇ remember the token ALPHA-1 and · tmp                                                                         2m  █
+      ALPHA-1                                                                                                          █
+                                                                                                                       █
+    ◇ remember the token ALPHA-2 and · tmp                                                                         3m  █
+      ALPHA-2                                                                                                          █
+                                                                                                                       █
+    ◇ remember the token BRAVO-1 and · tmp                                                                         3m  █
+      Pi error: API key auth failed for provider inception: Failed to resolve API key for provider "inception" from …  █
+                                                                                                                       █
+    ◇ xai-grok-pager Leader Roster Socket Launch                                                                  10d  █
+      grok-4.7                                                                                                         █
+                                                                                                                       █
+    ◇ Request to Reply With Only ALPHA                                                                            10d  █
+      grok-4.7                                                                                                         █
+                                                                                                                       █
+    ◇ Grok-TEAMS-ACP                                                                                              13d  █
+      Bugs + wrong ACP path; ~20m build/transfer                                                                       █
+                                                                                                                       █
+    ◇ Leader hosts external ACP agent sessions                                                                    15d  █
+      Handoff 2026-10-04: push done; merge still open                                                                  █
+                                                                                                                       █
+    ◇ VM disk cleanup: worktrees, builds, Khoj                                                                    15d  █
+      Khoj removed; 62 GB free; notes and Postgres kept
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Dispatch a new agent                                                                                           │
+  ╰────────────────────────────────────────────────────────────────────────────────────── Fable 5.1 · always-approve ╯
+
+  Enter:create  │  Tab:input  │  ?:shortcuts
+

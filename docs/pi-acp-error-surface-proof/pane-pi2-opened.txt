@@ -1,0 +1,40 @@
+ pi · remember the token BRAVO-2 and reply only … │ pi /tmp                                       ‹ 1/4 › │ [Dashboard]
+    remember the token BRAVO-2 and reply only with it                                                        11:40 AM
+
+    Pi error: API key auth failed for provider inception: Failed to resolve API key for provider             11:40 AM  █
+    "inception" from shell command: security find-generic-password -s 'mercury-sab' -w                                 █
+                                                                                                                       █
+ ┃  Turn failed in 0.1s: Request failed: failed to deserialize response. Try sending again.                            █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ ❯                                                                                                                  │
+ ╰───────────────────────────────────────────────────────────────────────────── inception/Mercury 2 · always-approve ─╯
+ Ctrl+\:dashboard  │  Ctrl+[/]:prev/next agent  │  Ctrl+x:archive  │  Shift+Tab:mode  │  Ctrl+.:shortcuts

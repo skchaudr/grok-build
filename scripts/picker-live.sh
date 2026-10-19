@@ -47,9 +47,10 @@ rm -f "$OUT"/pane-*.txt "$OUT"/result.env
 # PICKER_CLAUDE_CMD: full claude --agent-choice command on the target (e.g. a
 # named API-key wrapper such as ~/.local/bin/claude-agent-acp-api); used as is.
 # PICKER_PI_BIN: pi binary the Pi pin wrapper execs (default: `command -v pi`).
+# PICKER_PI_ACP: pi-acp entry point ON THE TARGET (default: `command -v pi-acp`, /usr/bin/pi-acp on khoj).
 CLAUDE_ACP="$(R 'command -v claude-agent-acp || command -v claude-acp || command -v claude-code-acp')"
 CLAUDE_BIN="$(R 'command -v claude')"
-PI_ACP="$(R 'command -v pi-acp')"
+PI_ACP="${PICKER_PI_ACP:-$(R 'command -v pi-acp')}"
 [[ -n "${PICKER_CLAUDE_CMD:-}" ]] && { CLAUDE_ACP="${PICKER_CLAUDE_CMD}"; CLAUDE_BIN="${CLAUDE_BIN:-none}"; }
 [[ -n "$CLAUDE_ACP" && -n "$CLAUDE_BIN" && -n "$PI_ACP" ]] || { echo "agent binaries missing on target: claude-acp='$CLAUDE_ACP' claude='$CLAUDE_BIN' pi-acp='$PI_ACP'" >&2; exit 1; }
 # Pi's default model (google-antigravity Gemini) was out of quota on 2026-10-18

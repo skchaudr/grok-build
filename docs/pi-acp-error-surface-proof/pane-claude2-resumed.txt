@@ -1,0 +1,40 @@
+ claude · remember the token ALPHA-2 and … │ claude /tmp                             35K / 1.0M │ ‹ 1/4 › │ [Dashboard]
+    Q29373693claude2n4 Reply with only the token I asked you to remember.                                   11:45 AM
+
+    ALPHA-2                                                                                                 11:45 AM
+
+    Worked for 3.9s
+
+
+
+
+
+
+
+
+
+
+                                                                                                                       ▴
+                                                                                                                       ─
+                                                                                                                      ━━
+                                                                                                                       ▾
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ ❯                                                                                                                  │
+ ╰─────────────────────────────────────────────────────────────────────────────────────── Fable 5.1 · always-approve ─╯
+ Ctrl+\:dashboard  │  Ctrl+[/]:prev/next agent  │  Ctrl+x:archive  │  Shift+Tab:mode  │  Ctrl+.:shortcuts

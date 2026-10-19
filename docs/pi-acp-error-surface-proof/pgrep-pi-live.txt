@@ -1,0 +1,13 @@
+ 240774 node /usr/bin/pi-acp
+1249899 /usr/bin/zsh -c source /home/sab-mini/.claude/shell-snapshots/snapshot-zsh-1792389311381-7a1bje.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \bu
+1249900 /usr/bin/zsh -c source /home/sab-mini/.claude/shell-snapshots/snapshot-zsh-1792389311381-7a1bje.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \bu
+1297143 /usr/bin/node /tmp/pi-acp-retry-drain-w9GnY0/fake-pi.mjs --mode json -p Task: retry
+1297181 /usr/bin/node /tmp/pi-acp-steer-grace-bBfsDk/fake-pi.mjs --mode json -p Task: grace
+1298605 /usr/bin/zsh -c source /home/sab-mini/.claude/shell-snapshots/snapshot-zsh-1792389311381-7a1bje.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \bu
+1298654 /usr/bin/tmux -L picker -f /dev/null new-session -d -s picker-live -x 120 -y 40 exec env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 /home/sab-mini/.grok/bin/grok-fork --leader --leader-socket /home/
+1298655 /home/sab-mini/.grok/bin/grok-fork --leader --leader-socket /home/sab-mini/.grok/leader.sock --always-approve --trust --fullscreen --no-alt-screen --cwd /tmp --agent-choice claude=env -u CLAUD
+1299632 node --preserve-symlinks --preserve-symlinks-main /home/sab-mini/.pi/pi-acp-patched/index.js
+1299750 /usr/bin/node /tmp/pi-acp-retry-drain-5auFM4/fake-pi.mjs --mode json -p Task: retry
+1299821 /usr/bin/node /tmp/pi-acp-steer-grace-KDWDRP/fake-pi.mjs --mode json -p Task: grace
+1300943 /usr/bin/node /tmp/pi-acp-retry-drain-MbyW6D/fake-pi.mjs --mode json -p Task: retry
+1301067 /usr/bin/node /tmp/pi-acp-steer-grace-tL5epD/fake-pi.mjs --mode json -p Task: grace

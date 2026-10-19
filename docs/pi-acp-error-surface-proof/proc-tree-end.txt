@@ -1,0 +1,23 @@
+ 239284     793    04:19:49 /home/sab-mini/.grok/bin/grok-fork agent leader --no-exit-on-disconnect --no-auto-update
+ 240314  239284    04:18:52 node /home/sab-mini/.local/share/claude-agent-acp/current/dist/index.js
+ 240774  239284    04:18:32 node /usr/bin/pi-acp
+1175829       1    03:11:15 pi
+1249899   38492    01:16:58 /usr/bin/zsh -c source /home/sab-mini/.claude/shell-snapshots/snapshot-zsh-1792389311381-7a1bje.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/n
+1249900 1249899    01:16:58 /usr/bin/zsh -c source /home/sab-mini/.claude/shell-snapshots/snapshot-zsh-1792389311381-7a1bje.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/n
+1263360  240774       59:52 pi
+1264125  240774       59:12 pi
+1297143       1       08:07 /usr/bin/node /tmp/pi-acp-retry-drain-w9GnY0/fake-pi.mjs --mode json -p Task: retry
+1297181       1       08:04 /usr/bin/node /tmp/pi-acp-steer-grace-bBfsDk/fake-pi.mjs --mode json -p Task: grace
+1298605   38492       06:55 /usr/bin/zsh -c source /home/sab-mini/.claude/shell-snapshots/snapshot-zsh-1792389311381-7a1bje.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/n
+1298654       1       06:55 /usr/bin/tmux -L picker -f /dev/null new-session -d -s picker-live -x 120 -y 40 exec env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 /home/sab-mini/.grok/bin/grok-fork --leader --
+1298655 1298654       06:55 /home/sab-mini/.grok/bin/grok-fork --leader --leader-socket /home/sab-mini/.grok/leader.sock --always-approve --trust --fullscreen --no-alt-screen --cwd /tmp --agent-choice
+1299632  239284       06:37 node --preserve-symlinks --preserve-symlinks-main /home/sab-mini/.pi/pi-acp-patched/index.js
+1299750       1       06:34 /usr/bin/node /tmp/pi-acp-retry-drain-5auFM4/fake-pi.mjs --mode json -p Task: retry
+1299821       1       06:31 /usr/bin/node /tmp/pi-acp-steer-grace-KDWDRP/fake-pi.mjs --mode json -p Task: grace
+1300943       1       06:11 /usr/bin/node /tmp/pi-acp-retry-drain-MbyW6D/fake-pi.mjs --mode json -p Task: retry
+1301067       1       06:08 /usr/bin/node /tmp/pi-acp-steer-grace-tL5epD/fake-pi.mjs --mode json -p Task: grace
+1301565 1299632       05:59 pi
+1302332 1290628       05:44 /home/sab-mini/.grok/bin/grok-fork --agent-cmd /home/sab-mini/repos/Pi-Coding-Agent/pi-acp-patched/run
+1302373 1302332       05:44 node --preserve-symlinks --preserve-symlinks-main /home/sab-mini/.pi/pi-acp-patched/index.js
+1302407 1302373       05:44 pi
+1306301 1299632       02:52 pi
