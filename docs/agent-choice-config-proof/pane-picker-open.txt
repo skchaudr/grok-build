@@ -1,0 +1,40 @@
+
+  /tmp [Choose Ctrl+l]                                                                                        ◇ 5 idle
+
+  + New Agent                                                                  Open Previous /resume │ Worktree Ctrl+w
+
+  ▾ Idle 5 ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    ◇ xai-grok-pager Leader Roster Socket Launch                                                                  10d
+      grok-4.7
+
+    ◇ Request to Reply With Only ALPHA                                                                            10d
+      grok-4.7
+
+    ◇ Grok-TEAMS-ACP                                                                                              13d
+      Bugs + wrong ACP path; ~20m build/transfer
+
+    ◇ Leader hosts external ACP agent sessions                                                                    15d
+      Handoff 2026-10-04: push done; merge┌ New session ─────────────────────┐
+                                          │Machine                           │
+    ◇ VM disk cleanup: worktrees, builds, │> claude                          │                                    15d
+      Khoj removed; 62 GB free; notes and │  pi                              │
+                                          │enter select · esc cancel         │
+                                          └──────────────────────────────────┘
+
+
+
+
+
+
+
+
+
+
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Dispatch a new agent                                                                                           │
+  ╰────────────────────────────────────────────────────────────────────────────────────── Fable 5.1 · always-approve ╯
+
+  Enter:create  │  Tab:input  │  ?:shortcuts
+

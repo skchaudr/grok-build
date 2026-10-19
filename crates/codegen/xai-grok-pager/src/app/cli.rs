@@ -469,6 +469,10 @@ pub struct PagerArgs {
         global = true
     )]
     pub agent_choices: Vec<String>,
+    /// `[[agent_choice]]` tables from the effective config, filled by [`Self::with_config_agent_choices`].
+    /// Used only when no `--agent-choice` flag was given (CLI wins). Never read from argv.
+    #[arg(skip)]
+    pub config_agent_choices: Vec<super::agent_choice::AgentChoice>,
     /// Trust this folder and persist the decision to the trust store.
     #[arg(long = "trust", alias = "trust-folder", hide = true)]
     pub trust: bool,
@@ -856,6 +860,34 @@ impl PagerArgs {
             .to_owned();
         Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)))
     }
+    /// True for the one-shot flags (`-p`, prompt files, memory flush): no composer, no picker.
+    fn is_headless(&self) -> bool {
+        self.single.is_some()
+            || self.prompt_json.is_some()
+            || self.prompt_file.is_some()
+            || self.memory_flush
+    }
+    /// Read `[[agent_choice]]` from the effective config into [`Self::config_agent_choices`].
+    ///
+    /// Only an interactive launch consults the config: a headless run keeps the native shell
+    /// unless it was given explicit `--agent-cmd` / `--agent-choice` flags. Any `--agent-choice`
+    /// flag makes the config list irrelevant, so it is not read. A malformed table is an error.
+    /// Call before [`Self::apply_cwd`], whose checks depend on whether an external agent launches.
+    pub fn with_config_agent_choices(self) -> anyhow::Result<Self> {
+        if self.is_headless() || !self.agent_choices.is_empty() {
+            return Ok(self);
+        }
+        let config = super::agent_choice::load_config_agent_choices().map_err(anyhow::Error::msg)?;
+        Ok(self.with_config_agent_choice_list(config))
+    }
+    /// [`Self::with_config_agent_choices`] with the list already in hand (tests, callers that read config themselves).
+    pub fn with_config_agent_choice_list(
+        mut self,
+        config: Vec<super::agent_choice::AgentChoice>,
+    ) -> Self {
+        self.config_agent_choices = config;
+        self
+    }
     /// Apply launch-directory path anchoring and `--cwd` after early commands have been dispatched without filesystem or process initialization.
     pub fn apply_cwd(self) -> anyhow::Result<Self> {
         let launch_dir = std::env::current_dir().ok();
@@ -870,18 +902,11 @@ impl PagerArgs {
         }
         // One-shot delegation goes through the leader. Without `--leader` the
         // headless path would ignore `--agent-cmd` and start the native shell.
-        if self.launches_external_agent()
-            && !self.leader
-            && (self.single.is_some()
-                || self.prompt_json.is_some()
-                || self.prompt_file.is_some()
-                || self.memory_flush)
-        {
+        if self.launches_external_agent() && !self.leader && self.is_headless() {
             anyhow::bail!("--agent-cmd is only supported in interactive mode, not headless mode");
         }
         if self.launches_external_agent() {
-            super::agent_choice::parse_agent_choices(&self.agent_choices)
-                .map_err(anyhow::Error::msg)?;
+            self.agent_choices().map_err(anyhow::Error::msg)?;
         }
         if let Some(ref cwd) = self.cwd {
             super::working_directory::apply(Some(cwd), self.launches_external_agent()).map_err(
@@ -890,16 +915,23 @@ impl PagerArgs {
         }
         Ok(self)
     }
-    /// True when this launch drives an external ACP agent (`--agent-cmd` or `--agent-choice`).
+    /// True when this launch drives an external ACP agent (`--agent-cmd`, `--agent-choice`,
+    /// or `[[agent_choice]]` in config).
     pub fn launches_external_agent(&self) -> bool {
-        self.agent_cmd.is_some() || !self.agent_choices.is_empty()
+        self.agent_cmd.is_some()
+            || !self.agent_choices.is_empty()
+            || !self.config_agent_choices.is_empty()
+    }
+    /// The named machines this pager offers: `--agent-choice` flags, else the config list.
+    pub fn agent_choices(&self) -> Result<Vec<super::agent_choice::AgentChoice>, String> {
+        super::agent_choice::resolve_agent_choices(&self.agent_choices, &self.config_agent_choices)
     }
     /// Command registered with the leader. `--agent-cmd` wins; otherwise the first choice.
     pub fn effective_agent_cmd(&self) -> Option<String> {
         if let Some(cmd) = &self.agent_cmd {
             return Some(cmd.clone());
         }
-        super::agent_choice::parse_agent_choices(&self.agent_choices)
+        self.agent_choices()
             .ok()
             .and_then(|choices| choices.into_iter().next().map(|choice| choice.cmd))
     }
@@ -1373,6 +1405,78 @@ mod tests {
             Some("ssh khoj worker")
         );
         assert_eq!(args.effective_agent_cmd().as_deref(), Some("grok-mini"));
+    }
+
+    fn config_choices() -> Vec<crate::app::agent_choice::AgentChoice> {
+        vec![
+            crate::app::agent_choice::AgentChoice {
+                name: "claude".into(),
+                cmd: "claude-agent-acp".into(),
+            },
+            crate::app::agent_choice::AgentChoice {
+                name: "pi".into(),
+                cmd: "pi-acp".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn plain_launch_takes_the_picker_from_config() {
+        let args = PagerArgs::try_parse_from(["grok"])
+            .unwrap()
+            .with_config_agent_choice_list(config_choices());
+        assert!(args.launches_external_agent());
+        let names: Vec<String> = args
+            .agent_choices()
+            .unwrap()
+            .into_iter()
+            .map(|choice| choice.name)
+            .collect();
+        assert_eq!(names, vec!["claude", "pi"]);
+        assert_eq!(args.effective_agent_cmd().as_deref(), Some("claude-agent-acp"));
+    }
+
+    #[test]
+    fn agent_choice_flags_replace_the_config_list() {
+        let args = PagerArgs::try_parse_from(["grok", "--agent-choice", "khoj=ssh khoj worker"])
+            .unwrap()
+            .with_config_agent_choice_list(config_choices());
+        let names: Vec<String> = args
+            .agent_choices()
+            .unwrap()
+            .into_iter()
+            .map(|choice| choice.name)
+            .collect();
+        assert_eq!(names, vec!["khoj"]);
+        assert_eq!(args.effective_agent_cmd().as_deref(), Some("ssh khoj worker"));
+    }
+
+    #[test]
+    fn agent_cmd_flag_beats_config_choices_for_the_leader_command() {
+        let args = PagerArgs::try_parse_from(["grok", "--agent-cmd", "external-agent"])
+            .unwrap()
+            .with_config_agent_choice_list(config_choices());
+        assert_eq!(args.effective_agent_cmd().as_deref(), Some("external-agent"));
+    }
+
+    #[test]
+    fn empty_config_list_is_the_old_native_launch() {
+        let args = PagerArgs::try_parse_from(["grok"])
+            .unwrap()
+            .with_config_agent_choice_list(Vec::new());
+        assert!(!args.launches_external_agent());
+        assert!(args.agent_choices().unwrap().is_empty());
+        assert_eq!(args.effective_agent_cmd(), None);
+    }
+
+    #[test]
+    fn headless_launch_does_not_read_config_choices() {
+        // `is_headless` gates the config read; a headless run with no flags must stay native,
+        // so the config list is never consulted and the headless/external-agent bail cannot fire.
+        let args = PagerArgs::try_parse_from(["grok", "-p", "hello"]).unwrap();
+        assert!(args.is_headless());
+        let interactive = PagerArgs::try_parse_from(["grok"]).unwrap();
+        assert!(!interactive.is_headless());
     }
 
     #[test]

@@ -1072,7 +1072,8 @@ pub(crate) async fn run(
         .effective_agent_cmd()
         .as_deref()
         .and_then(crate::slash::external_common::agent_label_from_cmd);
-    app.machine_picker = crate::app::agent_choice::parse_agent_choices(&args.agent_choices)
+    app.machine_picker = args
+        .agent_choices()
         .ok()
         .and_then(crate::app::agent_choice::MachinePicker::from_choices);
     app.screen_mode = term_state.screen_mode;

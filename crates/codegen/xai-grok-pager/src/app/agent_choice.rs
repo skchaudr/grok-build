@@ -1,7 +1,13 @@
-//! Named agent commands (`--agent-choice NAME=CMD`) and the new-session machine picker.
+//! Named agent commands (`--agent-choice NAME=CMD`, or `[[agent_choice]]` in config.toml) and
+//! the new-session machine picker.
 //!
 //! One pager can offer several machines. The first choice is the default. With two or more,
 //! creating a session asks which name to use before `session/new` is sent.
+//!
+//! The list comes from one of two places, never merged: every `--agent-choice` flag on the
+//! command line, or, when there are none, the `[[agent_choice]]` tables of the effective
+//! config (`~/.grok/config.toml` and the managed layers above it). Config tables keep their file
+//! order, so the first table is the default, exactly like the first flag.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::buffer::Buffer;
@@ -125,6 +131,17 @@ impl MachinePicker {
     }
 }
 
+/// Top-level config key: `[[agent_choice]]` with `name` and `cmd` strings.
+pub const CONFIG_KEY: &str = "agent_choice";
+
+/// A machine name is one word: ASCII letters, digits, `.`, `_`, `-`.
+fn is_machine_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+}
+
 /// `NAME=CMD`. The command may contain `=` and spaces. The name may not.
 pub fn parse_agent_choice(raw: &str) -> Result<AgentChoice, String> {
     let (name, cmd) = raw
@@ -135,10 +152,7 @@ pub fn parse_agent_choice(raw: &str) -> Result<AgentChoice, String> {
     if name.is_empty() || cmd.is_empty() {
         return Err(format!("--agent-choice expects NAME=CMD, got {raw:?}"));
     }
-    if !name
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
-    {
+    if !is_machine_name(name) {
         return Err(format!("--agent-choice name {name:?} is not a machine name"));
     }
     Ok(AgentChoice {
@@ -149,6 +163,79 @@ pub fn parse_agent_choice(raw: &str) -> Result<AgentChoice, String> {
 
 pub fn parse_agent_choices(raw: &[String]) -> Result<Vec<AgentChoice>, String> {
     raw.iter().map(|spec| parse_agent_choice(spec)).collect()
+}
+
+/// `[[agent_choice]]` tables of an effective config, in file order. No key is no choices.
+///
+/// Each table needs a non-empty `name` (a machine name, as on the CLI) and a non-empty `cmd`.
+/// A table that is not shaped like that is an error naming the table index, never skipped: a
+/// user who wrote a picker entry should not silently get no picker.
+pub fn agent_choices_from_config(root: &toml::Value) -> Result<Vec<AgentChoice>, String> {
+    let Some(value) = root.get(CONFIG_KEY) else {
+        return Ok(Vec::new());
+    };
+    let tables = value.as_array().ok_or_else(|| {
+        format!("config.toml: `{CONFIG_KEY}` must be an array of tables ([[{CONFIG_KEY}]])")
+    })?;
+    tables
+        .iter()
+        .enumerate()
+        .map(|(index, table)| {
+            let field = |key: &str| -> Result<String, String> {
+                let text = table
+                    .get(key)
+                    .ok_or_else(|| {
+                        format!("config.toml: [[{CONFIG_KEY}]] #{} is missing `{key}`", index + 1)
+                    })?
+                    .as_str()
+                    .ok_or_else(|| {
+                        format!("config.toml: [[{CONFIG_KEY}]] #{} `{key}` must be a string", index + 1)
+                    })?
+                    .trim();
+                if text.is_empty() {
+                    return Err(format!(
+                        "config.toml: [[{CONFIG_KEY}]] #{} `{key}` is empty",
+                        index + 1
+                    ));
+                }
+                Ok(text.to_string())
+            };
+            let name = field("name")?;
+            let cmd = field("cmd")?;
+            if !is_machine_name(&name) {
+                return Err(format!(
+                    "config.toml: [[{CONFIG_KEY}]] #{} name {name:?} is not a machine name",
+                    index + 1
+                ));
+            }
+            Ok(AgentChoice { name, cmd })
+        })
+        .collect()
+}
+
+/// `[[agent_choice]]` from the effective config on disk (user config plus the managed layers).
+/// An unreadable config is no choices; a malformed `[[agent_choice]]` table is an error.
+pub fn load_config_agent_choices() -> Result<Vec<AgentChoice>, String> {
+    match xai_grok_shell::config::load_effective_config() {
+        Ok(root) => agent_choices_from_config(&root),
+        Err(err) => {
+            tracing::warn!(error = %err, "agent_choice: effective config unreadable; no config choices");
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// The one list the pager offers. `--agent-choice` flags, when present, replace the config
+/// list entirely; the two are never merged.
+pub fn resolve_agent_choices(
+    cli: &[String],
+    config: &[AgentChoice],
+) -> Result<Vec<AgentChoice>, String> {
+    if cli.is_empty() {
+        Ok(config.to_vec())
+    } else {
+        parse_agent_choices(cli)
+    }
 }
 
 /// Header / roster label. The machine stays visible once the session has its own title.
@@ -336,6 +423,104 @@ mod tests {
     #[test]
     fn empty_choice_list_is_no_picker() {
         assert!(MachinePicker::from_choices(vec![]).is_none());
+    }
+
+    fn config(text: &str) -> toml::Value {
+        toml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn config_tables_parse_in_file_order_and_the_first_is_the_default() {
+        let root = config(
+            r#"
+[ui]
+theme = "dark"
+
+[[agent_choice]]
+name = "claude"
+cmd = "env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=/x/claude /x/claude-agent-acp"
+
+[[agent_choice]]
+name = "pi"
+cmd = "/usr/bin/pi-acp"
+"#,
+        );
+        let choices = agent_choices_from_config(&root).unwrap();
+        assert_eq!(
+            choices,
+            vec![
+                AgentChoice {
+                    name: "claude".into(),
+                    cmd: "env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=/x/claude /x/claude-agent-acp".into(),
+                },
+                AgentChoice {
+                    name: "pi".into(),
+                    cmd: "/usr/bin/pi-acp".into(),
+                },
+            ]
+        );
+        let mut picker = MachinePicker::from_choices(choices).unwrap();
+        assert_eq!(picker.default_choice().name, "claude");
+        assert_eq!(picker.begin_new_session(), NewSessionPick::Ask);
+    }
+
+    #[test]
+    fn config_without_the_key_is_no_picker() {
+        let root = config("[ui]\ntheme = \"dark\"\n");
+        let choices = agent_choices_from_config(&root).unwrap();
+        assert!(choices.is_empty());
+        assert!(MachinePicker::from_choices(choices).is_none());
+        let resolved = resolve_agent_choices(&[], &[]).unwrap();
+        assert!(MachinePicker::from_choices(resolved).is_none());
+    }
+
+    #[test]
+    fn malformed_config_tables_are_errors_not_silence() {
+        let missing_cmd = config("[[agent_choice]]\nname = \"pi\"\n");
+        assert!(agent_choices_from_config(&missing_cmd).unwrap_err().contains("missing `cmd`"));
+        let empty_name = config("[[agent_choice]]\nname = \"  \"\ncmd = \"pi-acp\"\n");
+        assert!(agent_choices_from_config(&empty_name).unwrap_err().contains("`name` is empty"));
+        let bad_name = config("[[agent_choice]]\nname = \"has space\"\ncmd = \"pi-acp\"\n");
+        assert!(agent_choices_from_config(&bad_name).unwrap_err().contains("not a machine name"));
+        let not_a_string = config("[[agent_choice]]\nname = \"pi\"\ncmd = 3\n");
+        assert!(agent_choices_from_config(&not_a_string).unwrap_err().contains("must be a string"));
+        let not_an_array = config("[agent_choice]\nname = \"pi\"\ncmd = \"pi-acp\"\n");
+        assert!(agent_choices_from_config(&not_an_array).unwrap_err().contains("array of tables"));
+    }
+
+    #[test]
+    fn cli_choices_replace_the_config_list_entirely() {
+        let from_config = vec![
+            AgentChoice { name: "claude".into(), cmd: "claude-agent-acp".into() },
+            AgentChoice { name: "pi".into(), cmd: "pi-acp".into() },
+        ];
+        let cli = vec!["khoj=ssh khoj worker".to_string()];
+        let resolved = resolve_agent_choices(&cli, &from_config).unwrap();
+        assert_eq!(
+            resolved,
+            vec![AgentChoice { name: "khoj".into(), cmd: "ssh khoj worker".into() }]
+        );
+        let picker = MachinePicker::from_choices(resolved).unwrap();
+        assert_eq!(picker.default_choice().name, "khoj");
+        assert_eq!(picker.names().collect::<Vec<_>>(), vec!["khoj"]);
+    }
+
+    #[test]
+    fn no_cli_choices_fall_back_to_config_in_order() {
+        let from_config = vec![
+            AgentChoice { name: "claude".into(), cmd: "claude-agent-acp".into() },
+            AgentChoice { name: "pi".into(), cmd: "pi-acp".into() },
+        ];
+        let resolved = resolve_agent_choices(&[], &from_config).unwrap();
+        assert_eq!(resolved, from_config);
+        let picker = MachinePicker::from_choices(resolved).unwrap();
+        assert_eq!(picker.names().collect::<Vec<_>>(), vec!["claude", "pi"]);
+    }
+
+    #[test]
+    fn a_bad_cli_choice_is_still_an_error_even_with_good_config() {
+        let from_config = vec![AgentChoice { name: "pi".into(), cmd: "pi-acp".into() }];
+        assert!(resolve_agent_choices(&["nocmd".to_string()], &from_config).is_err());
     }
 
     #[test]

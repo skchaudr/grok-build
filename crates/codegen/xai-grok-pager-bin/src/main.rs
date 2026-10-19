@@ -1749,7 +1749,7 @@ fn schedule_startup_prewarm() {
 }
 fn configure_process_env(mut args: PagerArgs) -> Result<PagerArgs> {
     flag_dashboard_at_startup_if_requested(&mut args)?;
-    let args = args.apply_cwd()?;
+    let args = args.with_config_agent_choices()?.apply_cwd()?;
     unsafe {
         if let Some(mode) = args.compaction_mode.as_deref() {
             std::env::set_var("GROK_COMPACTION_MODE", mode);

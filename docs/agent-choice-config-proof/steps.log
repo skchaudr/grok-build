@@ -1,0 +1,7 @@
+11:45:26 launch (cwd=/tmp): env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 /home/sab-mini/.grok/bin/grok-fork --leader --leader-socket /home/sab-mini/.grok/leader.sock --always-approve --trust --fullscreen --no-alt-screen
+11:45:31 captured pane 5s after launch
+11:45:31 ctrl+\ to open the dashboard
+11:45:33 dashboard open, cursor on + New Agent
+11:45:34 PASS picker opened with no --agent-choice flags
+11:45:34 cursor moved to second entry
+11:45:35 picker cancelled with Esc

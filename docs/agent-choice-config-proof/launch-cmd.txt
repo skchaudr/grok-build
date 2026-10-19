@@ -1,0 +1,1 @@
+env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 /home/sab-mini/.grok/bin/grok-fork --leader --leader-socket /home/sab-mini/.grok/leader.sock --always-approve --trust --fullscreen --no-alt-screen
