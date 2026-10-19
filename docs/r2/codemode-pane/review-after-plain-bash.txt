@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-review-after-plain-bash-404484                                                           [Dashboard]
+ ┌                                                                                                                    ┐
+ │                                                                                                                    │
+ │   ❯ replay review-after-plain-bash                                                                        1:59 PM  │
+ │                                                                                                                    │
+ └                                                                                                                    ┘
+     Worked for 0.0s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  Ctrl+e:collapse thinking  │  Space:prompt  │  Ctrl+x:shortcuts
+

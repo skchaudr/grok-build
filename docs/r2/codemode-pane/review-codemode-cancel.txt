@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-review-codemode-cancel-405270                                                            [Dashboard]
+
+
+     ❯ replay review-codemode-cancel                                                                         1:59 PM
+
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ Run printf '%s%s' CAN CEL1                                                                                     │
+ │┃                                                                                                                   │
+ │┃  CANCEL1                                                                                                          │
+ └                                                                                                                    ┘
+     ◆ Run sleep 30
+
+     Worked for 0.0s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰────────────────────────────────────────────────────── openrouter/Google: Gemini 3.1 Flash Lite · always-approve ─╯
+
+  ←:collapse  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

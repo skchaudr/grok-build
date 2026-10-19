@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-review-plain-bash-405852                                                                 [Dashboard]
+
+
+     ❯ replay review-plain-bash                                                                              1:59 PM
+
+
+     ◆ Run printf '%s%s' PLAIN OK1
+ ┌                                                                                                                    ┐
+ │   PLAINOK1                                                                                                1:59 PM  │
+ └                                                                                                                    ┘
+     Worked for 0.0s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰────────────────────────────────────────────────────── openrouter/Google: Gemini 3.1 Flash Lite · always-approve ─╯
+
+  Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

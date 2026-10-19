@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-review-codemode-cancel-405270                                                            [Dashboard]
+
+
+     ❯ replay review-codemode-cancel                                                                         1:59 PM
+
+
+ ┌                                                                                                                    ┐
+ │┃  ◆ [1mRun [0mprintf '%s%s' CAN CEL1                                                                                     │
+ │┃                                                                                                                   │
+ │┃  CANCEL1                                                                                                          │
+ └                                                                                                                    ┘
+     ◆ [1;2mRun [0;2msleep 30[0m
+
+     [2mWorked for 0.0s[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   Run [1m/doctor[0m for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │[2m ❯ Build anything                                                                                                 [0m│
+  ╰────────────────────────────────────────────────────── [2mopenrouter/Google: Gemini 3.1 Flash Lite[0m · [2malways-approve[0m ─╯
+
+  [1m←[0;2m:collapse  │  [0;1mEnter[0;2m:open  │  [0;1mCtrl+e[0;2m:collapse thinking  │  [0;1mCtrl+x[0;2m:shortcuts[0m
+

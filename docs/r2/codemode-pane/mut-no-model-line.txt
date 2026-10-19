@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-mut-no-model-line-467212                                                                 [Dashboard]
+
+
+     ❯ replay mut-no-model-line                                                                              2:10 PM
+
+
+  ┃  ```javascript                                                                                                     █
+  ┃  const a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });                                           █
+  ┃  const b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });                                           █
+  ┃  return a.output + "\n" + b.output;                                                                                █
+  ┃  ```                                                                                                               █
+  ┃                                                                                                                    █
+  ┃  Script completed                                                                                                  █
+  ┃  Wall time 0.1 seconds                                                                                             █
+  ┃  Output:                                                                                                           █
+  ┃  R2NESTED1                                                                                                         █
+  ┃  R2NESTED2                                                                                                         █
+  ┃                                                                                                                    █
+  ┃  ✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms                                                          █
+  ┃  ✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms                                                           █
+                                                                                                                       █
+     ◆ Run ↳ call_28131 completed call_28131/1 printf '%s%s%s' R2 NES TED1 R2NESTED1                                   █
+     ◆ Run ↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2 R2NESTED2                                   █
+ ┌                                                                                                                    ┐█
+ │   R2NESTED1 R2NESTED2                                                                                     2:10 PM  │█
+ └                                                                                                                    ┘█
+     agent_settled                                                                                                     █
+                                                                                                                       █
+     Worked for 0.0s                                                                                                   █
+                                                                                                                       █
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

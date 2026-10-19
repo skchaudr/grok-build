@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-mut-jev-cost-469459                                                                      [Dashboard]
+
+
+     ❯ replay mut-jev-cost                                                                                   2:11 PM
+
+
+  ┃  [2m  return item + "=" + result.answers.bucket.choice;[0m
+  ┃  [2m}));[0m
+  ┃  [2mreturn results.join("\n");[0m
+  ┃  [2m```[0m
+  ┃
+  ┃  [2mScript completed[0m
+  ┃  [2mWall time 0.4 seconds[0m
+  ┃  [2mOutput:[0m
+  ┃  [2malpha=first[0m                                                                                                       █
+  ┃  [2mbeta=second[0m                                                                                                       █
+  ┃  [2mgamma=third[0m                                                                                                       █
+  ┃                                                                                                                    █
+  ┃  [2m✓ models.classify 0 ok typesafe/jev-latest 131ms[0m                                                                  █
+  ┃  [2m✓ models.classify 0 ok typesafe/jev-latest 117ms[0m                                                                  █
+  ┃  [2m✓ models.classify 0 ok typesafe/jev-latest 114ms[0m                                                                  █
+  ┃                                                                                                                    █
+  ┃  [2mModel calls: $0.0[0m                                                                                                 █
+ ┌                                                                                                                    ┐█
+ │   alpha=first beta=second gamma=third                                                                     2:11 PM  │█
+ └                                                                                                                    ┘█
+     [2magent_settled[0m                                                                                                     █
+                                                                                                                       █
+     [2mWorked for 0.0s[0m                                                                                                   █
+                                                                                                                       █
+
+   Run [1m/doctor[0m for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │[2m ❯ Build anything                                                                                                 [0m│
+  ╰─────────────────────────────────────────────────────────────────────────────────────── [2munknown[0m · [2malways-approve[0m ─╯
+
+  [1mSpace[0;2m:prompt  │  [0;1mEnter[0;2m:open  │  [0;1mCtrl+e[0;2m:collapse thinking  │  [0;1mCtrl+x[0;2m:shortcuts[0m
+

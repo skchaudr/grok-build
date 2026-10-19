@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-mut-jev-cost-469459                                                                      [Dashboard]
+
+
+     ❯ replay mut-jev-cost                                                                                   2:11 PM
+
+
+  ┃    return item + "=" + result.answers.bucket.choice;
+  ┃  }));
+  ┃  return results.join("\n");
+  ┃  ```
+  ┃
+  ┃  Script completed
+  ┃  Wall time 0.4 seconds
+  ┃  Output:
+  ┃  alpha=first                                                                                                       █
+  ┃  beta=second                                                                                                       █
+  ┃  gamma=third                                                                                                       █
+  ┃                                                                                                                    █
+  ┃  ✓ models.classify 0 ok typesafe/jev-latest 131ms                                                                  █
+  ┃  ✓ models.classify 0 ok typesafe/jev-latest 117ms                                                                  █
+  ┃  ✓ models.classify 0 ok typesafe/jev-latest 114ms                                                                  █
+  ┃                                                                                                                    █
+  ┃  Model calls: $0.0                                                                                                 █
+ ┌                                                                                                                    ┐█
+ │   alpha=first beta=second gamma=third                                                                     2:11 PM  │█
+ └                                                                                                                    ┘█
+     agent_settled                                                                                                     █
+                                                                                                                       █
+     Worked for 0.0s                                                                                                   █
+                                                                                                                       █
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ Build anything                                                                                                 │
+  ╰─────────────────────────────────────────────────────────────────────────────────────── unknown · always-approve ─╯
+
+  Space:prompt  │  Enter:open  │  Ctrl+e:collapse thinking  │  Ctrl+x:shortcuts
+

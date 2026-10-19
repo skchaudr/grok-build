@@ -1,0 +1,40 @@
+
+  /tmp/acp-replay-mut-nested-failed-467690                                                                 [Dashboard]
+
+
+     ❯ replay mut-nested-failed                                                                              2:10 PM
+
+
+  ┃  [2m```javascript[0m                                                                                                     █
+  ┃  [2mconst a = await tools.bash({ command: "printf '%s%s%s' R2 NES TED1" });[0m                                           █
+  ┃  [2mconst b = await tools.bash({ command: "printf '%s%s%s' R2 NES TED2" });[0m                                           █
+  ┃  [2mreturn a.output + "\n" + b.output;[0m                                                                                █
+  ┃  [2m```[0m                                                                                                               █
+  ┃                                                                                                                    █
+  ┃  [2mScript completed[0m                                                                                                  █
+  ┃  [2mWall time 0.1 seconds[0m                                                                                             █
+  ┃  [2mOutput:[0m                                                                                                           █
+  ┃  [2mR2NESTED1[0m                                                                                                         █
+  ┃  [2mR2NESTED2[0m                                                                                                         █
+  ┃                                                                                                                    █
+  ┃  [2m✓ bash ok {"command":"printf '%s%s%s' R2 NES TED1"} 12ms[0m                                                          █
+  ┃  [2m✓ bash ok {"command":"printf '%s%s%s' R2 NES TED2"} 7ms[0m                                                           █
+                                                                                                                       █
+     ◆ [1;2mRun [0;2m↳ call_28131 failed call_28131/1 printf '%s%s%s' R2 NES TED1[0m                                                █
+     ◆ [1;2mRun [0;2m↳ call_28131 completed call_28131/2 printf '%s%s%s' R2 NES TED2 R2NESTED2[0m                                   █
+ ┌                                                                                                                    ┐█
+ │   R2NESTED1 R2NESTED2                                                                                     2:10 PM  │█
+ └                                                                                                                    ┘█
+     [2magent_settled[0m                                                                                                     █
+                                                                                                                       █
+     [2mWorked for 0.0s[0m                                                                                                   █
+                                                                                                                       █
+
+   Run [1m/doctor[0m for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │[2m ❯ Build anything                                                                                                 [0m│
+  ╰─────────────────────────────────────────────────────────────────────────────────────── [2munknown[0m · [2malways-approve[0m ─╯
+
+  [1mSpace[0;2m:prompt  │  [0;1mEnter[0;2m:open  │  [0;1mCtrl+e[0;2m:collapse thinking  │  [0;1mCtrl+x[0;2m:shortcuts[0m
+
