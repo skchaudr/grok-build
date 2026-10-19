@@ -14,7 +14,7 @@
 # Usage: scripts/picker-live.sh <label> <ssh-target|local>
 #        e.g. picker-live.sh mini sab-mini@sab-mini ; picker-live.sh air sab-mini@sab-air
 # Env:   PICKER_PAGER    pager binary ON THE TARGET (default ~/.grok/bin/grok-fork)
-#        PICKER_PI_MODEL Pi model to pin ("" = Pi's own default; default deepseek/deepseek-flash; openrouter/inception/mercury-2.5 after the khoj Pi migration, see docs/khoj-pi-migration.md)
+#        PICKER_PI_MODEL Pi model to pin ("" = Pi's own default; default openrouter/inception/mercury-2.5; deepseek/deepseek-flash is the fallback)
 #        PICKER_START_LEADER=0 (default) never starts, stops or touches a leader or its socket;
 #                        it requires one already listening. 1 starts a FOREGROUND fork leader on
 #                        the target when none is running, and stops it at the end
@@ -55,7 +55,7 @@ PI_ACP="$(R 'command -v pi-acp')"
 # Pi's default model (google-antigravity Gemini) was out of quota on 2026-10-18
 # (429), so pin a working one through pi-acp's PI_ACP_PI_COMMAND. Set
 # PICKER_PI_MODEL="" to use Pi's own default.
-PI_MODEL="${PICKER_PI_MODEL-deepseek/deepseek-flash}"
+PI_MODEL="${PICKER_PI_MODEL-openrouter/inception/mercury-2.5}"
 if [[ -n "$PI_MODEL" ]]; then
   PI_WRAP="/tmp/picker-live-pi-$LABEL.sh"
   R "PIBIN=${PICKER_PI_BIN:-\$(command -v pi)}; printf '#!/bin/sh\\nexec %s --model %s \"\$@\"\\n' \"\$PIBIN\" $PI_MODEL > $PI_WRAP; chmod +x $PI_WRAP"
@@ -211,15 +211,16 @@ reenter_and_ask() {
   [[ "$(vis)" == *"remember the token $token"* ]] || log "WARN attached view does not show the $token title"
   T clear-history -t "$SESS" 2>/dev/null || true
   wait_for "❯" 30 || true
-  send_line "$nonce what token did I give you earlier in this session? Reply with only the token."
+  send_line "$nonce Reply with only the token I asked you to remember."
   if wait_reply "$token" "$nonce" 150; then
-    ANSWERED[$name]=yes; log "$name RESUMED: fresh reply carried $token"
+    ANSWERED[$name]=yes; log "$name RESUMED: fresh reply carried $token"; rc=0
   else
-    ANSWERED[$name]=no; log "$name NOT resumed: no fresh reply with $token"
+    ANSWERED[$name]=no; log "$name NOT resumed: no fresh reply with $token"; rc=1
   fi
   MODEL[$name]="${MODEL[$name]:-$(status_model)}"
   snap "$name-resumed"
   all >"$OUT/scrollback-$name.txt"
+  return "${rc:-0}"
 }
 
 # The fork leader socket: ~/.grok/leader-fork.sock where S1 installed a named

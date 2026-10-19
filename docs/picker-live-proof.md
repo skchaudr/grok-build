@@ -178,3 +178,25 @@ nothing. That extension is khoj-only (the Air has one local extension) and is
 wiped by the migration, so the Mercury default is a post-migration proof, not a
 today default. Scout default stays `deepseek/deepseek-flash` (PASS 4/4 above).
 Captures: `docs/picker-khoj-2026-10-19-mercury-or/`.
+
+## khoj picker on a22e167d, Pi on openrouter/inception/mercury-2.5 (2026-10-19 10:47 UTC): PASS 4/4
+
+All four opened and resumed (`all_ok=1`, every `resumed=yes`). Captures:
+`docs/picker-khoj-2026-10-19-mercury/`. Scout default is now Mercury 2.5 over
+OpenRouter. Three changes made it pass, each with its own evidence directory:
+
+1. khoj `~/.pi/agent/settings.json` disables `extensions/harness-state.ts`
+   (Sab's call, 10:26 UTC). Its "(always approve) | guard inactive" line tripped
+   Mercury's refusal filter 4/4 with the full tool surface. Khoj-only; the
+   migration wipes it anyway.
+2. The picker's resume question changed from "what token did I give you earlier
+   in this session?" (Mercury refuses 2/2 as a probe about its internals) to
+   "Reply with only the token I asked you to remember" (answers 2/2).
+   `docs/picker-khoj-2026-10-19-mercury-resume-refusal/`.
+3. Picker scoring bug: `reenter_and_ask` never returned non-zero, so a run with
+   `resumed=no` rows still printed `all_ok=1`. Fixed. All earlier PASS runs
+   today had every row resumed=yes and stand.
+
+Still open for the fork: a Pi upstream error or refusal is a blank pane. pi-acp
+maps the error to `end_turn` (dist/index.js:2435) and forwards no text, so the
+pager's failed-turn banner never fires. Fix belongs in the patched pi-acp.

@@ -1,0 +1,40 @@
+ claude · remember the token ALPHA-2 and … │ claude /tmp                             35K / 1.0M │ ‹ 1/3 › │ [Dashboard]
+    remember the token ALPHA-2 and reply only with it                                                        10:28 AM
+
+    ALPHA-2                                                                                                  10:28 AM  █
+                                                                                                                       █
+    Worked for 4.4s                                                                                                    █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ ❯                                                                                                                  │
+ ╰─────────────────────────────────────────────────────────────────────────────────────── Fable 5.1 · always-approve ─╯
+ Ctrl+\:dashboard  │  Ctrl+[/]:prev/next agent  │  Ctrl+x:archive  │  Shift+Tab:mode  │  Ctrl+.:shortcuts

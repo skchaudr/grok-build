@@ -1,0 +1,12 @@
+ 239284     793    03:08:16 /home/sab-mini/.grok/bin/grok-fork agent leader --no-exit-on-disconnect --no-auto-update
+ 240314  239284    03:07:19 node /home/sab-mini/.local/share/claude-agent-acp/current/dist/index.js
+ 240774  239284    03:06:59 node /usr/bin/pi-acp
+1174279 1166660    02:01:35 pi
+1175829       1    01:59:42 pi
+1247415       1       06:52 /usr/bin/tmux -L picker -f /dev/null new-session -d -s picker-live -x 120 -y 40 exec env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 /home/sab-mini/.grok/bin/grok-fork --leader --
+1247416 1247415       06:52 /home/sab-mini/.grok/bin/grok-fork --leader --leader-socket /home/sab-mini/.grok/leader.sock --always-approve --trust --fullscreen --no-alt-screen --cwd /tmp --agent-choice
+1249114  240774       05:57 pi
+1249899   38492       05:25 /usr/bin/zsh -c source /home/sab-mini/.claude/shell-snapshots/snapshot-zsh-1792389311381-7a1bje.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/n
+1249900 1249899       05:25 /usr/bin/zsh -c source /home/sab-mini/.claude/shell-snapshots/snapshot-zsh-1792389311381-7a1bje.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/n
+1252097  240774       02:50 pi
+1253414 1253413       00:41 /home/sab-mini/.local/bin/cursor-agent --use-system-ca /home/sab-mini/.local/share/cursor-agent/versions/2026.10.16-e3cb207/index.js -p --output-format json --mode ask --mo

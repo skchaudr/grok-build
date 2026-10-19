@@ -1,0 +1,6 @@
+ 240774 node /usr/bin/pi-acp
+1247415 /usr/bin/tmux -L picker -f /dev/null new-session -d -s picker-live -x 120 -y 40 exec env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 /home/sab-mini/.grok/bin/grok-fork --leader --leader-socket /home/
+1247416 /home/sab-mini/.grok/bin/grok-fork --leader --leader-socket /home/sab-mini/.grok/leader.sock --always-approve --trust --fullscreen --no-alt-screen --cwd /tmp --agent-choice claude=env -u CLAUD
+1249899 /usr/bin/zsh -c source /home/sab-mini/.claude/shell-snapshots/snapshot-zsh-1792389311381-7a1bje.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \bu
+1249900 /usr/bin/zsh -c source /home/sab-mini/.claude/shell-snapshots/snapshot-zsh-1792389311381-7a1bje.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \bu
+1253414 /home/sab-mini/.local/bin/cursor-agent --use-system-ca /home/sab-mini/.local/share/cursor-agent/versions/2026.10.16-e3cb207/index.js -p --output-format json --mode ask --model claude-sonnet-5-

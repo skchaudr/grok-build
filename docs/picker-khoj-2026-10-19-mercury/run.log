@@ -1,0 +1,30 @@
+10:45:18 launch pager=/home/sab-mini/.grok/bin/grok-fork label=khoj
+10:45:19 open claude1 (claude) token=ALPHA-1 via=home
+10:45:35 claude1 replied; model='Fable 5.1' sid=''
+10:45:37 open pi1 (pi) token=BRAVO-1 via=dash
+10:45:52 pi1 replied; model='openrouter/Inception: Mercury 2.5' sid=''
+10:45:53 open claude2 (claude) token=ALPHA-2 via=dash
+10:46:09 claude2 replied; model='Fable 5.1' sid=''
+10:46:11 open pi2 (pi) token=BRAVO-2 via=dash
+10:46:25 pi2 replied; model='openrouter/Inception: Mercury 2.5' sid=''
+10:46:34 claude1 RESUMED: fresh reply carried ALPHA-1
+10:46:44 pi2 RESUMED: fresh reply carried BRAVO-2
+10:46:59 pi1 RESUMED: fresh reply carried BRAVO-1
+10:47:08 claude2 RESUMED: fresh reply carried ALPHA-2
+10:47:19 claude1 RESUMED: fresh reply carried ALPHA-1
+label=khoj
+pager=local:/home/sab-mini/.grok/bin/grok-fork
+claude1.resumed=yes
+claude1.model=Fable 5.1
+claude1.sid=
+pi1.resumed=yes
+pi1.model=openrouter/Inception: Mercury 2.5
+pi1.sid=
+claude2.resumed=yes
+claude2.model=Fable 5.1
+claude2.sid=
+pi2.resumed=yes
+pi2.model=openrouter/Inception: Mercury 2.5
+pi2.sid=
+all_ok=1
+EXIT=0
