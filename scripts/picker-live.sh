@@ -14,7 +14,7 @@
 # Usage: scripts/picker-live.sh <label> <ssh-target|local>
 #        e.g. picker-live.sh mini sab-mini@sab-mini ; picker-live.sh air sab-mini@sab-air
 # Env:   PICKER_PAGER    pager binary ON THE TARGET (default ~/.grok/bin/grok-fork)
-#        PICKER_PI_MODEL Pi model to pin ("" = Pi's own default; default deepseek/deepseek-flash)
+#        PICKER_PI_MODEL Pi model to pin ("" = Pi's own default; default inception/mercury-2)
 #        PICKER_START_LEADER=0 (default) never starts, stops or touches a leader or its socket;
 #                        it requires one already listening. 1 starts a FOREGROUND fork leader on
 #                        the target when none is running, and stops it at the end
