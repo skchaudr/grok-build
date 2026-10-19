@@ -136,9 +136,18 @@ scripts/picker-live.sh mini sab-mini@sab-mini     # against the durable gui-doma
 scripts/picker-live.sh khojlocal local
 ```
 
-Env: `PICKER_PAGER`, `PICKER_PI_MODEL` (default `deepseek/deepseek-flash`, empty string uses Pi's default), `PICKER_START_LEADER=1`, `PICKER_LEADER_SOCK`, `PICKER_OUT`.
+Env: `PICKER_PAGER`, `PICKER_PI_MODEL` (default `inception/mercury-2`, empty string uses Pi's default), `PICKER_START_LEADER=1`, `PICKER_LEADER_SOCK`, `PICKER_OUT`.
 
 ## Haiku delegation log
 
 1. Haiku 5.5: mapped the dashboard / resume code path (`dispatch/dashboard.rs`, leader routing) for the script design. Returned file:line references that I verified.
 2. Haiku 5.5: extracted session ids, models and fresh-reply lines from the pane captures.
+
+## khoj deploy of fbc972aa (2026-10-19 07:26 UTC)
+
+Built `main` a22e167d on khoj-38w (`cargo build --release -p xai-grok-pager-bin`, 14m54s, exit 0).
+Installed to `~/.grok/bin/grok-fork` (previous copy kept as `grok-fork.386a6f17`).
+Proof in the installed file: `grep -c -a 'RelaunchForUpdate ignored' ~/.grok/bin/grok-fork` = 1 (old copy = 0);
+`'is not this fork build'` = 1 (old = 0). `active_sessions.json` was `[]` before restart.
+`systemctl --user restart grok-leader`: active, MainPID 239284, `/proc/239284/exe` = `~/.grok/bin/grok-fork`,
+`grok-fork --version` = `grok 1.0.45 (a22e167de374)`. Macs not yet rebuilt.

@@ -55,7 +55,7 @@ PI_ACP="$(R 'command -v pi-acp')"
 # Pi's default model (google-antigravity Gemini) was out of quota on 2026-10-18
 # (429), so pin a working one through pi-acp's PI_ACP_PI_COMMAND. Set
 # PICKER_PI_MODEL="" to use Pi's own default.
-PI_MODEL="${PICKER_PI_MODEL-deepseek/deepseek-flash}"
+PI_MODEL="${PICKER_PI_MODEL-inception/mercury-2}"
 if [[ -n "$PI_MODEL" ]]; then
   PI_WRAP="/tmp/picker-live-pi-$LABEL.sh"
   R "PIBIN=${PICKER_PI_BIN:-\$(command -v pi)}; printf '#!/bin/sh\\nexec %s --model %s \"\$@\"\\n' \"\$PIBIN\" $PI_MODEL > $PI_WRAP; chmod +x $PI_WRAP"
