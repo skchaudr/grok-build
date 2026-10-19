@@ -1,0 +1,30 @@
+08:51:23 launch pager=/home/sab-mini/.grok/bin/grok-fork label=khoj
+08:51:24 open claude1 (claude) token=ALPHA-1 via=home
+08:51:40 claude1 replied; model='Fable 5.1' sid=''
+08:51:41 open pi1 (pi) token=BRAVO-1 via=dash
+08:54:23 FAIL pi1 never replied with BRAVO-1
+08:54:25 open claude2 (claude) token=ALPHA-2 via=dash
+08:54:43 claude2 replied; model='Fable 5.1' sid=''
+08:54:45 open pi2 (pi) token=BRAVO-2 via=dash
+08:57:27 FAIL pi2 never replied with BRAVO-2
+08:57:38 claude1 RESUMED: fresh reply carried ALPHA-1
+09:00:15 pi2 NOT resumed: no fresh reply with BRAVO-2
+09:02:53 pi1 NOT resumed: no fresh reply with BRAVO-1
+09:03:04 claude2 RESUMED: fresh reply carried ALPHA-2
+09:03:13 claude1 RESUMED: fresh reply carried ALPHA-1
+label=khoj
+pager=local:/home/sab-mini/.grok/bin/grok-fork
+claude1.resumed=yes
+claude1.model=Fable 5.1
+claude1.sid=
+pi1.resumed=no
+pi1.model=openrouter/Inception: Mercury 2.5
+pi1.sid=
+claude2.resumed=yes
+claude2.model=Fable 5.1
+claude2.sid=
+pi2.resumed=no
+pi2.model=openrouter/Inception: Mercury 2.5
+pi2.sid=
+all_ok=0
+EXIT=1

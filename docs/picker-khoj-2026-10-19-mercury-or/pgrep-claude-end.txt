@@ -1,0 +1,3 @@
+ 240314 node /home/sab-mini/.local/share/claude-agent-acp/current/dist/index.js
+1185861 /usr/bin/tmux -L picker -f /dev/null new-session -d -s picker-live -x 120 -y 40 exec env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 /home/sab-mini/.grok/bin/grok-fork --leader --leader-socket /home/
+1185862 /home/sab-mini/.grok/bin/grok-fork --leader --leader-socket /home/sab-mini/.grok/leader.sock --always-approve --trust --fullscreen --no-alt-screen --cwd /tmp --agent-choice claude=env -u CLAUD

@@ -21,3 +21,13 @@ Proof of done (all three on disk in a repo, never /tmp). All three proofs go in 
 1. `pi --version` on khoj prints 1.3.0 and `pi --mode rpc` starts without exiting.
 2. `grok pi` on khoj via the leader completes one turn (the picker-live script's khoj case).
 3. `diff <(ssh sab-air cat ~/.pi/agent/settings.json) ~/.pi/agent/settings.json` is empty.
+
+## Fourth proof of done (added 2026-10-19 09:05 UTC)
+
+`PICKER_PI_MODEL=openrouter/inception/mercury-2.5 scripts/picker-live.sh khoj local`
+must be PASS 4/4 on the fresh install. On the old install it is FAIL 2/4 because
+khoj's local `extensions/harness-state.ts` injects a "(always approve) | guard
+inactive" line that trips Mercury's refusal filter (see docs/picker-live-proof.md,
+09:05 update). The wipe removes that extension; this proof shows it stayed gone.
+Once it passes, flip the default in scripts/picker-live.sh line 58 to the
+Mercury id in the same commit as the proof.

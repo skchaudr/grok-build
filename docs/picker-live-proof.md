@@ -166,3 +166,15 @@ command, which cannot run on Linux. Captures and cause:
 Linux-readable Inception key, run khoj proofs with the DeepSeek override.
 Open gap: a Pi auth failure shows as a blank pane; the picker reports only
 "never replied".
+
+Update 09:05 UTC: `openrouter/inception/mercury-2.5` answers on khoj (OpenRouter
+key is a literal), but the picker on it is FAIL 2/4: both Pi panes blank. Cause
+(bisected, 4 runs each): Mercury 2.5's refusal filter fires on the user-message
+line khoj's local `~/.pi/agent/extensions/harness-state.ts` injects
+("# harness interactive | mut OFF (always approve) | guard inactive | ...")
+combined with the 42-tool surface; 4/4 refuse with it, 0/4 without the line.
+The refusal arrives as "Upstream error from Inception" and the pane shows
+nothing. That extension is khoj-only (the Air has one local extension) and is
+wiped by the migration, so the Mercury default is a post-migration proof, not a
+today default. Scout default stays `deepseek/deepseek-flash` (PASS 4/4 above).
+Captures: `docs/picker-khoj-2026-10-19-mercury-or/`.

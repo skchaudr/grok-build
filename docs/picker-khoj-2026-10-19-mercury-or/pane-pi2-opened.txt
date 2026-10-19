@@ -1,0 +1,40 @@
+ pi · remember the token BRAVO-2 and reply only … │ pi /tmp                                       ‹ 1/4 › │ [Dashboard]
+    remember the token BRAVO-2 and reply only with it                                                         8:54 AM
+
+    Worked for 2.7s                                                                                                    █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ ❯                                                                                                                  │
+ ╰─────────────────────────────────────────────────────────────── openrouter/Inception: Mercury 2.5 · always-approve ─╯
+ Ctrl+\:dashboard  │  Ctrl+[/]:prev/next agent  │  Ctrl+x:archive  │  Shift+Tab:mode  │  Ctrl+.:shortcuts
