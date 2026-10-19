@@ -1,0 +1,30 @@
+07:43:14 launch pager=/home/sab-mini/.grok/bin/grok-fork label=khoj
+07:43:15 open claude1 (claude) token=ALPHA-1 via=home
+07:43:30 claude1 replied; model='Fable 5.1' sid=''
+07:43:32 open pi1 (pi) token=BRAVO-1 via=dash
+07:43:47 pi1 replied; model='deepseek/DeepSeek V4.1 Flash' sid=''
+07:43:49 open claude2 (claude) token=ALPHA-2 via=dash
+07:44:06 claude2 replied; model='Fable 5.1' sid=''
+07:44:08 open pi2 (pi) token=BRAVO-2 via=dash
+07:44:21 pi2 replied; model='deepseek/DeepSeek V4.1 Flash' sid=''
+07:44:32 claude1 RESUMED: fresh reply carried ALPHA-1
+07:44:40 pi2 RESUMED: fresh reply carried BRAVO-2
+07:44:53 pi1 RESUMED: fresh reply carried BRAVO-1
+07:45:04 claude2 RESUMED: fresh reply carried ALPHA-2
+07:45:13 claude1 RESUMED: fresh reply carried ALPHA-1
+label=khoj
+pager=local:/home/sab-mini/.grok/bin/grok-fork
+claude1.resumed=yes
+claude1.model=Fable 5.1
+claude1.sid=
+pi1.resumed=yes
+pi1.model=deepseek/DeepSeek V4.1 Flash
+pi1.sid=
+claude2.resumed=yes
+claude2.model=Fable 5.1
+claude2.sid=
+pi2.resumed=yes
+pi2.model=deepseek/DeepSeek V4.1 Flash
+pi2.sid=
+all_ok=1
+EXIT=0

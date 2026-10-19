@@ -151,3 +151,18 @@ Proof in the installed file: `grep -c -a 'RelaunchForUpdate ignored' ~/.grok/bin
 `'is not this fork build'` = 1 (old = 0). `active_sessions.json` was `[]` before restart.
 `systemctl --user restart grok-leader`: active, MainPID 239284, `/proc/239284/exe` = `~/.grok/bin/grok-fork`,
 `grok-fork --version` = `grok 1.0.45 (a22e167de374)`. Macs not yet rebuilt.
+
+## khoj picker on a22e167d (2026-10-19 07:45 UTC): PASS 4/4
+
+`PICKER_PI_MODEL=deepseek/deepseek-flash scripts/picker-live.sh khoj local`
+against the running `grok-leader` unit (MainPID from the deploy above).
+claude1/claude2 resumed on Fable 5.1, pi1/pi2 resumed on DeepSeek V4.1 Flash,
+`all_ok=1`. Captures: `docs/picker-khoj-2026-10-19/`.
+
+First attempt on the default `inception/mercury-2` was FAIL for Pi only: khoj's
+`~/.pi/agent/models.json` resolves the Inception key via a macOS keychain
+command, which cannot run on Linux. Captures and cause:
+`docs/picker-khoj-2026-10-19-mercury-keyfail/README.md`. Until khoj has a
+Linux-readable Inception key, run khoj proofs with the DeepSeek override.
+Open gap: a Pi auth failure shows as a blank pane; the picker reports only
+"never replied".

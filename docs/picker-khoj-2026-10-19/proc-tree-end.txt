@@ -1,0 +1,7 @@
+ 239284     793       18:58 /home/sab-mini/.grok/bin/grok-fork agent leader --no-exit-on-disconnect --no-auto-update
+ 240314  239284       18:01 node /home/sab-mini/.local/share/claude-agent-acp/current/dist/index.js
+ 240774  239284       17:42 node /usr/bin/pi-acp
+ 476611       1       01:59 /usr/bin/tmux -L picker -f /dev/null new-session -d -s picker-live -x 120 -y 40 exec env -u CLAUDECODE GROK_AGENT_DASHBOARD=1 /home/sab-mini/.grok/bin/grok-fork --leader --
+ 476616  476611       01:59 /home/sab-mini/.grok/bin/grok-fork --leader --leader-socket /home/sab-mini/.grok/leader.sock --always-approve --trust --fullscreen --no-alt-screen --cwd /tmp --agent-choice
+ 515397  240774       01:04 pi
+ 556113  240774       00:26 pi

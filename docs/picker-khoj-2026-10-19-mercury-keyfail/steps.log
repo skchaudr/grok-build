@@ -1,0 +1,14 @@
+07:27:11 launch pager=/home/sab-mini/.grok/bin/grok-fork label=khoj
+07:27:12 open claude1 (claude) token=ALPHA-1 via=home
+07:27:28 claude1 replied; model='Fable 5.1' sid=''
+07:27:29 open pi1 (pi) token=BRAVO-1 via=dash
+07:30:14 FAIL pi1 never replied with BRAVO-1
+07:30:16 open claude2 (claude) token=ALPHA-2 via=dash
+07:30:25 claude2 replied; model='Fable 5.1' sid=''
+07:30:28 open pi2 (pi) token=BRAVO-2 via=dash
+07:33:17 FAIL pi2 never replied with BRAVO-2
+07:33:30 claude1 RESUMED: fresh reply carried ALPHA-1
+07:36:07 pi2 NOT resumed: no fresh reply with BRAVO-2
+07:38:45 pi1 NOT resumed: no fresh reply with BRAVO-1
+07:38:56 claude2 RESUMED: fresh reply carried ALPHA-2
+07:39:12 claude1 RESUMED: fresh reply carried ALPHA-1

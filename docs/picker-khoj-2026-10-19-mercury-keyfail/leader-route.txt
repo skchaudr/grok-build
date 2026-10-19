@@ -1,0 +1,4 @@
+Oct 19 07:27:12 khoj-38w grok-fork[240314]: [session/create] sessionId=3646cec2-3e5e-4917-be1e-3d63e4f632b7 phase=sdk-initialize durationMs=726 totalMs=798
+Oct 19 07:27:12 khoj-38w grok-fork[240314]: [session/create] sessionId=3646cec2-3e5e-4917-be1e-3d63e4f632b7 phase=register durationMs=1 totalMs=801
+Oct 19 07:30:18 khoj-38w grok-fork[240314]: [session/create] sessionId=51bd1879-28ad-4298-a44f-c51d33cc9c2b phase=sdk-initialize durationMs=1278 totalMs=1290
+Oct 19 07:30:18 khoj-38w grok-fork[240314]: [session/create] sessionId=51bd1879-28ad-4298-a44f-c51d33cc9c2b phase=register durationMs=1 totalMs=1293

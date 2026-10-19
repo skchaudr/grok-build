@@ -1,0 +1,40 @@
+ claude · remember the token ALPHA-1 and … │ claude /tmp                             36K / 1.0M │ ‹ 1/4 › │ [Dashboard]
+    Q711421372claude1n5 what token did I give you earlier in this session? Reply with only the token.        7:45 AM
+
+    ALPHA-1                                                                                                  7:45 AM
+
+    Worked for 1.6s
+
+
+
+
+
+
+
+
+
+
+                                                                                                                       ▴
+                                                                                                                       ─
+                                                                                                                       ─
+                                                                                                                      ━━
+                                                                                                                       ▾
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ ❯                                                                                                                  │
+ ╰─────────────────────────────────────────────────────────────────────────────────────── Fable 5.1 · always-approve ─╯
+ Ctrl+\:dashboard  │  Ctrl+[/]:prev/next agent  │  Ctrl+x:archive  │  Shift+Tab:mode  │  Ctrl+.:shortcuts
