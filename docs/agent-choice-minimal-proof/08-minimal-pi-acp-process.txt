@@ -1,0 +1,155 @@
+# children of grok-fork pid 1367238 BEFORE /new (minimal)
+grok-fork,1367238
+  |-node,1367283 /home/sab-mini/.local/share/claude-agent-acp/current/dist/index.js
+  |   |-claude,1367317 --output-format stream-json --verbose --input-format stream-json --permission-prompt-tool stdio--d
+  |   |   |-{claude},1367319
+  |   |   |-{claude},1367320
+  |   |   |-{claude},1367322
+  |   |   |-{claude},1367324
+  |   |   |-{claude},1367325
+  |   |   |-{claude},1367326
+  |   |   |-{claude},1367327
+  |   |   |-{claude},1367330
+  |   |   |-{claude},1367331
+  |   |   |-{claude},1367332
+  |   |   |-{claude},1367334
+  |   |   |-{claude},1367337
+  |   |   |-{claude},1367339
+  |   |   |-{claude},1367340
+  |   |   |-{claude},1367341
+  |   |   |-{claude},1367342
+  |   |   |-{claude},1367343
+  |   |   |-{claude},1367344
+  |   |   |-{claude},1367345
+  |   |   |-{claude},1367346
+  |   |   `-{claude},1367356
+  |   |-{node},1367284
+  |   |-{node},1367285
+  |   |-{node},1367286
+  |   |-{node},1367287
+  |   |-{node},1367288
+  |   |-{node},1367289
+  |   |-{node},1367311
+  |   |-{node},1367312
+  |   |-{node},1367313
+  |   `-{node},1367314
+  |-{grok-fork},1367241
+  |-{grok-fork},1367242
+  |-{grok-fork},1367243
+  |-{grok-fork},1367244
+  |-{grok-fork},1367245
+  |-{grok-fork},1367246
+  |-{grok-fork},1367247
+  |-{grok-fork},1367248
+  |-{grok-fork},1367249
+  |-{grok-fork},1367250
+  |-{grok-fork},1367251
+  |-{grok-fork},1367252
+  |-{grok-fork},1367253
+  |-{grok-fork},1367254
+  |-{grok-fork},1367255
+  |-{grok-fork},1367256
+  |-{grok-fork},1367257
+  |-{grok-fork},1367258
+  |-{grok-fork},1367259
+  |-{grok-fork},1367260
+  |-{grok-fork},1367261
+  |-{grok-fork},1367262
+  |-{grok-fork},1367263
+  |-{grok-fork},1367264
+  |-{grok-fork},1367265
+  |-{grok-fork},1367278
+  |-{grok-fork},1367280
+  |-{grok-fork},1367281
+  |-{grok-fork},1367282
+  |-{grok-fork},1367304
+  `-{grok-fork},1367522
+
+# children of grok-fork pid 1367238 AFTER picking pi
+grok-fork,1367238
+  |-node,1367283 /home/sab-mini/.local/share/claude-agent-acp/current/dist/index.js
+  |   |-claude,1367317 --output-format stream-json --verbose --input-format stream-json --permission-prompt-tool stdio--d
+  |   |   |-{claude},1367319
+  |   |   |-{claude},1367320
+  |   |   |-{claude},1367322
+  |   |   |-{claude},1367324
+  |   |   |-{claude},1367325
+  |   |   |-{claude},1367326
+  |   |   |-{claude},1367327
+  |   |   |-{claude},1367330
+  |   |   |-{claude},1367331
+  |   |   |-{claude},1367332
+  |   |   |-{claude},1367334
+  |   |   |-{claude},1367337
+  |   |   |-{claude},1367339
+  |   |   |-{claude},1367340
+  |   |   |-{claude},1367341
+  |   |   |-{claude},1367342
+  |   |   |-{claude},1367343
+  |   |   |-{claude},1367344
+  |   |   |-{claude},1367345
+  |   |   |-{claude},1367346
+  |   |   `-{claude},1367356
+  |   |-claude,1367670 --output-format stream-json --verbose --input-format stream-json --permission-prompt-tool stdio--d
+  |   |   |-{claude},1367671
+  |   |   |-{claude},1367672
+  |   |   |-{claude},1367673
+  |   |   |-{claude},1367674
+  |   |   |-{claude},1367675
+  |   |   |-{claude},1367676
+  |   |   |-{claude},1367677
+  |   |   |-{claude},1367680
+  |   |   |-{claude},1367681
+  |   |   |-{claude},1367682
+  |   |   |-{claude},1367684
+  |   |   |-{claude},1367687
+  |   |   |-{claude},1367690
+  |   |   |-{claude},1367691
+  |   |   |-{claude},1367692
+  |   |   |-{claude},1367693
+  |   |   |-{claude},1367694
+  |   |   |-{claude},1367695
+  |   |   |-{claude},1367696
+  |   |   |-{claude},1367697
+  |   |   `-{claude},1367703
+  |   |-{node},1367284
+  |   |-{node},1367285
+  |   |-{node},1367286
+  |   |-{node},1367287
+  |   |-{node},1367288
+  |   |-{node},1367289
+  |   |-{node},1367311
+  |   |-{node},1367312
+  |   |-{node},1367313
+  |   `-{node},1367314
+  |-{grok-fork},1367241
+  |-{grok-fork},1367242
+  |-{grok-fork},1367243
+  |-{grok-fork},1367244
+  |-{grok-fork},1367245
+  |-{grok-fork},1367246
+  |-{grok-fork},1367247
+  |-{grok-fork},1367248
+  |-{grok-fork},1367249
+  |-{grok-fork},1367250
+  |-{grok-fork},1367251
+  |-{grok-fork},1367252
+  |-{grok-fork},1367253
+  |-{grok-fork},1367254
+  |-{grok-fork},1367255
+  |-{grok-fork},1367256
+  |-{grok-fork},1367257
+  |-{grok-fork},1367258
+  |-{grok-fork},1367259
+  |-{grok-fork},1367260
+  |-{grok-fork},1367261
+  |-{grok-fork},1367262
+  |-{grok-fork},1367263
+  |-{grok-fork},1367264
+  |-{grok-fork},1367265
+  |-{grok-fork},1367278
+  |-{grok-fork},1367280
+  |-{grok-fork},1367281
+  |-{grok-fork},1367282
+  |-{grok-fork},1367304
+  `-{grok-fork},1367522

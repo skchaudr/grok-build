@@ -1,0 +1,3 @@
+ pi /tmp                                                                                                    [Dashboard]
+    Session 2f748c5d-eda5-449c-a86e-a21bc1290abd, use /dashboard to switch between sessions
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮

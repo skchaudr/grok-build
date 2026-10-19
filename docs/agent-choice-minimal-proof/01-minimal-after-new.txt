@@ -1,0 +1,36 @@
+Switched to minimal mode · /fullscreen to go back
+
+
+
+minimal · /fullscreen to go back · /help
+┌ New session ─────────────────────┐
+│Machine                           │
+│> claude                          │
+│  pi                              │
+│enter select · esc cancel         │
+└──────────────────────────────────┘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

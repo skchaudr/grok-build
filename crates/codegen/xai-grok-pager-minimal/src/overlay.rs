@@ -25,6 +25,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 
 use xai_grok_pager::app::PagerTerminal;
+use xai_grok_pager::app::agent_choice::MachinePicker;
 use xai_grok_pager::app::agent_view::AgentView;
 use xai_grok_pager::app::app_view::{ActiveView, AppView};
 use xai_grok_pager::appearance::LayoutConfig;
@@ -198,6 +199,9 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
     let theme = xai_grok_pager::theme::Theme::current();
     let style = super::live::prompt_style(&app.appearance, input_mode, &theme, multiline);
 
+    // App-level: read before the agent borrow. Checked first in the modal chain below, matching input routing
+    let picker_modal = machine_pick_modal(app.machine_picker.as_ref());
+
     let Some(agent) = app.agents.get_mut(&id) else {
         return base;
     };
@@ -218,7 +222,7 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
     // A prompt-replacing modal (permission / question / elicitation / rewind) takes the bottom region in place of the prompt.
     // Without reserving room for it, the viewport collapses to just the modal and the "Allow Edit to …?" prompt shows
     // with no visible diff.
-    if let Some(modal) = active_modal(agent) {
+    if let Some(modal) = picker_modal.or_else(|| active_modal(agent)) {
         let modal_h = modal_height(modal, agent, term_h, content_w);
         let tail_h = super::live::tail_height(agent, width, &commit_app);
         return modal_target(tail_h, modal_h, sl_h, base, ceiling);
@@ -362,6 +366,19 @@ pub enum Modal {
     Cancel,
     /// Plan approval (`AgentView::plan_approval_view`), rendered compactly by [`super::plan`] in place of the full TUI's fullscreen line viewer.
     Plan,
+    /// The new-session machine picker (`AppView::machine_picker`, opened by `/new` with two or more `[[agent_choice]]`
+    /// entries). App-level, not per-agent, so it is resolved by [`machine_pick_modal`] rather than [`active_modal`].
+    /// Carries its row count ([`MachinePicker::inline_rows`]) so sizing needs no picker borrow.
+    MachinePick(u16),
+}
+
+/// The open machine picker as a prompt-replacing modal, or `None` when it is closed or there is no picker.
+/// Callers chain it ahead of [`active_modal`]: input already routes to the picker before anything else
+/// (`AppView::handle_input`), so the paint must follow the same precedence or the user steers a box they cannot see.
+pub fn machine_pick_modal(picker: Option<&MachinePicker>) -> Option<Modal> {
+    picker
+        .filter(|picker| picker.is_open())
+        .map(|picker| Modal::MachinePick(picker.inline_rows()))
 }
 
 /// The active prompt-replacing modal, in the full-TUI render precedence (cancel-confirm > plan > permission > question > elicitation > rewind), or `None`.
@@ -445,6 +462,7 @@ pub fn modal_height(modal: Modal, agent: &mut AgentView, screen_h: u16, content_
             }
         }
         Modal::Plan => super::plan::height(agent),
+        Modal::MachinePick(rows) => rows,
     }
 }
 
@@ -458,8 +476,15 @@ pub fn render_modal(
     agent: &mut AgentView,
     theme: &Theme,
     screen_h: u16,
+    picker: Option<&MachinePicker>,
 ) -> Option<(u16, u16)> {
     match modal {
+        Modal::MachinePick(_) => {
+            if let Some(picker) = picker {
+                xai_grok_pager::app::agent_choice::paint_picker_inline(area, buf, picker);
+            }
+            None
+        }
         Modal::Permission => render_permission(buf, area, agent, theme),
         Modal::Question => render_question(buf, area, agent, theme, screen_h),
         Modal::Elicitation => {
@@ -920,6 +945,7 @@ mod tests {
             &mut agent,
             &Theme::terminal_default(),
             screen_h,
+            None,
         );
         assert_eq!(cursor, None);
         let painted: String = (0..area.height)
@@ -942,6 +968,59 @@ mod tests {
                 "{needle:?} must paint:\n{painted}"
             );
         }
+    }
+
+    /// Regression: `/new` with two `[[agent_choice]]` entries opened the picker, which captured every key, but minimal
+    /// never painted it (the picker lived only on the fullscreen render branches). The user saw nothing and the
+    /// "invisible" picker ate keys until Esc. It is now a prompt-replacing modal that wins over the per-agent ones.
+    #[test]
+    fn machine_picker_replaces_the_prompt_in_minimal_and_paints_every_choice() {
+        use xai_grok_pager::app::agent_choice::{NewSessionPick, parse_agent_choices};
+
+        let screen_h = 36u16;
+        let content_w = 120usize;
+        let mut agent = minimal_api::test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+
+        assert_eq!(machine_pick_modal(None), None, "no picker, no modal");
+        let mut picker = MachinePicker::from_choices(
+            parse_agent_choices(&["claude=claude-agent-acp".into(), "pi=pi-acp".into()]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(machine_pick_modal(Some(&picker)), None, "closed picker, no modal");
+
+        assert_eq!(picker.begin_new_session(), NewSessionPick::Ask);
+        let modal = machine_pick_modal(Some(&picker)).expect("open picker is a modal");
+        assert_eq!(modal, Modal::MachinePick(6));
+        // The picker wins over a per-agent modal, the same order `AppView::handle_input` routes keys in
+        minimal_api::open_test_elicitation(&mut agent, "airlock", "Create the ticket?");
+        assert_eq!(
+            machine_pick_modal(Some(&picker)).or_else(|| active_modal(&agent)),
+            Some(Modal::MachinePick(6))
+        );
+        assert!(!is_live_region_modal_active(&agent), "commits still flow under the picker");
+
+        let modal_h = modal_height(modal, &mut agent, screen_h, content_w);
+        assert_eq!(modal_h, 6, "border + header + two choices + hint + border");
+        let area = Rect::new(0, 0, content_w as u16, modal_h);
+        let mut buf = Buffer::empty(area);
+        let cursor = render_modal(
+            &mut buf,
+            area,
+            modal,
+            &mut agent,
+            &Theme::terminal_default(),
+            screen_h,
+            Some(&picker),
+        );
+        assert_eq!(cursor, None, "the picker hosts no text editor");
+        let painted = crate::buffer_text(&buf);
+        for needle in ["New session", "Machine", "> claude", "  pi", "enter select · esc cancel"] {
+            assert!(painted.contains(needle), "{needle:?} must paint:\n{painted}");
+        }
+        assert!(
+            painted.lines().nth(2).is_some_and(|row| row.starts_with("│> claude")),
+            "flush-left like the rest of the minimal band:\n{painted}"
+        );
     }
 
     /// Prompt-replacing modals are sized by `modal_target`; only band-owning modals may hold commits.

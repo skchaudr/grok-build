@@ -2388,6 +2388,67 @@ fn welcome_ctrl_u_update_keeps_priority_over_foreign_resume() {
         InputOutcome::Action(Action::QuitForUpdate)
     ));
 }
+/// Regression: in minimal mode the open picker captured keys but was never painted. The paint now follows
+/// `AppView::handle_input`, which routes to the picker ahead of the minimal key intercept: Down moves, Enter
+/// confirms into `ConfirmMachinePick`, Esc cancels and drops the pending intent.
+#[test]
+fn minimal_mode_routes_keys_to_the_open_machine_picker() {
+    use crate::app::agent_choice::{MachinePickIntent, MachinePicker, NewSessionPick, parse_agent_choices};
+    let mut minimal = test_app_with_agent();
+    minimal.screen_mode = ScreenMode::Minimal;
+    minimal.registry = ActionRegistry::defaults_for(ScreenMode::Minimal);
+    let id = super::super::agent::AgentId(0);
+    minimal
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .set_screen_mode(ScreenMode::Minimal);
+    let mut picker = MachinePicker::from_choices(
+        parse_agent_choices(&["claude=claude-agent-acp".into(), "pi=pi-acp".into()]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(picker.begin_new_session(), NewSessionPick::Ask);
+    minimal.machine_picker = Some(picker);
+    minimal.machine_pick_intent = Some(MachinePickIntent::NewSession);
+
+    assert!(matches!(
+        minimal.handle_input(&key_event(KeyCode::Down, KeyModifiers::NONE)),
+        InputOutcome::Changed
+    ));
+    assert_eq!(
+        minimal.machine_picker.as_ref().unwrap().selected().name,
+        "pi",
+        "Down reaches the picker, not the minimal prompt"
+    );
+    assert!(matches!(
+        minimal.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE)),
+        InputOutcome::Action(Action::ConfirmMachinePick)
+    ));
+    assert!(!minimal.machine_picker.as_ref().unwrap().is_open());
+
+    // Reopen and cancel: Esc closes the picker and drops the intent so nothing is created
+    assert_eq!(
+        minimal.machine_picker.as_mut().unwrap().begin_new_session(),
+        NewSessionPick::Use(crate::app::agent_choice::AgentChoice {
+            name: "pi".into(),
+            cmd: "pi-acp".into(),
+        }),
+        "the confirmed pick is armed for the session that follows"
+    );
+    assert_eq!(
+        minimal.machine_picker.as_mut().unwrap().begin_new_session(),
+        NewSessionPick::Ask
+    );
+    minimal.machine_pick_intent = Some(MachinePickIntent::NewSession);
+    assert!(matches!(
+        minimal.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE)),
+        InputOutcome::Changed
+    ));
+    assert!(!minimal.machine_picker.as_ref().unwrap().is_open());
+    assert!(minimal.machine_pick_intent.is_none());
+    assert!(minimal.pending_session_agent.is_none());
+}
 #[test]
 fn minimal_ctrl_g_edits_prompt_while_full_tui_keeps_tasks() {
     let event = key_event(KeyCode::Char('g'), KeyModifiers::CONTROL);

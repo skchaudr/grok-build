@@ -93,6 +93,12 @@ impl MachinePicker {
         self.open = true;
     }
 
+    /// Rows the bordered picker block needs when painted inline (minimal mode): a border row,
+    /// the "Machine" header, one row per choice, the key hint, and the closing border.
+    pub fn inline_rows(&self) -> u16 {
+        self.choices.len() as u16 + 4
+    }
+
     pub fn cancel(&mut self) {
         self.open = false;
         self.armed = None;
@@ -280,9 +286,13 @@ pub enum PickerKey {
     Ignored,
 }
 
+/// Widest the picker block ever gets; both paint paths share it so the box looks the same in every mode.
+const PICKER_WIDTH: u16 = 36;
+
+/// Centered popup over the fullscreen / inline TUI. Clears the cells under the box first.
 pub fn paint_picker(area: Rect, buf: &mut Buffer, picker: &MachinePicker) {
-    let width = 36.min(area.width.saturating_sub(4)).max(20);
-    let height = (picker.choices.len() as u16 + 4).min(area.height.saturating_sub(2));
+    let width = PICKER_WIDTH.min(area.width.saturating_sub(4)).max(20);
+    let height = picker.inline_rows().min(area.height.saturating_sub(2));
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let rect = Rect {
@@ -292,6 +302,26 @@ pub fn paint_picker(area: Rect, buf: &mut Buffer, picker: &MachinePicker) {
         height: height.max(4),
     };
     Clear.render(rect, buf);
+    paint_picker_block(rect, buf, picker);
+}
+
+/// Flush-left block for the minimal (scrollback-native) live region, which has no popup layer: the box is painted
+/// into `area` top-left, in place of the prompt, so the choices sit right above the status line. Nothing outside
+/// the box is touched; the caller owns clearing.
+pub fn paint_picker_inline(area: Rect, buf: &mut Buffer, picker: &MachinePicker) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let rect = Rect {
+        x: area.x,
+        y: area.y,
+        width: PICKER_WIDTH.min(area.width),
+        height: picker.inline_rows().min(area.height),
+    };
+    paint_picker_block(rect, buf, picker);
+}
+
+fn paint_picker_block(rect: Rect, buf: &mut Buffer, picker: &MachinePicker) {
     let mut lines = vec![Line::from(Span::styled(
         "Machine",
         Style::default().add_modifier(Modifier::BOLD),
@@ -423,6 +453,63 @@ mod tests {
     #[test]
     fn empty_choice_list_is_no_picker() {
         assert!(MachinePicker::from_choices(vec![]).is_none());
+    }
+
+    fn buffer_text(buf: &Buffer) -> Vec<String> {
+        let area = buf.area;
+        (area.y..area.y + area.height)
+            .map(|y| {
+                (area.x..area.x + area.width)
+                    .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// Minimal mode has no popup layer, so the picker paints flush-left into the row band it was given.
+    /// The cursor marker and both names must be visible, and nothing outside the box may be touched.
+    #[test]
+    fn inline_picker_paints_flush_left_with_every_choice_and_the_cursor() {
+        let mut picker = MachinePicker::from_choices(parse_agent_choices(&[
+            "claude=claude-agent-acp".into(),
+            "pi=pi-acp".into(),
+        ])
+        .unwrap())
+        .unwrap();
+        assert_eq!(picker.begin_new_session(), NewSessionPick::Ask);
+        assert_eq!(picker.inline_rows(), 6);
+
+        let area = Rect::new(0, 0, 80, 6);
+        let mut buf = Buffer::empty(area);
+        paint_picker_inline(area, &mut buf, &picker);
+        let rows = buffer_text(&buf);
+        let text = rows.join("\n");
+        assert!(text.contains("New session"), "title must paint:\n{text}");
+        assert!(text.contains("Machine"), "header must paint:\n{text}");
+        assert!(text.contains("> claude"), "cursor row must paint:\n{text}");
+        assert!(text.contains("  pi"), "second choice must paint:\n{text}");
+        assert!(text.contains("enter select · esc cancel"), "hint must paint:\n{text}");
+        // Flush-left: the border starts in column 0, the cursor row starts just inside it.
+        assert!(rows[0].starts_with('┌'), "top border at column 0:\n{text}");
+        assert!(rows[2].starts_with("│> claude"), "cursor row flush-left:\n{text}");
+        // Nothing past the 36-column box is painted.
+        assert!(
+            rows.iter()
+                .all(|row| row.chars().skip(36).collect::<String>().trim().is_empty()),
+            "cells right of the box stay untouched:\n{text}"
+        );
+
+        handle_picker_key(&mut picker, &key(KeyCode::Down));
+        let mut buf = Buffer::empty(area);
+        paint_picker_inline(area, &mut buf, &picker);
+        let text = buffer_text(&buf).join("\n");
+        assert!(text.contains("  claude") && text.contains("> pi"), "cursor moved to pi:\n{text}");
+
+        // A band too short for the whole box still paints the top rows instead of panicking.
+        let short = Rect::new(0, 0, 80, 3);
+        let mut buf = Buffer::empty(short);
+        paint_picker_inline(short, &mut buf, &picker);
+        assert!(buffer_text(&buf).join("\n").contains("New session"));
     }
 
     fn config(text: &str) -> toml::Value {

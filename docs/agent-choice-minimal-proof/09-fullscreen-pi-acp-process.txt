@@ -1,0 +1,9 @@
+# direct children of grok-fork pid 1369674 BEFORE /new (fullscreen)
+1369826 node /home/sab-mini/.local/share/claude-agent-acp/current/dist/index.js
+
+# direct children of grok-fork pid 1369674 AFTER picking pi (fullscreen)
+1369826 node /home/sab-mini/.local/share/claude-agent-acp/current/dist/index.js
+
+# grandchildren (agent processes under the ACP adapter)
+1369861 /home/sab-mini/.local/bin/claude --output-format stream-json --verbose --input-format stream-json --permission-p
+1370212 /home/sab-mini/.local/bin/claude --output-format stream-json --verbose --input-format stream-json --permission-p

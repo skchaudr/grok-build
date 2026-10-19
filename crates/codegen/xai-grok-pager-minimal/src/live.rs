@@ -100,8 +100,11 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal, ctx: &Terminal
         agents,
         active_view,
         appearance,
+        machine_picker,
         ..
     } = app;
+    // App-level new-session picker: a prompt-replacing modal that outranks the per-agent ones (see `overlay::machine_pick_modal`)
+    let picker = machine_picker.as_ref().filter(|picker| picker.is_open());
     let agent_id = match active_view {
         ActiveView::Agent(id) => Some(*id),
         _ => None,
@@ -166,7 +169,9 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal, ctx: &Terminal
                 }
                 return (None, None);
             }
-            if let Some(modal) = super::overlay::active_modal(agent) {
+            if let Some(modal) = super::overlay::machine_pick_modal(picker)
+                .or_else(|| super::overlay::active_modal(agent))
+            {
                 let status_h = 1u16.min(area.height);
                 let sl_h = status_line_frame
                     .height()
@@ -238,6 +243,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal, ctx: &Terminal
                     agent,
                     &theme,
                     term_h,
+                    picker,
                 );
                 return (cursor, None);
             }

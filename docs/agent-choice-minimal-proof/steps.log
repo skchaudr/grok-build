@@ -1,0 +1,44 @@
+12:20:50 binary: 238880392 Oct 19 12:20 sha256 f822fd70115c80ef
+12:20:50 launched /home/sab-mini/.grok/bin/grok-fork in 120x36 tmux (-L newfix)
+12:20:57 sent: /minimal Enter
+12:21:01 sent: /new Enter
+12:21:05 captured 01-minimal-after-new.txt
+12:21:05 sent: Down
+12:21:06 captured 02-minimal-after-down.txt
+12:21:06 sent: Escape
+12:21:08 captured 03-minimal-after-esc.txt
+12:21:08 sent: /new Enter
+12:21:12 sent: Down
+12:21:13 sent: Enter
+12:21:21 captured 04-minimal-after-enter-pi.txt
+12:21:21 killed tmux server (minimal pass)
+12:21:22 launched /home/sab-mini/.grok/bin/grok-fork in 120x36 tmux (-L newfix)
+12:21:29 sent: /new Enter
+12:21:33 captured 05-fullscreen-after-new.txt
+12:21:33 sent: Down
+12:21:34 captured 06-fullscreen-after-down.txt
+12:21:34 sent: Escape
+12:21:36 captured 07-fullscreen-after-esc.txt
+12:21:36 killed tmux server (fullscreen pass)
+12:21:36 done
+12:21:52 extra: confirm Enter on 'pi' spawns pi-acp (minimal)
+12:21:52 pi-acp processes before launch: 8
+12:22:03 sent: /minimal Enter
+12:22:07 sent: /new Enter
+12:22:08 sent: Down, Enter (pick pi)
+12:22:16 pi-acp processes after pick: 7 (08-minimal-pi-acp-process.txt)
+12:22:16 killed tmux server (extra pass)
+12:22:17 pi-acp processes after kill: 8
+12:22:31 correction: the pgrep count above matched other sessions' pi-acp and my own shells; redoing with the process tree under this grok-fork pid
+12:22:38 grok-fork pane pid 1367238
+12:22:42 sent: /minimal Enter
+12:22:46 sent: /new Enter
+12:22:47 sent: Down, Enter (pick pi)
+12:22:55 captured 08-minimal-pi-acp-process.txt
+12:22:55 killed tmux server (process-tree pass)
+12:23:39 fullscreen control for the same question: does picking pi spawn pi-acp under this grok-fork?
+12:23:46 grok-fork pane pid 1369674 (fullscreen)
+12:23:50 sent: /new Enter
+12:23:51 sent: Down, Enter (pick pi)
+12:23:59 captured 09-fullscreen-pi-acp-process.txt and 09-fullscreen-after-enter-pi.txt
+12:23:59 killed tmux server (fullscreen control)
