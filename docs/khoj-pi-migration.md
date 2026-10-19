@@ -31,3 +31,14 @@ every `resumed=yes`. It passes today only because khoj's settings.json disables
 The wipe removes that extension and the Air settings.json carries no such entry;
 this proof shows Mercury still answers on the clean install. See
 docs/picker-live-proof.md, 10:47 UTC section.
+
+## Fifth proof of done (added 2026-10-19 11:45 UTC)
+
+Every model id the copied Air settings.json names as a default (main model,
+subagent/workflow defaults, scout model) must answer one `pi -p ... ping` on
+khoj, and the answer must be pasted into the proof. Today the subagent default
+on the old install was `google-antigravity/gemini-3.5-flash`, which the provider
+now rejects ("Gemini 3.5 Flash is no longer available"); Pi's subagent tool
+reported it as "did not submit a valid workflow_result" with zero tokens, not as
+a dead model. A dead default has to be found by this check, not by the next
+person's subagents dying.
