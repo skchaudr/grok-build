@@ -40,7 +40,7 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
     - User lines that start with `<` (injected context) are never titles.
 - **Index** (`index.rs`):
   - Skip when size and mtime are unchanged. If the size matches but mtime changed, compare the full hash and only touch mtime.
-  - Append from `indexed_bytes` when the old-prefix sha256 matches. Otherwise do a full reparse. zstd always reparses.
+  - Append from `indexed_bytes` when the sha256 of the 64KB before it (`content_hash`, `TAIL_WINDOW`) matches, so append cost does not grow with file size. Otherwise (shrink, tail changed) do a full reparse. zstd always reparses. An in-place edit further back than 64KB with unchanged size is not seen.
   - An unterminated tail line is never indexed.
   - `byte_offset` per event makes `raw_line` a seek.
   - A corrupt db is renamed `*.corrupt.<nanos>` and rebuilt. There is no `quick_check` on open, because it is O(db) and the open runs on the UI thread.
@@ -49,12 +49,13 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
   - `active` if not terminal and the file mtime is within 5 min.
   - Otherwise `idle`.
 - **Storage diet:** events keep a `preview` (whitespace-collapsed, 160 chars), not the text. Titles come from the full text before clipping. The inspector re-reads the raw line via `byte_offset`; nothing is copied.
-- **Versions:** `trace_meta` holds `schema_version` and `parser_version`. A mismatch on open renames the db and sidecars to `*.old.<nanos>` and deletes them, then starts fresh (a smaller row does not shrink a SQLite file).
+- **Versions:** `trace_meta` holds `schema_version` and `parser_version` (both 3). A mismatch on open renames the db and sidecars to `*.old.<nanos>` and deletes them, then starts fresh (a smaller row does not shrink a SQLite file).
 - **Caps (fail loud):**
   - `MAX_DB_BYTES` = 256 MiB over db + `-wal`. `scan`, `index_file` and `record_receipt` call `check_cap()` first and return `Error::OverCap`, writing `trace_meta.health`. `TraceIndex::health()` is `None` when ok; the ledger shows it as a red line on the search row.
   - `MAX_EVENTS_PER_FILE` = 200k, recorded in `parse_error`.
   - Path guard: `roots::root_for` / `resolve` need the canonical path inside the root and a name that passes the root's rules. `.db`, `.sqlite`, `-wal`, `-shm`, `-journal` and `.corrupt.` names are rejected. `index_file` also rejects anything under the db's own directory.
 - **Receipts:** `trace_receipts` (one row per hook event, pruned to 100k every 1000th insert). `record_receipt`, `receipts_watermark`, `last_receipt`. A receipt under 2 min old whose event is not terminal (`SessionEnd`, `Stop`, `stop`, `session_shutdown`, `agent_end`) makes a session Active regardless of mtime.
+- **Live modal:** `event_loop.rs` arms `traces_poll_at` (1s, same pattern as `dashboard_poll_at`) while the active agent's modal is `Traces`; the arm calls `TracesModalState::poll_live`. It compares `receipts_watermark()`; on change it requeries the ledger keeping the selected session by id, and requeries an open trajectory only if that session's `event_count` grew (follows the bottom row, otherwise keeps selection). Header shows `● live` while the newest receipt is under 2 min old. `last_receipt_at()` backs it. Tests: `live_poll_*` in `traces_modal.rs`; the pty scenario runs `grok-traces hook claude` mid-ledger (binary: `GROK_TRACES_BIN` or next to the pager binary; build `-p xai-grok-traces --bin grok-traces` first).
 - **Hook rules:** busy timeout 250 ms. Failures go to one stderr line; over-cap also posts a macOS notification at most hourly (stamp file `overcap.notified` beside the db). Grok's `updates.jsonl` path maps to the sibling `chat_history.jsonl`. No watcher or daemon exists; the hook is the only live feed.
 - The index lives at `~/.grok/traces/traces.sqlite`. It is disposable and never uploaded.
 

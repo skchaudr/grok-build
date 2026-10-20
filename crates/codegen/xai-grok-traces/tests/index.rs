@@ -299,8 +299,8 @@ fn old_schema_is_replaced_not_migrated() {
     idx.scan(&e.roots).unwrap();
     assert_eq!(all(&idx).len(), 6);
     let stats = idx.stats().unwrap();
-    assert_eq!(stats.schema_version.as_deref(), Some("2"));
-    assert_eq!(stats.parser_version.as_deref(), Some("2"));
+    assert_eq!(stats.schema_version.as_deref(), Some("3"));
+    assert_eq!(stats.parser_version.as_deref(), Some("3"));
     let names: Vec<String> = fs::read_dir(e.db.parent().unwrap()).unwrap().map(|d| d.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert!(names.iter().all(|n| !n.contains(".old.")), "old db removed: {names:?}");
     assert!(!names.iter().any(|n| n.contains(".corrupt.")));
@@ -434,4 +434,20 @@ fn grok_hook_updates_path_maps_to_chat_history() {
     let g = by_source(&idx, "grok");
     assert_eq!(g.event_count, 5);
     assert_eq!(idx.last_receipt(&g.id).unwrap().unwrap().1, "PostToolUse");
+}
+
+#[test]
+fn same_size_edit_near_the_end_reparses() {
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let pi_root = e.roots.iter().find(|r| r.source == "pi").unwrap();
+    let path = e.home.join(".pi/agent/sessions/--w-pi--/p.jsonl");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(&path, &PI.replace("\"ok\"", "\"no\""));
+    assert!(idx.index_file(pi_root, &path).unwrap());
+    // Touch only: same bytes, new mtime → no reparse.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(&path, &PI.replace("\"ok\"", "\"no\""));
+    assert!(!idx.index_file(pi_root, &path).unwrap());
 }

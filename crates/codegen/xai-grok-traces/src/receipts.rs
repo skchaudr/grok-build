@@ -46,6 +46,11 @@ impl TraceIndex {
         Ok(self.conn().query_row("SELECT COALESCE(MAX(id), 0) FROM trace_receipts", [], |r| r.get(0))?)
     }
 
+    /// Time of the newest receipt of any session.
+    pub fn last_receipt_at(&self) -> Result<Option<i64>> {
+        Ok(self.conn().query_row("SELECT at_ms FROM trace_receipts ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).optional()?)
+    }
+
     /// (at_ms, event) of the newest receipt for a session.
     pub fn last_receipt(&self, session_id: &str) -> Result<Option<(i64, String)>> {
         Ok(self

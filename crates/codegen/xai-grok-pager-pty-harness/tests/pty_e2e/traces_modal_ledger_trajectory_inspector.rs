@@ -21,6 +21,33 @@ fn seed(path: PathBuf, lines: &[&str]) {
     std::fs::write(path, lines.join("\n") + "\n").unwrap();
 }
 
+/// `grok-traces`: `GROK_TRACES_BIN`, else next to the pager binary.
+fn traces_binary(pager: &Path) -> PathBuf {
+    std::env::var_os("GROK_TRACES_BIN").map(PathBuf::from).unwrap_or_else(|| pager.with_file_name("grok-traces"))
+}
+
+/// What a harness hook does: `grok-traces hook claude` with the event JSON on stdin, same HOME as the pager.
+fn run_hook(bin: &Path, home: &Path, transcript: &Path) {
+    use std::io::Write;
+    let payload = format!(
+        r#"{{"hook_event_name":"PostToolUse","session_id":"live","transcript_path":"{}","tool_name":"Bash","cwd":"/w"}}"#,
+        transcript.display()
+    );
+    let mut child = std::process::Command::new(bin)
+        .args(["hook", "claude"])
+        .env("HOME", home)
+        .env_remove("GROK_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn grok-traces");
+    child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(), "hook: {out:?}");
+}
+
 /// `/traces` lists sessions from HOME, tab filters by source, Enter opens the trajectory,
 /// `e` filters errors, Enter shows the raw source line, `y` copies it byte for byte,
 /// and `r` on a source with no resume path shows the notice instead of launching anything.
@@ -53,6 +80,32 @@ async fn traces_modal_ledger_trajectory_inspector() {
     h.wait_for_text("ptyclaudetask", Duration::from_secs(20)).expect("ledger lists the claude fixture");
     h.wait_for_text("ptycodextask", Duration::from_secs(5)).expect("ledger lists the codex fixture");
     h.wait_for_text("ptypitask", Duration::from_secs(5)).expect("ledger lists the pi fixture");
+
+    // Live mode: hooks fire while the ledger is open and the rows change with no key press.
+    let hook_bin = traces_binary(&binary);
+    let claude_file = home.join(".claude/projects/-w-claude/0b7e1c2a-0000-4000-8000-000000000001.jsonl");
+    let row_tokens = |h: &PtyHarness| -> Vec<String> {
+        let screen = h.screen_contents();
+        let row = screen.lines().find(|l| l.contains("ptyclaudetask")).unwrap_or_default();
+        row.split_whitespace().map(str::to_string).collect()
+    };
+    assert!(!row_tokens(&h).contains(&"4".to_string()), "3 events before\n{}", h.screen_contents());
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&claude_file).unwrap();
+        writeln!(f, r#"{{"type":"assistant","timestamp":"2026-10-01T00:00:09Z","message":{{"role":"assistant","content":"more"}}}}"#).unwrap();
+    }
+    run_hook(&hook_bin, &home, &claude_file);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !row_tokens(&h).contains(&"4".to_string()) {
+        assert!(Instant::now() < deadline, "event count never reached 4\n{}", h.screen_contents());
+        h.update(Duration::from_millis(200));
+    }
+    h.wait_for_text("live", Duration::from_secs(5)).expect("live marker");
+    let fresh = home.join(".claude/projects/-w-claude/0b7e1c2a-0000-4000-8000-000000000009.jsonl");
+    seed(fresh.clone(), &[r#"{"type":"user","timestamp":"2026-09-01T00:00:00Z","message":{"role":"user","content":"ptylivetask"}}"#]);
+    run_hook(&hook_bin, &home, &fresh);
+    h.wait_for_text("ptylivetask", Duration::from_secs(10)).expect("new session appears without a key press");
 
     // All → DeepSeek → Claude.
     h.inject_keys(b"\t\t").expect("tab to Claude");

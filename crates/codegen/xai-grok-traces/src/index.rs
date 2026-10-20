@@ -16,9 +16,9 @@ use crate::lines;
 use crate::normalize::{Kind, NormalizedEvent, Role, clip, normalize};
 use crate::roots::{Format, MAX_FILES, Root, discover, resolve};
 
-pub const PARSER_VERSION: i64 = 2;
+pub const PARSER_VERSION: i64 = 3;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 /// Writes pause once the db plus its `-wal` pass this.
 pub const MAX_DB_BYTES: u64 = 256 * 1024 * 1024;
 /// Events indexed per file; the rest of a runaway file is left to the source.
@@ -116,10 +116,17 @@ fn mtime_ms(meta: &fs::Metadata) -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-fn sha256_prefix(path: &Path, len: u64) -> io::Result<String> {
+/// Bytes before `indexed_bytes` that vouch the old prefix is unchanged. Bounded so an
+/// append costs the same on a 200MB transcript as on a 2KB one.
+const TAIL_WINDOW: u64 = 64 * 1024;
+
+/// sha256 of the last `TAIL_WINDOW` bytes before `end`.
+fn tail_hash(path: &Path, end: u64) -> io::Result<String> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    file.seek(SeekFrom::Start(end.saturating_sub(TAIL_WINDOW)))?;
     let mut h = Sha256::new();
-    let mut reader = fs::File::open(path)?.take(len);
-    io::copy(&mut reader, &mut h)?;
+    io::copy(&mut file.take(end.min(TAIL_WINDOW)), &mut h)?;
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -483,7 +490,9 @@ impl TraceIndex {
             )
             .optional()?;
 
-        let full_hash = || sha256_prefix(path, size as u64);
+        let tail_ok = |f: &FileRow| -> io::Result<bool> {
+            Ok(f.indexed_bytes <= size && f.content_hash.as_deref() == Some(tail_hash(path, f.indexed_bytes as u64)?.as_str()))
+        };
         let reset = match &existing {
             None => true,
             Some(f) if f.parser_version != PARSER_VERSION => true,
@@ -493,20 +502,16 @@ impl TraceIndex {
                     if f.mtime_ms == mtime {
                         return Ok(false);
                     }
-                    if f.content_hash.as_deref() == Some(full_hash()?.as_str()) {
+                    if tail_ok(f)? {
                         self.conn.execute("UPDATE trace_files SET mtime_ms = ?1 WHERE path = ?2", params![mtime, path_str])?;
                         return Ok(false);
                     }
                     true
                 } else {
-                    root.format == Format::Zstd
-                        || f.size_bytes > size
-                        || f.indexed_bytes > size
-                        || f.content_hash.as_deref() != Some(sha256_prefix(path, f.size_bytes as u64)?.as_str())
+                    root.format == Format::Zstd || f.size_bytes > size || !tail_ok(f)?
                 }
             }
         };
-        let content_hash = full_hash()?;
         let (start_byte, start_line) = match (&existing, reset) {
             (Some(f), false) => (f.indexed_bytes, f.indexed_lines),
             _ => (0, 0),
@@ -585,6 +590,7 @@ impl TraceIndex {
             (end_byte, next_line)
         };
         let indexed_bytes = if root.format == Format::Zstd { size } else { end_byte };
+        let content_hash = tail_hash(path, indexed_bytes as u64)?;
         if root.source == "grok" && agg.cwd.is_none() {
             agg.cwd = grok_cwd(path);
         }

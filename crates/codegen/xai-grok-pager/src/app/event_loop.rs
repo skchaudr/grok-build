@@ -1687,6 +1687,9 @@ pub(crate) async fn run(
     };
     const DASHBOARD_POLL_INTERVAL: Duration = Duration::from_secs(1);
     let mut dashboard_poll_at: Option<Instant> = Some(Instant::now());
+    // Live /traces: polls the hook-receipt watermark once a second while the modal is open.
+    const TRACES_POLL_INTERVAL: Duration = Duration::from_secs(1);
+    let mut traces_poll_at: Option<Instant> = None;
     const RECAP_POLL_INTERVAL: Duration = Duration::from_secs(20);
     let mut recap_poll_at: Option<Instant> = Some(Instant::now() + RECAP_POLL_INTERVAL);
     let mut presenter = Presenter::new();
@@ -2025,6 +2028,11 @@ pub(crate) async fn run(
         } else if dashboard_poll_at.is_none() {
             dashboard_poll_at = Some(Instant::now());
         }
+        if traces_state_mut(&mut app).is_none() {
+            traces_poll_at = None;
+        } else if traces_poll_at.is_none() {
+            traces_poll_at = Some(Instant::now() + TRACES_POLL_INTERVAL);
+        }
         if subscription_watch_at.is_none()
             && app.subscription_watch_wanted()
             && let Some(iv) = app.subscription_watch_interval()
@@ -2093,6 +2101,12 @@ pub(crate) async fn run(
         };
         let subscription_watch = async {
             match subscription_watch_at {
+                Some(at) => sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+        let traces_poll = async {
+            match traces_poll_at {
                 Some(at) => sleep_until(at).await,
                 None => std::future::pending().await,
             }
@@ -2527,6 +2541,14 @@ pub(crate) async fn run(
                 let effs = app.fire_subscription_check("watch");
                 if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                     break;
+                }
+            }
+
+            _ = traces_poll => {
+                // Re-armed by the loop-top check above.
+                traces_poll_at = None;
+                if traces_state_mut(&mut app).is_some_and(|state| state.poll_live()) {
+                    presenter.request(false);
                 }
             }
 
@@ -4037,6 +4059,15 @@ fn process_effects(
     }
     false
 }
+/// The open `/traces` modal of the active agent, if any.
+fn traces_state_mut(app: &mut AppView) -> Option<&mut crate::views::traces_modal::TracesModalState> {
+    let ActiveView::Agent(id) = app.active_view else { return None };
+    match app.agents.get_mut(&id)?.active_modal.as_mut()? {
+        crate::views::modal::ActiveModal::Traces { state } => Some(state.as_mut()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
