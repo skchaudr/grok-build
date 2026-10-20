@@ -56,3 +56,23 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
 - The first pty launch of a freshly built binary can time out on welcome (macOS first exec). Rerun before debugging.
 - The test baseline on main 7eb90d57 is pager lib 10389/0 and shell lib 6 failures (with `RUST_MIN_STACK=33554432`; without it the run aborts on stack overflow). `GROK_HOME` must be empty for pager tests.
 - The binary comes from `-p xai-grok-pager-bin` (bin `xai-grok-pager`). `--version` prints `grok <ver> (<12-char HEAD sha>)`.
+
+## Hooks
+
+Per-harness wiring so sessions index as they happen. Templates and installer: `xai-grok-traces/hooks/`. Every path calls `~/.grok/bin/grok-traces hook <source>` (one JSON payload on stdin, exit 0, silent).
+
+| Harness | Mechanism | Installed to |
+|---|---|---|
+| claude | `settings.json` hooks: SessionStart, UserPromptSubmit, Pre/PostToolUse, PostToolUseFailure, Stop, SubagentStop, SessionEnd | edited in place via jq |
+| codex | `hooks.json`, same list minus SessionEnd (Codex has none) | edited in place via jq |
+| grok | `hooks/grok/traces.json` (async): SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd | `~/.grok/hooks/traces.json` |
+| omp, pi | `hooks/{omp,pi}/traces.ts` extension, tool_result debounced 500ms with a trailing spawn | `~/.omp/agent/extensions/`, `~/.pi/agent/extensions/` |
+| dsh | `hooks/dsh/traces.mjs` Cordis plugin on `session/event`, throttled 1s | manual: mount from a profile `cordis.patch.yml` |
+| cursor | skipped, no parser | |
+
+- `install.sh`: `--dry-run` (default, prints `diff -u`), `--apply`, `--remove`, `--check`. `--apply` refuses while the binary is missing (`--even-if-missing` overrides). JSON files get a `.bak-traces-<ts>` backup, are built in a temp file, and are validated with `jq empty` before the move.
+- Claude/Codex: removes hook entries containing `log-commands.sh` or `atuin hook`, plus any previous grok-traces entry, then appends one per event. Re-runs are idempotent. Moshi, Orca, Herdr and other hooks are untouched.
+- `pi-observability.ts` (OMP symlink) is only moved aside with `--apply --retire-pi-observability`. `--remove --retire-pi-observability` puts it back.
+- Grok's hook payload carries `transcriptPath`/`transcript_path`, but it is `<session dir>/updates.jsonl` (set only if the file exists), not `chat_history.jsonl`. The session dir is the same, so the trace side should map it to the sibling `chat_history.jsonl`.
+- DSH logs are `~/.dsh/sessions/<project-key>/<session id>/session[.vN].jsonl.zstd`. The plugin finds the file by scanning project dirs for the session id.
+- Tests: `hooks/test.sh` (synthetic `HOME`, includes the JS templates under node >= 22). Real-config dry-run: `docs/traces/HOOKS-dryrun-mini.txt`.
