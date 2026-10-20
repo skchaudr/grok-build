@@ -140,6 +140,8 @@ fn humanize(s: &str) -> String {
 }
 
 fn normalize_text(s: &str) -> String {
+    let unwrapped = crate::cursor::unwrap_user_query(s);
+    let s = unwrapped.as_ref();
     let long = s.chars().count() > SUMMARY_CHARS;
     let head: String = s.chars().take(SUMMARY_CHARS).collect();
     let mut t = head.replace("\r\n", "\n");
@@ -360,7 +362,7 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         (Some(t), Some(n)) => format!("{t}/{n}"),
         (Some(t), None) => t.to_string(),
         (None, Some(n)) => n.to_string(),
-        (None, None) => "record".to_string(),
+        (None, None) => string_value(top.get("role")).unwrap_or("record").to_string(),
     };
 
     let role = content_tool_role(payload).or_else(|| detect_role(&event_type, top, payload));
@@ -542,6 +544,19 @@ mod tests {
         assert_eq!((t.kind, t.role, t.depth), (Kind::Tool, Some(Role::ToolResult), 2));
         let a = normalize(&json!({"type": "assistant", "model_id": "grok-5", "content": "x"}));
         assert_eq!(a.model.as_deref(), Some("grok-5"));
+    }
+
+    #[test]
+    fn cursor_lines() {
+        let u = normalize(&json!({"role": "user", "message": {"content": [
+            {"type": "text", "text": "<timestamp>Tue</timestamp>\n<user_query>\nfix it\n</user_query>"}]}}));
+        assert_eq!((u.event_type.as_str(), u.kind, u.role), ("user", Kind::Message, Some(Role::User)));
+        assert_eq!(u.summary, "fix it");
+        let t = normalize(&json!({"role": "assistant", "message": {"content": [
+            {"type": "text", "text": "looking"}, {"type": "tool_use", "name": "Shell", "input": {"command": "ls"}}]}}));
+        assert_eq!((t.kind, t.role, t.title.as_str()), (Kind::Tool, Some(Role::Tool), "Shell"));
+        let end = normalize(&json!({"type": "turn_ended", "status": "success"}));
+        assert_eq!(end.kind, Kind::Turn);
     }
 
     #[test]
