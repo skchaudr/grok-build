@@ -15162,6 +15162,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-grok-traces"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "tempfile",
+ "tracing",
+ "xai-dirs",
+ "xai-sqlite-journal",
+ "zstd",
+]
+
+[[package]]
 name = "xai-grok-update"
 version = "0.1.220-alpha.4"
 dependencies = [
