@@ -385,13 +385,6 @@ impl TracesModalState {
                 offset: 0,
             };
             index.list_events(&session.id, &filter)
-        let (Some(index), Some(session)) = (&self.index, &self.session) else { return };
-        let filter = EventFilter {
-            text: (!self.event_query.is_empty()).then(|| self.event_query.clone()),
-            errors_only: self.event_errors_only,
-            tool: self.tool_filter.and_then(|i| self.tools.get(i).cloned()),
-            limit: EVENT_PAGE,
-            offset: 0,
         };
         match listed {
             Ok(rows) => self.set_events(rows),
