@@ -13,6 +13,7 @@ mod lines;
 mod links;
 pub mod normalize;
 mod query;
+pub mod remote;
 mod receipts;
 pub mod roots;
 
