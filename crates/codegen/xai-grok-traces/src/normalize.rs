@@ -6,7 +6,10 @@
 
 use serde_json::{Map, Value};
 
-pub const SUMMARY_CHARS: usize = 1024;
+/// Transient per-event text (error heuristic, titles); only the preview is stored.
+const TEXT_CHARS: usize = 1024;
+/// Stored per-event preview; the full line is re-read from the source on demand.
+pub const PREVIEW_CHARS: usize = 100;
 const TYPE_CHARS: usize = 120;
 const TITLE_CHARS: usize = 160;
 const SEARCH_DEPTH: usize = 6;
@@ -24,6 +27,18 @@ pub enum Kind {
 }
 
 impl Kind {
+    pub const ALL: [Kind; 7] =
+        [Kind::Message, Kind::Tool, Kind::Step, Kind::Turn, Kind::Reasoning, Kind::Telemetry, Kind::System];
+
+    /// Small integer stored in the index; `ALL[code]` is the inverse.
+    pub fn code(self) -> i64 {
+        Self::ALL.iter().position(|k| *k == self).unwrap_or(0) as i64
+    }
+
+    pub fn from_code(code: i64) -> Option<Kind> {
+        usize::try_from(code).ok().and_then(|i| Self::ALL.get(i).copied())
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Message => "message",
@@ -47,6 +62,17 @@ pub enum Role {
 }
 
 impl Role {
+    pub const ALL: [Role; 5] = [Role::User, Role::Assistant, Role::Tool, Role::ToolResult, Role::Reasoning];
+
+    /// Small integer stored in the index; `ALL[code]` is the inverse.
+    pub fn code(self) -> i64 {
+        Self::ALL.iter().position(|r| *r == self).unwrap_or(0) as i64
+    }
+
+    pub fn from_code(code: i64) -> Option<Role> {
+        usize::try_from(code).ok().and_then(|i| Self::ALL.get(i).copied())
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Role::User => "user",
@@ -64,7 +90,10 @@ pub struct NormalizedEvent {
     pub kind: Kind,
     pub role: Option<Role>,
     pub title: String,
-    pub summary: String,
+    /// Up to `TEXT_CHARS` of content; not stored.
+    pub text: String,
+    /// Whitespace-collapsed `text`, clipped to `PREVIEW_CHARS`; this is what the index keeps.
+    pub preview: String,
     pub timestamp_ms: Option<i64>,
     pub duration_ms: Option<f64>,
     pub input_tokens: Option<f64>,
@@ -89,7 +118,7 @@ impl NormalizedEvent {
             return true;
         }
         self.role == Some(Role::ToolResult) && {
-            let s = self.summary.to_lowercase();
+            let s = self.text.to_lowercase();
             ["error", "fail", "denied", "exception", "timeout"]
                 .iter()
                 .any(|w| s.contains(w))
@@ -124,6 +153,15 @@ pub fn clip(s: &str, max: usize) -> String {
     }
 }
 
+/// One line, single spaces, at most `PREVIEW_CHARS` chars.
+pub fn preview(s: &str) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(PREVIEW_CHARS) {
+        None => flat,
+        Some((i, _)) => format!("{}…", &flat[..i]),
+    }
+}
+
 fn humanize(s: &str) -> String {
     let spaced: String = s
         .chars()
@@ -140,8 +178,10 @@ fn humanize(s: &str) -> String {
 }
 
 fn normalize_text(s: &str) -> String {
-    let long = s.chars().count() > SUMMARY_CHARS;
-    let head: String = s.chars().take(SUMMARY_CHARS).collect();
+    let unwrapped = crate::cursor::unwrap_user_query(s);
+    let s = unwrapped.as_ref();
+    let long = s.chars().count() > TEXT_CHARS;
+    let head: String = s.chars().take(TEXT_CHARS).collect();
     let mut t = head.replace("\r\n", "\n");
     while let Some((a, b)) = find_trailing_ws(&t) {
         t.replace_range(a..b, "");
@@ -222,8 +262,8 @@ fn text_from(v: &Value, depth: usize) -> String {
                     out.push('\n');
                 }
                 out.push_str(&part);
-                if out.chars().count() >= SUMMARY_CHARS {
-                    return clip(&out, SUMMARY_CHARS);
+                if out.chars().count() >= TEXT_CHARS {
+                    return clip(&out, TEXT_CHARS);
                 }
             }
             out
@@ -360,7 +400,7 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         (Some(t), Some(n)) => format!("{t}/{n}"),
         (Some(t), None) => t.to_string(),
         (None, Some(n)) => n.to_string(),
-        (None, None) => "record".to_string(),
+        (None, None) => string_value(top.get("role")).unwrap_or("record").to_string(),
     };
 
     let role = content_tool_role(payload).or_else(|| detect_role(&event_type, top, payload));
@@ -415,11 +455,13 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         .or_else(|| find_string(&payload_value, &["cwd"], 0));
 
     let title = if title.is_empty() { "Event".to_string() } else { title };
+    let text = if text.is_empty() { title.clone() } else { text };
     NormalizedEvent {
         event_type: clip(&event_type, TYPE_CHARS),
         kind,
         role,
-        summary: if text.is_empty() { title.clone() } else { text },
+        preview: preview(&text),
+        text,
         title: clip(&title, TITLE_CHARS),
         timestamp_ms,
         duration_ms,
@@ -450,7 +492,8 @@ mod tests {
         }));
         assert_eq!((e.kind, e.role, e.depth), (Kind::Message, Some(Role::User), 0));
         assert_eq!(e.title, "User");
-        assert_eq!(e.summary, "hello\nworld");
+        assert_eq!(e.text, "hello\nworld");
+        assert_eq!(e.preview, "hello world");
         assert_eq!(e.cwd.as_deref(), Some("/w"));
         assert_eq!(e.timestamp_ms, Some(1_790_812_800_000));
     }
@@ -506,7 +549,7 @@ mod tests {
         }));
         assert_eq!((e.kind, e.role, e.depth), (Kind::Tool, Some(Role::ToolResult), 2));
         assert_eq!(e.title, "bash");
-        assert_eq!(e.summary, "ok");
+        assert_eq!(e.text, "ok");
     }
 
     #[test]
@@ -537,7 +580,7 @@ mod tests {
     #[test]
     fn grok_chat_history_entries() {
         let u = normalize(&json!({"type": "user", "content": [{"type": "text", "text": "fix it"}]}));
-        assert_eq!((u.kind, u.role, u.summary.as_str()), (Kind::Message, Some(Role::User), "fix it"));
+        assert_eq!((u.kind, u.role, u.text.as_str()), (Kind::Message, Some(Role::User), "fix it"));
         let t = normalize(&json!({"type": "tool_result", "tool_call_id": "t1", "content": "ok"}));
         assert_eq!((t.kind, t.role, t.depth), (Kind::Tool, Some(Role::ToolResult), 2));
         let a = normalize(&json!({"type": "assistant", "model_id": "grok-5", "content": "x"}));
@@ -545,9 +588,27 @@ mod tests {
     }
 
     #[test]
+    fn cursor_lines() {
+        let u = normalize(&json!({"role": "user", "message": {"content": [
+            {"type": "text", "text": "<timestamp>Tue</timestamp>\n<user_query>\nfix it\n</user_query>"}]}}));
+        assert_eq!((u.event_type.as_str(), u.kind, u.role), ("user", Kind::Message, Some(Role::User)));
+        assert_eq!((u.text.as_str(), u.preview.as_str()), ("fix it", "fix it"));
+        let t = normalize(&json!({"role": "assistant", "message": {"content": [
+            {"type": "text", "text": "looking"}, {"type": "tool_use", "name": "Shell", "input": {"command": "ls"}}]}}));
+        assert_eq!((t.kind, t.role, t.title.as_str()), (Kind::Tool, Some(Role::Tool), "Shell"));
+        let end = normalize(&json!({"type": "turn_ended", "status": "success"}));
+        assert_eq!(end.kind, Kind::Turn);
+    }
+
+    #[test]
     fn humanize_and_clip() {
         assert_eq!(humanize("response_item/message"), "Response Item Message");
         assert_eq!(clip("abcdef", 3), "abc\n…");
         assert_eq!(normalize_text("a  \nb"), "a\nb");
+        assert_eq!(preview("a \n\t b"), "a b");
+        let long = "x".repeat(500);
+        let p = preview(&long);
+        assert_eq!(p.chars().count(), PREVIEW_CHARS + 1);
+        assert!(p.ends_with('…'));
     }
 }

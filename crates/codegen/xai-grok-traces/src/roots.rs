@@ -13,6 +13,8 @@ const IGNORED_DIRS: [&str; 15] = [
 pub enum Format {
     Jsonl,
     Zstd,
+    /// A SQLite db read in place (bb); the root path is the db file.
+    Sqlite,
 }
 
 impl Format {
@@ -20,12 +22,13 @@ impl Format {
         match self {
             Format::Jsonl => "jsonl",
             Format::Zstd => "zstd",
+            Format::Sqlite => "sqlite",
         }
     }
 }
 
 /// Ledger tab order: All, then these.
-pub const SOURCES: [&str; 6] = ["dsh", "claude", "pi", "omp", "codex", "grok"];
+pub const SOURCES: [&str; 8] = ["dsh", "claude", "pi", "omp", "codex", "cursor", "grok", "bb"];
 
 pub fn source_label(source: &str) -> &str {
     match source {
@@ -34,7 +37,9 @@ pub fn source_label(source: &str) -> &str {
         "pi" => "Pi",
         "omp" => "OMP",
         "codex" => "Codex",
+        "cursor" => "Cursor",
         "grok" => "Grok",
+        "bb" => "bb",
         other => other,
     }
 }
@@ -69,10 +74,14 @@ pub fn default_roots(home: &Path, grok_home: &Path) -> Vec<Root> {
         Root::new("omp-sessions", "omp", home.join(".omp/agent/sessions"), Format::Jsonl),
         Root::new("codex-archive", "codex", codex.join("archived_sessions"), Format::Jsonl),
         Root::new("codex-sessions", "codex", codex.join("sessions"), Format::Jsonl),
+        // Cursor's agent-transcripts hold the JSONL; its chats/*/store.db is a SQLite blob store.
+        Root::new("cursor-projects", "cursor", home.join(".cursor/projects"), Format::Jsonl),
         Root {
             file_name: Some("chat_history.jsonl"),
             ..Root::new("grok-sessions", "grok", grok_home.join("sessions"), Format::Jsonl)
         },
+        // bb threads live in one SQLite db, read in place (see `bb`); absent where bb is not installed.
+        Root::new("bb-threads", "bb", crate::bb::default_db_path(home), Format::Sqlite),
     ]
 }
 
@@ -98,6 +107,37 @@ fn matches(name: &str, root: &Root) -> bool {
             lower.ends_with(".jsonl") || lower.ends_with(".jsonl.zst") || lower.ends_with(".jsonl.zstd")
         }
     }
+}
+
+/// Names that are never trace sources, whatever the root's format rules say.
+fn forbidden_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    [".db", ".sqlite", "-wal", "-shm", "-journal"].iter().any(|s| lower.ends_with(s))
+        || lower.contains(".corrupt.")
+}
+
+/// The root that owns `path`, plus the path spelled under that root's own
+/// (non-canonical) directory so it keys the same as a scan would. Requires
+/// the canonical path to be inside the root and the file name to match.
+pub fn resolve<'a>(path: &Path, roots: &'a [Root]) -> Option<(&'a Root, PathBuf)> {
+    let canon = path.canonicalize().ok()?;
+    let name = canon.file_name()?.to_string_lossy();
+    if forbidden_name(&name) || !canon.is_file() {
+        return None;
+    }
+    roots.iter().find_map(|root| {
+        if root.format == Format::Sqlite || !matches(&name, root) {
+            return None;
+        }
+        let base = root.path.canonicalize().ok()?;
+        let rel = canon.strip_prefix(&base).ok()?;
+        let spelled = if rel.as_os_str().is_empty() { root.path.clone() } else { root.path.join(rel) };
+        Some((root, spelled))
+    })
+}
+
+pub fn root_for<'a>(path: &Path, roots: &'a [Root]) -> Option<&'a Root> {
+    resolve(path, roots).map(|(r, _)| r)
 }
 
 pub fn discover(root: &Root, max_files: usize) -> Discovery {

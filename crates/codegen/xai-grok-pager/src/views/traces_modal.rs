@@ -9,7 +9,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use unicode_width::UnicodeWidthStr;
-use xai_grok_traces::{EventFilter, EventRow, SOURCES, SessionFilter, SessionRow, Sort, Status, TraceIndex, source_label};
+use xai_grok_traces::{EventFilter, EventRow, RECEIPT_WINDOW_MS, SOURCES, SessionFilter, SessionRow, Sort, Status, TraceIndex, source_label};
 
 use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
@@ -42,6 +42,12 @@ pub struct TracesModalState {
     index: Option<TraceIndex>,
     pub scanning: bool,
     pub status: Option<String>,
+    /// Index health problem (over cap, ...); shown red under the tabs.
+    pub health: Option<String>,
+    /// Hook receipts arrived within `RECEIPT_WINDOW_MS`.
+    pub live: bool,
+    /// Highest receipt id seen; a change means the index moved under us.
+    watermark: i64,
     typing: Typing,
 
     pub source_tab: usize,
@@ -97,6 +103,9 @@ impl TracesModalState {
             mode: Mode::List,
             status: index.is_none().then(|| "trace index unavailable".to_string()),
             index,
+            health: None,
+            live: false,
+            watermark: 0,
             scanning: true,
             typing: Typing::No,
             source_tab: 0,
@@ -119,13 +128,62 @@ impl TracesModalState {
             raw: None,
             raw_scroll: 0,
         };
+        s.watermark = s.index.as_ref().and_then(|i| i.receipts_watermark().ok()).unwrap_or(0);
         s.refresh();
+        s.poll_live();
         s
+    }
+
+    /// Live mode, driven by the app's 1s poll while the modal is open. Returns whether to redraw.
+    pub fn poll_live(&mut self) -> bool {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        self.poll_live_at(now)
+    }
+
+    fn poll_live_at(&mut self, now_ms: i64) -> bool {
+        let Some(index) = &self.index else { return false };
+        let mark = index.receipts_watermark().unwrap_or(self.watermark);
+        let live = index.last_receipt_at().ok().flatten().is_some_and(|at| now_ms - at < RECEIPT_WINDOW_MS);
+        let health = index.health();
+        let changed = live != self.live || health != self.health;
+        (self.live, self.health) = (live, health);
+        if mark == self.watermark {
+            return changed;
+        }
+        self.watermark = mark;
+        // Ledger: requery in place, following the selected session wherever it moved.
+        let keep = self.sessions.get(self.selected).map(|s| s.id.clone());
+        self.reload_sessions();
+        if let Some(i) = keep.and_then(|id| self.sessions.iter().position(|s| s.id == id)) {
+            self.selected = i;
+        }
+        // Trajectory: requery only when the open session grew; follow if the user was at the bottom.
+        if self.mode != Mode::List
+            && let (Some(index), Some(open)) = (&self.index, &self.session)
+            && let Ok(Some(now)) = index.session(&open.id)
+            && now.event_count != open.event_count
+        {
+            let at_bottom = self.event_selected + 1 >= self.events.len();
+            self.load_events();
+            if at_bottom {
+                self.event_selected = self.events.len().saturating_sub(1);
+            }
+        }
+        true
     }
 
     /// Re-query the ledger (and the open trajectory) from the index.
     pub fn refresh(&mut self) {
+        self.reload_sessions();
+        self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
+        if self.mode != Mode::List {
+            self.load_events();
+        }
+    }
+
+    fn reload_sessions(&mut self) {
         let Some(index) = &self.index else { return };
+        self.health = index.health();
         let filter = SessionFilter {
             source: tab_source(self.source_tab).map(str::to_string),
             text: (!self.query.is_empty()).then(|| self.query.clone()),
@@ -141,9 +199,6 @@ impl TracesModalState {
             Err(e) => self.status = Some(format!("query failed: {e}")),
         }
         self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
-        if self.mode != Mode::List {
-            self.load_events();
-        }
     }
 
     pub fn finish_scan(&mut self, summary: String) {
@@ -544,6 +599,9 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
         x += text.width() as u16 + 1;
     }
     let mut flags = Vec::new();
+    if state.live {
+        flags.push("● live".to_string());
+    }
     if state.scanning {
         flags.push("indexing…".to_string());
     }
@@ -568,7 +626,14 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
         (false, true) => ("/ to search titles, cwd, model · Enter searches events too".into(), dim),
         (false, false) => (format!("/{}{}", state.query, if state.deep { "  (events)" } else { "" }), Style::default().fg(theme.fuzzy_accent)),
     };
-    buf.set_span(area.x, search_y, &Span::styled(truncate_str(&text, area.width as usize).as_str(), style), area.width);
+    // A red health line takes the right of the search row; the search hint yields to it.
+    let health_w = state.health.as_deref().map_or(0, |h| h.width().min(area.width as usize * 2 / 3)) as u16;
+    if let Some(health) = &state.health {
+        let red = Style::default().fg(theme.accent_error).add_modifier(Modifier::BOLD);
+        buf.set_span(area.x + area.width - health_w, search_y, &Span::styled(truncate_str(health, health_w as usize).as_str(), red), health_w);
+    }
+    let search_w = area.width.saturating_sub(health_w + u16::from(health_w > 0));
+    buf.set_span(area.x, search_y, &Span::styled(truncate_str(&text, search_w as usize).as_str(), style), search_w);
 
     let status_rows = u16::from(state.status.is_some());
     let list = Rect { y: area.y + 3, height: area.height.saturating_sub(3 + status_rows), ..area };
@@ -775,9 +840,9 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         };
         let indent = "  ".repeat(e.depth.clamp(0, 2) as usize);
         let body = if e.kind == "tool" && e.role.as_deref() == Some("tool") {
-            format!("{indent}{}  {}", e.title, one_line(&e.summary))
+            format!("{indent}{}  {}", e.title, one_line(&e.preview))
         } else {
-            format!("{indent}{}", one_line(&e.summary))
+            format!("{indent}{}", one_line(&e.preview))
         };
         let turn_mark = if e.turn.is_some() && e.turn != prev_turn { "┊" } else { " " };
         prev_turn = e.turn.or(prev_turn);
@@ -849,6 +914,81 @@ mod tests {
         let g = resume_target(&row("grok", "/h/.grok/sessions/%2Fw/01a10b35-4b73-7903-a589-181aba7b40f5/chat_history.jsonl")).unwrap();
         assert_eq!(g.native_id, "01a10b35-4b73-7903-a589-181aba7b40f5");
         assert_eq!(resume_target(&row("dsh", "/h/.dsh/sessions/a/b/session.v2.jsonl.zstd")), None);
+        assert_eq!(resume_target(&row("bb", "/h/.bb/bb.db#thr_x")), None);
+        assert_eq!(source_label("bb"), "bb");
+    }
+
+    fn line(ts: &str, text: &str) -> String {
+        format!("{{\"type\":\"message\",\"timestamp\":\"{ts}\",\"message\":{{\"role\":\"user\",\"content\":\"{text}\"}}}}\n")
+    }
+
+    /// Three pi sessions (a < b < c by time), indexed, with a modal and a writer handle on one db.
+    fn live_fixture() -> (tempfile::TempDir, [xai_grok_traces::Root; 1], TraceIndex, TracesModalState) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pi");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (n, ts) in [("a", "2026-10-01T00:00:01Z"), ("b", "2026-10-01T00:00:02Z"), ("c", "2026-10-01T00:00:03Z")] {
+            std::fs::write(dir.join(format!("{n}.jsonl")), line(ts, &format!("task {n}"))).unwrap();
+        }
+        let roots = [xai_grok_traces::Root {
+            id: "pi".into(),
+            source: "pi".into(),
+            path: dir,
+            format: xai_grok_traces::Format::Jsonl,
+            file_name: None,
+        }];
+        let db = tmp.path().join("idx/t.sqlite");
+        let mut writer = TraceIndex::open(&db).unwrap();
+        writer.scan(&roots).unwrap();
+        let state = TracesModalState::open(Some(TraceIndex::open(&db).unwrap()));
+        (tmp, roots, writer, state)
+    }
+
+    fn hook(writer: &mut TraceIndex, roots: &[xai_grok_traces::Root], file: &std::path::Path, append: &str) {
+        use std::io::Write;
+        std::fs::OpenOptions::new().append(true).open(file).unwrap().write_all(append.as_bytes()).unwrap();
+        let payload = format!(r#"{{"hook_event_name":"PostToolUse","transcript_path":"{}"}}"#, file.display());
+        xai_grok_traces::hook::ingest(writer, roots, xai_grok_traces::hook::extract("pi", payload.as_bytes())).unwrap();
+    }
+
+    fn titles(state: &TracesModalState) -> Vec<&str> {
+        state.sessions.iter().map(|s| s.title.as_str()).collect()
+    }
+
+    #[test]
+    fn live_poll_keeps_selection_by_session_id() {
+        let (_tmp, roots, mut writer, mut state) = live_fixture();
+        assert_eq!(titles(&state), ["task c", "task b", "task a"]);
+        assert!(!state.live);
+        state.selected = 1;
+        assert!(!state.poll_live(), "nothing changed");
+
+        let a = roots[0].path.join("a.jsonl");
+        hook(&mut writer, &roots, &a, &line("2026-10-01T00:00:09Z", "later"));
+        assert!(state.poll_live());
+        assert_eq!(titles(&state), ["task a", "task c", "task b"], "a moved to the top");
+        assert_eq!((state.selected, state.sessions[state.selected].title.as_str()), (2, "task b"));
+        assert!(state.live, "fresh receipt shows the live marker");
+        assert!(state.poll_live_at(i64::MAX / 2), "marker flips off after the window");
+        assert!(!state.live);
+    }
+
+    #[test]
+    fn live_poll_appends_events_and_follows_the_bottom() {
+        let (_tmp, roots, mut writer, mut state) = live_fixture();
+        let a = roots[0].path.join("a.jsonl");
+        state.selected = 2; // task a
+        state.open_selected();
+        assert_eq!(state.events.len(), 1);
+
+        hook(&mut writer, &roots, &a, &line("2026-10-01T00:00:05Z", "second"));
+        assert!(state.poll_live());
+        assert_eq!((state.events.len(), state.event_selected), (2, 1), "at the bottom: follows");
+
+        state.event_selected = 0;
+        hook(&mut writer, &roots, &a, &line("2026-10-01T00:00:06Z", "third"));
+        assert!(state.poll_live());
+        assert_eq!((state.events.len(), state.event_selected), (3, 0), "mid-list: stays put");
     }
 
     #[test]
