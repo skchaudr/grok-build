@@ -25,7 +25,7 @@ impl Format {
 }
 
 /// Ledger tab order: All, then these.
-pub const SOURCES: [&str; 6] = ["dsh", "claude", "pi", "omp", "codex", "grok"];
+pub const SOURCES: [&str; 7] = ["dsh", "claude", "pi", "omp", "codex", "cursor", "grok"];
 
 pub fn source_label(source: &str) -> &str {
     match source {
@@ -34,6 +34,7 @@ pub fn source_label(source: &str) -> &str {
         "pi" => "Pi",
         "omp" => "OMP",
         "codex" => "Codex",
+        "cursor" => "Cursor",
         "grok" => "Grok",
         other => other,
     }
@@ -69,6 +70,8 @@ pub fn default_roots(home: &Path, grok_home: &Path) -> Vec<Root> {
         Root::new("omp-sessions", "omp", home.join(".omp/agent/sessions"), Format::Jsonl),
         Root::new("codex-archive", "codex", codex.join("archived_sessions"), Format::Jsonl),
         Root::new("codex-sessions", "codex", codex.join("sessions"), Format::Jsonl),
+        // Cursor's agent-transcripts hold the JSONL; its chats/*/store.db is a SQLite blob store.
+        Root::new("cursor-projects", "cursor", home.join(".cursor/projects"), Format::Jsonl),
         Root {
             file_name: Some("chat_history.jsonl"),
             ..Root::new("grok-sessions", "grok", grok_home.join("sessions"), Format::Jsonl)

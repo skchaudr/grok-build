@@ -26,6 +26,7 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
   - pi `~/.pi/agent/sessions`
   - omp `~/.omp/agent/sessions`
   - codex `$CODEX_HOME|~/.codex/{sessions,archived_sessions}`
+  - cursor `~/.cursor/projects/*/agent-transcripts/*/*.jsonl` (user text unwrapped from `<user_query>`; bb threads: `bb.rs`, not wired, see `docs/traces/BB.md`)
   - grok `$GROK_HOME/sessions/**/chat_history.jsonl` (cwd from sibling `summary.json`)
   - Walk caps: 50k files, depth 32. Symlinks are skipped.
 - **Session id:** `source:` + `sha1(source \0 path)[..24]`.
