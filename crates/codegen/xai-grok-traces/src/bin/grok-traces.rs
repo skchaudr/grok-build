@@ -1,4 +1,4 @@
-//! `grok-traces hook <source> | scan | list [--limit N] [--json] | doctor`.
+//! `grok-traces hook <source> | scan | list [--limit N] [--json] | doctor [--reset]`.
 //!
 //! `hook` runs once per harness event: it must be fast, silent and always
 //! exit 0 so it can never block an agent.
@@ -9,7 +9,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use xai_grok_traces::hook::{MAX_STDIN_BYTES, extract, ingest};
-use xai_grok_traces::{Error, MAX_DB_BYTES, SessionFilter, TraceIndex, default_db_path, user_roots};
+use xai_grok_traces::{SessionFilter, TraceIndex, default_db_path, user_roots};
 
 const HOOK_BUSY: Duration = Duration::from_millis(250);
 const NOTIFY_EVERY: Duration = Duration::from_secs(3600);
@@ -20,9 +20,9 @@ fn main() -> ExitCode {
         Some("hook") => hook(args.get(1).map_or("unknown", String::as_str)),
         Some("scan") => finish(scan()),
         Some("list") => finish(list(&args[1..])),
-        Some("doctor") => finish(doctor()),
+        Some("doctor") => finish(doctor(&args[1..])),
         _ => {
-            eprintln!("usage: grok-traces hook <source> | scan | list [--limit N] [--json] | doctor");
+            eprintln!("usage: grok-traces hook <source> | scan | list [--limit N] [--json] | doctor [--reset]");
             ExitCode::from(2)
         }
     }
@@ -49,12 +49,17 @@ fn hook(source: &str) -> ExitCode {
         let receipt = extract(source, &buf);
         drop(buf);
         let db = default_db_path();
-        let result = TraceIndex::open_with(&db, Some(HOOK_BUSY)).and_then(|mut idx| ingest(&mut idx, &user_roots(), receipt));
-        if let Err(e) = result {
-            eprintln!("grok-traces hook {source}: {e}");
-            if matches!(e, Error::OverCap { .. }) {
-                notify_once(db.parent().unwrap_or(Path::new(".")), &e.to_string());
+        match TraceIndex::open_with(&db, Some(HOOK_BUSY)) {
+            Ok(mut idx) => {
+                if let Err(e) = ingest(&mut idx, &user_roots(), receipt) {
+                    eprintln!("grok-traces hook {source}: {e}");
+                }
+                // Only a runaway tripwire is health; eviction never alerts.
+                if let Some(msg) = idx.health() {
+                    notify_once(db.parent().unwrap_or(Path::new(".")), &msg);
+                }
             }
+            Err(e) => eprintln!("grok-traces hook {source}: {e}"),
         }
     });
     if run.is_err() {
@@ -68,7 +73,7 @@ fn hook(source: &str) -> ExitCode {
 
 /// macOS notification, at most once an hour (stamp file next to the db).
 fn notify_once(dir: &Path, msg: &str) {
-    let stamp = dir.join("overcap.notified");
+    let stamp = dir.join("tripped.notified");
     let fresh = std::fs::metadata(&stamp)
         .and_then(|m| m.modified())
         .ok()
@@ -100,7 +105,10 @@ fn scan() -> Result<bool, Box<dyn std::error::Error>> {
     for (path, e) in report.errors.iter().take(5) {
         println!("  error {}: {e}", path.display());
     }
-    Ok(true)
+    if let Some(msg) = &report.tripped {
+        println!("  {msg}");
+    }
+    Ok(report.tripped.is_none())
 }
 
 fn list(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
@@ -129,14 +137,23 @@ fn when(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms).map_or_else(|| ms.to_string(), |t| t.to_rfc3339())
 }
 
-/// Exit 1 unless the index is healthy.
-fn doctor() -> Result<bool, Box<dyn std::error::Error>> {
+/// Exit 1 unless the index is healthy. `--reset` first clears a tripwire (after you have looked).
+fn doctor(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
     let idx = TraceIndex::open(&default_db_path())?;
+    match args.first().map(String::as_str) {
+        None => {}
+        Some("--reset") => match idx.reset_trip()? {
+            Some(was) => println!("reset    cleared: {was}"),
+            None => println!("reset    nothing was tripped"),
+        },
+        Some(other) => return Err(format!("unknown flag {other}").into()),
+    }
     let mb = |b: u64| b / (1024 * 1024);
     let stats = idx.stats()?;
     let health = idx.health();
     println!("db       {}", idx.db_path().display());
-    println!("size     {}MB / {}MB (db + wal)", mb(idx.db_bytes()), mb(MAX_DB_BYTES));
+    let l = idx.limits();
+    println!("size     {}MB (db + wal); budget {}MB (oldest sessions evicted), hard ceiling {}MB", mb(idx.db_bytes()), mb(l.budget), mb(l.ceiling));
     println!("health   {}", health.as_deref().unwrap_or("ok"));
     println!(
         "version  schema={} parser={}",

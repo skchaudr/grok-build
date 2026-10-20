@@ -7,7 +7,7 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
 | Piece | Where |
 |---|---|
 | Index crate | `xai-grok-traces/src/{roots,normalize,lines,index,query,receipts,hook}.rs`. Tests in `tests/index.rs`. Real-data smoke: `cargo run --release -p xai-grok-traces --example scan -- <db>` |
-| Hook CLI | `xai-grok-traces/src/bin/grok-traces.rs`: `hook <source>` (stdin JSON, always exit 0, `{}` for cursor), `scan`, `list --json`, `doctor` (exit 1 unless healthy). Field extraction and the receipt+index step are `hook::{extract,ingest}` |
+| Hook CLI | `xai-grok-traces/src/bin/grok-traces.rs`: `hook <source>` (stdin JSON, always exit 0, `{}` for cursor), `scan`, `list --json`, `doctor [--reset]` (exit 1 unless healthy; `--reset` clears a tripwire). Field extraction and the receipt+index step are `hook::{extract,ingest}` |
 | Slash command | `P/slash/commands/traces.rs`, registered in `P/slash/commands/mod.rs` `builtin_commands()`. Reserved in `xai-grok-shell/src/session/slash_commands.rs` `PAGER_COMMAND_KEYS` (test `pager_builtin_triggers_are_reserved_in_shell`) |
 | Modal state, keys, render | `P/views/traces_modal.rs` |
 | `ActiveModal::Traces` | `P/views/modal.rs` (variant, `hint_pairs`, `message`) |
@@ -57,14 +57,20 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
   - Duration, tokens, turn and step live in `trace_event_usage`, only for events that have them.
   - Measured on the Mini's real data (604 files, 99k events): 338 -> 122 B/event all-in; the events table alone is 110 B, of which message previews are the bulk (avg 125 B on user/assistant events).
   - Scan order: all roots are discovered first, then files are indexed newest mtime first across roots, bb threads by `updated_at`. If the cap is hit, the oldest sessions are the ones missing. Titles come from the full text before clipping. The inspector re-reads the raw line via `byte_offset`; nothing is copied.
-- **Versions:** `trace_meta` holds `schema_version` and `parser_version` (both 4). A mismatch on open renames the db and sidecars to `*.old.<nanos>` and deletes them, then starts fresh (a smaller row does not shrink a SQLite file).
-- **Caps (fail loud):**
-  - `MAX_DB_BYTES` = 256 MiB over db + `-wal`. `scan`, `index_file` and `record_receipt` call `check_cap()` first and return `Error::OverCap`, writing `trace_meta.health`. `TraceIndex::health()` is `None` when ok; the ledger shows it as a red line on the search row.
-  - `MAX_EVENTS_PER_FILE` = 200k, recorded in `parse_error`.
+- **Versions:** `trace_meta` holds `schema_version` and `parser_version` (parser 4, schema 5). A mismatch on open renames the db and sidecars to `*.old.<nanos>` and deletes them, then starts fresh (a smaller row does not shrink a SQLite file).
+- **Size (budget, not cap):**
+  - `SIZE_BUDGET` = 256 MiB over db + `-wal`. Passing it is normal and silent: `check_writable()` (start of `scan`, `index_file`, bb thread, `record_receipt`; two stats when under budget) and the end of `scan` call `evict_if_over()`. It deletes the oldest sessions by `updated_at` (events, usage, receipts, file rows) until live pages are under 85%, then `incremental_vacuum` + `wal_checkpoint(TRUNCATE)`. The db is created `auto_vacuum=INCREMENTAL`. No health change, no alert.
+  - Evicted files stay out: `trace_meta.evict_floor_ms` = newest mtime among evicted files; a file not already in the index with mtime <= floor is skipped (files and bb threads). A file that changes later has a newer mtime and returns. The floor never drops (the index is a cache; it will not backfill old sessions).
+  - Scan is newest-first, so once the budget is spent, evicting trims the oldest of the prefix and the floor skips the rest.
+- **Tripwires (fail loud):** health red (`trace_meta.tripped`, sticky, persists across opens), writes refused with `Error::Tripped`, `doctor` exit 1, macOS notification at most hourly from the hook (`tripped.notified`). `grok-traces doctor --reset` (`reset_trip`) clears it and the growth baseline, then evicts if over budget. Thresholds are `Limits` (`TraceIndex::open_with_limits`; tests use small ones).
+  - Hard ceiling `HARD_CEILING` = 2x budget: still above it after an eviction attempt.
+  - Growth rate: `trace_meta.growth_samples` (`ts:gross,...`, kept 1h, taken at scan end and every 100th receipt, >=60s apart). Gross = db+wal + `evicted_bytes`, so a loop that is evicted as fast as it writes still counts. More than `GROWTH_LIMIT` (64 MiB) above the smallest sample in the hour trips. The first scan of a db only sets the baseline.
+  - Event flood: more than `MAX_CAPPED_FILES` (5) files hit `MAX_EVENTS_PER_FILE` in one scan (`ScanReport.tripped`).
+  - `MAX_EVENTS_PER_FILE` = 200k, recorded in `parse_error` (the file is still indexed to the cap).
   - Path guard: `roots::root_for` / `resolve` need the canonical path inside the root and a name that passes the root's rules. `.db`, `.sqlite`, `-wal`, `-shm`, `-journal` and `.corrupt.` names are rejected. `index_file` also rejects anything under the db's own directory.
 - **Receipts:** `trace_receipts` (one row per hook event, pruned to 100k every 1000th insert). `record_receipt`, `receipts_watermark`, `last_receipt`. A receipt under 2 min old whose event is not terminal (`SessionEnd`, `Stop`, `stop`, `session_shutdown`, `agent_end`) makes a session Active regardless of mtime.
 - **Live modal:** `event_loop.rs` arms `traces_poll_at` (1s, same pattern as `dashboard_poll_at`) while the active agent's modal is `Traces`; the arm calls `TracesModalState::poll_live`. It compares `receipts_watermark()`; on change it requeries the ledger keeping the selected session by id, and requeries an open trajectory only if that session's `event_count` grew (follows the bottom row, otherwise keeps selection). Header shows `● live` while the newest receipt is under 2 min old. `last_receipt_at()` backs it. Tests: `live_poll_*` in `traces_modal.rs`; the pty scenario runs `grok-traces hook claude` mid-ledger (binary: `GROK_TRACES_BIN` or next to the pager binary; build `-p xai-grok-traces --bin grok-traces` first).
-- **Hook rules:** busy timeout 250 ms. Failures go to one stderr line; over-cap also posts a macOS notification at most hourly (stamp file `overcap.notified` beside the db). Grok's `updates.jsonl` path maps to the sibling `chat_history.jsonl`. No watcher or daemon exists; the hook is the only live feed.
+- **Hook rules:** busy timeout 250 ms. Failures go to one stderr line; a tripped index posts a macOS notification at most hourly (stamp file `tripped.notified` beside the db). Grok's `updates.jsonl` path maps to the sibling `chat_history.jsonl`. No watcher or daemon exists; the hook is the only live feed.
 - The index lives at `~/.grok/traces/traces.sqlite`. It is disposable and never uploaded.
 
 ## Pager rules learned

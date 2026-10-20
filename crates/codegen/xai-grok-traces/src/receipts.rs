@@ -3,7 +3,7 @@
 
 use rusqlite::{OptionalExtension, params};
 
-use crate::index::{Result, TraceIndex, now_ms};
+use crate::index::{Result, SAMPLE_EVERY, TraceIndex, now_ms};
 
 /// Rows kept once pruning runs (every 1000th insert).
 const KEEP_RECEIPTS: i64 = 100_000;
@@ -24,7 +24,7 @@ pub struct Receipt {
 
 impl TraceIndex {
     pub fn record_receipt(&mut self, r: &Receipt) -> Result<i64> {
-        self.check_cap()?;
+        self.check_writable()?;
         let at = if r.at_ms == 0 { now_ms() } else { r.at_ms };
         self.conn().execute(
             "INSERT INTO trace_receipts (at_ms, source, event, native_session, path, session_id, tool, cwd)
@@ -32,6 +32,10 @@ impl TraceIndex {
             params![at, r.source, r.event, r.native_session, r.path, r.session_id, r.tool, r.cwd],
         )?;
         let id = self.conn().last_insert_rowid();
+        if id % SAMPLE_EVERY == 0 {
+            // A trip is recorded in the db and refuses the next write; this receipt is already in.
+            let _ = self.sample_growth();
+        }
         if id % 1000 == 0 {
             self.conn().execute(
                 "DELETE FROM trace_receipts WHERE id <= (SELECT MAX(id) FROM trace_receipts) - ?1",

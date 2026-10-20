@@ -15,8 +15,8 @@ mod receipts;
 pub mod roots;
 
 pub use index::{
-    Error, MAX_DB_BYTES, MAX_EVENTS_PER_FILE, PARSER_VERSION, Result, RootReport, SCHEMA_VERSION, ScanReport, TraceIndex,
-    default_db_path, over_cap_message, session_id,
+    Error, GROWTH_LIMIT, GROWTH_WINDOW_MS, HARD_CEILING, Limits, MAX_CAPPED_FILES, MAX_EVENTS_PER_FILE, PARSER_VERSION, Result,
+    RootReport, SCHEMA_VERSION, SIZE_BUDGET, ScanReport, TraceIndex, default_db_path, session_id,
 };
 pub use query::{
     ACTIVE_WINDOW_MS, EventFilter, EventRow, Facets, RECEIPT_WINDOW_MS, SessionFilter, SessionRow, Sort, Stats, Status,

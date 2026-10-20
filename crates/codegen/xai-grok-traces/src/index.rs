@@ -22,11 +22,57 @@ use crate::bb::{Bb, BbThread, thread_key};
 
 pub const PARSER_VERSION: i64 = 4;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
-pub const SCHEMA_VERSION: i64 = 4;
-/// Writes pause once the db plus its `-wal` pass this.
-pub const MAX_DB_BYTES: u64 = 256 * 1024 * 1024;
+pub const SCHEMA_VERSION: i64 = 5;
+/// Size the index may use (db + `-wal`). Passing it is normal: the oldest sessions are evicted
+/// down to `EVICT_TO_PERCENT` of it. It is a cache of pointers, so this is not an alert.
+pub const SIZE_BUDGET: u64 = 256 * 1024 * 1024;
+/// Eviction stops at this share of the budget, so it runs rarely rather than on every write.
+pub const EVICT_TO_PERCENT: u64 = 85;
+/// Eviction failed to keep the db under this (2x budget): something is wrong, writes pause.
+pub const HARD_CEILING: u64 = 2 * SIZE_BUDGET;
+/// Gross growth (size plus bytes evicted) within `GROWTH_WINDOW_MS` that trips: a feedback loop.
+pub const GROWTH_LIMIT: u64 = 64 * 1024 * 1024;
+pub const GROWTH_WINDOW_MS: i64 = 3_600_000;
 /// Events indexed per file; the rest of a runaway file is left to the source.
 pub const MAX_EVENTS_PER_FILE: usize = 200_000;
+/// More files than this hitting the event cap in one scan trips.
+pub const MAX_CAPPED_FILES: usize = 5;
+/// Growth is sampled on every Nth hook receipt (and at the end of each scan).
+pub(crate) const SAMPLE_EVERY: i64 = 100;
+const MAX_SAMPLES: usize = 100;
+const MIN_SAMPLE_GAP_MS: i64 = 60_000;
+/// Sessions deleted per eviction transaction.
+const EVICT_BATCH: i64 = 25;
+
+/// Thresholds; `Default` is production. Tests pass small ones instead of building huge files.
+#[derive(Clone, Debug)]
+pub struct Limits {
+    pub budget: u64,
+    pub ceiling: u64,
+    pub growth_bytes: u64,
+    pub growth_window_ms: i64,
+    pub max_events: usize,
+    pub max_capped_files: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            budget: SIZE_BUDGET,
+            ceiling: HARD_CEILING,
+            growth_bytes: GROWTH_LIMIT,
+            growth_window_ms: GROWTH_WINDOW_MS,
+            max_events: MAX_EVENTS_PER_FILE,
+            max_capped_files: MAX_CAPPED_FILES,
+        }
+    }
+}
+
+fn mb(b: u64) -> u64 {
+    b / (1024 * 1024)
+}
+
+const TRIP_HELP: &str = "writes paused; run grok-traces doctor, then doctor --reset";
 const TITLE_CHARS: usize = 180;
 
 const SCHEMA: &str = "
@@ -63,15 +109,19 @@ CREATE INDEX IF NOT EXISTS trace_sessions_source ON trace_sessions(source_id, up
 pub enum Error {
     Sqlite(rusqlite::Error),
     Io(io::Error),
-    /// The db is past `MAX_DB_BYTES`; writes are refused until it is rebuilt.
-    OverCap { bytes: u64 },
+    /// A runaway tripwire fired (see `Limits`); writes are refused until `reset_trip`.
+    Tripped(String),
     /// A path that is not a trace source of the given root.
     Rejected(PathBuf),
 }
 
-pub fn over_cap_message(bytes: u64) -> String {
-    let mb = |b: u64| b / (1024 * 1024);
-    format!("over cap: {}MB / {}MB — writes paused; run grok-traces doctor", mb(bytes), mb(MAX_DB_BYTES))
+fn ceiling_message(bytes: u64, l: &Limits) -> String {
+    format!(
+        "tripped: hard ceiling — db {}MB > {}MB (2x the {}MB budget; eviction could not keep up) — {TRIP_HELP}",
+        mb(bytes),
+        mb(l.ceiling),
+        mb(l.budget)
+    )
 }
 
 impl std::fmt::Display for Error {
@@ -79,7 +129,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Sqlite(e) => write!(f, "sqlite: {e}"),
             Error::Io(e) => write!(f, "io: {e}"),
-            Error::OverCap { bytes } => f.write_str(&over_cap_message(*bytes)),
+            Error::Tripped(msg) => f.write_str(msg),
             Error::Rejected(p) => write!(f, "not a trace source: {}", p.display()),
         }
     }
@@ -193,6 +243,8 @@ pub struct ScanReport {
     pub roots: Vec<RootReport>,
     pub indexed: usize,
     pub errors: Vec<(PathBuf, String)>,
+    /// Set when this scan tripped a runaway tripwire (also in `TraceIndex::health`).
+    pub tripped: Option<String>,
 }
 
 /// One unit of scan work, ordered by recency.
@@ -376,6 +428,9 @@ pub struct TraceIndex {
     conn: Connection,
     /// The db file actually opened (per-host on network mounts).
     db: PathBuf,
+    limits: Limits,
+    /// Files that hit the event cap since the last scan began.
+    capped_files: usize,
 }
 
 impl TraceIndex {
@@ -385,6 +440,10 @@ impl TraceIndex {
 
     /// `busy`: lock wait for short-lived writers (hooks); `None` keeps the shared default.
     pub fn open_with(path: &Path, busy: Option<Duration>) -> Result<Self> {
+        Self::open_with_limits(path, busy, Limits::default())
+    }
+
+    pub fn open_with_limits(path: &Path, busy: Option<Duration>, limits: Limits) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -393,7 +452,10 @@ impl TraceIndex {
         // At most one quarantine or version rebuild, then a fresh file.
         for _ in 0..2 {
             match Self::try_open(mode, &db, busy) {
-                Ok(Some(idx)) => return Ok(idx),
+                Ok(Some(mut idx)) => {
+                    idx.limits = limits;
+                    return Ok(idx);
+                }
                 Ok(None) => {
                     tracing::info!(?db, "traces: index schema changed, rebuilding");
                     retire(&db);
@@ -405,7 +467,9 @@ impl TraceIndex {
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok(Self::try_open(mode, &db, busy)?.ok_or_else(|| io::Error::other("index rebuild did not stick"))?)
+        let mut idx = Self::try_open(mode, &db, busy)?.ok_or_else(|| io::Error::other("index rebuild did not stick"))?;
+        idx.limits = limits;
+        Ok(idx)
     }
 
     /// `None` when the db was written by another schema or parser version.
@@ -425,13 +489,17 @@ impl TraceIndex {
             .query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trace_meta'", [], |_| Ok(()))
             .optional()?
             .is_some();
-        let idx = Self { conn, db: db.to_path_buf() };
+        let idx = Self { conn, db: db.to_path_buf(), limits: Limits::default(), capped_files: 0 };
         if has_meta {
             let same = |key: &str, want: i64| idx.meta(key).ok().flatten().and_then(|v| v.parse::<i64>().ok()) == Some(want);
             if !same("schema_version", SCHEMA_VERSION) || !same("parser_version", PARSER_VERSION) {
                 return Ok(None);
             }
         } else {
+            // Lets eviction give pages back to the filesystem. The journal mode has already written the
+            // header, so the mode only takes effect through a VACUUM (free here: the db is empty).
+            idx.conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+            idx.conn.execute_batch("VACUUM;")?;
             idx.conn.execute_batch(&format!(
                 "BEGIN; {SCHEMA}
                  INSERT INTO trace_meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}'), ('parser_version', '{PARSER_VERSION}');
@@ -463,30 +531,168 @@ impl TraceIndex {
         Ok(())
     }
 
-    /// Refuses a write batch while the db is over `MAX_DB_BYTES`, recording why in
-    /// `trace_meta.health`; clears the record once under the cap again.
-    pub fn check_cap(&self) -> Result<()> {
-        let bytes = self.db_bytes();
-        if bytes > MAX_DB_BYTES {
-            let msg = over_cap_message(bytes);
-            if self.meta("health").ok().flatten().as_deref() != Some(msg.as_str()) {
-                let _ = self.set_meta("health", &msg);
-            }
-            return Err(Error::OverCap { bytes });
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
+    /// Gate for every write. A tripped index refuses. Past the budget the oldest sessions are
+    /// evicted first (silently); only if the db is still past the hard ceiling does it trip.
+    pub fn check_writable(&self) -> Result<()> {
+        if let Some(msg) = self.meta("tripped")? {
+            return Err(Error::Tripped(msg));
         }
-        if self.meta("health")?.is_some_and(|h| h != "ok") {
-            self.set_meta("health", "ok")?;
+        if self.db_bytes() > self.limits.budget {
+            self.evict_if_over()?;
+            let bytes = self.db_bytes();
+            if bytes > self.limits.ceiling {
+                return Err(self.trip(ceiling_message(bytes, &self.limits)));
+            }
         }
         Ok(())
     }
 
-    /// Why the index is unhealthy, or `None` when it is fine.
+    /// Records a tripwire; stays until `reset_trip`.
+    fn trip(&self, msg: String) -> Error {
+        let _ = self.set_meta("tripped", &msg);
+        Error::Tripped(msg)
+    }
+
+    /// Why writes are paused, or `None`. Eviction never shows up here.
     pub fn health(&self) -> Option<String> {
-        let bytes = self.db_bytes();
-        if bytes > MAX_DB_BYTES {
-            return Some(over_cap_message(bytes));
+        if let Some(msg) = self.meta("tripped").ok().flatten() {
+            return Some(msg);
         }
-        self.meta("health").ok().flatten().filter(|h| h != "ok")
+        let bytes = self.db_bytes();
+        (bytes > self.limits.ceiling).then(|| ceiling_message(bytes, &self.limits))
+    }
+
+    /// Clears a trip (and the growth baseline) after the user has looked; returns what was cleared.
+    /// Then evicts if over budget, so a ceiling trip can clear.
+    pub fn reset_trip(&self) -> Result<Option<String>> {
+        let was = self.meta("tripped")?;
+        self.conn.execute("DELETE FROM trace_meta WHERE key IN ('tripped', 'growth_samples')", [])?;
+        self.evict_if_over()?;
+        Ok(was)
+    }
+
+    fn pragma_i64(&self, name: &str) -> rusqlite::Result<i64> {
+        self.conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))
+    }
+
+    /// Bytes of live pages (excludes the freelist, which `incremental_vacuum` returns to the OS).
+    fn used_bytes(&self) -> rusqlite::Result<u64> {
+        let pages = self.pragma_i64("page_count")? - self.pragma_i64("freelist_count")?;
+        Ok(pages.max(0) as u64 * self.pragma_i64("page_size")? as u64)
+    }
+
+    /// Over budget: deletes the oldest sessions (by `updated_at`: events, usage, receipts, file rows)
+    /// until live pages are under `EVICT_TO_PERCENT` of it, then shrinks the file. Records the newest
+    /// evicted file mtime as `evict_floor_ms`: files not yet in the index at or below it are not re-added
+    /// (see `index_file`), so a scan does not undo this. A file that changes later has a newer mtime and
+    /// comes back. Returns sessions evicted.
+    pub fn evict_if_over(&self) -> Result<usize> {
+        if self.db_bytes() <= self.limits.budget {
+            return Ok(0);
+        }
+        let target = self.limits.budget / 100 * EVICT_TO_PERCENT;
+        let before = self.used_bytes()?;
+        let mut evicted = 0;
+        while self.used_bytes()? > target {
+            let victims: Vec<(i64, String)> = {
+                let mut stmt =
+                    self.conn.prepare("SELECT sk, id FROM trace_sessions ORDER BY COALESCE(updated_at, 0), sk LIMIT ?1")?;
+                stmt.query_map([EVICT_BATCH], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+            };
+            if victims.is_empty() {
+                break;
+            }
+            let tx = self.conn.unchecked_transaction()?;
+            for (sk, id) in &victims {
+                // Live pages count uncommitted deletes, so the batch stops as soon as it is enough.
+                if self.used_bytes()? <= target {
+                    break;
+                }
+                evicted += 1;
+                let floor: Option<i64> =
+                    tx.query_row("SELECT MAX(mtime_ms) FROM trace_files WHERE session_id = ?1", [id], |r| r.get(0))?;
+                if let Some(floor) = floor {
+                    tx.execute(
+                        "INSERT INTO trace_meta (key, value) VALUES ('evict_floor_ms', ?1)
+                         ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), CAST(?1 AS INTEGER))",
+                        [floor],
+                    )?;
+                }
+                delete_events(&tx, *sk)?;
+                tx.execute("DELETE FROM trace_sessions WHERE sk = ?1", [sk])?;
+                tx.execute("DELETE FROM trace_files WHERE session_id = ?1", [id])?;
+                tx.execute("DELETE FROM trace_receipts WHERE session_id = ?1", [id])?;
+            }
+            tx.commit()?;
+        }
+        self.conn.execute_batch("PRAGMA incremental_vacuum;")?;
+        // Moves the vacuum's pages out of the wal and truncates it; a no-op in rollback-journal mode.
+        let _ = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        let freed = before.saturating_sub(self.used_bytes()?);
+        let total = self.meta("evicted_bytes")?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) + freed;
+        self.set_meta("evicted_bytes", &total.to_string())?;
+        Ok(evicted)
+    }
+
+    /// Files first seen at or below this mtime were evicted; they stay out.
+    fn evict_floor(&self) -> i64 {
+        self.meta("evict_floor_ms").ok().flatten().and_then(|v| v.parse().ok()).unwrap_or(0)
+    }
+
+    /// Gross index growth: size on disk plus everything evicted so far, so a loop that is evicted as
+    /// fast as it writes still shows.
+    fn gross_bytes(&self) -> u64 {
+        self.db_bytes() + self.meta("evicted_bytes").ok().flatten().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0)
+    }
+
+    fn samples(&self) -> Vec<(i64, u64)> {
+        let raw = self.meta("growth_samples").ok().flatten().unwrap_or_default();
+        raw.split(',')
+            .filter_map(|p| {
+                let (t, b) = p.split_once(':')?;
+                Some((t.parse().ok()?, b.parse().ok()?))
+            })
+            .collect()
+    }
+
+    /// Hook-side sampling: trips quietly into `health`.
+    pub(crate) fn sample_growth(&self) -> Result<()> {
+        self.check_growth(false).map(|_| ())
+    }
+
+    /// Compares gross size against the smallest sample inside the window and trips past
+    /// `growth_bytes`. Otherwise records a sample (always when `force`, else at most once a minute).
+    /// Returns the trip message when it tripped.
+    fn check_growth(&self, force: bool) -> Result<Option<String>> {
+        let now = now_ms();
+        let gross = self.gross_bytes();
+        let mut samples = self.samples();
+        samples.retain(|(t, _)| *t >= now - self.limits.growth_window_ms);
+        if let Some(&(t, low)) = samples.iter().min_by_key(|(_, b)| *b) {
+            let grew = gross.saturating_sub(low);
+            if grew > self.limits.growth_bytes {
+                let msg = format!(
+                    "tripped: growth rate — db grew {}MB in {} min (limit {}MB per {} min) — {TRIP_HELP}",
+                    mb(grew),
+                    ((now - t) / 60_000).max(1),
+                    mb(self.limits.growth_bytes),
+                    self.limits.growth_window_ms / 60_000
+                );
+                self.trip(msg.clone());
+                return Ok(Some(msg));
+            }
+        }
+        if force || samples.last().is_none_or(|(t, _)| now - t >= MIN_SAMPLE_GAP_MS) {
+            samples.push((now, gross));
+            let skip = samples.len().saturating_sub(MAX_SAMPLES);
+            let text: Vec<String> = samples[skip..].iter().map(|(t, b)| format!("{t}:{b}")).collect();
+            self.set_meta("growth_samples", &text.join(","))?;
+        }
+        Ok(None)
     }
 
     pub(crate) fn conn(&self) -> &Connection {
@@ -499,7 +705,10 @@ impl TraceIndex {
     }
 
     pub fn scan_with_limit(&mut self, roots: &[Root], max_files: usize) -> Result<ScanReport> {
-        self.check_cap()?;
+        self.check_writable()?;
+        self.capped_files = 0;
+        // The first scan of a db builds it from nothing; its growth is the baseline, not a runaway.
+        let first_scan: i64 = self.conn.query_row("SELECT COUNT(*) FROM trace_roots WHERE last_scan_at IS NOT NULL", [], |r| r.get(0))?;
         let mut report = ScanReport::default();
         // Discover every root first, then index newest-first across all of them: if the
         // cap is ever hit, what is missing is the oldest.
@@ -544,7 +753,7 @@ impl TraceIndex {
             match done {
                 Ok(true) => report.indexed += 1,
                 Ok(false) => {}
-                Err(e @ Error::OverCap { .. }) => return Err(e),
+                Err(e @ Error::Tripped(_)) => return Err(e),
                 Err(e) => report.errors.push((key, e.to_string())),
             }
         }
@@ -572,6 +781,20 @@ impl TraceIndex {
             self.prune_files(&id, |_| true)?;
             self.conn.execute("DELETE FROM trace_roots WHERE id = ?1", [&id])?;
         }
+        // Over budget is routine: evict quietly. Only the tripwires are loud.
+        self.evict_if_over()?;
+        if self.capped_files > self.limits.max_capped_files {
+            let msg = format!(
+                "tripped: event flood — {} files hit the {}-event cap in one scan (limit {}) — {TRIP_HELP}",
+                self.capped_files, self.limits.max_events, self.limits.max_capped_files
+            );
+            report.tripped = Some(self.trip(msg).to_string());
+        } else if first_scan == 0 {
+            self.set_meta("growth_samples", "")?;
+            self.check_growth(true)?;
+        } else {
+            report.tripped = self.check_growth(true)?;
+        }
         Ok(report)
     }
 
@@ -595,7 +818,7 @@ impl TraceIndex {
 
     /// Indexes one file. Returns whether anything was (re)parsed.
     pub fn index_file(&mut self, root: &Root, path: &Path) -> Result<bool> {
-        self.check_cap()?;
+        self.check_writable()?;
         self.guard(root, path)?;
         let meta = fs::metadata(path)?;
         let (size, mtime) = (meta.len() as i64, mtime_ms(&meta));
@@ -619,6 +842,9 @@ impl TraceIndex {
                 },
             )
             .optional()?;
+        if existing.is_none() && mtime <= self.evict_floor() {
+            return Ok(false);
+        }
 
         let tail_ok = |f: &FileRow| -> io::Result<bool> {
             Ok(f.indexed_bytes <= size && f.content_hash.as_deref() == Some(tail_hash(path, f.indexed_bytes as u64)?.as_str()))
@@ -658,12 +884,13 @@ impl TraceIndex {
         let mut names = Names::default();
         let mut parse_error: Option<String> = None;
         let mut capped = false;
+        let max_events = self.limits.max_events;
         let (end_byte, next_line) = {
             let mut insert = tx.prepare_cached(INSERT_EVENT)?;
             let mut usage = tx.prepare_cached(INSERT_USAGE)?;
             let reader = lines::open(path, root.format, start_byte as u64, size as u64)?;
             lines::for_each(reader, start_byte, start_line, |line| {
-                if line.number >= MAX_EVENTS_PER_FILE as i64 {
+                if line.number >= max_events as i64 {
                     capped = true;
                     return Ok(false);
                 }
@@ -684,8 +911,9 @@ impl TraceIndex {
             })?
         };
         let (end_byte, next_line) = if capped {
-            parse_error = Some(format!("event cap {MAX_EVENTS_PER_FILE} reached; rest of file not indexed"));
-            (size, MAX_EVENTS_PER_FILE as i64)
+            parse_error = Some(format!("event cap {max_events} reached; rest of file not indexed"));
+            self.capped_files += 1;
+            (size, max_events as i64)
         } else {
             (end_byte, next_line)
         };
