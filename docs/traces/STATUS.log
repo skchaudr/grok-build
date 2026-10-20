@@ -3,3 +3,8 @@
 2026-10-20T07:17:26Z P2 wiring: /traces modal (ledger/trajectory/inspector), scan effect, resume (claude/codex skill, grok native), copy; 444 slash+modal tests green
 2026-10-20T07:32:11Z P2 pty green: traces_modal_ledger_trajectory_inspector; running full pager suite
 2026-10-20T07:37:23Z P2 done: full pager suite 10391/0 (baseline 10389/0); docs + MAP.md; merging
+2026-10-20T07:37:34Z MERGED 12524e1c; release build started (CARGO_BUILD_JOBS=4)
+2026-10-20T07:46:46Z BUILT 12524e1ca28b (533s, marker=1); INSTALLED mini (backup grok-fork.e389c0f4006d); mini leader not loaded and plist points at stock grok -> no kickstart
+2026-10-20T07:47:37Z mini proof: /traces 300 sessions, dsh session + inspector captured
+2026-10-20T07:53:10Z RSYNCED air; INSTALLED air (backup grok-fork.e389c0f4006d), leader kickstarted pid 16990 on grok-fork; air proof: 6164 files 24.8s, DSH session + inspector
+2026-10-20T07:53:10Z LANDED 12524e1c mini+air
