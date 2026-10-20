@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha1::Sha1;
@@ -14,9 +14,15 @@ use xai_sqlite_journal::JournalMode;
 
 use crate::lines;
 use crate::normalize::{Kind, NormalizedEvent, Role, clip, normalize};
-use crate::roots::{Format, MAX_FILES, Root, discover};
+use crate::roots::{Format, MAX_FILES, Root, discover, resolve};
 
-pub const PARSER_VERSION: i64 = 1;
+pub const PARSER_VERSION: i64 = 2;
+/// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
+pub const SCHEMA_VERSION: i64 = 2;
+/// Writes pause once the db plus its `-wal` pass this.
+pub const MAX_DB_BYTES: u64 = 256 * 1024 * 1024;
+/// Events indexed per file; the rest of a runaway file is left to the source.
+pub const MAX_EVENTS_PER_FILE: usize = 200_000;
 const TITLE_CHARS: usize = 180;
 
 const SCHEMA: &str = "
@@ -32,10 +38,13 @@ CREATE TABLE IF NOT EXISTS trace_sessions (id TEXT PRIMARY KEY, source_id TEXT N
   tool_count INTEGER NOT NULL DEFAULT 0, error_count INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER, output_tokens INTEGER,
   duration_ms INTEGER, status TEXT NOT NULL DEFAULT 'unknown', file_size_bytes INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS trace_events (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, line_number INTEGER NOT NULL,
-  byte_offset INTEGER NOT NULL, type TEXT NOT NULL, kind TEXT NOT NULL, role TEXT, title TEXT NOT NULL, summary TEXT NOT NULL,
+  byte_offset INTEGER NOT NULL, type TEXT NOT NULL, kind TEXT NOT NULL, role TEXT, title TEXT NOT NULL, preview TEXT NOT NULL,
   timestamp INTEGER, duration_ms INTEGER, input_tokens INTEGER, output_tokens INTEGER, usage_is_total INTEGER NOT NULL DEFAULT 0,
   turn INTEGER, step INTEGER, depth INTEGER NOT NULL DEFAULT 0, model TEXT, cwd TEXT, is_error INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS trace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS trace_receipts (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
+  event TEXT NOT NULL, native_session TEXT, path TEXT, session_id TEXT, tool TEXT, cwd TEXT);
+CREATE INDEX IF NOT EXISTS trace_receipts_session ON trace_receipts(session_id, id);
 CREATE INDEX IF NOT EXISTS trace_sessions_updated ON trace_sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS trace_sessions_source ON trace_sessions(source_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS trace_events_session ON trace_events(session_id, line_number);
@@ -45,6 +54,15 @@ CREATE INDEX IF NOT EXISTS trace_events_session ON trace_events(session_id, line
 pub enum Error {
     Sqlite(rusqlite::Error),
     Io(io::Error),
+    /// The db is past `MAX_DB_BYTES`; writes are refused until it is rebuilt.
+    OverCap { bytes: u64 },
+    /// A path that is not a trace source of the given root.
+    Rejected(PathBuf),
+}
+
+pub fn over_cap_message(bytes: u64) -> String {
+    let mb = |b: u64| b / (1024 * 1024);
+    format!("over cap: {}MB / {}MB — writes paused; run grok-traces doctor", mb(bytes), mb(MAX_DB_BYTES))
 }
 
 impl std::fmt::Display for Error {
@@ -52,6 +70,8 @@ impl std::fmt::Display for Error {
         match self {
             Error::Sqlite(e) => write!(f, "sqlite: {e}"),
             Error::Io(e) => write!(f, "io: {e}"),
+            Error::OverCap { bytes } => f.write_str(&over_cap_message(*bytes)),
+            Error::Rejected(p) => write!(f, "not a trace source: {}", p.display()),
         }
     }
 }
@@ -114,16 +134,32 @@ fn is_unusable(e: &rusqlite::Error) -> bool {
     }
 }
 
-/// Renames the db and its sidecars to `*.corrupt.<nanos>`.
-fn quarantine(db: &Path) {
+/// Renames the db and its sidecars to `*.<tag>.<nanos>`; returns the new names.
+fn move_aside(db: &Path, tag: &str) -> Vec<PathBuf> {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let mut moved = Vec::new();
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let from = PathBuf::from(format!("{}{suffix}", db.display()));
         if from.exists() {
-            let to = PathBuf::from(format!("{}{suffix}.corrupt.{nanos}", db.display()));
-            if let Err(e) = fs::rename(&from, &to) {
-                tracing::warn!(?from, %e, "traces: quarantine rename failed");
+            let to = PathBuf::from(format!("{}{suffix}.{tag}.{nanos}", db.display()));
+            match fs::rename(&from, &to) {
+                Ok(()) => moved.push(to),
+                Err(e) => tracing::warn!(?from, %e, "traces: rename failed"),
             }
+        }
+    }
+    moved
+}
+
+fn quarantine(db: &Path) {
+    move_aside(db, "corrupt");
+}
+
+/// Drops a db from an older schema/parser: a smaller row does not shrink a SQLite file.
+fn retire(db: &Path) {
+    for old in move_aside(db, "old") {
+        if let Err(e) = fs::remove_file(&old) {
+            tracing::warn!(?old, %e, "traces: removing old index failed");
         }
     }
 }
@@ -190,10 +226,10 @@ impl Aggregate {
         // Injected context (`<user_info>`, `<system-reminder>`, `<command-name>`) is not a title.
         if self.user_title.is_none()
             && e.role == Some(Role::User)
-            && !e.summary.is_empty()
-            && !e.summary.trim_start().starts_with('<')
+            && !e.text.is_empty()
+            && !e.text.trim_start().starts_with('<')
         {
-            let first = e.summary.lines().next().unwrap_or(&e.summary);
+            let first = e.text.lines().next().unwrap_or(&e.text);
             self.user_title = Some(clip(first, TITLE_CHARS));
         }
         if self.model.is_none() {
@@ -232,31 +268,119 @@ fn grok_cwd(file: &Path) -> Option<String> {
 
 pub struct TraceIndex {
     conn: Connection,
+    /// The db file actually opened (per-host on network mounts).
+    db: PathBuf,
 }
 
 impl TraceIndex {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with(path, None)
+    }
+
+    /// `busy`: lock wait for short-lived writers (hooks); `None` keeps the shared default.
+    pub fn open_with(path: &Path, busy: Option<Duration>) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let mode = JournalMode::for_db_path(path);
         let db = mode.effective_db_path(path);
-        match Self::try_open(mode, &db) {
-            Err(e) if is_unusable(&e) => {
-                tracing::warn!(?db, %e, "traces: index unusable, rebuilding");
-                quarantine(&db);
-                Ok(Self::try_open(mode, &db)?)
+        // At most one quarantine or version rebuild, then a fresh file.
+        for _ in 0..2 {
+            match Self::try_open(mode, &db, busy) {
+                Ok(Some(idx)) => return Ok(idx),
+                Ok(None) => {
+                    tracing::info!(?db, "traces: index schema changed, rebuilding");
+                    retire(&db);
+                }
+                Err(e) if is_unusable(&e) => {
+                    tracing::warn!(?db, %e, "traces: index unusable, rebuilding");
+                    quarantine(&db);
+                }
+                Err(e) => return Err(e.into()),
             }
-            other => Ok(other?),
         }
+        Ok(Self::try_open(mode, &db, busy)?.ok_or_else(|| io::Error::other("index rebuild did not stick"))?)
     }
 
-    fn try_open(mode: JournalMode, db: &Path) -> rusqlite::Result<Self> {
-        let conn = mode.open(db)?;
+    /// `None` when the db was written by another schema or parser version.
+    fn try_open(mode: JournalMode, db: &Path, busy: Option<Duration>) -> rusqlite::Result<Option<Self>> {
+        let conn = match busy {
+            None => mode.open(db)?,
+            Some(wait) => {
+                let conn = Connection::open(db)?;
+                conn.busy_timeout(wait)?;
+                mode.apply(&conn)?;
+                conn
+            }
+        };
         // No integrity scan here: it is O(db) and the pager opens on the UI thread.
-        // A garbage file fails on the schema batch below.
-        conn.execute_batch(SCHEMA)?;
-        Ok(Self { conn })
+        // A garbage file fails on the first query below.
+        let has_meta = conn
+            .query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trace_meta'", [], |_| Ok(()))
+            .optional()?
+            .is_some();
+        let idx = Self { conn, db: db.to_path_buf() };
+        if has_meta {
+            let same = |key: &str, want: i64| idx.meta(key).ok().flatten().and_then(|v| v.parse::<i64>().ok()) == Some(want);
+            if !same("schema_version", SCHEMA_VERSION) || !same("parser_version", PARSER_VERSION) {
+                return Ok(None);
+            }
+        } else {
+            idx.conn.execute_batch(&format!(
+                "BEGIN; {SCHEMA}
+                 INSERT INTO trace_meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}'), ('parser_version', '{PARSER_VERSION}');
+                 COMMIT;"
+            ))?;
+        }
+        Ok(Some(idx))
+    }
+
+    pub fn db_path(&self) -> &Path {
+        &self.db
+    }
+
+    /// Db plus `-wal` size on disk.
+    pub fn db_bytes(&self) -> u64 {
+        let size = |p: PathBuf| fs::metadata(p).map_or(0, |m| m.len());
+        size(self.db.clone()) + size(PathBuf::from(format!("{}-wal", self.db.display())))
+    }
+
+    pub(crate) fn meta(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        self.conn.query_row("SELECT value FROM trace_meta WHERE key = ?1", [key], |r| r.get(0)).optional()
+    }
+
+    pub(crate) fn set_meta(&self, key: &str, value: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO trace_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Refuses a write batch while the db is over `MAX_DB_BYTES`, recording why in
+    /// `trace_meta.health`; clears the record once under the cap again.
+    pub fn check_cap(&self) -> Result<()> {
+        let bytes = self.db_bytes();
+        if bytes > MAX_DB_BYTES {
+            let msg = over_cap_message(bytes);
+            if self.meta("health").ok().flatten().as_deref() != Some(msg.as_str()) {
+                let _ = self.set_meta("health", &msg);
+            }
+            return Err(Error::OverCap { bytes });
+        }
+        if self.meta("health")?.is_some_and(|h| h != "ok") {
+            self.set_meta("health", "ok")?;
+        }
+        Ok(())
+    }
+
+    /// Why the index is unhealthy, or `None` when it is fine.
+    pub fn health(&self) -> Option<String> {
+        let bytes = self.db_bytes();
+        if bytes > MAX_DB_BYTES {
+            return Some(over_cap_message(bytes));
+        }
+        self.meta("health").ok().flatten().filter(|h| h != "ok")
     }
 
     pub(crate) fn conn(&self) -> &Connection {
@@ -269,6 +393,7 @@ impl TraceIndex {
     }
 
     pub fn scan_with_limit(&mut self, roots: &[Root], max_files: usize) -> Result<ScanReport> {
+        self.check_cap()?;
         let mut report = ScanReport::default();
         for root in roots {
             let d = discover(root, max_files);
@@ -276,6 +401,7 @@ impl TraceIndex {
                 match self.index_file(root, file) {
                     Ok(true) => report.indexed += 1,
                     Ok(false) => {}
+                    Err(e @ Error::OverCap { .. }) => return Err(e),
                     Err(e) => report.errors.push((file.clone(), e.to_string())),
                 }
             }
@@ -332,6 +458,8 @@ impl TraceIndex {
 
     /// Indexes one file. Returns whether anything was (re)parsed.
     pub fn index_file(&mut self, root: &Root, path: &Path) -> Result<bool> {
+        self.check_cap()?;
+        self.guard(root, path)?;
         let meta = fs::metadata(path)?;
         let (size, mtime) = (meta.len() as i64, mtime_ms(&meta));
         let path_str = path.to_string_lossy().into_owned();
@@ -397,14 +525,19 @@ impl TraceIndex {
             tx.execute("DELETE FROM trace_events WHERE session_id = ?1", [&sid])?;
         }
         let mut parse_error: Option<String> = None;
+        let mut capped = false;
         let (end_byte, next_line) = {
             let mut insert = tx.prepare_cached(
-                "INSERT OR REPLACE INTO trace_events (id, session_id, line_number, byte_offset, type, kind, role, title, summary,
+                "INSERT OR REPLACE INTO trace_events (id, session_id, line_number, byte_offset, type, kind, role, title, preview,
                  timestamp, duration_ms, input_tokens, output_tokens, usage_is_total, turn, step, depth, model, cwd, is_error)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             )?;
             let reader = lines::open(path, root.format, start_byte as u64, size as u64)?;
             lines::for_each(reader, start_byte, start_line, |line| {
+                if line.number >= MAX_EVENTS_PER_FILE as i64 {
+                    capped = true;
+                    return Ok(false);
+                }
                 if line.text.trim().is_empty() {
                     return Ok(true);
                 }
@@ -428,7 +561,7 @@ impl TraceIndex {
                         e.kind.as_str(),
                         e.role.map(Role::as_str),
                         e.title,
-                        e.summary,
+                        e.preview,
                         e.timestamp_ms,
                         round(e.duration_ms),
                         round(e.input_tokens),
@@ -444,6 +577,12 @@ impl TraceIndex {
                     .map_err(io::Error::other)?;
                 Ok(true)
             })?
+        };
+        let (end_byte, next_line) = if capped {
+            parse_error = Some(format!("event cap {MAX_EVENTS_PER_FILE} reached; rest of file not indexed"));
+            (size, MAX_EVENTS_PER_FILE as i64)
+        } else {
+            (end_byte, next_line)
         };
         let indexed_bytes = if root.format == Format::Zstd { size } else { end_byte };
         if root.source == "grok" && agg.cwd.is_none() {
@@ -463,6 +602,16 @@ impl TraceIndex {
         )?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Only files of this root's format, inside it and outside the index's own directory.
+    fn guard(&self, root: &Root, path: &Path) -> Result<()> {
+        let own = self.db.parent().and_then(|d| d.canonicalize().ok());
+        let inside_own = own.zip(path.canonicalize().ok()).is_some_and(|(dir, p)| p.starts_with(dir));
+        if inside_own || resolve(path, std::slice::from_ref(root)).is_none() {
+            return Err(Error::Rejected(path.to_path_buf()));
+        }
+        Ok(())
     }
 
     fn load_aggregate(&self, sid: &str, basename: &str) -> Result<Aggregate> {

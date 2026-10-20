@@ -6,7 +6,8 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
 
 | Piece | Where |
 |---|---|
-| Index crate | `xai-grok-traces/src/{roots,normalize,lines,index,query}.rs`. Tests in `tests/index.rs`. Real-data smoke: `cargo run --release -p xai-grok-traces --example scan -- <db>` |
+| Index crate | `xai-grok-traces/src/{roots,normalize,lines,index,query,receipts,hook}.rs`. Tests in `tests/index.rs`. Real-data smoke: `cargo run --release -p xai-grok-traces --example scan -- <db>` |
+| Hook CLI | `xai-grok-traces/src/bin/grok-traces.rs`: `hook <source>` (stdin JSON, always exit 0, `{}` for cursor), `scan`, `list --json`, `doctor` (exit 1 unless healthy). Field extraction and the receipt+index step are `hook::{extract,ingest}` |
 | Slash command | `P/slash/commands/traces.rs`, registered in `P/slash/commands/mod.rs` `builtin_commands()`. Reserved in `xai-grok-shell/src/session/slash_commands.rs` `PAGER_COMMAND_KEYS` (test `pager_builtin_triggers_are_reserved_in_shell`) |
 | Modal state, keys, render | `P/views/traces_modal.rs` |
 | `ActiveModal::Traces` | `P/views/modal.rs` (variant, `hint_pairs`, `message`) |
@@ -47,6 +48,14 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
   - `completed` if the last event type is terminal (complete, turn end, session end, run end).
   - `active` if not terminal and the file mtime is within 5 min.
   - Otherwise `idle`.
+- **Storage diet:** events keep a `preview` (whitespace-collapsed, 160 chars), not the text. Titles come from the full text before clipping. The inspector re-reads the raw line via `byte_offset`; nothing is copied.
+- **Versions:** `trace_meta` holds `schema_version` and `parser_version`. A mismatch on open renames the db and sidecars to `*.old.<nanos>` and deletes them, then starts fresh (a smaller row does not shrink a SQLite file).
+- **Caps (fail loud):**
+  - `MAX_DB_BYTES` = 256 MiB over db + `-wal`. `scan`, `index_file` and `record_receipt` call `check_cap()` first and return `Error::OverCap`, writing `trace_meta.health`. `TraceIndex::health()` is `None` when ok; the ledger shows it as a red line on the search row.
+  - `MAX_EVENTS_PER_FILE` = 200k, recorded in `parse_error`.
+  - Path guard: `roots::root_for` / `resolve` need the canonical path inside the root and a name that passes the root's rules. `.db`, `.sqlite`, `-wal`, `-shm`, `-journal` and `.corrupt.` names are rejected. `index_file` also rejects anything under the db's own directory.
+- **Receipts:** `trace_receipts` (one row per hook event, pruned to 100k every 1000th insert). `record_receipt`, `receipts_watermark`, `last_receipt`. A receipt under 2 min old whose event is not terminal (`SessionEnd`, `Stop`, `stop`, `session_shutdown`, `agent_end`) makes a session Active regardless of mtime.
+- **Hook rules:** busy timeout 250 ms. Failures go to one stderr line; over-cap also posts a macOS notification at most hourly (stamp file `overcap.notified` beside the db). Grok's `updates.jsonl` path maps to the sibling `chat_history.jsonl`. No watcher or daemon exists; the hook is the only live feed.
 - The index lives at `~/.grok/traces/traces.sqlite`. It is disposable and never uploaded.
 
 ## Pager rules learned
