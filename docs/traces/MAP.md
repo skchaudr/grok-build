@@ -50,7 +50,7 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
   - `completed` if the last event type is terminal (complete, turn end, session end, run end).
   - `active` if not terminal and the file mtime is within 5 min.
   - Otherwise `idle`.
-- **Storage diet:** events keep a `preview` (whitespace-collapsed, 160 chars), not the text. Row layout (schema 4):
+- **Storage diet:** events keep a `preview` (whitespace-collapsed, 100 chars), not the text. Row layout (schema 4):
   - `trace_events` is `WITHOUT ROWID`, `PRIMARY KEY (sk, line_number)`; no text id, no extra index, no per-event cwd.
   - `kind`/`role` are `Kind::code`/`Role::code`. Event type, title and model are interned in `trace_names` (rows hold ids).
   - `preview` is `''` when it equals the title (read back as the title).

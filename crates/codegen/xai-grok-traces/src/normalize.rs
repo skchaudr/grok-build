@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 /// Transient per-event text (error heuristic, titles); only the preview is stored.
 const TEXT_CHARS: usize = 1024;
 /// Stored per-event preview; the full line is re-read from the source on demand.
-pub const PREVIEW_CHARS: usize = 160;
+pub const PREVIEW_CHARS: usize = 100;
 const TYPE_CHARS: usize = 120;
 const TITLE_CHARS: usize = 160;
 const SEARCH_DEPTH: usize = 6;
