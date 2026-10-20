@@ -17,6 +17,7 @@ Generated from `xai_grok_config_types::FEATURES` so the operator table matches t
 | `cancel_rewind` | `GROK_CANCEL_REWIND` |
 | `compaction_verbatim_input` | `GROK_COMPACTION_VERBATIM_INPUT` |
 | `two_pass_compaction` | `GROK_TWO_PASS_COMPACTION` |
+| `backend_tools` | `GROK_BACKEND_SEARCH` |
 | `auto_wake` | `GROK_AUTO_WAKE` |
 | `subagent_worktree_snapshot` | `GROK_SUBAGENT_WORKTREE_SNAPSHOT` |
 | `subagent_model_inheritance` | `GROK_SUBAGENT_MODEL_INHERITANCE` |

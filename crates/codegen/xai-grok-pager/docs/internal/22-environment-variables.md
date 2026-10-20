@@ -17,6 +17,7 @@ Generated from `xai_grok_config_types::FEATURES`.
 | `GROK_CANCEL_REWIND` | `cancel_rewind` |
 | `GROK_COMPACTION_VERBATIM_INPUT` | `compaction_verbatim_input` |
 | `GROK_TWO_PASS_COMPACTION` | `two_pass_compaction` |
+| `GROK_BACKEND_SEARCH` | `backend_tools` |
 | `GROK_AUTO_WAKE` | `auto_wake` |
 | `GROK_SUBAGENT_WORKTREE_SNAPSHOT` | `subagent_worktree_snapshot` |
 | `GROK_SUBAGENT_MODEL_INHERITANCE` | `subagent_model_inheritance` |

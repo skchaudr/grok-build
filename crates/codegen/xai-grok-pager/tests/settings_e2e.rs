@@ -105,7 +105,31 @@ fn matrix_is_subset_of_registry() {
     }
 }
 
+/// Process-wide appearance caches lazy-seed from `~/.grok/config.toml` on first read.
+/// Pin registry defaults so settings e2e tests do not depend on the host config.
+fn reset_appearance_cache_for_registry_defaults() {
+    xai_grok_pager::appearance::cache::set_keep_text_selection(
+        xai_grok_pager::appearance::TextSelection::Flash,
+    );
+    xai_grok_pager::appearance::cache::set_show_thinking_blocks(true);
+    xai_grok_pager::appearance::cache::set_prompt_suggestions(true);
+    xai_grok_pager::appearance::cache::set_group_tool_verbs(true);
+    xai_grok_pager::appearance::cache::set_page_flip_on_send(true);
+    xai_grok_pager::appearance::cache::set_combine_queued_prompts(false);
+    xai_grok_pager::appearance::cache::set_collapsed_edit_blocks(false);
+    xai_grok_pager::appearance::cache::set_follow_up_behavior(
+        xai_grok_pager::appearance::FollowUpBehavior::Queue,
+    );
+    xai_grok_pager::appearance::cache::set_scroll_mode(
+        xai_grok_pager::appearance::ScrollMode::Auto,
+    );
+    xai_grok_pager::appearance::cache::set_invert_scroll(false);
+    // 3 = the registry default shown while the profile is in charge.
+    xai_grok_pager::appearance::cache::set_scroll_lines(3);
+}
+
 fn make_state() -> SettingsModalState {
+    reset_appearance_cache_for_registry_defaults();
     // Voice rows are hidden when the process gate is off (default until startup).
     xai_grok_pager::app::set_voice_mode_enabled_for_test(true);
     SettingsModalState::new(
@@ -1996,23 +2020,7 @@ fn defaults_round_trip_through_registry() {
 
     // `current_value_for` for these keys reads process-wide caches, not `ui`.
     // Reset to defaults so a sibling test on this worker thread can't leak in.
-    xai_grok_pager::appearance::cache::set_keep_text_selection(
-        xai_grok_pager::appearance::TextSelection::Flash,
-    );
-    xai_grok_pager::appearance::cache::set_show_thinking_blocks(true);
-    xai_grok_pager::appearance::cache::set_prompt_suggestions(true);
-    xai_grok_pager::appearance::cache::set_group_tool_verbs(true);
-    xai_grok_pager::appearance::cache::set_page_flip_on_send(true);
-    xai_grok_pager::appearance::cache::set_combine_queued_prompts(false);
-    xai_grok_pager::appearance::cache::set_follow_up_behavior(
-        xai_grok_pager::appearance::FollowUpBehavior::Queue,
-    );
-    xai_grok_pager::appearance::cache::set_scroll_mode(
-        xai_grok_pager::appearance::ScrollMode::Auto,
-    );
-    xai_grok_pager::appearance::cache::set_invert_scroll(false);
-    // 3 = the registry default shown while the profile is in charge.
-    xai_grok_pager::appearance::cache::set_scroll_lines(3);
+    reset_appearance_cache_for_registry_defaults();
 
     // Hard-coded per-key expectations (independent of registry).
     let expected = |key: &str| -> SettingValue {
@@ -3543,6 +3551,8 @@ fn reset_overlay_dims_all_rows_except_target() {
     use ratatui::buffer::Buffer;
     use ratatui::style::Modifier;
     use xai_grok_pager::views::settings_modal::ResetConfirmOverlay;
+    // Bandless terminal themes apply `Modifier::DIM` via `theme.muted()` on footer shortcut labels.
+    let _theme = xai_grok_pager::theme::cache::pin_theme();
     // Set up a state with at least 3 rows visible AND navigate to a specific target (NOT the initially-selected row)
     // That lets us assert dim-vs-full-intensity for both target and non-target rows
     let mut s = make_state();
@@ -6815,7 +6825,6 @@ fn scroll_lines_mouse_click_opens_editor() {
 
 #[test]
 fn invert_scroll_space_dispatches_typed_setter() {
-    xai_grok_pager::appearance::cache::set_invert_scroll(false);
     let mut s = make_state();
     navigate_to(&mut s, "invert_scroll");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
@@ -6825,8 +6834,8 @@ fn invert_scroll_space_dispatches_typed_setter() {
 
 #[test]
 fn invert_scroll_enter_dispatches_typed_setter() {
-    xai_grok_pager::appearance::cache::set_invert_scroll(true);
     let mut s = make_state();
+    xai_grok_pager::appearance::cache::set_invert_scroll(true);
     navigate_to(&mut s, "invert_scroll");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
     assert_set_bool_action(outcome, "invert_scroll", false);
@@ -6835,7 +6844,6 @@ fn invert_scroll_enter_dispatches_typed_setter() {
 
 #[test]
 fn invert_scroll_mouse_click_two_stage_toggles() {
-    xai_grok_pager::appearance::cache::set_invert_scroll(false);
     let mut s = make_state();
     synth_rects(&mut s);
     let row_y = row_idx_for(&s, "invert_scroll") as u16;
@@ -6963,8 +6971,8 @@ fn display_refresh_auto_cadence_defaults_roundtrip_via_current_value_for() {
 #[test]
 fn show_thinking_blocks_space_dispatches_typed_setter() {
     // Pin off so space toggles to true.
-    xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
     let mut s = make_state();
+    xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
     navigate_to(&mut s, "show_thinking_blocks");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
     assert_set_bool_action(outcome, "show_thinking_blocks", true);
@@ -6973,8 +6981,8 @@ fn show_thinking_blocks_space_dispatches_typed_setter() {
 
 #[test]
 fn show_thinking_blocks_enter_dispatches_typed_setter() {
-    xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
     let mut s = make_state();
+    xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
     navigate_to(&mut s, "show_thinking_blocks");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
     assert_set_bool_action(outcome, "show_thinking_blocks", true);
@@ -6983,8 +6991,8 @@ fn show_thinking_blocks_enter_dispatches_typed_setter() {
 
 #[test]
 fn show_thinking_blocks_mouse_click_two_stage_toggles() {
-    xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
     let mut s = make_state();
+    xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
     synth_rects(&mut s);
     let row_y = row_idx_for(&s, "show_thinking_blocks") as u16;
 
@@ -7065,8 +7073,8 @@ fn show_thinking_blocks_renders_under_appearance_category_shell_owned() {
 #[test]
 fn prompt_suggestions_space_dispatches_typed_setter() {
     // Pin off so space toggles to true.
-    xai_grok_pager::appearance::cache::set_prompt_suggestions(false);
     let mut s = make_state();
+    xai_grok_pager::appearance::cache::set_prompt_suggestions(false);
     navigate_to(&mut s, "prompt_suggestions");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
     assert_set_bool_action(outcome, "prompt_suggestions", true);
@@ -7075,8 +7083,8 @@ fn prompt_suggestions_space_dispatches_typed_setter() {
 
 #[test]
 fn prompt_suggestions_enter_dispatches_typed_setter() {
-    xai_grok_pager::appearance::cache::set_prompt_suggestions(false);
     let mut s = make_state();
+    xai_grok_pager::appearance::cache::set_prompt_suggestions(false);
     navigate_to(&mut s, "prompt_suggestions");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
     assert_set_bool_action(outcome, "prompt_suggestions", true);
@@ -7085,8 +7093,8 @@ fn prompt_suggestions_enter_dispatches_typed_setter() {
 
 #[test]
 fn prompt_suggestions_mouse_click_two_stage_toggles() {
-    xai_grok_pager::appearance::cache::set_prompt_suggestions(false);
     let mut s = make_state();
+    xai_grok_pager::appearance::cache::set_prompt_suggestions(false);
     synth_rects(&mut s);
     let row_y = row_idx_for(&s, "prompt_suggestions") as u16;
 
