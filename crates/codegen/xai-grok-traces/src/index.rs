@@ -187,7 +187,12 @@ impl Aggregate {
             self.first_ts = Some(self.first_ts.map_or(ts, |f| f.min(ts)));
             self.last_ts = Some(self.last_ts.map_or(ts, |l| l.max(ts)));
         }
-        if self.user_title.is_none() && e.role == Some(Role::User) && !e.summary.is_empty() {
+        // Injected context (`<user_info>`, `<system-reminder>`, `<command-name>`) is not a title.
+        if self.user_title.is_none()
+            && e.role == Some(Role::User)
+            && !e.summary.is_empty()
+            && !e.summary.trim_start().starts_with('<')
+        {
             let first = e.summary.lines().next().unwrap_or(&e.summary);
             self.user_title = Some(clip(first, TITLE_CHARS));
         }

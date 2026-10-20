@@ -30,6 +30,7 @@ const DSH: &str = r#"{"type":"session","version":2,"id":"d","cwd":"/w/dsh","crea
 {"type":"turn/end","seq":4,"time":1759276803000,"data":{"turn":1,"reason":"stop"}}
 "#;
 const GROK: &str = r#"{"type":"system","content":"sys"}
+{"type":"user","content":[{"type":"text","text":"<user_info>injected</user_info>"}],"synthetic_reason":"x"}
 {"type":"user","content":[{"type":"text","text":"grok task"}],"prompt_index":0}
 {"type":"assistant","content":"x","model_id":"grok-5","tool_calls":[{"id":"t1","name":"read_file"}]}
 {"type":"tool_result","tool_call_id":"t1","content":"ok"}
@@ -107,7 +108,7 @@ fn each_source_discovers_its_fixture() {
     assert_eq!(d.cwd.as_deref(), Some("/w/dsh"));
 
     let g = by_source(&idx, "grok");
-    assert_eq!((g.title.as_str(), g.event_count), ("grok task", 4));
+    assert_eq!((g.title.as_str(), g.event_count), ("grok task", 5));
     assert_eq!(g.cwd.as_deref(), Some("/w/grok"), "cwd from summary.json");
     assert_eq!(g.model.as_deref(), Some("grok-5"));
     // Fresh, non-terminal file → active.

@@ -572,8 +572,10 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
 
     let status_rows = u16::from(state.status.is_some());
     let list = Rect { y: area.y + 3, height: area.height.saturating_sub(3 + status_rows), ..area };
-    let wide = area.width >= 110;
-    let title_w = (area.width as usize).saturating_sub(8 + 7 + 6 + 6 + 7 + 13 + 12 + if wide { 28 } else { 0 } + 9);
+    let wide = area.width >= 140;
+    // Fixed columns plus one separator each, and room for the trailing error count.
+    let fixed: usize = [8, 7, 5, 5, 6, 12, 12].iter().map(|w| w + 1).sum::<usize>() + if wide { 29 } else { 0 } + 9;
+    let title_w = (area.width as usize).saturating_sub(fixed + 1);
     let cols = |title: String, s: &SessionRow, base: Style| -> Vec<(String, usize, Style)> {
         let mut v = vec![
             (source_label(&s.source).to_string(), 8, base.fg(source_color(&s.source, theme))),
