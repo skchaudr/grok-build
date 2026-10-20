@@ -1,7 +1,8 @@
-// grok-traces hook for DSH (Cordis plugin). Mount from a profile's cordis.patch.yml:
+// grok-traces hook for DSH (Cordis plugin). `hooks/install.sh --apply --dsh-profile NAME` copies this to
+// ~/.dsh/plugins/grok-traces.mjs and adds, between `# grok-traces begin/end` markers in the profile's cordis.patch.yml:
 //   - insert:
 //     - id: grok-traces
-//       name: '/abs/path/to/traces.mjs'
+//       name: '/Users/<you>/.dsh/plugins/grok-traces.mjs'
 // Observes the durable `session/event` firehose; spawns `grok-traces hook dsh` detached, at most once per 1s per session
 // (leading + one trailing). No network, no env loading, errors swallowed.
 // Verified: API shape read from ~/.dsh/plugins/jev-guard.mjs and profiles/web/moshi-bridge.mjs; log path/name from the
