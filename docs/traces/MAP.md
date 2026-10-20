@@ -89,7 +89,7 @@ Per-harness wiring so sessions index as they happen. Templates and installer: `x
 | cursor | skipped, no parser | |
 
 - `install.sh`: `--dry-run` (default, prints `diff -u`), `--apply`, `--remove`, `--check`. `--apply` refuses while the binary is missing (`--even-if-missing` overrides). JSON files get a `.bak-traces-<ts>` backup, are built in a temp file, and are validated with `jq empty` before the move.
-- Claude/Codex: removes hook entries containing `log-commands.sh` or `atuin hook`, plus any previous grok-traces entry, then appends one per event. Re-runs are idempotent. Moshi, Orca, Herdr and other hooks are untouched.
+- Claude/Codex: removes hook entries containing `log-commands.sh`, plus any previous grok-traces entry, then appends one per event. Re-runs are idempotent. Atuin, Moshi, Orca, Herdr and other hooks are untouched.
 - `pi-observability.ts` (OMP symlink) is only moved aside with `--apply --retire-pi-observability`. `--remove --retire-pi-observability` puts it back.
 - Grok's hook payload carries `transcriptPath`/`transcript_path`, but it is `<session dir>/updates.jsonl` (set only if the file exists), not `chat_history.jsonl`. The session dir is the same, so the trace side should map it to the sibling `chat_history.jsonl`.
 - DSH logs are `~/.dsh/sessions/<project-key>/<session id>/session[.vN].jsonl.zstd`. The plugin finds the file by scanning project dirs for the session id.
