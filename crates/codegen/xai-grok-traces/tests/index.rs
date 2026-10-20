@@ -257,7 +257,7 @@ fn preview_is_flat_and_clipped() {
     assert_eq!(rows[0].title, "line one", "title is the first line of the full text");
     let ev = idx.list_events(&rows[0].id, &EventFilter::default()).unwrap();
     assert!(ev[0].preview.starts_with("line one line two xxx"), "{}", ev[0].preview);
-    assert_eq!(ev[0].preview.chars().count(), 161);
+    assert_eq!(ev[0].preview.chars().count(), xai_grok_traces::normalize::PREVIEW_CHARS + 1);
     assert!(!ev[0].preview.contains('\n'));
 }
 
