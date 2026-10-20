@@ -52,7 +52,7 @@ printf '#!/bin/sh\nexit 0\n' > "$HOME/.grok/bin/grok-traces"; chmod +x "$HOME/.g
 for f in "$S" "$C"; do
   n="$(basename "$(dirname "$f")")"
   expect 0 "$(cnt "$f" log-commands.sh)" "$n: log-commands gone"
-  expect 0 "$(cnt "$f" 'atuin hook')" "$n: atuin gone"
+  expect 1 "$(cnt "$f" 'atuin hook')" "$n: atuin untouched"
 done
 expect 1 "$(cnt "$S" moshi-hook)" "claude: moshi untouched"
 expect 1 "$(cnt "$C" moshi-hook)" "codex: moshi untouched"

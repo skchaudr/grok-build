@@ -27,7 +27,7 @@ CODEX_EVENTS='[["SessionStart",1],["UserPromptSubmit",0],["PreToolUse",1],["Post
 
 JQ_DEFS='
 def ours: contains("grok-traces\" hook ");
-def stale: contains("log-commands.sh") or contains("atuin hook");
+def stale: contains("log-commands.sh");
 def strip(f):
   if .hooks == null then . else
     .hooks |= (with_entries(
