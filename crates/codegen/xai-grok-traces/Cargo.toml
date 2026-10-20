@@ -1,0 +1,24 @@
+[package]
+license = "Apache-2.0"
+name = "xai-grok-traces"
+version = "0.1.0"
+edition.workspace = true
+description = "Local index of Claude, Codex, Pi, OMP, DeepSeek Harness and Grok session traces"
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+zstd = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+xai-dirs = { workspace = true }
+xai-sqlite-journal = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

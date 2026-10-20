@@ -363,6 +363,15 @@ impl AgentView {
             }
         }
 
+        // Traces: sub-views and editors own Esc; the ledger's Esc closes.
+        if let ActiveModal::Traces { state } = modal {
+            if key.code == KeyCode::Esc && !crate::views::traces_modal::wants_esc(state) {
+                self.active_modal = None;
+                return InputOutcome::Changed;
+            }
+            return crate::views::traces_modal::handle_traces_key(state, key);
+        }
+
         // MemoryBrowser: route through ModalWindow chrome, then delegate.
         if let ActiveModal::MemoryBrowser { state } = modal {
             // While the filter or the preview has focus, Esc leaves that mode instead of closing
@@ -483,6 +492,7 @@ impl AgentView {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
+            | ActiveModal::Traces { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
@@ -1510,6 +1520,18 @@ impl AgentView {
             }
         }
 
+        // Traces is keyboard-only; the chrome still takes clicks (close button).
+        if let Some(ActiveModal::Traces { state }) = &mut self.active_modal {
+            return match mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row) {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::Unhandled => InputOutcome::Unchanged,
+                _ => InputOutcome::Changed,
+            };
+        }
+
         // MemoryBrowser: route through ModalWindow chrome, then delegate.
         if let Some(ActiveModal::MemoryBrowser { state }) = &mut self.active_modal {
             let outcome =
@@ -2362,6 +2384,8 @@ impl AgentView {
                 );
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
+            } else if let modal::ActiveModal::Traces { state } = active_modal {
+                crate::views::traces_modal::render_traces_modal(buf, area, state, compact);
             } else if let modal::ActiveModal::Settings {
                 state: settings_state,
             } = active_modal

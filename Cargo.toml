@@ -77,6 +77,7 @@ members = [
     "crates/codegen/xai-grok-test-support",
     "crates/codegen/xai-grok-tools",
     "crates/codegen/xai-grok-tools-api",
+    "crates/codegen/xai-grok-traces",
     "crates/codegen/xai-grok-update",
     "crates/codegen/xai-grok-version",
     "crates/codegen/xai-grok-voice",
@@ -375,6 +376,7 @@ xai-grok-telemetry = { path = "crates/codegen/xai-grok-telemetry", default-featu
 xai-grok-test-support = { path = "crates/codegen/xai-grok-test-support" }
 xai-grok-tools = { path = "crates/codegen/xai-grok-tools" }
 xai-grok-tools-api = { path = "crates/codegen/xai-grok-tools-api" }
+xai-grok-traces = { path = "crates/codegen/xai-grok-traces" }
 xai-grok-version = { path = "crates/codegen/xai-grok-version" }
 xai-grok-workspace = { path = "crates/codegen/xai-grok-workspace", default-features = false }
 xai-grok-workspace-types = { path = "crates/codegen/xai-grok-workspace-types" }

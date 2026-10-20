@@ -939,6 +939,23 @@ pub enum Action {
     },
     /// Open the memory browser modal.
     OpenMemoryModal,
+    /// Open the `/traces` session ledger and start an index scan.
+    OpenTraces,
+    /// Re-scan trace roots while `/traces` is open.
+    TracesRescan,
+    /// Copy text from the `/traces` inspector; the outcome shows in its status line.
+    TracesCopy {
+        text: String,
+    },
+    /// Show a one-line notice in the `/traces` status line.
+    TracesNotice {
+        text: String,
+    },
+    /// Resume a `/traces` session in its harness (foreign skill or native grok load).
+    TracesResume {
+        source: String,
+        native_id: String,
+    },
     /// Open the hidden `/gboom` easter egg (DOOM-style raycaster modal).
     OpenGboom,
     /// Suspend the TUI and open a configuration file in `$EDITOR`.
@@ -1839,6 +1856,10 @@ pub enum Effect {
     FetchPluginsList {
         agent_id: AgentId,
         session_id: acp::SessionId,
+    },
+    /// Discover and index local session traces for `/traces`.
+    ScanTraces {
+        agent_id: AgentId,
     },
     /// Fetch the `/memory` modal contents (x.ai/memory/list).
     FetchMemoryList {
@@ -2797,6 +2818,11 @@ pub enum TaskResult {
     PluginsListLoaded {
         agent_id: AgentId,
         result: Result<xai_hooks_plugins_types::PluginsListResponse, String>,
+    },
+    /// A `/traces` index scan finished; `summary` is the status line.
+    TracesScanned {
+        agent_id: AgentId,
+        summary: String,
     },
     /// Memory listing fetched for the `/memory` modal.
     MemoryListLoaded {

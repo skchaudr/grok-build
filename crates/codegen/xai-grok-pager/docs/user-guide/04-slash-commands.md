@@ -18,6 +18,10 @@ Start a fresh session and clear the current conversation. Alias: `/clear`.
 
 Open the session picker to reload a previous session from disk.
 
+### `/traces`
+
+Browse local agent sessions from Claude Code, Codex, Pi, OMP, DeepSeek Harness, and Grok in one ledger. Tab cycles sources, `/` filters by title, cwd, or model, and Enter on a search also matches event content. `e` shows sessions with errors, `a` shows active ones, and `s` cycles the sort. Enter opens a session's trajectory: a timeline of input, model, and tool events over the event list, with `e` for errors only and `t` to filter by tool. Enter on an event shows its raw source line, and `y` copies it. `r` resumes Claude and Codex sessions through their resume skills and Grok sessions natively. Other sources say they have no resume path. The index lives at `~/.grok/traces/traces.sqlite`, never leaves the machine, and is rebuilt from the session files whenever it is missing or corrupt.
+
 ### `/dashboard`
 
 Open the [Agent Dashboard](23-dashboard.md): live roster of top-level sessions in this pager (peek, reply, dispatch, pin, rename, stop, attach). Aliases: `/agents-dashboard`, `/sessions`.
