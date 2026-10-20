@@ -1,5 +1,5 @@
-//! bb threads, read in place from `~/.bb/bb.db` (read-only). Not wired into the
-//! file index yet; see `docs/traces/BB.md`.
+//! bb threads, read in place from `~/.bb/bb.db` (read-only). Indexed by
+//! `index/bb_index.rs`; see `docs/traces/BB.md`.
 //!
 //! The pointer to an event is `(thread_id, sequence)`: `sequence` is unique and
 //! increasing per thread (`events_thread_sequence_idx`), so it plays the role a
@@ -29,6 +29,19 @@ const SKIPPED_TYPES: [&str; 8] = [
 ];
 const TOOL_KINDS: [&str; 7] =
     ["toolCall", "commandExecution", "fileChange", "fileRead", "webFetch", "webSearch", "delegation"];
+
+/// Lock wait when reading bb.db; bb is the writer, so give up fast.
+const BUSY: Duration = Duration::from_millis(500);
+
+/// The key a thread is indexed under: `<db path>#<thread id>` (unique, so it can be a session's `file_path`).
+pub fn thread_key(db: &Path, thread_id: &str) -> String {
+    format!("{}#{thread_id}", db.display())
+}
+
+/// Inverse of [`thread_key`].
+pub fn split_key(key: &str) -> Option<(&str, &str)> {
+    key.rsplit_once('#')
+}
 
 pub fn default_db_path(home: &Path) -> PathBuf {
     home.join(".bb/bb.db")
@@ -66,23 +79,36 @@ pub struct Bb {
 
 impl Bb {
     /// Opens `path` read-only; bb keeps writing to it (WAL), so readers never block it.
+    /// Callers open per scan and drop the handle; nothing holds bb.db between scans.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with(path, BUSY)
+    }
+
+    pub fn open_with(path: &Path, busy: Duration) -> Result<Self> {
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let conn = Connection::open_with_flags(path, flags)?;
-        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.busy_timeout(busy)?;
         Ok(Self { conn })
     }
 
     /// Non-deleted threads, most recently updated first.
     pub fn threads(&self) -> Result<Vec<BbThread>> {
+        self.query_threads(None)
+    }
+
+    pub fn thread(&self, id: &str) -> Result<Option<BbThread>> {
+        Ok(self.query_threads(Some(id))?.into_iter().next())
+    }
+
+    fn query_threads(&self, only: Option<&str>) -> Result<Vec<BbThread>> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, COALESCE(t.title, t.title_fallback), t.provider_id, t.model_override, t.status, env.path,
                     t.parent_thread_id, t.created_at, t.updated_at, t.archived_at IS NOT NULL,
                     (SELECT MAX(sequence) FROM events WHERE thread_id = t.id)
              FROM threads t LEFT JOIN environments env ON env.id = t.environment_id
-             WHERE t.deleted_at IS NULL ORDER BY t.updated_at DESC",
+             WHERE t.deleted_at IS NULL AND (?1 IS NULL OR t.id = ?1) ORDER BY t.updated_at DESC",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map([only], |r| {
             Ok(BbThread {
                 id: r.get(0)?,
                 title: r.get::<_, Option<String>>(1)?.filter(|t| !t.trim().is_empty()),

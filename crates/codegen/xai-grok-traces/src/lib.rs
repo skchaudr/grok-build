@@ -1,7 +1,7 @@
 //! Local index of agent session traces across harnesses.
 //!
-//! Sources: Claude Code, Codex, Pi, OMP, Cursor, DeepSeek Harness (zstd) and Grok's
-//! own `chat_history.jsonl`. The index is disposable; source files are the
+//! Sources: Claude Code, Codex, Pi, OMP, Cursor, DeepSeek Harness (zstd), Grok's
+//! own `chat_history.jsonl`, and bb threads read in place from its SQLite db. The index is disposable; source files are the
 //! truth and raw lines are re-read from them on demand. traces-ledger-v1
 
 pub mod bb;

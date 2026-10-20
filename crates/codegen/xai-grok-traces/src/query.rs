@@ -1,6 +1,6 @@
 //! Read side: ledger rows, trajectory events, facets, raw lines.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rusqlite::types::Value as Sql;
 use rusqlite::{OptionalExtension, Row, params};
@@ -299,6 +299,11 @@ impl TraceIndex {
             )
             .optional()?;
         let Some((path, format, offset)) = loc else { return Ok(None) };
+        if format == "sqlite" {
+            // bb: the pointer is `<db>#<thread id>` plus the event sequence (the line number).
+            let Some((db, thread)) = crate::bb::split_key(&path) else { return Ok(None) };
+            return crate::bb::Bb::open(Path::new(db))?.raw_event(thread, line);
+        }
         let format = if format == "zstd" { Format::Zstd } else { Format::Jsonl };
         Ok(lines::read_line(path.as_ref(), format, line, offset)?)
     }

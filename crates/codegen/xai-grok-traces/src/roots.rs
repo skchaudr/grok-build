@@ -13,6 +13,8 @@ const IGNORED_DIRS: [&str; 15] = [
 pub enum Format {
     Jsonl,
     Zstd,
+    /// A SQLite db read in place (bb); the root path is the db file.
+    Sqlite,
 }
 
 impl Format {
@@ -20,12 +22,13 @@ impl Format {
         match self {
             Format::Jsonl => "jsonl",
             Format::Zstd => "zstd",
+            Format::Sqlite => "sqlite",
         }
     }
 }
 
 /// Ledger tab order: All, then these.
-pub const SOURCES: [&str; 7] = ["dsh", "claude", "pi", "omp", "codex", "cursor", "grok"];
+pub const SOURCES: [&str; 8] = ["dsh", "claude", "pi", "omp", "codex", "cursor", "grok", "bb"];
 
 pub fn source_label(source: &str) -> &str {
     match source {
@@ -36,6 +39,7 @@ pub fn source_label(source: &str) -> &str {
         "codex" => "Codex",
         "cursor" => "Cursor",
         "grok" => "Grok",
+        "bb" => "bb",
         other => other,
     }
 }
@@ -76,6 +80,8 @@ pub fn default_roots(home: &Path, grok_home: &Path) -> Vec<Root> {
             file_name: Some("chat_history.jsonl"),
             ..Root::new("grok-sessions", "grok", grok_home.join("sessions"), Format::Jsonl)
         },
+        // bb threads live in one SQLite db, read in place (see `bb`); absent where bb is not installed.
+        Root::new("bb-threads", "bb", crate::bb::default_db_path(home), Format::Sqlite),
     ]
 }
 
@@ -120,7 +126,7 @@ pub fn resolve<'a>(path: &Path, roots: &'a [Root]) -> Option<(&'a Root, PathBuf)
         return None;
     }
     roots.iter().find_map(|root| {
-        if !matches(&name, root) {
+        if root.format == Format::Sqlite || !matches(&name, root) {
             return None;
         }
         let base = root.path.canonicalize().ok()?;

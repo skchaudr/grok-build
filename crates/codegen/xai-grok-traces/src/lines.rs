@@ -23,6 +23,7 @@ pub fn open(path: &Path, format: Format, start_byte: u64, limit: u64) -> io::Res
             Box::new(file.take(limit.saturating_sub(start_byte)))
         }
         Format::Zstd => Box::new(zstd::Decoder::new(file)?),
+        Format::Sqlite => return Err(io::Error::other("sqlite sources have no line stream")),
     })
 }
 
@@ -62,7 +63,7 @@ pub fn for_each<R: Read>(
 pub fn read_line(path: &Path, format: Format, number: i64, start_byte: i64) -> io::Result<Option<String>> {
     let (from_byte, from_line) = match format {
         Format::Jsonl => (start_byte.max(0) as u64, number),
-        Format::Zstd => (0, 0),
+        Format::Zstd | Format::Sqlite => (0, 0),
     };
     let reader = open(path, format, from_byte, u64::MAX)?;
     let mut found = None;

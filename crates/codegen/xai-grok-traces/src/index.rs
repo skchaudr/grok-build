@@ -16,6 +16,8 @@ use crate::lines;
 use crate::normalize::{Kind, NormalizedEvent, Role, clip, normalize};
 use crate::roots::{Format, MAX_FILES, Root, discover, resolve};
 
+mod bb_index;
+
 pub const PARSER_VERSION: i64 = 3;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
 pub const SCHEMA_VERSION: i64 = 3;
@@ -256,6 +258,44 @@ impl Aggregate {
     }
 }
 
+const INSERT_EVENT: &str = "INSERT OR REPLACE INTO trace_events (id, session_id, line_number, byte_offset, type, kind, role,
+  title, preview, timestamp, duration_ms, input_tokens, output_tokens, usage_is_total, turn, step, depth, model, cwd, is_error)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)";
+
+/// One event row; `line` is the line number in a file, or the event sequence for bb.
+fn insert_event(
+    insert: &mut rusqlite::CachedStatement<'_>,
+    sid: &str,
+    line: i64,
+    offset: i64,
+    e: &NormalizedEvent,
+) -> rusqlite::Result<()> {
+    let round = |v: Option<f64>| v.map(|v| v.round() as i64);
+    insert.execute(params![
+        format!("{sid}:{line}"),
+        sid,
+        line,
+        offset,
+        e.event_type,
+        e.kind.as_str(),
+        e.role.map(Role::as_str),
+        e.title,
+        e.preview,
+        e.timestamp_ms,
+        round(e.duration_ms),
+        round(e.input_tokens),
+        round(e.output_tokens),
+        e.usage_is_total,
+        round(e.turn),
+        round(e.step),
+        e.depth,
+        e.model,
+        e.cwd,
+        e.is_error(),
+    ])?;
+    Ok(())
+}
+
 /// Last event type marks a finished run.
 fn is_terminal(event_type: &str) -> bool {
     let squashed: String = event_type
@@ -403,6 +443,11 @@ impl TraceIndex {
         self.check_cap()?;
         let mut report = ScanReport::default();
         for root in roots {
+            if root.format == Format::Sqlite {
+                let r = self.scan_bb_root(root, &mut report)?;
+                report.roots.push(r);
+                continue;
+            }
             let d = discover(root, max_files);
             for file in &d.files {
                 match self.index_file(root, file) {
@@ -532,11 +577,7 @@ impl TraceIndex {
         let mut parse_error: Option<String> = None;
         let mut capped = false;
         let (end_byte, next_line) = {
-            let mut insert = tx.prepare_cached(
-                "INSERT OR REPLACE INTO trace_events (id, session_id, line_number, byte_offset, type, kind, role, title, preview,
-                 timestamp, duration_ms, input_tokens, output_tokens, usage_is_total, turn, step, depth, model, cwd, is_error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-            )?;
+            let mut insert = tx.prepare_cached(INSERT_EVENT)?;
             let reader = lines::open(path, root.format, start_byte as u64, size as u64)?;
             lines::for_each(reader, start_byte, start_line, |line| {
                 if line.number >= MAX_EVENTS_PER_FILE as i64 {
@@ -555,31 +596,7 @@ impl TraceIndex {
                 };
                 let e = normalize(&value);
                 agg.add(&e);
-                let round = |v: Option<f64>| v.map(|v| v.round() as i64);
-                insert
-                    .execute(params![
-                        format!("{sid}:{}", line.number),
-                        sid,
-                        line.number,
-                        line.start_byte,
-                        e.event_type,
-                        e.kind.as_str(),
-                        e.role.map(Role::as_str),
-                        e.title,
-                        e.preview,
-                        e.timestamp_ms,
-                        round(e.duration_ms),
-                        round(e.input_tokens),
-                        round(e.output_tokens),
-                        e.usage_is_total,
-                        round(e.turn),
-                        round(e.step),
-                        e.depth,
-                        e.model,
-                        e.cwd,
-                        e.is_error(),
-                    ])
-                    .map_err(io::Error::other)?;
+                insert_event(&mut insert, &sid, line.number, line.start_byte, &e).map_err(io::Error::other)?;
                 Ok(true)
             })?
         };

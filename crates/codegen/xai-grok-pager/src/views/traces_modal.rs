@@ -914,6 +914,8 @@ mod tests {
         let g = resume_target(&row("grok", "/h/.grok/sessions/%2Fw/01a10b35-4b73-7903-a589-181aba7b40f5/chat_history.jsonl")).unwrap();
         assert_eq!(g.native_id, "01a10b35-4b73-7903-a589-181aba7b40f5");
         assert_eq!(resume_target(&row("dsh", "/h/.dsh/sessions/a/b/session.v2.jsonl.zstd")), None);
+        assert_eq!(resume_target(&row("bb", "/h/.bb/bb.db#thr_x")), None);
+        assert_eq!(source_label("bb"), "bb");
     }
 
     fn line(ts: &str, text: &str) -> String {

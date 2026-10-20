@@ -1,6 +1,6 @@
 # bb threads as a /traces source
 
-Status: reader and mapping written and tested (`crates/codegen/xai-grok-traces/src/bb.rs`, synthetic db). Not wired into `TraceIndex`: the index is file-shaped end to end, and the wiring below touches `index.rs` and `query.rs`.
+Status: wired. `bb.rs` reads and maps; `index/bb_index.rs` indexes; tests are `tests/bb.rs` (synthetic db).
 
 ## Store
 
@@ -37,21 +37,15 @@ Tables used (structure only; everything else in the db is out of scope):
 - Skipped at read time: `*/delta` and `*Delta`, `item/started` (the completed row has the same item), `provider/unhandled`, and bookkeeping (`provider.env-resolved`, `system/thread-provisioning`, `thread/extensionState/updated`, `thread/contextWindowUsage/updated`, `client/thread/start`, `turn/input/accepted`). On sab-air that drops about three quarters of the rows (57k events, 29k of them `provider/unhandled`).
 - Never read or stored: tool arguments beyond the clipped preview, `aggregatedOutput`, `result`. Only the preview text goes in the index.
 
-## Wiring needed
+## Wiring (as built)
 
-All in the file-shaped index; this is why it was not forced.
-
-1. `Format::Sqlite` (or a separate `Root.kind`) and a branch in `scan_with_limit`: for a bb root call `Bb::threads()` instead of `discover`. `discover` on a file path returns the file, which `index_file` would then read as JSONL.
-2. A per-thread `index_bb_thread(root, bb, thread)` beside `index_file`:
-   - Key: `trace_files.path = "<db>#<thread_id>"`, `format = "sqlite"`. `trace_sessions.file_path` takes the same string (it is `UNIQUE`). `session_id("bb", path)` as usual.
-   - Watermarks: `size_bytes = thread.last_sequence`, `mtime_ms = thread.updated_at`, `indexed_bytes = last indexed sequence`, `indexed_lines = event count`. Skip when `last_sequence == indexed_bytes`. Append with `Bb::events(thread, indexed_bytes, N)` in a loop until a short page. Reset (delete the thread's events, reparse) on `parser_version` change or `last_sequence < indexed_bytes`.
-   - `trace_events`: `line_number = sequence`, `byte_offset = 0`, id `"{sid}:{sequence}"`.
-   - Feed each `BbEvent.event` through `Aggregate::add` (private to `index.rs`; do the wiring there or make it `pub(crate)`). Title is `thread.title`, else the first user message; `cwd = thread.cwd`; model is `thread.model`, else the first event model. `write_aggregate` takes `thread.updated_at` as the mtime.
-3. Pruning: a thread missing from `threads()` (deleted) is pruned like a vanished file, only when the listing succeeded.
-4. `raw_line` (query.rs): when `source_id = "bb"`, split `file_path` on the last `#` and call `Bb::open(db)?.raw_event(thread, line)` instead of seeking.
-5. `roots.rs`: `bb` in `SOURCES`/`source_label`, and a root at `bb::default_db_path(home)` (or `$BB_HOME/bb.db`).
-
-Estimate: about 100 lines across `index.rs`, `query.rs`, `roots.rs`.
+- Root `bb-threads` (`Format::Sqlite`, path `~/.bb/bb.db`), source `bb`, tab label `bb`. A missing db is an inaccessible root, no error; an unreadable one keeps cached rows. `SOURCES` ends with `bb`.
+- `scan_with_limit` hands a Sqlite root to `scan_bb_root`: open read-only (500 ms busy), list threads, index each, drop the handle. Nothing is held between scans and nothing is written to bb.db.
+- Per thread: `trace_files.path = trace_sessions.file_path = "<db>#<thread_id>"`, `format = sqlite`, `size_bytes` = last sequence, `mtime_ms` = `updated_at`, `indexed_bytes` = last examined sequence, `indexed_lines` = events indexed. Skipped when sequence and `updated_at` are unchanged; append reads `sequence > indexed_bytes`; reset on parser version change or a sequence that went backwards. Threads with no events are not indexed; deleted threads are pruned.
+- `trace_events.line_number = sequence`, `byte_offset = 0`. `raw_line` for `format = sqlite` opens bb.db and returns `Bb::raw_event` (the row as JSON).
+- Caps: `check_cap` before every thread (health/`MAX_DB_BYTES`), and `MAX_EVENTS_PER_FILE` per thread with a `parse_error` note.
+- Hook: `grok-traces hook bb` records the receipt (with the thread's session id when `thread_id` is given) and indexes just that thread via `index_bb_thread_id`. A bb payload has no file, so `root_for` never matches it.
+- Modal: the tab comes from `SOURCES`; `resume_target` is `None` for bb.
 
 ## Caveats
 

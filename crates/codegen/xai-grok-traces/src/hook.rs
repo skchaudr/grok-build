@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::bb::thread_key;
 use crate::index::{Result, TraceIndex, now_ms, session_id};
 use crate::receipts::Receipt;
-use crate::roots::{Root, resolve};
+use crate::roots::{Format, Root, resolve};
 
 /// Stdin beyond this is discarded.
 pub const MAX_STDIN_BYTES: usize = 16 * 1024 * 1024;
@@ -52,6 +53,9 @@ pub fn transcript_for(source: &str, path: &Path) -> PathBuf {
 
 /// Records the receipt and, when its path is a trace source, indexes just that file.
 pub fn ingest(idx: &mut TraceIndex, roots: &[Root], mut r: Receipt) -> Result<i64> {
+    if r.source == "bb" {
+        return ingest_bb(idx, roots, r);
+    }
     let target = r.path.as_deref().and_then(|p| resolve(&transcript_for(&r.source, Path::new(p)), roots));
     if let Some((root, path)) = &target {
         r.session_id = Some(session_id(&root.source, &path.to_string_lossy()));
@@ -59,6 +63,20 @@ pub fn ingest(idx: &mut TraceIndex, roots: &[Root], mut r: Receipt) -> Result<i6
     let id = idx.record_receipt(&r)?;
     if let Some((root, path)) = target {
         idx.index_file(root, &path)?;
+    }
+    Ok(id)
+}
+
+/// bb hooks carry a thread id, not a file: record the receipt and index just that thread.
+fn ingest_bb(idx: &mut TraceIndex, roots: &[Root], mut r: Receipt) -> Result<i64> {
+    let root = roots.iter().find(|x| x.source == "bb" && x.format == Format::Sqlite);
+    let thread = r.native_session.clone();
+    if let (Some(root), Some(thread)) = (root, &thread) {
+        r.session_id = Some(session_id(&root.source, &thread_key(&root.path, thread)));
+    }
+    let id = idx.record_receipt(&r)?;
+    if let (Some(root), Some(thread)) = (root, &thread) {
+        idx.index_bb_thread_id(root, thread)?;
     }
     Ok(id)
 }
