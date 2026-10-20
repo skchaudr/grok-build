@@ -82,6 +82,10 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
 - **Hook rules:** busy timeout 250 ms. Failures go to one stderr line; a tripped index posts a macOS notification at most hourly (stamp file `tripped.notified` beside the db). Grok's `updates.jsonl` path maps to the sibling `chat_history.jsonl`. No watcher or daemon exists; the hook is the only live feed.
 - The index lives at `~/.grok/traces/traces.sqlite`. It is disposable and never uploaded.
 
+## Remote (read-only, ssh)
+
+`xai-grok-traces/src/remote.rs`. Hosts: `~/.grok/traces/hosts`, one ssh target per line (`sab-mini@sab-air`), `#` comments; absent = none. Remote rows: `host = Some(label after '@')`, id `label:<remote id>`, `parent_id` prefixed the same. `fetch_sessions/fetch_events/fetch_raw` run `ssh -o BatchMode=yes -o ConnectTimeout=2 -o ServerAliveInterval=2 -o ServerAliveCountMax=1 <target> '~/.grok/bin/grok-traces list|events|raw ...'`, child killed at 4s. Errors are `remote::Error` values (`"sab-air unreachable (...)"`). Last good result per host cached in memory only (`cached_sessions`). Old remote binary (rejects a flag): `fetch_sessions` falls back to plain `list --json`, filters locally, `Fetched.note` says so. Bin: `list --json [--since MS] [--active] [--roots] [--limit N]`, `events <id> --json [--noise] [--limit N]`, `raw <id> <line>` (exit 3 = none), `version`. Tests: `tests/remote.rs` (fake ssh scripts). Smoke: `--example remote_smoke -- user@host`.
+
 ## Pager rules learned
 
 - The modal runs SQLite queries synchronously; the index makes them cheap. Live `/` search covers session columns only. Enter adds the event-content scan (`SessionFilter.deep`).

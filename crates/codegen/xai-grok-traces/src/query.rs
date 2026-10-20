@@ -40,6 +40,15 @@ impl Status {
             Status::Unknown => "-",
         }
     }
+
+    pub fn parse(s: &str) -> Status {
+        match s {
+            "active" => Status::Active,
+            "idle" => Status::Idle,
+            "done" => Status::Completed,
+            _ => Status::Unknown,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -63,6 +72,8 @@ pub struct SessionFilter {
     pub roots_only: bool,
     /// Hide pings: fewer than 3 non-noise events and no tools.
     pub hide_trivial: bool,
+    /// Only sessions updated at or after this time (ms).
+    pub since_ms: Option<i64>,
     /// Also match event titles and previews (a scan of trace_events).
     pub deep: bool,
     pub sort: Sort,
@@ -101,6 +112,8 @@ pub struct SessionRow {
     pub children: u32,
     /// Ended in failure: a trailing error with nothing after it, or a finished-with-error sidecar.
     pub failed: bool,
+    /// `None` = this machine. Remote rows (see `remote`) carry the host label and a `host:`-prefixed id.
+    pub host: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -195,6 +208,7 @@ fn session_row(r: &Row<'_>, now: i64) -> rusqlite::Result<SessionRow> {
         last_event_at: r.get(24)?,
         children: r.get::<_, i64>(25)?.max(0) as u32,
         failed: r.get(26)?,
+        host: None,
     })
 }
 
@@ -227,6 +241,10 @@ impl TraceIndex {
             let n = sql.matches("?1x").count();
             sql = sql.replace("?1x", "?");
             args.extend(std::iter::repeat_n(Sql::Text(pat), n));
+        }
+        if let Some(since) = filter.since_ms {
+            sql.push_str(" AND COALESCE(s.updated_at,0) >= ?");
+            args.push(Sql::Integer(since));
         }
         if filter.errors_only {
             sql.push_str(" AND s.error_count > 0");
