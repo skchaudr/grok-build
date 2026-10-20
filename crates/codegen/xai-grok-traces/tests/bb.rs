@@ -97,7 +97,7 @@ fn threads_are_indexed_by_pointer_and_empty_threads_skipped() {
 
     assert_eq!(thread(&idx, "second thread").status, Status::Idle, "no terminal event, updated_at long ago");
 
-    let lines: Vec<i64> = idx.list_events(&a.id, &EventFilter::default()).unwrap().iter().map(|e| e.line).collect();
+    let lines: Vec<i64> = idx.list_events(&a.id, &EventFilter { include_noise: true, ..Default::default() }).unwrap().iter().map(|e| e.line).collect();
     assert_eq!(lines, [1, 3, 4, 5, 7, 8, 9], "line number is the event sequence");
     let raw: serde_json::Value = serde_json::from_str(&idx.raw_line(&a.id, 3).unwrap().unwrap()).unwrap();
     assert_eq!((raw["id"].as_str(), raw["data"]["item"]["text"].as_str()), (Some("evt_thr_a_3"), Some("Looking.")));
@@ -196,4 +196,25 @@ fn event_cap_stops_a_runaway_thread() {
     idx.scan(&roots).unwrap();
     assert_eq!(thread(&idx, "second thread").event_count, MAX_EVENTS_PER_FILE as i64);
     assert_eq!(idx.scan(&roots).unwrap().indexed, 0, "capped thread is not rescanned");
+}
+
+#[test]
+fn child_threads_nest_under_parent_thread() {
+    let e = env();
+    {
+        let c = rw(&e.bb);
+        c.execute("UPDATE threads SET parent_thread_id = 'thr_a' WHERE id = 'thr_b'", []).unwrap();
+        c.execute("UPDATE threads SET status = 'error' WHERE id = 'thr_b'", []).unwrap();
+    }
+    let roots = default_roots(&e.home, &e.home.join(".grok"));
+    let mut idx = TraceIndex::open(&e.idx_db).unwrap();
+    idx.scan(&roots).unwrap();
+    let parent = thread(&idx, "Fix the bug");
+    let child = thread(&idx, "second thread");
+    assert_eq!((parent.parent_id.clone(), parent.children), (None, 1));
+    assert_eq!((child.parent_id.as_deref(), child.agent_type.as_deref(), child.failed), (Some(parent.id.as_str()), Some("pi"), true));
+    assert_eq!(idx.children(&parent.id).unwrap().len(), 1);
+    let ev = idx.list_events(&parent.id, &EventFilter::default()).unwrap();
+    let tools: Vec<_> = ev.iter().filter_map(|v| v.detail.as_deref()).collect();
+    assert_eq!(tools, ["ls", "a"], "bash command and read_file path");
 }

@@ -5,10 +5,12 @@
 //! truth and raw lines are re-read from them on demand. traces-ledger-v1
 
 pub mod bb;
+mod classify;
 mod cursor;
 pub mod hook;
 mod index;
 mod lines;
+mod links;
 pub mod normalize;
 mod query;
 mod receipts;
