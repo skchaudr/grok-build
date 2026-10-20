@@ -2,3 +2,4 @@
 2026-10-20T06:55:13Z P1 green: xai-grok-traces crate, 17 tests; real Mini scan 298 files 2.6s 0 errors, rescan 16ms
 2026-10-20T07:17:26Z P2 wiring: /traces modal (ledger/trajectory/inspector), scan effect, resume (claude/codex skill, grok native), copy; 444 slash+modal tests green
 2026-10-20T07:32:11Z P2 pty green: traces_modal_ledger_trajectory_inspector; running full pager suite
+2026-10-20T07:37:23Z P2 done: full pager suite 10391/0 (baseline 10389/0); docs + MAP.md; merging
