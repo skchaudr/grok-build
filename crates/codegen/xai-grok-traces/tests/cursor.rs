@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::Path;
 
+use xai_grok_traces::roots::root_for;
 use xai_grok_traces::{EventFilter, SessionFilter, Status, TraceIndex, default_roots};
 
 const CURSOR: &str = r#"{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Tuesday, Oct 20, 2026</timestamp>\n<user_query>\nfix the bug\n</user_query>"}]}}
@@ -25,8 +26,12 @@ fn cursor_transcripts_are_indexed_in_place() {
     // Not a transcript: Cursor's per-project metadata sits beside it.
     write(&home.join(".cursor/projects/w-proj/repo.json"), r#"{"id":"x"}"#);
 
-    let mut idx = TraceIndex::open(&tmp.path().join("t.sqlite")).unwrap();
-    let report = idx.scan(&default_roots(&home, &home.join(".grok"))).unwrap();
+    let roots = default_roots(&home, &home.join(".grok"));
+    assert_eq!(root_for(&file, &roots).map(|r| r.source.as_str()), Some("cursor"));
+    assert!(root_for(&home.join(".cursor/projects/w-proj/repo.json"), &roots).is_none());
+
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/t.sqlite")).unwrap();
+    let report = idx.scan(&roots).unwrap();
     assert!(report.errors.is_empty(), "{:?}", report.errors);
 
     let rows = idx.list_sessions(&SessionFilter { source: Some("cursor".into()), ..Default::default() }).unwrap();

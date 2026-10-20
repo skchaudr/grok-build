@@ -42,6 +42,8 @@ pub struct TracesModalState {
     index: Option<TraceIndex>,
     pub scanning: bool,
     pub status: Option<String>,
+    /// Index health problem (over cap, ...); shown red under the tabs.
+    pub health: Option<String>,
     typing: Typing,
 
     pub source_tab: usize,
@@ -97,6 +99,7 @@ impl TracesModalState {
             mode: Mode::List,
             status: index.is_none().then(|| "trace index unavailable".to_string()),
             index,
+            health: None,
             scanning: true,
             typing: Typing::No,
             source_tab: 0,
@@ -126,6 +129,7 @@ impl TracesModalState {
     /// Re-query the ledger (and the open trajectory) from the index.
     pub fn refresh(&mut self) {
         let Some(index) = &self.index else { return };
+        self.health = index.health();
         let filter = SessionFilter {
             source: tab_source(self.source_tab).map(str::to_string),
             text: (!self.query.is_empty()).then(|| self.query.clone()),
@@ -568,7 +572,14 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
         (false, true) => ("/ to search titles, cwd, model · Enter searches events too".into(), dim),
         (false, false) => (format!("/{}{}", state.query, if state.deep { "  (events)" } else { "" }), Style::default().fg(theme.fuzzy_accent)),
     };
-    buf.set_span(area.x, search_y, &Span::styled(truncate_str(&text, area.width as usize).as_str(), style), area.width);
+    // A red health line takes the right of the search row; the search hint yields to it.
+    let health_w = state.health.as_deref().map_or(0, |h| h.width().min(area.width as usize * 2 / 3)) as u16;
+    if let Some(health) = &state.health {
+        let red = Style::default().fg(theme.accent_error).add_modifier(Modifier::BOLD);
+        buf.set_span(area.x + area.width - health_w, search_y, &Span::styled(truncate_str(health, health_w as usize).as_str(), red), health_w);
+    }
+    let search_w = area.width.saturating_sub(health_w + u16::from(health_w > 0));
+    buf.set_span(area.x, search_y, &Span::styled(truncate_str(&text, search_w as usize).as_str(), style), search_w);
 
     let status_rows = u16::from(state.status.is_some());
     let list = Rect { y: area.y + 3, height: area.height.saturating_sub(3 + status_rows), ..area };
@@ -775,9 +786,9 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         };
         let indent = "  ".repeat(e.depth.clamp(0, 2) as usize);
         let body = if e.kind == "tool" && e.role.as_deref() == Some("tool") {
-            format!("{indent}{}  {}", e.title, one_line(&e.summary))
+            format!("{indent}{}  {}", e.title, one_line(&e.preview))
         } else {
-            format!("{indent}{}", one_line(&e.summary))
+            format!("{indent}{}", one_line(&e.preview))
         };
         let turn_mark = if e.turn.is_some() && e.turn != prev_turn { "┊" } else { " " };
         prev_turn = e.turn.or(prev_turn);

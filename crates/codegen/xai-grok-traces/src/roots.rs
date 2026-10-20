@@ -103,6 +103,37 @@ fn matches(name: &str, root: &Root) -> bool {
     }
 }
 
+/// Names that are never trace sources, whatever the root's format rules say.
+fn forbidden_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    [".db", ".sqlite", "-wal", "-shm", "-journal"].iter().any(|s| lower.ends_with(s))
+        || lower.contains(".corrupt.")
+}
+
+/// The root that owns `path`, plus the path spelled under that root's own
+/// (non-canonical) directory so it keys the same as a scan would. Requires
+/// the canonical path to be inside the root and the file name to match.
+pub fn resolve<'a>(path: &Path, roots: &'a [Root]) -> Option<(&'a Root, PathBuf)> {
+    let canon = path.canonicalize().ok()?;
+    let name = canon.file_name()?.to_string_lossy();
+    if forbidden_name(&name) || !canon.is_file() {
+        return None;
+    }
+    roots.iter().find_map(|root| {
+        if !matches(&name, root) {
+            return None;
+        }
+        let base = root.path.canonicalize().ok()?;
+        let rel = canon.strip_prefix(&base).ok()?;
+        let spelled = if rel.as_os_str().is_empty() { root.path.clone() } else { root.path.join(rel) };
+        Some((root, spelled))
+    })
+}
+
+pub fn root_for<'a>(path: &Path, roots: &'a [Root]) -> Option<&'a Root> {
+    resolve(path, roots).map(|(r, _)| r)
+}
+
 pub fn discover(root: &Root, max_files: usize) -> Discovery {
     let mut d = Discovery { complete: true, ..Default::default() };
     let Ok(meta) = std::fs::metadata(&root.path) else {

@@ -191,7 +191,7 @@ fn zstd_matches_plain() {
     let packed = Root { id: "z".into(), source: "dsh".into(), path: tmp.path().join("z"), format: Format::Zstd, file_name: None };
     write(&plain.path.join("s.jsonl"), DSH);
     zstd_write(&packed.path.join("s.jsonl.zstd"), DSH);
-    let mut idx = TraceIndex::open(&tmp.path().join("t.sqlite")).unwrap();
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/t.sqlite")).unwrap();
     idx.scan(&[plain, packed]).unwrap();
     let rows = all(&idx);
     assert_eq!(rows.len(), 2);
@@ -237,4 +237,201 @@ fn vanished_files_and_roots_are_pruned() {
     let fewer: Vec<Root> = e.roots.iter().filter(|r| r.source != "pi").cloned().collect();
     idx.scan(&fewer).unwrap();
     assert_eq!(all(&idx).len(), 4);
+}
+
+fn grow(path: &Path, to: u64) {
+    fs::OpenOptions::new().write(true).open(path).unwrap().set_len(to).unwrap();
+}
+
+#[test]
+fn preview_is_flat_and_clipped() {
+    let e = env();
+    let long = format!("line one\n\n   line   two {}", "x".repeat(400));
+    write(&e.home.join(".pi/agent/sessions/--w-pi--/long.jsonl"), &format!(
+        "{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":{}}}}}\n", serde_json::to_string(&long).unwrap()
+    ));
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let rows = idx.list_sessions(&SessionFilter { text: Some("line one".into()), ..Default::default() }).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].title, "line one", "title is the first line of the full text");
+    let ev = idx.list_events(&rows[0].id, &EventFilter::default()).unwrap();
+    assert!(ev[0].preview.starts_with("line one line two xxx"), "{}", ev[0].preview);
+    assert_eq!(ev[0].preview.chars().count(), 161);
+    assert!(!ev[0].preview.contains('\n'));
+}
+
+#[test]
+fn over_cap_refuses_writes_and_reports_health() {
+    let e = env();
+    drop(TraceIndex::open(&e.db).unwrap());
+    let small = fs::metadata(&e.db).unwrap().len();
+    grow(&e.db, xai_grok_traces::MAX_DB_BYTES + 1024 * 1024);
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    let err = idx.scan(&e.roots).unwrap_err();
+    assert!(matches!(err, xai_grok_traces::Error::OverCap { .. }), "{err}");
+    let health = idx.health().unwrap();
+    assert!(health.starts_with("over cap: 257MB / 256MB — writes paused; run grok-traces doctor"), "{health}");
+    let pi = e.roots.iter().find(|r| r.source == "pi").unwrap();
+    assert!(idx.index_file(pi, &e.home.join(".pi/agent/sessions/--w-pi--/p.jsonl")).is_err());
+    let r = xai_grok_traces::Receipt { source: "claude".into(), event: "Stop".into(), ..Default::default() };
+    assert!(matches!(idx.record_receipt(&r), Err(xai_grok_traces::Error::OverCap { .. })));
+    assert_eq!(all(&idx).len(), 0, "nothing was written");
+
+    drop(idx);
+    grow(&e.db, small);
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    assert_eq!(idx.health(), None, "cleared once under the cap");
+    assert_eq!(all(&idx).len(), 6);
+}
+
+#[test]
+fn old_schema_is_replaced_not_migrated() {
+    let e = env();
+    fs::create_dir_all(e.db.parent().unwrap()).unwrap();
+    {
+        let c = rusqlite::Connection::open(&e.db).unwrap();
+        c.execute_batch("CREATE TABLE trace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE trace_events (summary TEXT);
+                         INSERT INTO trace_events VALUES ('stale');").unwrap();
+    }
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    assert_eq!(all(&idx).len(), 6);
+    let stats = idx.stats().unwrap();
+    assert_eq!(stats.schema_version.as_deref(), Some("2"));
+    assert_eq!(stats.parser_version.as_deref(), Some("2"));
+    let names: Vec<String> = fs::read_dir(e.db.parent().unwrap()).unwrap().map(|d| d.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert!(names.iter().all(|n| !n.contains(".old.")), "old db removed: {names:?}");
+    assert!(!names.iter().any(|n| n.contains(".corrupt.")));
+}
+
+#[test]
+fn root_for_guards_paths() {
+    let e = env();
+    let ok = e.home.join(".claude/projects/-w-claude/c1.jsonl");
+    assert_eq!(xai_grok_traces::root_for(&ok, &e.roots).map(|r| r.source.as_str()), Some("claude"));
+    // Wrong name for a named root, outside every root, and index-ish files.
+    let grok_other = e.home.join(".grok/sessions/%2Fw%2Fgrok/g1/updates.jsonl");
+    assert!(xai_grok_traces::root_for(&grok_other, &e.roots).is_none());
+    let outside = e.home.join("elsewhere.jsonl");
+    write(&outside, "{}\n");
+    assert!(xai_grok_traces::root_for(&outside, &e.roots).is_none());
+    for name in ["x.db", "x.sqlite", "x.sqlite-wal", "x.sqlite-shm", "x.sqlite.corrupt.123", "x.jsonl.corrupt.9"] {
+        let p = e.home.join(".claude/projects/-w-claude").join(name);
+        write(&p, "{}\n");
+        assert!(xai_grok_traces::root_for(&p, &e.roots).is_none(), "{name}");
+    }
+    assert!(xai_grok_traces::root_for(&e.home.join(".claude/projects/missing.jsonl"), &e.roots).is_none());
+    // `..` cannot escape a root.
+    let sneaky = e.home.join(".claude/projects/-w-claude/../../../elsewhere.jsonl");
+    assert!(xai_grok_traces::root_for(&sneaky, &e.roots).is_none());
+}
+
+#[test]
+fn index_file_rejects_non_sources_and_own_dir() {
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    let claude = e.roots.iter().find(|r| r.source == "claude").unwrap();
+    let outside = e.home.join("elsewhere.jsonl");
+    write(&outside, "{}\n");
+    assert!(matches!(idx.index_file(claude, &outside), Err(xai_grok_traces::Error::Rejected(_))));
+    // A root that happens to contain the index directory still cannot index it.
+    let own = Root { id: "own".into(), source: "claude".into(), path: e.db.parent().unwrap().to_path_buf(), format: Format::Jsonl, file_name: None };
+    let planted = e.db.parent().unwrap().join("x.jsonl");
+    write(&planted, "{}\n");
+    assert!(matches!(idx.index_file(&own, &planted), Err(xai_grok_traces::Error::Rejected(_))));
+    assert_eq!(all(&idx).len(), 0);
+}
+
+#[test]
+fn event_cap_stops_a_runaway_file() {
+    let e = env();
+    let line = "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"x\"}}\n";
+    write(&e.home.join(".pi/agent/sessions/--w-pi--/big.jsonl"), &line.repeat(xai_grok_traces::MAX_EVENTS_PER_FILE + 5));
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    let pi = e.roots.iter().find(|r| r.source == "pi").unwrap();
+    let path = e.home.join(".pi/agent/sessions/--w-pi--/big.jsonl");
+    assert!(idx.index_file(pi, &path).unwrap());
+    let row = idx.list_sessions(&SessionFilter::default()).unwrap().remove(0);
+    assert_eq!(row.event_count, xai_grok_traces::MAX_EVENTS_PER_FILE as i64);
+    assert!(!idx.index_file(pi, &path).unwrap(), "capped file is not rescanned");
+}
+
+#[test]
+fn receipts_watermark_and_active_status() {
+    use xai_grok_traces::hook::{extract, ingest};
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    assert_eq!(idx.receipts_watermark().unwrap(), 0);
+    // The codex fixture ends in task_complete → completed, until a live receipt says otherwise.
+    let x = by_source(&idx, "codex");
+    assert_eq!(x.status, Status::Completed);
+    let path = e.home.join(".codex/sessions/2026/10/01/rollout-x.jsonl");
+    let payload = |event: &str| format!(r#"{{"hook_event_name":"{event}","session_id":"n1","transcript_path":"{}","tool_name":"Bash","cwd":"/w"}}"#, path.display());
+
+    let id = ingest(&mut idx, &e.roots, extract("codex", payload("PostToolUse").as_bytes())).unwrap();
+    assert_eq!((id, idx.receipts_watermark().unwrap()), (1, 1));
+    let x = by_source(&idx, "codex");
+    assert_eq!(x.status, Status::Active, "fresh non-terminal receipt wins");
+    let (at, event) = idx.last_receipt(&x.id).unwrap().unwrap();
+    assert_eq!(event, "PostToolUse");
+    assert!(at > 0);
+    let active = |idx: &TraceIndex| idx.list_sessions(&SessionFilter { active_only: true, ..Default::default() }).unwrap();
+    assert!(active(&idx).iter().any(|s| s.source == "codex"));
+
+    ingest(&mut idx, &e.roots, extract("codex", payload("Stop").as_bytes())).unwrap();
+    assert_eq!(by_source(&idx, "codex").status, Status::Completed, "terminal receipt falls back to file rules");
+    assert!(active(&idx).iter().all(|s| s.source != "codex"));
+
+    // A receipt for a path outside every root is still recorded, without a session.
+    ingest(&mut idx, &e.roots, extract("codex", br#"{"hook_event_name":"Stop","transcript_path":"/nope.jsonl"}"#)).unwrap();
+    assert_eq!(idx.receipts_watermark().unwrap(), 3);
+    assert_eq!(idx.stats().unwrap().receipts.len(), 1);
+}
+
+#[test]
+fn receipts_are_pruned_to_a_bound() {
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    let r = xai_grok_traces::Receipt { source: "pi".into(), event: "x".into(), ..Default::default() };
+    for _ in 0..101_000 {
+        idx.record_receipt(&r).unwrap();
+    }
+    let n: i64 = idx.stats().unwrap().receipts.iter().map(|r| r.1).sum();
+    assert_eq!(n, 100_000);
+    assert_eq!(idx.receipts_watermark().unwrap(), 101_000);
+}
+
+#[test]
+fn hook_payload_fields_across_harnesses() {
+    use xai_grok_traces::hook::extract;
+    let c = extract("claude", br#"{"hook_event_name":"PreToolUse","session_id":"s1","transcript_path":"/t.jsonl","tool_name":"Bash","cwd":"/w"}"#);
+    assert_eq!((c.event.as_str(), c.native_session.as_deref(), c.path.as_deref()), ("PreToolUse", Some("s1"), Some("/t.jsonl")));
+    assert_eq!((c.tool.as_deref(), c.cwd.as_deref(), c.source.as_str()), (Some("Bash"), Some("/w"), "claude"));
+    let k = extract("cursor", br#"{"hookEventName":"beforeShellExecution","conversation_id":"c9","workspace_roots":["/a","/b"]}"#);
+    assert_eq!((k.event.as_str(), k.native_session.as_deref(), k.cwd.as_deref()), ("beforeShellExecution", Some("c9"), Some("/a")));
+    let p = extract("pi", br#"{"type":"agent_end","sessionId":"p1","sessionFile":"/p.jsonl","toolName":"read"}"#);
+    assert_eq!((p.event.as_str(), p.native_session.as_deref(), p.path.as_deref(), p.tool.as_deref()), ("agent_end", Some("p1"), Some("/p.jsonl"), Some("read")));
+    let t = extract("codex", br#"{"event":"x","thread_id":"t1","transcriptPath":"/c.jsonl","tool":"shell"}"#);
+    assert_eq!((t.event.as_str(), t.native_session.as_deref(), t.path.as_deref(), t.tool.as_deref()), ("x", Some("t1"), Some("/c.jsonl"), Some("shell")));
+    assert_eq!(extract("x", b"not json").event, "unparsed");
+    assert_eq!(extract("x", b"{}").event, "unknown");
+    assert_eq!(extract("x", br#"{"event":"e","cwd":""}"#).cwd, None);
+}
+
+#[test]
+fn grok_hook_updates_path_maps_to_chat_history() {
+    use xai_grok_traces::hook::{extract, ingest, transcript_for};
+    let e = env();
+    let dir = e.home.join(".grok/sessions/%2Fw%2Fgrok/g1");
+    assert_eq!(transcript_for("grok", &dir.join("updates.jsonl")), dir.join("chat_history.jsonl"));
+    assert_eq!(transcript_for("claude", &dir.join("updates.jsonl")), dir.join("updates.jsonl"));
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    let payload = format!(r#"{{"hook_event_name":"PostToolUse","transcript_path":"{}"}}"#, dir.join("updates.jsonl").display());
+    ingest(&mut idx, &e.roots, extract("grok", payload.as_bytes())).unwrap();
+    let g = by_source(&idx, "grok");
+    assert_eq!(g.event_count, 5);
+    assert_eq!(idx.last_receipt(&g.id).unwrap().unwrap().1, "PostToolUse");
 }

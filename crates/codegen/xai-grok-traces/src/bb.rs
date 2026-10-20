@@ -325,7 +325,7 @@ mod tests {
 
         let e = |i: usize| &events[i].event;
         assert_eq!((e(0).role, e(0).kind, e(0).model.as_deref()), (Some(Role::User), Kind::Message, Some("gpt-5")));
-        assert_eq!(e(0).summary, "fix the bug");
+        assert_eq!(e(0).text, "fix the bug");
         assert_eq!((e(2).role, e(2).title.as_str()), (Some(Role::Assistant), "Assistant"));
         assert_eq!((e(3).kind, e(3).title.as_str(), e(3).duration_ms), (Kind::Tool, "bash", Some(12.0)));
         assert_eq!((e(4).title.as_str(), e(4).is_error()), ("read_file", true));
