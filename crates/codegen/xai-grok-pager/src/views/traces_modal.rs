@@ -4,6 +4,7 @@
 //! parsing run in a background effect and refresh the ledger when done.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
@@ -83,6 +84,11 @@ pub struct TracesModalState {
     folded: Vec<Option<Fold>>,
     /// Children of the open session (dispatch targets), oldest first.
     session_children: Vec<SessionRow>,
+    /// Per event: which of `session_children` its dispatch started.
+    dispatch_child: Vec<Option<usize>>,
+    /// Bumped by every synchronous query; a worker snapshot from an older one is dropped.
+    generation: u64,
+    inflight: Option<mpsc::Receiver<Snapshot>>,
     parent_name: Option<String>,
     /// Sessions we descended from with Enter on a dispatch row, and the row we were on.
     trail: Vec<(SessionRow, usize)>,
@@ -170,6 +176,9 @@ impl TracesModalState {
             include_noise: false,
             folded: Vec::new(),
             session_children: Vec::new(),
+            dispatch_child: Vec::new(),
+            generation: 0,
+            inflight: None,
             parent_name: None,
             trail: Vec::new(),
             tools: Vec::new(),
@@ -189,31 +198,74 @@ impl TracesModalState {
         self.poll_live_at(now)
     }
 
+    /// Cheap checks on the UI thread (three tiny queries); anything heavier runs on a worker
+    /// and is applied by a later poll.
     fn poll_live_at(&mut self, now_ms: i64) -> bool {
-        let Some(index) = &self.index else { return false };
+        let mut redraw = false;
+        if let Some(rx) = &self.inflight {
+            match rx.try_recv() {
+                Ok(snap) => {
+                    self.inflight = None;
+                    redraw |= self.apply(snap);
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => self.inflight = None,
+            }
+        }
+        let Some(index) = &self.index else { return redraw };
         let mark = index.receipts_watermark().unwrap_or(self.watermark);
         let live = index.last_receipt_at().ok().flatten().is_some_and(|at| now_ms - at < RECEIPT_WINDOW_MS);
         let health = index.health();
-        let changed = live != self.live || health != self.health;
+        redraw |= live != self.live || health != self.health;
         (self.live, self.health) = (live, health);
-        if mark == self.watermark {
-            return changed;
+        if mark != self.watermark && self.inflight.is_none() {
+            self.watermark = mark;
+            self.spawn_refresh();
         }
-        self.watermark = mark;
-        // Ledger: requery in place, following the selected session wherever it moved.
-        let keep = self.selected_session().map(|s| s.id.clone());
-        self.reload_sessions();
-        if let Some(i) = keep.and_then(|id| self.ledger.iter().position(|it| matches!(it, Item::Row { row, .. } if row.id == id))) {
-            self.selected = i;
+        redraw
+    }
+
+    /// Requery the ledger (and the open trajectory if it may have grown) off the UI thread.
+    fn spawn_refresh(&mut self) {
+        let Some(index) = &self.index else { return };
+        let path = index.db_path().to_path_buf();
+        let req = Request {
+            generation: self.generation,
+            sessions: self.session_filter(),
+            browse: self.browse(),
+            open: (self.mode != Mode::List).then(|| self.session.as_ref().map(|s| (s.id.clone(), s.event_count))).flatten(),
+            events: self.event_filter(),
+        };
+        let (tx, rx) = mpsc::channel();
+        self.inflight = Some(rx);
+        std::thread::spawn(move || {
+            if let Ok(index) = TraceIndex::open(&path) {
+                let _ = tx.send(run_request(&index, req));
+            }
+        });
+    }
+
+    /// Install a worker snapshot unless the user changed filters since it was requested.
+    fn apply(&mut self, snap: Snapshot) -> bool {
+        if snap.generation != self.generation {
+            return false;
         }
-        // Trajectory: requery only when the open session grew; follow if the user was at the bottom.
-        if self.mode != Mode::List
-            && let (Some(index), Some(open)) = (&self.index, &self.session)
-            && let Ok(Some(now)) = index.session(&open.id)
-            && now.event_count != open.event_count
+        if let Ok((sessions, children)) = snap.ledger {
+            // Follow the selected session wherever it moved.
+            let keep = self.selected_session().map(|s| s.id.clone());
+            (self.sessions, self.children) = (sessions, children);
+            self.rebuild_ledger();
+            if let Some(i) = keep.and_then(|id| self.ledger.iter().position(|it| matches!(it, Item::Row { row, .. } if row.id == id))) {
+                self.selected = i;
+            }
+        }
+        if let Some(t) = snap.trajectory
+            && self.mode != Mode::List
+            && self.session.as_ref().is_some_and(|s| s.id == t.session_id)
         {
+            // Follow the bottom if the user was there.
             let at_bottom = self.event_selected + 1 >= self.events.len();
-            self.load_events();
+            self.install_trajectory(t.rows, t.session, t.children);
             if at_bottom {
                 self.event_selected = self.events.len().saturating_sub(1);
             }
@@ -234,11 +286,9 @@ impl TracesModalState {
         !self.show_all && self.query.is_empty()
     }
 
-    fn reload_sessions(&mut self) {
-        let Some(index) = &self.index else { return };
-        self.health = index.health();
+    fn session_filter(&self) -> SessionFilter {
         let browse = self.browse();
-        let filter = SessionFilter {
+        SessionFilter {
             source: tab_source(self.source_tab).map(str::to_string),
             text: (!self.query.is_empty()).then(|| self.query.clone()),
             deep: self.deep,
@@ -249,27 +299,27 @@ impl TracesModalState {
             roots_only: browse,
             hide_trivial: browse,
             ..Default::default()
-        };
-        match index.list_sessions(&filter) {
-            Ok(rows) => self.sessions = rows,
-            Err(e) => self.status = Some(format!("query failed: {e}")),
         }
-        self.children.clear();
-        if browse {
-            for r in self.sessions.iter().filter(|r| r.children > 0) {
-                if let Ok(kids) = index.children(&r.id) {
-                    self.children.insert(r.id.clone(), kids);
-                }
-            }
-            if self.sort == Sort::Updated {
-                // Running work first (a finished parent with a running child counts), then by recency.
-                let running = |r: &SessionRow, kids: Option<&Vec<SessionRow>>| {
-                    r.status == Status::Active || kids.is_some_and(|k| k.iter().any(|c| c.status == Status::Active))
-                };
-                let flags: HashMap<String, bool> =
-                    self.sessions.iter().map(|r| (r.id.clone(), running(r, self.children.get(&r.id)))).collect();
-                self.sessions.sort_by_key(|r| !flags[&r.id]);
-            }
+    }
+
+    fn event_filter(&self) -> EventFilter {
+        EventFilter {
+            text: (!self.event_query.is_empty()).then(|| self.event_query.clone()),
+            errors_only: self.event_errors_only,
+            tool: self.tool_filter.and_then(|i| self.tools.get(i).cloned()),
+            include_noise: self.include_noise,
+            limit: EVENT_PAGE,
+            offset: 0,
+        }
+    }
+
+    fn reload_sessions(&mut self) {
+        let Some(index) = &self.index else { return };
+        self.generation += 1;
+        self.health = index.health();
+        match query_ledger(index, &self.session_filter(), self.browse()) {
+            Ok((sessions, children)) => (self.sessions, self.children) = (sessions, children),
+            Err(e) => self.status = Some(format!("query failed: {e}")),
         }
         self.rebuild_ledger();
     }
@@ -374,34 +424,24 @@ impl TracesModalState {
     }
 
     fn load_events(&mut self) {
-        let listed = {
+        self.generation += 1;
+        let loaded = {
             let (Some(index), Some(session)) = (&self.index, &self.session) else { return };
-            let filter = EventFilter {
-                text: (!self.event_query.is_empty()).then(|| self.event_query.clone()),
-                errors_only: self.event_errors_only,
-                tool: self.tool_filter.and_then(|i| self.tools.get(i).cloned()),
-                include_noise: self.include_noise,
-                limit: EVENT_PAGE,
-                offset: 0,
-            };
-            index.list_events(&session.id, &filter)
+            query_trajectory(index, &session.id, &self.event_filter())
         };
-        match listed {
-            Ok(rows) => self.set_events(rows),
+        match loaded {
+            Ok((rows, session, children)) => self.install_trajectory(rows, session, children),
             Err(e) => self.status = Some(format!("query failed: {e}")),
         }
-        let fresh = match (&self.index, &self.session) {
-            (Some(i), Some(s)) => i.session(&s.id).ok().flatten(),
-            _ => None,
-        };
-        if fresh.is_some() {
-            self.session = fresh;
+    }
+
+    fn install_trajectory(&mut self, rows: Vec<EventRow>, session: Option<SessionRow>, children: Vec<SessionRow>) {
+        self.set_events(rows);
+        if session.is_some() {
+            self.session = session;
         }
-        self.session_children = match (&self.index, &self.session) {
-            (Some(i), Some(s)) if s.children > 0 => i.children(&s.id).unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        self.session_children.sort_by_key(|c| c.started_at);
+        self.session_children = children;
+        self.dispatch_child = self.match_dispatches();
         self.event_selected = self.event_selected.min(self.events.len().saturating_sub(1));
     }
 
@@ -426,28 +466,32 @@ impl TracesModalState {
 
     /// The child session a dispatch row (Agent/Task tool call) started, if one matches.
     fn child_of(&self, i: usize) -> Option<&SessionRow> {
-        let e = self.events.get(i)?;
-        if !is_dispatch(e) || self.session_children.is_empty() {
-            return None;
-        }
-        let want = norm(e.detail.as_deref().unwrap_or(&e.preview));
-        if !want.is_empty()
-            && let Some(c) = self.session_children.iter().find(|c| {
-                let l = norm(c.label.as_deref().unwrap_or_default());
-                !l.is_empty() && (l == want || l.starts_with(&want) || want.starts_with(&l))
-            })
-        {
-            return Some(c);
-        }
-        // No label match: pair the nth dispatch row with the nth child when the counts agree.
-        if !self.event_query.is_empty() || self.event_errors_only {
-            return None;
+        self.session_children.get(self.dispatch_child.get(i).copied().flatten()?)
+    }
+
+    /// Per event, the index into `session_children` its dispatch started. Computed once per load.
+    fn match_dispatches(&self) -> Vec<Option<usize>> {
+        let mut out = vec![None; self.events.len()];
+        if self.session_children.is_empty() {
+            return out;
         }
         let dispatches: Vec<usize> = (0..self.events.len()).filter(|&j| is_dispatch(&self.events[j])).collect();
-        if dispatches.len() != self.session_children.len() {
-            return None;
+        // Without a label match, pair the nth dispatch with the nth child when the counts agree.
+        let positional = self.event_query.is_empty() && !self.event_errors_only && dispatches.len() == self.session_children.len();
+        for (n, &i) in dispatches.iter().enumerate() {
+            let e = &self.events[i];
+            let want = norm(e.detail.as_deref().unwrap_or(&e.preview));
+            let by_label = (!want.is_empty())
+                .then(|| {
+                    self.session_children.iter().position(|c| {
+                        let l = norm(c.label.as_deref().unwrap_or_default());
+                        !l.is_empty() && (l == want || l.starts_with(&want) || want.starts_with(&l))
+                    })
+                })
+                .flatten();
+            out[i] = by_label.or(positional.then_some(n));
         }
-        self.session_children.get(dispatches.iter().position(|&j| j == i)?)
+        out
     }
 
     fn enter_child(&mut self, child: SessionRow) {
@@ -486,6 +530,77 @@ impl TracesModalState {
             None => InputOutcome::Action(Action::TracesNotice { text: format!("no resume for {}", source_label(&row.source)) }),
         }
     }
+}
+
+type Ledger = (Vec<SessionRow>, HashMap<String, Vec<SessionRow>>);
+type Trajectory = (Vec<EventRow>, Option<SessionRow>, Vec<SessionRow>);
+
+/// Roots (running ones first when sorted by update) and, when browsing, each root's children.
+fn query_ledger(index: &TraceIndex, filter: &SessionFilter, browse: bool) -> Result<Ledger, xai_grok_traces::Error> {
+    let mut sessions = index.list_sessions(filter)?;
+    let mut children = HashMap::new();
+    if browse {
+        for r in sessions.iter().filter(|r| r.children > 0) {
+            if let Ok(kids) = index.children(&r.id) {
+                children.insert(r.id.clone(), kids);
+            }
+        }
+        if filter.sort == Sort::Updated {
+            // A finished parent with a running child counts as running.
+            let running: HashMap<String, bool> = sessions
+                .iter()
+                .map(|r| (r.id.clone(), r.status == Status::Active || children.get(&r.id).is_some_and(|k| k.iter().any(|c| c.status == Status::Active))))
+                .collect();
+            sessions.sort_by_key(|r| !running[&r.id]);
+        }
+    }
+    Ok((sessions, children))
+}
+
+fn query_trajectory(index: &TraceIndex, id: &str, filter: &EventFilter) -> Result<Trajectory, xai_grok_traces::Error> {
+    let rows = index.list_events(id, filter)?;
+    let session = index.session(id).ok().flatten();
+    let mut children = match &session {
+        Some(s) if s.children > 0 => index.children(&s.id).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    children.sort_by_key(|c| c.started_at);
+    Ok((rows, session, children))
+}
+
+struct Request {
+    generation: u64,
+    sessions: SessionFilter,
+    browse: bool,
+    /// The open trajectory (session id, event count we have).
+    open: Option<(String, i64)>,
+    events: EventFilter,
+}
+
+struct Snapshot {
+    generation: u64,
+    ledger: Result<Ledger, xai_grok_traces::Error>,
+    trajectory: Option<Loaded>,
+}
+
+struct Loaded {
+    session_id: String,
+    rows: Vec<EventRow>,
+    session: Option<SessionRow>,
+    children: Vec<SessionRow>,
+}
+
+fn run_request(index: &TraceIndex, req: Request) -> Snapshot {
+    let trajectory = req.open.and_then(|(id, count)| {
+        // Only requery the trajectory when the session grew.
+        let grown = index.session(&id).ok().flatten().is_some_and(|s| s.event_count != count);
+        if !grown {
+            return None;
+        }
+        let (rows, session, children) = query_trajectory(index, &id, &req.events).ok()?;
+        Some(Loaded { session_id: id, rows, session, children })
+    });
+    Snapshot { generation: req.generation, ledger: query_ledger(index, &req.sessions, req.browse), trajectory }
 }
 
 fn is_result(e: &EventRow) -> bool {
@@ -1100,14 +1215,18 @@ fn chip_color(e: &EventRow, theme: &Theme) -> Color {
 
 const SHADES: [char; 5] = [' ', '░', '▒', '▓', '█'];
 
-/// Bucket of event `i` out of `n`: by time when the span has one, else by position.
-fn bucket_of(events: &[EventRow], i: usize, n: usize) -> usize {
-    let stamps = events.iter().filter_map(|e| e.timestamp);
-    let frac = match (events[i].timestamp, stamps.clone().min(), stamps.max()) {
-        (Some(t), Some(a), Some(b)) if b > a => (t - a) as f64 / (b - a) as f64,
+/// Bucket of event `i` out of `n` given the time span `(lo, hi)`: by time when it has one, else by position.
+fn bucket_of(events: &[EventRow], i: usize, n: usize, span: (Option<i64>, Option<i64>)) -> usize {
+    let frac = match (events[i].timestamp, span) {
+        (Some(t), (Some(a), Some(b))) if b > a => (t - a) as f64 / (b - a) as f64,
         _ => i as f64 / (events.len().max(2) - 1) as f64,
     };
     ((frac * (n - 1) as f64).round() as usize).min(n - 1)
+}
+
+fn time_span(events: &[EventRow]) -> (Option<i64>, Option<i64>) {
+    let stamps = events.iter().filter_map(|e| e.timestamp);
+    (stamps.clone().min(), stamps.max())
 }
 
 /// Per-bucket (event count, has error, turn starts here) over `n` buckets.
@@ -1116,9 +1235,10 @@ fn bucket_events(events: &[EventRow], n: usize) -> Vec<(u32, bool, bool)> {
     if n == 0 {
         return out;
     }
+    let span = time_span(events);
     let mut prev_turn = None;
     for (i, e) in events.iter().enumerate() {
-        let b = &mut out[bucket_of(events, i, n)];
+        let b = &mut out[bucket_of(events, i, n, span)];
         b.0 += 1;
         b.1 |= e.is_error;
         if e.turn.is_some() && e.turn != prev_turn {
@@ -1151,7 +1271,7 @@ fn render_strip(buf: &mut Buffer, area: Rect, events: &[EventRow], selected: usi
         }
     }
     if selected < events.len() {
-        let at = area.x + gutter + bucket_of(events, selected, n) as u16;
+        let at = area.x + gutter + bucket_of(events, selected, n, time_span(events)) as u16;
         buf.set_span(at, area.y + 1, &Span::styled("▲", Style::default().fg(theme.text_primary).add_modifier(Modifier::BOLD)), 1);
     }
 }
@@ -1377,6 +1497,17 @@ mod tests {
         state.sessions.iter().map(|s| s.title.as_str()).collect()
     }
 
+    /// Polls until the worker's snapshot (if one was started) has been applied; true if anything redrew.
+    fn settle(state: &mut TracesModalState) -> bool {
+        let mut redraw = state.poll_live();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while state.inflight.is_some() && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            redraw |= state.poll_live();
+        }
+        redraw
+    }
+
     #[test]
     fn live_poll_keeps_selection_by_session_id() {
         let (_tmp, roots, mut writer, mut state) = live_fixture();
@@ -1387,7 +1518,7 @@ mod tests {
 
         let a = roots[0].path.join("a.jsonl");
         hook(&mut writer, &roots, &a, &line("2026-10-01T00:00:09Z", "later"));
-        assert!(state.poll_live());
+        assert!(settle(&mut state));
         assert_eq!(titles(&state), ["task a", "task c", "task b"], "a moved to the top");
         assert_eq!((state.selected, state.selected_session().unwrap().title.as_str()), (2, "task b"));
         assert!(state.live, "fresh receipt shows the live marker");
@@ -1404,13 +1535,62 @@ mod tests {
         assert_eq!(state.events.len(), 1);
 
         hook(&mut writer, &roots, &a, &line("2026-10-01T00:00:05Z", "second"));
-        assert!(state.poll_live());
+        assert!(settle(&mut state));
         assert_eq!((state.events.len(), state.event_selected), (2, 1), "at the bottom: follows");
 
         state.event_selected = 0;
         hook(&mut writer, &roots, &a, &line("2026-10-01T00:00:06Z", "third"));
-        assert!(state.poll_live());
+        assert!(settle(&mut state));
         assert_eq!((state.events.len(), state.event_selected), (3, 0), "mid-list: stays put");
+    }
+
+    /// `TRACES_DB=<copy of traces.sqlite> cargo test -p xai-grok-pager --lib traces_perf -- --ignored --nocapture`
+    #[test]
+    #[ignore = "profiling against a real index"]
+    fn traces_perf() {
+        let Some(db) = std::env::var_os("TRACES_DB") else { return };
+        let t = |label: &str, f: &mut dyn FnMut()| {
+            let start = std::time::Instant::now();
+            f();
+            eprintln!("{label:<28} {:>8.2} ms", start.elapsed().as_secs_f64() * 1e3);
+        };
+        if std::env::var_os("TRACES_SCAN").is_some() {
+            let mut w = TraceIndex::open(std::path::Path::new(&db)).unwrap();
+            t("scan (background thread)", &mut || {
+                w.scan(&xai_grok_traces::user_roots()).unwrap();
+            });
+        }
+        let mut state = None;
+        t("open (ledger query)", &mut || state = Some(TracesModalState::open(Some(TraceIndex::open(std::path::Path::new(&db)).unwrap()))));
+        let mut state = state.unwrap();
+        eprintln!("ledger items {} roots {}", state.ledger.len(), state.sessions.len());
+        t("render ledger (warm theme)", &mut || {
+            draw(&mut state, 200, 50);
+        });
+        t("poll, nothing changed", &mut || {
+            state.poll_live();
+        });
+        t("render ledger 200x50", &mut || {
+            draw(&mut state, 200, 50);
+        });
+        t("reload_sessions (sync)", &mut || state.reload_sessions());
+        state.watermark = -1;
+        t("poll, index changed (UI)", &mut || {
+            state.poll_live();
+        });
+        t("  worker settle", &mut || {
+            settle(&mut state);
+        });
+        // The biggest session by events.
+        let big = state.index.as_ref().unwrap().list_sessions(&SessionFilter { sort: Sort::Events, limit: 1, ..Default::default() }).unwrap();
+        let Some(big) = big.into_iter().next() else { return };
+        eprintln!("biggest: {} events", big.event_count);
+        t("open_session (big)", &mut || state.open_session(big.clone()));
+        eprintln!("trajectory events {}", state.events.len());
+        t("render trajectory 200x50", &mut || {
+            draw(&mut state, 200, 50);
+        });
+        t("load_events (poll path)", &mut || state.load_events());
     }
 
     #[test]
