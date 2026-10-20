@@ -13,7 +13,7 @@ const CLAUDE: &str = r#"{"type":"user","timestamp":"2026-10-01T00:00:00Z","cwd":
 const CODEX: &str = r#"{"timestamp":"2026-10-01T00:00:00Z","type":"session_meta","payload":{"cwd":"/w/codex","model":"gpt-5"}}
 {"timestamp":"2026-10-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex task"}]}}
 {"timestamp":"2026-10-01T00:00:02Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}"}}
-{"timestamp":"2026-10-01T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","output":"error: no such file"}}
+{"timestamp":"2026-10-01T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","output":"Chunk ID: a\nProcess exited with code 1\nerror: no such file"}}
 {"timestamp":"2026-10-01T00:00:04Z","type":"event_msg","payload":{"type":"task_complete"}}
 "#;
 const PI: &str = r#"{"type":"session","version":3,"id":"p","timestamp":"2026-10-01T00:00:00Z","cwd":"/w/pi"}
@@ -135,9 +135,11 @@ fn events_facets_and_raw_line() {
     let mut idx = TraceIndex::open(&e.db).unwrap();
     idx.scan(&e.roots).unwrap();
     let x = by_source(&idx, "codex");
-    let events = idx.list_events(&x.id, &EventFilter::default()).unwrap();
+    let all_events = EventFilter { include_noise: true, ..Default::default() };
+    let events = idx.list_events(&x.id, &all_events).unwrap();
     assert_eq!(events.len(), 5);
     assert_eq!(events[3].depth, 2);
+    assert_eq!(idx.list_events(&x.id, &EventFilter::default()).unwrap().len(), 4, "session_meta is noise");
     let errs = idx.list_events(&x.id, &EventFilter { errors_only: true, ..Default::default() }).unwrap();
     assert_eq!(errs.iter().map(|e| e.line).collect::<Vec<_>>(), vec![3]);
     let shell = idx.list_events(&x.id, &EventFilter { tool: Some("shell".into()), ..Default::default() }).unwrap();
@@ -172,7 +174,7 @@ fn append_reindexes_only_new_lines_and_rewrite_reparses() {
     idx.index_file(pi_root, &path).unwrap();
     let p = by_source(&idx, "pi");
     assert_eq!(p.event_count, 4);
-    let events = idx.list_events(&p.id, &EventFilter::default()).unwrap();
+    let events = idx.list_events(&p.id, &EventFilter { include_noise: true, ..Default::default() }).unwrap();
     let lines: Vec<i64> = events.iter().map(|e| e.line).collect();
     assert_eq!(lines, vec![0, 1, 2, 3], "no duplicates");
     assert_eq!(p.title, "pi task", "title kept across append");
@@ -195,7 +197,7 @@ fn zstd_matches_plain() {
     idx.scan(&[plain, packed]).unwrap();
     let rows = all(&idx);
     assert_eq!(rows.len(), 2);
-    let ev = |r: &xai_grok_traces::SessionRow| idx.list_events(&r.id, &EventFilter::default()).unwrap();
+    let ev = |r: &xai_grok_traces::SessionRow| idx.list_events(&r.id, &EventFilter { include_noise: true, ..Default::default() }).unwrap();
     assert_eq!(ev(&rows[0]), ev(&rows[1]));
     assert_eq!((rows[0].title.clone(), rows[0].event_count), (rows[1].title.clone(), rows[1].event_count));
 }
@@ -467,8 +469,8 @@ fn old_schema_is_replaced_not_migrated() {
     idx.scan(&e.roots).unwrap();
     assert_eq!(all(&idx).len(), 6);
     let stats = idx.stats().unwrap();
-    assert_eq!(stats.schema_version.as_deref(), Some("5"));
-    assert_eq!(stats.parser_version.as_deref(), Some("4"));
+    assert_eq!(stats.schema_version.as_deref(), Some("6"));
+    assert_eq!(stats.parser_version.as_deref(), Some("5"));
     let names: Vec<String> = fs::read_dir(e.db.parent().unwrap()).unwrap().map(|d| d.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert!(names.iter().all(|n| !n.contains(".old.")), "old db removed: {names:?}");
     assert!(!names.iter().any(|n| n.contains(".corrupt.")));

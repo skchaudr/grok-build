@@ -233,6 +233,7 @@ impl TracesModalState {
             text: (!self.event_query.is_empty()).then(|| self.event_query.clone()),
             errors_only: self.event_errors_only,
             tool: self.tool_filter.and_then(|i| self.tools.get(i).cloned()),
+            include_noise: false,
             limit: EVENT_PAGE,
             offset: 0,
         };
@@ -902,6 +903,13 @@ mod tests {
             output_tokens: None,
             duration_ms: None,
             status: Status::Unknown,
+            parent_id: None,
+            label: None,
+            agent_type: None,
+            now: None,
+            last_event_at: None,
+            children: 0,
+            failed: false,
         }
     }
 

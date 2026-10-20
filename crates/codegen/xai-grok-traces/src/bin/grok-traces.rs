@@ -126,7 +126,9 @@ fn list(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
     for s in idx.list_sessions(&SessionFilter { limit, ..Default::default() })? {
         let line = serde_json::json!({
             "id": s.id, "source": s.source, "title": s.title, "status": s.status.as_str(),
-            "updated_at": s.updated_at, "path": s.file_path,
+            "updated_at": s.updated_at, "path": s.file_path, "parent_id": s.parent_id, "label": s.label,
+            "agent_type": s.agent_type, "now": s.now, "last_event_at": s.last_event_at, "children": s.children,
+            "failed": s.failed,
         });
         writeln!(out, "{line}")?;
     }

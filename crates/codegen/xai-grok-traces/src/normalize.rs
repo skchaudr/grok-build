@@ -104,35 +104,31 @@ pub struct NormalizedEvent {
     pub depth: u8,
     pub model: Option<String>,
     pub cwd: Option<String>,
-    /// An explicit error marker: a non-empty `error` field or `is_error: true`.
+    /// A structured error marker (see [`structured_error`]); never inferred from output text.
     pub error_flag: bool,
+    /// Bookkeeping, telemetry or injected context; the default trajectory hides it.
+    pub noise: bool,
+    /// Tool call: compact argument summary. Tool result: `exit N` or the first line of an error.
+    pub detail: Option<String>,
+    /// Name of the tool being called (calls only; not stored).
+    pub tool: Option<String>,
+    /// A title the harness itself recorded for the session (Claude `ai-title`, OMP `title`, DSH `session/title`).
+    pub session_title: Option<String>,
 }
 
 impl NormalizedEvent {
     pub fn is_error(&self) -> bool {
-        if self.error_flag {
-            return true;
-        }
-        let t = self.event_type.to_lowercase();
-        if t.contains("error") || t.contains("fail") {
-            return true;
-        }
-        self.role == Some(Role::ToolResult) && {
-            let s = self.text.to_lowercase();
-            ["error", "fail", "denied", "exception", "timeout"]
-                .iter()
-                .any(|w| s.contains(w))
-        }
+        self.error_flag
     }
 }
 
 static EMPTY: std::sync::LazyLock<Map<String, Value>> = std::sync::LazyLock::new(Map::new);
 
-fn record(v: Option<&Value>) -> &Map<String, Value> {
+pub(crate) fn record(v: Option<&Value>) -> &Map<String, Value> {
     v.and_then(Value::as_object).unwrap_or(&EMPTY)
 }
 
-fn string_value(v: Option<&Value>) -> Option<&str> {
+pub(crate) fn string_value(v: Option<&Value>) -> Option<&str> {
     v.and_then(Value::as_str).filter(|s| !s.trim().is_empty())
 }
 
@@ -177,9 +173,17 @@ fn humanize(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn normalize_text(s: &str) -> String {
+/// What `text_from` removed: the first injected wrapper tag seen.
+#[derive(Default)]
+struct Injected(Option<String>);
+
+fn normalize_text(s: &str, inj: &mut Injected) -> String {
     let unwrapped = crate::cursor::unwrap_user_query(s);
-    let s = unwrapped.as_ref();
+    let (stripped, tag) = crate::classify::strip_injected(unwrapped.as_ref());
+    if inj.0.is_none() {
+        inj.0 = tag;
+    }
+    let s = stripped.as_ref();
     let long = s.chars().count() > TEXT_CHARS;
     let head: String = s.chars().take(TEXT_CHARS).collect();
     let mut t = head.replace("\r\n", "\n");
@@ -243,18 +247,18 @@ const TEXT_KEYS: [&str; 12] = [
     "command", "description", "name",
 ];
 
-fn text_from(v: &Value, depth: usize) -> String {
+fn text_from(v: &Value, depth: usize, inj: &mut Injected) -> String {
     if depth > TEXT_DEPTH {
         return String::new();
     }
     match v {
-        Value::String(s) => normalize_text(s),
+        Value::String(s) => normalize_text(s, inj),
         Value::Number(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Array(items) => {
             let mut out = String::new();
             for item in items {
-                let part = text_from(item, depth + 1);
+                let part = text_from(item, depth + 1, inj);
                 if part.is_empty() {
                     continue;
                 }
@@ -271,7 +275,7 @@ fn text_from(v: &Value, depth: usize) -> String {
         Value::Object(map) => TEXT_KEYS
             .iter()
             .filter_map(|k| map.get(*k))
-            .map(|v| text_from(v, depth + 1))
+            .map(|v| text_from(v, depth + 1, inj))
             .find(|s| !s.is_empty())
             .unwrap_or_default(),
         Value::Null => String::new(),
@@ -301,28 +305,6 @@ fn usage_object(v: &Map<String, Value>) -> Option<&Map<String, Value>> {
         .or_else(|| v.get("total_token_usage").and_then(Value::as_object))
 }
 
-fn find_true(v: &Value, keys: &[&str], depth: usize) -> bool {
-    if depth > SEARCH_DEPTH {
-        return false;
-    }
-    match v {
-        Value::Array(items) => items.iter().any(|i| find_true(i, keys, depth + 1)),
-        Value::Object(map) => {
-            keys.iter().any(|k| map.get(*k) == Some(&Value::Bool(true)))
-                || map.values().any(|i| find_true(i, keys, depth + 1))
-        }
-        _ => false,
-    }
-}
-
-fn has_error_field(map: &Map<String, Value>) -> bool {
-    match map.get("error") {
-        None | Some(Value::Null | Value::Bool(false)) => false,
-        Some(Value::String(s)) => !s.trim().is_empty(),
-        Some(_) => true,
-    }
-}
-
 fn first_number(obj: &Map<String, Value>, keys: &[&str]) -> Option<f64> {
     keys.iter().find_map(|k| number_value(obj.get(*k)))
 }
@@ -332,6 +314,11 @@ fn detect_role(event_type: &str, top: &Map<String, Value>, payload: &Map<String,
         .or_else(|| string_value(payload.get("role")))
         .or_else(|| string_value(record(payload.get("message")).get("role")))
         .or_else(|| string_value(record(payload.get("data")).get("role")));
+    // DSH wraps a tool result in a user-role message.
+    let lower_type = event_type.to_lowercase();
+    if matches!(explicit, Some("user" | "human")) && (lower_type.contains("tool/result") || lower_type.contains("tool-result")) {
+        return Some(Role::ToolResult);
+    }
     match explicit {
         Some("user" | "human") => return Some(Role::User),
         Some("assistant" | "agent") => return Some(Role::Assistant),
@@ -366,6 +353,26 @@ fn content_tool_role(payload: &Map<String, Value>) -> Option<Role> {
         "tool_result" | "toolResult" | "function_call_output" => Some(Role::ToolResult),
         _ => None,
     })
+}
+
+/// A message whose content is only thinking blocks (Claude writes one line per block).
+fn thinking_only(payload: &Map<String, Value>) -> Option<String> {
+    let blocks = payload.get("content")?.as_array()?;
+    if blocks.is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    for b in blocks {
+        match b.get("type").and_then(Value::as_str)? {
+            "thinking" | "redacted_thinking" => {
+                if let Some(t) = b.get("thinking").and_then(Value::as_str) {
+                    text.push_str(t);
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(text)
 }
 
 fn detect_kind(event_type: &str, role: Option<Role>) -> Kind {
@@ -403,7 +410,12 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         (None, None) => string_value(top.get("role")).unwrap_or("record").to_string(),
     };
 
-    let role = content_tool_role(payload).or_else(|| detect_role(&event_type, top, payload));
+    let thinking = thinking_only(payload);
+    let role = if thinking.is_some() {
+        Some(Role::Reasoning)
+    } else {
+        content_tool_role(payload).or_else(|| detect_role(&event_type, top, payload))
+    };
     let kind = detect_kind(&event_type, role);
     let lower = event_type.to_lowercase();
     let depth = if role == Some(Role::ToolResult)
@@ -439,10 +451,11 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
 
     const NAME: [&str; 3] = ["name", "toolName", "tool_name"];
     let tool_name = find_string(&payload_value, &NAME, 0).or_else(|| find_string(value, &NAME, 0));
-    let text = {
-        let t = text_from(&payload_value, 0);
-        if t.is_empty() { text_from(value, 0) } else { t }
-    };
+    let mut inj = Injected::default();
+    let mut text = thinking.clone().map(|t| normalize_text(&t, &mut inj)).unwrap_or_else(|| text_from(&payload_value, 0, &mut inj));
+    if text.is_empty() && inj.0.is_none() {
+        text = text_from(value, 0, &mut inj);
+    }
     let display_type = humanize(&event_type);
     let title = match (kind, tool_name, role) {
         (Kind::Tool, Some(n), _) => n.to_string(),
@@ -454,6 +467,49 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
     let cwd = find_string(value, &["cwd", "working_directory", "workingDirectory"], 0)
         .or_else(|| find_string(&payload_value, &["cwd"], 0));
 
+    // Noise: bookkeeping record types, telemetry, injected user context, empty reasoning.
+    let explicit_role = string_value(top.get("role")).or_else(|| string_value(payload.get("role")));
+    let had_text = !text.is_empty();
+    let mut noise = crate::classify::noise_type(&event_type)
+        || kind == Kind::Telemetry
+        || matches!(explicit_role, Some("developer" | "system"))
+        || (kind == Kind::Reasoning && !had_text);
+    if role == Some(Role::User) {
+        let flagged = top.get("isMeta") == Some(&Value::Bool(true))
+            || top.get("isCompactSummary") == Some(&Value::Bool(true))
+            || string_value(top.get("synthetic_reason")).is_some();
+        if flagged || (!had_text && inj.0.is_some()) || crate::classify::harness_prompt(&text) {
+            noise = true;
+        }
+    }
+    if noise && !had_text {
+        if let Some(tag) = &inj.0 {
+            text = format!("<{tag}>");
+        }
+    }
+
+    // Structured errors; Codex writes an exit-status header instead of a flag.
+    let is_result = role == Some(Role::ToolResult);
+    let exit = (is_result && matches!(nested, Some("function_call_output" | "custom_tool_call_output")))
+        .then(|| crate::classify::exit_status(&text))
+        .flatten();
+    let error_flag = crate::classify::structured_error(top, payload, &event_type) || exit.as_ref().is_some_and(|(failed, _)| *failed);
+
+    // Tool-call summary, or a tool result's exit status / first error line.
+    let flat_call = role == Some(Role::Tool) && kind == Kind::Tool;
+    let call = (flat_call || payload.contains_key("tool_calls") || top.contains_key("tool_calls") || payload.contains_key("content"))
+        .then(|| crate::classify::tool_call(top, payload, flat_call))
+        .flatten();
+    let tool = call.as_ref().map(|(n, _)| n.clone());
+    let detail = if let Some((name, args)) = &call {
+        crate::classify::call_detail(name, args)
+    } else if is_result {
+        exit.map(|(_, d)| d).or_else(|| if error_flag { crate::classify::first_line(&text) } else { None })
+    } else {
+        None
+    };
+
+    let session_title = session_title(top, payload);
     let title = if title.is_empty() { "Event".to_string() } else { title };
     let text = if text.is_empty() { title.clone() } else { text };
     NormalizedEvent {
@@ -473,10 +529,25 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         depth,
         model: model.map(str::to_string),
         cwd: cwd.map(str::to_string),
-        error_flag: has_error_field(top)
-            || has_error_field(payload)
-            || find_true(value, &["is_error", "isError", "isApiErrorMessage"], 0),
+        error_flag,
+        noise,
+        detail,
+        tool,
+        session_title,
     }
+}
+
+/// A title the harness wrote itself: Claude `ai-title`, OMP `title`/`title_change`, DSH `session/title`.
+fn session_title(top: &Map<String, Value>, payload: &Map<String, Value>) -> Option<String> {
+    let t = string_value(top.get("type"))?;
+    let raw = match t {
+        "ai-title" => string_value(top.get("aiTitle")),
+        "title" | "title_change" => string_value(top.get("title")),
+        "session/title" => string_value(payload.get("title")),
+        _ => None,
+    }?;
+    let line = raw.lines().next().unwrap_or(raw).trim();
+    (!line.is_empty()).then(|| clip(line, TITLE_CHARS))
 }
 
 #[cfg(test)]
@@ -524,10 +595,17 @@ mod tests {
 
         let out = normalize(&json!({
             "type": "response_item",
-            "payload": {"type": "function_call_output", "output": "permission denied"}
+            "payload": {"type": "function_call_output", "output": "Chunk ID: a\nProcess exited with code 126\npermission denied"}
         }));
         assert_eq!((out.kind, out.role, out.depth), (Kind::Tool, Some(Role::ToolResult), 2));
         assert!(out.is_error());
+        assert_eq!(out.detail.as_deref(), Some("exit 126"));
+        let words = normalize(&json!({
+            "type": "response_item",
+            "payload": {"type": "function_call_output", "output": "Process exited with code 0\nerror: failed, denied, timeout"}
+        }));
+        assert!(!words.is_error(), "words in output are not errors");
+        assert_eq!(words.detail.as_deref(), Some("exit 0"));
     }
 
     #[test]
@@ -601,10 +679,49 @@ mod tests {
     }
 
     #[test]
+    fn noise_detail_and_errors_across_shapes() {
+        // Grok: tool calls ride on the assistant line.
+        let a = normalize(&json!({"type": "assistant", "content": "I'll look.", "tool_calls": [
+            {"id": "t1", "name": "run_terminal_command", "arguments": "{\"command\":\"node q.mjs \\\"x\\\"\"}"}]}));
+        assert_eq!((a.role, a.tool.as_deref(), a.detail.as_deref()), (Some(Role::Assistant), Some("run_terminal_command"), Some("node q.mjs \"x\"")));
+        assert!(!a.noise);
+        // Grok injected user turns and system prompt.
+        let s = normalize(&json!({"type": "user", "synthetic_reason": "system_reminder", "content": [{"type": "text", "text": "<system-reminder>\nctx\n</system-reminder>"}]}));
+        assert!(s.noise && s.role == Some(Role::User));
+        assert!(normalize(&json!({"type": "system", "content": "prompt"})).noise);
+        // Claude: bookkeeping lines, thinking-only lines.
+        for t in ["attachment", "file-history-snapshot", "last-prompt", "mode", "permission-mode", "api-request", "queue-operation"] {
+            assert!(normalize(&json!({"type": t})).noise, "{t}");
+        }
+        let th = normalize(&json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": "s"}]}}));
+        assert_eq!((th.role, th.kind, th.noise), (Some(Role::Reasoning), Kind::Reasoning, true));
+        let th2 = normalize(&json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "hmm"}]}}));
+        assert_eq!((th2.noise, th2.text.as_str()), (false, "hmm"));
+        // Codex bookkeeping versus content.
+        assert!(normalize(&json!({"type": "event_msg", "payload": {"type": "task_started"}})).noise);
+        assert!(!normalize(&json!({"type": "event_msg", "payload": {"type": "task_complete"}})).noise);
+        assert!(normalize(&json!({"type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "perm"}]}})).noise);
+        // Pi/OMP bookkeeping.
+        for t in ["session", "model_change", "thinking_level_change", "custom", "session_init"] {
+            assert!(normalize(&json!({"type": t})).noise, "{t}");
+        }
+        // DSH: a tool result wrapped in a user message is a tool result; bookkeeping is noise; session titles surface.
+        let r = normalize(&json!({"type": "tool/result", "data": {"message": {"role": "user", "content": [{"type": "tool-result", "isError": false, "content": [{"type": "text", "text": "fine"}]}]}}}));
+        assert_eq!((r.role, r.is_error()), (Some(Role::ToolResult), false));
+        assert!(normalize(&json!({"type": "step/start", "data": {"step": 1}})).noise);
+        let t = normalize(&json!({"type": "session/title", "data": {"title": "Read the spec\nmore"}}));
+        assert_eq!((t.noise, t.session_title.as_deref()), (true, Some("Read the spec")));
+        assert_eq!(normalize(&json!({"type": "ai-title", "aiTitle": "Fix parser"})).session_title.as_deref(), Some("Fix parser"));
+        // Cursor: an abort carries an error field but is not a failure.
+        assert!(!normalize(&json!({"type": "turn_ended", "status": "aborted", "error": "User aborted"})).is_error());
+        assert!(normalize(&json!({"type": "turn_ended", "status": "error"})).is_error());
+    }
+
+    #[test]
     fn humanize_and_clip() {
         assert_eq!(humanize("response_item/message"), "Response Item Message");
         assert_eq!(clip("abcdef", 3), "abc\n…");
-        assert_eq!(normalize_text("a  \nb"), "a\nb");
+        assert_eq!(normalize_text("a  \nb", &mut Injected::default()), "a\nb");
         assert_eq!(preview("a \n\t b"), "a b");
         let long = "x".repeat(500);
         let p = preview(&long);

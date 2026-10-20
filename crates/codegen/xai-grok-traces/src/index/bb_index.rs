@@ -94,6 +94,16 @@ impl TraceIndex {
 
         let tx = self.conn.transaction()?;
         let sk = upsert_session(&tx, &sid, &root.source, &t.id, &key, last_seq)?;
+        write_links(
+            &tx,
+            &sid,
+            &Links {
+                native_id: Some(t.id.clone()),
+                parent_native: t.parent_thread_id.clone(),
+                agent_type: Some(t.provider_id.clone()),
+                ..Default::default()
+            },
+        )?;
         if reset {
             delete_events(&tx, sk)?;
         }
@@ -131,6 +141,9 @@ impl TraceIndex {
         };
         if capped {
             self.capped_files += 1;
+        }
+        if t.status == "error" {
+            agg.failed = true;
         }
         Self::write_aggregate(&tx, &sid, &agg, t.updated_at)?;
         tx.execute(
