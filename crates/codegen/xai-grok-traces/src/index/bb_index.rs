@@ -1,55 +1,44 @@
 //! bb threads in the index. One `trace_files`/`trace_sessions` row per thread,
 //! keyed `<bb.db path>#<thread id>`; the pointer behind an event is
 //! `(thread id, sequence)` with `line_number = sequence`. `bb.db` is opened
-//! read-only for the length of one scan and never kept.
+//! read-only for the length of one scan and never kept. Threads are scanned newest
+//! first alongside files (see `scan_with_limit`).
 
 use super::*;
-use crate::bb::{Bb, BbThread, thread_key};
 
 /// Events read from bb.db per query.
 const PAGE: usize = 1000;
 
 impl TraceIndex {
-    /// Indexes every thread of a bb root, pruning threads that are gone. A missing
-    /// or unreadable db leaves cached rows alone.
-    pub(super) fn scan_bb_root(&mut self, root: &Root, report: &mut ScanReport) -> Result<RootReport> {
+    /// Lists a bb root's threads into `work` (by `updated_at`). A missing or unreadable
+    /// db leaves cached rows alone.
+    pub(super) fn plan_bb_root(&self, root: &Root, i: usize, work: &mut Vec<(i64, usize, Work)>) -> RootPlan {
         let accessible = root.path.is_file();
-        let mut rr = RootReport { id: root.id.clone(), accessible, ..Default::default() };
-        let mut error = (!accessible).then(|| "Root is missing or not readable".to_string());
-        let mut seen: Option<HashSet<String>> = None;
-        if accessible {
-            match Bb::open(&root.path) {
-                Err(e) => error = Some(format!("bb.db: {e}")),
-                Ok(bb) => match bb.threads() {
-                    Err(e) => error = Some(format!("bb.db: {e}")),
-                    Ok(threads) => {
-                        let mut keys = HashSet::new();
-                        for t in threads.iter().filter(|t| t.last_sequence.is_some()) {
-                            let key = thread_key(&root.path, &t.id);
-                            match self.index_bb_thread(root, &bb, t) {
-                                Ok(true) => report.indexed += 1,
-                                Ok(false) => {}
-                                Err(e @ Error::OverCap { .. }) => return Err(e),
-                                Err(e) => report.errors.push((PathBuf::from(&key), e.to_string())),
-                            }
-                            keys.insert(key);
-                        }
-                        rr.files = keys.len();
-                        seen = Some(keys);
-                    }
-                },
+        let mut plan = RootPlan {
+            files: 0,
+            accessible,
+            limited: false,
+            error: (!accessible).then(|| "Root is missing or not readable".to_string()),
+            seen: None,
+            bb: None,
+        };
+        if !accessible {
+            return plan;
+        }
+        match Bb::open(&root.path).and_then(|bb| bb.threads().map(|t| (bb, t))) {
+            Err(e) => plan.error = Some(format!("bb.db: {e}")),
+            Ok((bb, threads)) => {
+                let mut keys = HashSet::new();
+                for t in threads.into_iter().filter(|t| t.last_sequence.is_some()) {
+                    keys.insert(thread_key(&root.path, &t.id));
+                    work.push((t.updated_at, i, Work::Bb(t)));
+                }
+                plan.files = keys.len();
+                plan.seen = Some(keys);
+                plan.bb = Some(bb);
             }
         }
-        self.conn.execute(
-            "INSERT INTO trace_roots (id, source_id, path, exists_flag, file_count, last_scan_at, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(id) DO UPDATE SET source_id=?2, path=?3, exists_flag=?4, file_count=?5, last_scan_at=?6, error=?7",
-            params![root.id, root.source, root.path.to_string_lossy(), accessible, rr.files, now_ms(), error],
-        )?;
-        if let Some(keys) = seen {
-            self.prune_files(&root.id, |p| !keys.contains(p))?;
-        }
-        Ok(rr)
+        plan
     }
 
     /// Indexes one thread of a bb root (a hook's `thread_id`). Returns whether anything was parsed.
@@ -64,7 +53,7 @@ impl TraceIndex {
         }
     }
 
-    fn index_bb_thread(&mut self, root: &Root, bb: &Bb, t: &BbThread) -> Result<bool> {
+    pub(super) fn index_bb_thread(&mut self, root: &Root, bb: &Bb, t: &BbThread) -> Result<bool> {
         self.check_cap()?;
         let key = thread_key(&root.path, &t.id);
         let sid = session_id(&root.source, &key);
@@ -101,18 +90,16 @@ impl TraceIndex {
         }
 
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT INTO trace_sessions (id, source_id, title, file_path, file_size_bytes) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(id) DO UPDATE SET file_path = ?4, file_size_bytes = ?5",
-            params![sid, root.source, t.id, key, last_seq],
-        )?;
+        let sk = upsert_session(&tx, &sid, &root.source, &t.id, &key, last_seq)?;
         if reset {
-            tx.execute("DELETE FROM trace_events WHERE session_id = ?1", [&sid])?;
+            delete_events(&tx, sk)?;
         }
+        let mut names = Names::default();
         let mut seq = after;
         let mut capped = false;
         {
             let mut insert = tx.prepare_cached(INSERT_EVENT)?;
+            let mut usage = tx.prepare_cached(INSERT_USAGE)?;
             'pages: loop {
                 let page = bb.events(&t.id, seq, PAGE)?;
                 let short = page.len() < PAGE;
@@ -122,7 +109,7 @@ impl TraceIndex {
                         break 'pages;
                     }
                     agg.add(&ev.event);
-                    insert_event(&mut insert, &sid, ev.sequence, 0, &ev.event)?;
+                    insert_event(&mut insert, &mut usage, &mut names, &tx, sk, ev.sequence, 0, &ev.event)?;
                     seq = ev.sequence;
                     count += 1;
                 }

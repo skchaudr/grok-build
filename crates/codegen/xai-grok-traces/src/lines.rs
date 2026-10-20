@@ -58,11 +58,11 @@ pub fn for_each<R: Read>(
     }
 }
 
-/// The text of line `number`, starting the search at `start_byte` (plain files
-/// only; zstd always decodes from the start).
-pub fn read_line(path: &Path, format: Format, number: i64, start_byte: i64) -> io::Result<Option<String>> {
+/// The text of line `number`, starting the search at line `from_line`, which begins
+/// at byte `from_byte` (plain files only; zstd always decodes from the start).
+pub fn read_line(path: &Path, format: Format, number: i64, from_line: i64, from_byte: i64) -> io::Result<Option<String>> {
     let (from_byte, from_line) = match format {
-        Format::Jsonl => (start_byte.max(0) as u64, number),
+        Format::Jsonl => (from_byte.max(0) as u64, from_line),
         Format::Zstd | Format::Sqlite => (0, 0),
     };
     let reader = open(path, format, from_byte, u64::MAX)?;

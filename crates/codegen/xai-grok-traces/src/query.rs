@@ -7,6 +7,7 @@ use rusqlite::{OptionalExtension, Row, params};
 
 use crate::index::{Result, TraceIndex, now_ms};
 use crate::lines;
+use crate::normalize::{Kind, Role};
 use crate::roots::Format;
 
 /// A non-terminal session written to within this window is live.
@@ -185,7 +186,8 @@ impl TraceIndex {
             sql.push_str(" OR s.file_path LIKE ?1x ESCAPE '\\' OR s.id LIKE ?1x ESCAPE '\\'");
             if filter.deep {
                 sql.push_str(
-                    " OR s.id IN (SELECT session_id FROM trace_events WHERE preview LIKE ?1x ESCAPE '\\' OR title LIKE ?1x ESCAPE '\\')",
+                    " OR s.sk IN (SELECT e.sk FROM trace_events e JOIN trace_names ti ON ti.id = e.title_id
+                   WHERE e.preview LIKE ?1x ESCAPE '\\' OR ti.name LIKE ?1x ESCAPE '\\')",
                 );
             }
             sql.push(')');
@@ -232,22 +234,26 @@ impl TraceIndex {
 
     pub fn list_events(&self, session_id: &str, filter: &EventFilter) -> Result<Vec<EventRow>> {
         let mut sql = String::from(
-            "SELECT line_number, type, kind, role, title, preview, timestamp, duration_ms, input_tokens, output_tokens,
-             turn, step, depth, model, is_error FROM trace_events WHERE session_id = ?",
+            "SELECT e.line_number, ty.name, e.kind, e.role, ti.name, CASE WHEN e.preview = '' THEN ti.name ELSE e.preview END,
+             e.timestamp, u.duration_ms, u.input_tokens, u.output_tokens, u.turn, u.step, e.depth, mo.name, e.is_error
+             FROM trace_events e JOIN trace_names ty ON ty.id = e.type_id JOIN trace_names ti ON ti.id = e.title_id
+             LEFT JOIN trace_names mo ON mo.id = e.model_id
+             LEFT JOIN trace_event_usage u ON u.sk = e.sk AND u.line_number = e.line_number
+             WHERE e.sk = (SELECT sk FROM trace_sessions WHERE id = ?)",
         );
         let mut args = vec![Sql::Text(session_id.into())];
         if filter.errors_only {
-            sql.push_str(" AND is_error = 1");
+            sql.push_str(" AND e.is_error = 1");
         }
         if let Some(tool) = &filter.tool {
-            sql.push_str(" AND kind = 'tool' AND title = ?");
+            sql.push_str(&format!(" AND e.kind = {} AND ti.name = ?", Kind::Tool.code()));
             args.push(Sql::Text(tool.clone()));
         }
         if let Some(text) = filter.text.as_deref().filter(|t| !t.trim().is_empty()) {
-            sql.push_str(" AND (type LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR preview LIKE ? ESCAPE '\\')");
+            sql.push_str(" AND (ty.name LIKE ? ESCAPE '\\' OR ti.name LIKE ? ESCAPE '\\' OR e.preview LIKE ? ESCAPE '\\')");
             args.extend(std::iter::repeat_n(Sql::Text(like(text)), 3));
         }
-        sql.push_str(" ORDER BY line_number LIMIT ? OFFSET ?");
+        sql.push_str(" ORDER BY e.line_number LIMIT ? OFFSET ?");
         args.push(Sql::Integer(if filter.limit == 0 { 2000 } else { filter.limit as i64 }));
         args.push(Sql::Integer(filter.offset as i64));
         let mut stmt = self.conn().prepare(&sql)?;
@@ -255,8 +261,8 @@ impl TraceIndex {
             Ok(EventRow {
                 line: r.get(0)?,
                 event_type: r.get(1)?,
-                kind: r.get(2)?,
-                role: r.get(3)?,
+                kind: Kind::from_code(r.get(2)?).map_or("message", Kind::as_str).to_string(),
+                role: r.get::<_, Option<i64>>(3)?.and_then(Role::from_code).map(|r| r.as_str().to_string()),
                 title: r.get(4)?,
                 preview: r.get(5)?,
                 timestamp: r.get(6)?,
@@ -275,14 +281,16 @@ impl TraceIndex {
 
     pub fn facets(&self, session_id: &str) -> Result<Facets> {
         let (total, errors) = self.conn().query_row(
-            "SELECT COUNT(*), COALESCE(SUM(is_error),0) FROM trace_events WHERE session_id = ?1",
+            "SELECT COUNT(*), COALESCE(SUM(is_error),0) FROM trace_events WHERE sk = (SELECT sk FROM trace_sessions WHERE id = ?1)",
             [session_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        let mut stmt = self.conn().prepare(
-            "SELECT title, COUNT(*) c FROM trace_events WHERE session_id = ?1 AND kind = 'tool'
-             GROUP BY title ORDER BY c DESC, title LIMIT 100",
-        )?;
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT ti.name, COUNT(*) c FROM trace_events e JOIN trace_names ti ON ti.id = e.title_id
+             WHERE e.sk = (SELECT sk FROM trace_sessions WHERE id = ?1) AND e.kind = {}
+             GROUP BY ti.name ORDER BY c DESC, ti.name LIMIT 100",
+            Kind::Tool.code()
+        ))?;
         let tools = stmt.query_map([session_id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
         Ok(Facets { total, errors, tools })
     }
@@ -292,20 +300,31 @@ impl TraceIndex {
         let loc: Option<(String, String, i64)> = self
             .conn()
             .query_row(
-                "SELECT f.path, f.format, e.byte_offset FROM trace_events e JOIN trace_sessions s ON s.id = e.session_id
-                 JOIN trace_files f ON f.path = s.file_path WHERE e.session_id = ?1 AND e.line_number = ?2",
+                "SELECT f.path, f.format, s.sk FROM trace_sessions s JOIN trace_events e ON e.sk = s.sk
+                 JOIN trace_files f ON f.path = s.file_path WHERE s.id = ?1 AND e.line_number = ?2",
                 params![session_id, line],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let Some((path, format, offset)) = loc else { return Ok(None) };
+        let Some((path, format, sk)) = loc else { return Ok(None) };
         if format == "sqlite" {
             // bb: the pointer is `<db>#<thread id>` plus the event sequence (the line number).
             let Some((db, thread)) = crate::bb::split_key(&path) else { return Ok(None) };
             return crate::bb::Bb::open(Path::new(db))?.raw_event(thread, line);
         }
         let format = if format == "zstd" { Format::Zstd } else { Format::Jsonl };
-        Ok(lines::read_line(path.as_ref(), format, line, offset)?)
+        // Only every Nth line keeps its offset; scan on from the nearest one before it.
+        let (from_line, from_byte): (i64, i64) = self
+            .conn()
+            .query_row(
+                "SELECT line_number, byte_offset FROM trace_events WHERE sk = ?1 AND line_number <= ?2 AND byte_offset IS NOT NULL
+                 ORDER BY line_number DESC LIMIT 1",
+                params![sk, line],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((0, 0));
+        Ok(lines::read_line(path.as_ref(), format, line, from_line, from_byte)?)
     }
 
     /// Sources that have at least one session, for the ledger tabs.

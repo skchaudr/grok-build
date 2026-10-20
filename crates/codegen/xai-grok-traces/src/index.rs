@@ -18,9 +18,11 @@ use crate::roots::{Format, MAX_FILES, Root, discover, resolve};
 
 mod bb_index;
 
-pub const PARSER_VERSION: i64 = 3;
+use crate::bb::{Bb, BbThread, thread_key};
+
+pub const PARSER_VERSION: i64 = 4;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 /// Writes pause once the db plus its `-wal` pass this.
 pub const MAX_DB_BYTES: u64 = 256 * 1024 * 1024;
 /// Events indexed per file; the rest of a runaway file is left to the source.
@@ -34,22 +36,27 @@ CREATE TABLE IF NOT EXISTS trace_files (path TEXT PRIMARY KEY, root_id TEXT NOT 
   format TEXT NOT NULL, size_bytes INTEGER NOT NULL, mtime_ms INTEGER NOT NULL, indexed_bytes INTEGER NOT NULL DEFAULT 0,
   indexed_lines INTEGER NOT NULL DEFAULT 0, parser_version INTEGER NOT NULL DEFAULT 0, content_hash TEXT,
   session_id TEXT NOT NULL, indexed_at INTEGER NOT NULL, parse_error TEXT);
-CREATE TABLE IF NOT EXISTS trace_sessions (id TEXT PRIMARY KEY, source_id TEXT NOT NULL, title TEXT NOT NULL,
-  file_path TEXT NOT NULL UNIQUE, model TEXT, cwd TEXT, started_at INTEGER, updated_at INTEGER,
+CREATE TABLE IF NOT EXISTS trace_sessions (sk INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, source_id TEXT NOT NULL,
+  title TEXT NOT NULL, file_path TEXT NOT NULL UNIQUE, model TEXT, cwd TEXT, started_at INTEGER, updated_at INTEGER,
   event_count INTEGER NOT NULL DEFAULT 0, user_count INTEGER NOT NULL DEFAULT 0, assistant_count INTEGER NOT NULL DEFAULT 0,
   tool_count INTEGER NOT NULL DEFAULT 0, error_count INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER, output_tokens INTEGER,
   duration_ms INTEGER, status TEXT NOT NULL DEFAULT 'unknown', file_size_bytes INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS trace_events (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, line_number INTEGER NOT NULL,
-  byte_offset INTEGER NOT NULL, type TEXT NOT NULL, kind TEXT NOT NULL, role TEXT, title TEXT NOT NULL, preview TEXT NOT NULL,
-  timestamp INTEGER, duration_ms INTEGER, input_tokens INTEGER, output_tokens INTEGER, usage_is_total INTEGER NOT NULL DEFAULT 0,
-  turn INTEGER, step INTEGER, depth INTEGER NOT NULL DEFAULT 0, model TEXT, cwd TEXT, is_error INTEGER NOT NULL DEFAULT 0);
+-- Event types, titles and models are few and repeat on every row, so rows store ids into this table.
+CREATE TABLE IF NOT EXISTS trace_names (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+-- kind/role are `Kind::code`/`Role::code`. No cwd here: it is session-level. `preview` is '' when it equals the
+-- title. `byte_offset` is kept only on every `CHECKPOINT_EVERY`th line; a raw line is found by scanning on from there.
+CREATE TABLE IF NOT EXISTS trace_events (sk INTEGER NOT NULL, line_number INTEGER NOT NULL, byte_offset INTEGER, type_id INTEGER NOT NULL, kind INTEGER NOT NULL, role INTEGER, title_id INTEGER NOT NULL, preview TEXT NOT NULL,
+  timestamp INTEGER, depth INTEGER NOT NULL DEFAULT 0, model_id INTEGER, is_error INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (sk, line_number)) WITHOUT ROWID;
+-- Most events carry none of these; only the ones that do get a row.
+CREATE TABLE IF NOT EXISTS trace_event_usage (sk INTEGER NOT NULL, line_number INTEGER NOT NULL, duration_ms INTEGER,
+  input_tokens INTEGER, output_tokens INTEGER, turn INTEGER, step INTEGER, PRIMARY KEY (sk, line_number)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS trace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS trace_receipts (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
   event TEXT NOT NULL, native_session TEXT, path TEXT, session_id TEXT, tool TEXT, cwd TEXT);
 CREATE INDEX IF NOT EXISTS trace_receipts_session ON trace_receipts(session_id, id);
 CREATE INDEX IF NOT EXISTS trace_sessions_updated ON trace_sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS trace_sessions_source ON trace_sessions(source_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS trace_events_session ON trace_events(session_id, line_number);
 ";
 
 #[derive(Debug)]
@@ -188,6 +195,23 @@ pub struct ScanReport {
     pub errors: Vec<(PathBuf, String)>,
 }
 
+/// One unit of scan work, ordered by recency.
+enum Work {
+    File(PathBuf),
+    Bb(BbThread),
+}
+
+/// What discovery learned about a root, applied after its files are indexed.
+struct RootPlan {
+    files: usize,
+    accessible: bool,
+    limited: bool,
+    error: Option<String>,
+    /// Keys present now; `None` leaves cached rows alone (discovery was incomplete).
+    seen: Option<HashSet<String>>,
+    bb: Option<Bb>,
+}
+
 struct FileRow {
     size_bytes: i64,
     mtime_ms: i64,
@@ -258,41 +282,76 @@ impl Aggregate {
     }
 }
 
-const INSERT_EVENT: &str = "INSERT OR REPLACE INTO trace_events (id, session_id, line_number, byte_offset, type, kind, role,
-  title, preview, timestamp, duration_ms, input_tokens, output_tokens, usage_is_total, turn, step, depth, model, cwd, is_error)
-  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)";
+const INSERT_EVENT: &str = "INSERT OR REPLACE INTO trace_events (sk, line_number, byte_offset, type_id, kind, role, title_id,
+  preview, timestamp, depth, model_id, is_error) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)";
+const INSERT_USAGE: &str = "INSERT OR REPLACE INTO trace_event_usage (sk, line_number, duration_ms, input_tokens, output_tokens,
+  turn, step) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+/// Every Nth line keeps its byte offset.
+pub(crate) const CHECKPOINT_EVERY: i64 = 16;
+
+/// Interns strings into `trace_names` for the length of one write transaction.
+#[derive(Default)]
+struct Names(std::collections::HashMap<String, i64>);
+
+impl Names {
+    fn id(&mut self, conn: &Connection, name: &str) -> rusqlite::Result<i64> {
+        if let Some(id) = self.0.get(name) {
+            return Ok(*id);
+        }
+        let id: i64 = conn.prepare_cached("INSERT INTO trace_names (name) VALUES (?1) ON CONFLICT(name) DO UPDATE SET name = name RETURNING id")?
+            .query_row([name], |r| r.get(0))?;
+        self.0.insert(name.to_string(), id);
+        Ok(id)
+    }
+}
+
+/// Inserts or refreshes a session row and returns its integer key.
+fn upsert_session(tx: &Transaction<'_>, sid: &str, source: &str, title: &str, file_path: &str, size: i64) -> rusqlite::Result<i64> {
+    tx.execute(
+        "INSERT INTO trace_sessions (id, source_id, title, file_path, file_size_bytes) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET file_path = ?4, file_size_bytes = ?5",
+        params![sid, source, title, file_path, size],
+    )?;
+    tx.query_row("SELECT sk FROM trace_sessions WHERE id = ?1", [sid], |r| r.get(0))
+}
 
 /// One event row; `line` is the line number in a file, or the event sequence for bb.
 fn insert_event(
     insert: &mut rusqlite::CachedStatement<'_>,
-    sid: &str,
+    usage: &mut rusqlite::CachedStatement<'_>,
+    names: &mut Names,
+    conn: &Connection,
+    sk: i64,
     line: i64,
     offset: i64,
     e: &NormalizedEvent,
 ) -> rusqlite::Result<()> {
     let round = |v: Option<f64>| v.map(|v| v.round() as i64);
+    let model = e.model.as_deref().map(|m| names.id(conn, m)).transpose()?;
     insert.execute(params![
-        format!("{sid}:{line}"),
-        sid,
+        sk,
         line,
-        offset,
-        e.event_type,
-        e.kind.as_str(),
-        e.role.map(Role::as_str),
-        e.title,
-        e.preview,
+        (line % CHECKPOINT_EVERY == 0).then_some(offset),
+        names.id(conn, &e.event_type)?,
+        e.kind.code(),
+        e.role.map(Role::code),
+        names.id(conn, &e.title)?,
+        if e.preview == e.title { "" } else { e.preview.as_str() },
         e.timestamp_ms,
-        round(e.duration_ms),
-        round(e.input_tokens),
-        round(e.output_tokens),
-        e.usage_is_total,
-        round(e.turn),
-        round(e.step),
         e.depth,
-        e.model,
-        e.cwd,
+        model,
         e.is_error(),
     ])?;
+    let extra = [e.duration_ms, e.input_tokens, e.output_tokens, e.turn, e.step].map(round);
+    if extra.iter().any(Option::is_some) {
+        usage.execute(params![sk, line, extra[0], extra[1], extra[2], extra[3], extra[4]])?;
+    }
+    Ok(())
+}
+
+fn delete_events(tx: &Transaction<'_>, sk: i64) -> rusqlite::Result<()> {
+    tx.execute("DELETE FROM trace_events WHERE sk = ?1", [sk])?;
+    tx.execute("DELETE FROM trace_event_usage WHERE sk = ?1", [sk])?;
     Ok(())
 }
 
@@ -442,41 +501,64 @@ impl TraceIndex {
     pub fn scan_with_limit(&mut self, roots: &[Root], max_files: usize) -> Result<ScanReport> {
         self.check_cap()?;
         let mut report = ScanReport::default();
-        for root in roots {
-            if root.format == Format::Sqlite {
-                let r = self.scan_bb_root(root, &mut report)?;
-                report.roots.push(r);
-                continue;
-            }
-            let d = discover(root, max_files);
-            for file in &d.files {
-                match self.index_file(root, file) {
-                    Ok(true) => report.indexed += 1,
-                    Ok(false) => {}
-                    Err(e @ Error::OverCap { .. }) => return Err(e),
-                    Err(e) => report.errors.push((file.clone(), e.to_string())),
-                }
-            }
-            let error = if !d.accessible {
-                Some("Root is missing or not readable")
-            } else if d.limited {
-                Some("Discovery limit reached; cached rows were preserved")
-            } else if !d.complete {
-                Some("Discovery incomplete; cached rows were preserved")
+        // Discover every root first, then index newest-first across all of them: if the
+        // cap is ever hit, what is missing is the oldest.
+        let mut plans: Vec<RootPlan> = Vec::with_capacity(roots.len());
+        let mut work: Vec<(i64, usize, Work)> = Vec::new();
+        for (i, root) in roots.iter().enumerate() {
+            let plan = if root.format == Format::Sqlite {
+                self.plan_bb_root(root, i, &mut work)
             } else {
-                None
+                let d = discover(root, max_files);
+                for file in &d.files {
+                    let mtime = fs::metadata(file).map_or(0, |m| mtime_ms(&m));
+                    work.push((mtime, i, Work::File(file.clone())));
+                }
+                let error = if !d.accessible {
+                    Some("Root is missing or not readable")
+                } else if d.limited {
+                    Some("Discovery limit reached; cached rows were preserved")
+                } else if !d.complete {
+                    Some("Discovery incomplete; cached rows were preserved")
+                } else {
+                    None
+                };
+                let seen = d.complete.then(|| d.files.iter().map(|p| p.to_string_lossy().into_owned()).collect());
+                RootPlan { files: d.files.len(), accessible: d.accessible, limited: d.limited, error: error.map(String::from), seen, bb: None }
             };
+            plans.push(plan);
+        }
+        work.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, i, item) in &work {
+            let root = &roots[*i];
+            let (key, done) = match item {
+                Work::File(file) => (file.clone(), self.index_file(root, file)),
+                Work::Bb(t) => {
+                    let done = match &plans[*i].bb {
+                        Some(bb) => self.index_bb_thread(root, bb, t),
+                        None => continue,
+                    };
+                    (PathBuf::from(thread_key(&root.path, &t.id)), done)
+                }
+            };
+            match done {
+                Ok(true) => report.indexed += 1,
+                Ok(false) => {}
+                Err(e @ Error::OverCap { .. }) => return Err(e),
+                Err(e) => report.errors.push((key, e.to_string())),
+            }
+        }
+        for (root, plan) in roots.iter().zip(plans) {
             self.conn.execute(
                 "INSERT INTO trace_roots (id, source_id, path, exists_flag, file_count, last_scan_at, error)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(id) DO UPDATE SET source_id=?2, path=?3, exists_flag=?4, file_count=?5, last_scan_at=?6, error=?7",
-                params![root.id, root.source, root.path.to_string_lossy(), d.accessible, d.files.len(), now_ms(), error],
+                params![root.id, root.source, root.path.to_string_lossy(), plan.accessible, plan.files, now_ms(), plan.error],
             )?;
-            if d.complete {
-                let seen: HashSet<String> = d.files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            if let Some(seen) = plan.seen {
                 self.prune_files(&root.id, |p| !seen.contains(p))?;
             }
-            report.roots.push(RootReport { id: root.id.clone(), files: d.files.len(), accessible: d.accessible, limited: d.limited });
+            report.roots.push(RootReport { id: root.id.clone(), files: plan.files, accessible: plan.accessible, limited: plan.limited });
         }
         let ids: HashSet<&str> = roots.iter().map(|r| r.id.as_str()).collect();
         let stale: Vec<String> = {
@@ -500,7 +582,10 @@ impl TraceIndex {
         };
         let tx = self.conn.transaction()?;
         for (path, sid) in rows.iter().filter(|(p, _)| gone(p)) {
-            tx.execute("DELETE FROM trace_events WHERE session_id = ?1", [sid])?;
+            let sk: Option<i64> = tx.query_row("SELECT sk FROM trace_sessions WHERE id = ?1", [sid], |r| r.get(0)).optional()?;
+            if let Some(sk) = sk {
+                delete_events(&tx, sk)?;
+            }
             tx.execute("DELETE FROM trace_sessions WHERE id = ?1", [sid])?;
             tx.execute("DELETE FROM trace_files WHERE path = ?1", [path])?;
         }
@@ -566,18 +651,16 @@ impl TraceIndex {
         let mut agg = if reset { Aggregate { title: basename.clone(), ..Default::default() } } else { self.load_aggregate(&sid, &basename)? };
 
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT INTO trace_sessions (id, source_id, title, file_path, file_size_bytes) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(id) DO UPDATE SET file_path = ?4, file_size_bytes = ?5",
-            params![sid, root.source, basename, path_str, size],
-        )?;
+        let sk = upsert_session(&tx, &sid, &root.source, &basename, &path_str, size)?;
         if reset {
-            tx.execute("DELETE FROM trace_events WHERE session_id = ?1", [&sid])?;
+            delete_events(&tx, sk)?;
         }
+        let mut names = Names::default();
         let mut parse_error: Option<String> = None;
         let mut capped = false;
         let (end_byte, next_line) = {
             let mut insert = tx.prepare_cached(INSERT_EVENT)?;
+            let mut usage = tx.prepare_cached(INSERT_USAGE)?;
             let reader = lines::open(path, root.format, start_byte as u64, size as u64)?;
             lines::for_each(reader, start_byte, start_line, |line| {
                 if line.number >= MAX_EVENTS_PER_FILE as i64 {
@@ -596,7 +679,7 @@ impl TraceIndex {
                 };
                 let e = normalize(&value);
                 agg.add(&e);
-                insert_event(&mut insert, &sid, line.number, line.start_byte, &e).map_err(io::Error::other)?;
+                insert_event(&mut insert, &mut usage, &mut names, &tx, sk, line.number, line.start_byte, &e).map_err(io::Error::other)?;
                 Ok(true)
             })?
         };
@@ -671,7 +754,8 @@ impl TraceIndex {
     fn write_aggregate(tx: &Transaction<'_>, sid: &str, agg: &Aggregate, mtime: i64) -> Result<()> {
         let latest: Option<String> = tx
             .query_row(
-                "SELECT type FROM trace_events WHERE session_id = ?1 ORDER BY line_number DESC LIMIT 1",
+                "SELECT n.name FROM trace_events e JOIN trace_names n ON n.id = e.type_id
+                 WHERE e.sk = (SELECT sk FROM trace_sessions WHERE id = ?1) ORDER BY e.line_number DESC LIMIT 1",
                 [sid],
                 |r| r.get(0),
             )
@@ -706,5 +790,44 @@ impl TraceIndex {
             ],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn scan_indexes_newest_files_first_across_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let line = "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"x\"}}\n";
+        let mk = |root: &str, name: &str, age_s: u64| {
+            let p = tmp.path().join(root).join(name);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, line).unwrap();
+            let t = SystemTime::now() - Duration::from_secs(age_s);
+            fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+        };
+        mk("a", "old.jsonl", 3000);
+        mk("a", "mid.jsonl", 2000);
+        mk("b", "new.jsonl", 1000);
+        mk("b", "oldest.jsonl", 4000);
+        let root = |id: &str, source: &str| Root {
+            id: id.into(),
+            source: source.into(),
+            path: tmp.path().join(id),
+            format: Format::Jsonl,
+            file_name: None,
+        };
+        let mut idx = TraceIndex::open(&tmp.path().join("idx/t.sqlite")).unwrap();
+        idx.scan(&[root("a", "pi"), root("b", "omp")]).unwrap();
+        let mut stmt = idx.conn().prepare("SELECT file_path FROM trace_sessions ORDER BY sk").unwrap();
+        let order: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|p| Path::new(&p.unwrap()).file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(order, ["new.jsonl", "mid.jsonl", "old.jsonl", "oldest.jsonl"]);
     }
 }

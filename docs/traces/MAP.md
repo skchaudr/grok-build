@@ -30,7 +30,7 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
   - bb `~/.bb/bb.db` threads, read in place (`bb.rs`, `index/bb_index.rs`; pointer = thread id + event sequence; see `BB.md`)
   - grok `$GROK_HOME/sessions/**/chat_history.jsonl` (cwd from sibling `summary.json`)
   - Walk caps: 50k files, depth 32. Symlinks are skipped.
-- **Session id:** `source:` + `sha1(source \0 path)[..24]`.
+- **Session id:** `source:` + `sha1(source \0 path)[..24]` (API key). Tables use the integer `trace_sessions.sk`.
 - **Normalize:** type is `top.type/payload.type`, where `payload` = `payload|data|message`.
   - Role: explicit role first, else from the type name.
   - Kind is one of telemetry, tool, step, turn, reasoning, message, system.
@@ -44,14 +44,20 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
   - Skip when size and mtime are unchanged. If the size matches but mtime changed, compare the full hash and only touch mtime.
   - Append from `indexed_bytes` when the sha256 of the 64KB before it (`content_hash`, `TAIL_WINDOW`) matches, so append cost does not grow with file size. Otherwise (shrink, tail changed) do a full reparse. zstd always reparses. An in-place edit further back than 64KB with unchanged size is not seen.
   - An unterminated tail line is never indexed.
-  - `byte_offset` per event makes `raw_line` a seek.
+  - `byte_offset` is kept on every 16th line (`CHECKPOINT_EVERY`); `raw_line` seeks to the nearest earlier checkpoint and scans on.
   - A corrupt db is renamed `*.corrupt.<nanos>` and rebuilt. There is no `quick_check` on open, because it is O(db) and the open runs on the UI thread.
 - **Status:**
   - `completed` if the last event type is terminal (complete, turn end, session end, run end).
   - `active` if not terminal and the file mtime is within 5 min.
   - Otherwise `idle`.
-- **Storage diet:** events keep a `preview` (whitespace-collapsed, 160 chars), not the text. Titles come from the full text before clipping. The inspector re-reads the raw line via `byte_offset`; nothing is copied.
-- **Versions:** `trace_meta` holds `schema_version` and `parser_version` (both 3). A mismatch on open renames the db and sidecars to `*.old.<nanos>` and deletes them, then starts fresh (a smaller row does not shrink a SQLite file).
+- **Storage diet:** events keep a `preview` (whitespace-collapsed, 160 chars), not the text. Row layout (schema 4):
+  - `trace_events` is `WITHOUT ROWID`, `PRIMARY KEY (sk, line_number)`; no text id, no extra index, no per-event cwd.
+  - `kind`/`role` are `Kind::code`/`Role::code`. Event type, title and model are interned in `trace_names` (rows hold ids).
+  - `preview` is `''` when it equals the title (read back as the title).
+  - Duration, tokens, turn and step live in `trace_event_usage`, only for events that have them.
+  - Measured on the Mini's real data (604 files, 99k events): 338 -> 122 B/event all-in; the events table alone is 110 B, of which message previews are the bulk (avg 125 B on user/assistant events).
+  - Scan order: all roots are discovered first, then files are indexed newest mtime first across roots, bb threads by `updated_at`. If the cap is hit, the oldest sessions are the ones missing. Titles come from the full text before clipping. The inspector re-reads the raw line via `byte_offset`; nothing is copied.
+- **Versions:** `trace_meta` holds `schema_version` and `parser_version` (both 4). A mismatch on open renames the db and sidecars to `*.old.<nanos>` and deletes them, then starts fresh (a smaller row does not shrink a SQLite file).
 - **Caps (fail loud):**
   - `MAX_DB_BYTES` = 256 MiB over db + `-wal`. `scan`, `index_file` and `record_receipt` call `check_cap()` first and return `Error::OverCap`, writing `trace_meta.health`. `TraceIndex::health()` is `None` when ok; the ledger shows it as a red line on the search row.
   - `MAX_EVENTS_PER_FILE` = 200k, recorded in `parse_error`.

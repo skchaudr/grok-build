@@ -27,6 +27,18 @@ pub enum Kind {
 }
 
 impl Kind {
+    pub const ALL: [Kind; 7] =
+        [Kind::Message, Kind::Tool, Kind::Step, Kind::Turn, Kind::Reasoning, Kind::Telemetry, Kind::System];
+
+    /// Small integer stored in the index; `ALL[code]` is the inverse.
+    pub fn code(self) -> i64 {
+        Self::ALL.iter().position(|k| *k == self).unwrap_or(0) as i64
+    }
+
+    pub fn from_code(code: i64) -> Option<Kind> {
+        usize::try_from(code).ok().and_then(|i| Self::ALL.get(i).copied())
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Message => "message",
@@ -50,6 +62,17 @@ pub enum Role {
 }
 
 impl Role {
+    pub const ALL: [Role; 5] = [Role::User, Role::Assistant, Role::Tool, Role::ToolResult, Role::Reasoning];
+
+    /// Small integer stored in the index; `ALL[code]` is the inverse.
+    pub fn code(self) -> i64 {
+        Self::ALL.iter().position(|r| *r == self).unwrap_or(0) as i64
+    }
+
+    pub fn from_code(code: i64) -> Option<Role> {
+        usize::try_from(code).ok().and_then(|i| Self::ALL.get(i).copied())
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Role::User => "user",

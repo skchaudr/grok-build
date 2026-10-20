@@ -299,8 +299,8 @@ fn old_schema_is_replaced_not_migrated() {
     idx.scan(&e.roots).unwrap();
     assert_eq!(all(&idx).len(), 6);
     let stats = idx.stats().unwrap();
-    assert_eq!(stats.schema_version.as_deref(), Some("3"));
-    assert_eq!(stats.parser_version.as_deref(), Some("3"));
+    assert_eq!(stats.schema_version.as_deref(), Some("4"));
+    assert_eq!(stats.parser_version.as_deref(), Some("4"));
     let names: Vec<String> = fs::read_dir(e.db.parent().unwrap()).unwrap().map(|d| d.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert!(names.iter().all(|n| !n.contains(".old.")), "old db removed: {names:?}");
     assert!(!names.iter().any(|n| n.contains(".corrupt.")));
@@ -450,4 +450,37 @@ fn same_size_edit_near_the_end_reparses() {
     std::thread::sleep(std::time::Duration::from_millis(20));
     write(&path, &PI.replace("\"ok\"", "\"no\""));
     assert!(!idx.index_file(pi_root, &path).unwrap());
+}
+
+#[test]
+fn compact_rows_round_trip() {
+    let e = env();
+    // 40 lines: blank/garbage mixed in so line numbers have gaps; usage on every 7th assistant line.
+    let mut text = String::new();
+    for i in 0..40 {
+        text.push_str(&match i % 7 {
+            0 => format!("{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"model\":\"m\",\"content\":\"a{i}\",\"usage\":{{\"input_tokens\":{i},\"output_tokens\":2}}}}}}\n"),
+            3 => "\n".to_string(),
+            5 => "not json\n".to_string(),
+            _ => format!("{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"u{i}\"}}}}\n"),
+        });
+    }
+    write(&e.home.join(".pi/agent/sessions/--w-pi--/many.jsonl"), &text);
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let row = idx.list_sessions(&SessionFilter { text: Some("many".into()), ..Default::default() }).unwrap().remove(0);
+    for n in [0, 1, 7, 16, 17, 21, 35, 39] {
+        let want = text.lines().nth(n).unwrap();
+        if want.is_empty() || want == "not json" {
+            assert_eq!(idx.raw_line(&row.id, n as i64).unwrap(), None, "line {n} has no event");
+        } else {
+            assert_eq!(idx.raw_line(&row.id, n as i64).unwrap().as_deref(), Some(want), "line {n}");
+        }
+    }
+    let events = idx.list_events(&row.id, &EventFilter::default()).unwrap();
+    assert!(events.iter().all(|e| !e.preview.is_empty()), "title stands in for an empty preview");
+    let ev = |l: i64| events.iter().find(|e| e.line == l).unwrap();
+    assert_eq!((ev(7).input_tokens, ev(7).output_tokens, ev(7).model.as_deref()), (Some(7), Some(2), Some("m")));
+    assert_eq!(ev(1).input_tokens, None);
+    assert_eq!((ev(1).kind.as_str(), ev(1).role.as_deref(), ev(1).preview.as_str()), ("message", Some("user"), "u1"));
 }
