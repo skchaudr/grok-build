@@ -371,20 +371,7 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
     if let Some(foreign_source) =
         crate::app::foreign_sessions::ForeignPickerSource::from_picker_source(&source)
     {
-        let prompt = foreign_source.resume_prompt(&session_id);
-        clear_startup_actions(app);
-        if !app.session_startup_allowed() {
-            app.deferred_startup.session = Some(
-                crate::app::session_startup::DeferredSessionStartup::ForeignResume {
-                    tool: foreign_source.tool(),
-                    native_id: session_id,
-                },
-            );
-            return vec![];
-        }
-        let mut effects = dispatch_new_session_inner(app, None);
-        effects.extend(dispatch(Action::SendPrompt(prompt), app));
-        return effects;
+        return dispatch_foreign_resume(app, foreign_source, session_id);
     }
     let chat_kind = source == "conversation";
     #[cfg(feature = "local-workspace")]
@@ -453,6 +440,51 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
         vec![]
     }
 }
+/// Start a new session that resumes a Claude/Codex/Cursor session through its resume skill.
+fn dispatch_foreign_resume(
+    app: &mut AppView,
+    foreign_source: crate::app::foreign_sessions::ForeignPickerSource,
+    native_id: String,
+) -> Vec<Effect> {
+    let prompt = foreign_source.resume_prompt(&native_id);
+    clear_startup_actions(app);
+    if !app.session_startup_allowed() {
+        app.deferred_startup.session = Some(
+            crate::app::session_startup::DeferredSessionStartup::ForeignResume {
+                tool: foreign_source.tool(),
+                native_id,
+            },
+        );
+        return vec![];
+    }
+    let mut effects = dispatch_new_session_inner(app, None);
+    effects.extend(dispatch(Action::SendPrompt(prompt), app));
+    effects
+}
+
+/// Resume a `/traces` row: foreign harnesses through their resume skill, grok sessions natively.
+pub(in crate::app::dispatch) fn dispatch_traces_resume(
+    app: &mut AppView,
+    source: &str,
+    native_id: String,
+) -> Vec<Effect> {
+    if let Some(agent) = get_active_agent_mut(app) {
+        agent.active_modal = None;
+    }
+    if let Some(foreign_source) =
+        crate::app::foreign_sessions::ForeignPickerSource::from_picker_source(source)
+    {
+        return dispatch_foreign_resume(app, foreign_source, native_id);
+    }
+    match xai_grok_shell::session::resolve_local_session_any_cwd(&native_id) {
+        Some(cwd) => dispatch_load_session(app, native_id, Some(std::path::PathBuf::from(cwd)), false),
+        None => {
+            app.show_toast("Session not found locally");
+            vec![]
+        }
+    }
+}
+
 fn dispatch_daemon_session_pick(app: &mut AppView, session_id: String, cwd: String) -> Vec<Effect> {
     #[cfg(feature = "local-workspace")]
     {

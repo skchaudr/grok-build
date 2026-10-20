@@ -248,14 +248,9 @@ impl TraceIndex {
 
     fn try_open(mode: JournalMode, db: &Path) -> rusqlite::Result<Self> {
         let conn = mode.open(db)?;
+        // No integrity scan here: it is O(db) and the pager opens on the UI thread.
+        // A garbage file fails on the schema batch below.
         conn.execute_batch(SCHEMA)?;
-        let check: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
-        if check != "ok" {
-            return Err(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
-                Some(check),
-            ));
-        }
         Ok(Self { conn })
     }
 

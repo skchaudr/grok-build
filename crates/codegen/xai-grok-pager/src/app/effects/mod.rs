@@ -2779,6 +2779,25 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::ScanTraces { agent_id } => {
+            tasks.spawn(async move {
+                let summary = tokio::task::spawn_blocking(|| {
+                    let started = std::time::Instant::now();
+                    let mut index = xai_grok_traces::TraceIndex::open(&xai_grok_traces::default_db_path())?;
+                    let report = index.scan(&xai_grok_traces::user_roots())?;
+                    let mut line = format!("indexed {} changed files in {:.1}s", report.indexed, started.elapsed().as_secs_f64());
+                    if !report.errors.is_empty() {
+                        line.push_str(&format!(" · {} files failed", report.errors.len()));
+                    }
+                    Ok::<_, xai_grok_traces::Error>(line)
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()))
+                .unwrap_or_else(|e| format!("trace scan failed: {e}"));
+                TaskResult::TracesScanned { agent_id, summary }
+            });
+        }
         Effect::FetchMemoryList { agent_id, session_id } => {
             use xai_grok_shell::extensions::memory::{
                 MEMORY_LIST_METHOD, MemoryListRequest, MemoryListing,

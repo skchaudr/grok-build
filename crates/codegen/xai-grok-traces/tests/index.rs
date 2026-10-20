@@ -123,7 +123,8 @@ fn filters_and_search() {
     assert_eq!(f(SessionFilter { errors_only: true, ..Default::default() }), 1);
     assert_eq!(f(SessionFilter { text: Some("omp task".into()), ..Default::default() }), 1);
     // Event-level match: "no such file" only appears in a codex tool output.
-    assert_eq!(f(SessionFilter { text: Some("no such file".into()), ..Default::default() }), 1);
+    assert_eq!(f(SessionFilter { text: Some("no such file".into()), ..Default::default() }), 0, "shallow");
+    assert_eq!(f(SessionFilter { text: Some("no such file".into()), deep: true, ..Default::default() }), 1);
     assert_eq!(f(SessionFilter { text: Some("100%".into()), ..Default::default() }), 0);
 }
 

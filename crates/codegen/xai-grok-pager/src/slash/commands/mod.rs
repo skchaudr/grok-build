@@ -59,6 +59,7 @@ pub mod share;
 pub mod tasks;
 pub mod theme;
 pub mod timeline;
+pub mod traces;
 pub mod timestamps;
 pub mod toggle_mouse_reporting;
 pub mod transcript;
@@ -140,6 +141,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::fullscreen()),
         // Reached for occasionally.
         Arc::new(timeline::TimelineCommand),
+        Arc::new(traces::TracesCommand),
         Arc::new(cd::CdCommand),
         Arc::new(imagine::ImagineCommand),
         Arc::new(imagine_video::ImagineVideoCommand),

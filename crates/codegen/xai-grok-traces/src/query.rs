@@ -48,6 +48,8 @@ pub struct SessionFilter {
     pub errors_only: bool,
     pub active_only: bool,
     pub has_tools: bool,
+    /// Also match event titles and summaries (a scan of trace_events).
+    pub deep: bool,
     pub sort: Sort,
     pub limit: usize,
     pub offset: usize,
@@ -159,11 +161,14 @@ impl TraceIndex {
             args.push(Sql::Text(source.clone()));
         }
         if let Some(text) = filter.text.as_deref().filter(|t| !t.trim().is_empty()) {
-            sql.push_str(
-                " AND (s.title LIKE ?1x ESCAPE '\\' OR s.cwd LIKE ?1x ESCAPE '\\' OR s.model LIKE ?1x ESCAPE '\\'
-                  OR s.file_path LIKE ?1x ESCAPE '\\' OR s.id IN (SELECT session_id FROM trace_events
-                  WHERE summary LIKE ?1x ESCAPE '\\' OR title LIKE ?1x ESCAPE '\\'))",
-            );
+            sql.push_str(" AND (s.title LIKE ?1x ESCAPE '\\' OR s.cwd LIKE ?1x ESCAPE '\\' OR s.model LIKE ?1x ESCAPE '\\'");
+            sql.push_str(" OR s.file_path LIKE ?1x ESCAPE '\\' OR s.id LIKE ?1x ESCAPE '\\'");
+            if filter.deep {
+                sql.push_str(
+                    " OR s.id IN (SELECT session_id FROM trace_events WHERE summary LIKE ?1x ESCAPE '\\' OR title LIKE ?1x ESCAPE '\\')",
+                );
+            }
+            sql.push(')');
             // Positional placeholders: one per occurrence.
             let pat = like(text);
             let n = sql.matches("?1x").count();

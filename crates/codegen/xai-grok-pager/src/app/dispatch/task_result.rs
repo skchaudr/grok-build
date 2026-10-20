@@ -1285,6 +1285,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::PluginsListLoaded { agent_id, result } => {
             handle_plugins_list_loaded(app, agent_id, result)
         }
+        TaskResult::TracesScanned { agent_id, summary } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id)
+                && let Some(crate::views::modal::ActiveModal::Traces { state }) = agent.active_modal.as_mut()
+            {
+                state.finish_scan(summary);
+            }
+            vec![]
+        }
         TaskResult::MemoryListLoaded { agent_id, result } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 match result {

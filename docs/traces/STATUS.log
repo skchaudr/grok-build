@@ -1,2 +1,3 @@
 2026-10-20T06:45:55Z mapping (3 sonnet subagents: reference port spec, storage crates, pager entry points)
 2026-10-20T06:55:13Z P1 green: xai-grok-traces crate, 17 tests; real Mini scan 298 files 2.6s 0 errors, rescan 16ms
+2026-10-20T07:17:26Z P2 wiring: /traces modal (ledger/trajectory/inspector), scan effect, resume (claude/codex skill, grok native), copy; 444 slash+modal tests green

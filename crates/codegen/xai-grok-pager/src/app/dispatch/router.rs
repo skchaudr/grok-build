@@ -68,7 +68,7 @@ use super::session::lifecycle::{
 };
 use super::session::load::{
     dispatch_cycle_session_source_filter, dispatch_load_session, dispatch_pick_content_session,
-    dispatch_pick_content_session_in_worktree, dispatch_pick_session,
+    dispatch_pick_content_session_in_worktree, dispatch_pick_session, dispatch_traces_resume,
     dispatch_pick_session_in_worktree, dispatch_session_picker_closed,
     dispatch_show_session_picker, dispatch_trigger_deep_search, session_picker_entry_matches,
     session_picker_external_filter_active,
@@ -1434,6 +1434,39 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             }
             vec![]
         }
+        Action::OpenTraces => {
+            let ActiveView::Agent(id) = app.active_view else { return vec![] };
+            let Some(agent) = app.agents.get_mut(&id) else { return vec![] };
+            let index = xai_grok_traces::TraceIndex::open(&xai_grok_traces::default_db_path())
+                .map_err(|e| tracing::warn!(%e, "traces: index open failed"))
+                .ok();
+            agent.active_modal = Some(crate::views::modal::ActiveModal::Traces {
+                state: Box::new(crate::views::traces_modal::TracesModalState::open(index)),
+            });
+            vec![Effect::ScanTraces { agent_id: id }]
+        }
+        Action::TracesRescan => match app.active_view {
+            ActiveView::Agent(id) => vec![Effect::ScanTraces { agent_id: id }],
+            _ => vec![],
+        },
+        Action::TracesCopy { text } => {
+            let delivery = crate::clipboard::copy_text_or_file(&text);
+            with_active_agent(app, |agent| {
+                if let Some(crate::views::modal::ActiveModal::Traces { state }) = agent.active_modal.as_mut() {
+                    state.report_copy(&delivery);
+                }
+            });
+            vec![]
+        }
+        Action::TracesNotice { text } => {
+            with_active_agent(app, |agent| {
+                if let Some(crate::views::modal::ActiveModal::Traces { state }) = agent.active_modal.as_mut() {
+                    state.status = Some(text);
+                }
+            });
+            vec![]
+        }
+        Action::TracesResume { source, native_id } => dispatch_traces_resume(app, &source, native_id),
         Action::OpenMemoryModal => {
             if let ActiveView::Agent(id) = app.active_view
                 && let Some(agent) = app.agents.get(&id)

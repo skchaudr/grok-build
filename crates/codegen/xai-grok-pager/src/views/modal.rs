@@ -292,6 +292,10 @@ pub enum ActiveModal {
     MemoryBrowser {
         state: Box<crate::views::memory_modal::MemoryModalState>,
     },
+    /// Local agent session traces (/traces).
+    Traces {
+        state: Box<crate::views::traces_modal::TracesModalState>,
+    },
     /// Settings modal (F2, /settings, palette). Boxed because the state is large.
     Settings {
         state: Box<crate::views::settings_modal::SettingsModalState>,
@@ -665,6 +669,7 @@ impl ActiveModal {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
+            | ActiveModal::Traces { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
             | ActiveModal::RememberNoteReview { .. } => vec![],
@@ -695,6 +700,7 @@ impl ActiveModal {
             ActiveModal::DocViewer { title, .. } => title.as_str(),
             ActiveModal::ShortcutsHelp { .. } => "Keyboard Shortcuts",
             ActiveModal::MemoryBrowser { .. } => "Memory",
+            ActiveModal::Traces { .. } => crate::views::traces_modal::TITLE,
             ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",
