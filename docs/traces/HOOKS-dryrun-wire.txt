@@ -1,0 +1,130 @@
+# Dry-run of install.sh --dsh-profile acp-enhanced, cursor/dsh/bb sections only (claude/codex/grok/omp/pi omitted; file bodies of copied templates elided).
+## Mini (real HOME, bb CLI there is a client of Air, so skipped)
+[cursor] /Users/sab-mini/.cursor/hooks.json: would change
+--- /Users/sab-mini/.cursor/hooks.json
++++ /Users/sab-mini/.cursor/hooks.json (new)
+@@ -7,6 +7,10 @@
+       {
+         "command": "if [ -f '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -r '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -x '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ]; then ORCA_CURSOR_HOOK_RESPONSE='{}' /bin/sh '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh'; else printf '%s\\n' '{}'; { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi",
+         "timeout": 10
++      },
++      {
++        "command": "\"$HOME/.grok/bin/grok-traces\" hook cursor",
++        "timeout": 10
+       }
+     ],
+     "afterFileEdit": [
+@@ -53,6 +57,10 @@
+       {
+         "command": "if [ -f '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -r '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -x '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ]; then ORCA_CURSOR_HOOK_RESPONSE='{}' /bin/sh '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh'; else printf '%s\\n' '{}'; { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi",
+         "timeout": 10
++      },
++      {
++        "command": "\"$HOME/.grok/bin/grok-traces\" hook cursor",
++        "timeout": 10
+       }
+     ],
+     "preToolUse": [
+@@ -65,12 +73,20 @@
+       {
+         "command": "if [ -f '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -r '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -x '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ]; then ORCA_CURSOR_HOOK_RESPONSE='{}' /bin/sh '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh'; else printf '%s\\n' '{}'; { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi",
+         "timeout": 10
++      },
++      {
++        "command": "\"$HOME/.grok/bin/grok-traces\" hook cursor",
++        "timeout": 10
+       }
+     ],
+     "postToolUseFailure": [
+       {
+         "command": "if [ -f '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -r '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -x '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ]; then ORCA_CURSOR_HOOK_RESPONSE='{}' /bin/sh '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh'; else printf '%s\\n' '{}'; { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi",
+         "timeout": 10
++      },
++      {
++        "command": "\"$HOME/.grok/bin/grok-traces\" hook cursor",
++        "timeout": 10
+       }
+     ]
+   },
+[dsh-plugin] /Users/sab-mini/.dsh/plugins/grok-traces.mjs: would install
+  (template body elided)
+[dsh] /Users/sab-mini/.dsh/profiles/acp-enhanced/cordis.patch.yml: would change
+--- /Users/sab-mini/.dsh/profiles/acp-enhanced/cordis.patch.yml
++++ /Users/sab-mini/.dsh/profiles/acp-enhanced/cordis.patch.yml (new)
+@@ -223,3 +223,8 @@
+         apiKeyEnv: OPENCODE_GO_API_KEY
+         headers:
+           x-opencode-session: dsh-session
++# grok-traces begin
++- insert:
++    - id: grok-traces
++      name: '/Users/sab-mini/.dsh/plugins/grok-traces.mjs'
++# grok-traces end
+[bb] skipped: bb CLI here is a client of http://100.93.242.91:38886; run install.sh on that host
+
+## Air (hooks.json and acp-enhanced patch fetched read-only over ssh, run against a synthetic HOME; bb is local there)
+[cursor] /Users/sab-mini/.cursor/hooks.json: would change
+--- /Users/sab-mini/.cursor/hooks.json
++++ /Users/sab-mini/.cursor/hooks.json (new)
+@@ -10,6 +10,10 @@
+       {
+         "command": "if [ -f '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -r '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -x '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ]; then ORCA_CURSOR_HOOK_RESPONSE='{}' /bin/sh '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh'; else printf '%s\\n' '{}'; { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi",
+         "timeout": 10
++      },
++      {
++        "command": "\"$HOME/.grok/bin/grok-traces\" hook cursor",
++        "timeout": 10
+       }
+     ],
+     "afterFileEdit": [
+@@ -73,6 +77,10 @@
+       {
+         "command": "if [ -f '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -r '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -x '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ]; then ORCA_CURSOR_HOOK_RESPONSE='{}' /bin/sh '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh'; else printf '%s\\n' '{}'; { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi",
+         "timeout": 10
++      },
++      {
++        "command": "\"$HOME/.grok/bin/grok-traces\" hook cursor",
++        "timeout": 10
+       }
+     ],
+     "preToolUse": [
+@@ -90,12 +98,20 @@
+       {
+         "command": "if [ -f '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -r '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -x '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ]; then ORCA_CURSOR_HOOK_RESPONSE='{}' /bin/sh '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh'; else printf '%s\\n' '{}'; { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi",
+         "timeout": 10
++      },
++      {
++        "command": "\"$HOME/.grok/bin/grok-traces\" hook cursor",
++        "timeout": 10
+       }
+     ],
+     "postToolUseFailure": [
+       {
+         "command": "if [ -f '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -r '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ] && [ -x '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh' ]; then ORCA_CURSOR_HOOK_RESPONSE='{}' /bin/sh '/Users/sab-mini/.orca/agent-hooks/cursor-hook.sh'; else printf '%s\\n' '{}'; { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi",
+         "timeout": 10
++      },
++      {
++        "command": "\"$HOME/.grok/bin/grok-traces\" hook cursor",
++        "timeout": 10
+       }
+     ]
+   },
+[dsh-plugin] /Users/sab-mini/.dsh/plugins/grok-traces.mjs: would install
+  (template body elided)
+[dsh] /Users/sab-mini/.dsh/profiles/acp-enhanced/cordis.patch.yml: would change
+--- /Users/sab-mini/.dsh/profiles/acp-enhanced/cordis.patch.yml
++++ /Users/sab-mini/.dsh/profiles/acp-enhanced/cordis.patch.yml (new)
+@@ -223,3 +223,8 @@
+         apiKeyEnv: OPENCODE_GO_API_KEY
+         headers:
+           x-opencode-session: dsh-session
++# grok-traces begin
++- insert:
++    - id: grok-traces
++      name: '/Users/sab-mini/.dsh/plugins/grok-traces.mjs'
++# grok-traces end
+[bb-files] /Users/sab-mini/.grok/hooks/bb/server.ts: would install
+  (template body elided)
+[bb-files] /Users/sab-mini/.grok/hooks/bb/package.json: would install
+  (template body elided)
+[bb] would run: bb plugin install /Users/sab-mini/.grok/hooks/bb --yes   (then bb plugin reload grok-traces-hook)

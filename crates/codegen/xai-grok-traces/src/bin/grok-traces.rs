@@ -1,4 +1,4 @@
-//! `grok-traces hook <source> | scan | list [--limit N] [--json] | doctor [--reset]`.
+//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | events <id> --json [--noise] [--limit N] | raw <id> <line> | version | doctor [--reset]`.
 //!
 //! `hook` runs once per harness event: it must be fast, silent and always
 //! exit 0 so it can never block an agent.
@@ -9,7 +9,8 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use xai_grok_traces::hook::{MAX_STDIN_BYTES, extract, ingest};
-use xai_grok_traces::{SessionFilter, TraceIndex, default_db_path, user_roots};
+use xai_grok_traces::remote::{event_to_json, session_to_json};
+use xai_grok_traces::{EventFilter, SessionFilter, TraceIndex, default_db_path, user_roots};
 
 const HOOK_BUSY: Duration = Duration::from_millis(250);
 const NOTIFY_EVERY: Duration = Duration::from_secs(3600);
@@ -21,8 +22,14 @@ fn main() -> ExitCode {
         Some("scan") => finish(scan()),
         Some("list") => finish(list(&args[1..])),
         Some("doctor") => finish(doctor(&args[1..])),
+        Some("events") => finish(events(&args[1..])),
+        Some("raw") => raw(&args[1..]),
+        Some("version") => {
+            println!("grok-traces {} remote=1", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
         _ => {
-            eprintln!("usage: grok-traces hook <source> | scan | list [--limit N] [--json] | doctor [--reset]");
+            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | events <id> --json [--noise] [--limit N] | raw <id> <line> | version | doctor [--reset]");
             ExitCode::from(2)
         }
     }
@@ -112,27 +119,65 @@ fn scan() -> Result<bool, Box<dyn std::error::Error>> {
 }
 
 fn list(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
-    let mut limit = 50;
+    let mut filter = SessionFilter { limit: 50, ..Default::default() };
     let mut it = args.iter();
     while let Some(a) = it.next() {
+        let mut num = |name: &str| -> Result<i64, String> { it.next().and_then(|v| v.parse().ok()).ok_or(format!("{name} needs a number")) };
         match a.as_str() {
             "--json" => {}
-            "--limit" => limit = it.next().and_then(|v| v.parse().ok()).ok_or("--limit needs a number")?,
+            "--limit" => filter.limit = num("--limit")?.max(1) as usize,
+            "--since" => filter.since_ms = Some(num("--since")?),
+            "--active" => filter.active_only = true,
+            "--roots" => filter.roots_only = true,
             other => return Err(format!("unknown flag {other}").into()),
         }
     }
     let idx = TraceIndex::open(&default_db_path())?;
     let mut out = io::stdout().lock();
-    for s in idx.list_sessions(&SessionFilter { limit, ..Default::default() })? {
-        let line = serde_json::json!({
-            "id": s.id, "source": s.source, "title": s.title, "status": s.status.as_str(),
-            "updated_at": s.updated_at, "path": s.file_path, "parent_id": s.parent_id, "label": s.label,
-            "agent_type": s.agent_type, "now": s.now, "last_event_at": s.last_event_at, "children": s.children,
-            "failed": s.failed,
-        });
-        writeln!(out, "{line}")?;
+    for s in idx.list_sessions(&filter)? {
+        writeln!(out, "{}", session_to_json(&s))?;
     }
     Ok(true)
+}
+
+fn events(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
+    let id = args.first().ok_or("events needs a session id")?;
+    let mut filter = EventFilter::default();
+    let mut it = args[1..].iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--json" => {}
+            "--noise" => filter.include_noise = true,
+            "--limit" => filter.limit = it.next().and_then(|v| v.parse().ok()).ok_or("--limit needs a number")?,
+            other => return Err(format!("unknown flag {other}").into()),
+        }
+    }
+    let idx = TraceIndex::open(&default_db_path())?;
+    let mut out = io::stdout().lock();
+    for e in idx.list_events(id, &filter)? {
+        writeln!(out, "{}", event_to_json(&e))?;
+    }
+    Ok(true)
+}
+
+/// Prints the raw source line. Exit 3 = no such line.
+fn raw(args: &[String]) -> ExitCode {
+    let run = || -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let id = args.first().ok_or("raw needs a session id and a line number")?;
+        let line: i64 = args.get(1).and_then(|v| v.parse().ok()).ok_or("raw needs a line number")?;
+        Ok(TraceIndex::open(&default_db_path())?.raw_line(id, line)?)
+    };
+    match run() {
+        Ok(Some(l)) => {
+            println!("{l}");
+            ExitCode::SUCCESS
+        }
+        Ok(None) => ExitCode::from(3),
+        Err(e) => {
+            eprintln!("grok-traces: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn when(ms: i64) -> String {
