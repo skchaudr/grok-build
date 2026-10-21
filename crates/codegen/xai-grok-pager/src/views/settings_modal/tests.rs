@@ -6760,6 +6760,12 @@ fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
         crate::theme::ThemeKind::RosePineMoon => crate::theme::Theme::rosepine_moon(),
         // Resolved via `Theme::current()` rather than a constructor because `theme::oscura` is a private module
         crate::theme::ThemeKind::OscuraMidnight => crate::theme::Theme::current(),
+        crate::theme::ThemeKind::KansoMist => crate::theme::Theme::kanso_mist(),
+        crate::theme::ThemeKind::KanagawaWave => crate::theme::Theme::kanagawa_wave(),
+        crate::theme::ThemeKind::Kanagawa => crate::theme::Theme::kanagawa(),
+        crate::theme::ThemeKind::JetBrainsIslandsDark => {
+            crate::theme::Theme::jetbrains_islands_dark()
+        }
         // Both bg tokens are Reset (bandless palette), so the two-tone
         // assertion below does not apply — the preview reads via the
         // underline cue instead.

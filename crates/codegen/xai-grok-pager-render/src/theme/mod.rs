@@ -19,6 +19,7 @@ mod rosepine;
 pub mod system_appearance;
 mod terminal_default;
 pub mod tokyonight;
+mod zed_ports;
 
 pub use color_support::quantize;
 pub use tokyonight::{Theme, pulse_brightness, wave_brightness};
@@ -35,6 +36,11 @@ pub enum ThemeKind {
     /// Every bg is `Reset` so the terminal canvas shows through; legible on both polarities without appearance detection.
     /// Hidden and unparseable while `cache::terminal_theme_enabled()` is off.
     Terminal = 6,
+    /// Ports of Zed themes; see `zed_ports.rs`.
+    KansoMist = 7,
+    KanagawaWave = 8,
+    Kanagawa = 9,
+    JetBrainsIslandsDark = 10,
     /// Follow system appearance. Disk stores `"auto"`; `cache::CURRENT` holds only the resolved concrete kind. Excluded from [`ALL`].
     Auto = 4,
 }
@@ -47,6 +53,10 @@ impl ThemeKind {
         ThemeKind::TokyoNight,
         ThemeKind::RosePineMoon,
         ThemeKind::OscuraMidnight,
+        ThemeKind::KansoMist,
+        ThemeKind::KanagawaWave,
+        ThemeKind::Kanagawa,
+        ThemeKind::JetBrainsIslandsDark,
         ThemeKind::Terminal,
     ];
 
@@ -101,6 +111,10 @@ impl ThemeKind {
             Self::GrokDay => "grokday",
             Self::RosePineMoon => "rosepine-moon",
             Self::OscuraMidnight => "oscura-midnight",
+            Self::KansoMist => "kanso-mist",
+            Self::KanagawaWave => "kanagawa-wave",
+            Self::Kanagawa => "kanagawa",
+            Self::JetBrainsIslandsDark => "jetbrains-islands-dark",
             Self::Terminal => "terminal",
             Self::Auto => "auto",
         }
@@ -114,6 +128,7 @@ impl ThemeKind {
             Self::GrokDay => false,
             Self::RosePineMoon => true,
             Self::OscuraMidnight => true,
+            Self::KansoMist | Self::KanagawaWave | Self::Kanagawa | Self::JetBrainsIslandsDark => true,
             // Reset plus named ANSI-16 entries only — nothing to quantize.
             Self::Terminal => false,
             // Auto is resolved to a concrete theme before rendering.
@@ -135,6 +150,10 @@ impl ThemeKind {
             Self::GrokDay => &["grok-day", "light", "day"],
             Self::RosePineMoon => &["rosepine", "rose-pine", "rose-pine-moon"],
             Self::OscuraMidnight => &["oscura"],
+            Self::KansoMist => &["kanso", "kanso-mist-borderless"],
+            Self::KanagawaWave => &["kanagawa_wave"],
+            Self::Kanagawa => &["kanagawa-default"],
+            Self::JetBrainsIslandsDark => &["jetbrains", "islands-dark", "jetbrains-islands"],
             Self::Terminal => &["terminal-default", "transparent", "native"],
             Self::Auto => &["system"],
         }
@@ -189,6 +208,11 @@ pub fn display_name_for_canonical(value: &str) -> &str {
         "grokday" => "Grok Day",
         "tokyonight" => "Tokyo Night",
         "rosepine-moon" => "Rose Pine Moon",
+        "oscura-midnight" => "Oscura Midnight",
+        "kanso-mist" => "Kanso Mist",
+        "kanagawa-wave" => "Kanagawa Wave",
+        "kanagawa" => "Kanagawa",
+        "jetbrains-islands-dark" => "JetBrains Islands Dark",
         "terminal" => "Terminal",
         other => other,
     }
@@ -306,6 +330,10 @@ impl Theme {
             ThemeKind::GrokDay => Self::grokday(),
             ThemeKind::RosePineMoon => Self::rosepine_moon(),
             ThemeKind::OscuraMidnight => Self::oscura_midnight(),
+            ThemeKind::KansoMist => Self::kanso_mist(),
+            ThemeKind::KanagawaWave => Self::kanagawa_wave(),
+            ThemeKind::Kanagawa => Self::kanagawa(),
+            ThemeKind::JetBrainsIslandsDark => Self::jetbrains_islands_dark(),
             // Handled by the early return above.
             ThemeKind::Terminal => Self::terminal(),
             // Auto is resolved to a concrete theme before being stored; if reached, fall back to GrokNight
@@ -739,6 +767,10 @@ mod tests {
         assert!(Theme::tokyonight().is_dark());
         assert!(Theme::rosepine_moon().is_dark());
         assert!(Theme::oscura_midnight().is_dark());
+        assert!(Theme::kanso_mist().is_dark());
+        assert!(Theme::kanagawa_wave().is_dark());
+        assert!(Theme::kanagawa().is_dark());
+        assert!(Theme::jetbrains_islands_dark().is_dark());
         assert!(!Theme::grokday().is_dark());
     }
 
@@ -1034,6 +1066,10 @@ mod tests {
                 ThemeKind::TokyoNight => Theme::tokyonight(),
                 ThemeKind::RosePineMoon => Theme::rosepine_moon(),
                 ThemeKind::OscuraMidnight => Theme::oscura_midnight(),
+                ThemeKind::KansoMist => Theme::kanso_mist(),
+                ThemeKind::KanagawaWave => Theme::kanagawa_wave(),
+                ThemeKind::Kanagawa => Theme::kanagawa(),
+                ThemeKind::JetBrainsIslandsDark => Theme::jetbrains_islands_dark(),
                 // Reset plus named ANSI entries: the scrollbar rides the
                 // terminal's own fg/bg contrast, so there is no RGB delta.
                 ThemeKind::Terminal => continue,
@@ -1230,5 +1266,59 @@ mod tests {
             !cursor_color_applied_for_test(),
             "apply on a Reset accent must clear a previously-painted flag"
         );
+    }
+
+    #[test]
+    fn zed_ports_keep_source_anchor_colors() {
+        // Anchors copied from the Zed theme JSON (editor.background, text, syntax.keyword).
+        use ratatui::style::Color::Rgb;
+        let cases = [
+            (Theme::kanso_mist(), Rgb(0x2f, 0x30, 0x36), Rgb(0xc5, 0xc9, 0xc7), Rgb(0x89, 0x92, 0xa7)),
+            (Theme::kanagawa_wave(), Rgb(0x1f, 0x1f, 0x28), Rgb(0xdc, 0xd7, 0xba), Rgb(0x95, 0x7f, 0xb8)),
+            (Theme::kanagawa(), Rgb(0x1f, 0x1f, 0x28), Rgb(0xc5, 0xc9, 0xc5), Rgb(0x95, 0x7f, 0xb8)),
+            (Theme::jetbrains_islands_dark(), Rgb(0x19, 0x1a, 0x1c), Rgb(0xdf, 0xe1, 0xe5), Rgb(0xcf, 0x8e, 0x6d)),
+        ];
+        for (theme, bg, text, keyword) in cases {
+            assert_eq!(theme.bg_base, bg);
+            assert_eq!(theme.text_primary, text);
+            assert_eq!(theme.accent_assistant, keyword);
+        }
+    }
+
+    #[test]
+    fn zed_port_names_round_trip() {
+        for (name, kind) in [
+            ("kanso-mist", ThemeKind::KansoMist),
+            ("Kanso", ThemeKind::KansoMist),
+            ("kanagawa-wave", ThemeKind::KanagawaWave),
+            ("kanagawa", ThemeKind::Kanagawa),
+            ("jetbrains-islands-dark", ThemeKind::JetBrainsIslandsDark),
+            ("jetbrains", ThemeKind::JetBrainsIslandsDark),
+        ] {
+            assert_eq!(ThemeKind::from_name(name), Some(kind), "{name}");
+            assert_eq!(canonical_name(name), Some(kind.display_name()));
+        }
+    }
+
+    #[test]
+    fn zed_port_tmthemes_load_with_matching_background() {
+        use syntect::highlighting::{Color, ThemeSet};
+        let assets: [(&[u8], Theme); 4] = [
+            (include_bytes!("../../assets/kanso-mist.tmTheme"), Theme::kanso_mist()),
+            (include_bytes!("../../assets/kanagawa-wave.tmTheme"), Theme::kanagawa_wave()),
+            (include_bytes!("../../assets/kanagawa.tmTheme"), Theme::kanagawa()),
+            (
+                include_bytes!("../../assets/jetbrains-islands-dark.tmTheme"),
+                Theme::jetbrains_islands_dark(),
+            ),
+        ];
+        for (bytes, theme) in assets {
+            let tm = ThemeSet::load_from_reader(&mut std::io::Cursor::new(bytes)).expect("tmTheme parses");
+            let ratatui::style::Color::Rgb(r, g, b) = theme.bg_base else {
+                panic!("bg_base must be RGB");
+            };
+            assert_eq!(tm.settings.background, Some(Color { r, g, b, a: 0xff }));
+            assert!(tm.scopes.len() > 20, "{:?} has too few scope rules", tm.name);
+        }
     }
 }
