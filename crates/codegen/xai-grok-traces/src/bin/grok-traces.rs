@@ -190,7 +190,7 @@ fn live_cmd(args: &[String]) -> ExitCode {
     let run = || -> Result<String, Box<dyn std::error::Error>> {
         let idx = TraceIndex::open(&default_db_path())?;
         let now = chrono::Utc::now().timestamp_millis();
-        let rows = fold_all(&idx, now, live::alive)?;
+        let rows = fold_all(&idx, now, |pid, start| start.map_or_else(|| live::alive_pid(pid), |s| live::alive(pid, s)))?;
         Ok(serde_json::to_string(&LiveEnvelope { live_schema: LIVE_SCHEMA, rows })?)
     };
     match run() {

@@ -19,6 +19,7 @@ xai-dirs = { workspace = true }
 xai-sqlite-journal = { workspace = true }
 
 [dev-dependencies]
+dunce = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

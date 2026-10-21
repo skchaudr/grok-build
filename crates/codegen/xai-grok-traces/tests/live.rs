@@ -353,11 +353,29 @@ fn seq_24_dead_pid_is_gone_and_seq_25_reused_pid_is_gone() {
     let seen = std::cell::Cell::new(None);
     let rows = fold_all(&e.idx, at(1.0), |pid, start| {
         seen.set(Some((pid, start)));
-        start == 1_700_000_001
+        start == Some(1_700_000_001)
     })
     .unwrap();
     assert!(rows.is_empty(), "same pid, different start time");
-    assert_eq!(seen.get(), Some((4242, 1_700_000_000)));
+    assert_eq!(seen.get(), Some((4242, Some(1_700_000_000))));
+}
+
+#[test]
+fn pid_without_a_start_time_gets_a_pid_only_check() {
+    let (mut e, ids) = claude_env(&["c1"]);
+    ck(&mut e, &ids[0], "UserPromptSubmit", 0.0, |_| {});
+    // Receipts only record a pid together with its start; a pid alone comes from an older row.
+    let db = rusqlite::Connection::open(e.home.parent().unwrap().join("idx/t.sqlite")).unwrap();
+    db.execute("UPDATE trace_sessions SET harness_start = NULL WHERE id = ?1", [&ids[0]]).unwrap();
+    let seen = std::cell::Cell::new(None);
+    let rows = fold_all(&e.idx, at(1.0), |pid, start| {
+        seen.set(Some((pid, start)));
+        false
+    })
+    .unwrap();
+    assert!(rows.is_empty(), "pid set, start None, the check says dead");
+    assert_eq!(seen.get(), Some((4242, None)));
+    assert_eq!(fold_all(&e.idx, at(1.0), |_, _| true).unwrap().len(), 1);
 }
 
 #[test]
@@ -367,6 +385,7 @@ fn seq_26_alive_is_never_called_without_a_pid() {
     let rows = fold_all(&e.idx, at(3600.0), |_, _| panic!("no pid, no liveness check")).unwrap();
     let v = render(&rows[0], 0);
     assert_eq!((v.glyph, v.text.as_str(), v.marks), ("◌", "quiet", vec!["pid?"]));
+    // The fixture transcript yields no `now` text (the line above is bare `quiet`), so the unit row 26 owns `◌ quiet · w`.
 }
 
 #[test]
@@ -453,4 +472,46 @@ fn claude_subagent_rows_map_by_exact_agent_file_id() {
     assert_eq!(rows.len(), 2, "{rows:?}");
     assert_eq!((rows[1].parent_id.as_deref(), show(&rows[1]).as_str()), (Some(ids[0].as_str()), "▶ Read · 1s"));
     assert_eq!(show(&rows[0]), "● 1 bg");
+}
+
+#[test]
+fn seq_27_ordering_through_the_index() {
+    let (mut e, ids) = claude_env(&["c1", "c2", "c3", "c4", "c5"]);
+    let own = |pid: i64| move |r: &mut Receipt| r.harness_pid = Some(pid);
+    ck(&mut e, &ids[0], "UserPromptSubmit", 40.0, own(1));
+    ck(&mut e, &ids[0], "PermissionRequest", 50.0, |r| {
+        r.harness_pid = Some(1);
+        r.tool = Some("Bash".into());
+    });
+    ck(&mut e, &ids[1], "Stop", 90.0, own(2));
+    ck(&mut e, &ids[2], "Stop", 95.0, own(3));
+    ck(&mut e, &ids[3], "Stop", 95.0, own(4));
+    ck(&mut e, &ids[4], "UserPromptSubmit", 99.0, own(5));
+    let rows = all(&e, 100.0);
+    let states: Vec<LiveState> = rows.iter().map(|r| r.state).collect();
+    assert_eq!(states, [LiveState::Waiting, LiveState::Prompt, LiveState::Prompt, LiveState::Prompt, LiveState::Working]);
+    let mut tied = [ids[2].clone(), ids[3].clone()];
+    tied.sort();
+    let want = [ids[0].clone(), tied[0].clone(), tied[1].clone(), ids[1].clone(), ids[4].clone()];
+    assert_eq!(rows.iter().map(|r| r.session_id.clone()).collect::<Vec<_>>(), want);
+}
+
+#[test]
+fn seq_11_and_39_ended_sessions_are_not_in_live_sessions() {
+    let (mut e, ids) = claude_env(&["c1"]);
+    ck(&mut e, &ids[0], "Stop", 0.0, |_| {});
+    assert_eq!(e.idx.live_sessions().unwrap().len(), 1);
+    ck(&mut e, &ids[0], "SessionEnd", 1.0, |_| {});
+    assert!(e.idx.live_sessions().unwrap().is_empty());
+    assert!(all(&e, 2.0).is_empty());
+
+    let mut e = env();
+    write_old(&e.home.join(".cursor/projects/w-a/agent-transcripts/a1/a1.jsonl"), CURSOR);
+    e.scan();
+    let sid = e.session("cursor").id;
+    e.rcpt("cursor", "stop", at(0.0), |r| r.session_id = Some(sid.clone()));
+    assert_eq!(e.idx.live_sessions().unwrap().len(), 1);
+    e.rcpt("cursor", "sessionEnd", at(1.0), |r| r.session_id = Some(sid.clone()));
+    assert!(e.idx.live_sessions().unwrap().is_empty());
+    assert!(all(&e, 2.0).is_empty());
 }

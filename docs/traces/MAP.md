@@ -194,3 +194,6 @@ Code: `crates/codegen/xai-grok-traces/src/live.rs` (`norm`, `strict_ids`, `fold_
 - `LiveRow` adds `extra_tools: u32` (the `+N`, state `Tool` only) beyond the spec's field list; `LIVE_SCHEMA` stays 1 since nothing shipped. `stale` is dropped.
 - `turn_receipts` also returns the newest own-thread `End` at any age; the fold drops children started before it.
 - `fmt_age` (age column) prints `0s`..`59s`, `Nm`, `Nh`, `Nd`; `fmt_dur` (inside text) `0s`..`59s`, `Nm`, `Nh`.
+- `fmt_age` never prints `now`, by lead decision: the spec mock and rows 40/43 require seconds.
+- Cursor duplicate Pre: `preToolUse` and `beforeReadFile`/`beforeShellExecution` share a `tool_use_id` (and `beforeReadFile` has no `after*`). A `Pre` whose non-NULL id is already open is not pushed again (the first keeps its `since`); a `Post` with an id closes every open `Pre` with that id (close-older also closes the older ones). Strict and close-older both.
+- `fold_all`'s `alive` takes `(pid, Option<start>)`: `(pid, None)` is the pid-only `alive_pid` (signal 0 or EPERM, not a zombie).

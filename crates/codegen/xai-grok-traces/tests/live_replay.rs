@@ -47,7 +47,7 @@ fn hms(ms: i64) -> String {
 }
 
 fn under(path: &Path, dir: &Path) -> bool {
-    match (path.canonicalize(), dir.canonicalize()) {
+    match (dunce::canonicalize(path), dunce::canonicalize(dir)) {
         (Ok(p), Ok(d)) => p.starts_with(d),
         _ => false,
     }
@@ -199,7 +199,7 @@ fn resolve_receipt(
         .and_then(|p| resolve(&transcript_for(&r.source, Path::new(p)), roots));
     if let Some((root, path)) = target {
         r.session_id = Some(session_id(&root.source, &path.to_string_lossy()));
-        if !indexed.contains_key(&path) {
+        if let std::collections::btree_map::Entry::Vacant(slot) = indexed.entry(path.clone()) {
             let ok = match idx.index_file(root, &path) {
                 Ok(_) => true,
                 Err(e) => {
@@ -211,7 +211,7 @@ fn resolve_receipt(
                     false
                 }
             };
-            indexed.insert(path, ok);
+            slot.insert(ok);
         }
     }
 }
@@ -226,10 +226,10 @@ fn index_agent_file(idx: &mut TraceIndex, roots: &[Root], r: &Receipt, errs: &mu
         .with_extension("")
         .join("subagents")
         .join(format!("agent-{a}.jsonl"));
-    if let Some((root, path)) = resolve(&file, roots) {
-        if let Err(e) = idx.index_file(root, &path) {
-            errs.push(format!("agent index_file: {}", kind(&e)));
-        }
+    if let Some((root, path)) = resolve(&file, roots)
+        && let Err(e) = idx.index_file(root, &path)
+    {
+        errs.push(format!("agent index_file: {}", kind(&e)));
     }
 }
 
@@ -439,8 +439,8 @@ fn replay_real_sessions() {
         );
     }
     assert_ne!(
-        new_db.parent().unwrap().canonicalize().unwrap(),
-        copy.parent().unwrap().canonicalize().unwrap()
+        dunce::canonicalize(new_db.parent().unwrap()).unwrap(),
+        dunce::canonicalize(copy.parent().unwrap()).unwrap()
     );
     let old = Connection::open_with_flags(&copy, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     let mut idx = TraceIndex::open(&new_db).unwrap();
@@ -534,13 +534,11 @@ fn replay_real_sessions() {
         tot_ids += ids;
         tot_map += mapped;
         co += s.close_older;
-        if label.starts_with("claude") || label == "pi" {
-            viol += s.violations;
-        }
+        viol += s.violations;
     }
     println!(
         "TOTAL sessions={} close_older={co} violations={viol} agent_ids={tot_ids} mapped={tot_map}",
         sids.len()
     );
-    assert_eq!(viol, 0, "a Claude/Pi open tool persists after a later Post");
+    assert_eq!(viol, 0, "an open tool persists after a later Post with its id");
 }
