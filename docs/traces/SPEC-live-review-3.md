@@ -56,3 +56,21 @@ Reviewer: Opus lead, 2026-10-21. One Sonnet pass executed all 25 rows literally 
 ## Next
 
 Fable makes rev 4 with these changes. I'll spot-check the changed rows only. Then Step 0a (`--dump`) plus the captures run before anything else. The implementer is a compacted Opus with Sonnet 5.5 subagents.
+
+## Amendments from Sab (2026-10-21)
+
+**Scope: dialed for some agents, not "alright" for all.**
+- v1 is Claude Code only. It has the richest hooks (`tool_use_id`, `agent_id`, `PermissionRequest`, `Notification`) and nearly all the real receipts we have.
+- v1 must be completely right: every state, every test row, verified on real sessions.
+- v2 adds Codex. Other sources stay out of the live screen; they remain in `/traces` history.
+- Cut from rev 4 everything that exists only for non-Claude sources: the normalizer rows, OMP/Pi/Cursor/Grok/bb tests, the Grok notification-hook route, and the remote `live --json`. Keep the data model source-agnostic so v2 only adds rows.
+
+**Liveness: no timers, no Herdr dependency.**
+- Herdr stays optional. Its only use is the jump-to-pane key, and without it Enter opens the trajectory.
+- On each receipt, the hook records the harness's process:
+  - Walk up from the hook's parent PID past shells (`sh`, `bash`, `zsh`) to the first non-shell ancestor.
+  - Store its PID and process start time, so a reused PID doesn't count as alive.
+- A session is on the live screen until either a `SessionEnd` receipt arrives or that process is gone (`kill(pid, 0)` plus a start-time check).
+- Remove every live-presence timer (10 min window, 30 min caps). "Your turn" rows stay for as long as the agent runs.
+- Timers remain only for display: `⏳` at 30 s, the `?` mark, and the 2 s `Stop` debounce.
+- Step 0 adds a capture: the process chain from the hook up to `claude`, as seen inside a Claude Code hook.
