@@ -1,4 +1,4 @@
-//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | events <id> --json [--noise] [--limit N] | raw <id> <line> | version | doctor [--reset]`.
+//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] | raw <id> <line> | version | doctor [--reset]`.
 //!
 //! `hook` runs once per harness event: it must be fast, silent and always
 //! exit 0 so it can never block an agent.
@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use xai_grok_traces::live::{self, LIVE_SCHEMA, LiveEnvelope, fold_all};
 use xai_grok_traces::hook::{MAX_STDIN_BYTES, extract, ingest};
 use xai_grok_traces::remote::{event_to_json, session_to_json};
 use xai_grok_traces::{EventFilter, SessionFilter, TraceIndex, default_db_path, user_roots};
@@ -23,6 +24,7 @@ fn main() -> ExitCode {
         Some("hook") => hook(args.get(1).map_or("unknown", String::as_str)),
         Some("scan") => finish(scan()),
         Some("list") => finish(list(&args[1..])),
+        Some("live") => live_cmd(&args[1..]),
         Some("doctor") => finish(doctor(&args[1..])),
         Some("events") => finish(events(&args[1..])),
         Some("raw") => raw(&args[1..]),
@@ -177,6 +179,30 @@ fn list(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
         writeln!(out, "{}", session_to_json(&s))?;
     }
     Ok(true)
+}
+
+/// One line: `{"live_schema":N,"rows":[...]}`. Exit 2 without `--json`, 1 on error (nothing on stdout).
+fn live_cmd(args: &[String]) -> ExitCode {
+    if args != ["--json"] {
+        eprintln!("usage: grok-traces live --json");
+        return ExitCode::from(2);
+    }
+    let run = || -> Result<String, Box<dyn std::error::Error>> {
+        let idx = TraceIndex::open(&default_db_path())?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let rows = fold_all(&idx, now, live::alive)?;
+        Ok(serde_json::to_string(&LiveEnvelope { live_schema: LIVE_SCHEMA, rows })?)
+    };
+    match run() {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("grok-traces: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn events(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {

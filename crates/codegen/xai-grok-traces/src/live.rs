@@ -329,6 +329,14 @@ pub struct LiveRow {
     pub host: Option<String>,
 }
 
+/// What `grok-traces live --json` prints, one line. `live_schema` must equal [`LIVE_SCHEMA`] to be read.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LiveEnvelope {
+    pub live_schema: u32,
+    pub rows: Vec<LiveRow>,
+}
+
 /// A glyph, the full state text and the ordered marks (`✗`, `?`, `pid?`). The pager adds the age and `⌖`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rendered {
@@ -662,15 +670,35 @@ fn rank(r: &LiveRow) -> (u8, i64, &str) {
 }
 
 /// Roots by `(rank, age, session_id)`; each root's children directly under it by the same key.
-/// A group is a root followed by its children.
-#[doc(hidden)]
-pub fn arrange(mut groups: Vec<Vec<LiveRow>>) -> Vec<LiveRow> {
-    groups.retain(|g| !g.is_empty());
-    for g in &mut groups {
-        g[1..].sort_by(|a, b| rank(a).cmp(&rank(b)));
+/// A row whose parent is not in the list is a root (a cross-fetch orphan).
+pub fn order(rows: &mut Vec<LiveRow>) {
+    let ids: std::collections::HashSet<String> = rows.iter().map(|r| r.session_id.clone()).collect();
+    let (mut roots, mut kids): (Vec<LiveRow>, Vec<LiveRow>) =
+        std::mem::take(rows).into_iter().partition(|r| r.parent_id.as_ref().is_none_or(|p| !ids.contains(p) || *p == r.session_id));
+    roots.sort_by(|a, b| rank(a).cmp(&rank(b)));
+    kids.sort_by(|a, b| rank(a).cmp(&rank(b)));
+    for root in roots {
+        let id = root.session_id.clone();
+        rows.push(root);
+        let (mine, rest): (Vec<LiveRow>, Vec<LiveRow>) = std::mem::take(&mut kids).into_iter().partition(|k| k.parent_id.as_deref() == Some(id.as_str()));
+        rows.extend(mine);
+        kids = rest;
     }
-    groups.sort_by(|a, b| rank(&a[0]).cmp(&rank(&b[0])));
-    groups.into_iter().flatten().collect()
+    // Parent cycles leave rows unplaced: keep them, in order, rather than drop them.
+    rows.extend(kids);
+}
+
+/// Age of a row at render time: its own plus `extra_ms` (the age of the fetch), never negative.
+pub fn age_ms(row: &LiveRow, extra_ms: i64) -> i64 {
+    (row.age_ms + extra_ms).max(0)
+}
+
+/// Groups (a root, then its children) ordered by [`order`].
+#[doc(hidden)]
+pub fn arrange(groups: Vec<Vec<LiveRow>>) -> Vec<LiveRow> {
+    let mut rows: Vec<LiveRow> = groups.into_iter().flatten().collect();
+    order(&mut rows);
+    rows
 }
 
 /// The live screen's rows: `live_sessions` → not-alive dropped (a missing pid stays) → same-process supersede

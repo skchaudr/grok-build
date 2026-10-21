@@ -6,7 +6,7 @@
 //!   `fetch_events`/`fetch_raw` accept the prefixed id and strip it.
 //! * Never blocks: ssh runs with BatchMode, a 2s connect timeout, and a hard 4s wall clock (child killed).
 //!   Every failure is an [`Error`] value whose `Display` is UI-ready ("sab-air unreachable").
-//! * Nothing is written to disk: the last good result per host lives in memory ([`cached_sessions`]).
+//! * Nothing is written to disk: the last good result per host lives in memory ([`cached_sessions`], [`cached_live`]).
 //! * Version skew: if the remote binary rejects a flag, [`fetch_sessions`] falls back to plain
 //!   `list --json`, filters locally and reports it in [`Fetched::note`].
 
@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::live::{LIVE_SCHEMA, LiveRow};
 use crate::query::{EventRow, SessionRow, Status};
 
 pub const WALL_TIMEOUT: Duration = Duration::from_secs(4);
@@ -49,10 +50,17 @@ impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Rows plus an optional status line (e.g. version-skew degrade).
-#[derive(Clone, Debug, Default)]
-pub struct Fetched {
-    pub rows: Vec<SessionRow>,
+#[derive(Clone, Debug)]
+pub struct Fetched<T = SessionRow> {
+    pub rows: Vec<T>,
     pub note: Option<String>,
+}
+
+// Not derived: a derive would require `T: Default`.
+impl<T> Default for Fetched<T> {
+    fn default() -> Self {
+        Fetched { rows: Vec::new(), note: None }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -122,6 +130,19 @@ fn cache() -> &'static Cache {
 /// Last successful `fetch_sessions` rows for `target` and their age.
 pub fn cached_sessions(target: &str) -> Option<(Duration, Vec<SessionRow>)> {
     let c = cache().lock().ok()?;
+    c.get(target).map(|(at, rows)| (at.elapsed(), rows.clone()))
+}
+
+type LiveCache = Mutex<HashMap<String, (Instant, Vec<LiveRow>)>>;
+static LIVE_CACHE: std::sync::OnceLock<LiveCache> = std::sync::OnceLock::new();
+
+fn live_cache() -> &'static LiveCache {
+    LIVE_CACHE.get_or_init(Default::default)
+}
+
+/// Last good `fetch_live` rows for `target` (tagged) and their age. Gated results and errors never replace it.
+pub fn cached_live(target: &str) -> Option<(Duration, Vec<LiveRow>)> {
+    let c = live_cache().lock().ok()?;
     c.get(target).map(|(at, rows)| (at.elapsed(), rows.clone()))
 }
 
@@ -380,6 +401,45 @@ pub fn fetch_sessions_with(ssh: &Ssh, target: &str, f: &RemoteFilter) -> Result<
         c.insert(target.to_string(), (Instant::now(), rows.clone()));
     }
     Ok(Fetched { rows, note })
+}
+
+/// `grok-traces live --json` on `target`. Rows are tagged like sessions (`host`, `label:`-prefixed
+/// `session_id` and `parent_id`; `native_id` stays as the remote knows it). A remote that exits 2, prints
+/// nothing/garbage or speaks another `live_schema` gives `Ok` with no rows and a note: never guessed at.
+pub fn fetch_live(target: &str) -> Result<Fetched<LiveRow>> {
+    fetch_live_with(&Ssh::default(), target)
+}
+
+pub fn fetch_live_with(ssh: &Ssh, target: &str) -> Result<Fetched<LiveRow>> {
+    let o = run(ssh, target, &format!("{REMOTE_BIN} live --json"))?;
+    let gate = |schema: String| Ok(Fetched { rows: Vec::new(), note: Some(format!("{}: update grok-traces (live_schema {schema})", label(target))) });
+    match o.code {
+        0 => {}
+        2 => return gate("none".into()),
+        _ => return Err(remote_failed(target, &o)),
+    }
+    let Ok(v) = serde_json::from_str::<Value>(o.stdout.trim()) else { return gate("none".into()) };
+    match v.get("live_schema").and_then(Value::as_u64) {
+        None => return gate("none".into()),
+        Some(n) if n != u64::from(LIVE_SCHEMA) => return gate(n.to_string()),
+        Some(_) => {}
+    }
+    let rows: Vec<LiveRow> = serde_json::from_value(v.get("rows").cloned().unwrap_or(Value::Array(Vec::new())))
+        .map_err(|e| Error::Parse { host: target.into(), detail: e.to_string() })?;
+    let l = label(target);
+    let rows: Vec<LiveRow> = rows
+        .into_iter()
+        .map(|mut r| {
+            r.session_id = format!("{l}:{}", r.session_id);
+            r.parent_id = r.parent_id.take().map(|p| format!("{l}:{p}"));
+            r.host = Some(l.to_string());
+            r
+        })
+        .collect();
+    if let Ok(mut c) = live_cache().lock() {
+        c.insert(target.to_string(), (Instant::now(), rows.clone()));
+    }
+    Ok(Fetched { rows, note: None })
 }
 
 pub fn fetch_events(target: &str, session_id: &str, q: &EventQuery) -> Result<Vec<EventRow>> {
