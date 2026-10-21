@@ -11,7 +11,8 @@
 //! | dsh | header `parentSession` (a session id; `seedLength` marks a fork) |
 //! | grok | `summary.json` `parent_session_id` when `session_kind` starts with `subagent` |
 //! | bb | `threads.parent_thread_id` |
-//! | pi, cursor | no parent field in the files |
+//! | pi | no parent field in the files |
+//! | cursor | none; `native_id` is the transcript file stem |
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -82,6 +83,8 @@ pub(crate) fn path_links(root: &Root, path: &Path) -> (Links, Option<PathBuf>) {
                 return (l, Some(meta));
             }
         }
+        // `agent-transcripts/<id>/<id>.jsonl`: the stem is the chat's `conversation_id` that hooks report.
+        "cursor" => l.native_id = path.file_stem().map(|n| n.to_string_lossy().into_owned()),
         "pi" | "omp" => {
             l.native_id = rel_stem(&root.path, path);
             // `<cwd dir>/<parent stem>/<Name>.jsonl`: a task subagent next to its parent's transcript.
@@ -209,6 +212,13 @@ mod tests {
         assert!(aux.is_some_and(|p| p.ends_with("agent-a1.meta.json")));
         let (top, aux) = path_links(&r, &tmp.path().join("-w/sess1.jsonl"));
         assert_eq!((top.native_id.as_deref(), top.parent_native, aux), (Some("-w/sess1"), None, None));
+    }
+
+    #[test]
+    fn cursor_native_id_is_the_transcript_stem() {
+        let r = root("cursor", Path::new("/c"));
+        let (l, aux) = path_links(&r, Path::new("/c/w-proj/agent-transcripts/abc/abc.jsonl"));
+        assert_eq!((l.native_id.as_deref(), l.parent_native, aux), (Some("abc"), None, None));
     }
 
     #[test]

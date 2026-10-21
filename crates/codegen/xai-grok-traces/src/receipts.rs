@@ -64,6 +64,14 @@ impl TraceIndex {
         Ok(id)
     }
 
+    /// The session of `source` whose `native_id` is `native`, for receipts whose path did not resolve.
+    pub(crate) fn session_by_native(&self, source: &str, native: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row("SELECT id FROM trace_sessions WHERE source_id = ?1 AND native_id = ?2 LIMIT 1", [source, native], |r| r.get(0))
+            .optional()?)
+    }
+
     /// Highest receipt id, or 0 when there are none.
     pub fn receipts_watermark(&self) -> Result<i64> {
         Ok(self.conn().query_row("SELECT COALESCE(MAX(id), 0) FROM trace_receipts", [], |r| r.get(0))?)

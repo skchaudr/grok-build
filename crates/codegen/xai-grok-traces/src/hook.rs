@@ -116,6 +116,9 @@ pub fn ingest(idx: &mut TraceIndex, roots: &[Root], mut r: Receipt) -> Result<i6
     let target = r.path.as_deref().and_then(|p| resolve(&transcript_for(&r.source, Path::new(p)), roots));
     if let Some((root, path)) = &target {
         r.session_id = Some(session_id(&root.source, &path.to_string_lossy()));
+    } else if let Some(native) = &r.native_session {
+        // No usable path (Cursor sends none early): the harness's own id, within the source. Else NULL, never dropped.
+        r.session_id = idx.session_by_native(&r.source, native)?;
     }
     let id = idx.record_receipt(&r)?;
     if let Some((root, path)) = target {
