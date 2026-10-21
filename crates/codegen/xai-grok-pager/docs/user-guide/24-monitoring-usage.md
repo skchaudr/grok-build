@@ -377,3 +377,20 @@ Set `OTEL_LOGS_EXPORTER=console` / `OTEL_METRICS_EXPORTER=console` to print
 redacted records to **stderr** (suppressed in `agent`/`headless` entrypoints
 to keep captured logs clean). Export errors never surface in the TUI; check
 the debug log.
+
+## Live agents (`grok live`)
+
+`grok live` is a full-screen view of the agents running now: Claude Code, Pi, and Cursor, on this machine and on the hosts you list. It is a separate subcommand, so it starts instantly with no login, agent, or model, and `grok live` is no longer read as a prompt. Rows show a state glyph, the source, a title, what the agent is doing, its age, and marks; subagents nest under their parent. Agents waiting on a permission prompt (`⚠`) sort first.
+
+Rows come from hook receipts in the local trace index. Install the hooks with `crates/codegen/xai-grok-traces/hooks/install.sh --apply`; with none installed the screen says so.
+
+Remote machines are the ssh targets in `~/.grok/traces/hosts` (one `user@host` per line, the same file `/traces` uses). Their agents are fetched every 10 seconds and merged in; the header shows each host with `●` (reachable), `✗` (failed, last rows kept), or `…` (not answered yet).
+
+| Key | Action |
+|-----|--------|
+| `j` / `k`, `↑` / `↓`, wheel | Move the selection |
+| `PgUp` / `PgDn`, `g` / `G` | Page, first, last |
+| `c` | Collapse or expand the selected agent's subagents |
+| `Enter` / `o` | Open the selected agent's trajectory (`Esc` returns) |
+| `/` | Filter rows (`Esc` clears) |
+| `Esc` / `q` / `Ctrl+C` | Exit (`Esc` first clears an active filter) |

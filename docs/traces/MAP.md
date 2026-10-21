@@ -17,6 +17,7 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
 | Resume | `P/app/dispatch/session/load.rs`: `dispatch_traces_resume` routes to `dispatch_foreign_resume`, shared with the session picker. Claude and Codex go through `/resume-claude` or `/resume-codex <id>`. Grok goes through `resolve_local_session_any_cwd` and then `dispatch_load_session` |
 | pty proof | `xai-grok-pager-pty-harness/tests/pty_e2e/traces_modal_ledger_trajectory_inspector.rs` (family `pty_e2e_config_ui`) |
 | User doc | `xai-grok-pager/docs/user-guide/04-slash-commands.md` `### /traces` |
+| `grok live` | `P/live_cmd.rs` (`run`, `step`), `Command::Live` in `P/app/cli.rs`, handled at the top of `async_main` in BIN. pty proof: `xai-grok-pager-pty-harness/tests/pty_e2e/traces_live.rs` (family `pty_e2e_config_ui`). Docs: `24-monitoring-usage.md` `## Live agents (grok live)` |
 
 ## Data model (ported from bb-plugin-traces `indexer.ts`)
 
@@ -93,6 +94,7 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
 - The pty harness copy check reads `$GROK_COPY_FILE`. OSC52 is not emitted in that harness for this path.
 - The first pty launch of a freshly built binary can time out on welcome (macOS first exec). Rerun before debugging.
 - The test baseline on main 7eb90d57 is pager lib 10389/0 and shell lib 6 failures (with `RUST_MIN_STACK=33554432`; without it the run aborts on stack overflow). `GROK_HOME` must be empty for pager tests.
+- `grok live` is standalone: no agent, no auth, no sandbox, no tracing init (stderr is redirected to /dev/null). `live_cmd` runs its own ratatui loop straight into `Mode::Live`; the 1s tick is `poll_live()` called from `live_cmd`, not from `event_loop`, and every tick redraws. Intentional reading of SPEC-live line 19 (which has `grok live` booting the agent/TUI); the spec is unedited.
 - The binary comes from `-p xai-grok-pager-bin` (bin `xai-grok-pager`). `--version` prints `grok <ver> (<12-char HEAD sha>)`.
 
 ## Hooks

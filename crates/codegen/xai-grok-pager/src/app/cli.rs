@@ -142,6 +142,9 @@ See ~/.grok/README.md for more information.
     /// The dashboard shows every session, top-level and subagents.
     /// Disabled when `[dashboard].enabled = false` in `~/.grok/config.toml` or when the `GROK_AGENT_DASHBOARD=0` env var is set.
     Dashboard,
+    /// Full-screen live view of running agents (Claude Code, Pi, Cursor; local and ~/.grok/traces/hosts).
+    /// `grok live` is a subcommand, so it is no longer read as a prompt.
+    Live,
 }
 /// Arguments for the `wrap` subcommand: the command to run, then its args.
 #[derive(Debug, clap::Args, Clone)]
@@ -1117,6 +1120,11 @@ impl PagerArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_parses_as_a_subcommand_not_a_prompt() {
+        let args = PagerArgs::try_parse_from(["grok", "live"]).expect("live parses");
+        assert!(matches!(args.command, Some(Command::Live)));
+    }
     #[test]
     fn version_flags_parse_as_early_intent_without_exiting() {
         for flag in ["--version", "-v", "-V"] {
