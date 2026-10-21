@@ -60,10 +60,20 @@ Fable makes rev 4 with these changes. I'll spot-check the changed rows only. The
 ## Amendments from Sab (2026-10-21)
 
 **Scope: dialed for some agents, not "alright" for all.**
-- v1 is Claude Code only. It has the richest hooks (`tool_use_id`, `agent_id`, `PermissionRequest`, `Notification`) and nearly all the real receipts we have.
-- v1 must be completely right: every state, every test row, verified on real sessions.
-- v2 adds Codex. Other sources stay out of the live screen; they remain in `/traces` history.
-- Cut from rev 4 everything that exists only for non-Claude sources: the normalizer rows, OMP/Pi/Cursor/Grok/bb tests, the Grok notification-hook route, and the remote `live --json`. Keep the data model source-agnostic so v2 only adds rows.
+- v1 is Claude Code and Pi, Sab's two main harnesses. Both must be completely right: every state, every test row, verified on real sessions.
+- Codex comes later. Other sources stay out of the live screen and remain in `/traces` history.
+- Cut from rev 4 all normalizer rows and tests for OMP, Cursor, Grok, bb and DSH, plus the Grok notification-hook route and the remote `live --json`. Keep the data model source-agnostic so later sources only add rows.
+- **Pi needs a richer extension.** Today `hooks/pi/traces.ts` sends only `session_start`, `turn_end`, `agent_end`, a debounced `tool_result` and `session_shutdown`, so Pi has no Tool state.
+  - Pi's API also offers `agent_start`, `tool_call`/`tool_execution_start`, `tool_execution_end`, `message_end` and `input` (seen in `Pi-Coding-Agent` source).
+  - v1 maps:
+    - `agent_start` → Prompt event (turn begins)
+    - `tool_execution_start` → Pre
+    - `tool_execution_end` → Post, with the tool call id if the payload has one
+    - `agent_end` → Idle
+    - `turn_end` → no-op
+  - Drop the `tool_result` debounce for these.
+  - Step 0 captures one real Pi payload for each of those events: the tool-call id field and the session id.
+  - The extension runs in-process, so its liveness PID is `process.pid`.
 
 **Liveness: no timers, no Herdr dependency.**
 - Herdr stays optional. Its only use is the jump-to-pane key, and without it Enter opens the trajectory.
