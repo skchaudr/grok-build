@@ -1400,8 +1400,26 @@ struct BodyMsg {
 fn wrap_body(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out: Vec<String> = Vec::new();
-    for line in text.lines() {
-        out.extend(wrap_line(line, width));
+    for raw in text.lines() {
+        let line = raw.replace('\t', "    ");
+        let body = line.trim_start();
+        if body.is_empty() {
+            out.push(String::new());
+        } else {
+            let indent = line.get(..line.len() - body.len()).unwrap_or("");
+            let indent_w = cols(indent);
+            // An indent that leaves no room for text is dropped for this line.
+            let (indent, avail) = if indent_w < width {
+                (indent, width - indent_w)
+            } else {
+                ("", width)
+            };
+            out.extend(
+                modal_window::word_wrap(body, avail)
+                    .into_iter()
+                    .map(|row| format!("{indent}{row}")),
+            );
+        }
         if out.len() > BODY_LINES {
             break;
         }
@@ -1418,85 +1436,6 @@ fn cols(s: &str) -> usize {
     s.chars()
         .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
         .sum()
-}
-
-/// Splits `line` into `(leading whitespace, word)` pairs; a trailing whitespace run has an empty word.
-fn word_units(line: &str) -> Vec<(&str, &str)> {
-    let mut units = Vec::new();
-    let mut rest = line;
-    while !rest.is_empty() {
-        let body = rest.trim_start();
-        let word_len = body.find(char::is_whitespace).unwrap_or(body.len());
-        let (Some(lead), Some(word), Some(next)) = (
-            rest.get(..rest.len() - body.len()),
-            body.get(..word_len),
-            body.get(word_len..),
-        ) else {
-            break;
-        };
-        units.push((lead, word));
-        rest = next;
-    }
-    units
-}
-
-/// Rows built up by `wrap_line`; `width` is the column limit for each row.
-struct Rows {
-    done: Vec<String>,
-    cur: String,
-    cur_w: usize,
-    width: usize,
-}
-
-impl Rows {
-    fn break_row(&mut self) {
-        self.done.push(std::mem::take(&mut self.cur));
-        self.cur_w = 0;
-    }
-
-    /// Appends `s` char by char, breaking only when the row is full (hard split).
-    fn push_chars(&mut self, s: &str) {
-        for c in s.chars() {
-            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-            if self.cur_w + cw > self.width && !self.cur.is_empty() {
-                self.break_row();
-            }
-            self.cur.push(c);
-            self.cur_w += cw;
-        }
-    }
-
-    /// True when `total` columns would overflow the current row while `word_w` (<= width) fits on a fresh one.
-    fn moves_whole(&self, total: usize, word_w: usize) -> bool {
-        !self.cur.is_empty() && self.cur_w + total > self.width && word_w <= self.width
-    }
-}
-
-/// Wraps one line at word boundaries to `width` columns. Leading indentation stays on the line's first row;
-/// a word that does not fit the rest of a row moves whole to the next; only a word wider than `width` is split.
-fn wrap_line(line: &str, width: usize) -> Vec<String> {
-    let mut rows = Rows {
-        done: Vec::new(),
-        cur: String::new(),
-        cur_w: 0,
-        width,
-    };
-    for (lead, word) in word_units(line) {
-        let (lead_w, word_w) = (cols(lead), cols(word));
-        let lead = if rows.moves_whole(lead_w + word_w, word_w) {
-            rows.break_row();
-            ""
-        } else {
-            lead
-        };
-        rows.push_chars(lead);
-        if rows.moves_whole(word_w, word_w) {
-            rows.break_row();
-        }
-        rows.push_chars(word);
-    }
-    rows.done.push(rows.cur);
-    rows.done
 }
 
 /// Scrolls so row `sel` sits fully inside `height` lines, where row `i` is `heights[i]` lines tall.
@@ -2571,21 +2510,28 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         let mark = state.fold_mark(n);
         let collapsed = state.outline.has_children(n) && state.key_at(n).is_some_and(|key| state.ofolds.is_collapsed(key));
         match state.outline_items.get(n) {
-            Some(OutlineItem::Turn { event, tools, msgs, errors }) => {
+            Some(OutlineItem::Turn { event, opener, tools, msgs, errors }) => {
                 let Some(e) = state.events.get(*event) else {
                     y += h;
                     continue;
                 };
                 let preview = one_line(e.detail.as_deref().filter(|d| !d.is_empty()).unwrap_or(&e.preview));
-                let opener_child = traces_outline::is_user(e);
-                let text = format!("{indent}{mark}{}", turn_label(&preview, opener_child, collapsed, *tools, *msgs, *errors));
+                // The opener is the next node; when it is shown, its own row carries the line and chip.
+                let opener_shown = *opener && !collapsed && state.oshown.contains(&(n + 1)) && matches!(state.outline_items.get(n + 1), Some(OutlineItem::Event(i)) if i == event);
+                let text = format!("{indent}{mark}{}", turn_label(&preview, opener_shown, collapsed, *tools, *msgs, *errors));
+                let (line_cell, chip_cell) = if opener_shown {
+                    (String::new(), String::new())
+                } else {
+                    (format!("{:>6}", format!("#{}", e.line)), role_chip(e).to_string())
+                };
+                let chip_fg = if opener_shown { base } else { base.fg(chip_color(e, theme)) };
                 put_row(
                     buf,
                     list,
                     y,
                     &[
-                        (format!("{:>6}", format!("#{}", e.line)), 6, base.fg(theme.gray)),
-                        (role_chip(e).to_string(), 6, base.fg(chip_color(e, theme)).add_modifier(Modifier::BOLD)),
+                        (line_cell, 6, base.fg(theme.gray)),
+                        (chip_cell, 6, chip_fg.add_modifier(Modifier::BOLD)),
                         (text, text_w, base.add_modifier(Modifier::BOLD)),
                     ],
                 );
@@ -2605,7 +2551,14 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
                 // Noise (only present when `n` is on) is dimmed.
                 let (text_style, chip_fg) = if e.noise { (base.fg(theme.gray_dim), theme.gray_dim) } else { (base, chip_color(e, theme)) };
                 let one = one_line(e.detail.as_deref().filter(|d| !d.is_empty()).unwrap_or(&e.preview));
-                let body = if is_call(e) { format!("{indent}{mark}{}  {}", e.title, one) } else { format!("{indent}{mark}{one}") };
+                // An expanded body carries the text, so the row keeps only what identifies it: the tool title, or nothing.
+                let body_shown = state.oshown.contains(&(n + 1)) && matches!(state.outline_items.get(n + 1), Some(OutlineItem::Body(j)) if j == i);
+                let body = match (body_shown, is_call(e) || is_result(e)) {
+                    (true, true) => format!("{indent}{mark}{}", e.title),
+                    (true, false) => format!("{indent}{mark}"),
+                    (false, true) if is_call(e) => format!("{indent}{mark}{}  {}", e.title, one),
+                    (false, _) => format!("{indent}{mark}{one}"),
+                };
                 // Suffix: where a dispatch went, and how the call ended.
                 let mut suffix = String::new();
                 if let Some(c) = state.child_of(*i) {
@@ -2667,28 +2620,32 @@ fn count_of(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// Turn row text after the indent and fold mark. An expanded turn with an opener child shows `turn`
-/// instead of the preview, since that child already carries the prompt. Count suffix is shown when
-/// collapsed or when the opener child is shown, never for an expanded synthetic turn.
-fn turn_label(preview: &str, opener_child: bool, collapsed: bool, tools: usize, msgs: usize, errors: usize) -> String {
-    let show_preview = collapsed || !opener_child;
-    let mut text = if show_preview { preview.to_string() } else { "turn".to_string() };
-    if collapsed || opener_child {
-        let mut parts = Vec::new();
-        if tools > 0 {
-            parts.push(count_of(tools, "tool", "tools"));
-        }
-        if msgs > 0 {
-            parts.push(count_of(msgs, "msg", "msgs"));
-        }
-        if errors > 0 {
-            parts.push(format!("✗{errors}"));
-        }
+/// Turn row text after the indent and fold mark. Collapsed: the preview, then `  · ` and the counts.
+/// Expanded with its opener row shown: `turn`, then the counts joined by ` · `, since that row carries
+/// the prompt. Otherwise (an expanded synthetic turn): the preview alone. Counts come last, so a narrow
+/// row cuts them first.
+fn turn_label(preview: &str, opener_shown: bool, collapsed: bool, tools: usize, msgs: usize, errors: usize) -> String {
+    let mut parts = Vec::new();
+    if tools > 0 {
+        parts.push(count_of(tools, "tool", "tools"));
+    }
+    if msgs > 0 {
+        parts.push(count_of(msgs, "msg", "msgs"));
+    }
+    if errors > 0 {
+        parts.push(format!("✗{errors}"));
+    }
+    if collapsed {
+        let mut text = preview.to_string();
         if !parts.is_empty() {
             text.push_str(&format!("  · {}", parts.join(" · ")));
         }
+        text
+    } else if opener_shown {
+        std::iter::once("turn".to_string()).chain(parts).collect::<Vec<_>>().join(" · ")
+    } else {
+        preview.to_string()
     }
-    text
 }
 
 fn render_inspector(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, theme: &Theme) {
@@ -3387,21 +3344,60 @@ mod tests {
     }
 
     #[test]
-    fn body_wrap_keeps_words_whole_when_they_fit_the_next_row() {
+    fn body_wrap_keeps_words_whole() {
         assert_eq!(wrap_body("aaa bbbb cc", 6), ["aaa", "bbbb", "cc"]);
         assert_eq!(wrap_body("ab cdef", 4), ["ab", "cdef"]);
     }
 
     #[test]
-    fn body_wrap_hard_splits_only_words_wider_than_the_row() {
-        assert_eq!(wrap_body("abcdefghij", 4), ["abcd", "efgh", "ij"]);
-        assert_eq!(wrap_body("x abcdefgh", 4), ["x ab", "cdef", "gh"]);
+    fn body_wrap_cjk_rows_fit_odd_width() {
+        let rows = wrap_body("中文字符测试", 5);
+        assert_eq!(rows, ["中文", "字符", "测试"]);
+        assert_eq!(wrap_body("中文 字符", 5), ["中文", "字符"]);
+        for row in rows {
+            assert!(cols(&row) <= 5, "{row:?} is wider than 5 columns");
+        }
     }
 
     #[test]
-    fn body_wrap_keeps_indentation_and_blank_lines() {
-        assert_eq!(wrap_body("  one two three", 8), ["  one", "two", "three"]);
+    fn body_wrap_repeats_indent_on_continuations() {
+        assert_eq!(wrap_body("  one two three", 8), ["  one", "  two", "  three"]);
+    }
+
+    #[test]
+    fn body_wrap_indent_wider_than_row_is_dropped() {
+        assert_eq!(wrap_body("      abc", 4), ["abc"]);
+    }
+
+    #[test]
+    fn body_wrap_hard_splits_over_long_url() {
+        assert_eq!(wrap_body("https://a.b/cdefghij", 8), ["https://", "a.b/cdef", "ghij"]);
+    }
+
+    #[test]
+    fn body_wrap_keeps_blank_lines() {
         assert_eq!(wrap_body("ab\n\n  cd", 10), ["ab", "", "  cd"]);
+        assert_eq!(wrap_body("ab\n   \ncd", 10), ["ab", "", "cd"]);
+    }
+
+    #[test]
+    fn body_wrap_exact_fit_has_no_trailing_row() {
+        assert_eq!(wrap_body("abcd", 4), ["abcd"]);
+        assert_eq!(wrap_body("  abcd", 6), ["  abcd"]);
+    }
+
+    #[test]
+    fn body_wrap_tiny_widths_do_not_panic() {
+        assert_eq!(wrap_body("", 0), Vec::<String>::new());
+        assert_eq!(wrap_body("  x", 0), ["x"]);
+        assert_eq!(wrap_body("abc", 1), ["a", "b", "c"]);
+        assert_eq!(wrap_body("中", 1), ["中"]);
+    }
+
+    #[test]
+    fn body_wrap_expands_tabs() {
+        assert_eq!(wrap_body("\tab", 10), ["    ab"]);
+        assert_eq!(wrap_body("a\tb", 10), ["a    b"]);
     }
 
     #[test]
@@ -3538,20 +3534,80 @@ mod tests {
 
     #[test]
     fn turn_label_summarizes_an_expanded_turn_with_opener() {
-        assert_eq!(turn_label("Yoooooo", true, false, 14, 3, 1), "turn  · 14 tools · 3 msgs · ✗1");
-        assert_eq!(turn_label("Yoooooo", true, false, 1, 0, 0), "turn  · 1 tool");
+        assert_eq!(turn_label("Yoooooo", true, false, 14, 3, 1), "turn · 14 tools · 3 msgs · ✗1");
+        assert_eq!(turn_label("Yoooooo", true, false, 1, 0, 0), "turn · 1 tool");
+        assert_eq!(turn_label("Yoooooo", true, false, 0, 2, 0), "turn · 2 msgs");
+    }
+
+    #[test]
+    fn turn_label_has_no_separator_when_all_counts_are_zero() {
         assert_eq!(turn_label("Yoooooo", true, false, 0, 0, 0), "turn");
     }
 
     #[test]
-    fn turn_label_keeps_preview_when_collapsed() {
-        assert_eq!(turn_label("Yoooooo", true, true, 14, 3, 1), "Yoooooo  · 14 tools · 3 msgs · ✗1");
-        assert_eq!(turn_label("Yoooooo", true, true, 0, 0, 0), "Yoooooo");
+    fn turn_label_collapsed_is_unchanged() {
+        assert_eq!(turn_label("Yoooooo", false, true, 14, 3, 1), "Yoooooo  · 14 tools · 3 msgs · ✗1");
+        assert_eq!(turn_label("Yoooooo", false, true, 0, 0, 0), "Yoooooo");
+        assert_eq!(turn_label("bash ls", false, true, 14, 3, 1), "bash ls  · 14 tools · 3 msgs · ✗1");
     }
 
     #[test]
-    fn turn_label_keeps_preview_when_expanded_synthetic() {
+    fn turn_label_expanded_synthetic_keeps_its_preview() {
         assert_eq!(turn_label("bash ls", false, false, 14, 3, 1), "bash ls");
-        assert_eq!(turn_label("bash ls", false, true, 14, 3, 1), "bash ls  · 14 tools · 3 msgs · ✗1");
+    }
+
+    #[test]
+    fn turn_label_counts_are_the_first_thing_a_narrow_row_drops() {
+        for w in [12, 20] {
+            let t = truncate_str(&turn_label("Yoooooo", true, false, 14, 3, 1), w);
+            assert!(!t.is_empty() && t.starts_with("turn"), "width {w}: {t:?}");
+            let t = truncate_str(&turn_label("bash ls", false, true, 14, 3, 1), w);
+            assert!(!t.is_empty(), "width {w}");
+        }
+    }
+
+    #[test]
+    fn expanded_turn_with_opener_blanks_its_line_and_chip() {
+        let mut state = trajectory(three_calls());
+        let screen = draw(&mut state, 140, 20);
+        let turn = screen.lines().find(|l| l.contains("turn · 3 tools · 1 msg")).expect("turn row");
+        assert!(!turn.contains("#1"), "{turn}");
+        assert!(screen.lines().any(|l| l.contains("#1") && l.contains("fix it")), "the opener row keeps its line\n{screen}");
+    }
+
+    #[test]
+    fn turn_whose_opener_is_filtered_out_shows_the_preview() {
+        let mut state = trajectory(three_calls());
+        state.hidden[0] = true;
+        state.rebuild_outline();
+        assert!(matches!(state.outline_items[0], OutlineItem::Turn { opener: false, .. }), "{:?}", state.outline_items[0]);
+        let screen = draw(&mut state, 140, 20);
+        assert!(!screen.contains("turn ·"), "{screen}");
+    }
+
+    #[test]
+    fn event_row_with_expanded_body_drops_its_preview() {
+        let rows = vec![
+            ev(1, "message", "user", "fix it"),
+            ev(2, "tool", "tool", "zzprobe"),
+            ev(3, "tool", "tool_result", "a"),
+            ev(4, "message", "assistant", "wrapup"),
+        ];
+        let mut state = trajectory(rows);
+        let row = |screen: &str, tag: &str| screen.lines().find(|l| l.contains(tag)).map(str::to_string).unwrap_or_default();
+
+        let screen = draw(&mut state, 140, 24);
+        assert!(row(&screen, "#2").contains("zzprobe"), "collapsed rows keep their preview\n{screen}");
+
+        state.sel = Some(OutlineKey::Ev(2));
+        press(&mut state, KeyCode::Right);
+        state.sel = Some(OutlineKey::Ev(4));
+        press(&mut state, KeyCode::Right);
+        assert!(shown_rows(&state).contains(&"Body(2)".to_string()), "{:?}", shown_rows(&state));
+        let screen = draw(&mut state, 140, 24);
+        let call = row(&screen, "#2");
+        assert!(call.contains("Bash") && !call.contains("zzprobe"), "{call}");
+        let reply = row(&screen, "#4");
+        assert!(!reply.contains("wrapup") && reply.contains("#4"), "{reply}");
     }
 }

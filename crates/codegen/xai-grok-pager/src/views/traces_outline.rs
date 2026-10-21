@@ -23,10 +23,12 @@ pub enum OutlineKey {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum OutlineItem {
-    /// `event` indexes the turn's first event; `tools` counts visible tool calls, `msgs` visible
-    /// user/assistant messages after the opener, `errors` visible rows that failed.
+    /// `event` indexes the turn's first event; `opener` says it is a user message (its first child
+    /// is then that message, not a synthetic turn's first event); `tools` counts visible tool calls,
+    /// `msgs` visible user/assistant messages after the opener, `errors` visible rows that failed.
     Turn {
         event: usize,
+        opener: bool,
         tools: usize,
         msgs: usize,
         errors: usize,
@@ -41,7 +43,7 @@ pub enum OutlineItem {
 }
 
 /// Same classification as `traces_modal.rs` (`is_result`, `is_call`, the USER chip).
-pub(crate) fn is_user(e: &EventRow) -> bool {
+fn is_user(e: &EventRow) -> bool {
     e.role.as_deref() == Some("user") && !e.noise
 }
 
@@ -113,6 +115,7 @@ pub fn outline(events: &[EventRow], hidden: &[bool]) -> (FoldTree<OutlineKey>, V
             0,
             OutlineItem::Turn {
                 event: head,
+                opener,
                 tools: turn.iter().filter(|&&i| is_call(&events[i])).count(),
                 msgs: rest.iter().filter(|&&i| is_message(&events[i])).count(),
                 errors: turn.iter().filter(|&&i| failed_at(i)).count(),
@@ -333,6 +336,7 @@ mod tests {
                     tools,
                     msgs,
                     errors,
+                    ..
                 } => Some((*event, *tools, *msgs, *errors)),
                 _ => None,
             })
@@ -381,6 +385,20 @@ mod tests {
         assert_eq!(tree.nodes[turn + 2].key, OutlineKey::Body(1));
         assert_eq!(tree.nodes[turn + 2].parent, Some(turn + 1));
         assert!(tree.has_children(turn + 1), "the opener folds to hide its body");
+    }
+
+    #[test]
+    fn turn_records_whether_it_opens_with_a_user_message() {
+        let ev = [says(1), user(2), says(3)];
+        let (_, items) = run(&ev);
+        let openers: Vec<bool> = items
+            .iter()
+            .filter_map(|it| match it {
+                OutlineItem::Turn { opener, .. } => Some(*opener),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(openers, [false, true]);
     }
 
     #[test]
