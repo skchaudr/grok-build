@@ -128,7 +128,9 @@ impl ThemeKind {
             Self::GrokDay => false,
             Self::RosePineMoon => true,
             Self::OscuraMidnight => true,
-            Self::KansoMist | Self::KanagawaWave | Self::Kanagawa | Self::JetBrainsIslandsDark => true,
+            Self::KansoMist | Self::KanagawaWave | Self::Kanagawa | Self::JetBrainsIslandsDark => {
+                true
+            }
             // Reset plus named ANSI-16 entries only — nothing to quantize.
             Self::Terminal => false,
             // Auto is resolved to a concrete theme before rendering.
@@ -1273,10 +1275,30 @@ mod tests {
         // Anchors copied from the Zed theme JSON (editor.background, text, syntax.keyword).
         use ratatui::style::Color::Rgb;
         let cases = [
-            (Theme::kanso_mist(), Rgb(0x2f, 0x30, 0x36), Rgb(0xc5, 0xc9, 0xc7), Rgb(0x89, 0x92, 0xa7)),
-            (Theme::kanagawa_wave(), Rgb(0x1f, 0x1f, 0x28), Rgb(0xdc, 0xd7, 0xba), Rgb(0x95, 0x7f, 0xb8)),
-            (Theme::kanagawa(), Rgb(0x1f, 0x1f, 0x28), Rgb(0xc5, 0xc9, 0xc5), Rgb(0x95, 0x7f, 0xb8)),
-            (Theme::jetbrains_islands_dark(), Rgb(0x19, 0x1a, 0x1c), Rgb(0xdf, 0xe1, 0xe5), Rgb(0xcf, 0x8e, 0x6d)),
+            (
+                Theme::kanso_mist(),
+                Rgb(0x2f, 0x30, 0x36),
+                Rgb(0xc5, 0xc9, 0xc7),
+                Rgb(0x89, 0x92, 0xa7),
+            ),
+            (
+                Theme::kanagawa_wave(),
+                Rgb(0x1f, 0x1f, 0x28),
+                Rgb(0xdc, 0xd7, 0xba),
+                Rgb(0x95, 0x7f, 0xb8),
+            ),
+            (
+                Theme::kanagawa(),
+                Rgb(0x1f, 0x1f, 0x28),
+                Rgb(0xc5, 0xc9, 0xc5),
+                Rgb(0x95, 0x7f, 0xb8),
+            ),
+            (
+                Theme::jetbrains_islands_dark(),
+                Rgb(0x19, 0x1a, 0x1c),
+                Rgb(0xdf, 0xe1, 0xe5),
+                Rgb(0xcf, 0x8e, 0x6d),
+            ),
         ];
         for (theme, bg, text, keyword) in cases {
             assert_eq!(theme.bg_base, bg);
@@ -1304,21 +1326,35 @@ mod tests {
     fn zed_port_tmthemes_load_with_matching_background() {
         use syntect::highlighting::{Color, ThemeSet};
         let assets: [(&[u8], Theme); 4] = [
-            (include_bytes!("../../assets/kanso-mist.tmTheme"), Theme::kanso_mist()),
-            (include_bytes!("../../assets/kanagawa-wave.tmTheme"), Theme::kanagawa_wave()),
-            (include_bytes!("../../assets/kanagawa.tmTheme"), Theme::kanagawa()),
+            (
+                include_bytes!("../../assets/kanso-mist.tmTheme"),
+                Theme::kanso_mist(),
+            ),
+            (
+                include_bytes!("../../assets/kanagawa-wave.tmTheme"),
+                Theme::kanagawa_wave(),
+            ),
+            (
+                include_bytes!("../../assets/kanagawa.tmTheme"),
+                Theme::kanagawa(),
+            ),
             (
                 include_bytes!("../../assets/jetbrains-islands-dark.tmTheme"),
                 Theme::jetbrains_islands_dark(),
             ),
         ];
         for (bytes, theme) in assets {
-            let tm = ThemeSet::load_from_reader(&mut std::io::Cursor::new(bytes)).expect("tmTheme parses");
+            let tm = ThemeSet::load_from_reader(&mut std::io::Cursor::new(bytes))
+                .expect("tmTheme parses");
             let ratatui::style::Color::Rgb(r, g, b) = theme.bg_base else {
                 panic!("bg_base must be RGB");
             };
             assert_eq!(tm.settings.background, Some(Color { r, g, b, a: 0xff }));
-            assert!(tm.scopes.len() > 20, "{:?} has too few scope rules", tm.name);
+            assert!(
+                tm.scopes.len() > 20,
+                "{:?} has too few scope rules",
+                tm.name
+            );
         }
     }
 }

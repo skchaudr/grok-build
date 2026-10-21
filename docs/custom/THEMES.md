@@ -24,7 +24,7 @@ Generated, not hand-written: `scripts/themes/zed_port.py <zed-themes-dir> <repo-
 | accent_plan | modified |
 | accent_remember, md_task_checked, diff_insert_fg | created |
 | diff_delete_fg | deleted |
-| diff_*_bg | created/deleted.background if distinct, else 22% mix of fg into bg |
+| diff_*_bg | created/deleted.background if both present, distinct from each other and from bg; otherwise both are 22% mix of their fg into bg |
 | diff_equal_fg / diff_gutter_fg | syntax.comment / editor.line_number |
 | selection_border / hover_border / prompt_border / prompt_border_active | border.selected / border.variant / border / border.focused; Borderless (alpha 0) falls back to element.selected / element.hover |
 | accent_model | syntax.type |

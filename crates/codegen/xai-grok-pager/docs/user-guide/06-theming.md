@@ -132,7 +132,7 @@ Every theme is defined using full RGB values. At startup, Grok quantizes all col
 - On **256-color** terminals, each RGB value is mapped to the nearest indexed palette entry.
 - On **16-color** terminals, colors map to ANSI names.
 
-GrokNight and GrokDay use neutral grays that quantize cleanly. TokyoNight, RosePineMoon, and OscuraMidnight use distinctive tinted backgrounds that lose their character when quantized, which is why the theme picker hides them on non-truecolor terminals.
+GrokNight and GrokDay use neutral grays that quantize cleanly. TokyoNight, RosePineMoon, OscuraMidnight, Kanso Mist, Kanagawa Wave, Kanagawa, and JetBrains Islands Dark use distinctive tinted backgrounds that lose their character when quantized, which is why the theme picker hides them on non-truecolor terminals.
 
 ### Runtime-Generated Colors
 
