@@ -21,12 +21,17 @@ use crate::app::app_view::InputOutcome;
 use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
 use crate::views::modal_window::{self, ModalContentArea, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut};
+use crate::views::traces_fold::{FoldNode, FoldState, FoldTree};
 
 pub const TITLE: &str = "Traces";
 const PAGE: usize = 500;
 const EVENT_PAGE: usize = 5000;
 /// Children shown under a parent before `+N more`.
 const MAX_KIDS: usize = 6;
+/// Deepest ledger level: roots are 0, and nothing below depth `MAX_DEPTH` is loaded or shown.
+const MAX_DEPTH: usize = 8;
+/// Key prefix of a `+N more` node; it cannot collide with a session id.
+const MORE_KEY: &str = "\u{1}more:";
 /// How often remote hosts are refetched while the modal is open.
 const REMOTE_EVERY: Duration = Duration::from_secs(10);
 
@@ -70,9 +75,18 @@ pub struct TracesModalState {
     /// Root sessions as queried.
     pub sessions: Vec<SessionRow>,
     children: HashMap<String, Vec<SessionRow>>,
-    expanded: HashSet<String>,
-    /// What the ledger draws: roots with their children beneath. `selected` indexes this.
-    ledger: Vec<Item>,
+    /// Parents whose `+N more` overflow is expanded.
+    kids_all: HashSet<String>,
+    /// Collapsed ledger nodes, keyed by session id (or `+N more` key).
+    folds: FoldState<String>,
+    /// Parents that already got their default fold (collapsed below the roots).
+    fold_seen: HashSet<String>,
+    /// Every ledger node in preorder, folded or not.
+    tree: FoldTree<String>,
+    /// Parallel to `tree.nodes`.
+    nodes: Vec<Node>,
+    /// The visible ledger: indices into `nodes`. `selected` indexes this.
+    ledger: Vec<usize>,
     pub selected: usize,
     scroll: usize,
 
@@ -126,17 +140,89 @@ pub struct TracesModalState {
     raw_scroll: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Branch {
-    Root,
-    Mid,
-    Last,
-}
-
 #[derive(Clone, Debug)]
 enum Item {
-    Row { row: SessionRow, branch: Branch },
+    Row { row: SessionRow },
     More { parent: String, hidden: usize },
+}
+
+/// One ledger node, parallel to `FoldTree::nodes`.
+#[derive(Clone, Debug)]
+struct Node {
+    item: Item,
+    /// Per level 1..=depth: whether that level's node is the last of its siblings.
+    guides: Vec<bool>,
+    /// Rows under this node, `+N more` overflow included.
+    hidden: usize,
+}
+
+/// Preorder flattening of the ledger: a session, then its shown children, then its `+N more`.
+struct Flatten<'a> {
+    kids: &'a HashMap<String, Vec<SessionRow>>,
+    all_kids: &'a HashSet<String>,
+    tree: Vec<FoldNode<String>>,
+    nodes: Vec<Node>,
+    /// Cycle and repeat guard.
+    seen: HashSet<String>,
+}
+
+impl Flatten<'_> {
+    fn session(&mut self, row: &SessionRow, parent: Option<usize>, guides: Vec<bool>) {
+        if !self.seen.insert(row.id.clone()) {
+            return;
+        }
+        let me = self.push(Item::Row { row: row.clone() }, row.id.clone(), parent, &guides);
+        if guides.len() >= MAX_DEPTH {
+            return;
+        }
+        let kids_map: &HashMap<String, Vec<SessionRow>> = self.kids;
+        let Some(kids) = kids_map.get(&row.id) else { return };
+        let shown = if kids.len() > MAX_KIDS && !self.all_kids.contains(&row.id) { MAX_KIDS } else { kids.len() };
+        let more = shown < kids.len();
+        for (i, c) in kids.iter().take(shown).enumerate() {
+            let mut g = guides.clone();
+            g.push(!more && i + 1 == shown);
+            self.session(c, Some(me), g);
+        }
+        if more {
+            let mut g = guides;
+            g.push(true);
+            let item = Item::More { parent: row.id.clone(), hidden: kids.len() - shown };
+            self.push(item, format!("{MORE_KEY}{}", row.id), Some(me), &g);
+        }
+    }
+
+    fn push(&mut self, item: Item, key: String, parent: Option<usize>, guides: &[bool]) -> usize {
+        self.tree.push(FoldNode { key, parent, depth: guides.len() });
+        self.nodes.push(Node { item, guides: guides.to_vec(), hidden: 0 });
+        self.tree.len() - 1
+    }
+
+    /// Fills `Node::hidden` bottom-up: each node counts its descendants.
+    fn finish(mut self) -> (FoldTree<String>, Vec<Node>) {
+        for j in (0..self.tree.len()).rev() {
+            if let Some(p) = self.tree[j].parent {
+                let weight = match &self.nodes[j].item {
+                    Item::Row { .. } => 1,
+                    Item::More { hidden, .. } => *hidden,
+                };
+                let add = self.nodes[j].hidden + weight;
+                self.nodes[p].hidden += add;
+            }
+        }
+        (FoldTree { nodes: self.tree }, self.nodes)
+    }
+}
+
+/// Tree guides for a node: `│` past ancestors that have later siblings, `├─`/`└─` for its own level.
+fn guide_prefix(guides: &[bool]) -> String {
+    let Some((&last, ancestors)) = guides.split_last() else { return String::new() };
+    let mut s = String::new();
+    for &a in ancestors {
+        s.push_str(if a { "   " } else { "│  " });
+    }
+    s.push_str(if last { "└─ " } else { "├─ " });
+    s
 }
 
 /// A tool result folded into the call row before it.
@@ -194,7 +280,11 @@ impl TracesModalState {
             show_all: false,
             sessions: Vec::new(),
             children: HashMap::new(),
-            expanded: HashSet::new(),
+            kids_all: HashSet::new(),
+            folds: FoldState::new(),
+            fold_seen: HashSet::new(),
+            tree: FoldTree { nodes: Vec::new() },
+            nodes: Vec::new(),
             ledger: Vec::new(),
             selected: 0,
             scroll: 0,
@@ -304,11 +394,11 @@ impl TracesModalState {
             return false;
         }
         if let Ok((sessions, children)) = snap.ledger {
-            // Follow the selected session wherever it moved.
-            let keep = self.selected_session().map(|s| s.id.clone());
+            // Follow the selected row wherever it moved.
+            let keep = self.selected_key();
             (self.sessions, self.children) = (sessions, children);
             self.rebuild_ledger();
-            if let Some(i) = keep.and_then(|id| self.ledger.iter().position(|it| matches!(it, Item::Row { row, .. } if row.id == id))) {
+            if let Some(i) = keep.and_then(|k| self.position_of(&k)) {
                 self.selected = i;
             }
         }
@@ -401,22 +491,132 @@ impl TracesModalState {
             }
         }
         kids.extend(remote_kids);
-        let mut out = Vec::new();
+        let mut flat = Flatten { kids: &kids, all_kids: &self.kids_all, tree: Vec::new(), nodes: Vec::new(), seen: HashSet::new() };
         for r in &roots {
-            out.push(Item::Row { row: r.clone(), branch: Branch::Root });
-            let Some(k) = kids.get(&r.id) else { continue };
-            let shown = if k.len() > MAX_KIDS && !self.expanded.contains(&r.id) { MAX_KIDS } else { k.len() };
-            for (i, c) in k.iter().take(shown).enumerate() {
-                let last = i + 1 == k.len();
-                out.push(Item::Row { row: c.clone(), branch: if last { Branch::Last } else { Branch::Mid } });
-            }
-            if shown < k.len() {
-                out.push(Item::More { parent: r.id.clone(), hidden: k.len() - shown });
-            }
+            flat.session(r, None, Vec::new());
         }
+        (self.tree, self.nodes) = flat.finish();
         (self.shown_roots, self.shown_children) = (roots, kids);
-        self.ledger = out;
-        self.selected = self.selected.min(self.ledger.len().saturating_sub(1));
+        self.fold_defaults();
+        self.relist(None);
+    }
+
+    /// Drops fold state for nodes that left the tree. A parent below the roots starts collapsed
+    /// the first time it appears; after that its fold is whatever the user left it.
+    fn fold_defaults(&mut self) {
+        self.folds.retain(&self.tree);
+        let live: HashSet<String> = self.tree.nodes.iter().map(|n| n.key.clone()).collect();
+        self.fold_seen.retain(|k| live.contains(k));
+        for i in 0..self.tree.nodes.len() {
+            let key = &self.tree.nodes[i].key;
+            if self.tree.nodes[i].depth == 0 || !self.tree.has_children(i) || self.fold_seen.contains(key) {
+                continue;
+            }
+            self.folds.collapse(&self.tree, i);
+            self.fold_seen.insert(key.clone());
+        }
+    }
+
+    /// Recomputes the visible ledger from the fold state. `keep` is the key to stay on, if still shown;
+    /// otherwise the index is clamped.
+    fn relist(&mut self, keep: Option<String>) {
+        self.ledger = self.tree.visible(&self.folds);
+        self.selected = keep.and_then(|k| self.position_of(&k)).unwrap_or(self.selected.min(self.ledger.len().saturating_sub(1)));
+    }
+
+    /// Re-lists after a fold change on `node`, keeping the selection on it or on its nearest ancestor still shown.
+    fn refold(&mut self, node: usize) {
+        let shown = self.tree.visible(&self.folds);
+        let mut at = Some(node);
+        while let Some(i) = at {
+            if shown.contains(&i) {
+                break;
+            }
+            at = self.tree.nodes[i].parent;
+        }
+        let keep = at.map(|i| self.tree.nodes[i].key.clone());
+        self.relist(keep);
+    }
+
+    fn selected_node(&self) -> Option<usize> {
+        self.ledger.get(self.selected).copied()
+    }
+
+    /// Key of the selected line: a session id, or the `+N more` key.
+    fn selected_key(&self) -> Option<String> {
+        self.selected_node().map(|n| self.tree.nodes[n].key.clone())
+    }
+
+    fn position_of(&self, key: &str) -> Option<usize> {
+        self.ledger.iter().position(|&n| self.tree.nodes[n].key == key)
+    }
+
+    /// Applies a fold op to the selected node. False when it changed nothing.
+    fn fold_with(&mut self, op: impl FnOnce(&mut FoldState<String>, &FoldTree<String>, usize)) -> bool {
+        let Some(node) = self.selected_node() else { return false };
+        let before = self.folds.clone();
+        op(&mut self.folds, &self.tree, node);
+        if self.folds == before {
+            return false;
+        }
+        self.refold(node);
+        true
+    }
+
+    /// `h` / `←`: collapse the selected node; on a leaf or an already collapsed node, select its parent.
+    fn collapse_selected(&mut self) -> bool {
+        let Some(node) = self.selected_node() else { return false };
+        let before = self.folds.clone();
+        match self.folds.collapse(&self.tree, node) {
+            Some(parent) => {
+                self.refold(parent);
+                true
+            }
+            None if self.folds != before => {
+                self.refold(node);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `e` / Space.
+    fn toggle_selected(&mut self) -> bool {
+        self.fold_with(|f, t, n| f.toggle(t, n))
+    }
+
+    /// `→` / `l`: expand the selected node. On a node that is already open, or on `+N more`, show the overflow.
+    fn expand_selected(&mut self) -> bool {
+        if let Some(parent) = self.selected_more() {
+            return self.show_more(parent);
+        }
+        let Some(node) = self.selected_node() else { return false };
+        if self.fold_with(|f, t, n| f.expand(t, n)) {
+            return true;
+        }
+        let id = match &self.nodes[node].item {
+            Item::Row { row } => row.id.clone(),
+            Item::More { .. } => return false,
+        };
+        let overflow = self.shown_children.get(&id).is_some_and(|k| k.len() > MAX_KIDS) && !self.kids_all.contains(&id);
+        overflow && self.show_more(id)
+    }
+
+    /// The parent of the selected `+N more` row.
+    fn selected_more(&self) -> Option<String> {
+        match &self.nodes.get(self.selected_node()?)?.item {
+            Item::More { parent, .. } => Some(parent.clone()),
+            Item::Row { .. } => None,
+        }
+    }
+
+    /// Shows every child of `parent` past the `MAX_KIDS` cut. Index clamping keeps the cursor on the first revealed child.
+    fn show_more(&mut self, parent: String) -> bool {
+        if !self.kids_all.insert(parent) {
+            return false;
+        }
+        self.rebuild_ledger();
+        true
     }
 
     /// Remote rows that pass the ledger filters; when browsing, grouped into roots and children.
@@ -455,30 +655,18 @@ impl TracesModalState {
     }
 
     pub fn selected_session(&self) -> Option<&SessionRow> {
-        match self.ledger.get(self.selected)? {
-            Item::Row { row, .. } => Some(row),
+        match &self.nodes.get(self.selected_node()?)?.item {
+            Item::Row { row } => Some(row),
             Item::More { .. } => None,
         }
     }
 
     /// Enter on `+N more` expands it; on anything else it does nothing here.
     fn expand_selected_more(&mut self) -> bool {
-        matches!(self.ledger.get(self.selected), Some(Item::More { .. })) && self.expand_selected()
-    }
-
-    /// `→` on `+N more` or on a root with hidden children: show every child of that parent.
-    fn expand_selected(&mut self) -> bool {
-        let parent = match self.ledger.get(self.selected) {
-            Some(Item::More { parent, .. }) => parent.clone(),
-            Some(Item::Row { row, branch: Branch::Root }) if self.shown_children.get(&row.id).is_some_and(|k| k.len() > MAX_KIDS) => row.id.clone(),
-            _ => return false,
-        };
-        if !self.expanded.insert(parent.clone()) {
-            return false;
+        match self.selected_more() {
+            Some(parent) => self.show_more(parent),
+            None => false,
         }
-        // Keep the cursor on the row it was on (a root) or on the first revealed child.
-        self.rebuild_ledger();
-        true
     }
 
     /// (active, failed, total) over everything loaded, children included.
@@ -731,7 +919,7 @@ impl TracesModalState {
 
     /// Merge one host's answer; on failure keep showing its last good rows and say so.
     fn apply_host(&mut self, h: HostResult) {
-        let keep = self.selected_session().map(|s| s.id.clone());
+        let keep = self.selected_key();
         match h.result {
             Ok(Fetched { rows, note }) => {
                 self.remote_err.remove(&h.target);
@@ -750,7 +938,7 @@ impl TracesModalState {
             }
         }
         self.rebuild_ledger();
-        if let Some(i) = keep.and_then(|id| self.ledger.iter().position(|it| matches!(it, Item::Row { row, .. } if row.id == id))) {
+        if let Some(i) = keep.and_then(|k| self.position_of(&k)) {
             self.selected = i;
         }
     }
@@ -864,12 +1052,17 @@ type Trajectory = (Vec<EventRow>, Option<SessionRow>, Vec<SessionRow>);
 /// Roots (running ones first when sorted by update) and, when browsing, each root's children.
 fn query_ledger(index: &TraceIndex, filter: &SessionFilter, browse: bool) -> Result<Ledger, xai_grok_traces::Error> {
     let mut sessions = index.list_sessions(filter)?;
-    let mut children = HashMap::new();
+    let mut children: HashMap<String, Vec<SessionRow>> = HashMap::new();
     if browse {
-        for r in sessions.iter().filter(|r| r.children > 0) {
-            if let Ok(kids) = index.children(&r.id) {
-                children.insert(r.id.clone(), kids);
+        // Children of children too, down to MAX_DEPTH; a parent already fetched is skipped, so cycles end.
+        let mut open: Vec<(String, usize)> = sessions.iter().filter(|r| r.children > 0).map(|r| (r.id.clone(), 0)).collect();
+        while let Some((id, depth)) = open.pop() {
+            if depth >= MAX_DEPTH || children.contains_key(&id) {
+                continue;
             }
+            let Ok(kids) = index.children(&id) else { continue };
+            open.extend(kids.iter().filter(|k| k.children > 0).map(|k| (k.id.clone(), depth + 1)));
+            children.insert(id, kids);
         }
         if filter.sort == Sort::Updated {
             // A finished parent with a running child counts as running.
@@ -1059,6 +1252,31 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                         return InputOutcome::Unchanged;
                     }
                 }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    if !state.collapse_selected() {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('e' | ' ') => {
+                    if !state.toggle_selected() {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('E') => {
+                    if !state.fold_with(|f, t, _| f.toggle_all(t)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('>') => {
+                    if !state.fold_with(|f, t, n| f.expand_subtree(t, n)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('<') => {
+                    if !state.fold_with(|f, t, n| f.collapse_subtree(t, n)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
                 KeyCode::Char('s') => {
                     state.sort = match state.sort {
                         Sort::Updated => Sort::Started,
@@ -1235,6 +1453,9 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
             plain("H host"),
             plain("s sort"),
             plain("Enter open"),
+            plain("e fold"),
+            plain("E all"),
+            plain("</> more/less"),
             plain("→ expand"),
             plain("r resume"),
             plain("R rescan"),
@@ -1476,40 +1697,44 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
     }
     keep_visible(state.selected, &mut state.scroll, list.height as usize);
     let now = now_ms();
-    for (i, item) in state.ledger.iter().enumerate().skip(state.scroll).take(list.height as usize) {
+    for (i, &n) in state.ledger.iter().enumerate().skip(state.scroll).take(list.height as usize) {
         let y = list.y + (i - state.scroll) as u16;
         let selected = i == state.selected;
         let base = if selected { Style::default().bg(theme.bg_highlight).fg(theme.text_primary) } else { Style::default().fg(theme.text_primary) };
         if selected {
             fill(buf, list, y, base);
         }
-        match item {
-            Item::More { hidden, .. } => put_row(
-                buf,
-                list,
-                y,
-                &{
-                    let mut v = vec![(" ".into(), 1, base), ("".into(), 7, base)];
-                    if show_host {
-                        v.push(("".into(), 8, base));
-                    }
-                    v.push((format!("└─ +{hidden} more (→)"), c.name, base.fg(theme.gray)));
-                    v
-                },
-            ),
-            Item::Row { row: s, branch } => {
+        let node = &state.nodes[n];
+        match &node.item {
+            Item::More { hidden, .. } => put_row(buf, list, y, &{
+                let mut v = vec![(" ".into(), 1, base), ("".into(), 7, base)];
+                if show_host {
+                    v.push(("".into(), 8, base));
+                }
+                v.push((format!("{}  +{hidden} more (→)", guide_prefix(&node.guides)), c.name, base.fg(theme.gray)));
+                v
+            }),
+            Item::Row { row: s } => {
                 let (glyph, glyph_color) = status_glyph(s, theme);
-                let prefix = match branch {
-                    Branch::Root => "",
-                    Branch::Mid => "├─ ",
-                    Branch::Last => "└─ ",
+                let foldable = state.tree.has_children(n);
+                let collapsed = foldable && state.folds.is_collapsed(&state.tree.nodes[n].key);
+                let fold = match (foldable, collapsed) {
+                    (false, _) => "  ".to_string(),
+                    (true, true) => format!("{} ", crate::glyphs::chevron()),
+                    (true, false) => format!("{} ", crate::glyphs::chevron_down()),
                 };
+                let mut name = format!("{}{fold}{}", guide_prefix(&node.guides), clean_name(s));
+                if collapsed {
+                    // The hidden count stays visible; the name gives way to it.
+                    let tag = format!(" (+{})", node.hidden);
+                    name = format!("{}{tag}", truncate_str(&name, c.name.saturating_sub(tag.width())).as_str());
+                }
                 let running = s.status == Status::Active;
                 let now_text = one_line(s.now.as_deref().unwrap_or_default());
                 let mut v = vec![
                     (glyph.to_string(), 1, base.fg(glyph_color)),
                     (source_label(&s.source).to_string(), 7, base.fg(source_color(&s.source, theme))),
-                    (format!("{prefix}{}", clean_name(s)), c.name, base),
+                    (name, c.name, base),
                     (now_text, c.now, base.fg(if running { theme.text_secondary } else { theme.gray })),
                     (format!("{:>4}", age_of(s, now)), 4, base.fg(theme.text_secondary)),
                     (format!("{:>5}", s.tool_count), 5, base.fg(theme.accent_tool)),
@@ -2046,9 +2271,9 @@ mod tests {
         let (_tmp, mut state) = claude_fixture();
         assert_eq!(state.sessions.len(), 1, "roots only by default");
         assert_eq!(state.ledger.len(), 2, "parent then its child");
-        assert!(matches!(&state.ledger[1], Item::Row { row, branch: Branch::Last } if row.parent_id.is_some()));
+        assert!(matches!(&state.nodes[state.ledger[1]].item, Item::Row { row } if row.parent_id.is_some()));
         let screen = draw(&mut state, 140, 20);
-        assert!(screen.contains("└─ Explore index code"), "{screen}");
+        assert!(screen.lines().any(|l| l.contains("└─") && l.contains("Explore index code")), "{screen}");
         assert!(screen.contains("index everything please"), "{screen}");
         assert!(screen.contains("2 sessions"), "{screen}");
 
@@ -2075,20 +2300,128 @@ mod tests {
     #[test]
     fn many_children_collapse_until_expanded() {
         let (_tmp, mut state) = claude_fixture();
-        let kid = match &state.ledger[1] {
-            Item::Row { row, .. } => row.clone(),
+        let kid = match &state.nodes[state.ledger[1]].item {
+            Item::Row { row } => row.clone(),
             _ => unreachable!(),
         };
         let parent = state.sessions[0].id.clone();
         state.children.insert(parent.clone(), (0..9).map(|i| SessionRow { id: format!("k{i}"), ..kid.clone() }).collect());
         state.rebuild_ledger();
         assert_eq!(state.ledger.len(), 1 + MAX_KIDS + 1);
-        assert!(matches!(state.ledger.last(), Some(Item::More { hidden: 3, .. })));
+        assert!(matches!(state.nodes[*state.ledger.last().unwrap()].item, Item::More { hidden: 3, .. }));
         assert!(draw(&mut state, 140, 20).contains("+3 more"));
         state.selected = state.ledger.len() - 1;
         press(&mut state, KeyCode::Enter);
         assert_eq!(state.mode, Mode::List, "Enter on +N more expands instead of opening");
         assert_eq!(state.ledger.len(), 1 + 9);
+    }
+
+    /// A ledger from `(id, parent)` edges; parents must come before their children.
+    fn tree_state(edges: &[(&str, Option<&str>)]) -> TracesModalState {
+        let mut state = TracesModalState::open_with_hosts(None, vec![]);
+        let mut children: HashMap<String, Vec<SessionRow>> = HashMap::new();
+        for &(id, parent) in edges {
+            let r = SessionRow { id: id.into(), title: format!("task {id}"), ..row("claude", "/h/x.jsonl") };
+            match parent {
+                None => state.sessions.push(r),
+                Some(p) => children.entry(p.into()).or_default().push(r),
+            }
+        }
+        state.children = children;
+        state.rebuild_ledger();
+        state
+    }
+
+    /// Session ids of the visible ledger lines, in order.
+    fn shown(state: &TracesModalState) -> Vec<String> {
+        state.ledger.iter().map(|&n| state.tree.nodes[n].key.clone()).collect()
+    }
+
+    fn select(state: &mut TracesModalState, id: &str) {
+        state.selected = state.position_of(id).expect("row is shown");
+    }
+
+    #[test]
+    fn nested_tree_renders_and_folds() {
+        // r ─┬─ c1 ── g1 ── gg1
+        //    └─ c2
+        let mut state = tree_state(&[("r", None), ("c1", Some("r")), ("g1", Some("c1")), ("gg1", Some("g1")), ("c2", Some("r"))]);
+        assert_eq!(shown(&state), ["r", "c1", "c2"], "roots open, deeper parents start folded");
+        let screen = draw(&mut state, 140, 20);
+        assert!(screen.lines().any(|l| l.contains("├─ ›") && l.contains("(+2)")), "{screen}");
+
+        select(&mut state, "c1");
+        press(&mut state, KeyCode::Char('l'));
+        assert_eq!(shown(&state), ["r", "c1", "g1", "c2"]);
+        select(&mut state, "g1");
+        press(&mut state, KeyCode::Right);
+        assert_eq!(shown(&state), ["r", "c1", "g1", "gg1", "c2"]);
+        let screen = draw(&mut state, 140, 20);
+        assert!(screen.lines().any(|l| l.contains("│     └─") && l.contains("task gg1")), "{screen}");
+
+        // `h` on a leaf selects its parent; on an open parent it folds; on a folded one it moves up.
+        select(&mut state, "gg1");
+        press(&mut state, KeyCode::Char('h'));
+        assert_eq!(state.selected_session().unwrap().id, "g1");
+        assert_eq!(shown(&state), ["r", "c1", "g1", "gg1", "c2"], "parent stays open");
+        press(&mut state, KeyCode::Char('h'));
+        assert_eq!(shown(&state), ["r", "c1", "g1", "c2"], "open parent folds");
+        assert_eq!(state.selected_session().unwrap().id, "g1");
+        press(&mut state, KeyCode::Char('h'));
+        assert_eq!(state.selected_session().unwrap().id, "c1", "folded parent: selection moves up");
+        press(&mut state, KeyCode::Char('e'));
+        assert_eq!(shown(&state), ["r", "c1", "c2"], "e folds the open node");
+        let screen = draw(&mut state, 140, 20);
+        assert!(screen.lines().any(|l| l.contains("├─ ›") && l.contains("task c1") && l.contains("(+2)")), "{screen}");
+    }
+
+    #[test]
+    fn angle_brackets_fold_a_subtree_and_leave_siblings_alone() {
+        let mut state = tree_state(&[
+            ("r", None),
+            ("c1", Some("r")),
+            ("g1", Some("c1")),
+            ("gg1", Some("g1")),
+            ("c2", Some("r")),
+            ("r2", None),
+            ("s1", Some("r2")),
+            ("s1a", Some("s1")),
+        ]);
+        assert_eq!(shown(&state), ["r", "c1", "c2", "r2", "s1"]);
+        press(&mut state, KeyCode::Char('E'));
+        assert_eq!(shown(&state).len(), 8, "E expands everything when anything is folded");
+
+        select(&mut state, "c1");
+        press(&mut state, KeyCode::Char('<'));
+        assert_eq!(shown(&state), ["r", "c1", "c2", "r2", "s1", "s1a"], "< folds c1 and g1, nothing else");
+
+        select(&mut state, "r2");
+        press(&mut state, KeyCode::Char('<'));
+        assert_eq!(shown(&state), ["r", "c1", "c2", "r2"], "< on r2 folds its branch only");
+
+        select(&mut state, "r");
+        press(&mut state, KeyCode::Char('>'));
+        assert_eq!(shown(&state), ["r", "c1", "g1", "gg1", "c2", "r2"], "> opens r's branch; r2 stays folded");
+
+        press(&mut state, KeyCode::Char('E'));
+        assert_eq!(shown(&state).len(), 8, "E expands everything since r2 is folded");
+    }
+
+    #[test]
+    fn selection_and_folds_survive_a_live_requery() {
+        let mut state = tree_state(&[("r", None), ("c1", Some("r")), ("g1", Some("c1")), ("c2", Some("r"))]);
+        select(&mut state, "c1");
+        press(&mut state, KeyCode::Char('e'));
+        assert_eq!(shown(&state), ["r", "c1", "g1", "c2"]);
+        select(&mut state, "c2");
+
+        // A requery that adds a root in front of the others.
+        let mut sessions = vec![SessionRow { id: "new".into(), ..state.sessions[0].clone() }];
+        sessions.extend(state.sessions.clone());
+        let snap = Snapshot { generation: state.generation, ledger: Ok((sessions, state.children.clone())), trajectory: None };
+        assert!(state.apply(snap));
+        assert_eq!(state.selected_session().unwrap().id, "c2", "selection follows its session id");
+        assert_eq!(shown(&state), ["new", "r", "c1", "g1", "c2"], "c1 stays expanded");
     }
 
     #[test]
