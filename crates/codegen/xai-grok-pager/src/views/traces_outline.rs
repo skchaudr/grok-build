@@ -689,12 +689,12 @@ mod tests {
         ];
         let (tree, items) = run(&ev);
         assert_eq!(turns(&items).len(), 3);
+        // Turns are the roots; every other node's parent precedes it (preorder).
         assert!(
             tree.nodes
                 .iter()
                 .enumerate()
-                .skip(1)
-                .all(|(i, n)| n.parent.is_some_and(|p| p < i))
+                .all(|(i, n)| n.parent.map_or(n.depth == 0, |p| p < i))
         );
     }
 }
