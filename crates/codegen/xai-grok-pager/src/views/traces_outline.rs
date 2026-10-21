@@ -41,7 +41,7 @@ pub enum OutlineItem {
 }
 
 /// Same classification as `traces_modal.rs` (`is_result`, `is_call`, the USER chip).
-fn is_user(e: &EventRow) -> bool {
+pub(crate) fn is_user(e: &EventRow) -> bool {
     e.role.as_deref() == Some("user") && !e.noise
 }
 

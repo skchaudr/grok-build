@@ -1401,18 +1401,7 @@ fn wrap_body(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
-        let mut cur = String::new();
-        let mut w = 0;
-        for c in line.chars() {
-            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-            if w + cw > width && !cur.is_empty() {
-                out.push(std::mem::take(&mut cur));
-                w = 0;
-            }
-            cur.push(c);
-            w += cw;
-        }
-        out.push(cur);
+        out.extend(wrap_line(line, width));
         if out.len() > BODY_LINES {
             break;
         }
@@ -1422,6 +1411,92 @@ fn wrap_body(text: &str, width: usize) -> Vec<String> {
         out.push("… Enter for inspector".to_string());
     }
     out
+}
+
+/// Display columns of `s`, measured per char as the body wrap always has.
+fn cols(s: &str) -> usize {
+    s.chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum()
+}
+
+/// Splits `line` into `(leading whitespace, word)` pairs; a trailing whitespace run has an empty word.
+fn word_units(line: &str) -> Vec<(&str, &str)> {
+    let mut units = Vec::new();
+    let mut rest = line;
+    while !rest.is_empty() {
+        let body = rest.trim_start();
+        let word_len = body.find(char::is_whitespace).unwrap_or(body.len());
+        let (Some(lead), Some(word), Some(next)) = (
+            rest.get(..rest.len() - body.len()),
+            body.get(..word_len),
+            body.get(word_len..),
+        ) else {
+            break;
+        };
+        units.push((lead, word));
+        rest = next;
+    }
+    units
+}
+
+/// Rows built up by `wrap_line`; `width` is the column limit for each row.
+struct Rows {
+    done: Vec<String>,
+    cur: String,
+    cur_w: usize,
+    width: usize,
+}
+
+impl Rows {
+    fn break_row(&mut self) {
+        self.done.push(std::mem::take(&mut self.cur));
+        self.cur_w = 0;
+    }
+
+    /// Appends `s` char by char, breaking only when the row is full (hard split).
+    fn push_chars(&mut self, s: &str) {
+        for c in s.chars() {
+            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+            if self.cur_w + cw > self.width && !self.cur.is_empty() {
+                self.break_row();
+            }
+            self.cur.push(c);
+            self.cur_w += cw;
+        }
+    }
+
+    /// True when `total` columns would overflow the current row while `word_w` (<= width) fits on a fresh one.
+    fn moves_whole(&self, total: usize, word_w: usize) -> bool {
+        !self.cur.is_empty() && self.cur_w + total > self.width && word_w <= self.width
+    }
+}
+
+/// Wraps one line at word boundaries to `width` columns. Leading indentation stays on the line's first row;
+/// a word that does not fit the rest of a row moves whole to the next; only a word wider than `width` is split.
+fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    let mut rows = Rows {
+        done: Vec::new(),
+        cur: String::new(),
+        cur_w: 0,
+        width,
+    };
+    for (lead, word) in word_units(line) {
+        let (lead_w, word_w) = (cols(lead), cols(word));
+        let lead = if rows.moves_whole(lead_w + word_w, word_w) {
+            rows.break_row();
+            ""
+        } else {
+            lead
+        };
+        rows.push_chars(lead);
+        if rows.moves_whole(word_w, word_w) {
+            rows.break_row();
+        }
+        rows.push_chars(word);
+    }
+    rows.done.push(rows.cur);
+    rows.done
 }
 
 /// Scrolls so row `sel` sits fully inside `height` lines, where row `i` is `heights[i]` lines tall.
@@ -2502,22 +2577,8 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
                     continue;
                 };
                 let preview = one_line(e.detail.as_deref().filter(|d| !d.is_empty()).unwrap_or(&e.preview));
-                let mut text = format!("{indent}{mark}{preview}");
-                if collapsed {
-                    let mut parts = Vec::new();
-                    if *tools > 0 {
-                        parts.push(count_of(*tools, "tool", "tools"));
-                    }
-                    if *msgs > 0 {
-                        parts.push(count_of(*msgs, "msg", "msgs"));
-                    }
-                    if *errors > 0 {
-                        parts.push(format!("✗{errors}"));
-                    }
-                    if !parts.is_empty() {
-                        text.push_str(&format!("  · {}", parts.join(" · ")));
-                    }
-                }
+                let opener_child = traces_outline::is_user(e);
+                let text = format!("{indent}{mark}{}", turn_label(&preview, opener_child, collapsed, *tools, *msgs, *errors));
                 put_row(
                     buf,
                     list,
@@ -2604,6 +2665,30 @@ fn row_heights(bodies: &[Option<Vec<String>>]) -> Vec<usize> {
 /// `1 tool` / `3 tools`.
 fn count_of(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// Turn row text after the indent and fold mark. An expanded turn with an opener child shows `turn`
+/// instead of the preview, since that child already carries the prompt. Count suffix is shown when
+/// collapsed or when the opener child is shown, never for an expanded synthetic turn.
+fn turn_label(preview: &str, opener_child: bool, collapsed: bool, tools: usize, msgs: usize, errors: usize) -> String {
+    let show_preview = collapsed || !opener_child;
+    let mut text = if show_preview { preview.to_string() } else { "turn".to_string() };
+    if collapsed || opener_child {
+        let mut parts = Vec::new();
+        if tools > 0 {
+            parts.push(count_of(tools, "tool", "tools"));
+        }
+        if msgs > 0 {
+            parts.push(count_of(msgs, "msg", "msgs"));
+        }
+        if errors > 0 {
+            parts.push(format!("✗{errors}"));
+        }
+        if !parts.is_empty() {
+            text.push_str(&format!("  · {}", parts.join(" · ")));
+        }
+    }
+    text
 }
 
 fn render_inspector(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, theme: &Theme) {
@@ -3302,6 +3387,24 @@ mod tests {
     }
 
     #[test]
+    fn body_wrap_keeps_words_whole_when_they_fit_the_next_row() {
+        assert_eq!(wrap_body("aaa bbbb cc", 6), ["aaa", "bbbb", "cc"]);
+        assert_eq!(wrap_body("ab cdef", 4), ["ab", "cdef"]);
+    }
+
+    #[test]
+    fn body_wrap_hard_splits_only_words_wider_than_the_row() {
+        assert_eq!(wrap_body("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+        assert_eq!(wrap_body("x abcdefgh", 4), ["x ab", "cdef", "gh"]);
+    }
+
+    #[test]
+    fn body_wrap_keeps_indentation_and_blank_lines() {
+        assert_eq!(wrap_body("  one two three", 8), ["  one", "two", "three"]);
+        assert_eq!(wrap_body("ab\n\n  cd", 10), ["ab", "", "  cd"]);
+    }
+
+    #[test]
     fn activity_strip_buckets_events() {
         let mk = |t: i64, err: bool, turn: i64| EventRow {
             line: 0,
@@ -3431,5 +3534,24 @@ mod tests {
 
         state.install_trajectory(three_calls(), None, vec![]);
         assert!(!shown_rows(&state).contains(&"Ev(4)".to_string()), "a live poll keeps the manual collapse");
+    }
+
+    #[test]
+    fn turn_label_summarizes_an_expanded_turn_with_opener() {
+        assert_eq!(turn_label("Yoooooo", true, false, 14, 3, 1), "turn  · 14 tools · 3 msgs · ✗1");
+        assert_eq!(turn_label("Yoooooo", true, false, 1, 0, 0), "turn  · 1 tool");
+        assert_eq!(turn_label("Yoooooo", true, false, 0, 0, 0), "turn");
+    }
+
+    #[test]
+    fn turn_label_keeps_preview_when_collapsed() {
+        assert_eq!(turn_label("Yoooooo", true, true, 14, 3, 1), "Yoooooo  · 14 tools · 3 msgs · ✗1");
+        assert_eq!(turn_label("Yoooooo", true, true, 0, 0, 0), "Yoooooo");
+    }
+
+    #[test]
+    fn turn_label_keeps_preview_when_expanded_synthetic() {
+        assert_eq!(turn_label("bash ls", false, false, 14, 3, 1), "bash ls");
+        assert_eq!(turn_label("bash ls", false, true, 14, 3, 1), "bash ls  · 14 tools · 3 msgs · ✗1");
     }
 }
