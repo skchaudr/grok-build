@@ -325,7 +325,8 @@ fn usage_object(v: &Map<String, Value>) -> Option<&Map<String, Value>> {
 fn context_tokens(usage: &Map<String, Value>) -> Option<i64> {
     let sum = |keys: &[&str]| {
         let parts: Vec<f64> = keys.iter().filter_map(|k| number_value(usage.get(*k))).collect();
-        (!parts.is_empty()).then(|| parts.iter().sum::<f64>().round() as i64)
+        // A zero is a synthetic or error message with no real usage: it must not replace a good value.
+        Some(parts.iter().sum::<f64>().round() as i64).filter(|n| *n > 0)
     };
     if usage.contains_key("input_tokens") {
         return sum(&["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]);
@@ -637,6 +638,8 @@ mod tests {
             "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 500, "output_tokens": 50}}}
         }));
         assert_eq!(codex.context_tokens, None, "running totals are not a context size");
+        let zero = normalize(&json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "x"}], "usage": {"input_tokens": 0, "output_tokens": 0}}}));
+        assert_eq!(zero.context_tokens, None, "zero usage is no context size");
         assert_eq!(normalize(&json!({"type": "user", "message": {"role": "user", "content": "x"}})).context_tokens, None);
     }
 

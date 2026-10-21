@@ -112,7 +112,9 @@ CREATE TABLE IF NOT EXISTS trace_receipts (id INTEGER PRIMARY KEY, at_ms INTEGER
   event TEXT NOT NULL, native_session TEXT, path TEXT, session_id TEXT, tool TEXT, cwd TEXT,
   detail TEXT, tool_use_id TEXT, agent_id TEXT, harness_pid INTEGER, harness_start INTEGER);
 CREATE INDEX IF NOT EXISTS trace_receipts_session ON trace_receipts(session_id, at_ms, id);
-CREATE INDEX IF NOT EXISTS trace_receipts_native ON trace_receipts(source, native_session);
+CREATE INDEX IF NOT EXISTS trace_receipts_at ON trace_receipts(at_ms, id);
+-- Receipts not yet keyed to a session row: the native-id branch of every receipt match, and the receipt-only grouping.
+CREATE INDEX IF NOT EXISTS trace_receipts_native ON trace_receipts(source, native_session, at_ms, id) WHERE session_id IS NULL;
 CREATE INDEX IF NOT EXISTS trace_sessions_updated ON trace_sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS trace_sessions_source ON trace_sessions(source_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS trace_sessions_native ON trace_sessions(source_id, native_id);
@@ -1220,16 +1222,28 @@ impl TraceIndex {
                 agg.context_window
             ],
         )?;
-        // The newest receipt's process (an unresolved walk never wipes it). Receipts keyed by native id count too.
+        // Receipts that arrived before this row existed take its key (same rule as ingest).
+        let (source, native): (String, Option<String>) =
+            tx.query_row("SELECT source_id, native_id FROM trace_sessions WHERE id = ?1", [sid], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        for key in crate::receipts::native_keys(&source, native.as_deref()) {
+            tx.execute(
+                "UPDATE trace_receipts SET session_id = ?1 WHERE session_id IS NULL AND source = ?2 AND native_session = ?3",
+                params![sid, source, key],
+            )?;
+        }
+        // The newest receipt's process; a receipt without a resolved pid and start never wipes it.
+        let newest = |col: &str| {
+            format!(
+                "(SELECT r.{col} FROM trace_receipts r WHERE r.harness_pid IS NOT NULL AND r.harness_start IS NOT NULL AND r.session_id = trace_sessions.id
+                  ORDER BY r.at_ms DESC, r.id DESC LIMIT 1)"
+            )
+        };
         tx.execute(
-            "UPDATE trace_sessions SET
-               harness_pid = COALESCE((SELECT r.harness_pid FROM trace_receipts r WHERE r.harness_pid IS NOT NULL AND
-                 (r.session_id = trace_sessions.id OR (r.session_id IS NULL AND r.native_session = trace_sessions.native_id AND r.source = trace_sessions.source_id))
-                 ORDER BY r.at_ms DESC, r.id DESC LIMIT 1), harness_pid),
-               harness_start = COALESCE((SELECT r.harness_start FROM trace_receipts r WHERE r.harness_pid IS NOT NULL AND
-                 (r.session_id = trace_sessions.id OR (r.session_id IS NULL AND r.native_session = trace_sessions.native_id AND r.source = trace_sessions.source_id))
-                 ORDER BY r.at_ms DESC, r.id DESC LIMIT 1), harness_start)
-             WHERE id = ?1",
+            &format!(
+                "UPDATE trace_sessions SET harness_pid = COALESCE({}, harness_pid), harness_start = COALESCE({}, harness_start) WHERE id = ?1",
+                newest("harness_pid"),
+                newest("harness_start")
+            ),
             [sid],
         )?;
         Ok(())

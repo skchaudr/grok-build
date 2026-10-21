@@ -750,3 +750,43 @@ fn pathless_claude_and_pi_receipts_match_the_session_uuid() {
     let miss = ingest(&mut idx, &e.roots, extract("claude", br#"{"hook_event_name":"PermissionRequest","session_id":"3a680ac6"}"#)).unwrap();
     assert_eq!(key(&idx, miss), None, "a partial uuid is not a match");
 }
+
+#[test]
+fn orphan_receipts_are_rekeyed_when_the_session_row_is_written() {
+    use xai_grok_traces::hook::{extract, ingest};
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    // Before any session exists: stored unkeyed.
+    let c = ingest(&mut idx, &e.roots, extract("claude", br#"{"hook_event_name":"PermissionRequest","session_id":"9f0e1d2c-0000-4000-8000-aaaaaaaaaaaa"}"#)).unwrap();
+    let p = ingest(&mut idx, &e.roots, extract("pi", br#"{"event":"agent_start","session_id":"0199cccc-dddd"}"#)).unwrap();
+    let other = ingest(&mut idx, &e.roots, extract("claude", br#"{"hook_event_name":"PermissionRequest","session_id":"someone-else"}"#)).unwrap();
+    write(&e.home.join(".claude/projects/-w-claude/9f0e1d2c-0000-4000-8000-aaaaaaaaaaaa.jsonl"), CLAUDE);
+    write(&e.home.join(".pi/agent/sessions/--w-pi--/2026-10-01T00-00-00-000Z_0199cccc-dddd.jsonl"), PI);
+    idx.scan(&e.roots).unwrap();
+    let key = |id: i64| -> Option<String> {
+        rusqlite::Connection::open(&e.db).unwrap().query_row("SELECT session_id FROM trace_receipts WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+    };
+    let sid = |src: &str, needle: &str| idx.list_sessions(&SessionFilter { source: Some(src.into()), ..Default::default() }).unwrap().into_iter().find(|s| s.file_path.to_string_lossy().contains(needle)).unwrap().id;
+    assert_eq!(key(c), Some(sid("claude", "9f0e1d2c")));
+    assert_eq!(key(p), Some(sid("pi", "0199cccc")));
+    assert_eq!(key(other), None);
+}
+
+#[test]
+fn a_receipt_without_a_start_never_overwrites_the_stored_pair() {
+    use xai_grok_traces::hook::{extract, ingest};
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let path = e.home.join(".codex/sessions/2026/10/01/rollout-x.jsonl");
+    let me = std::process::id();
+    ingest(&mut idx, &e.roots, extract("codex", format!(r#"{{"hook_event_name":"PostToolUse","transcript_path":"{}","harness_pid":{me}}}"#, path.display()).as_bytes())).unwrap();
+    let sid = xai_grok_traces::session_id("codex", &path.to_string_lossy());
+    let pair = || rusqlite::Connection::open(&e.db).unwrap().query_row("SELECT harness_pid, harness_start FROM trace_sessions WHERE id = ?1", [&sid], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?))).unwrap();
+    let before = pair();
+    if cfg!(target_os = "macos") {
+        assert!(before.0.is_some() && before.1.is_some());
+    }
+    idx.record_receipt(&xai_grok_traces::Receipt { source: "codex".into(), event: "x".into(), session_id: Some(sid.clone()), harness_pid: Some(1234), harness_start: None, ..Default::default() }).unwrap();
+    assert_eq!(pair(), before);
+}

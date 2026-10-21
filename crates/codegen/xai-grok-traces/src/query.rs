@@ -7,8 +7,8 @@ use rusqlite::{OptionalExtension, Row, params};
 
 use crate::index::{Result, TraceIndex, now_ms};
 use crate::lines;
-use crate::live::{BOUNDARY_EVENTS, Boundary, boundary};
-use crate::receipts::{RECEIPT_ONLY_PREFIX, RECEIPT_OF, in_list};
+use crate::live::Boundary;
+use crate::receipts::{RECEIPT_ONLY_PREFIX, has_receipt_sql, in_list, newest_receipt_sql};
 use crate::normalize::{Kind, Role};
 use crate::roots::Format;
 
@@ -22,8 +22,8 @@ pub const TERMINAL_EVENTS: [&str; 5] = ["SessionEnd", "Stop", "stop", "session_s
 /// The dispatcher, resolved inside the source; a missing or evicted parent leaves a root.
 const PARENT_ID: &str = "(SELECT p.id FROM trace_sessions p WHERE p.source_id = s.source_id AND p.native_id = s.parent_native LIMIT 1)";
 const CHILDREN: &str = "(SELECT COUNT(*) FROM trace_sessions c WHERE c.source_id = s.source_id AND c.parent_native = s.native_id)";
-const LAST_RECEIPT_AT: &str = "(SELECT r.at_ms FROM trace_receipts r WHERE (r.session_id = s.id OR (r.session_id IS NULL AND r.native_session = s.native_id AND r.source = s.source_id)) ORDER BY r.at_ms DESC, r.id DESC LIMIT 1)";
-const LAST_RECEIPT_EVENT: &str = "(SELECT r.event FROM trace_receipts r WHERE (r.session_id = s.id OR (r.session_id IS NULL AND r.native_session = s.native_id AND r.source = s.source_id)) ORDER BY r.at_ms DESC, r.id DESC LIMIT 1)";
+static LAST_RECEIPT_AT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| newest_receipt_sql("at_ms"));
+static LAST_RECEIPT_EVENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| newest_receipt_sql("event"));
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Status {
@@ -175,8 +175,8 @@ const SESSION_COLS: &str = "s.id, s.source_id, s.title, s.file_path, s.model, s.
   s.duration_ms, s.status, f.mtime_ms";
 
 pub(crate) fn session_cols() -> String {
-    format!("{SESSION_COLS}, {LAST_RECEIPT_AT}, {LAST_RECEIPT_EVENT}, {PARENT_ID}, s.label, s.agent_type, s.now_text, s.last_event_at, {CHILDREN}, s.failed,
-  s.native_id, s.harness_pid, s.harness_start, s.context_tokens, s.context_window")
+    format!("{SESSION_COLS}, {}, {}, {PARENT_ID}, s.label, s.agent_type, s.now_text, s.last_event_at, {CHILDREN}, s.failed,
+  s.native_id, s.harness_pid, s.harness_start, s.context_tokens, s.context_window", *LAST_RECEIPT_AT, *LAST_RECEIPT_EVENT)
 }
 
 fn terminal_list() -> String {
@@ -232,18 +232,6 @@ pub(crate) fn session_row(r: &Row<'_>, now: i64) -> rusqlite::Result<SessionRow>
     })
 }
 
-/// The kind of the newest receipt (own thread, newest first) that is a turn boundary for `source`.
-fn newest_boundary(stmt: &mut rusqlite::CachedStatement<'_>, source: &str, key: &str) -> Result<Option<Boundary>> {
-    let mut rows = stmt.query([key])?;
-    while let Some(r) = rows.next()? {
-        let (event, detail): (String, Option<String>) = (r.get(0)?, r.get(1)?);
-        if let Some(b) = boundary(source, &event, detail.as_deref()) {
-            return Ok(Some(b));
-        }
-    }
-    Ok(None)
-}
-
 fn like(text: &str) -> String {
     let escaped = text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
     format!("%{escaped}%")
@@ -291,7 +279,9 @@ impl TraceIndex {
             // A just-dispatched agent is trivial until it has done something;
             // keep live sessions visible so new work shows up immediately.
             sql.push_str(&format!(
-                " AND (NOT (s.signal_count < 3 AND s.tool_count = 0) OR (s.status = 'open' AND f.mtime_ms > ?) OR ({LAST_RECEIPT_AT} > ? AND {LAST_RECEIPT_EVENT} NOT IN ({})))",
+                " AND (NOT (s.signal_count < 3 AND s.tool_count = 0) OR (s.status = 'open' AND f.mtime_ms > ?) OR ({} > ? AND {} NOT IN ({})))",
+                *LAST_RECEIPT_AT,
+                *LAST_RECEIPT_EVENT,
                 terminal_list()
             ));
             args.push(Sql::Integer(now - ACTIVE_WINDOW_MS));
@@ -299,7 +289,9 @@ impl TraceIndex {
         }
         if filter.active_only {
             sql.push_str(&format!(
-                " AND ((s.status = 'open' AND f.mtime_ms > ?) OR ({LAST_RECEIPT_AT} > ? AND {LAST_RECEIPT_EVENT} NOT IN ({})))",
+                " AND ((s.status = 'open' AND f.mtime_ms > ?) OR ({} > ? AND {} NOT IN ({})))",
+                *LAST_RECEIPT_AT,
+                *LAST_RECEIPT_EVENT,
                 terminal_list()
             ));
             args.push(Sql::Integer(now - ACTIVE_WINDOW_MS));
@@ -322,31 +314,30 @@ impl TraceIndex {
 
     /// Sessions of `claude`, `pi` and `cursor` with receipts whose newest turn boundary is not `End`,
     /// plus receipt-only Cursor rows (chats seen in hooks whose transcript is not indexed yet).
-    /// Process liveness and same-process supersede are the caller's.
+    /// Liveness of every row, receipt-only included, is the caller's `alive(harness_pid, harness_start)`;
+    /// a row with a NULL pid stays until its newest boundary is `End`. Same-process supersede is the caller's too.
     pub fn live_sessions(&self) -> Result<Vec<SessionRow>> {
         const SOURCES: [&str; 3] = ["claude", "pi", "cursor"];
         let now = now_ms();
         let conn = self.conn();
         let sql = format!(
             "SELECT {} FROM trace_sessions s LEFT JOIN trace_files f ON f.path = s.file_path
-             WHERE s.source_id IN ({}) AND EXISTS (SELECT 1 FROM trace_receipts r WHERE {RECEIPT_OF})",
+             WHERE s.source_id IN ({}) AND {}",
             session_cols(),
-            in_list(&SOURCES)
+            in_list(&SOURCES),
+            has_receipt_sql()
         );
         let candidates: Vec<SessionRow> = conn.prepare_cached(&sql)?.query_map([], |r| session_row(r, now))?.collect::<rusqlite::Result<_>>()?;
-        let boundaries = in_list(BOUNDARY_EVENTS);
-        let mut own = conn.prepare_cached(&format!(
-            "SELECT r.event, r.detail FROM trace_sessions s JOIN trace_receipts r ON {RECEIPT_OF}
-             WHERE s.id = ?1 AND r.agent_id IS NULL AND r.event IN ({boundaries}) ORDER BY r.at_ms DESC, r.id DESC"
-        ))?;
         let mut out = Vec::new();
         for row in candidates {
-            if newest_boundary(&mut own, &row.source, &row.id)? != Some(Boundary::End) {
+            let ended = self.newest_boundary(&row.source, Some(&row.id), row.native_id.as_deref())?.is_some_and(|(_, _, b)| b == Boundary::End);
+            if !ended {
                 out.push(row);
             }
         }
 
         // Cursor chats with receipts but no session row: grouped by chat id, minus any chat a row now owns.
+        // Only unkeyed receipts are read (partial index `trace_receipts_native`).
         let mut groups = conn.prepare_cached(
             "SELECT r.native_session, MIN(r.at_ms), MAX(r.at_ms) FROM trace_receipts r
              WHERE r.source = 'cursor' AND r.session_id IS NULL AND r.native_session IS NOT NULL
@@ -354,11 +345,6 @@ impl TraceIndex {
              GROUP BY r.native_session",
         )?;
         let groups: Vec<(String, i64, i64)> = groups.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
-        let mut chat = conn.prepare_cached(&format!(
-            "SELECT r.event, r.detail FROM trace_receipts r
-             WHERE r.source = 'cursor' AND r.session_id IS NULL AND r.native_session = ?1 AND r.agent_id IS NULL
-               AND r.event IN ({boundaries}) ORDER BY r.at_ms DESC, r.id DESC"
-        ))?;
         let mut cwd = conn.prepare_cached(
             "SELECT r.cwd FROM trace_receipts r WHERE r.source = 'cursor' AND r.session_id IS NULL AND r.native_session = ?1 AND r.cwd IS NOT NULL
              ORDER BY r.at_ms DESC, r.id DESC LIMIT 1",
@@ -369,7 +355,7 @@ impl TraceIndex {
              ORDER BY r.at_ms DESC, r.id DESC LIMIT 1",
         )?;
         for (native, first, last) in groups {
-            if newest_boundary(&mut chat, "cursor", &native)? == Some(Boundary::End) {
+            if self.newest_boundary("cursor", None, Some(&native))?.is_some_and(|(_, _, b)| b == Boundary::End) {
                 continue;
             }
             let cwd: Option<String> = cwd.query_row([&native], |r| r.get(0)).optional()?;

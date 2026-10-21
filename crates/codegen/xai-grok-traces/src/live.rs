@@ -20,9 +20,9 @@ pub fn harness_in_chain(chain: &[Proc]) -> Option<i64> {
     chain.iter().find(|(_, _, comm)| !is_shell(comm)).map(|(pid, _, _)| *pid)
 }
 
-/// (ppid, comm, start in Unix seconds) of a process.
+/// (ppid, comm, start in Unix seconds, is zombie) of a process.
 #[cfg(target_os = "macos")]
-fn proc_info(pid: i64) -> Option<(i64, String, i64)> {
+fn proc_info(pid: i64) -> Option<(i64, String, i64, bool)> {
     let pid32 = i32::try_from(pid).ok().filter(|p| *p > 0)?;
     // SAFETY: `proc_pidinfo` fills at most `size` bytes of the zeroed struct we pass.
     let info = unsafe {
@@ -40,17 +40,17 @@ fn proc_info(pid: i64) -> Option<(i64, String, i64)> {
     };
     let name = text(&info.pbi_name);
     let comm = if name.is_empty() { text(&info.pbi_comm) } else { name };
-    Some((i64::from(info.pbi_ppid), comm, i64::try_from(info.pbi_start_tvsec).ok()?))
+    Some((i64::from(info.pbi_ppid), comm, i64::try_from(info.pbi_start_tvsec).ok()?, info.pbi_status == libc::SZOMB))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn proc_info(_pid: i64) -> Option<(i64, String, i64)> {
+fn proc_info(_pid: i64) -> Option<(i64, String, i64, bool)> {
     None
 }
 
 /// Start time of a process in Unix seconds.
 pub fn proc_start(pid: i64) -> Option<i64> {
-    proc_info(pid).map(|(_, _, start)| start)
+    proc_info(pid).map(|(_, _, start, _)| start)
 }
 
 /// The harness above the hook: walks up from this process's parent, past shells.
@@ -63,7 +63,7 @@ pub fn find_harness() -> Option<(i64, i64)> {
         let mut chain: Vec<Proc> = Vec::new();
         let mut starts = Vec::new();
         while pid > 1 && chain.len() < MAX_WALK && !chain.iter().any(|(p, _, _)| *p == pid) {
-            let Some((ppid, comm, start)) = proc_info(pid) else { break };
+            let Some((ppid, comm, start, _)) = proc_info(pid) else { break };
             chain.push((pid, ppid, comm));
             starts.push(start);
             pid = ppid;
@@ -76,7 +76,7 @@ pub fn find_harness() -> Option<(i64, i64)> {
     None
 }
 
-/// The process exists and is the one that started at `start` (a reused pid has a different start).
+/// The process exists, is not a zombie, and is the one that started at `start` (a reused pid has a different start).
 pub fn alive(pid: i64, start: i64) -> bool {
     #[cfg(unix)]
     {
@@ -86,7 +86,8 @@ pub fn alive(pid: i64, start: i64) -> bool {
         }
         // SAFETY: signal 0 only checks that the process can be signalled.
         let exists = unsafe { libc::kill(pid32, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-        exists && proc_start(pid) == Some(start)
+        // A zombie has exited; its pid and start linger until the parent reaps it.
+        exists && proc_info(pid).is_some_and(|(_, _, s, zombie)| s == start && !zombie)
     }
     #[cfg(not(unix))]
     {
@@ -260,6 +261,22 @@ mod tests {
         assert!(!alive(0, 0));
         assert!(!alive(-5, 0));
         assert!(!alive(i64::from(i32::MAX), 1));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_zombie_is_not_alive() {
+        let mut child = std::process::Command::new("sh").args(["-c", "sleep 0.3"]).spawn().unwrap();
+        let pid = i64::from(child.id());
+        let start = proc_start(pid).expect("child start");
+        assert!(alive(pid, start));
+        // Exited but not yet waited for: the pid is still in the process table (a zombie, or already unreadable).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while alive(pid, start) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!alive(pid, start), "an exited, unreaped child is not alive");
+        child.wait().unwrap();
     }
 
     #[cfg(target_os = "macos")]
