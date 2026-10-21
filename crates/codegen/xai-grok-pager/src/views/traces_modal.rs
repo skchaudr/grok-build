@@ -3112,7 +3112,7 @@ mod tests {
         assert_eq!(state.shown_roots[0].host.as_deref(), Some("sab-air"), "newest first across hosts");
         let screen = draw(&mut state, 140, 20);
         assert!(screen.contains("HOST") && screen.contains("sab-air") && screen.contains("remote refactor job"), "{screen}");
-        assert!(screen.contains("└─ remote kid"), "{screen}");
+        assert!(screen.lines().any(|l| l.contains("└─") && l.contains("remote kid")), "{screen}");
 
         // Resume is refused for remote rows.
         state.selected = 0;
