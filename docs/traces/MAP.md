@@ -118,3 +118,67 @@ Per-harness wiring so sessions index as they happen. Templates and installer: `x
 - DSH: the block is wrapped in `# grok-traces begin/end` comments, injected into the profile's existing top-level `- insert:` list or appended as a new one; `--remove` deletes the block (byte-identical restore) and the plugin copy once no profile uses it. Profiles are git-synced between Macs, so the plugin file must be installed on both before a synced patch is used. Profiles in use: `acp-enhanced` (gb `dsh`, khoj worker), `acp` (gb `dsh-stock`), `web`, `tui`.
 - DSH logs are `~/.dsh/sessions/<project-key>/<session id>/session[.vN].jsonl.zstd`. The plugin finds the file by scanning project dirs for the session id.
 - Tests: `hooks/test.sh` (synthetic `HOME`, includes the JS templates under node >= 22). Real-config dry-runs: `docs/traces/HOOKS-dryrun-mini.txt`, and for cursor/dsh/bb on both Macs `docs/traces/HOOKS-dryrun-wire.txt`.
+
+## Live captures (Gate 0, 2026-10-21)
+
+Source: `~/.grok/traces/capture/` on the mini, from the headless runs below plus the interactive Claude sessions already captured. Air: only `capture/cursor/` with one empty smoke file; no Claude or Pi captures, and nothing was run there (read-only). Every Air cell is therefore "no data; needs Sab". Counts are files; no payload text is recorded here.
+
+| # | mini | air | evidence | fallback in use |
+|---|---|---|---|---|
+| 1 | yes (Pre/Post/PostToolUseFailure); needs Sab (PermissionRequest/Denied) | no data | `tool_use_id` present in 154 Pre, 144 Post, 3 PostToolUseFailure files (none missing). 0 PermissionRequest and 0 PermissionDenied files exist | orphan rule for the two permission events |
+| 2 | yes | no data | headless A: one `agent_id` appears in SubagentStart, a Pre, a Post and SubagentStop; the parent's tool receipts carry no `agent_id`. Start keys: `agent_id, agent_type`; Stop adds `agent_transcript_path`. The subagent tool is `tool_name` `Agent` | none needed |
+| 3 | needs Sab | no data | 0 PermissionRequest files; a granted prompt cannot occur headless | `⚠?` form stands; row 4 as written |
+| 4 | yes (Notification); needs Sab (PermissionRequest/Denied) | no data | 5 Notification files, all `idle_prompt`, all have `transcript_path`. No permission-type Notification seen | `native_session` → `trace_sessions.native_id` for the two permission events |
+| 5 | no | no data | 5 hook-denied Pre calls (incl. headless C) are followed by no `PostToolUseFailure` or `PermissionDenied` for their `tool_use_id`; they have no Post file at all | close-older rule stays for Claude |
+| 6 | yes | no data | 13 UserPromptSubmit files: first non-shell ancestor is `claude` in all; one `lstart` per session (3 interactive sessions). Caveat: headless `-p` chains show two `claude` (the run, then the lead's) | none needed |
+| 7 | yes | no data | headless A, B, C each have one SessionStart and one SessionEnd (3/3). The lead session has a Start and no End (still running) | PID liveness + supersede rule remain as backstop |
+| 8 | needs Sab | n/a | `herdr agent list` row fields: `agent, agent_session{agent,kind,source,value}, agent_status, completion_seq, cwd, focused, foreground_cwd, pane_id, revision, state_change_seq, tab_id, terminal_id, terminal_title, terminal_title_stripped, workspace_id`. `focus` not run | `Enter` opens the trajectory |
+| 9 | closed from source | closed | `toolCallId` on `tool_execution_start`/`_end` (observed in Pi capture payloads: `args, toolCallId, toolName, type` / `durationMs, isError, result, toolCallId, toolName, type`) | n/a |
+| 9b | yes | no data | 15 Pi files: 0 empty `session_file`, 0 empty `session_id`. Envelope keys `event, payload, pid, session_file, session_id`. No approval event in the 9 event names seen | Pi has no `Waiting` either way |
+| 10 | open until step 1 | open | needs `grok-traces list --json` | none; it is a number |
+| 11 | yes (CLI only); needs Sab (app) | no data | Cursor CLI run: 2 `beforeShellExecution` + 2 `beforeReadFile` fired and the tool calls completed after the neutral replies (count 4 ≥ 2) | `capture.sh` stays on gating events; app unverified |
+| 12 | recorded (CLI) | no data | see "Row 12 detail" below | Cursor pairs by `tool_use_id`; no FIFO needed |
+| 13 | yes (CLI only); needs Sab (app) | no data | 1 file matches `projects/*/agent-transcripts/<id>/<id>.jsonl` for the CLI `conversation_id` | receipt-only rows if the app differs |
+| 14 | yes (CLI only); needs Sab (app) | no data | first non-shell ancestor is `cursor-agent`, same pid and `lstart` in first and last file of the chat | first non-shell ancestor used; `sessionEnd` the reliable end |
+| 15 | needs Sab (decision) | no data | `sessionEnd` fired once, when the CLI process ended (`reason` `error`, the run lost its connection). Chat close in the app untested | finished chat stays `○ your turn` until Cursor quits; Sab decides, or display-only hide after `stop` |
+| 16 | needs Sab (no data) | no data | 0 `subagent*` files; the CLI prompt dispatched none | children not separated; parent `Tool` disabled while `open_children` non-empty |
+| 17 | n/a | needs Sab | Air has no Claude/Pi captures and 1 empty Cursor file; running sessions there is outside read-only | per-item fallbacks per host |
+| 18 | step 3 | step 3 | needs the step-3 binary | none |
+
+Schema 7: no ALTER path; an old index is replaced through the `.rebuild.lock` rebuild.
+
+### Row 12 detail (Cursor CLI, conversation d4bc8505)
+
+- Every event has `conversation_id`, `generation_id`, `workspace_roots`, `hook_event_name`, `session_id` (equals `conversation_id` in this run), `transcript_path`, `model`, `cursor_version`, `user_email`.
+- `transcript_path` is null on `sessionStart` and the first two `preToolUse`, then a string on all later events.
+- `cwd` is present on `beforeShellExecution` and on `preToolUse`/`postToolUse` for Shell only; absent on Read and on `beforeReadFile`, `afterShellExecution`, `sessionStart`, `sessionEnd`.
+- Tool-call id field: `tool_use_id` on `preToolUse`, `beforeShellExecution`, `beforeReadFile`, `postToolUse`, `afterShellExecution`; the same id across each Pre/before/after/Post for one call (Shell ids are UUIDs, Read ids are `tool_…`).
+- `beforeShellExecution` has no `tool_name`; its command field is `command` (also `cwd`, `sandbox`). `afterShellExecution` has `command, duration, output, sandbox`. `beforeReadFile` has `file_path, content, attachments` and no `tool_name`.
+- Order for one read: `preToolUse` (Read) then `beforeReadFile`, then `postToolUse`; no `afterReadFile`. For one shell call: `preToolUse`, `beforeShellExecution`, `afterShellExecution`, `postToolUse`. So each call is two Pre and two Post receipts, matched by the same id.
+- `beforeReadFile`: observed: the read completed after the neutral reply (yes).
+- Other keys: `sessionStart`/`sessionEnd` add `is_background_agent`; `sessionEnd` adds `duration_ms, final_status, reason`; `afterAgentThought` adds `text, duration_ms, model_id, model_params`.
+- No `beforeSubmitPrompt`, `stop`, `afterFileEdit` or MCP events occurred (the edit step never ran; the run failed with a connection error).
+- Label: all `cli` (`cursor-agent` in the chain; `workspace_roots` is the throwaway dir).
+
+### Needs Sab
+
+Rows 1 and 4 (PermissionRequest/PermissionDenied), 3 (granted prompt), 8 (`herdr agent focus`), 11 and 13-14 (Cursor app), 15 (chat close; decision), 16 (subagents), 17 (whole Air side), 10 and 18 (later steps).
+
+### Surprises
+
+- The spec's `rg -L` is `--follow` in ripgrep, not "files without match": rows 1 and 4 must use `--files-without-match`. Capture files have no blank line before the process chain; the separator is a line starting `--- process`, so `sed '/^$/,$d'` prints nothing useful (use `head -1`).
+- The Cursor CLI also fires the Claude hook config: the same chat produced `SessionStart`/`PreToolUse`/`PostToolUse`/`SessionEnd` files under `capture/claude/` (camelCase `hook_event_name`, `session_id` = the Cursor `conversation_id`, chain through `cursor-agent`). A Cursor chat can therefore be indexed under source `claude` as well as `cursor`.
+- A Claude `SessionStart` with `source: compact` was observed (lead session): `PreCompact`, then `SessionStart`, then `PostCompact`, with no `UserPromptSubmit` between the surrounding tool calls (mid-turn).
+- Headless `-p` Claude B (`run ls`, no allowedTools) was allowed; no permission events fired.
+
+### Headless runs (mini, UTC, one-line prompts, hooks fired in all)
+
+| Run | Command | Session / conversation id | Start - end |
+|---|---|---|---|
+| Claude A | `claude -p --output-format json --allowedTools 'Task Bash(ls:*)' --max-turns 6 '<subagent runs ls; also ls and ls -a in one message>'` | 2740b20d-a74f-4fef-ac50-9a159ff1df2e | 11:42:54 - 11:43:36 |
+| Claude B | `claude -p --output-format json --max-turns 3 'run ls'` | 639519a8-e048-4389-a3a7-2d4c46d3e73c | 11:43:36 - 11:43:45 |
+| Claude C | `claude -p --output-format json --allowedTools 'Bash' --max-turns 3 '<recursive grep>'` | e256be2d-40b2-48b2-babc-c9da2e4145c8 | 11:43:45 - 11:44:05 |
+| Pi | `pi -p 'run ls, then read f.txt'` | 01a15e46-c4c8-7056-82cb-69d09fabd968 | 11:44:18 - 11:44:25 |
+| Cursor CLI | `cursor-agent -p --force --output-format json '<ls, read f.txt, append a word>'` | d4bc8505-5df3-4908-9226-dc1a468cdee6 | 11:44:25 - 11:46:11 (connection errors, edit never ran) |
+
+Each run used a throwaway dir under `$TMPDIR`, wrapped in a 120-180 s alarm (no `timeout` on macOS).
