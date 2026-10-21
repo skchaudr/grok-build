@@ -467,7 +467,7 @@ fn is_terminal(event_type: &str) -> bool {
         .chars()
         .filter(|c| !matches!(c, '/' | '_' | ' ' | '-'))
         .collect();
-    ["complete", "turnend", "sessionend", "runend"].iter().any(|w| squashed.contains(w))
+    ["sessionend", "sessionshutdown", "runend", "agentend"].iter().any(|w| squashed.ends_with(w))
 }
 
 /// What `TraceIndex::peek` found.
@@ -1264,5 +1264,15 @@ mod tests {
             .map(|p| Path::new(&p.unwrap()).file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(order, ["new.jsonl", "mid.jsonl", "old.jsonl", "oldest.jsonl"]);
+    }
+
+    #[test]
+    fn terminal_events() {
+        for e in ["task_complete", "turn_end", "turn/complete"] {
+            assert!(!is_terminal(e), "{e}");
+        }
+        for e in ["session_end", "session/end", "agent_end", "session_shutdown", "SessionEnd", "run_end"] {
+            assert!(is_terminal(e), "{e}");
+        }
     }
 }

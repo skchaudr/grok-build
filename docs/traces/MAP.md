@@ -49,7 +49,7 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
   - `byte_offset` is kept on every 16th line (`CHECKPOINT_EVERY`); `raw_line` seeks to the nearest earlier checkpoint and scans on.
   - A corrupt db is renamed `*.corrupt.<nanos>` and rebuilt. There is no `quick_check` on open, because it is O(db) and the open runs on the UI thread.
 - **Status:**
-  - `completed` if the last event type is terminal (complete, turn end, session end, run end).
+  - `completed` if the last event type is terminal: the squashed type ends with `sessionend`, `sessionshutdown`, `runend` or `agentend` (`task_complete`, `turn_end`, `turn/complete` are not).
   - `active` if not terminal and the file mtime is within 5 min.
   - Otherwise `idle`.
 - **Storage diet:** events keep a `preview` (whitespace-collapsed, 100 chars), not the text. Row layout (schema 4):
