@@ -12,7 +12,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use xai_grok_traces::remote::{self, EventQuery, Fetched, RemoteFilter};
 use xai_grok_traces::{EventFilter, EventRow, RECEIPT_WINDOW_MS, SOURCES, SessionFilter, SessionRow, Sort, Status, TraceIndex, source_label};
 
@@ -22,12 +22,17 @@ use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
 use crate::views::modal_window::{self, ModalContentArea, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut};
 use crate::views::traces_fold::{FoldNode, FoldState, FoldTree};
+use crate::views::traces_outline::{self, OutlineItem, OutlineKey};
 
 pub const TITLE: &str = "Traces";
 const PAGE: usize = 500;
 const EVENT_PAGE: usize = 5000;
 /// Children shown under a parent before `+N more`.
 const MAX_KIDS: usize = 6;
+/// Most wrapped lines a message body shows before its `… Enter for inspector` tail.
+const BODY_LINES: usize = 200;
+/// Columns before a trajectory row's text: `#line` and the role chip, each with a space.
+const TEXT_COL: usize = 14;
 /// Deepest ledger level: roots are 0, and nothing below depth `MAX_DEPTH` is loaded or shown.
 const MAX_DEPTH: usize = 8;
 /// Key prefix of a `+N more` node; it cannot collide with a session id.
@@ -92,7 +97,6 @@ pub struct TracesModalState {
 
     pub session: Option<SessionRow>,
     pub events: Vec<EventRow>,
-    pub event_selected: usize,
     event_scroll: usize,
     pub event_errors_only: bool,
     pub event_query: String,
@@ -100,6 +104,23 @@ pub struct TracesModalState {
     pub include_noise: bool,
     /// Per event: the tool result folded into that call row.
     folded: Vec<Option<Fold>>,
+    /// Per event: a result shown inside its call row, so it gets no outline row of its own.
+    hidden: Vec<bool>,
+    /// The trajectory outline over `events`; `oshown` lists the visible rows (indices into `outline`).
+    outline: FoldTree<OutlineKey>,
+    outline_items: Vec<OutlineItem>,
+    /// Collapsed outline rows.
+    ofolds: FoldState<OutlineKey>,
+    /// Foldable outline rows that already got their default fold.
+    oseen: HashSet<OutlineKey>,
+    oshown: Vec<usize>,
+    /// The selected row, by key: kept across folds, filters and live growth.
+    sel: Option<OutlineKey>,
+    /// Full text per event line (pretty JSON of its raw line), loaded when its row shows.
+    bodies: HashMap<i64, String>,
+    body_pending: HashSet<i64>,
+    body_tx: mpsc::Sender<BodyMsg>,
+    body_rx: mpsc::Receiver<BodyMsg>,
     /// Children of the open session (dispatch targets), oldest first.
     session_children: Vec<SessionRow>,
     /// Per event: which of `session_children` its dispatch started.
@@ -132,7 +153,7 @@ pub struct TracesModalState {
     shown_children: HashMap<String, Vec<SessionRow>>,
     parent_name: Option<String>,
     /// Sessions we descended from with Enter on a dispatch row, and the row we were on.
-    trail: Vec<(SessionRow, usize)>,
+    trail: Vec<(SessionRow, Option<OutlineKey>)>,
     tools: Vec<String>,
     pub tool_filter: Option<usize>,
 
@@ -261,6 +282,7 @@ impl TracesModalState {
     }
 
     pub fn open_with_hosts(index: Option<TraceIndex>, hosts: Vec<String>) -> Self {
+        let (body_tx, body_rx) = mpsc::channel();
         let mut s = Self {
             window: ModalWindowState::new(),
             mode: Mode::List,
@@ -290,12 +312,22 @@ impl TracesModalState {
             scroll: 0,
             session: None,
             events: Vec::new(),
-            event_selected: 0,
             event_scroll: 0,
             event_errors_only: false,
             event_query: String::new(),
             include_noise: false,
             folded: Vec::new(),
+            hidden: Vec::new(),
+            outline: FoldTree { nodes: Vec::new() },
+            outline_items: Vec::new(),
+            ofolds: FoldState::new(),
+            oseen: HashSet::new(),
+            oshown: Vec::new(),
+            sel: None,
+            bodies: HashMap::new(),
+            body_pending: HashSet::new(),
+            body_tx,
+            body_rx,
             session_children: Vec::new(),
             dispatch_child: Vec::new(),
             generation: 0,
@@ -407,10 +439,10 @@ impl TracesModalState {
             && self.session.as_ref().is_some_and(|s| s.id == t.session_id)
         {
             // Follow the bottom if the user was there.
-            let at_bottom = self.event_selected + 1 >= self.events.len();
+            let at_bottom = self.sel_pos() + 1 >= self.oshown.len();
             self.install_trajectory(t.rows, t.session, t.children);
             if at_bottom {
-                self.event_selected = self.events.len().saturating_sub(1);
+                self.goto(self.oshown.len().saturating_sub(1));
             }
         }
         true
@@ -699,8 +731,10 @@ impl TracesModalState {
             _ => None,
         };
         self.session = Some(row);
-        self.event_selected = 0;
+        self.sel = None;
         self.event_scroll = 0;
+        self.bodies.clear();
+        self.body_pending.clear();
         self.event_errors_only = false;
         self.event_query.clear();
         self.tool_filter = None;
@@ -720,12 +754,11 @@ impl TracesModalState {
     fn leave_trajectory(&mut self) {
         if let Some((parent, selected)) = self.trail.pop() {
             self.open_session(parent);
-            self.event_selected = selected.min(self.events.len().saturating_sub(1));
+            self.sel = selected;
         } else {
             self.mode = Mode::List;
             self.session = None;
-            self.events.clear();
-            self.folded.clear();
+            self.set_events(Vec::new());
             self.remote_loading = false;
             self.remote_ev = None;
         }
@@ -753,26 +786,196 @@ impl TracesModalState {
         }
         self.session_children = children;
         self.dispatch_child = self.match_dispatches();
-        self.event_selected = self.event_selected.min(self.events.len().saturating_sub(1));
     }
 
-    /// Folds each tool result into the call row right before it (unless noise is shown).
+    /// Keeps every loaded event; a tool result right after a call (unless noise is shown) is hidden
+    /// and recorded on that call row as `folded`. Then rebuilds the outline.
     fn set_events(&mut self, rows: Vec<EventRow>) {
-        let mut events: Vec<EventRow> = Vec::with_capacity(rows.len());
-        let mut folded: Vec<Option<Fold>> = Vec::with_capacity(rows.len());
-        for e in rows {
-            if !self.include_noise
-                && is_result(&e)
-                && events.last().is_some_and(is_call)
-                && folded.last().is_some_and(Option::is_none)
-            {
-                *folded.last_mut().unwrap() = Some(Fold { error: e.is_error, detail: e.detail.clone() });
+        let mut folded: Vec<Option<Fold>> = vec![None; rows.len()];
+        let mut hidden = vec![false; rows.len()];
+        let mut last: Option<usize> = None;
+        for (i, e) in rows.iter().enumerate() {
+            let call = last.filter(|&j| rows.get(j).is_some_and(is_call) && folded.get(j).is_some_and(Option::is_none));
+            match call {
+                Some(j) if !self.include_noise && is_result(e) => {
+                    if let Some(f) = folded.get_mut(j) {
+                        *f = Some(Fold { error: e.is_error, detail: e.detail.clone() });
+                    }
+                    if let Some(h) = hidden.get_mut(i) {
+                        *h = true;
+                    }
+                }
+                _ => last = Some(i),
+            }
+        }
+        (self.events, self.folded, self.hidden) = (rows, folded, hidden);
+        self.rebuild_outline();
+    }
+
+    // ---- trajectory outline: rows, folds, selection, bodies ----
+
+    fn filtering(&self) -> bool {
+        !self.event_query.is_empty() || self.event_errors_only || self.tool_filter.is_some()
+    }
+
+    fn key_at(&self, node: usize) -> Option<&OutlineKey> {
+        self.outline.nodes.get(node).map(|n| &n.key)
+    }
+
+    /// Fold mark before an outline row: `› ` collapsed, `⌄ ` expanded, two spaces when there is nothing to fold.
+    fn fold_mark(&self, node: usize) -> String {
+        match self.key_at(node) {
+            Some(key) if self.outline.has_children(node) => {
+                let glyph = if self.ofolds.is_collapsed(key) { crate::glyphs::chevron() } else { crate::glyphs::chevron_down() };
+                format!("{glyph} ")
+            }
+            _ => "  ".to_string(),
+        }
+    }
+
+    /// Position of the selected row in `oshown`; the first row when nothing is selected.
+    fn sel_pos(&self) -> usize {
+        self.sel.as_ref().and_then(|k| self.oshown.iter().position(|&n| self.key_at(n) == Some(k))).unwrap_or(0)
+    }
+
+    /// Selects the visible row at `pos`.
+    fn goto(&mut self, pos: usize) {
+        self.sel = self.oshown.get(pos).and_then(|&n| self.key_at(n)).cloned();
+    }
+
+    fn step(&mut self, delta: isize) {
+        let mut pos = self.sel_pos();
+        move_sel(&mut pos, self.oshown.len(), delta);
+        self.goto(pos);
+    }
+
+    /// Event index of the selected row: a turn's opener, a run's first call, or the row's own event.
+    fn selected_event(&self) -> Option<usize> {
+        match self.outline_items.get(*self.oshown.get(self.sel_pos())?)? {
+            OutlineItem::Turn { event, .. } | OutlineItem::Run { first: event, .. } => Some(*event),
+            OutlineItem::Event(i) | OutlineItem::Body(i) => Some(*i),
+        }
+    }
+
+    /// Rebuilds the outline from `events`. The selection stays on its key when that row is still
+    /// shown, else on the row at the old position.
+    fn rebuild_outline(&mut self) {
+        let pos = self.sel_pos();
+        let (tree, items) = traces_outline::outline(&self.events, &self.hidden);
+        (self.outline, self.outline_items) = (tree, items);
+        self.ofolds.retain(&self.outline);
+        let live: HashSet<OutlineKey> = self.outline.nodes.iter().map(|n| n.key.clone()).collect();
+        self.oseen.retain(|k| live.contains(k));
+        // Defaults on first sight: turns open, runs and event rows closed. A filter opens turns and runs.
+        let filtering = self.filtering();
+        for i in 0..self.outline.nodes.len() {
+            let Some(key) = self.key_at(i).cloned() else { continue };
+            let turn = matches!(key, OutlineKey::Turn(_));
+            let run = matches!(key, OutlineKey::Run(_));
+            if self.outline.has_children(i) && self.oseen.insert(key) && !turn && !(filtering && run) {
+                self.ofolds.collapse(&self.outline, i);
+            }
+            if filtering && (turn || run) {
+                self.ofolds.expand(&self.outline, i);
+            }
+        }
+        self.oshown = self.outline.visible(&self.ofolds);
+        self.place(self.sel.clone(), pos);
+        self.ensure_bodies();
+    }
+
+    /// Selects `keep` if it is shown, else the row at `pos` (clamped).
+    fn place(&mut self, keep: Option<OutlineKey>, pos: usize) {
+        let at = keep
+            .as_ref()
+            .and_then(|k| self.oshown.iter().position(|&n| self.key_at(n) == Some(k)))
+            .unwrap_or_else(|| pos.min(self.oshown.len().saturating_sub(1)));
+        self.goto(at);
+    }
+
+    /// Re-lists the outline after a fold change on `node`, keeping the selection on it or its nearest shown ancestor.
+    fn reshow(&mut self, node: usize) {
+        self.oshown = self.outline.visible(&self.ofolds);
+        let mut at = Some(node);
+        while let Some(i) = at {
+            if self.oshown.contains(&i) {
+                break;
+            }
+            at = self.outline.nodes.get(i).and_then(|n| n.parent);
+        }
+        let keep = at.and_then(|i| self.key_at(i)).cloned();
+        let pos = self.sel_pos();
+        self.place(keep, pos);
+        self.ensure_bodies();
+    }
+
+    /// Applies a fold op to the selected row. False when it changed nothing.
+    fn outline_fold(&mut self, op: impl FnOnce(&mut FoldState<OutlineKey>, &FoldTree<OutlineKey>, usize)) -> bool {
+        let Some(&node) = self.oshown.get(self.sel_pos()) else { return false };
+        let before = self.ofolds.clone();
+        op(&mut self.ofolds, &self.outline, node);
+        if self.ofolds == before {
+            return false;
+        }
+        self.reshow(node);
+        true
+    }
+
+    /// `h` / `←`: collapse the selected row; on a leaf or a collapsed row, select its parent.
+    fn outline_collapse(&mut self) -> bool {
+        let Some(&node) = self.oshown.get(self.sel_pos()) else { return false };
+        let before = self.ofolds.clone();
+        match self.ofolds.collapse(&self.outline, node) {
+            Some(parent) => {
+                self.reshow(parent);
+                true
+            }
+            None if self.ofolds != before => {
+                self.reshow(node);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Loads the full text of each visible body row not cached yet: local rows now, remote rows on a worker.
+    fn ensure_bodies(&mut self) {
+        let Some(session) = self.session.clone() else { return };
+        let wanted: Vec<i64> = self
+            .oshown
+            .iter()
+            .filter_map(|&n| match self.outline_items.get(n)? {
+                OutlineItem::Body(i) => self.events.get(*i).map(|e| e.line),
+                _ => None,
+            })
+            .collect();
+        for line in wanted {
+            if self.bodies.contains_key(&line) || self.body_pending.contains(&line) {
                 continue;
             }
-            events.push(e);
-            folded.push(None);
+            if session.host.is_some() {
+                let Some(target) = self.target_for(&session) else { continue };
+                self.body_pending.insert(line);
+                let tx = self.body_tx.clone();
+                let sid = session.id.clone();
+                std::thread::spawn(move || {
+                    let raw = remote::fetch_raw(&target, remote::remote_id(&target, &sid), line);
+                    let text = pretty(raw.map_err(|e| e.to_string()));
+                    let _ = tx.send(BodyMsg { session_id: sid, line, text });
+                });
+            } else if let Some(index) = &self.index {
+                let text = pretty(index.raw_line(&session.id, line).map_err(|e| e.to_string()));
+                self.bodies.insert(line, text);
+            }
         }
-        (self.events, self.folded) = (events, folded);
+    }
+
+    /// The body text of event `ev` wrapped to `width`; a placeholder until a remote body arrives.
+    fn body_lines(&self, ev: usize, width: usize) -> Vec<String> {
+        match self.events.get(ev).and_then(|e| self.bodies.get(&e.line)) {
+            Some(text) => wrap_body(text, width),
+            None => vec!["loading…".to_string()],
+        }
     }
 
     /// The child session a dispatch row (Agent/Task tool call) started, if one matches.
@@ -807,7 +1010,7 @@ impl TracesModalState {
 
     fn enter_child(&mut self, child: SessionRow) {
         if let Some(open) = self.session.clone() {
-            self.trail.push((open, self.event_selected));
+            self.trail.push((open, self.sel.clone()));
         }
         self.open_session(child);
     }
@@ -816,10 +1019,9 @@ impl TracesModalState {
         if self.session.as_ref().is_some_and(|s| s.host.is_some()) {
             return self.open_remote_inspector();
         }
-        let (Some(index), Some(session), Some(ev)) = (&self.index, &self.session, self.events.get(self.event_selected)) else {
-            return;
-        };
-        self.raw = Some(pretty(index.raw_line(&session.id, ev.line).map_err(|e| e.to_string())));
+        let Some(line) = self.selected_event().and_then(|i| self.events.get(i)).map(|e| e.line) else { return };
+        let (Some(index), Some(session)) = (&self.index, &self.session) else { return };
+        self.raw = Some(pretty(index.raw_line(&session.id, line).map_err(|e| e.to_string())));
         self.raw_scroll = 0;
         self.mode = Mode::Inspector;
     }
@@ -829,8 +1031,10 @@ impl TracesModalState {
         if self.session.as_ref().is_some_and(|s| s.host.is_some()) {
             return self.raw_source.clone();
         }
-        let (index, session, ev) = (self.index.as_ref()?, self.session.as_ref()?, self.events.get(self.event_selected)?);
-        index.raw_line(&session.id, ev.line).ok().flatten()
+        let index = self.index.as_ref()?;
+        let session = self.session.as_ref()?;
+        let line = self.events.get(self.selected_event()?)?.line;
+        index.raw_line(&session.id, line).ok().flatten()
     }
 
     fn resume(&self, row: Option<&SessionRow>) -> InputOutcome {
@@ -903,6 +1107,13 @@ impl TracesModalState {
                     }
                     Err(e) => self.status = Some(e.to_string()),
                 }
+                redraw = true;
+            }
+        }
+        while let Ok(m) = self.body_rx.try_recv() {
+            if self.session.as_ref().is_some_and(|s| s.id == m.session_id) {
+                self.body_pending.remove(&m.line);
+                self.bodies.insert(m.line, m.text);
                 redraw = true;
             }
         }
@@ -983,9 +1194,9 @@ impl TracesModalState {
     }
 
     fn open_remote_inspector(&mut self) {
-        let (Some(session), Some(ev)) = (self.session.clone(), self.events.get(self.event_selected)) else { return };
+        let Some(line) = self.selected_event().and_then(|i| self.events.get(i)).map(|e| e.line) else { return };
+        let Some(session) = self.session.clone() else { return };
         let Some(target) = self.target_for(&session) else { return };
-        let line = ev.line;
         let (tx, rx) = mpsc::channel();
         self.raw_rx = Some(rx);
         self.raw_source = None;
@@ -1012,6 +1223,53 @@ struct RemoteEvents {
     session_id: String,
     noise: bool,
     result: Result<Vec<EventRow>, remote::Error>,
+}
+
+/// A remote body fetched for a trajectory row; `session_id` lets a stale one be dropped.
+struct BodyMsg {
+    session_id: String,
+    line: i64,
+    text: String,
+}
+
+/// Wraps `text` to `width` columns (one entry per screen line), capped at `BODY_LINES` plus a tail line.
+fn wrap_body(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let mut cur = String::new();
+        let mut w = 0;
+        for c in line.chars() {
+            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+            if w + cw > width && !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+                w = 0;
+            }
+            cur.push(c);
+            w += cw;
+        }
+        out.push(cur);
+        if out.len() > BODY_LINES {
+            break;
+        }
+    }
+    if out.len() > BODY_LINES {
+        out.truncate(BODY_LINES);
+        out.push("… Enter for inspector".to_string());
+    }
+    out
+}
+
+/// Scrolls so row `sel` sits fully inside `height` lines, where row `i` is `heights[i]` lines tall.
+fn fit_rows(sel: usize, scroll: &mut usize, heights: &[usize], height: usize) {
+    if sel < *scroll {
+        *scroll = sel;
+    }
+    let mut total: usize = heights.iter().skip(*scroll).take(sel + 1 - *scroll).sum();
+    while total > height && *scroll < sel {
+        total -= heights.get(*scroll).copied().unwrap_or(0);
+        *scroll += 1;
+    }
 }
 
 fn pretty(raw: Result<Option<String>, String>) -> String {
@@ -1200,7 +1458,6 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                 _ if edit_line(&mut state.event_query, key) => {}
                 _ => return InputOutcome::Unchanged,
             }
-            state.event_selected = 0;
             state.load_events();
             return InputOutcome::Changed;
         }
@@ -1301,18 +1558,47 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
             }
         }
         Mode::Trajectory => {
-            let len = state.events.len();
+            let len = state.oshown.len();
             match key.code {
                 KeyCode::Esc => state.leave_trajectory(),
-                KeyCode::Char('j') | KeyCode::Down => move_sel(&mut state.event_selected, len, 1),
-                KeyCode::Char('k') | KeyCode::Up => move_sel(&mut state.event_selected, len, -1),
-                KeyCode::PageDown => move_sel(&mut state.event_selected, len, page),
-                KeyCode::PageUp => move_sel(&mut state.event_selected, len, -page),
-                KeyCode::Char('g') | KeyCode::Home => state.event_selected = 0,
-                KeyCode::Char('G') | KeyCode::End => move_sel(&mut state.event_selected, len, isize::MAX / 2),
+                KeyCode::Char('j') | KeyCode::Down => state.step(1),
+                KeyCode::Char('k') | KeyCode::Up => state.step(-1),
+                KeyCode::PageDown => state.step(page),
+                KeyCode::PageUp => state.step(-page),
+                KeyCode::Char('g') | KeyCode::Home => state.goto(0),
+                KeyCode::Char('G') | KeyCode::End => state.goto(len.saturating_sub(1)),
+                KeyCode::Char('e' | ' ') => {
+                    if !state.outline_fold(|f, t, n| f.toggle(t, n)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    if !state.outline_fold(|f, t, n| f.expand(t, n)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    if !state.outline_collapse() {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('E') => {
+                    if !state.outline_fold(|f, t, _| f.toggle_all(t)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('>') => {
+                    if !state.outline_fold(|f, t, n| f.expand_subtree(t, n)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('<') => {
+                    if !state.outline_fold(|f, t, n| f.collapse_subtree(t, n)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
                 KeyCode::Char('x') => {
                     state.event_errors_only = !state.event_errors_only;
-                    state.event_selected = 0;
                     state.load_events();
                 }
                 KeyCode::Char('n') => {
@@ -1326,12 +1612,11 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                         Some(i) if i + 1 < state.tools.len() => Some(i + 1),
                         Some(_) => None,
                     };
-                    state.event_selected = 0;
                     state.load_events();
                 }
                 KeyCode::Char('/') => state.typing = Typing::Events,
                 KeyCode::Char('r') => return state.resume(state.session.as_ref()),
-                KeyCode::Enter => match state.child_of(state.event_selected).cloned() {
+                KeyCode::Enter => match state.selected_event().and_then(|i| state.child_of(i)).cloned() {
                     Some(child) => state.enter_child(child),
                     None => state.open_inspector(),
                 },
@@ -1464,6 +1749,9 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
         Mode::Trajectory => vec![
             plain("j/k move"),
             plain("Enter inspect/open agent"),
+            plain("e fold"),
+            plain("E all"),
+            plain("</> more/less"),
             plain("n noise"),
             plain("x errors"),
             plain("t tool"),
@@ -1897,7 +2185,7 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         buf.set_span(x, area.y + 1, &Span::styled(truncate_str(text, w as usize).as_str(), *style), w);
         x += w;
     }
-    render_strip(buf, Rect { y: area.y + 2, height: 2, ..area }, &state.events, state.event_selected, theme);
+    render_strip(buf, Rect { y: area.y + 2, height: 2, ..area }, &state.events, state.selected_event().unwrap_or(0), theme);
 
     let mut filters = Vec::new();
     if state.event_errors_only {
@@ -1920,69 +2208,159 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
     let line = if filters.is_empty() {
         session.cwd.clone().unwrap_or_else(|| session.file_path.display().to_string())
     } else {
-        format!("{} · {} matching", filters.join(" · "), state.events.len())
+        format!("{} · {} matching", filters.join(" · "), state.hidden.iter().filter(|h| !**h).count())
     };
     buf.set_span(area.x, area.y + 4, &Span::styled(truncate_str(&line, area.width as usize).as_str(), Style::default().fg(theme.fuzzy_accent)), area.width);
 
     let status_rows = u16::from(state.status.is_some());
     let list = Rect { y: area.y + 5, height: area.height.saturating_sub(5 + status_rows), ..area };
-    if state.events.is_empty() {
+    if state.oshown.is_empty() {
         let msg = if state.remote_loading { "Fetching events over ssh…" } else { "No events match." };
         buf.set_span(list.x, list.y, &Span::styled(msg, dim), list.width);
     }
-    keep_visible(state.event_selected, &mut state.event_scroll, list.height as usize);
+    // Body rows are as tall as their wrapped text, so scrolling works in lines, not rows.
+    let text_w = (list.width as usize).saturating_sub(TEXT_COL);
+    let mut bodies: Vec<Option<Vec<String>>> = Vec::with_capacity(state.oshown.len());
+    for &n in &state.oshown {
+        let depth = state.outline.nodes.get(n).map_or(0, |x| x.depth);
+        bodies.push(match state.outline_items.get(n) {
+            Some(OutlineItem::Body(i)) => Some(state.body_lines(*i, text_w.saturating_sub(2 * depth))),
+            _ => None,
+        });
+    }
+    let heights: Vec<usize> = bodies.iter().map(|b| b.as_ref().map_or(1, |v| v.len().max(1))).collect();
+    fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, list.height as usize);
+
     let summary_w = (list.width as usize).saturating_sub(7 + 7 + 9 + 2);
-    let mut prev_turn = None;
-    for (i, e) in state.events.iter().enumerate().skip(state.event_scroll).take(list.height as usize) {
-        let y = list.y + (i - state.event_scroll) as u16;
-        let selected = i == state.event_selected;
+    let bottom = list.y + list.height;
+    let sel = state.sel_pos();
+    let mut y = list.y;
+    for (k, &n) in state.oshown.iter().enumerate().skip(state.event_scroll) {
+        let h = heights.get(k).copied().unwrap_or(1) as u16;
+        if y >= bottom {
+            break;
+        }
+        let span = h.min(bottom - y);
+        let selected = k == sel;
         let base = if selected { Style::default().bg(theme.bg_highlight).fg(theme.text_primary) } else { Style::default().fg(theme.text_primary) };
         if selected {
-            fill(buf, list, y, base);
-        }
-        // Noise (only present when `n` is on) is dimmed.
-        let (text_style, chip_fg) = if e.noise { (base.fg(theme.gray_dim), theme.gray_dim) } else { (base, chip_color(e, theme)) };
-        let indent = "  ".repeat(e.depth.clamp(0, 2) as usize);
-        let one = one_line(e.detail.as_deref().filter(|d| !d.is_empty()).unwrap_or(&e.preview));
-        let body = if is_call(e) { format!("{indent}{}  {}", e.title, one) } else { format!("{indent}{one}") };
-        // Suffix: where a dispatch went, and how the call ended.
-        let mut suffix = String::new();
-        if let Some(c) = state.child_of(i) {
-            suffix.push_str(&format!("→ {} {}", truncate_str(&clean_name(c), 28), status_glyph(c, theme).0));
-        }
-        let mut failed = e.is_error;
-        if let Some(Some(f)) = state.folded.get(i) {
-            failed |= f.error;
-            if !suffix.is_empty() {
-                suffix.push(' ');
-            }
-            suffix.push_str(if f.error { "✗" } else { "✓" });
-            if f.error && let Some(d) = f.detail.as_deref().filter(|d| !d.is_empty()) {
-                suffix.push_str(&format!(" {}", truncate_str(&one_line(d), 24)));
+            for dy in 0..span {
+                fill(buf, list, y + dy, base);
             }
         }
-        let sw = suffix.width().min(summary_w / 2);
-        let body_w = summary_w.saturating_sub(if sw > 0 { sw + 1 } else { 0 });
-        let turn_mark = if e.turn.is_some() && e.turn != prev_turn { "┊" } else { " " };
-        prev_turn = e.turn.or(prev_turn);
-        let body_style = if is_result(e) && e.is_error { text_style.fg(theme.accent_error) } else { text_style };
-        let mut cells = vec![
-            (format!("{:>6}", format!("#{}", e.line)), 6, base.fg(theme.gray)),
-            (role_chip(e).to_string(), 6, base.fg(chip_fg).add_modifier(Modifier::BOLD)),
-            (format!("{turn_mark}{body}"), body_w, body_style),
-        ];
-        if sw > 0 {
-            cells.push((suffix, sw, base.fg(if failed { theme.accent_error } else { theme.accent_success })));
+        let depth = state.outline.nodes.get(n).map_or(0, |x| x.depth);
+        let indent = "  ".repeat(depth);
+        let mark = state.fold_mark(n);
+        let collapsed = state.outline.has_children(n) && state.key_at(n).is_some_and(|key| state.ofolds.is_collapsed(key));
+        match state.outline_items.get(n) {
+            Some(OutlineItem::Turn { event, tools, msgs, errors }) => {
+                let Some(e) = state.events.get(*event) else {
+                    y += h;
+                    continue;
+                };
+                let preview = one_line(e.detail.as_deref().filter(|d| !d.is_empty()).unwrap_or(&e.preview));
+                let mut text = format!("{indent}{mark}{preview}");
+                if collapsed {
+                    let mut parts = Vec::new();
+                    if *tools > 0 {
+                        parts.push(count_of(*tools, "tool", "tools"));
+                    }
+                    if *msgs > 0 {
+                        parts.push(count_of(*msgs, "msg", "msgs"));
+                    }
+                    if *errors > 0 {
+                        parts.push(format!("✗{errors}"));
+                    }
+                    if !parts.is_empty() {
+                        text.push_str(&format!("  · {}", parts.join(" · ")));
+                    }
+                }
+                put_row(
+                    buf,
+                    list,
+                    y,
+                    &[
+                        (format!("{:>6}", format!("#{}", e.line)), 6, base.fg(theme.gray)),
+                        (role_chip(e).to_string(), 6, base.fg(chip_color(e, theme)).add_modifier(Modifier::BOLD)),
+                        (text, text_w, base.add_modifier(Modifier::BOLD)),
+                    ],
+                );
+            }
+            Some(OutlineItem::Run { count, errors, .. }) => {
+                let mut text = format!("{indent}{mark}{}", count_of(*count, "tool call", "tool calls"));
+                if *errors > 0 {
+                    text.push_str(&format!("  · ✗{errors}"));
+                }
+                put_row(buf, list, y, &[(String::new(), 6, base), (String::new(), 6, base), (text, text_w, base.fg(theme.accent_tool))]);
+            }
+            Some(OutlineItem::Event(i)) => {
+                let Some(e) = state.events.get(*i) else {
+                    y += h;
+                    continue;
+                };
+                // Noise (only present when `n` is on) is dimmed.
+                let (text_style, chip_fg) = if e.noise { (base.fg(theme.gray_dim), theme.gray_dim) } else { (base, chip_color(e, theme)) };
+                let one = one_line(e.detail.as_deref().filter(|d| !d.is_empty()).unwrap_or(&e.preview));
+                let body = if is_call(e) { format!("{indent}{mark}{}  {}", e.title, one) } else { format!("{indent}{mark}{one}") };
+                // Suffix: where a dispatch went, and how the call ended.
+                let mut suffix = String::new();
+                if let Some(c) = state.child_of(*i) {
+                    suffix.push_str(&format!("→ {} {}", truncate_str(&clean_name(c), 28), status_glyph(c, theme).0));
+                }
+                let mut failed = e.is_error;
+                if let Some(Some(f)) = state.folded.get(*i) {
+                    failed |= f.error;
+                    if !suffix.is_empty() {
+                        suffix.push(' ');
+                    }
+                    suffix.push_str(if f.error { "✗" } else { "✓" });
+                    if f.error
+                        && let Some(d) = f.detail.as_deref().filter(|d| !d.is_empty())
+                    {
+                        suffix.push_str(&format!(" {}", truncate_str(&one_line(d), 24)));
+                    }
+                }
+                let sw = suffix.width().min(summary_w / 2);
+                let body_w = summary_w.saturating_sub(if sw > 0 { sw + 1 } else { 0 });
+                let body_style = if is_result(e) && e.is_error { text_style.fg(theme.accent_error) } else { text_style };
+                let mut cells = vec![
+                    (format!("{:>6}", format!("#{}", e.line)), 6, base.fg(theme.gray)),
+                    (role_chip(e).to_string(), 6, base.fg(chip_fg).add_modifier(Modifier::BOLD)),
+                    (body, body_w, body_style),
+                ];
+                if sw > 0 {
+                    cells.push((suffix, sw, base.fg(if failed { theme.accent_error } else { theme.accent_success })));
+                }
+                cells.push((fmt_time(e.timestamp, false), 8, base.fg(theme.text_secondary)));
+                put_row(buf, list, y, &cells);
+            }
+            Some(OutlineItem::Body(_)) => {
+                let indent_w = (2 * depth).min(text_w);
+                for (dy, line) in bodies.get(k).into_iter().flatten().flatten().take(span as usize).enumerate() {
+                    let text = format!("{}{line}", " ".repeat(indent_w));
+                    put_row(
+                        buf,
+                        list,
+                        y + dy as u16,
+                        &[(String::new(), 6, base), (String::new(), 6, base), (text, text_w, base.fg(theme.text_secondary))],
+                    );
+                }
+            }
+            None => {}
         }
-        cells.push((fmt_time(e.timestamp, false), 8, base.fg(theme.text_secondary)));
-        put_row(buf, list, y, &cells);
+        y += h;
     }
     render_status(buf, area, state, theme);
 }
 
+/// `1 tool` / `3 tools`.
+fn count_of(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 fn render_inspector(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, theme: &Theme) {
     let dim = Style::default().fg(theme.gray);
-    if let Some(e) = state.events.get(state.event_selected) {
+    if let Some(e) = state.selected_event().and_then(|i| state.events.get(i)) {
         let head = format!("{} · line {} · {} · {}", e.event_type, e.line, fmt_time(e.timestamp, true), fmt_duration(e.duration_ms));
         buf.set_span(area.x, area.y, &Span::styled(truncate_str(&head, area.width as usize).as_str(), Style::default().fg(theme.text_primary).add_modifier(Modifier::BOLD)), area.width);
     }
@@ -2121,15 +2499,16 @@ mod tests {
         state.selected = 2; // task a
         state.open_selected();
         assert_eq!(state.events.len(), 1);
+        state.goto(state.oshown.len() - 1);
 
         hook(&mut writer, &roots, &a, &line("2026-10-01T00:00:05Z", "second"));
         assert!(settle(&mut state));
-        assert_eq!((state.events.len(), state.event_selected), (2, 1), "at the bottom: follows");
+        assert_eq!((state.events.len(), state.selected_event()), (2, Some(1)), "at the bottom: follows");
 
-        state.event_selected = 0;
+        state.goto(0);
         hook(&mut writer, &roots, &a, &line("2026-10-01T00:00:06Z", "third"));
         assert!(settle(&mut state));
-        assert_eq!((state.events.len(), state.event_selected), (3, 0), "mid-list: stays put");
+        assert_eq!((state.events.len(), state.selected_event()), (3, Some(0)), "mid-list: stays put");
     }
 
     /// `TRACES_DB=<copy of traces.sqlite> cargo test -p xai-grok-pager --lib traces_perf -- --ignored --nocapture`
@@ -2444,10 +2823,11 @@ mod tests {
         let (_tmp, mut state) = claude_fixture();
         let parent = state.selected_session().unwrap().id.clone();
         press(&mut state, KeyCode::Enter);
-        assert!(state.events.iter().all(|e| !is_result(e)), "adjacent results are folded away");
+        assert!(state.hidden.iter().zip(&state.events).all(|(&h, e)| h || !is_result(e)), "adjacent results are hidden");
+        assert!(shown_events(&state).iter().all(|&i| !is_result(&state.events[i])), "and get no row of their own");
         let at = state.events.iter().position(is_dispatch).expect("an Agent row");
         assert!(matches!(&state.folded[at], Some(Fold { error: false, .. })));
-        state.event_selected = at;
+        state.sel = Some(OutlineKey::Ev(state.events[at].line));
         let screen = draw(&mut state, 140, 24);
         assert!(screen.contains("Agent  Explore index code"), "{screen}");
         assert!(screen.contains("→ Explore index code") && screen.contains("✓"), "{screen}");
@@ -2460,7 +2840,7 @@ mod tests {
 
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.session.as_ref().unwrap().id, parent, "Esc returns to the parent");
-        assert_eq!(state.event_selected, at, "at the row we left");
+        assert_eq!(state.selected_event(), Some(at), "at the row we left");
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.mode, Mode::List);
     }
@@ -2502,6 +2882,175 @@ mod tests {
         press(&mut state, KeyCode::Char('H'));
         assert_eq!(state.shown_roots.len(), 1);
         assert!(state.shown_roots[0].host.is_none());
+    }
+
+    /// Outline rows as `Turn(1)`-style keys, in order.
+    fn shown_rows(state: &TracesModalState) -> Vec<String> {
+        state.oshown.iter().filter_map(|&n| state.key_at(n)).map(|k| format!("{k:?}")).collect()
+    }
+
+    /// Event indices of the visible event rows.
+    fn shown_events(state: &TracesModalState) -> Vec<usize> {
+        state
+            .oshown
+            .iter()
+            .filter_map(|&n| match state.outline_items.get(n)? {
+                OutlineItem::Event(i) => Some(*i),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ev(line: i64, kind: &str, role: &str, text: &str) -> EventRow {
+        EventRow {
+            line,
+            event_type: "x".into(),
+            kind: kind.into(),
+            role: Some(role.into()),
+            title: if kind == "tool" { "Bash".into() } else { String::new() },
+            preview: text.into(),
+            timestamp: None,
+            duration_ms: None,
+            input_tokens: None,
+            output_tokens: None,
+            turn: None,
+            step: None,
+            depth: 0,
+            model: None,
+            is_error: false,
+            noise: false,
+            detail: None,
+        }
+    }
+
+    /// A trajectory over `rows` with no index behind it.
+    fn trajectory(rows: Vec<EventRow>) -> TracesModalState {
+        let mut state = TracesModalState::open_with_hosts(None, vec![]);
+        state.session = Some(row("claude", "/h/x.jsonl"));
+        state.mode = Mode::Trajectory;
+        state.install_trajectory(rows, None, vec![]);
+        state
+    }
+
+    /// A user prompt, three Bash calls with their results (lines 2, 4, 6), and a reply.
+    fn three_calls() -> Vec<EventRow> {
+        vec![
+            ev(1, "message", "user", "fix it"),
+            ev(2, "tool", "tool", "ls"),
+            ev(3, "tool", "tool_result", "a"),
+            ev(4, "tool", "tool", "pwd"),
+            ev(5, "tool", "tool_result", "b"),
+            ev(6, "tool", "tool", "date"),
+            ev(7, "tool", "tool_result", "c"),
+            ev(8, "message", "assistant", "done"),
+        ]
+    }
+
+    #[test]
+    fn turn_collapses_to_a_summary_and_back() {
+        let mut state = trajectory(three_calls());
+        assert_eq!(shown_rows(&state), ["Turn(1)", "Body(1)", "Run(2)", "Ev(8)"], "turn open, run grouped and closed");
+        assert!(draw(&mut state, 140, 20).contains("3 tool calls"));
+
+        state.goto(0);
+        press(&mut state, KeyCode::Char('h'));
+        assert_eq!(shown_rows(&state), ["Turn(1)"]);
+        assert!(draw(&mut state, 140, 20).contains("3 tools · 1 msg"), "{}", draw(&mut state, 140, 20));
+
+        press(&mut state, KeyCode::Char('l'));
+        assert_eq!(shown_rows(&state).len(), 4);
+    }
+
+    #[test]
+    fn run_is_one_row_until_expanded() {
+        let mut state = trajectory(three_calls());
+        state.goto(2);
+        press(&mut state, KeyCode::Right);
+        assert_eq!(shown_rows(&state), ["Turn(1)", "Body(1)", "Run(2)", "Ev(2)", "Ev(4)", "Ev(6)", "Ev(8)"]);
+        assert!(draw(&mut state, 140, 20).contains("Bash  ls"));
+    }
+
+    #[test]
+    fn angle_bracket_opens_runs_and_bodies_under_a_turn() {
+        let mut state = trajectory(three_calls());
+        state.goto(0);
+        press(&mut state, KeyCode::Char('>'));
+        assert_eq!(shown_rows(&state).len(), 11, "{:?}", shown_rows(&state));
+        assert!(shown_rows(&state).contains(&"Body(8)".to_string()));
+
+        press(&mut state, KeyCode::Char('G'));
+        assert_eq!(state.selected_event(), Some(7), "G lands on the last visible row");
+        press(&mut state, KeyCode::Char('g'));
+        assert_eq!(state.selected_event(), Some(0));
+    }
+
+    #[test]
+    fn body_expands_from_the_cached_text_not_the_index() {
+        let mut state = trajectory(three_calls());
+        state.bodies.insert(2, "{\n  \"cached\": \"yes\"\n}".into());
+        state.goto(2);
+        press(&mut state, KeyCode::Right);
+        state.sel = Some(OutlineKey::Ev(2));
+        press(&mut state, KeyCode::Char('l'));
+        assert!(shown_rows(&state).contains(&"Body(2)".to_string()));
+        let screen = draw(&mut state, 140, 24);
+        assert!(screen.contains("\"cached\": \"yes\""), "{screen}");
+    }
+
+    #[test]
+    fn selection_follows_its_key_through_live_growth() {
+        let mut state = trajectory(three_calls());
+        state.goto(2);
+        press(&mut state, KeyCode::Right);
+        state.sel = Some(OutlineKey::Ev(6));
+        let mut grown = three_calls();
+        grown.push(ev(9, "message", "assistant", "more"));
+        state.install_trajectory(grown, None, vec![]);
+        assert_eq!(state.sel, Some(OutlineKey::Ev(6)));
+        assert_eq!(state.selected_event(), Some(5));
+    }
+
+    #[test]
+    fn filters_open_the_runs_that_hold_matches() {
+        let mut state = trajectory(three_calls());
+        assert!(!shown_rows(&state).contains(&"Ev(4)".to_string()));
+        state.event_query = "pwd".into();
+        state.rebuild_outline();
+        assert!(shown_rows(&state).contains(&"Ev(4)".to_string()), "a filter opens the run");
+        state.event_query.clear();
+        state.rebuild_outline();
+        assert!(shown_rows(&state).contains(&"Ev(4)".to_string()), "and it stays open once seen");
+    }
+
+    #[test]
+    fn e_toggles_one_row_and_capital_e_toggles_all() {
+        let mut state = trajectory(three_calls());
+        state.goto(0);
+        press(&mut state, KeyCode::Char('e'));
+        assert_eq!(shown_rows(&state), ["Turn(1)"]);
+        press(&mut state, KeyCode::Char('E'));
+        assert_eq!(shown_rows(&state).len(), 11, "anything folded: expand all");
+        press(&mut state, KeyCode::Char('E'));
+        assert_eq!(shown_rows(&state), ["Turn(1)"], "nothing folded: collapse all");
+    }
+
+    #[test]
+    fn fit_rows_keeps_the_selected_row_on_screen() {
+        let mut scroll = 0;
+        fit_rows(5, &mut scroll, &[1, 1, 1, 1, 1, 1], 3);
+        assert_eq!(scroll, 3);
+        let mut scroll = 0;
+        fit_rows(2, &mut scroll, &[1, 4, 1], 3);
+        assert_eq!(scroll, 2, "a tall row above pushes the top down");
+    }
+
+    #[test]
+    fn bodies_wrap_to_width_and_cap() {
+        assert_eq!(wrap_body("abcdef\nxy", 4), ["abcd", "ef", "xy"]);
+        let long = "x\n".repeat(300);
+        let lines = wrap_body(&long, 10);
+        assert_eq!(lines.len(), BODY_LINES + 1);
+        assert_eq!(lines.last().map(String::as_str), Some("… Enter for inspector"));
     }
 
     #[test]
