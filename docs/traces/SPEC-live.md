@@ -26,7 +26,7 @@ A full-screen, always-on view on a second screen that answers, per running agent
 
 `capture.sh <source> [event]` saves the raw stdin payload plus the hook's process chain (`pid ppid lstart comm` up to PID 1) to `~/.grok/traces/capture/<source>/<ts>-<pid>-<event>.txt`, prints nothing, exits 0. The output holds real session text and is never committed. It is already appended to every event in `~/.cursor/hooks.json` (Sab approved; backup `~/.cursor/hooks.json.bak-capture-20261021`); the file `20261021T041502-53488-stop.txt` is a smoke test, ignore it. No `--dump` flag is built. Wiring it into `~/.claude/settings.json` (every event in `CLAUDE_EVENTS` plus the new ones) and into `~/.pi/agent/extensions/traces.ts` (spawn it beside the hook binary) is a config edit: show Sab the exact diff first. Nothing in steps 1–5 starts until every capture below has its answer in `MAP.md` and the (U) markers here are replaced.
 
-(U) On Cursor's gating events (`beforeSubmitPrompt`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `preToolUse`) `capture.sh` prints nothing. MAP.md says those need `{"continue":true}` or `{"permission":"allow"}`. Whether Cursor treats an empty reply as allow, and how it combines several hooks on one event, is capture 11 below. If Cursor blocks, the capture lines come off the gating events first.
+On Cursor's gating events `capture.sh` prints the neutral reply (`{"continue":true}` for `beforeSubmitPrompt`, `{"permission":"allow"}` for `preToolUse`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `{}` otherwise). How Cursor combines several hooks on one event is capture 11. If Cursor blocks anyway, the capture lines come off the gating events first.
 
 ### 0b: captures. Each has the command, the field that closes it, and the fallback if the answer is no
 
@@ -44,14 +44,17 @@ Run on this machine one Claude session that dispatches a subagent, gets a permis
 | 8 | `herdr agent focus w36:p5` focuses the pane | it does | `Enter` opens the trajectory |
 | 9 | Pi: payload of `agent_start`, `tool_execution_start`, `tool_execution_end`, `agent_end`, `session_shutdown`: the tool call id field name, `getSessionId`/`getSessionFile`, and whether Pi exposes an approval event | field names recorded | Pi pairs FIFO by name; Pi has no `Waiting` state |
 | 10 | Hook-to-index latency | ten samples of receipt `at_ms` against the transcript's `last_event_at` on the next poll; median and max in `MAP.md` | none; it is a number |
-| 11 | Cursor: gating events with an empty reply still run, and with several hooks on one event | the capture session's shell command and file read go through with `capture.sh` wired | remove `capture.sh` from the gating events; capture only `after*`, `post*`, `stop`, `session*` |
+| 11 | Cursor: gating events still run with three hooks on one event (moshi, grok-traces, capture) all replying | the capture session's shell command and file read go through with `capture.sh` wired | remove `capture.sh` from the gating events; capture only `after*`, `post*`, `stop`, `session*` |
 | 12 | Cursor: one payload per event in `~/.cursor/hooks.json`: `conversation_id`, `generation_id`, any tool-call id, `tool_name`, `transcript_path` (null or not), `hook_event_name` | field names per event recorded | no tool id: Cursor pairs FIFO by name |
 | 13 | Cursor: `conversation_id` equals the transcript file stem under `~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` | one captured id matches one file | Cursor receipts cannot join to a session row; Cursor rows are built from receipts alone (title = `cwd` basename, no `ctx`, no `now`) |
 | 14 | Cursor: process chain from the hook to the Cursor process; which ancestor is stable for the life of a chat (`Cursor Helper (Plugin)`, `Cursor`, or a per-chat process) | `comm` and `lstart` recorded across the session | the first non-shell ancestor is used, whatever it is |
 | 15 | Cursor: `sessionEnd` fires when a chat is closed or switched, not only when Cursor quits | a `sessionEnd` capture exists after closing the chat | a finished Cursor chat stays as `○ your turn` until Cursor quits; Sab decides whether that is acceptable or Cursor gets a display-only hide after `stop` (not a liveness timer) |
 | 16 | Cursor: `subagentStart`/`subagentStop` payload: the child's id field, and whether child tool events carry a different `conversation_id` | fields recorded | Cursor children are not separated; parent `Tool` state is disabled while `open_children` is non-empty |
 
-The Claude smoke test already shows the chain `sh → zsh → claude → -zsh → herdr`, so the shell-skipping walk reaches `claude` at the third hop.
+| 17 | Air: captures 1–7, 9 and 12–16 repeated on sab-air (its Claude hooks, Cursor hooks and Pi extension differ from the mini's) | the same fields in `~/.grok/traces/capture/` on the Air | per-item fallbacks above apply per host |
+| 18 | Air: the Air's `grok-traces version` equals the mini's after `rsync` of the new binary; `ssh sab-air '~/.grok/bin/grok-traces live --json'` returns rows inside the 4 s kill | one successful call recorded with its wall time | the version gate shows `sab-air: update grok-traces` until it does |
+
+Changing the Air's hook configs (adding `capture.sh`, the Pi extension update, new Claude and Cursor events) needs Sab's OK as an exception to the Air read-only rule; show the diff first. The Claude smoke test on the mini already shows the chain `sh → zsh → claude → -zsh → herdr`, so the shell-skipping walk reaches `claude` at the third hop.
 
 ## Data (`xai-grok-traces`)
 
@@ -78,6 +81,15 @@ New queries:
 - `live_sessions() -> Vec<SessionRow>`: sessions in sources `claude`, `pi`, `cursor` with `ended = 0` and at least one receipt, plus receipt-only Cursor rows (above). The pager filters by `alive(harness_pid, harness_start)`; a session with `harness_pid IS NULL` stays until `ended`.
 - `turn_receipts(session_id) -> Vec<LiveReceipt>`: the session's newest turn-boundary receipt (events that normalize to `Idle`, `Prompt`, `End`) **and** every receipt after it, by `(at_ms, id)`; when no boundary exists, every receipt. Rows with `agent_id` set are included and tagged. Fields: `session_id, agent_id, event, tool, detail, tool_use_id, at_ms`. Because the boundary itself is returned, `last_ev` is never undefined (review 3, blocker 2).
 - `receipt_count_since(ms) -> i64` for the empty state.
+- `live::fold_all(index, now, alive) -> Vec<LiveRow>`: `live_sessions` → `turn_receipts` → state per session, children attached. `LiveRow { session_id, parent_id, source, title, label, state: LiveState, text, glyph, age_ms, bg: u32, failed: bool, stale: bool, pid_unknown: bool, native_id, context_tokens, context_window, host: Option<String> }`. Serde both ways; this is the wire format.
+
+### Remote (`remote.rs`, bin)
+
+- Bin: `grok-traces live --json` prints `fold_all` for this host as a JSON array, `host` = `None`. `version` already exists.
+- `remote::fetch_live(target) -> Result<Fetched<LiveRow>>`: `ssh … '~/.grok/bin/grok-traces live --json'` with the existing `BatchMode`, 2 s connect, 4 s kill. Rows get `host = Some(label)` and `label:`-prefixed `session_id`/`parent_id`, exactly as `fetch_sessions` tags them. Cached in memory per host like `cached_sessions`; the cache is shown with the host marked `◌` in the header while a fetch is in flight or failing.
+- **Version gate:** exit 2 (unknown subcommand) or a `version` mismatch yields no rows and `Fetched.note = "<host>: update grok-traces (<remote version>)"`, rendered as one dim row under the header. Never the rev-3 fallback of guessing states from `list --json --active`. Unreachable: `Fetched` error → header `<host> ✗`, last cached rows stay with `◌`.
+- The mini applies no clocks to remote rows: `age_ms` is rendered as received (clamped at 0), `stale`/`pid_unknown`/`bg` are taken as sent.
+- Poll cadence: the existing `poll_remote` 10 s, on its worker.
 
 ### Usage
 
@@ -146,7 +158,7 @@ Marks column (two cells after the age column, every row has it):
 
 Sessions with no receipts are never on the live screen (they have no PID). Children: a child row folds its own `agent_id` receipts when any exist, else shows `● <now>` from its transcript while its parent is alive and it has no `End` and is not in `ChildStop`. The parent fold never reads child tool receipts.
 
-Ordering: `Waiting`, `Prompt`, then `age` ascending, then `session_id` ascending. Children directly under their parent in the same order.
+Ordering: `Waiting`, `Prompt`, then `age` ascending, then `session_id` ascending; local and remote rows interleave by these keys alone, the host is not a sort key. Children directly under their parent in the same order; a remote child's parent is matched by the prefixed `parent_id`.
 
 ### Sequence tests (`live.rs`, one named test each; `@` is `at_ms` in seconds; ids in listed order unless said; `now` as stated; all sessions alive)
 
@@ -191,6 +203,14 @@ Ordering: `Waiting`, `Prompt`, then `age` ascending, then `session_id` ascending
 | 37 | Cursor: receipts only, `transcript_path` null, `conversation_id = c1`, no session row; `beforeSubmitPrompt@0`, `beforeShellExecution@1`; now=2 | receipt-only row titled from `cwd`, Tool `▶ Shell … · 1s`, no `ctx` |
 | 38 | Cursor: as 37, then a session row with `native_id = c1` appears | the same row, now with title and `ctx` from the transcript; the receipts are attached to it; no duplicate row |
 | 39 | Cursor: `stop@0`, `sessionEnd@1` | gone |
+| 40 | remote: `fetch_live` returns a Waiting row `age_ms=5000` and a local Working row age 1 s | order: remote Waiting first; its age renders `5s` untouched; `session_id` is `air:…` |
+| 41 | remote: `age_ms=−400` | renders 0 |
+| 42 | remote: ssh exits 2 | no rows; note `sab-air: update grok-traces (…)`; local rows unaffected |
+| 43 | remote: unreachable after one good fetch | cached rows kept, header `sab-air ✗` |
+| 44 | remote: a child row with `parent_id = air:<p>` and its parent in the same fetch | nested under it |
+| 45 | `fold_all` round-trips through JSON (`serde`) unchanged | equality |
+
+`tests/remote.rs` gains `live --json` cases with the fake ssh scripts: good rows, exit 2, timeout.
 
 Tests 12, 20, 32, 37 and 38 go through a real index (`turn_receipts`, `live_sessions`), not a hand-built `Vec`. Tests 24 and 25 inject `alive` as a closure.
 
@@ -201,17 +221,17 @@ Real-session replay: the review 3 replay script is rewritten in Rust as a test h
 `Mode::Live`. Full width `W`, height `H`.
 
 ```
- grok live · 3 agents · 1 waiting                                                      ← header
+ grok live · 5 agents · 1 waiting                               sab-mini ● sab-air ●  ← header
  ⚠ claude  Traces packet on Mini             permission: Bash cargo build --release  2m ⌖
    ● claude  review spec                     Read docs/traces/SPEC-live.md            4s
    ○ claude  snapshot tests                  your turn                                1m
- ● pi      khoj worker                       Bash rg --files                          1s
+ ● pi      air: khoj worker                  Bash rg --files                          1s
  ▶ cursor  grok-build                        Shell cargo test -p xai-grok-traces      8s
- ◌ claude  fork lead  ctx 142k               quiet · Edit src/views/traces_modal.rs   4m ✗
+ ◌ claude  air: fork lead  ctx 142k          quiet · Edit src/views/traces_modal.rs   4m ✗
  enter pane   o open   j/k   c children   q quit                                          ← hints
 ```
 
-Row = `glyph source title [ctx] state-text age marks`. Columns: glyph 1, source 7 (`source_label`), title 28 (`clean_name`; `label` for children), ctx 13 (`ctx Nk`, or `ctx Nk/Mk` when a window is known; blank when `None`), state text fills, age 4 right-aligned (`fmt_age`), marks 4. Truncation with `…` uses `modal_window.rs` `word_wrap` on one line, never splitting a token. Title and state text are identical collapsed and expanded.
+Header hosts: `●` fresh fetch, `◌` cached or in flight, `✗` unreachable; the version-gate note is one dim row under the header. Row = `glyph source title [ctx] state-text age marks`. Columns: glyph 1, source 7 (`source_label`), title 28 (`clean_name`; `label` for children; `host:` prefix for remote rows), ctx 13 (`ctx Nk`, or `ctx Nk/Mk` when a window is known; blank when `None`), state text fills, age 4 right-aligned (`fmt_age`), marks 4. Truncation with `…` uses `modal_window.rs` `word_wrap` on one line, never splitting a token. Title and state text are identical collapsed and expanded.
 
 Selection kept by session id across polls (`keep_selection`). A child whose parent is not on screen is a root titled `↑ <parent title>`.
 
@@ -245,19 +265,20 @@ If `herdr` is on `PATH`: poll `herdr pane list` every 10 s on its own worker, mo
 7. `⌖` present and absent; herdr absent entirely (no marks, hint reads `enter open`).
 8. Parent `● 2 bg · <now>`; parent `○ your turn · 1 bg`.
 9. A receipt-only Cursor row (title from `cwd`, blank ctx) beside a Cursor row with a transcript.
+10. Remote: header `sab-air ●` with interleaved `air:` rows; `sab-air ◌` with cached rows; `sab-air ✗`; the `update grok-traces` note row. `⌖` never appears on a remote row (Herdr panes are local).
 
 pty proof: launch `grok live`; pipe `UserPromptSubmit`, `PreToolUse`, `PermissionRequest` for one session into `grok-traces hook claude` (the pty harness process is the "harness PID"; the hook walks up to it); assert `⚠` within 2 s; pipe `PostToolUse`; assert `●` on the next poll; pipe `SessionEnd`; assert the row is gone.
 
 ## Non-goals (v1)
 
-Codex, OMP, Grok, bb, DSH rows. Remote hosts. A Cursor `Waiting` state. Web UI, websocket, notification center. Live tool output (the inspector exists). Transcript reading outside the index. Model window tables.
+Codex, OMP, Grok, bb, DSH rows. A Cursor `Waiting` state. Reading remote receipts or checking remote PIDs from the mini. Jump-to-pane for remote rows. Web UI, websocket, notification center. Live tool output (the inspector exists). Transcript reading outside the index. Model window tables.
 
 ## Delivery order
 
-0. **Gate.** `capture.sh` wired into Claude and Pi (diffs shown to Sab first); the 16 captures; answers in `MAP.md`; (U) markers here replaced.
-1. `is_terminal` fix + tests. Schema 7, receipt columns, PID capture and `alive`, Cursor `native_id` and receipt-only rows, `live_sessions`, `turn_receipts`, `receipt_count_since`, usage fields, `norm` + `live.rs` + the 39 sequence tests + the replay helper, Claude installer events, Cursor per-event reply + installer events, Pi extension rewrite + `hooks/test.sh`. `cargo test -p xai-grok-traces`.
-2. `Mode::Live` render, ordering, snapshots 1–6, 8 and 9.
-3. `grok live` subcommand, Esc exits, pty proof.
+0. **Gate.** `capture.sh` wired into Claude and Pi on both Macs (diffs shown to Sab first; the Air needs his OK); the 18 captures; answers in `MAP.md`; (U) markers here replaced.
+1. `is_terminal` fix + tests. Schema 7, receipt columns, PID capture and `alive`, Cursor `native_id` and receipt-only rows, `live_sessions`, `turn_receipts`, `receipt_count_since`, usage fields, `norm` + `live.rs` + `fold_all` + the 45 sequence tests + the replay helper, `live --json` bin + `fetch_live` + version gate + `tests/remote.rs` cases, Claude installer events, Cursor per-event reply + installer events, Pi extension rewrite + `hooks/test.sh`. `cargo test -p xai-grok-traces`.
+2. `Mode::Live` render, ordering, remote merge, snapshots 1–6 and 8–10.
+3. `grok live` subcommand, Esc exits, pty proof. Release build on the mini, `rsync` to the Air, `grok-traces version` equal on both, `live --json` over ssh proven (capture 18 closes here if it did not in step 0).
 4. Trajectory `include_children` + snapshots.
 5. Herdr jump, snapshot 7.
 
@@ -269,6 +290,7 @@ Each step merges alone. 0–3 are the deliverable.
 2. v1 = Claude Code + Pi + Cursor, fully correct; Codex next; others stay in history (Sab, review 3 and its Cursor amendment).
 8. Cursor is keyed by `conversation_id`; a null `transcript_path` yields a receipt-only row, never a dropped receipt.
 9. Captures use `hooks/capture.sh`, not a `--dump` flag (Opus, 43810bdf).
+10. sab-air is in v1. The Air folds its own `LiveRow`s (own PIDs, own clock) via `grok-traces live --json`; the mini merges and renders. Version mismatch shows a notice row, never guessed states (Sab, review 3 Air amendment).
 3. Herdr optional, jump only (Sab, review 3).
 4. Done is gone: an `End` receipt removes the row on the next poll; nothing lingers.
 5. Transcript growth clears nothing; `⚠?` is the honest display for a granted permission until step 0.3 finds a grant signal.
