@@ -6,7 +6,7 @@ set -euo pipefail
 
 usage() {
   echo "Usage: $0 <agent>" >&2
-  echo "Agents: dsh | cursor | pi | codex | grok | claude" >&2
+  echo "Agents: dsh | cursor | pi | codex | grok | claude | prime | bb" >&2
   exit 2
 }
 
@@ -14,7 +14,7 @@ usage() {
 
 AGENT="$1"
 case "$AGENT" in
-  dsh | cursor | pi | codex | grok | claude) ;;
+  dsh | cursor | pi | codex | grok | claude | prime | bb) ;;
   *) usage ;;
 esac
 
@@ -50,6 +50,8 @@ agent_cmd_for() {
     pi) echo 'pi-acp' ;;
     codex) echo 'codex-acp' ;;
     grok) echo 'grok agent stdio' ;;
+    prime) echo 'prime-agent --mode acp' ;;
+    bb) echo '/Users/sab-mini/repos/agentic_harness_work/agent-browser-harness/bin/bb-acp' ;;
   esac
 }
 
@@ -193,6 +195,9 @@ is_tool_line() {
   [[ "$line" == *"Running"* && "$line" == *"ls"* ]] && return 0
   [[ "$line" == *"Ran "* && "$line" == *"command"* ]] && return 0
   [[ "$line" == *"Bash"* && "$line" == *"ls"* ]] && return 0
+  [[ "$line" == *"Python cell"* ]] && return 0
+  [[ "$line" == *"Perceive"* ]] && return 0
+  [[ "$line" == *"Action:"* || "$line" == *"Done"* ]] && return 0
   return 1
 }
 
