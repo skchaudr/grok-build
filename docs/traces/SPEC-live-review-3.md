@@ -60,7 +60,7 @@ Fable makes rev 4 with these changes. I'll spot-check the changed rows only. The
 ## Amendments from Sab (2026-10-21)
 
 **Scope: dialed for some agents, not "alright" for all.**
-- v1 is Claude Code, Pi and Cursor. Sab: Claude and Pi cover the most ground, and Cursor matters uniquely this month. Both must be completely right: every state, every test row, verified on real sessions.
+- v1 is Claude Code, Pi and Cursor. Sab: Claude and Pi cover the most ground, and Cursor matters uniquely this month. All three must be completely right: every state, every test row, verified on real sessions.
 - Codex comes later. Other sources stay out of the live screen and remain in `/traces` history.
 - Cut from rev 4 all normalizer rows and tests for OMP, Grok, bb and DSH, plus the Grok notification-hook route and the remote `live --json`. Keep the data model source-agnostic so later sources only add rows.
 - **Pi needs a richer extension.** Today `hooks/pi/traces.ts` sends only `session_start`, `turn_end`, `agent_end`, a debounced `tool_result` and `session_shutdown`, so Pi has no Tool state.
