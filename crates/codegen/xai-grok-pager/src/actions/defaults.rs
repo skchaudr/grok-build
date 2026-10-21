@@ -379,6 +379,21 @@ pub(super) fn default_actions(
             ),
         },
         ActionDef {
+            id: ActionId::OpenInEditor,
+            label: "edit",
+            description: "Open file in editor",
+            default_key: key!('v'),
+            alt_keys: vec![],
+            category: Category::ConversationAction,
+            context: When::ScrollbackFocused,
+            hint_priority: None,
+            hint_key_display: None,
+            requires_confirmation: false,
+            long_help: Some(
+                "Opens a Read or Edit block's file in your editor at the read or first changed line.\nEditor: $GROK_OPEN_EDITOR, else $VISUAL, else $EDITOR, else zed.\nGUI editors (zed, code, cursor) open detached; terminal editors open in a new Herdr pane inside Herdr, otherwise in place of the TUI.",
+            ),
+        },
+        ActionDef {
             id: ActionId::OpenBlockViewer,
             label: "view",
             description: "Open in viewer",

@@ -85,6 +85,7 @@ pub enum ActionId {
     CopyBlockContent,
     CopyBlockMeta,
     OpenBlockViewer,
+    OpenInEditor,
 
     // Link navigation
     OpenNextLink,

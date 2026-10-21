@@ -105,7 +105,7 @@ use super::status::{
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
-    dispatch_copy_assistant_message, dispatch_copy_block_content, dispatch_copy_block_meta,
+    dispatch_copy_assistant_message, dispatch_copy_block_content, dispatch_copy_block_meta, dispatch_open_in_editor,
     dispatch_dump_input_log, dispatch_export_conversation, dispatch_open_block_viewer,
     dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
     dispatch_open_transcript_pager,
@@ -724,6 +724,10 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::CopyBlockMeta => {
             dispatch_copy_block_meta(app);
+            vec![]
+        }
+        Action::OpenInEditor => {
+            dispatch_open_in_editor(app);
             vec![]
         }
         Action::OpenBlockViewer => {

@@ -574,6 +574,41 @@ fn model_agent_type_from_info(info: &agent_client_protocol::ModelInfo) -> Option
         .map(str::to_owned)
 }
 
+/// Open the selected Read/Edit block's file in the user's editor (see [`crate::app::open_in_editor`]).
+pub(super) fn dispatch_open_in_editor(app: &mut AppView) {
+    use crate::app::open_in_editor::{OpenOutcome, open, target_for_block};
+    let mut fallback = None;
+    with_active_agent(app, |agent| {
+        let Some(idx) = agent.scrollback.selected() else {
+            return;
+        };
+        if agent.scrollback.entry_content_hidden_by_group(idx) {
+            return;
+        }
+        let cwd = agent.session.cwd.clone();
+        let Some(target) = agent
+            .scrollback
+            .entry(idx)
+            .and_then(|entry| target_for_block(&entry.block, &cwd))
+        else {
+            agent.show_toast("no file to open on this block");
+            return;
+        };
+        match open(&target, &cwd) {
+            OpenOutcome::Launched(msg) | OpenOutcome::Failed(msg) => agent.show_toast(&msg),
+            OpenOutcome::SuspendFallback(path) => fallback = Some(path),
+        }
+    });
+    if let Some(path) = fallback
+        && app.pending_editor.is_none()
+    {
+        app.pending_editor = Some(crate::app::external_editor::PendingEditorRequest::ConfigFile {
+            path,
+            refresh_agents_modal: None,
+        });
+    }
+}
+
 /// Copy the selected block's metadata (e.g., command) to clipboard.
 pub(super) fn dispatch_copy_block_meta(app: &mut AppView) {
     with_active_agent(app, |agent| {
