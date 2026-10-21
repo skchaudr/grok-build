@@ -91,12 +91,31 @@ impl TraceIndex {
         Ok(id)
     }
 
-    /// The session of `source` whose `native_id` is `native`, for receipts whose path did not resolve.
+    /// The session of `source` for a receipt whose path did not resolve. `native_id` equal to `native` wins
+    /// (Cursor); else its last path component is `native` (Claude `<project>/<uuid>`) or ends in `_<native>`
+    /// (Pi `<project>/<timestamp>_<uuid>`). Newest `updated_at` among several.
     pub(crate) fn session_by_native(&self, source: &str, native: &str) -> Result<Option<String>> {
-        Ok(self
+        let exact: Option<String> = self
             .conn()
             .query_row("SELECT id FROM trace_sessions WHERE source_id = ?1 AND native_id = ?2 LIMIT 1", [source, native], |r| r.get(0))
-            .optional()?)
+            .optional()?;
+        if exact.is_some() || !matches!(source, "claude" | "pi") {
+            return Ok(exact);
+        }
+        let esc = native.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let mut stmt = self.conn().prepare_cached(
+            "SELECT id, native_id FROM trace_sessions WHERE source_id = ?1 AND native_id LIKE ?2 ESCAPE '\\'
+             ORDER BY COALESCE(updated_at, 0) DESC, id",
+        )?;
+        let mut rows = stmt.query(params![source, format!("%{esc}")])?;
+        while let Some(r) = rows.next()? {
+            let (id, nid): (String, String) = (r.get(0)?, r.get(1)?);
+            let last = nid.rsplit('/').next().unwrap_or(&nid);
+            if last == native || last.strip_suffix(native).is_some_and(|p| p.ends_with('_')) {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
     }
 
     /// Highest receipt id, or 0 when there are none.

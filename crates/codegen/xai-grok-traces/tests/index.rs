@@ -729,3 +729,24 @@ fn compact_rows_round_trip() {
     assert_eq!(ev(1).input_tokens, None);
     assert_eq!((ev(1).kind.as_str(), ev(1).role.as_deref(), ev(1).preview.as_str()), ("message", Some("user"), "u1"));
 }
+
+#[test]
+fn pathless_claude_and_pi_receipts_match_the_session_uuid() {
+    use xai_grok_traces::hook::{extract, ingest};
+    let e = env();
+    write(&e.home.join(".claude/projects/-w-claude/3a680ac6-2551-4c67-88d3-a18d8b3bbe73.jsonl"), CLAUDE);
+    write(&e.home.join(".pi/agent/sessions/--w-pi--/2026-10-01T00-00-00-000Z_0199aaaa-bbbb.jsonl"), PI);
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let key = |idx: &TraceIndex, id: i64| -> Option<String> {
+        rusqlite::Connection::open(idx.db_path()).unwrap().query_row("SELECT session_id FROM trace_receipts WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+    };
+    let claude = ingest(&mut idx, &e.roots, extract("claude", br#"{"hook_event_name":"PermissionRequest","session_id":"3a680ac6-2551-4c67-88d3-a18d8b3bbe73","tool_name":"Bash"}"#)).unwrap();
+    let want = idx.list_sessions(&SessionFilter { source: Some("claude".into()), ..Default::default() }).unwrap().into_iter().find(|s| s.file_path.to_string_lossy().contains("3a680ac6")).unwrap().id;
+    assert_eq!(key(&idx, claude), Some(want));
+    let pi = ingest(&mut idx, &e.roots, extract("pi", br#"{"event":"tool_execution_start","session_id":"0199aaaa-bbbb"}"#)).unwrap();
+    let pi_id = idx.list_sessions(&SessionFilter { source: Some("pi".into()), ..Default::default() }).unwrap().into_iter().find(|s| s.file_path.to_string_lossy().contains("0199aaaa")).unwrap().id;
+    assert_eq!(key(&idx, pi), Some(pi_id));
+    let miss = ingest(&mut idx, &e.roots, extract("claude", br#"{"hook_event_name":"PermissionRequest","session_id":"3a680ac6"}"#)).unwrap();
+    assert_eq!(key(&idx, miss), None, "a partial uuid is not a match");
+}

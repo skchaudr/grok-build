@@ -28,7 +28,7 @@ Tables used (structure only; everything else in the db is out of scope):
 | `item/completed` `reasoning` | reasoning |
 | `item/completed` `toolCall` `commandExecution` `fileChange` `fileRead` `webFetch` `webSearch` `delegation` | tool, depth 1, title = tool name (`bash`, `edit`, `read` for the three built-ins), `durationMs` |
 | `thread/tokenUsage/updated` (`tokenUsage.total.{inputTokens,outputTokens}`) | telemetry, `usage_is_total` |
-| `turn/started`, `turn/completed` | turn; `turn/completed` is the terminal event |
+| `turn/started`, `turn/completed` | turn; `turn/completed` ends a turn, not the thread (not terminal; only session/run/agent end are) |
 | `provider/error`, `system/error` | system, error |
 
 - A tool call is one event, not call plus result: bb writes the call and its output in one `item/completed` row.
