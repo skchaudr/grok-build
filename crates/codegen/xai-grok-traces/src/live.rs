@@ -68,7 +68,11 @@ fn is_interpreter(comm: &str) -> bool {
 }
 
 /// Options that take the next argument as a value (not a script).
-const VALUE_FLAGS: [&str; 7] = ["-e", "-p", "-m", "-r", "--require", "--import", "--loader"];
+const VALUE_FLAGS: [&str; 10] = ["-m", "-r", "--require", "--import", "--loader", "-W", "-X", "--conditions", "--eval", "--print"];
+/// Inline code: the arguments are code, never a script, and may hold anything.
+const INLINE_FLAGS: [&str; 5] = ["-e", "-p", "-c", "--eval", "--print"];
+/// `bun` subcommands that precede the script.
+const BUN_SUBCOMMANDS: [&str; 4] = ["run", "x", "test", "exec"];
 
 /// `argv` of a process from a `KERN_PROCARGS2` buffer: `argc: i32`, the exec path, NUL padding, then the
 /// NUL-terminated arguments (argv[0] first). Tolerates `argc` larger than the strings present; a final
@@ -93,19 +97,27 @@ pub fn parse_procargs2(buf: &[u8]) -> Vec<String> {
 /// The script (or `-m` module) an interpreter runs: the first argument after argv[0] that is not an option.
 /// `-e`/`-p` run inline code, so no script resolves; the other value-taking options skip their value.
 pub fn script_of(argv: &[String]) -> Option<String> {
+    let bun = argv.first().is_some_and(|a| a.rsplit('/').next() == Some("bun"));
+    let mut skipped_sub = false;
     let mut args = argv.iter().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
-            "-m" => return args.next().cloned().filter(|m| !m.is_empty()),
-            "-e" | "-p" => return None,
+            "-m" => return args.next().cloned().and_then(plain_name),
+            f if INLINE_FLAGS.contains(&f) => return None,
             f if VALUE_FLAGS.contains(&f) => {
                 args.next();
             }
             f if f.starts_with('-') => {}
-            _ => return Some(a.rsplit('/').next().unwrap_or(a).to_string()).filter(|n| !n.is_empty()),
+            f if bun && !skipped_sub && BUN_SUBCOMMANDS.contains(&f) => skipped_sub = true,
+            _ => return plain_name(a.rsplit('/').next().unwrap_or(a).to_string()),
         }
     }
     None
+}
+
+/// A name safe to show: not empty, at most 64 chars, no whitespace (else it is likely code or a secret).
+fn plain_name(n: String) -> Option<String> {
+    (!n.is_empty() && n.chars().count() <= 64 && !n.chars().any(char::is_whitespace)).then_some(n)
 }
 
 /// One chain entry: the `comm` basename without a login-shell `-`; for interpreters (after the harness) the script instead.
@@ -1035,6 +1047,18 @@ mod tests {
         assert_eq!(script_of(&argv(&["python3", "-p", "1"])), None);
         assert_eq!(script_of(&argv(&["node", "--inspect"])), None);
         assert_eq!(script_of(&argv(&["node"])), None);
+        assert_eq!(script_of(&argv(&["python3", "-c", "import os; x/y"])), None);
+        assert_eq!(script_of(&argv(&["node", "--eval", "x", "s.js"])), None);
+        assert_eq!(script_of(&argv(&["python3", "-W", "ignore", "-X", "dev", "t.py"])).as_deref(), Some("t.py"));
+        assert_eq!(script_of(&argv(&["node", "--conditions", "dev", "s.js"])).as_deref(), Some("s.js"));
+        assert_eq!(script_of(&argv(&["node", &"a".repeat(65)])), None);
+        assert_eq!(script_of(&argv(&["node", "my script.js"])), None);
+        assert_eq!(script_of(&argv(&["python3", "-m", "a b"])), None);
+        assert_eq!(script_of(&argv(&["bun", "run", "/p/x.ts"])).as_deref(), Some("x.ts"));
+        assert_eq!(script_of(&argv(&["bun", "x", "pkg"])).as_deref(), Some("pkg"));
+        assert_eq!(script_of(&argv(&["bun", "test"])), None);
+        assert_eq!(script_of(&argv(&["bun", "--hot", "exec", "srv.ts"])).as_deref(), Some("srv.ts"));
+        assert_eq!(script_of(&argv(&["node", "run"])).as_deref(), Some("run"));
         assert_eq!(script_of(&argv(&["node", "-m"])), None);
     }
 
