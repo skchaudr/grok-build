@@ -309,6 +309,12 @@ fn hide_trivial_drops_pings_but_not_tool_sessions() {
         &(0..3).map(|i| format!(r#"{{"type":"message","message":{{"role":"user","content":"msg {i}"}}}}"#)).collect::<Vec<_>>().join("\n"),
     );
     fs::write(e.home.join(".pi/agent/sessions/--w--/talk.jsonl"), fs::read_to_string(e.home.join(".pi/agent/sessions/--w--/talk.jsonl")).unwrap() + "\n").unwrap();
+    // Live sessions are never hidden; age the files past the active window.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for name in ["ping", "work", "talk"] {
+        let path = e.home.join(format!(".pi/agent/sessions/--w--/{name}.jsonl"));
+        fs::File::options().write(true).open(path).unwrap().set_modified(old).unwrap();
+    }
     let idx = e.scan();
     let all = rows(&idx, SessionFilter::default());
     assert_eq!(all.len(), 3);
@@ -316,6 +322,18 @@ fn hide_trivial_drops_pings_but_not_tool_sessions() {
     let mut titles: Vec<_> = shown.iter().map(|s| s.title.as_str()).collect();
     titles.sort();
     assert_eq!(titles, ["do a thing", "msg 0"], "the ping (2 non-noise events, no tools) is hidden");
+}
+
+#[test]
+fn hide_trivial_keeps_a_fresh_dispatch_visible() {
+    let e = env();
+    write(
+        &e.home.join(".pi/agent/sessions/--w--/fresh.jsonl"),
+        concat!(r#"{"type":"message","message":{"role":"user","content":"just dispatched"}}"#, "\n"),
+    );
+    let idx = e.scan();
+    let shown = rows(&idx, SessionFilter { hide_trivial: true, ..Default::default() });
+    assert_eq!(shown.len(), 1, "a live one-line session stays visible");
 }
 
 #[test]
