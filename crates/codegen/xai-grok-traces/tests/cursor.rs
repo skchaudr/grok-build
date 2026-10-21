@@ -39,7 +39,7 @@ fn cursor_transcripts_are_indexed_in_place() {
     let s = &rows[0];
     assert_eq!(s.title, "fix the bug", "user_query wrapper is unwrapped for the title");
     assert_eq!((s.event_count, s.user_count, s.assistant_count, s.tool_count), (4, 1, 1, 1));
-    assert_eq!(s.status, Status::Completed, "turn_ended is terminal");
+    assert_ne!(s.status, Status::Completed, "turn_ended ends a turn, not the session");
 
     let events = idx.list_events(&s.id, &EventFilter::default()).unwrap();
     assert_eq!(events[0].role.as_deref(), Some("user"));

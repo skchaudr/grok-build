@@ -98,13 +98,13 @@ fn each_source_discovers_its_fixture() {
     let x = by_source(&idx, "codex");
     assert_eq!(x.title, "codex task");
     assert_eq!((x.tool_count, x.error_count), (2, 1));
-    assert_eq!(x.status, Status::Completed);
+    assert_ne!(x.status, Status::Completed, "task_complete ends a turn, not the session");
 
     assert_eq!(by_source(&idx, "pi").model.as_deref(), Some("pi-model"));
     assert_eq!(by_source(&idx, "omp").title, "omp task");
 
     let d = by_source(&idx, "dsh");
-    assert_eq!((d.title.as_str(), d.tool_count, d.status), ("dsh task", 2, Status::Completed));
+    assert_eq!((d.title.as_str(), d.tool_count, d.status), ("dsh task", 2, d.status));
     assert_eq!(d.cwd.as_deref(), Some("/w/dsh"));
 
     let g = by_source(&idx, "grok");
@@ -469,11 +469,35 @@ fn old_schema_is_replaced_not_migrated() {
     idx.scan(&e.roots).unwrap();
     assert_eq!(all(&idx).len(), 6);
     let stats = idx.stats().unwrap();
-    assert_eq!(stats.schema_version.as_deref(), Some("6"));
-    assert_eq!(stats.parser_version.as_deref(), Some("5"));
+    assert_eq!(stats.schema_version.as_deref(), Some("7"));
+    assert_eq!(stats.parser_version.as_deref(), Some("6"));
     let names: Vec<String> = fs::read_dir(e.db.parent().unwrap()).unwrap().map(|d| d.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert!(names.iter().all(|n| !n.contains(".old.")), "old db removed: {names:?}");
     assert!(!names.iter().any(|n| n.contains(".corrupt.")));
+}
+
+#[test]
+fn schema_6_db_is_rebuilt_on_open() {
+    let e = env();
+    fs::create_dir_all(e.db.parent().unwrap()).unwrap();
+    {
+        let c = rusqlite::Connection::open(&e.db).unwrap();
+        c.execute_batch("CREATE TABLE trace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                         INSERT INTO trace_meta VALUES ('schema_version', '6'), ('parser_version', '5');
+                         CREATE TABLE trace_receipts (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
+                           event TEXT NOT NULL, native_session TEXT, path TEXT, session_id TEXT, tool TEXT, cwd TEXT);
+                         CREATE INDEX trace_receipts_session ON trace_receipts(session_id, id);").unwrap();
+    }
+    drop(TraceIndex::open(&e.db).unwrap());
+    let c = rusqlite::Connection::open(&e.db).unwrap();
+    let cols: Vec<String> = c.prepare("SELECT name FROM pragma_table_info('trace_receipts')").unwrap()
+        .query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+    for want in ["detail", "tool_use_id", "agent_id", "harness_pid", "harness_start"] {
+        assert!(cols.iter().any(|c| c == want), "{want} in {cols:?}");
+    }
+    let idx_cols: i64 = c.query_row("SELECT count(*) FROM pragma_index_info('trace_receipts_session')", [], |r| r.get(0)).unwrap();
+    assert_eq!(idx_cols, 3, "old index replaced");
+    assert!(!e.db.with_extension("sqlite.rebuild.lock").exists());
 }
 
 #[test]
@@ -532,12 +556,14 @@ fn event_cap_stops_a_runaway_file() {
 fn receipts_watermark_and_active_status() {
     use xai_grok_traces::hook::{extract, ingest};
     let e = env();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    fs::File::options().write(true).open(e.home.join(".codex/sessions/2026/10/01/rollout-x.jsonl")).unwrap().set_modified(old).unwrap();
     let mut idx = TraceIndex::open(&e.db).unwrap();
     idx.scan(&e.roots).unwrap();
     assert_eq!(idx.receipts_watermark().unwrap(), 0);
-    // The codex fixture ends in task_complete → completed, until a live receipt says otherwise.
+    // The codex fixture ends in task_complete (a turn end, not terminal) and is old → idle, until a live receipt says otherwise.
     let x = by_source(&idx, "codex");
-    assert_eq!(x.status, Status::Completed);
+    assert_eq!(x.status, Status::Idle);
     let path = e.home.join(".codex/sessions/2026/10/01/rollout-x.jsonl");
     let payload = |event: &str| format!(r#"{{"hook_event_name":"{event}","session_id":"n1","transcript_path":"{}","tool_name":"Bash","cwd":"/w"}}"#, path.display());
 
@@ -552,7 +578,7 @@ fn receipts_watermark_and_active_status() {
     assert!(active(&idx).iter().any(|s| s.source == "codex"));
 
     ingest(&mut idx, &e.roots, extract("codex", payload("Stop").as_bytes())).unwrap();
-    assert_eq!(by_source(&idx, "codex").status, Status::Completed, "terminal receipt falls back to file rules");
+    assert_eq!(by_source(&idx, "codex").status, Status::Idle, "terminal receipt falls back to file rules");
     assert!(active(&idx).iter().all(|s| s.source != "codex"));
 
     // A receipt for a path outside every root is still recorded, without a session.

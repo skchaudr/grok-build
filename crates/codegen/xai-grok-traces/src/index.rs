@@ -21,9 +21,9 @@ mod bb_index;
 
 use crate::bb::{Bb, BbThread, thread_key};
 
-pub const PARSER_VERSION: i64 = 5;
+pub const PARSER_VERSION: i64 = 6;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 /// Size the index may use (db + `-wal`). Passing it is normal: the oldest sessions are evicted
 /// down to `EVICT_TO_PERCENT` of it. It is a cache of pointers, so this is not an alert.
 pub const SIZE_BUDGET: u64 = 256 * 1024 * 1024;
@@ -92,7 +92,9 @@ CREATE TABLE IF NOT EXISTS trace_sessions (sk INTEGER PRIMARY KEY, id TEXT NOT N
   -- `parent_native` the same for its dispatcher. Both resolve within one source at query time, so scan order is free.
   native_id TEXT, parent_native TEXT, label TEXT, agent_type TEXT, done INTEGER NOT NULL DEFAULT 0,
   -- What the session is doing: last meaningful event (`Tool: arg` or assistant text), its time, and whether it ended in failure.
-  signal_count INTEGER NOT NULL DEFAULT 0, now_text TEXT, last_event_at INTEGER, failed INTEGER NOT NULL DEFAULT 0);
+  signal_count INTEGER NOT NULL DEFAULT 0, now_text TEXT, last_event_at INTEGER, failed INTEGER NOT NULL DEFAULT 0,
+  -- Live: the harness process of the newest receipt (start in Unix seconds), and the last context size seen.
+  harness_pid INTEGER, harness_start INTEGER, context_tokens INTEGER, context_window INTEGER);
 -- Event types, titles and models are few and repeat on every row, so rows store ids into this table.
 CREATE TABLE IF NOT EXISTS trace_names (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
 -- kind/role are `Kind::code`/`Role::code`. No cwd here: it is session-level. `preview` is '' when it equals the
@@ -103,11 +105,14 @@ CREATE TABLE IF NOT EXISTS trace_events (sk INTEGER NOT NULL, line_number INTEGE
   PRIMARY KEY (sk, line_number)) WITHOUT ROWID;
 -- Most events carry none of these; only the ones that do get a row.
 CREATE TABLE IF NOT EXISTS trace_event_usage (sk INTEGER NOT NULL, line_number INTEGER NOT NULL, duration_ms INTEGER,
-  input_tokens INTEGER, output_tokens INTEGER, turn INTEGER, step INTEGER, PRIMARY KEY (sk, line_number)) WITHOUT ROWID;
+  input_tokens INTEGER, output_tokens INTEGER, turn INTEGER, step INTEGER, context_tokens INTEGER, context_window INTEGER,
+  PRIMARY KEY (sk, line_number)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS trace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS trace_receipts (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
-  event TEXT NOT NULL, native_session TEXT, path TEXT, session_id TEXT, tool TEXT, cwd TEXT);
-CREATE INDEX IF NOT EXISTS trace_receipts_session ON trace_receipts(session_id, id);
+  event TEXT NOT NULL, native_session TEXT, path TEXT, session_id TEXT, tool TEXT, cwd TEXT,
+  detail TEXT, tool_use_id TEXT, agent_id TEXT, harness_pid INTEGER, harness_start INTEGER);
+CREATE INDEX IF NOT EXISTS trace_receipts_session ON trace_receipts(session_id, at_ms, id);
+CREATE INDEX IF NOT EXISTS trace_receipts_native ON trace_receipts(source, native_session);
 CREATE INDEX IF NOT EXISTS trace_sessions_updated ON trace_sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS trace_sessions_source ON trace_sessions(source_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS trace_sessions_native ON trace_sessions(source_id, native_id);
