@@ -955,12 +955,19 @@ impl TracesModalState {
         }
     }
 
-    /// The key a stored selection means now: an opener's event row is folded into its turn row.
+    /// The key a stored selection means now: an opener's event row is folded into its turn row, and a
+    /// prompt row that is no longer in the outline falls back to its turn.
     fn canon(&self, key: OutlineKey) -> OutlineKey {
-        match key {
-            OutlineKey::Ev(line) if self.opener_lines.contains(&line) => OutlineKey::Turn(line),
-            key => key,
-        }
+        let line = match &key {
+            OutlineKey::Ev(l) if self.opener_lines.contains(l) => return OutlineKey::Turn(*l),
+            OutlineKey::Prompt(l) | OutlineKey::PromptMore(l) | OutlineKey::PromptRest(l)
+                if self.opener_lines.contains(l) && !self.outline.nodes.iter().any(|n| n.key == key) =>
+            {
+                *l
+            }
+            _ => return key,
+        };
+        OutlineKey::Turn(line)
     }
 
     /// The turn row above outline node `node` (or the node itself): its event index and counts.
@@ -3628,7 +3635,7 @@ mod tests {
     #[test]
     fn run_is_one_row_until_expanded() {
         let mut state = trajectory(three_calls());
-        state.goto(2);
+        state.goto(1);
         press(&mut state, KeyCode::Right);
         assert_eq!(
             shown_rows(&state),
@@ -3655,7 +3662,7 @@ mod tests {
     fn body_expands_from_the_cached_text_not_the_index() {
         let mut state = trajectory(three_calls());
         state.bodies.insert(2, "{\n  \"cached\": \"yes\"\n}".into());
-        state.goto(2);
+        state.goto(1);
         press(&mut state, KeyCode::Right);
         state.sel = Some(OutlineKey::Ev(2));
         press(&mut state, KeyCode::Char('l'));
@@ -3667,7 +3674,7 @@ mod tests {
     #[test]
     fn selection_follows_its_key_through_live_growth() {
         let mut state = trajectory(three_calls());
-        state.goto(2);
+        state.goto(1);
         press(&mut state, KeyCode::Right);
         state.sel = Some(OutlineKey::Ev(6));
         let mut grown = three_calls();
@@ -3859,7 +3866,7 @@ mod tests {
         let mut state = trajectory(rows);
         state.session_children = vec![SessionRow { id: "child".into(), ..row("claude", "/h/child.jsonl") }];
         state.dispatch_child = state.match_dispatches();
-        state.goto(2);
+        state.goto(1);
         press(&mut state, KeyCode::Right);
         state.sel = Some(OutlineKey::Ev(6));
         assert!(shown_rows(&state).contains(&"Ev(6)".to_string()));
@@ -3901,7 +3908,7 @@ mod tests {
         state.event_errors_only = true;
         state.rebuild_outline();
         assert!(shown_rows(&state).contains(&"Ev(4)".to_string()), "the filter opens the run");
-        state.goto(2);
+        state.goto(1);
         press(&mut state, KeyCode::Char('h'));
         assert!(!shown_rows(&state).contains(&"Ev(4)".to_string()));
 
@@ -4022,5 +4029,267 @@ mod tests {
         assert!(shown_rows(&state).contains(&"Body(2)".to_string()), "{:?}", shown_rows(&state));
         let expanded = row(&draw(&mut state, 140, 24), "#2");
         assert!(expanded.contains("Bash  zzprobe"), "{expanded}");
+    }
+
+    // ---- header stability, prompt rows, seams, snapshots ----
+
+    const SNAP_W: u16 = 56;
+    const SNAP_H: u16 = 16;
+    const URL: &str = "https://example.com/very/long/path/that/does/not/break/anywhere";
+    const BODY: &str = "https://example.com/docs/architecture/index-layout/shard-0042/manifest.json lists the shards, and the reader merges them at startup before any query runs.";
+
+    /// The opener of the turn fixtures: a long multi-sentence prompt with a hex token and a long URL.
+    fn opener_prompt() -> String {
+        format!("Yoooooo please check the commit so the fix that landed as 7eb90d57 is verified, then read {URL} and summarize what changed and what is still open for the team.")
+    }
+
+    /// What the event row keeps in the index: the first 100 chars and an ellipsis.
+    fn short_of(s: &str) -> String {
+        if s.chars().count() > 100 {
+            format!("{}…", s.chars().take(100).collect::<String>())
+        } else {
+            s.to_string()
+        }
+    }
+
+    /// Rows of the trajectory at `w` x `h`, trailing spaces trimmed.
+    fn rows_at(state: &mut TracesModalState, w: u16, h: u16) -> Vec<String> {
+        draw(state, w, h).lines().map(|l| l.trim_end().to_string()).collect()
+    }
+
+    fn snapshot_rows(state: &mut TracesModalState) -> Vec<String> {
+        rows_at(state, SNAP_W, SNAP_H)
+    }
+
+    /// The first row holding `tag`, or empty.
+    fn row_with(rows: &[String], tag: &str) -> String {
+        rows.iter().find(|r| r.contains(tag)).cloned().unwrap_or_default()
+    }
+
+    /// A row with the fold mark normalised, so collapsed and expanded rows compare.
+    fn fold_normalised(row: &str) -> String {
+        row.replace('⌄', "›")
+    }
+
+    /// One opener turn: the prompt (its full text cached when `body`), a call and an assistant reply.
+    fn opener_turn(prompt: &str, body: bool) -> TracesModalState {
+        let mut state = trajectory(vec![
+            ev(1, "message", "user", &short_of(prompt)),
+            ev(2, "tool", "tool", "ls"),
+            ev(3, "message", "assistant", "done"),
+        ]);
+        if body {
+            assert!(state.settle_body(1, Ok(prompt.to_string())));
+        }
+        draw(&mut state, SNAP_W, SNAP_H);
+        state
+    }
+
+    /// An opener and an assistant reply whose body is `BODY`.
+    fn reply_fixture() -> TracesModalState {
+        let mut state = trajectory(vec![
+            ev(1, "message", "user", "Check the build"),
+            ev(2, "message", "assistant", &short_of(BODY)),
+        ]);
+        assert!(state.settle_body(2, Ok(BODY.to_string())));
+        state
+    }
+
+    /// An opener, an Agent dispatch with its folded result, and a reply; the dispatch opens a child session.
+    fn dispatch_fixture() -> TracesModalState {
+        let mut agent = ev(2, "tool", "tool", "Explore index");
+        agent.title = "Agent".into();
+        let child = SessionRow { label: Some("Explore index".into()), status: Status::Completed, ..row("claude", "/h/child.jsonl") };
+        let mut state = trajectory(vec![]);
+        state.install_trajectory(
+            vec![ev(1, "message", "user", "Check the build"), agent, ev(3, "tool", "tool_result", "found it"), ev(4, "message", "assistant", "done")],
+            None,
+            vec![child],
+        );
+        assert!(state.settle_body(2, Ok("look at the index and report".to_string())));
+        state
+    }
+
+    #[test]
+    fn trajectory_snapshot_turn_prompt() {
+        let prompt = opener_prompt();
+        let mut state = opener_turn(&prompt, true);
+        let rows = snapshot_rows(&mut state);
+        let at = rows.iter().position(|r| r.contains("#1")).expect("turn row");
+        let shown: Vec<&str> = rows[at..at + 5].iter().map(String::as_str).collect();
+        assert_eq!(
+            shown,
+            vec![
+                "    #1 USER   ⌄ Yoooooo please check  · 1 tool · 1 msg",
+                "                the commit so the fix that landed as",
+                "                7eb90d57 is verified, then read",
+                "                https://example.com/very/long/path/that/",
+                "              › … 3 more lines",
+            ]
+        );
+        assert_eq!(rows.iter().filter(|r| r.contains("Yoooooo")).count(), 1, "{rows:#?}");
+        assert!(shown_rows(&state).contains(&"PromptMore(1)".to_string()));
+        assert!(!shown_rows(&state).contains(&"PromptRest(1)".to_string()), "more rows default collapsed");
+
+        state.sel = Some(OutlineKey::PromptMore(1));
+        press(&mut state, KeyCode::Char('l'));
+        let all = snapshot_rows(&mut state);
+        for tok in prompt.split_whitespace().filter(|t| t.chars().count() <= 40) {
+            assert!(all.iter().any(|r| r.split_whitespace().any(|w| w == tok)), "`{tok}` is not whole in any row:\n{all:#?}");
+        }
+        let i = all.iter().position(|r| r.contains("https://")).expect("url row");
+        let piece = all[i].trim_start();
+        let next = all[i + 1].trim_start().split(' ').next().unwrap_or_default();
+        assert_eq!(format!("{piece}{next}"), URL, "{all:#?}");
+    }
+
+    #[test]
+    fn trajectory_snapshot_event_body() {
+        let mut state = reply_fixture();
+        state.sel = Some(OutlineKey::Ev(2));
+        press(&mut state, KeyCode::Char('l'));
+        assert!(shown_rows(&state).contains(&"Body(2)".to_string()), "{:?}", shown_rows(&state));
+        let rows = snapshot_rows(&mut state);
+        let at = rows.iter().position(|r| r.contains("#1")).expect("turn row");
+        let shown: Vec<&str> = rows[at..at + 6].iter().map(String::as_str).collect();
+        assert_eq!(
+            shown,
+            vec![
+                "    #1 USER   ⌄ Check the build  · 1 msg",
+                "    #2 ASSIST   ⌄ https://example.com/docs/ar -",
+                "                  chitecture/index-layout/shard-0042/man",
+                "                  ifest.json lists the shards, and the",
+                "                  reader merges them at startup before",
+                "                  any query runs.",
+            ]
+        );
+        // Header and body, with the whitespace dropped, spell the source exactly: no word repeats at the seam.
+        let got: String = std::iter::once("https://example.com/docs/ar".to_string())
+            .chain(rows[at + 2..at + 6].iter().map(|r| r.trim().to_string()))
+            .collect::<String>()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let want: String = BODY.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn turn_row_is_identical_collapsed_and_expanded() {
+        let mut state = opener_turn(&opener_prompt(), true);
+        let expanded = row_with(&snapshot_rows(&mut state), "#1");
+        state.sel = Some(OutlineKey::Turn(1));
+        press(&mut state, KeyCode::Char('h'));
+        let collapsed = row_with(&snapshot_rows(&mut state), "#1");
+        assert!(expanded.contains('⌄') && collapsed.contains('›'), "{expanded}\n{collapsed}");
+        assert_eq!(fold_normalised(&collapsed), fold_normalised(&expanded));
+    }
+
+    #[test]
+    fn event_row_is_identical_collapsed_and_expanded() {
+        let mut state = reply_fixture();
+        let collapsed = row_with(&snapshot_rows(&mut state), "#2");
+        state.sel = Some(OutlineKey::Ev(2));
+        press(&mut state, KeyCode::Char('l'));
+        let expanded = row_with(&snapshot_rows(&mut state), "#2");
+        assert!(collapsed.contains('›') && expanded.contains('⌄'), "{collapsed}\n{expanded}");
+        assert!(collapsed.ends_with('-'), "the time column is on the row: {collapsed}");
+        assert_eq!(fold_normalised(&collapsed), fold_normalised(&expanded));
+    }
+
+    #[test]
+    fn dispatch_row_with_child_suffix_is_identical_collapsed_and_expanded() {
+        let mut state = dispatch_fixture();
+        let collapsed = row_with(&rows_at(&mut state, 90, SNAP_H), "Agent");
+        assert!(collapsed.contains("→ Explore index") && collapsed.contains('✓'), "{collapsed}");
+        state.sel = Some(OutlineKey::Ev(2));
+        press(&mut state, KeyCode::Char('l'));
+        let expanded = row_with(&rows_at(&mut state, 90, SNAP_H), "Agent");
+        assert_eq!(fold_normalised(&collapsed), fold_normalised(&expanded));
+    }
+
+    #[test]
+    fn a_prompt_of_three_rows_or_fewer_has_no_more_row() {
+        let mut state = opener_turn("Yoooooo please check the commit so the fix landed", false);
+        assert!(shown_rows(&state).contains(&"Prompt(1)".to_string()), "{:?}", shown_rows(&state));
+        assert!(!shown_rows(&state).iter().any(|r| r.starts_with("PromptMore")), "{:?}", shown_rows(&state));
+        assert!(!draw(&mut state, SNAP_W, SNAP_H).contains("more lines"));
+    }
+
+    #[test]
+    fn selecting_any_prompt_row_selects_the_opener() {
+        let mut state = opener_turn(&opener_prompt(), true);
+        for key in [OutlineKey::Prompt(1), OutlineKey::PromptMore(1)] {
+            state.sel = Some(key);
+            assert_eq!(state.selected_event(), Some(0));
+        }
+        assert_eq!(state.turn_prompt_text(), Some(opener_prompt()));
+        state.sel = Some(OutlineKey::PromptMore(1));
+        press(&mut state, KeyCode::Char('l'));
+        state.sel = Some(OutlineKey::PromptRest(1));
+        assert_eq!(state.selected_event(), Some(0));
+    }
+
+    #[test]
+    fn a_stale_opener_event_key_selects_its_turn() {
+        let mut state = opener_turn(&opener_prompt(), true);
+        assert!(state.reveal(&OutlineKey::Ev(1)), "the turn stands in for the opener");
+        state.sel = Some(OutlineKey::Ev(1));
+        state.rebuild_outline();
+        assert_eq!(state.sel, Some(OutlineKey::Turn(1)));
+    }
+
+    #[test]
+    fn a_vanished_prompt_key_selects_its_turn() {
+        let mut state = opener_turn(&opener_prompt(), true);
+        state.sel = Some(OutlineKey::Prompt(1));
+        // The body shrinks to the header: no continuation, so no prompt rows.
+        state.bodies.insert(1, "Yoooooo please check".into());
+        state.dirty_outline = true;
+        draw(&mut state, SNAP_W, SNAP_H);
+        assert!(!shown_rows(&state).iter().any(|r| r.starts_with("Prompt")), "{:?}", shown_rows(&state));
+        assert_eq!(state.sel, Some(OutlineKey::Turn(1)));
+    }
+
+    #[test]
+    fn a_prompt_that_appears_on_body_arrival_keeps_the_turn_selected() {
+        let mut state = opener_turn("Check the build", false);
+        state.goto(0);
+        assert!(!shown_rows(&state).iter().any(|r| r.starts_with("Prompt")));
+        let grown = "Check the build and then read the logs and report anything that still fails in the nightly job across all shards.";
+        assert!(state.settle_body(1, Ok(grown.into())));
+        draw(&mut state, SNAP_W, SNAP_H);
+        assert!(shown_rows(&state).contains(&"Prompt(1)".to_string()), "{:?}", shown_rows(&state));
+        assert_eq!(state.sel, Some(OutlineKey::Turn(1)));
+    }
+
+    #[test]
+    fn resizing_rebuilds_the_prompt_and_keeps_the_selection() {
+        let mut state = opener_turn(&opener_prompt(), true);
+        state.goto(0);
+        for w in [30u16, 90, 40, SNAP_W] {
+            let screen = draw(&mut state, w, SNAP_H);
+            assert!(screen.contains("#1"), "{screen}");
+            assert_eq!(state.outline_w, w as usize - 14);
+            assert_eq!(state.sel, Some(OutlineKey::Turn(1)));
+        }
+    }
+
+    #[test]
+    fn narrow_rows_drop_the_counts_before_the_header() {
+        // Text cell 12: the counts would leave 1 cell for the header, under MIN_HEAD_W, so they go.
+        let mut state = reply_fixture();
+        let rows = rows_at(&mut state, 26, SNAP_H);
+        let turn = row_with(&rows, "#1");
+        assert!(turn.contains("Check") && !turn.contains('·'), "{turn}");
+        // Text cell 20: 9 cells of counts leave 9 for the header, so they stay.
+        let rows = rows_at(&mut state, 34, SNAP_H);
+        let turn = row_with(&rows, "#1");
+        assert!(turn.contains("Check") && turn.contains("· 1 msg"), "{turn}");
+        // Body expanded at the narrow width: no panic, header still shown.
+        state.sel = Some(OutlineKey::Ev(2));
+        press(&mut state, KeyCode::Char('l'));
+        let rows = rows_at(&mut state, 26, SNAP_H);
+        assert!(!row_with(&rows, "#2").trim().is_empty());
     }
 }
