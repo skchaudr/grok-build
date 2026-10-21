@@ -236,7 +236,7 @@ check() {
   f="$HOME/.omp/agent/extensions/traces.ts"; if [ -f "$f" ]; then note "omp    : wired"; else note "omp    : not wired"; fi
   f="$HOME/.pi/agent/extensions/traces.ts"; if [ -f "$f" ]; then note "pi     : wired"; else note "pi     : not wired"; fi
   ev="$(jq -r "$JQ_DEFS"'(.hooks // {}) | to_entries | map(select(.value | any(.[]?; (.command? // "") | ours)) | .key) | join(",")' "$HOME/.cursor/hooks.json" 2>/dev/null || true)"; note "cursor : ${ev:-not wired}"
-  local prof; prof="$(dsh_wired_profiles)"; note "dsh    : ${prof:+profiles: $prof}${prof:-not wired (use --dsh-profile NAME)}"
+  local prof; prof="$(dsh_wired_profiles)"; if [ -n "$prof" ]; then note "dsh    : profiles: $prof"; else note "dsh    : not wired (use --dsh-profile NAME)"; fi
   if bb_local; then note "bb     : $(bb_installed && echo wired || echo not wired)"; else note "bb     : n/a ($BB_WHY)"; fi
   if [ -x "$BIN" ]; then "$BIN" doctor || true; fi
 }
