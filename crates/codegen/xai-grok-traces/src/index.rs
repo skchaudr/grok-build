@@ -1258,7 +1258,10 @@ impl TraceIndex {
             )
             .optional()?;
         if let Some(chain) = chain {
-            tx.execute("UPDATE trace_sessions SET via = ?2 WHERE id = ?1", params![sid, crate::live::via_of(&chain)])?;
+            tx.execute(
+                "UPDATE trace_sessions SET via = COALESCE(?2, via) WHERE id = ?1 AND (?3 OR via IS NULL)",
+                params![sid, crate::live::via_of(&chain), chain.ends_with("launchd")],
+            )?;
         }
         Ok(())
     }

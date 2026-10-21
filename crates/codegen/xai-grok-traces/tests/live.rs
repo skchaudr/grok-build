@@ -225,6 +225,15 @@ fn via_follows_the_newest_chain_and_survives_a_missing_start() {
     });
     let after = e.idx.session(&sess.id).unwrap().unwrap();
     assert_eq!((after.via.as_deref(), after.harness_start), (Some("bb"), None));
+    // A truncated chain, or one naming no host, never clobbers a good via.
+    for chain in ["claude>zsh>herdr", "claude>zsh>launchd"] {
+        e.rcpt("cursor", "preToolUse", 60, |r| {
+            r.session_id = Some(sess.id.clone());
+            r.harness_chain = Some(chain.into());
+        });
+        let kept = e.idx.session(&sess.id).unwrap().unwrap().via;
+        assert_eq!(kept.as_deref(), Some("bb"), "{chain}");
+    }
     let json = xai_grok_traces::remote::session_to_json(&after);
     assert_eq!(xai_grok_traces::remote::session_from_json(&json).unwrap().via.as_deref(), Some("bb"));
     let mut old = json.clone();

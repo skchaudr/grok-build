@@ -121,7 +121,11 @@ impl TraceIndex {
         }
         // `via` follows the chain alone: it is kept even when the process start could not be read.
         if let (Some(sid), Some(chain)) = (&r.session_id, &r.harness_chain) {
-            self.conn().execute("UPDATE trace_sessions SET via = ?2 WHERE id = ?1", params![sid, crate::live::via_of(chain)])?;
+            // Never clobbers: a truncated chain (no `launchd`) or one naming no host keeps a stored via.
+            self.conn().execute(
+                "UPDATE trace_sessions SET via = COALESCE(?2, via) WHERE id = ?1 AND (?3 OR via IS NULL)",
+                params![sid, crate::live::via_of(chain), chain.ends_with("launchd")],
+            )?;
         }
         if id % SAMPLE_EVERY == 0 {
             // A trip is recorded in the db and refuses the next write; this receipt is already in.
