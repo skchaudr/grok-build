@@ -4,7 +4,7 @@ Rev 4 (Fable 5.1, 2026-10-21) after reviews 1–3 (7390998f, 5d43a539, ef69d3f7)
 
 ## Scope (Sab, 2026-10-21)
 
-v1 is **Claude Code, Pi and Cursor** (Cursor matters uniquely this month), all three completely right: every state, every test row, verified on real sessions. Codex comes later. Other sources stay in `/traces` history and never appear on the live screen. The data model stays source-agnostic (a later source adds normalizer rows and tests, nothing else). Cut from this spec: remote live rows, the Grok notification route, and every OMP/Grok/bb/DSH/Codex rule.
+v1 is **Claude Code, Pi and Cursor** (Cursor matters uniquely this month), all three completely right: every state, every test row, verified on real sessions. Codex comes later. Other sources stay in `/traces` history and never appear on the live screen. The data model stays source-agnostic (a later source adds normalizer rows and tests, nothing else). **sab-air is in v1**: it runs as many sessions as the mini, already has Claude, Cursor and Pi hooks feeding its own index, and `/traces` already pulls its session list every 10 s. Cut from this spec: the Grok notification route and every OMP/Grok/bb/DSH/Codex rule.
 
 ## The tool
 
@@ -18,6 +18,7 @@ A full-screen, always-on view on a second screen that answers, per running agent
 - Context comes from the index, refreshed per hook.
 - One modal, two hosts: `TracesModalState` gains `Mode::Live`. `/traces` opens in list mode as today. `grok live` boots the pager straight into `Mode::Live` full screen; Esc exits the process. Soft subcommand beside `Command::Dashboard` (`rg -n "Dashboard" crates/codegen/xai-grok-pager*/src`). Named `live` because `Command::Trace` exists.
 - Herdr is optional. Its only use is the jump key; without it `Enter` opens the trajectory.
+- **Remote hosts fold their own state.** `grok-traces live --json` on the Air runs the same fold against the Air's index, checks the Air's PIDs, and computes ages on the Air's clock, returning finished rows. The mini merges and renders; it never reads the Air's receipts and never checks a remote PID. The two binaries must match: an older Air binary gets one notice row, not guessed states.
 
 ## Step 0: hard gate
 
