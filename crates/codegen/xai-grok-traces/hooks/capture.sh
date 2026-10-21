@@ -8,10 +8,10 @@ mkdir -p "$dir" 2>/dev/null || exit 0
 f="$dir/$(date +%Y%m%dT%H%M%S)-$$-${2:-event}.txt"
 {
   cat
-  printf '\n--- process chain (pid ppid lstart comm) ---\n'
+  printf '\n--- process chain (pid ppid lstart comm args) ---\n'
   p=$$
   while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
-    ps -o pid=,ppid=,lstart=,comm= -p "$p" 2>/dev/null || break
+    ps -o pid=,ppid=,lstart=,comm=,args= -p "$p" 2>/dev/null || break
     p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
   done
 } >"$f" 2>/dev/null
