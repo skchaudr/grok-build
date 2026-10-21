@@ -1547,7 +1547,7 @@ impl TracesModalState {
         }
         if self.remote_pending == 0 {
             self.remote_rx = None;
-            if !(self.mode == Mode::Live || self.live_return) && !self.hosts.is_empty() && self.remote_at.is_none_or(|t| t.elapsed() >= REMOTE_EVERY) {
+            if !(self.mode == Mode::Live || self.live_return || self.hosts.is_empty()) && self.remote_at.is_none_or(|t| t.elapsed() >= REMOTE_EVERY) {
                 self.remote_at = Some(Instant::now());
                 let (tx, rx) = mpsc::channel();
                 self.remote_rx = Some(rx);
@@ -2450,7 +2450,7 @@ pub fn render_live_at(
     // The local host always stays: remote hosts drop first, then the left text is cut.
     let fits = (1..=hosts.len())
         .rev()
-        .find(|&n| left.width() + 1 + host_w(n) + 1 <= w);
+        .find(|&n| left.width() + 1 + host_w(n) < w);
     let shown = fits.unwrap_or(1);
     let left = if fits.is_none() {
         fit(&left, w.saturating_sub(host_w(1) + 2))

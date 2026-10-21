@@ -87,7 +87,8 @@ async fn traces_live() {
     )
     .expect("spawn grok live");
 
-    h.wait_for_text("no live agents", Duration::from_secs(10)).expect("live screen up");
+    // Generous: a cold exec of the debug binary (page-in from a slow volume) has taken over 30s here.
+    h.wait_for_text("no live agents", Duration::from_secs(90)).expect("live screen up");
     assert!(!h.contains_text("no index"), "GROK_HOME/HOME mismatch: the pager has no index\n{}", h.screen_contents());
 
     let hook = |event: &str, extra: serde_json::Value| run_hook(&hook_bin, &home, &transcript, event, extra);
