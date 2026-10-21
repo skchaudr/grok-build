@@ -68,7 +68,7 @@ fn is_call(e: &EventRow) -> bool {
 }
 
 /// A visible user or assistant message; injected (noise) context does not count.
-fn is_message(e: &EventRow) -> bool {
+pub(crate) fn is_message(e: &EventRow) -> bool {
     matches!(e.role.as_deref(), Some("user" | "assistant")) && !e.noise
 }
 

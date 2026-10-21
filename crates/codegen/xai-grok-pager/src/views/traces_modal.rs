@@ -1009,11 +1009,7 @@ impl TracesModalState {
             text_w,
             &turn_counts(tools, msgs, errors),
         );
-        let full = self
-            .bodies
-            .get(&e.line)
-            .map_or(index_text(e), String::as_str);
-        let rest = continuation(&head, full);
+        let rest = continuation(&head, &continuation_full(self.bodies.get(&e.line), index_text(e)));
         if rest.is_empty() {
             return Vec::new();
         }
@@ -1369,7 +1365,7 @@ impl TracesModalState {
         match self.bodies.get(&line) {
             Some(text) => {
                 let (own, result) = split_result(text);
-                let rest = continuation(head, own);
+                let rest = continuation(head, &continuation_source(own));
                 let mut rows = if rest.is_empty() {
                     vec![NO_MORE.to_string()]
                 } else {
@@ -2957,12 +2953,32 @@ fn first_line(src: &str, w: usize) -> String {
         .unwrap_or_default()
 }
 
-/// The text an event's header and prompt are drawn from: its detail, else its index preview.
+/// The text an event's header and prompt are drawn from. A message row shows its preview (its text, not a
+/// tool call's summary), else its detail; other rows show their detail, else their preview.
 fn index_text(e: &EventRow) -> &str {
-    e.detail
-        .as_deref()
-        .filter(|d| !d.is_empty())
-        .unwrap_or(e.preview.as_str())
+    let detail = e.detail.as_deref().filter(|d| !d.is_empty());
+    let preview = (!e.preview.is_empty()).then_some(e.preview.as_str());
+    if traces_outline::is_message(e) {
+        preview.or(detail).unwrap_or_default()
+    } else {
+        detail.or(preview).unwrap_or_default()
+    }
+}
+
+/// The text a header's continuation is cut from: `body` with its harness wrappers stripped, when that
+/// leaves text; else `body` as it is.
+fn continuation_source(body: &str) -> String {
+    let clean = xai_grok_traces::normalize::clean_text(body);
+    if clean.is_empty() { body.to_string() } else { clean }
+}
+
+/// The text a header's continuation is cut from when the event's body is `cached`, else `index`: the index
+/// text's preview ellipsis is a truncation marker, not text, so it is dropped.
+fn continuation_full(cached: Option<&String>, index: &str) -> String {
+    match cached {
+        Some(body) => continuation_source(body),
+        None => index.strip_suffix('…').unwrap_or(index).to_string(),
+    }
 }
 
 /// `… N more lines` for a prompt of `total` continuation rows; past the `wrap_body` cap, `N+`.
@@ -2995,7 +3011,8 @@ fn split_result(text: &str) -> (&str, &str) {
 /// the whitespace after it are dropped; the rest keeps its own lines. `full` comes back unchanged when the
 /// two disagree, so no text is lost to a mismatch.
 fn continuation(header: &str, full: &str) -> String {
-    let want: Vec<char> = one_line(header).chars().collect();
+    let header = one_line(header);
+    let want: Vec<char> = header.strip_suffix('…').unwrap_or(&header).chars().collect();
     let mut matched = 0;
     let mut end = 0;
     let mut chars = full.char_indices().peekable();
@@ -3985,6 +4002,54 @@ mod tests {
             "a text shorter than the header"
         );
         assert_eq!(continuation("", "  x"), "x", "no header: the whole text");
+    }
+
+    #[test]
+    fn continuation_drops_the_preview_ellipsis_and_the_wrappers() {
+        assert_eq!(continuation("abc def…", "abc def ghi jkl"), "ghi jkl", "the preview's cut marker is not text");
+        assert_eq!(continuation("abc def…", "abc def"), "", "a whole preview leaves nothing");
+        assert_eq!(continuation_full(None, "hello world…"), "hello world", "uncached: the index text without its marker");
+        assert_eq!(continuation_full(Some(&"hello world".to_string()), "hello"), "hello world");
+
+        let body = "<user_query>\nhello world\n</user_query>";
+        assert_eq!(continuation("hello", &continuation_source(body)), "world");
+        let injected = "<system-reminder>\nctx\n</system-reminder>\n\nhello world";
+        assert_eq!(continuation("hello", &continuation_source(injected)), "world");
+        let only = "<system-reminder>\nctx\n</system-reminder>";
+        assert_eq!(continuation_source(only), only, "nothing but wrappers: the body as it is");
+    }
+
+    #[test]
+    fn index_text_is_the_text_for_messages_and_the_summary_for_tools() {
+        let mut msg = ev(1, "message", "assistant", "let me look");
+        msg.detail = Some("Bash ls".into());
+        assert_eq!(index_text(&msg), "let me look", "a message with a tool call shows its text");
+        msg.preview.clear();
+        assert_eq!(index_text(&msg), "Bash ls", "a message without text falls back to its detail");
+
+        let mut call = ev(2, "tool", "tool", "ls");
+        call.detail = Some("ls -la".into());
+        assert_eq!(index_text(&call), "ls -la", "a tool row shows its summary");
+        call.detail = None;
+        assert_eq!(index_text(&call), "ls", "a tool row without a summary falls back to its preview");
+    }
+
+    #[test]
+    fn message_headers_come_from_the_text_and_tool_headers_from_the_summary() {
+        let mut user = ev(1, "message", "user", "fix it");
+        user.detail = Some("Bash ls".into());
+        let mut reply = ev(3, "message", "assistant", "wrapup");
+        reply.detail = Some("Bash pwd".into());
+        let mut call = ev(2, "tool", "tool", "zzprobe");
+        call.detail = Some("ls -la".into());
+        let mut state = trajectory(vec![user, call, ev(4, "tool", "tool_result", "a"), reply]);
+        let screen = draw(&mut state, 140, 24);
+        let row = |tag: &str| screen.lines().find(|l| l.contains(tag)).unwrap_or_default().to_string();
+        let turn = row("#1");
+        assert!(turn.contains("fix it") && !turn.contains("Bash ls"), "{turn}");
+        assert!(row("#2").contains("Bash  ls -la"), "{screen}");
+        let answer = row("#4");
+        assert!(answer.contains("wrapup") && !answer.contains("Bash pwd"), "{answer}");
     }
 
     #[test]

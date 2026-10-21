@@ -177,13 +177,25 @@ fn humanize(s: &str) -> String {
 #[derive(Default)]
 struct Injected(Option<String>);
 
-fn normalize_text(s: &str, inj: &mut Injected) -> String {
+/// The text with harness wrappers removed: a `<user_query>` envelope unwrapped, injected blocks dropped.
+fn strip_wrappers(s: &str, inj: &mut Injected) -> String {
     let unwrapped = crate::cursor::unwrap_user_query(s);
     let (stripped, tag) = crate::classify::strip_injected(unwrapped.as_ref());
     if inj.0.is_none() {
         inj.0 = tag;
     }
-    let s = stripped.as_ref();
+    stripped.into_owned()
+}
+
+/// Body text with the indexer's wrapper stripping (`strip_wrappers`), trimmed and not clipped, for a
+/// viewer that shows the whole text.
+pub fn clean_text(s: &str) -> String {
+    strip_wrappers(s, &mut Injected::default()).trim().to_string()
+}
+
+fn normalize_text(s: &str, inj: &mut Injected) -> String {
+    let stripped = strip_wrappers(s, inj);
+    let s = stripped.as_str();
     let long = s.chars().count() > TEXT_CHARS;
     let head: String = s.chars().take(TEXT_CHARS).collect();
     let mut t = head.replace("\r\n", "\n");
