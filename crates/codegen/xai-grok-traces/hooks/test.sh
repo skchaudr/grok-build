@@ -106,7 +106,7 @@ chmod +x "$T/stub/bb"; export BB_LOG="$T/bb.log"; : > "$BB_LOG"; OLDPATH="$PATH"
 
 out="$("$HERE/install.sh" --dsh-profile web)"
 cmp -s "$H" "$T/H.orig" && cmp -s "$HOME/.dsh/profiles/web/cordis.patch.yml" "$T/web.orig" && [ ! -e "$HOME/.dsh/plugins/grok-traces.mjs" ] && [ ! -s "$BB_LOG" ] && ok "cursor/dsh/bb dry-run writes nothing" || bad "dry-run wrote (cursor/dsh/bb)"
-echo "$out" | rg -q 'would run: bb plugin install' && ok "bb dry-run prints install command" || bad "bb dry-run output"
+echo "$out" | G -q 'would run: bb plugin install' && ok "bb dry-run prints install command" || bad "bb dry-run output"
 "$HERE/install.sh" --apply --dsh-profile web --dsh-profile tui >/dev/null
 "$HERE/install.sh" --apply --dsh-profile web --dsh-profile tui >/dev/null   # idempotent
 expect 4 "$(cnt "$H" 'grok-traces" hook cursor')" "cursor: 4 non-gating events wired, once after two applies"
@@ -116,13 +116,13 @@ expect 1 "$(cnt "$H" moshi-hook)" "cursor: moshi untouched"
 expect 2 "$(cnt "$H" orca-cursor)" "cursor: orca untouched"
 expect 1 "$(jq .version "$H")" "cursor: version preserved"
 W="$HOME/.dsh/profiles/web/cordis.patch.yml"; U="$HOME/.dsh/profiles/tui/cordis.patch.yml"
-expect 1 "$(rg -c 'grok-traces begin' "$W")" "dsh web: one block after two applies"
-[ "$(sed -n 2p "$W")" = "    # grok-traces begin" ] && rg -q "name: '$HOME/.dsh/plugins/grok-traces.mjs'" "$W" && ok "dsh web: block injected into existing insert list" || bad "dsh web injection"
-rg -q '^- insert:$' "$U" && tail -1 "$U" | rg -q 'grok-traces end' && ok "dsh tui: new insert block appended" || bad "dsh tui append"
+expect 1 "$(G -c 'grok-traces begin' "$W")" "dsh web: one block after two applies"
+[ "$(sed -n 2p "$W")" = "    # grok-traces begin" ] && G -q "name: '$HOME/.dsh/plugins/grok-traces.mjs'" "$W" && ok "dsh web: block injected into existing insert list" || bad "dsh web injection"
+G -q '^- insert:$' "$U" && tail -1 "$U" | G -q 'grok-traces end' && ok "dsh tui: new insert block appended" || bad "dsh tui append"
 cmp -s "$HERE/dsh/traces.mjs" "$HOME/.dsh/plugins/grok-traces.mjs" && ok "dsh: plugin copied" || bad "dsh plugin copy"
 ls "$HOME"/.dsh/profiles/web/cordis.patch.yml.bak-traces-* >/dev/null 2>&1 && ok "dsh: backup written" || bad "dsh backup"
-rg -q "bb plugin install $HOME/.grok/hooks/bb --yes" "$BB_LOG" && cmp -s "$HERE/bb/server.ts" "$HOME/.grok/hooks/bb/server.ts" && ok "bb: files copied, plugin install run" || bad "bb apply"
-out="$("$HERE/install.sh" --check)"; echo "$out" | rg -q 'cursor : .*stop' && echo "$out" | rg -q 'dsh    : profiles: .*tui' && ok "check reports cursor + dsh" || bad "check cursor/dsh: $out"
+G -q "bb plugin install $HOME/.grok/hooks/bb --yes" "$BB_LOG" && cmp -s "$HERE/bb/server.ts" "$HOME/.grok/hooks/bb/server.ts" && ok "bb: files copied, plugin install run" || bad "bb apply"
+out="$("$HERE/install.sh" --check)"; echo "$out" | G -q 'cursor : .*stop' && echo "$out" | G -q 'dsh    : profiles: .*tui' && ok "check reports cursor + dsh" || bad "check cursor/dsh: $out"
 "$HERE/install.sh" --remove >/dev/null
 [ "$(jq -S . "$H")" = "$(jq -S . "$T/H.orig")" ] && ok "cursor: --remove restores content" || bad "cursor remove"
 cmp -s "$W" "$T/web.orig" && ok "dsh web: --remove restores byte-identical" || bad "dsh web remove"
@@ -131,7 +131,7 @@ cmp -s "$W" "$T/web.orig" && ok "dsh web: --remove restores byte-identical" || b
 [ ! -e "$HOME/.grok/hooks/bb/server.ts" ] && ok "bb: files removed" || bad "bb files remain"
 # a bb CLI that is a client of another host must not be touched
 : > "$BB_LOG"; echo '{"serverUrl":"http://100.1.2.3:38886"}' > "$HOME/.bb/config.json"
-out="$("$HERE/install.sh" --apply)"; echo "$out" | rg -q '\[bb\] skipped: .*100.1.2.3' && [ ! -s "$BB_LOG" ] && ok "bb: remote-client CLI skipped" || bad "bb remote skip"
+out="$("$HERE/install.sh" --apply)"; echo "$out" | G -q '\[bb\] skipped: .*100.1.2.3' && [ ! -s "$BB_LOG" ] && ok "bb: remote-client CLI skipped" || bad "bb remote skip"
 export PATH="$OLDPATH"; export HOME="$REAL_HOME"
 
 # JS templates: spawn args, stdin payload, debounce (needs node >= 22 for type stripping; skipped otherwise)
@@ -164,7 +164,7 @@ JS
   done
   grep -q 'session-abc/session.jsonl.zstd' "$T/log" && ok "dsh: session file resolved" || bad "dsh: session file not resolved"
   : > "$T/log"; node --experimental-strip-types --no-warnings "$T/run.mjs" bb "$HERE/bb/server.ts"
-  rg -q '^hook bb \{"event":"thread.idle","thread_id":"thr_1"\}' "$T/log" && ok "bb: payload carries event + thread_id" || bad "bb payload"
+  G -q '^hook bb \{"event":"thread.idle","thread_id":"thr_1"\}' "$T/log" && ok "bb: payload carries event + thread_id" || bad "bb payload"
 else echo "skip js template tests (node >= 22 not found)"; fi
 
 [ "$fail" = 0 ] && echo "PASS" || { echo "FAILED"; exit 1; }

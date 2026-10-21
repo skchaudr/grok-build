@@ -289,8 +289,11 @@ fn run(ssh: &Ssh, target: &str, remote_cmd: &str) -> Result<Out> {
             Err(e) => return Err(unreachable(e.to_string())),
         }
     };
-    let grab = |rx: std::sync::mpsc::Receiver<Vec<u8>>| rx.recv_timeout(Duration::from_millis(500)).unwrap_or_default();
-    let (stdout, stderr) = (String::from_utf8_lossy(&grab(out_rx)).into_owned(), String::from_utf8_lossy(&grab(err_rx)).into_owned());
+    // A pipe that does not reach EOF in time is unknown output, not empty output: fail so callers keep their cache.
+    let grab = |rx: std::sync::mpsc::Receiver<Vec<u8>>| {
+        rx.recv_timeout(Duration::from_millis(500)).map_err(|e| unreachable(format!("output not read: {e}")))
+    };
+    let (stdout, stderr) = (String::from_utf8_lossy(&grab(out_rx)?).into_owned(), String::from_utf8_lossy(&grab(err_rx)?).into_owned());
     let code = status.code().unwrap_or(-1);
     if code == 255 {
         let first = stderr.lines().next().unwrap_or("ssh failed").trim();

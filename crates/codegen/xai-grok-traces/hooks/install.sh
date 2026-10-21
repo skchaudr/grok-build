@@ -152,7 +152,8 @@ bb_plugin() {
   fi
   bb_files
   if [ "$WRITE" = 1 ]; then
-    if bb plugin install "$BB_DEST" --yes; then bb plugin reload "$BB_PLUGIN_ID" >/dev/null 2>&1 || true; else note "[bb] install failed (files left in $BB_DEST)"; fi
+    if bb_installed; then bb plugin reload "$BB_PLUGIN_ID" >/dev/null 2>&1 || true; note "[bb] $BB_PLUGIN_ID: already installed, reloaded"
+    elif bb plugin install "$BB_DEST" --yes; then bb plugin reload "$BB_PLUGIN_ID" >/dev/null 2>&1 || true; else note "[bb] install failed (files left in $BB_DEST)"; fi
   else note "[bb] would run: bb plugin install $BB_DEST --yes   (then bb plugin reload $BB_PLUGIN_ID)"; fi
 }
 
@@ -191,6 +192,9 @@ dsh_patch() {
 dsh_profile() {
   local name="$1" f="$HOME/.dsh/profiles/$1/cordis.patch.yml" new="$WORK/dsh-$1.new"
   [ -f "$f" ] || { note "[dsh] profile '$name': $f not found, skipped"; return 0; }
+  if [ "$(grep -c '^ *# grok-traces begin' "$f")" -gt "$(grep -c '^ *# grok-traces end' "$f")" ]; then
+    note "!! [dsh] profile '$name': $f has '# grok-traces begin' with no matching end. REFUSED, file left untouched. Fix the markers by hand."; return 0
+  fi
   if [ "$MODE" != remove ] && ! grep -q '^ *# grok-traces begin' "$f" && grep -v '^ *#' "$f" | grep -q 'id: grok-traces'; then
     note "[dsh] profile '$name': an unmanaged 'grok-traces' entry exists, skipped"; return 0
   fi

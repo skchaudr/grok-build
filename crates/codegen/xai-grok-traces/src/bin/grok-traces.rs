@@ -47,7 +47,15 @@ fn finish(r: Result<bool, Box<dyn std::error::Error>>) -> ExitCode {
 }
 
 fn hook(source: &str) -> ExitCode {
-    // A panic must not turn into a failing hook.
+    // A panic must not turn into a failing hook. Release builds use panic = "abort", so
+    // catch_unwind cannot see it: the hook itself exits 0 (after the cursor reply).
+    let cursor = source == "cursor";
+    std::panic::set_hook(Box::new(move |_| {
+        if cursor {
+            let _ = io::stdout().write_all(b"{}\n");
+        }
+        std::process::exit(0);
+    }));
     let run = std::panic::catch_unwind(|| {
         let mut buf = Vec::new();
         let mut stdin = io::stdin().lock();
@@ -59,18 +67,20 @@ fn hook(source: &str) -> ExitCode {
         match TraceIndex::open_with(&db, Some(HOOK_BUSY)) {
             Ok(mut idx) => {
                 if let Err(e) = ingest(&mut idx, &user_roots(), receipt) {
-                    eprintln!("grok-traces hook {source}: {e}");
+                    let _ = writeln!(io::stderr(), "grok-traces hook {source}: {e}");
                 }
                 // Only a runaway tripwire is health; eviction never alerts.
                 if let Some(msg) = idx.health() {
                     notify_once(db.parent().unwrap_or(Path::new(".")), &msg);
                 }
             }
-            Err(e) => eprintln!("grok-traces hook {source}: {e}"),
+            Err(e) => {
+                let _ = writeln!(io::stderr(), "grok-traces hook {source}: {e}");
+            }
         }
     });
     if run.is_err() {
-        eprintln!("grok-traces hook {source}: internal error");
+        let _ = writeln!(io::stderr(), "grok-traces hook {source}: internal error");
     }
     if source == "cursor" {
         let _ = io::stdout().write_all(b"{}\n");
