@@ -1520,14 +1520,20 @@ impl AgentView {
             }
         }
 
-        // Traces is keyboard-only; the chrome still takes clicks (close button).
+        // Traces is keyboard-first; the chrome takes clicks (close button) and the wheel scrolls the live screen.
         if let Some(ActiveModal::Traces { state }) = &mut self.active_modal {
             return match mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row) {
                 ModalWindowOutcome::CloseRequested => {
                     self.active_modal = None;
                     InputOutcome::Changed
                 }
-                ModalWindowOutcome::Unhandled => InputOutcome::Unchanged,
+                ModalWindowOutcome::Unhandled => match mouse.kind {
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if state.mode == crate::views::traces_modal::Mode::Live => {
+                        state.live_wheel(matches!(mouse.kind, MouseEventKind::ScrollDown));
+                        InputOutcome::Changed
+                    }
+                    _ => InputOutcome::Unchanged,
+                },
                 _ => InputOutcome::Changed,
             };
         }
