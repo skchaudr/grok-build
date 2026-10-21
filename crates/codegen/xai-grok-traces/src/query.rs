@@ -256,7 +256,14 @@ impl TraceIndex {
             sql.push_str(&format!(" AND {PARENT_ID} IS NULL"));
         }
         if filter.hide_trivial {
-            sql.push_str(" AND NOT (s.signal_count < 3 AND s.tool_count = 0)");
+            // A just-dispatched agent is trivial until it has done something;
+            // keep live sessions visible so new work shows up immediately.
+            sql.push_str(&format!(
+                " AND (NOT (s.signal_count < 3 AND s.tool_count = 0) OR (s.status = 'open' AND f.mtime_ms > ?) OR ({LAST_RECEIPT_AT} > ? AND {LAST_RECEIPT_EVENT} NOT IN ({})))",
+                terminal_list()
+            ));
+            args.push(Sql::Integer(now - ACTIVE_WINDOW_MS));
+            args.push(Sql::Integer(now - RECEIPT_WINDOW_MS));
         }
         if filter.active_only {
             sql.push_str(&format!(
