@@ -82,8 +82,8 @@ pub fn find_harness() -> Option<(i64, i64)> {
     None
 }
 
-/// The process exists, is not a zombie, and is the one that started at `start` (a reused pid has a different start).
-pub fn alive(pid: i64, start: i64) -> bool {
+/// The process exists and is not a zombie (no start time to compare).
+pub fn alive_pid(pid: i64) -> bool {
     #[cfg(unix)]
     {
         let Ok(pid32) = i32::try_from(pid) else { return false };
@@ -92,8 +92,21 @@ pub fn alive(pid: i64, start: i64) -> bool {
         }
         // SAFETY: signal 0 only checks that the process can be signalled.
         let exists = unsafe { libc::kill(pid32, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-        // A zombie has exited; its pid and start linger until the parent reaps it.
-        exists && proc_info(pid).is_some_and(|(_, _, s, zombie)| s == start && !zombie)
+        // A zombie has exited; its pid lingers until the parent reaps it.
+        exists && proc_info(pid).is_some_and(|(_, _, _, zombie)| !zombie)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// The process exists, is not a zombie, and is the one that started at `start` (a reused pid has a different start).
+pub fn alive(pid: i64, start: i64) -> bool {
+    #[cfg(unix)]
+    {
+        alive_pid(pid) && proc_info(pid).is_some_and(|(_, _, s, zombie)| s == start && !zombie)
     }
     #[cfg(not(unix))]
     {
@@ -445,7 +458,6 @@ struct AskRun {
 struct Run {
     open_tools: Vec<OpenTool>,
     open_children: Vec<String>,
-    stopped_children: Vec<String>,
     last: Option<(Ev, i64)>,
     ask: Option<AskRun>,
     /// The newest boundary is an `End`.
@@ -459,18 +471,16 @@ fn run(items: &[(Ev, &LiveReceipt)], strict: bool) -> Run {
     for (ev, r) in items {
         match ev {
             Ev::ChildStart => {
-                if let Some(a) = &r.agent_id {
-                    s.stopped_children.retain(|c| c != a);
-                    if !s.open_children.contains(a) {
-                        s.open_children.push(a.clone());
-                    }
+                if let Some(a) = &r.agent_id
+                    && !s.open_children.contains(a)
+                {
+                    s.open_children.push(a.clone());
                 }
                 continue;
             }
             Ev::ChildStop => {
                 if let Some(a) = &r.agent_id {
                     s.open_children.retain(|c| c != a);
-                    s.stopped_children.push(a.clone());
                 }
                 continue;
             }
@@ -492,21 +502,32 @@ fn run(items: &[(Ev, &LiveReceipt)], strict: bool) -> Run {
                 s.ended = false;
             }
             Ev::Pre => {
-                if !strict && r.tool_use_id.is_none() {
-                    s.open_tools.retain(|t| !(t.id.is_none() && t.tool == r.tool));
+                // Cursor sends `preToolUse` and `beforeReadFile` with one id: the first Pre stays, with its `since`.
+                let dup = r.tool_use_id.is_some() && s.open_tools.iter().any(|t| t.id == r.tool_use_id);
+                if !dup {
+                    if !strict && r.tool_use_id.is_none() {
+                        s.open_tools.retain(|t| !(t.id.is_none() && t.tool == r.tool));
+                    }
+                    s.open_tools.push(OpenTool { id: r.tool_use_id.clone(), tool: r.tool.clone(), detail: r.detail.clone(), at_ms: r.at_ms });
                 }
-                s.open_tools.push(OpenTool { id: r.tool_use_id.clone(), tool: r.tool.clone(), detail: r.detail.clone(), at_ms: r.at_ms });
             }
             Ev::Post => {
-                let hit = match &r.tool_use_id {
-                    Some(id) => s.open_tools.iter().position(|t| t.id.as_deref() == Some(id)),
-                    None => s.open_tools.iter().position(|t| t.tool == r.tool),
-                };
-                if let Some(i) = hit {
-                    if strict {
-                        s.open_tools.remove(i);
-                    } else {
-                        s.open_tools.drain(..=i);
+                // A Post with an id closes every open Pre with that id; close-older also closes the older ones.
+                match &r.tool_use_id {
+                    Some(id) => {
+                        if !strict && let Some(i) = s.open_tools.iter().rposition(|t| t.id.as_deref() == Some(id)) {
+                            s.open_tools.drain(..=i);
+                        }
+                        s.open_tools.retain(|t| t.id.as_deref() != Some(id));
+                    }
+                    None => {
+                        if let Some(i) = s.open_tools.iter().position(|t| t.tool == r.tool) {
+                            if strict {
+                                s.open_tools.remove(i);
+                            } else {
+                                s.open_tools.drain(..=i);
+                            }
+                        }
                     }
                 }
             }
@@ -701,16 +722,13 @@ pub fn arrange(groups: Vec<Vec<LiveRow>>) -> Vec<LiveRow> {
     rows
 }
 
-/// The live screen's rows: `live_sessions` → not-alive dropped (a missing pid stays) → same-process supersede
+/// The live screen's rows: `live_sessions` → not-alive dropped (a missing pid stays; a pid without a start gets a pid-only check) → same-process supersede
 /// for claude/pi → `turn_receipts` → fold → children attached → ordered.
-pub fn fold_all(index: &TraceIndex, now_ms: i64, alive: impl Fn(i64, i64) -> bool) -> Result<Vec<LiveRow>> {
+pub fn fold_all(index: &TraceIndex, now_ms: i64, alive: impl Fn(i64, Option<i64>) -> bool) -> Result<Vec<LiveRow>> {
     let mut sessions: Vec<SessionRow> = index
         .live_sessions()?
         .into_iter()
-        .filter(|s| match (s.harness_pid, s.harness_start) {
-            (Some(pid), Some(start)) => alive(pid, start),
-            _ => true,
-        })
+        .filter(|s| s.harness_pid.is_none_or(|pid| alive(pid, s.harness_start)))
         .collect();
     // Of sessions sharing one process, only the one with the newest receipt stays.
     type Process = (String, i64, Option<i64>);
@@ -1243,10 +1261,25 @@ mod seq {
             assert_eq!(show(&f), "● w", "strict={strict}");
             assert!(f.open_tools.is_empty());
         }
-        let mut half = s.rs.clone();
-        half.pop();
-        let f = fold_session("cursor", &s.row, &half, &[], ms(4.0), false);
-        assert_eq!(f.open_tools.len(), 1, "one Post closes one Pre");
+    }
+
+    #[test]
+    fn cursor_duplicate_pre_keeps_the_first_since_and_one_post_closes_it() {
+        let rs = vec![
+            rc("beforeSubmitPrompt", 0.0),
+            rc("preToolUse", 1.0).tool("Read").id("X"),
+            rc("beforeReadFile", 2.0).tool("Read").id("X"),
+        ];
+        let s = seq("cursor", rs);
+        for strict in [false, true] {
+            let f = s.fold_in(5.0, strict);
+            assert_eq!((f.open_tools.len(), row(&f).since_ms), (1, Some(4000)), "strict={strict}");
+            let mut closed = s.rs.clone();
+            closed.push(LiveReceipt { id: 9, ..rc("postToolUse", 6.0).tool("Read").id("X") });
+            let f = fold_session("cursor", &s.row, &closed, &[], ms(7.0), strict);
+            assert_eq!(show(&f), "● w", "strict={strict}");
+            assert!(f.open_tools.is_empty(), "strict={strict}");
+        }
     }
 
     #[test]
@@ -1339,6 +1372,8 @@ mod seq {
         for e in ["preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile"] {
             assert_eq!(n("cursor", e, None), Some(Pre), "{e}");
         }
+        assert_eq!(n("claude", "PermissionRequest", None), Some(Ask));
+        assert_eq!(n("cursor", "afterMCPExecution", None), Some(Post));
         for e in ["afterFileEdit", "afterAgentThought", "afterAgentResponse"] {
             assert_eq!(n("cursor", e, None), Some(Tick), "{e}");
         }
