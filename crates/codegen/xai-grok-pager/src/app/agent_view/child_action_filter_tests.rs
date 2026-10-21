@@ -35,6 +35,7 @@ const ALLOWED: &[&str] = &[
     "CopyBlockContent",
     "CopyBlockMeta",
     "OpenBlockViewer",
+    "OpenInEditor",
     "OpenLink",
     "OpenUrl",
     "OpenNextLink",
@@ -204,6 +205,7 @@ fn child_navigation_and_link_actions_pass_filter() {
         Action::OpenUrl(String::from("https://x.ai")),
         Action::OpenNextLink,
         Action::OpenBlockViewer,
+        Action::OpenInEditor,
         Action::OpenScrollbackSearch(None),
         Action::Quit,
         // The takeover header's `[Dashboard]` and `‹`/`›` act for the parent

@@ -6,7 +6,7 @@ Grok Build draws all TUI colors from a central theme. You can switch themes whil
 
 ## Available Themes
 
-Grok includes six built-in themes, plus an `auto` option that follows your system appearance:
+Grok includes ten built-in themes, plus an `auto` option that follows your system appearance:
 
 | Theme | Config Names | Description | Truecolor Required |
 |-------|-------------|-------------|--------------------|
@@ -15,6 +15,10 @@ Grok includes six built-in themes, plus an `auto` option that follows your syste
 | **TokyoNight** | `tokyonight`, `tokyo-night`, `tokyo` | Dark, blue-tinted backgrounds from the Tokyo Night palette. Loses its character when quantized. | Yes |
 | **RosePineMoon** | `rosepine`, `rose-pine`, `rosepine-moon`, `rose-pine-moon` | Muted dark palette with mauve accents, from the Rosé Pine family. | Yes |
 | **OscuraMidnight** | `oscura`, `oscura-midnight` | Deep dark base with purple accents. | Yes |
+| **KansoMist** | `kanso-mist`, `kanso` | Port of Zed's Kanso Mist (Borderless + No italics). | Yes |
+| **KanagawaWave** | `kanagawa-wave` | Port of Zed's Kanagawa Wave. | Yes |
+| **Kanagawa** | `kanagawa` | Port of Zed's Kanagawa. | Yes |
+| **JetBrainsIslandsDark** | `jetbrains-islands-dark`, `jetbrains`, `islands-dark` | Port of Zed's JetBrains Islands Dark. | Yes |
 | **Terminal** | `terminal`, `terminal-default`, `transparent`, `native` | Your terminal's own colors: no background of its own, so the terminal canvas (translucency, background images) shows through. | No |
 
 Theme names are case-insensitive. The `auto` option (alias `system`) is documented under [Auto Theme (System Appearance)](#auto-theme-system-appearance).
@@ -128,7 +132,7 @@ Every theme is defined using full RGB values. At startup, Grok quantizes all col
 - On **256-color** terminals, each RGB value is mapped to the nearest indexed palette entry.
 - On **16-color** terminals, colors map to ANSI names.
 
-GrokNight and GrokDay use neutral grays that quantize cleanly. TokyoNight, RosePineMoon, and OscuraMidnight use distinctive tinted backgrounds that lose their character when quantized, which is why the theme picker hides them on non-truecolor terminals.
+GrokNight and GrokDay use neutral grays that quantize cleanly. TokyoNight, RosePineMoon, OscuraMidnight, Kanso Mist, Kanagawa Wave, Kanagawa, and JetBrains Islands Dark use distinctive tinted backgrounds that lose their character when quantized, which is why the theme picker hides them on non-truecolor terminals.
 
 ### Runtime-Generated Colors
 

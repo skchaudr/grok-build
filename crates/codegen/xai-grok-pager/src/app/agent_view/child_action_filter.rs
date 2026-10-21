@@ -46,6 +46,7 @@ pub(crate) fn gate_child_action(action: &Action) -> ChildActionGate {
         | Action::CopyBlockContent
         | Action::CopyBlockMeta
         | Action::OpenBlockViewer
+        | Action::OpenInEditor
         | Action::OpenLink(_)
         | Action::OpenUrl(_)
         | Action::OpenNextLink

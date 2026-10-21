@@ -4172,6 +4172,7 @@ fn dashboard_action_for_id(
         | ActionId::CopyBlockContent
         | ActionId::CopyBlockMeta
         | ActionId::OpenBlockViewer
+        | ActionId::OpenInEditor
         | ActionId::OpenNextLink
         | ActionId::OpenPrevLink
         | ActionId::ToggleTodos

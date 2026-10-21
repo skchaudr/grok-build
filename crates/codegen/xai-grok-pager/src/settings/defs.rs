@@ -60,6 +60,26 @@ const THEME_CHOICES: &[EnumChoice] = &[
         description: "Deep dark with warm accents; needs truecolor.",
     },
     EnumChoice {
+        canonical: "kanso-mist",
+        display: "Kanso Mist",
+        description: "Zed Kanso Mist (borderless, no italics); needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "kanagawa-wave",
+        display: "Kanagawa Wave",
+        description: "Zed Kanagawa Wave; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "kanagawa",
+        display: "Kanagawa",
+        description: "Zed Kanagawa; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "jetbrains-islands-dark",
+        display: "JetBrains Islands Dark",
+        description: "Zed JetBrains Islands Dark; needs truecolor.",
+    },
+    EnumChoice {
         canonical: "terminal",
         display: "Terminal",
         description: "Terminal's own background and text colors.",
@@ -445,6 +465,26 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
         canonical: "oscura-midnight",
         display: "Oscura Midnight",
         description: "Deep dark with warm accents; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "kanso-mist",
+        display: "Kanso Mist",
+        description: "Zed Kanso Mist (borderless, no italics); needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "kanagawa-wave",
+        display: "Kanagawa Wave",
+        description: "Zed Kanagawa Wave; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "kanagawa",
+        display: "Kanagawa",
+        description: "Zed Kanagawa; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "jetbrains-islands-dark",
+        display: "JetBrains Islands Dark",
+        description: "Zed JetBrains Islands Dark; needs truecolor.",
     },
     EnumChoice {
         canonical: "terminal",

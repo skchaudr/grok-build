@@ -80,6 +80,7 @@ prompt. `⇧E` clears all pins, and `Ctrl+E` clears pins on thinking blocks.
 |-----|--------|
 | `y` | Copy block content to clipboard |
 | `⇧Y` | Copy block metadata (e.g., the shell command) to clipboard |
+| `v` | Open a Read/Edit block's file in your editor at the line (`$GROK_OPEN_EDITOR`, `$VISUAL`, `$EDITOR`, else `zed`; terminal editors open in a new Herdr pane). Outside Herdr, a terminal editor runs in place via `$VISUAL`/`$EDITOR` with no line jump (`$GROK_OPEN_EDITOR` is not used). Like `y`/`Y`, needs scrollback focus and `[ui].vim_mode = true` |
 | `Enter` | Open block content in fullscreen viewer |
 | `Ctrl+F` | Open block content in fullscreen viewer (alt binding) |
 

@@ -68,6 +68,7 @@ mod leader_cluster;
 mod modals;
 pub(crate) mod mode_switch;
 mod mouse;
+pub(crate) mod open_in_editor;
 mod queue_edit;
 mod reader_thread;
 pub(crate) mod screen_mode_relaunch;

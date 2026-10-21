@@ -365,6 +365,8 @@ pub enum Action {
     CopyBlockMeta,
     /// Open the selected block in the fullscreen viewer.
     OpenBlockViewer,
+    /// Open the selected Read/Edit block's file in the user's editor at the relevant line.
+    OpenInEditor,
     /// Open the extensions modal dialog on a specific tab.
     OpenExtensionsModal {
         tab: crate::views::extensions_modal::ExtensionsTab,

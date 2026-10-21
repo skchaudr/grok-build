@@ -22,6 +22,10 @@ use crate::theme::ThemeKind;
 static SYNTECT_GROKNIGHT: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_TOKYONIGHT: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_GROKDAY: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_KANSO_MIST: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_KANAGAWA_WAVE: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_KANAGAWA: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_JETBRAINS_ISLANDS_DARK: OnceLock<Syntect> = OnceLock::new();
 
 /// Convert syntect style to ratatui foreground-only style, quantized for terminal color support (or polarity-safe under the terminal-native lock).
 pub fn syntect_to_ratatui_fg(style: syntect::highlighting::Style) -> Style {
@@ -130,6 +134,15 @@ pub fn get_syntect() -> &'static Syntect {
             .get_or_init(|| Syntect::new(include_bytes!("../assets/tokyo-night.tmTheme"))),
         ThemeKind::GrokDay => SYNTECT_GROKDAY
             .get_or_init(|| Syntect::new(include_bytes!("../assets/grok-day.tmTheme"))),
+        ThemeKind::KansoMist => SYNTECT_KANSO_MIST
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/kanso-mist.tmTheme"))),
+        ThemeKind::KanagawaWave => SYNTECT_KANAGAWA_WAVE
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/kanagawa-wave.tmTheme"))),
+        ThemeKind::Kanagawa => SYNTECT_KANAGAWA
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/kanagawa.tmTheme"))),
+        ThemeKind::JetBrainsIslandsDark => SYNTECT_JETBRAINS_ISLANDS_DARK.get_or_init(|| {
+            Syntect::new(include_bytes!("../assets/jetbrains-islands-dark.tmTheme"))
+        }),
     }
 }
 
