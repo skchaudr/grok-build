@@ -64,7 +64,7 @@ fn run_hook(bin: &Path, home: &Path, transcript: &Path) {
 }
 
 /// `/traces` lists sessions from HOME (a subagent nests under its parent), tab filters by source,
-/// Enter opens the trajectory, Enter on an Agent row opens the child and Esc returns, `e` filters errors, Enter shows the raw source line, `y` copies it byte for byte,
+/// Enter opens the trajectory, Enter on an Agent row opens the child and Esc returns, `x` filters errors, Enter shows the raw source line, `y` copies it byte for byte,
 /// and `r` on a source with no resume path shows the notice instead of launching anything.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
@@ -154,12 +154,12 @@ async fn traces_modal_ledger_trajectory_inspector() {
     h.wait_for_text_absent("ptychildcmd", Duration::from_secs(5)).expect("parent again");
     assert!(h.contains_text("ptyclaudetask") || h.contains_text("#0"), "{}", h.screen_contents());
 
-    h.inject_keys(b"e").expect("errors only");
+    h.inject_keys(b"x").expect("errors only");
     h.wait_for_text("errors only", Duration::from_secs(5)).expect("error filter on");
     h.wait_for_text_absent("#0", Duration::from_secs(5)).expect("non-error rows hidden");
     assert!(h.contains_text("#2"), "the is_error tool result stays\n{}", h.screen_contents());
 
-    h.inject_keys(b"e").expect("errors off");
+    h.inject_keys(b"x").expect("errors off");
     h.wait_for_text("#0", Duration::from_secs(5)).expect("rows back");
     h.inject_keys(keys::ENTER).expect("inspect first row");
     h.wait_for_text("line 0", Duration::from_secs(5)).expect("inspector header");

@@ -1013,6 +1013,10 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
         }
         Typing::No => {}
     }
+    // Plain-letter nav keys ignore Ctrl/Alt chords (Ctrl+E is not `e`, Ctrl+R is not `r`).
+    if matches!(key.code, KeyCode::Char(_)) && key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        return InputOutcome::Unchanged;
+    }
     let page = 10;
     match state.mode {
         Mode::List => {
@@ -1032,7 +1036,7 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                     state.refresh();
                 }
                 KeyCode::Char('/') => state.typing = Typing::Ledger,
-                KeyCode::Char('e') => {
+                KeyCode::Char('x') => {
                     state.errors_only = !state.errors_only;
                     state.refresh();
                 }
@@ -1088,7 +1092,7 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                 KeyCode::PageUp => move_sel(&mut state.event_selected, len, -page),
                 KeyCode::Char('g') | KeyCode::Home => state.event_selected = 0,
                 KeyCode::Char('G') | KeyCode::End => move_sel(&mut state.event_selected, len, isize::MAX / 2),
-                KeyCode::Char('e') => {
+                KeyCode::Char('x') => {
                     state.event_errors_only = !state.event_errors_only;
                     state.event_selected = 0;
                     state.load_events();
@@ -1227,7 +1231,7 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
             plain("/ search"),
             plain("a all"),
             plain("A active"),
-            plain("e errors"),
+            plain("x errors"),
             plain("H host"),
             plain("s sort"),
             plain("Enter open"),
@@ -1240,7 +1244,7 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
             plain("j/k move"),
             plain("Enter inspect/open agent"),
             plain("n noise"),
-            plain("e errors"),
+            plain("x errors"),
             plain("t tool"),
             plain("/ search"),
             plain("r resume"),
@@ -2053,6 +2057,19 @@ mod tests {
         assert!(state.show_all);
         assert_eq!(state.sessions.len(), 2);
         assert!(!draw(&mut state, 140, 20).contains("└─"));
+    }
+
+    #[test]
+    fn ctrl_and_alt_chords_do_not_fire_nav_letters() {
+        let (_tmp, mut state) = claude_fixture();
+        let before = state.show_all;
+        handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
+        assert_eq!(state.show_all, before);
+        press(&mut state, KeyCode::Char('x'));
+        assert!(state.errors_only);
+        handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(state.errors_only, "Ctrl+X must not toggle the errors filter");
     }
 
     #[test]
