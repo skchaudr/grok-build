@@ -313,6 +313,9 @@ struct Aggregate {
     last_signal_ts: Option<i64>,
     /// The last non-noise event is an error: nothing happened after it.
     failed: bool,
+    /// Latest per-message context size and window seen.
+    context_tokens: Option<i64>,
+    context_window: Option<i64>,
 }
 
 /// `Tool: arg`, clipped to the preview length.
@@ -384,6 +387,8 @@ impl Aggregate {
                 *total = Some(if e.usage_is_total { total.unwrap_or(0).max(v) } else { total.unwrap_or(0) + v });
             }
         };
+        self.context_tokens = e.context_tokens.or(self.context_tokens);
+        self.context_window = e.context_window.or(self.context_window);
         fold(&mut self.input, e.input_tokens);
         fold(&mut self.output, e.output_tokens);
     }
@@ -392,7 +397,7 @@ impl Aggregate {
 const INSERT_EVENT: &str = "INSERT OR REPLACE INTO trace_events (sk, line_number, byte_offset, type_id, kind, role, title_id,
   preview, timestamp, depth, model_id, is_error, noise, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 const INSERT_USAGE: &str = "INSERT OR REPLACE INTO trace_event_usage (sk, line_number, duration_ms, input_tokens, output_tokens,
-  turn, step) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+  turn, step, context_tokens, context_window) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
 /// Every Nth line keeps its byte offset.
 pub(crate) const CHECKPOINT_EVERY: i64 = 16;
 
@@ -453,8 +458,8 @@ fn insert_event(
         e.detail,
     ])?;
     let extra = [e.duration_ms, e.input_tokens, e.output_tokens, e.turn, e.step].map(round);
-    if extra.iter().any(Option::is_some) {
-        usage.execute(params![sk, line, extra[0], extra[1], extra[2], extra[3], extra[4]])?;
+    if extra.iter().any(Option::is_some) || e.context_tokens.is_some() || e.context_window.is_some() {
+        usage.execute(params![sk, line, extra[0], extra[1], extra[2], extra[3], extra[4], e.context_tokens, e.context_window])?;
     }
     Ok(())
 }
@@ -1132,7 +1137,7 @@ impl TraceIndex {
     fn load_aggregate(&self, sid: &str, basename: &str) -> Result<Aggregate> {
         let agg = self.conn.query_row(
             "SELECT title, model, cwd, started_at, updated_at, event_count, user_count, assistant_count, tool_count,
-             error_count, input_tokens, output_tokens, signal_count, now_text, last_event_at, failed FROM trace_sessions WHERE id = ?1",
+             error_count, input_tokens, output_tokens, signal_count, now_text, last_event_at, failed, context_tokens, context_window FROM trace_sessions WHERE id = ?1",
             [sid],
             |r| {
                 let title: String = r.get(0)?;
@@ -1154,6 +1159,8 @@ impl TraceIndex {
                     now: r.get(13)?,
                     last_signal_ts: r.get(14)?,
                     failed: r.get(15)?,
+                    context_tokens: r.get(16)?,
+                    context_window: r.get(17)?,
                     ..Default::default()
                 })
             },
@@ -1187,7 +1194,7 @@ impl TraceIndex {
         tx.execute(
             "UPDATE trace_sessions SET title=?2, model=?3, cwd=?4, started_at=?5, updated_at=?6, event_count=?7, user_count=?8,
              assistant_count=?9, tool_count=?10, error_count=?11, input_tokens=?12, output_tokens=?13, duration_ms=?14, status=?15,
-             signal_count=?16, now_text=?17, last_event_at=?18, failed=?19
+             signal_count=?16, now_text=?17, last_event_at=?18, failed=?19, context_tokens=?20, context_window=?21
              WHERE id = ?1",
             params![
                 sid,
@@ -1208,8 +1215,22 @@ impl TraceIndex {
                 agg.signals,
                 agg.now,
                 agg.last_signal_ts,
-                agg.failed || done == 2
+                agg.failed || done == 2,
+                agg.context_tokens,
+                agg.context_window
             ],
+        )?;
+        // The newest receipt's process (an unresolved walk never wipes it). Receipts keyed by native id count too.
+        tx.execute(
+            "UPDATE trace_sessions SET
+               harness_pid = COALESCE((SELECT r.harness_pid FROM trace_receipts r WHERE r.harness_pid IS NOT NULL AND
+                 (r.session_id = trace_sessions.id OR (r.session_id IS NULL AND r.native_session = trace_sessions.native_id AND r.source = trace_sessions.source_id))
+                 ORDER BY r.at_ms DESC, r.id DESC LIMIT 1), harness_pid),
+               harness_start = COALESCE((SELECT r.harness_start FROM trace_receipts r WHERE r.harness_pid IS NOT NULL AND
+                 (r.session_id = trace_sessions.id OR (r.session_id IS NULL AND r.native_session = trace_sessions.native_id AND r.source = trace_sessions.source_id))
+                 ORDER BY r.at_ms DESC, r.id DESC LIMIT 1), harness_start)
+             WHERE id = ?1",
+            [sid],
         )?;
         Ok(())
     }
