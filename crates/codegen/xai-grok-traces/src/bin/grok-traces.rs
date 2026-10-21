@@ -6,6 +6,8 @@
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use xai_grok_traces::hook::{MAX_STDIN_BYTES, extract, ingest};
@@ -46,13 +48,35 @@ fn finish(r: Result<bool, Box<dyn std::error::Error>>) -> ExitCode {
     }
 }
 
+/// Event name for the cursor reply, stored before the first stdout write so the panic hook can use it.
+static EVENT: OnceLock<String> = OnceLock::new();
+/// Set once a reply is on stdout: exactly one reply per run.
+static REPLIED: AtomicBool = AtomicBool::new(false);
+
+/// Cursor's per-event stdout reply. Gating events need a neutral "go ahead"; everything else takes `{}`.
+fn cursor_reply(event: &str) -> &'static str {
+    match event {
+        "beforeSubmitPrompt" => "{\"continue\":true}\n",
+        "preToolUse" | "beforeShellExecution" | "beforeMCPExecution" | "beforeReadFile" => "{\"permission\":\"allow\"}\n",
+        _ => "{}\n",
+    }
+}
+
+fn reply_once(event: &str) {
+    if !REPLIED.swap(true, Ordering::SeqCst) {
+        let mut out = io::stdout().lock();
+        let _ = out.write_all(cursor_reply(event).as_bytes());
+        let _ = out.flush();
+    }
+}
+
 fn hook(source: &str) -> ExitCode {
     // A panic must not turn into a failing hook. Release builds use panic = "abort", so
-    // catch_unwind cannot see it: the hook itself exits 0 (after the cursor reply).
+    // catch_unwind cannot see it: the hook itself exits 0 (after the cursor reply, if none was sent yet).
     let cursor = source == "cursor";
     std::panic::set_hook(Box::new(move |_| {
         if cursor {
-            let _ = io::stdout().write_all(b"{}\n");
+            reply_once(EVENT.get().map_or("", String::as_str));
         }
         std::process::exit(0);
     }));
@@ -63,6 +87,11 @@ fn hook(source: &str) -> ExitCode {
         let _ = io::copy(&mut stdin, &mut io::sink());
         let receipt = extract(source, &buf);
         drop(buf);
+        if source == "cursor" {
+            // Reply before touching the index: an index failure must never change or block it.
+            let event = if receipt.event == "unparsed" { String::new() } else { receipt.event.clone() };
+            reply_once(EVENT.get_or_init(|| event));
+        }
         let db = default_db_path();
         match TraceIndex::open_with(&db, Some(HOOK_BUSY)) {
             Ok(mut idx) => {
@@ -83,7 +112,7 @@ fn hook(source: &str) -> ExitCode {
         let _ = writeln!(io::stderr(), "grok-traces hook {source}: internal error");
     }
     if source == "cursor" {
-        let _ = io::stdout().write_all(b"{}\n");
+        reply_once(EVENT.get().map_or("", String::as_str));
     }
     ExitCode::SUCCESS
 }
@@ -225,4 +254,20 @@ fn doctor(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
         println!("receipts {source:8} count={n} last={}", when(*last));
     }
     Ok(health.is_none())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cursor_reply;
+
+    #[test]
+    fn cursor_reply_per_event() {
+        assert_eq!(cursor_reply("beforeSubmitPrompt"), "{\"continue\":true}\n");
+        for e in ["preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile"] {
+            assert_eq!(cursor_reply(e), "{\"permission\":\"allow\"}\n", "{e}");
+        }
+        for e in ["stop", "postToolUse", "afterAgentResponse", "sessionStart", "unparsed", "unknown", ""] {
+            assert_eq!(cursor_reply(e), "{}\n", "{e}");
+        }
+    }
 }
