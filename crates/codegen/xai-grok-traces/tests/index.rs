@@ -618,6 +618,55 @@ fn hook_payload_fields_across_harnesses() {
 }
 
 #[test]
+fn hook_extract_live_fields() {
+    use xai_grok_traces::hook::extract;
+    let c = extract("claude", br#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls -la\nsecond"},"tool_use_id":"tu1","agent_id":"a1"}"#);
+    assert_eq!((c.detail.as_deref(), c.tool_use_id.as_deref(), c.agent_id.as_deref()), (Some("ls -la"), Some("tu1"), Some("a1")));
+    let n = extract("claude", br#"{"hook_event_name":"Notification","notification_type":"idle_prompt"}"#);
+    assert_eq!(n.detail.as_deref(), Some("idle_prompt"));
+    let s = extract("claude", br#"{"hook_event_name":"SessionStart","source":"compact"}"#);
+    assert_eq!(s.detail.as_deref(), Some("compact"));
+    let pi = extract("pi", br#"{"event":"session_start","source":"x","harness_pid":4242}"#);
+    assert_eq!((pi.harness_pid, pi.detail), (Some(4242), None));
+    assert_eq!(extract("pi", br#"{"event":"e","harness_pid":0}"#).harness_pid, None);
+    assert_eq!(extract("pi", br#"{"event":"e","harness_pid":-3}"#).harness_pid, None);
+
+    // Cursor: conversation_id wins, before* events name their own tool.
+    let sh = extract("cursor", br#"{"hook_event_name":"beforeShellExecution","conversation_id":"c1","session_id":"other","command":"git status\nmore","tool_use_id":"u1"}"#);
+    assert_eq!((sh.native_session.as_deref(), sh.tool.as_deref(), sh.detail.as_deref()), (Some("c1"), Some("Shell"), Some("git status")));
+    let after = extract("cursor", br#"{"hook_event_name":"afterShellExecution","conversation_id":"c1","command":"git status","output":"x"}"#);
+    assert_eq!((after.tool.as_deref(), after.detail.as_deref()), (Some("Shell"), Some("git status")));
+    let mcp = extract("cursor", br#"{"hook_event_name":"beforeMCPExecution","tool_name":"search","server":"docs"}"#);
+    assert_eq!((mcp.tool.as_deref(), mcp.detail.as_deref()), (Some("MCP"), Some("docs.search")));
+    let read = extract("cursor", br#"{"hook_event_name":"beforeReadFile","file_path":"/a/b/c.rs"}"#);
+    assert_eq!((read.tool.as_deref(), read.detail.as_deref()), (Some("Read"), Some("b/c.rs")));
+    let pre = extract("cursor", br#"{"hook_event_name":"preToolUse","tool_name":"Read","tool_input":{"file_path":"/a/b/c.rs"}}"#);
+    assert_eq!((pre.tool.as_deref(), pre.detail.as_deref()), (Some("Read"), Some("b/c.rs")));
+    let post = extract("cursor", br#"{"hook_event_name":"postToolUseFailure","tool_name":"Shell","tool_input":{"command":"x"}}"#);
+    assert_eq!(post.tool.as_deref(), Some("Shell"));
+}
+
+#[test]
+fn receipt_pid_refreshes_the_session_row() {
+    use xai_grok_traces::hook::{extract, ingest};
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let path = e.home.join(".codex/sessions/2026/10/01/rollout-x.jsonl");
+    let me = std::process::id();
+    let payload = |pid: &str| format!(r#"{{"hook_event_name":"PostToolUse","session_id":"n1","transcript_path":"{}"{pid}}}"#, path.display());
+    ingest(&mut idx, &e.roots, extract("codex", payload(&format!(r#","harness_pid":{me}"#)).as_bytes())).unwrap();
+    let c = rusqlite::Connection::open(&e.db).unwrap();
+    let pid = || c.query_row("SELECT harness_pid FROM trace_sessions WHERE source_id = 'codex'", [], |r| r.get::<_, Option<i64>>(0)).unwrap();
+    assert_eq!(pid(), Some(i64::from(me)));
+    // A receipt without a pid whose walk finds nothing never wipes it.
+    let mut r = extract("codex", payload("").as_bytes());
+    r.harness_pid = None;
+    idx.record_receipt(&xai_grok_traces::Receipt { session_id: Some(xai_grok_traces::session_id("codex", &path.to_string_lossy())), ..r }).unwrap();
+    assert_eq!(pid(), Some(i64::from(me)));
+}
+
+#[test]
 fn grok_hook_updates_path_maps_to_chat_history() {
     use xai_grok_traces::hook::{extract, ingest, transcript_for};
     let e = env();

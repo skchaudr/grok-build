@@ -20,6 +20,14 @@ pub struct Receipt {
     pub session_id: Option<String>,
     pub tool: Option<String>,
     pub cwd: Option<String>,
+    /// What the event acted on: a call's argument summary, a notification type, a SessionStart source.
+    pub detail: Option<String>,
+    pub tool_use_id: Option<String>,
+    /// Set on events from inside a subagent.
+    pub agent_id: Option<String>,
+    /// The harness process (payload `harness_pid`, else the ancestry walk) and its start, Unix seconds.
+    pub harness_pid: Option<i64>,
+    pub harness_start: Option<i64>,
 }
 
 impl TraceIndex {
@@ -27,11 +35,22 @@ impl TraceIndex {
         self.check_writable()?;
         let at = if r.at_ms == 0 { now_ms() } else { r.at_ms };
         self.conn().execute(
-            "INSERT INTO trace_receipts (at_ms, source, event, native_session, path, session_id, tool, cwd)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![at, r.source, r.event, r.native_session, r.path, r.session_id, r.tool, r.cwd],
+            "INSERT INTO trace_receipts (at_ms, source, event, native_session, path, session_id, tool, cwd,
+             detail, tool_use_id, agent_id, harness_pid, harness_start)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                at, r.source, r.event, r.native_session, r.path, r.session_id, r.tool, r.cwd, r.detail, r.tool_use_id, r.agent_id,
+                r.harness_pid, r.harness_start
+            ],
         )?;
         let id = self.conn().last_insert_rowid();
+        // The row may not be re-indexed (unchanged file), so the receipt keeps the live process fresh itself.
+        if let (Some(sid), Some(pid)) = (&r.session_id, r.harness_pid) {
+            self.conn().execute(
+                "UPDATE trace_sessions SET harness_pid = ?2, harness_start = ?3 WHERE id = ?1",
+                params![sid, pid, r.harness_start],
+            )?;
+        }
         if id % SAMPLE_EVERY == 0 {
             // A trip is recorded in the db and refuses the next write; this receipt is already in.
             let _ = self.sample_growth();
