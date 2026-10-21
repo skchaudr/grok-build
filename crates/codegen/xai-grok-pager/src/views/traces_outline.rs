@@ -119,7 +119,8 @@ pub fn outline(events: &[EventRow], hidden: &[bool]) -> (FoldTree<OutlineKey>, V
             },
         );
         if opener {
-            push_body(&mut nodes, &mut items, events, head, turn_node);
+            // The opener is the turn's first child; its body stays collapsed until expanded.
+            push_event(&mut nodes, &mut items, events, head, turn_node);
         }
 
         let mut k = 0;
@@ -371,6 +372,18 @@ mod tests {
     }
 
     #[test]
+    fn opener_is_the_turn_first_child_with_its_body_under_it() {
+        let ev = [user(1), says(2)];
+        let (tree, _) = run(&ev);
+        let turn = tree.nodes.iter().position(|n| n.key == OutlineKey::Turn(1)).unwrap();
+        assert_eq!(tree.nodes[turn + 1].key, OutlineKey::Ev(1));
+        assert_eq!((tree.nodes[turn + 1].parent, tree.nodes[turn + 1].depth), (Some(turn), 1));
+        assert_eq!(tree.nodes[turn + 2].key, OutlineKey::Body(1));
+        assert_eq!(tree.nodes[turn + 2].parent, Some(turn + 1));
+        assert!(tree.has_children(turn + 1), "the opener folds to hide its body");
+    }
+
+    #[test]
     fn leading_events_form_a_synthetic_turn() {
         let ev = [says(1), call(2), user(3), says(4)];
         let (tree, items) = run(&ev);
@@ -416,7 +429,7 @@ mod tests {
         assert_eq!(
             kinds(&items),
             vec![
-                "turn", "body", "run", "ev", "body", "ev", "body", "ev", "body"
+                "turn", "ev", "body", "run", "ev", "body", "ev", "body", "ev", "body"
             ]
         );
         assert!(items.contains(&OutlineItem::Run {
@@ -458,7 +471,7 @@ mod tests {
         );
         assert_eq!(
             kinds(&items),
-            vec!["turn", "body", "ev", "body", "ev", "body"]
+            vec!["turn", "ev", "body", "ev", "body", "ev", "body"]
         );
     }
 
@@ -542,7 +555,7 @@ mod tests {
             row(6, "step", None),
         ];
         let (tree, items) = run(&ev);
-        // Opener body, assistant body, call body; the folded result has no node of its own; telemetry and
+        // Opener, assistant and call bodies; the folded result has no node of its own; telemetry and
         // step rows have no body.
         let bodies: Vec<_> = items
             .iter()
@@ -569,7 +582,7 @@ mod tests {
         );
         assert_eq!(
             kinds(&items),
-            vec!["turn", "body", "ev", "body", "ev", "body", "ev", "ev"]
+            vec!["turn", "ev", "body", "ev", "body", "ev", "body", "ev", "ev"]
         );
     }
 

@@ -35,6 +35,11 @@ const BODY_LINES: usize = 200;
 const TEXT_COL: usize = 14;
 /// Deepest ledger level: roots are 0, and nothing below depth `MAX_DEPTH` is loaded or shown.
 const MAX_DEPTH: usize = 8;
+/// Tree-guide levels drawn in the ledger (the node's own level included); deeper ones are cut to `…`.
+const GUIDE_LEVELS: usize = 3;
+/// Separators between a folded call's body and its result.
+const RESULT_SEP: &str = "── result ──";
+const RESULT_ERR_SEP: &str = "── ✗ result ──";
 /// Key prefix of a `+N more` node; it cannot collide with a session id.
 const MORE_KEY: &str = "\u{1}more:";
 /// How often remote hosts are refetched while the modal is open.
@@ -200,9 +205,13 @@ impl Flatten<'_> {
         let Some(kids) = kids_map.get(&row.id) else { return };
         let shown = if kids.len() > MAX_KIDS && !self.all_kids.contains(&row.id) { MAX_KIDS } else { kids.len() };
         let more = shown < kids.len();
-        for (i, c) in kids.iter().take(shown).enumerate() {
+        // Children that `session` will skip (already seen, or repeated in this list) get no guide, so the last one drawn is `└─`.
+        let mut ids = HashSet::new();
+        let live: Vec<&SessionRow> =
+            kids.iter().take(shown).filter(|c| !self.seen.contains(&c.id) && ids.insert(c.id.as_str())).collect();
+        for (i, c) in live.iter().enumerate() {
             let mut g = guides.clone();
-            g.push(!more && i + 1 == shown);
+            g.push(!more && i + 1 == live.len());
             self.session(c, Some(me), g);
         }
         if more {
@@ -222,13 +231,14 @@ impl Flatten<'_> {
     /// Fills `Node::hidden` bottom-up: each node counts its descendants.
     fn finish(mut self) -> (FoldTree<String>, Vec<Node>) {
         for j in (0..self.tree.len()).rev() {
-            if let Some(p) = self.tree[j].parent {
-                let weight = match &self.nodes[j].item {
-                    Item::Row { .. } => 1,
-                    Item::More { hidden, .. } => *hidden,
-                };
-                let add = self.nodes[j].hidden + weight;
-                self.nodes[p].hidden += add;
+            let Some(p) = self.tree.get(j).and_then(|n| n.parent) else { continue };
+            let weight = match self.nodes.get(j).map(|n| &n.item) {
+                Some(Item::More { hidden, .. }) => *hidden,
+                _ => 1,
+            };
+            let add = self.nodes.get(j).map_or(0, |n| n.hidden) + weight;
+            if let Some(parent) = self.nodes.get_mut(p) {
+                parent.hidden += add;
             }
         }
         (FoldTree { nodes: self.tree }, self.nodes)
@@ -236,9 +246,14 @@ impl Flatten<'_> {
 }
 
 /// Tree guides for a node: `│` past ancestors that have later siblings, `├─`/`└─` for its own level.
+/// Only the last `GUIDE_LEVELS` levels are drawn; anything deeper is cut to a leading `…`.
 fn guide_prefix(guides: &[bool]) -> String {
     let Some((&last, ancestors)) = guides.split_last() else { return String::new() };
-    let mut s = String::new();
+    let keep = ancestors.len().saturating_sub(GUIDE_LEVELS - 1);
+    let (mut s, ancestors) = match ancestors.get(keep..) {
+        Some(tail) if keep > 0 => ("… ".to_string(), tail),
+        _ => (String::new(), ancestors),
+    };
     for &a in ancestors {
         s.push_str(if a { "   " } else { "│  " });
     }
@@ -430,9 +445,7 @@ impl TracesModalState {
             let keep = self.selected_key();
             (self.sessions, self.children) = (sessions, children);
             self.rebuild_ledger();
-            if let Some(i) = keep.and_then(|k| self.position_of(&k)) {
-                self.selected = i;
-            }
+            self.keep_selection(keep);
         }
         if let Some(t) = snap.trajectory
             && self.mode != Mode::List
@@ -537,15 +550,17 @@ impl TracesModalState {
     /// the first time it appears; after that its fold is whatever the user left it.
     fn fold_defaults(&mut self) {
         self.folds.retain(&self.tree);
-        let live: HashSet<String> = self.tree.nodes.iter().map(|n| n.key.clone()).collect();
-        self.fold_seen.retain(|k| live.contains(k));
+        {
+            let live: HashSet<&str> = self.tree.nodes.iter().map(|n| n.key.as_str()).collect();
+            self.fold_seen.retain(|k| live.contains(k.as_str()));
+        }
         for i in 0..self.tree.nodes.len() {
-            let key = &self.tree.nodes[i].key;
-            if self.tree.nodes[i].depth == 0 || !self.tree.has_children(i) || self.fold_seen.contains(key) {
+            let Some(node) = self.tree.nodes.get(i) else { continue };
+            if node.depth == 0 || !self.tree.has_children(i) || self.fold_seen.contains(node.key.as_str()) {
                 continue;
             }
             self.folds.collapse(&self.tree, i);
-            self.fold_seen.insert(key.clone());
+            self.fold_seen.insert(node.key.clone());
         }
     }
 
@@ -564,10 +579,23 @@ impl TracesModalState {
             if shown.contains(&i) {
                 break;
             }
-            at = self.tree.nodes[i].parent;
+            at = self.tree.nodes.get(i).and_then(|n| n.parent);
         }
-        let keep = at.map(|i| self.tree.nodes[i].key.clone());
+        let keep = at.and_then(|i| self.tree.nodes.get(i)).map(|n| n.key.clone());
         self.relist(keep);
+    }
+
+    /// Selects the line for `key`, or the nearest ancestor of it that is still shown (a `+N more` row, or a
+    /// session that left the filter). Leaves the selection alone when the key is unknown.
+    fn keep_selection(&mut self, key: Option<String>) {
+        let mut at = key.and_then(|k| self.tree.nodes.iter().position(|n| n.key == k));
+        while let Some(i) = at {
+            if let Some(pos) = self.ledger.iter().position(|&n| n == i) {
+                self.selected = pos;
+                return;
+            }
+            at = self.tree.nodes.get(i).and_then(|n| n.parent);
+        }
     }
 
     fn selected_node(&self) -> Option<usize> {
@@ -576,11 +604,11 @@ impl TracesModalState {
 
     /// Key of the selected line: a session id, or the `+N more` key.
     fn selected_key(&self) -> Option<String> {
-        self.selected_node().map(|n| self.tree.nodes[n].key.clone())
+        self.selected_node().and_then(|n| self.tree.nodes.get(n)).map(|n| n.key.clone())
     }
 
     fn position_of(&self, key: &str) -> Option<usize> {
-        self.ledger.iter().position(|&n| self.tree.nodes[n].key == key)
+        self.ledger.iter().position(|&n| self.tree.nodes.get(n).is_some_and(|x| x.key == key))
     }
 
     /// Applies a fold op to the selected node. False when it changed nothing.
@@ -626,9 +654,9 @@ impl TracesModalState {
         if self.fold_with(|f, t, n| f.expand(t, n)) {
             return true;
         }
-        let id = match &self.nodes[node].item {
-            Item::Row { row } => row.id.clone(),
-            Item::More { .. } => return false,
+        let id = match self.nodes.get(node).map(|n| &n.item) {
+            Some(Item::Row { row }) => row.id.clone(),
+            _ => return false,
         };
         let overflow = self.shown_children.get(&id).is_some_and(|k| k.len() > MAX_KIDS) && !self.kids_all.contains(&id);
         overflow && self.show_more(id)
@@ -941,33 +969,42 @@ impl TracesModalState {
     /// Loads the full text of each visible body row not cached yet: local rows now, remote rows on a worker.
     fn ensure_bodies(&mut self) {
         let Some(session) = self.session.clone() else { return };
-        let wanted: Vec<i64> = self
+        // (event index, its line): the body is cached by the line of the event that owns it.
+        let wanted: Vec<(usize, i64)> = self
             .oshown
             .iter()
             .filter_map(|&n| match self.outline_items.get(n)? {
-                OutlineItem::Body(i) => self.events.get(*i).map(|e| e.line),
+                OutlineItem::Body(i) => self.events.get(*i).map(|e| (*i, e.line)),
                 _ => None,
             })
             .collect();
-        for line in wanted {
+        for (i, line) in wanted {
             if self.bodies.contains_key(&line) || self.body_pending.contains(&line) {
                 continue;
             }
+            let result = self.result_of(i);
             if session.host.is_some() {
                 let Some(target) = self.target_for(&session) else { continue };
                 self.body_pending.insert(line);
                 let tx = self.body_tx.clone();
                 let sid = session.id.clone();
                 std::thread::spawn(move || {
-                    let raw = remote::fetch_raw(&target, remote::remote_id(&target, &sid), line);
-                    let text = pretty(raw.map_err(|e| e.to_string()));
+                    let fetch = |l: i64| remote::fetch_raw(&target, remote::remote_id(&target, &sid), l).map_err(|e| e.to_string());
+                    let text = compose_body(fetch(line), result.map(|(l, error)| (fetch(l), error)));
                     let _ = tx.send(BodyMsg { session_id: sid, line, text });
                 });
             } else if let Some(index) = &self.index {
-                let text = pretty(index.raw_line(&session.id, line).map_err(|e| e.to_string()));
+                let fetch = |l: i64| index.raw_line(&session.id, l).map_err(|e| e.to_string());
+                let text = compose_body(fetch(line), result.map(|(l, error)| (fetch(l), error)));
                 self.bodies.insert(line, text);
             }
         }
+    }
+
+    /// The result folded into event `i`'s call row: its line and whether it failed.
+    fn result_of(&self, i: usize) -> Option<(i64, bool)> {
+        let fold = self.folded.get(i)?.as_ref()?;
+        Some((self.events.get(i + 1)?.line, fold.error))
     }
 
     /// The body text of event `ev` wrapped to `width`; a placeholder until a remote body arrives.
@@ -1149,9 +1186,7 @@ impl TracesModalState {
             }
         }
         self.rebuild_ledger();
-        if let Some(i) = keep.and_then(|k| self.position_of(&k)) {
-            self.selected = i;
-        }
+        self.keep_selection(keep);
     }
 
     /// Fetch the open remote session's events, or refilter the ones we have.
@@ -1280,6 +1315,77 @@ fn pretty(raw: Result<Option<String>, String>) -> String {
             .unwrap_or(line),
         Ok(_) => "(line no longer in the source file)".to_string(),
         Err(e) => format!("(could not read source: {e})"),
+    }
+}
+
+/// String values under these keys are body text, in any harness format.
+const TEXT_KEYS: [&str; 6] = ["text", "thinking", "output", "result", "stdout", "stderr"];
+/// Tool inputs under these keys render as JSON (or as the string, when it already is one).
+const INPUT_KEYS: [&str; 4] = ["input", "arguments", "args", "params"];
+
+/// The human text of one raw trajectory line: message text, thinking, tool inputs and tool output, in
+/// order, found by key across Claude, Codex and Pi shapes. Falls back to `pretty()` when none is found.
+fn body_text(raw: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+        collect_text(&v, &mut out);
+    }
+    if out.is_empty() {
+        return pretty(Ok(Some(raw.to_string())));
+    }
+    out.join("\n\n")
+}
+
+fn collect_text(v: &serde_json::Value, out: &mut Vec<String>) {
+    use serde_json::Value;
+    match v {
+        Value::Array(items) => items.iter().for_each(|x| collect_text(x, out)),
+        Value::Object(map) => {
+            for (key, x) in map {
+                let key = key.as_str();
+                match x {
+                    Value::String(s) if TEXT_KEYS.contains(&key) || key == "content" || key == "message" => push_chunk(out, s),
+                    Value::String(s) if INPUT_KEYS.contains(&key) => push_chunk(out, s),
+                    _ if INPUT_KEYS.contains(&key) => {
+                        if let Ok(pretty) = serde_json::to_string_pretty(x) {
+                            push_chunk(out, &pretty);
+                        }
+                    }
+                    _ => collect_text(x, out),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Appends a non-blank chunk, skipping it when it repeats the one before.
+fn push_chunk(out: &mut Vec<String>, s: &str) {
+    let t = s.trim_end();
+    if t.trim().is_empty() || out.last().is_some_and(|last| last.as_str() == t) {
+        return;
+    }
+    out.push(t.to_string());
+}
+
+/// Body text of one raw line, or the pretty raw text / read error when it cannot be read.
+fn body_of(raw: Result<Option<String>, String>) -> String {
+    let text = match &raw {
+        Ok(Some(line)) if !line.is_empty() => Some(body_text(line)),
+        _ => None,
+    };
+    text.unwrap_or_else(|| pretty(raw))
+}
+
+/// A body row: the event's own text, then its folded result under a separator (`✗` when it failed).
+fn compose_body(own: Result<Option<String>, String>, result: Option<(Result<Option<String>, String>, bool)>) -> String {
+    let text = body_of(own);
+    match result {
+        Some((raw, error)) => {
+            let sep = if error { RESULT_ERR_SEP } else { RESULT_SEP };
+            format!("{text}\n\n{sep}\n\n{}", body_of(raw))
+        }
+        None => text,
     }
 }
 
@@ -1992,7 +2098,7 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
         if selected {
             fill(buf, list, y, base);
         }
-        let node = &state.nodes[n];
+        let Some(node) = state.nodes.get(n) else { continue };
         match &node.item {
             Item::More { hidden, .. } => put_row(buf, list, y, &{
                 let mut v = vec![(" ".into(), 1, base), ("".into(), 7, base)];
@@ -2005,7 +2111,7 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
             Item::Row { row: s } => {
                 let (glyph, glyph_color) = status_glyph(s, theme);
                 let foldable = state.tree.has_children(n);
-                let collapsed = foldable && state.folds.is_collapsed(&state.tree.nodes[n].key);
+                let collapsed = foldable && state.tree.nodes.get(n).is_some_and(|x| state.folds.is_collapsed(&x.key));
                 let fold = match (foldable, collapsed) {
                     (false, _) => "  ".to_string(),
                     (true, true) => format!("{} ", crate::glyphs::chevron()),
@@ -2336,14 +2442,14 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
             }
             Some(OutlineItem::Body(_)) => {
                 let indent_w = (2 * depth).min(text_w);
+                // A failed call's result section (after its separator) is drawn in the error colour.
+                let failed = matches!(state.outline_items.get(n), Some(OutlineItem::Body(i)) if state.folded.get(*i).and_then(Option::as_ref).is_some_and(|f| f.error));
+                let mut in_result = false;
                 for (dy, line) in bodies.get(k).into_iter().flatten().flatten().take(span as usize).enumerate() {
+                    in_result |= line.as_str() == RESULT_SEP || line.as_str() == RESULT_ERR_SEP;
+                    let fg = if in_result && failed { theme.accent_error } else { theme.text_secondary };
                     let text = format!("{}{line}", " ".repeat(indent_w));
-                    put_row(
-                        buf,
-                        list,
-                        y + dy as u16,
-                        &[(String::new(), 6, base), (String::new(), 6, base), (text, text_w, base.fg(theme.text_secondary))],
-                    );
+                    put_row(buf, list, y + dy as u16, &[(String::new(), 6, base), (String::new(), 6, base), (text, text_w, base.fg(fg))]);
                 }
             }
             None => {}
@@ -2949,7 +3055,7 @@ mod tests {
     #[test]
     fn turn_collapses_to_a_summary_and_back() {
         let mut state = trajectory(three_calls());
-        assert_eq!(shown_rows(&state), ["Turn(1)", "Body(1)", "Run(2)", "Ev(8)"], "turn open, run grouped and closed");
+        assert_eq!(shown_rows(&state), ["Turn(1)", "Ev(1)", "Run(2)", "Ev(8)"], "turn open, opener and run closed");
         assert!(draw(&mut state, 140, 20).contains("3 tool calls"));
 
         state.goto(0);
@@ -2966,7 +3072,7 @@ mod tests {
         let mut state = trajectory(three_calls());
         state.goto(2);
         press(&mut state, KeyCode::Right);
-        assert_eq!(shown_rows(&state), ["Turn(1)", "Body(1)", "Run(2)", "Ev(2)", "Ev(4)", "Ev(6)", "Ev(8)"]);
+        assert_eq!(shown_rows(&state), ["Turn(1)", "Ev(1)", "Run(2)", "Ev(2)", "Ev(4)", "Ev(6)", "Ev(8)"]);
         assert!(draw(&mut state, 140, 20).contains("Bash  ls"));
     }
 
@@ -2975,7 +3081,7 @@ mod tests {
         let mut state = trajectory(three_calls());
         state.goto(0);
         press(&mut state, KeyCode::Char('>'));
-        assert_eq!(shown_rows(&state).len(), 11, "{:?}", shown_rows(&state));
+        assert_eq!(shown_rows(&state).len(), 12, "{:?}", shown_rows(&state));
         assert!(shown_rows(&state).contains(&"Body(8)".to_string()));
 
         press(&mut state, KeyCode::Char('G'));
@@ -3029,7 +3135,7 @@ mod tests {
         press(&mut state, KeyCode::Char('e'));
         assert_eq!(shown_rows(&state), ["Turn(1)"]);
         press(&mut state, KeyCode::Char('E'));
-        assert_eq!(shown_rows(&state).len(), 11, "anything folded: expand all");
+        assert_eq!(shown_rows(&state).len(), 12, "anything folded: expand all");
         press(&mut state, KeyCode::Char('E'));
         assert_eq!(shown_rows(&state), ["Turn(1)"], "nothing folded: collapse all");
     }
@@ -3077,5 +3183,51 @@ mod tests {
         let events = [mk(0, false, 1), mk(10, false, 1), mk(11, false, 1), mk(100, true, 2)];
         let b = bucket_events(&events, 11);
         assert_eq!((b[0], b[1], b[10]), ((1, false, true), (2, false, false), (1, true, true)));
+    }
+
+    #[test]
+    fn body_text_reads_each_harness_shape() {
+        // Claude assistant: the text block, then the tool input as JSON.
+        let claude = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me check."},{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#;
+        assert_eq!(body_text(claude), "Let me check.\n\n{\n  \"command\": \"ls\"\n}");
+        // Claude tool result: content as a string, then as an array of text blocks.
+        let plain = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"file.txt"}]}}"#;
+        assert_eq!(body_text(plain), "file.txt");
+        let blocks = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"out 1"},{"type":"text","text":"out 2"}]}]}}"#;
+        assert_eq!(body_text(blocks), "out 1\n\nout 2");
+        // Codex response item.
+        let codex = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}"#;
+        assert_eq!(body_text(codex), "Done.");
+        // Pi tool call: arguments as JSON.
+        let pi = r#"{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"read","arguments":{"path":"a.rs"}}]}}"#;
+        assert_eq!(body_text(pi), "{\n  \"path\": \"a.rs\"\n}");
+    }
+
+    #[test]
+    fn body_text_dedupes_and_falls_back_to_pretty() {
+        let dup = r#"{"message":{"role":"user","content":"same"},"toolUseResult":{"stdout":"same","stderr":""}}"#;
+        assert_eq!(body_text(dup), "same");
+        assert_eq!(body_text(r#"{"type":"x"}"#), "{\n  \"type\": \"x\"\n}");
+        assert_eq!(body_text("not json"), "not json");
+    }
+
+    #[test]
+    fn guides_cut_levels_deeper_than_three() {
+        assert_eq!(guide_prefix(&[true]), "└─ ");
+        assert_eq!(guide_prefix(&[false, false, true]), "│  │  └─ ");
+        assert_eq!(guide_prefix(&[false, true, false, true]), "…    │  └─ ");
+    }
+
+    #[test]
+    fn a_skipped_sibling_does_not_leave_the_last_drawn_one_open() {
+        let mk = |id: &str| SessionRow { id: id.into(), ..row("claude", "/h/x.jsonl") };
+        // The second `a` repeats the first, so `session` skips it: `b` is the last line drawn.
+        let kids: HashMap<String, Vec<SessionRow>> = HashMap::from([("p".to_string(), vec![mk("a"), mk("a"), mk("b")])]);
+        let all_kids = HashSet::new();
+        let mut flat = Flatten { kids: &kids, all_kids: &all_kids, tree: Vec::new(), nodes: Vec::new(), seen: HashSet::new() };
+        flat.session(&mk("p"), None, Vec::new());
+        let (_, nodes) = flat.finish();
+        let guides: Vec<String> = nodes.iter().map(|n| guide_prefix(&n.guides)).collect();
+        assert_eq!(guides, ["", "├─ ", "└─ "]);
     }
 }
