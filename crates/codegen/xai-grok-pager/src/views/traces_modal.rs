@@ -12,7 +12,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use xai_grok_traces::remote::{self, EventQuery, Fetched, RemoteFilter};
 use xai_grok_traces::{EventFilter, EventRow, RECEIPT_WINDOW_MS, SOURCES, SessionFilter, SessionRow, Sort, Status, TraceIndex, source_label};
 
@@ -21,14 +21,31 @@ use crate::app::app_view::InputOutcome;
 use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
 use crate::views::modal_window::{self, ModalContentArea, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut};
+use crate::views::traces_fold::{FoldNode, FoldState, FoldTree};
+use crate::views::traces_outline::{self, OutlineItem, OutlineKey};
 
 pub const TITLE: &str = "Traces";
 const PAGE: usize = 500;
 const EVENT_PAGE: usize = 5000;
 /// Children shown under a parent before `+N more`.
 const MAX_KIDS: usize = 6;
+/// Most wrapped lines a message body shows before its `… Enter for inspector` tail.
+const BODY_LINES: usize = 200;
+/// Columns before a trajectory row's text: `#line` and the role chip, each with a space.
+const TEXT_COL: usize = 14;
+/// Deepest ledger level: roots are 0, and nothing below depth `MAX_DEPTH` is loaded or shown.
+const MAX_DEPTH: usize = 8;
+/// Tree-guide levels drawn in the ledger (the node's own level included); deeper ones are cut to `…`.
+const GUIDE_LEVELS: usize = 3;
+/// Separators between a folded call's body and its result.
+const RESULT_SEP: &str = "── result ──";
+const RESULT_ERR_SEP: &str = "── ✗ result ──";
+/// Key prefix of a `+N more` node; it cannot collide with a session id.
+const MORE_KEY: &str = "\u{1}more:";
 /// How often remote hosts are refetched while the modal is open.
 const REMOTE_EVERY: Duration = Duration::from_secs(10);
+/// Remote body fetches allowed in flight at once; the rest wait for a later render.
+const MAX_BODY_FETCHES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -44,6 +61,17 @@ enum Typing {
     Ledger,
     Events,
 }
+
+/// A parent trajectory parked while its dispatch child is open: the session, the selected row and the outline folds.
+struct Trail {
+    session: SessionRow,
+    sel: Option<OutlineKey>,
+    folds: FoldState<OutlineKey>,
+    seen: HashSet<OutlineKey>,
+}
+
+/// The event filters (search text, errors only, tool); a change re-opens the matching turns and runs.
+type FilterSig = (String, bool, Option<usize>);
 
 pub struct TracesModalState {
     pub window: ModalWindowState,
@@ -70,15 +98,23 @@ pub struct TracesModalState {
     /// Root sessions as queried.
     pub sessions: Vec<SessionRow>,
     children: HashMap<String, Vec<SessionRow>>,
-    expanded: HashSet<String>,
-    /// What the ledger draws: roots with their children beneath. `selected` indexes this.
-    ledger: Vec<Item>,
+    /// Parents whose `+N more` overflow is expanded.
+    kids_all: HashSet<String>,
+    /// Collapsed ledger nodes, keyed by session id (or `+N more` key).
+    folds: FoldState<String>,
+    /// Parents that already got their default fold (collapsed below the roots).
+    fold_seen: HashSet<String>,
+    /// Every ledger node in preorder, folded or not.
+    tree: FoldTree<String>,
+    /// Parallel to `tree.nodes`.
+    nodes: Vec<Node>,
+    /// The visible ledger: indices into `nodes`. `selected` indexes this.
+    ledger: Vec<usize>,
     pub selected: usize,
     scroll: usize,
 
     pub session: Option<SessionRow>,
     pub events: Vec<EventRow>,
-    pub event_selected: usize,
     event_scroll: usize,
     pub event_errors_only: bool,
     pub event_query: String,
@@ -86,6 +122,25 @@ pub struct TracesModalState {
     pub include_noise: bool,
     /// Per event: the tool result folded into that call row.
     folded: Vec<Option<Fold>>,
+    /// Per event: a result shown inside its call row, so it gets no outline row of its own.
+    hidden: Vec<bool>,
+    /// The trajectory outline over `events`; `oshown` lists the visible rows (indices into `outline`).
+    outline: FoldTree<OutlineKey>,
+    outline_items: Vec<OutlineItem>,
+    /// Collapsed outline rows.
+    ofolds: FoldState<OutlineKey>,
+    /// Foldable outline rows that already got their default fold.
+    oseen: HashSet<OutlineKey>,
+    oshown: Vec<usize>,
+    /// The selected row, by key: kept across folds, filters and live growth.
+    sel: Option<OutlineKey>,
+    /// Full text per event line (pretty JSON of its raw line), loaded when its row shows.
+    bodies: HashMap<i64, String>,
+    body_pending: HashSet<i64>,
+    /// Lines whose last read failed; not cached, so `l` retries them.
+    body_failed: HashSet<i64>,
+    body_tx: mpsc::Sender<BodyMsg>,
+    body_rx: mpsc::Receiver<BodyMsg>,
     /// Children of the open session (dispatch targets), oldest first.
     session_children: Vec<SessionRow>,
     /// Per event: which of `session_children` its dispatch started.
@@ -117,8 +172,12 @@ pub struct TracesModalState {
     shown_roots: Vec<SessionRow>,
     shown_children: HashMap<String, Vec<SessionRow>>,
     parent_name: Option<String>,
-    /// Sessions we descended from with Enter on a dispatch row, and the row we were on.
-    trail: Vec<(SessionRow, usize)>,
+    /// Sessions we descended from with Enter on a dispatch row.
+    trail: Vec<Trail>,
+    /// Outline row to reveal once the restored trajectory has its events (remote loads are async).
+    reveal: Option<OutlineKey>,
+    /// Filters as the outline last saw them.
+    filter_seen: FilterSig,
     tools: Vec<String>,
     pub tool_filter: Option<usize>,
 
@@ -126,17 +185,99 @@ pub struct TracesModalState {
     raw_scroll: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Branch {
-    Root,
-    Mid,
-    Last,
-}
-
 #[derive(Clone, Debug)]
 enum Item {
-    Row { row: SessionRow, branch: Branch },
+    Row { row: SessionRow },
     More { parent: String, hidden: usize },
+}
+
+/// One ledger node, parallel to `FoldTree::nodes`.
+#[derive(Clone, Debug)]
+struct Node {
+    item: Item,
+    /// Per level 1..=depth: whether that level's node is the last of its siblings.
+    guides: Vec<bool>,
+    /// Rows under this node, `+N more` overflow included.
+    hidden: usize,
+}
+
+/// Preorder flattening of the ledger: a session, then its shown children, then its `+N more`.
+struct Flatten<'a> {
+    kids: &'a HashMap<String, Vec<SessionRow>>,
+    all_kids: &'a HashSet<String>,
+    tree: Vec<FoldNode<String>>,
+    nodes: Vec<Node>,
+    /// Cycle and repeat guard.
+    seen: HashSet<String>,
+}
+
+impl Flatten<'_> {
+    fn session(&mut self, row: &SessionRow, parent: Option<usize>, guides: Vec<bool>) {
+        if !self.seen.insert(row.id.clone()) {
+            return;
+        }
+        let me = self.push(Item::Row { row: row.clone() }, row.id.clone(), parent, &guides);
+        if guides.len() >= MAX_DEPTH {
+            return;
+        }
+        let kids_map: &HashMap<String, Vec<SessionRow>> = self.kids;
+        let Some(kids) = kids_map.get(&row.id) else { return };
+        let shown = if kids.len() > MAX_KIDS && !self.all_kids.contains(&row.id) { MAX_KIDS } else { kids.len() };
+        let more = shown < kids.len();
+        // Children that `session` will skip (already seen, or repeated in this list) get no guide, so the last one drawn is `└─`.
+        let mut ids = HashSet::new();
+        let live: Vec<&SessionRow> =
+            kids.iter().take(shown).filter(|c| !self.seen.contains(&c.id) && ids.insert(c.id.as_str())).collect();
+        for (i, c) in live.iter().enumerate() {
+            let mut g = guides.clone();
+            g.push(!more && i + 1 == live.len());
+            self.session(c, Some(me), g);
+        }
+        if more {
+            let mut g = guides;
+            g.push(true);
+            let item = Item::More { parent: row.id.clone(), hidden: kids.len() - shown };
+            self.push(item, format!("{MORE_KEY}{}", row.id), Some(me), &g);
+        }
+    }
+
+    fn push(&mut self, item: Item, key: String, parent: Option<usize>, guides: &[bool]) -> usize {
+        self.tree.push(FoldNode { key, parent, depth: guides.len() });
+        self.nodes.push(Node { item, guides: guides.to_vec(), hidden: 0 });
+        self.tree.len() - 1
+    }
+
+    /// Fills `Node::hidden` bottom-up: each node counts its descendants.
+    fn finish(mut self) -> (FoldTree<String>, Vec<Node>) {
+        for j in (0..self.tree.len()).rev() {
+            let Some(p) = self.tree.get(j).and_then(|n| n.parent) else { continue };
+            let weight = match self.nodes.get(j).map(|n| &n.item) {
+                Some(Item::More { hidden, .. }) => *hidden,
+                _ => 1,
+            };
+            let add = self.nodes.get(j).map_or(0, |n| n.hidden) + weight;
+            if let Some(parent) = self.nodes.get_mut(p) {
+                parent.hidden += add;
+            }
+        }
+        (FoldTree { nodes: self.tree }, self.nodes)
+    }
+}
+
+/// Tree guides for a node: `│` past ancestors that have later siblings, `├─`/`└─` for its own level.
+/// Only the last `GUIDE_LEVELS` levels are drawn; anything deeper is cut to a leading `…`.
+fn guide_prefix(guides: &[bool]) -> String {
+    let Some((&last, ancestors)) = guides.split_last() else { return String::new() };
+    let keep = ancestors.len().saturating_sub(GUIDE_LEVELS - 1);
+    let (mut s, ancestors) = match ancestors.get(keep..) {
+        Some(tail) if keep > 0 => ("… ".to_string(), tail),
+        _ => (String::new(), ancestors),
+    };
+    for &a in ancestors {
+        s.push_str(if a { "   " } else { "│  " });
+    }
+    s.push_str(if last { "└─ " } else { "├─ " });
+    s
 }
 
 /// A tool result folded into the call row before it.
@@ -175,6 +316,7 @@ impl TracesModalState {
     }
 
     pub fn open_with_hosts(index: Option<TraceIndex>, hosts: Vec<String>) -> Self {
+        let (body_tx, body_rx) = mpsc::channel();
         let mut s = Self {
             window: ModalWindowState::new(),
             mode: Mode::List,
@@ -194,18 +336,33 @@ impl TracesModalState {
             show_all: false,
             sessions: Vec::new(),
             children: HashMap::new(),
-            expanded: HashSet::new(),
+            kids_all: HashSet::new(),
+            folds: FoldState::new(),
+            fold_seen: HashSet::new(),
+            tree: FoldTree { nodes: Vec::new() },
+            nodes: Vec::new(),
             ledger: Vec::new(),
             selected: 0,
             scroll: 0,
             session: None,
             events: Vec::new(),
-            event_selected: 0,
             event_scroll: 0,
             event_errors_only: false,
             event_query: String::new(),
             include_noise: false,
             folded: Vec::new(),
+            hidden: Vec::new(),
+            outline: FoldTree { nodes: Vec::new() },
+            outline_items: Vec::new(),
+            ofolds: FoldState::new(),
+            oseen: HashSet::new(),
+            oshown: Vec::new(),
+            sel: None,
+            bodies: HashMap::new(),
+            body_pending: HashSet::new(),
+            body_failed: HashSet::new(),
+            body_tx,
+            body_rx,
             session_children: Vec::new(),
             dispatch_child: Vec::new(),
             generation: 0,
@@ -227,6 +384,8 @@ impl TracesModalState {
             shown_children: HashMap::new(),
             parent_name: None,
             trail: Vec::new(),
+            reveal: None,
+            filter_seen: FilterSig::default(),
             tools: Vec::new(),
             tool_filter: None,
             raw: None,
@@ -304,23 +463,21 @@ impl TracesModalState {
             return false;
         }
         if let Ok((sessions, children)) = snap.ledger {
-            // Follow the selected session wherever it moved.
-            let keep = self.selected_session().map(|s| s.id.clone());
+            // Follow the selected row wherever it moved.
+            let keep = self.selected_key();
             (self.sessions, self.children) = (sessions, children);
             self.rebuild_ledger();
-            if let Some(i) = keep.and_then(|id| self.ledger.iter().position(|it| matches!(it, Item::Row { row, .. } if row.id == id))) {
-                self.selected = i;
-            }
+            self.keep_selection(keep);
         }
         if let Some(t) = snap.trajectory
             && self.mode != Mode::List
             && self.session.as_ref().is_some_and(|s| s.id == t.session_id)
         {
             // Follow the bottom if the user was there.
-            let at_bottom = self.event_selected + 1 >= self.events.len();
+            let at_bottom = self.sel_pos() + 1 >= self.oshown.len();
             self.install_trajectory(t.rows, t.session, t.children);
             if at_bottom {
-                self.event_selected = self.events.len().saturating_sub(1);
+                self.goto(self.oshown.len().saturating_sub(1));
             }
         }
         true
@@ -401,22 +558,147 @@ impl TracesModalState {
             }
         }
         kids.extend(remote_kids);
-        let mut out = Vec::new();
+        let mut flat = Flatten { kids: &kids, all_kids: &self.kids_all, tree: Vec::new(), nodes: Vec::new(), seen: HashSet::new() };
         for r in &roots {
-            out.push(Item::Row { row: r.clone(), branch: Branch::Root });
-            let Some(k) = kids.get(&r.id) else { continue };
-            let shown = if k.len() > MAX_KIDS && !self.expanded.contains(&r.id) { MAX_KIDS } else { k.len() };
-            for (i, c) in k.iter().take(shown).enumerate() {
-                let last = i + 1 == k.len();
-                out.push(Item::Row { row: c.clone(), branch: if last { Branch::Last } else { Branch::Mid } });
-            }
-            if shown < k.len() {
-                out.push(Item::More { parent: r.id.clone(), hidden: k.len() - shown });
-            }
+            flat.session(r, None, Vec::new());
         }
+        (self.tree, self.nodes) = flat.finish();
         (self.shown_roots, self.shown_children) = (roots, kids);
-        self.ledger = out;
-        self.selected = self.selected.min(self.ledger.len().saturating_sub(1));
+        self.fold_defaults();
+        self.relist(None);
+    }
+
+    /// Drops fold state for nodes that left the tree. A parent below the roots starts collapsed
+    /// the first time it appears; after that its fold is whatever the user left it.
+    fn fold_defaults(&mut self) {
+        self.folds.retain(&self.tree);
+        {
+            let live: HashSet<&str> = self.tree.nodes.iter().map(|n| n.key.as_str()).collect();
+            self.fold_seen.retain(|k| live.contains(k.as_str()));
+        }
+        for i in 0..self.tree.nodes.len() {
+            let Some(node) = self.tree.nodes.get(i) else { continue };
+            if node.depth == 0 || !self.tree.has_children(i) || self.fold_seen.contains(node.key.as_str()) {
+                continue;
+            }
+            self.folds.collapse(&self.tree, i);
+            self.fold_seen.insert(node.key.clone());
+        }
+    }
+
+    /// Recomputes the visible ledger from the fold state. `keep` is the key to stay on, if still shown;
+    /// otherwise the index is clamped.
+    fn relist(&mut self, keep: Option<String>) {
+        self.ledger = self.tree.visible(&self.folds);
+        self.selected = keep.and_then(|k| self.position_of(&k)).unwrap_or(self.selected.min(self.ledger.len().saturating_sub(1)));
+    }
+
+    /// Re-lists after a fold change on `node`, keeping the selection on it or on its nearest ancestor still shown.
+    fn refold(&mut self, node: usize) {
+        let shown = self.tree.visible(&self.folds);
+        let mut at = Some(node);
+        while let Some(i) = at {
+            if shown.contains(&i) {
+                break;
+            }
+            at = self.tree.nodes.get(i).and_then(|n| n.parent);
+        }
+        let keep = at.and_then(|i| self.tree.nodes.get(i)).map(|n| n.key.clone());
+        self.relist(keep);
+    }
+
+    /// Selects the line for `key`, or the nearest ancestor of it that is still shown (a `+N more` row, or a
+    /// session that left the filter). Leaves the selection alone when the key is unknown.
+    fn keep_selection(&mut self, key: Option<String>) {
+        let mut at = key.and_then(|k| self.tree.nodes.iter().position(|n| n.key == k));
+        while let Some(i) = at {
+            if let Some(pos) = self.ledger.iter().position(|&n| n == i) {
+                self.selected = pos;
+                return;
+            }
+            at = self.tree.nodes.get(i).and_then(|n| n.parent);
+        }
+    }
+
+    fn selected_node(&self) -> Option<usize> {
+        self.ledger.get(self.selected).copied()
+    }
+
+    /// Key of the selected line: a session id, or the `+N more` key.
+    fn selected_key(&self) -> Option<String> {
+        self.selected_node().and_then(|n| self.tree.nodes.get(n)).map(|n| n.key.clone())
+    }
+
+    fn position_of(&self, key: &str) -> Option<usize> {
+        self.ledger.iter().position(|&n| self.tree.nodes.get(n).is_some_and(|x| x.key == key))
+    }
+
+    /// Applies a fold op to the selected node. False when it changed nothing.
+    fn fold_with(&mut self, op: impl FnOnce(&mut FoldState<String>, &FoldTree<String>, usize)) -> bool {
+        let Some(node) = self.selected_node() else { return false };
+        let before = self.folds.clone();
+        op(&mut self.folds, &self.tree, node);
+        if self.folds == before {
+            return false;
+        }
+        self.refold(node);
+        true
+    }
+
+    /// `h` / `←`: collapse the selected node; on a leaf or an already collapsed node, select its parent.
+    fn collapse_selected(&mut self) -> bool {
+        let Some(node) = self.selected_node() else { return false };
+        let before = self.folds.clone();
+        match self.folds.collapse(&self.tree, node) {
+            Some(parent) => {
+                self.refold(parent);
+                true
+            }
+            None if self.folds != before => {
+                self.refold(node);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `e` / Space.
+    fn toggle_selected(&mut self) -> bool {
+        self.fold_with(|f, t, n| f.toggle(t, n))
+    }
+
+    /// `→` / `l`: expand the selected node. On a node that is already open, or on `+N more`, show the overflow.
+    fn expand_selected(&mut self) -> bool {
+        if let Some(parent) = self.selected_more() {
+            return self.show_more(parent);
+        }
+        let Some(node) = self.selected_node() else { return false };
+        if self.fold_with(|f, t, n| f.expand(t, n)) {
+            return true;
+        }
+        let id = match self.nodes.get(node).map(|n| &n.item) {
+            Some(Item::Row { row }) => row.id.clone(),
+            _ => return false,
+        };
+        let overflow = self.shown_children.get(&id).is_some_and(|k| k.len() > MAX_KIDS) && !self.kids_all.contains(&id);
+        overflow && self.show_more(id)
+    }
+
+    /// The parent of the selected `+N more` row.
+    fn selected_more(&self) -> Option<String> {
+        match &self.nodes.get(self.selected_node()?)?.item {
+            Item::More { parent, .. } => Some(parent.clone()),
+            Item::Row { .. } => None,
+        }
+    }
+
+    /// Shows every child of `parent` past the `MAX_KIDS` cut. Index clamping keeps the cursor on the first revealed child.
+    fn show_more(&mut self, parent: String) -> bool {
+        if !self.kids_all.insert(parent) {
+            return false;
+        }
+        self.rebuild_ledger();
+        true
     }
 
     /// Remote rows that pass the ledger filters; when browsing, grouped into roots and children.
@@ -455,30 +737,18 @@ impl TracesModalState {
     }
 
     pub fn selected_session(&self) -> Option<&SessionRow> {
-        match self.ledger.get(self.selected)? {
-            Item::Row { row, .. } => Some(row),
+        match &self.nodes.get(self.selected_node()?)?.item {
+            Item::Row { row } => Some(row),
             Item::More { .. } => None,
         }
     }
 
     /// Enter on `+N more` expands it; on anything else it does nothing here.
     fn expand_selected_more(&mut self) -> bool {
-        matches!(self.ledger.get(self.selected), Some(Item::More { .. })) && self.expand_selected()
-    }
-
-    /// `→` on `+N more` or on a root with hidden children: show every child of that parent.
-    fn expand_selected(&mut self) -> bool {
-        let parent = match self.ledger.get(self.selected) {
-            Some(Item::More { parent, .. }) => parent.clone(),
-            Some(Item::Row { row, branch: Branch::Root }) if self.shown_children.get(&row.id).is_some_and(|k| k.len() > MAX_KIDS) => row.id.clone(),
-            _ => return false,
-        };
-        if !self.expanded.insert(parent.clone()) {
-            return false;
+        match self.selected_more() {
+            Some(parent) => self.show_more(parent),
+            None => false,
         }
-        // Keep the cursor on the row it was on (a root) or on the first revealed child.
-        self.rebuild_ledger();
-        true
     }
 
     /// (active, failed, total) over everything loaded, children included.
@@ -511,8 +781,16 @@ impl TracesModalState {
             _ => None,
         };
         self.session = Some(row);
-        self.event_selected = 0;
+        self.sel = None;
+        self.reveal = None;
         self.event_scroll = 0;
+        self.bodies.clear();
+        self.body_pending.clear();
+        self.body_failed.clear();
+        // Folds belong to one session: a new one starts with its defaults.
+        self.ofolds = FoldState::new();
+        self.oseen.clear();
+        self.filter_seen = FilterSig::default();
         self.event_errors_only = false;
         self.event_query.clear();
         self.tool_filter = None;
@@ -530,14 +808,18 @@ impl TracesModalState {
 
     /// Esc in a trajectory: back up the dispatch trail, else to the ledger.
     fn leave_trajectory(&mut self) {
-        if let Some((parent, selected)) = self.trail.pop() {
-            self.open_session(parent);
-            self.event_selected = selected.min(self.events.len().saturating_sub(1));
+        if let Some(t) = self.trail.pop() {
+            self.open_session(t.session);
+            // Back where we left: the same folds and row. The row's ancestors open so it shows.
+            self.ofolds = t.folds;
+            self.oseen = t.seen;
+            self.reveal = t.sel.clone();
+            self.sel = t.sel;
+            self.rebuild_outline();
         } else {
             self.mode = Mode::List;
             self.session = None;
-            self.events.clear();
-            self.folded.clear();
+            self.set_events(Vec::new());
             self.remote_loading = false;
             self.remote_ev = None;
         }
@@ -565,26 +847,302 @@ impl TracesModalState {
         }
         self.session_children = children;
         self.dispatch_child = self.match_dispatches();
-        self.event_selected = self.event_selected.min(self.events.len().saturating_sub(1));
     }
 
-    /// Folds each tool result into the call row right before it (unless noise is shown).
+    /// Keeps every loaded event; a tool result right after a call (unless noise is shown) is hidden
+    /// and recorded on that call row as `folded`. Then rebuilds the outline.
     fn set_events(&mut self, rows: Vec<EventRow>) {
-        let mut events: Vec<EventRow> = Vec::with_capacity(rows.len());
-        let mut folded: Vec<Option<Fold>> = Vec::with_capacity(rows.len());
-        for e in rows {
-            if !self.include_noise
-                && is_result(&e)
-                && events.last().is_some_and(is_call)
-                && folded.last().is_some_and(Option::is_none)
-            {
-                *folded.last_mut().unwrap() = Some(Fold { error: e.is_error, detail: e.detail.clone() });
+        let mut folded: Vec<Option<Fold>> = vec![None; rows.len()];
+        let mut hidden = vec![false; rows.len()];
+        let mut last: Option<usize> = None;
+        for (i, e) in rows.iter().enumerate() {
+            let call = last.filter(|&j| rows.get(j).is_some_and(is_call) && folded.get(j).is_some_and(Option::is_none));
+            match call {
+                Some(j) if !self.include_noise && is_result(e) => {
+                    if let Some(f) = folded.get_mut(j) {
+                        *f = Some(Fold { error: e.is_error, detail: e.detail.clone() });
+                    }
+                    if let Some(h) = hidden.get_mut(i) {
+                        *h = true;
+                    }
+                }
+                _ => last = Some(i),
+            }
+        }
+        (self.events, self.folded, self.hidden) = (rows, folded, hidden);
+        self.rebuild_outline();
+    }
+
+    // ---- trajectory outline: rows, folds, selection, bodies ----
+
+    fn filtering(&self) -> bool {
+        !self.event_query.is_empty() || self.event_errors_only || self.tool_filter.is_some()
+    }
+
+    fn key_at(&self, node: usize) -> Option<&OutlineKey> {
+        self.outline.nodes.get(node).map(|n| &n.key)
+    }
+
+    /// Fold mark before an outline row: `› ` collapsed, `⌄ ` expanded, two spaces when there is nothing to fold.
+    fn fold_mark(&self, node: usize) -> String {
+        match self.key_at(node) {
+            Some(key) if self.outline.has_children(node) => {
+                let glyph = if self.ofolds.is_collapsed(key) { crate::glyphs::chevron() } else { crate::glyphs::chevron_down() };
+                format!("{glyph} ")
+            }
+            _ => "  ".to_string(),
+        }
+    }
+
+    /// Position of the selected row in `oshown`; the first row when nothing is selected.
+    fn sel_pos(&self) -> usize {
+        self.sel.as_ref().and_then(|k| self.oshown.iter().position(|&n| self.key_at(n) == Some(k))).unwrap_or(0)
+    }
+
+    /// Selects the visible row at `pos`.
+    fn goto(&mut self, pos: usize) {
+        self.sel = self.oshown.get(pos).and_then(|&n| self.key_at(n)).cloned();
+    }
+
+    fn step(&mut self, delta: isize) {
+        let mut pos = self.sel_pos();
+        move_sel(&mut pos, self.oshown.len(), delta);
+        self.goto(pos);
+    }
+
+    /// Event index of the selected row: a turn's opener, a run's first call, or the row's own event.
+    fn selected_event(&self) -> Option<usize> {
+        match self.outline_items.get(*self.oshown.get(self.sel_pos())?)? {
+            OutlineItem::Turn { event, .. } | OutlineItem::Run { first: event, .. } => Some(*event),
+            OutlineItem::Event(i) | OutlineItem::Body(i) => Some(*i),
+        }
+    }
+
+    /// Rebuilds the outline from `events`. The selection stays on its key when that row is still
+    /// shown, else on the row at the old position.
+    fn rebuild_outline(&mut self) {
+        let pos = self.sel_pos();
+        let (tree, items) = traces_outline::outline(&self.events, &self.hidden);
+        (self.outline, self.outline_items) = (tree, items);
+        // An empty outline (remote events still loading, or no match) keeps the folds and selection for when rows return.
+        if !self.outline.nodes.is_empty() {
+            self.ofolds.retain(&self.outline);
+            let live: HashSet<OutlineKey> = self.outline.nodes.iter().map(|n| n.key.clone()).collect();
+            self.oseen.retain(|k| live.contains(k));
+        }
+        // Defaults on first sight: turns open, runs and event rows closed. Under a filter, turns and runs open
+        // on first sight and again when the filter itself changes, so a manual collapse survives live polls.
+        let sig = self.filter_sig();
+        let refilter = sig != self.filter_seen;
+        self.filter_seen = sig;
+        let filtering = self.filtering();
+        for i in 0..self.outline.nodes.len() {
+            let Some(key) = self.key_at(i).cloned() else { continue };
+            if !self.outline.has_children(i) {
                 continue;
             }
-            events.push(e);
-            folded.push(None);
+            let turn = matches!(key, OutlineKey::Turn(_));
+            let run = matches!(key, OutlineKey::Run(_));
+            let fresh = self.oseen.insert(key);
+            if fresh && !turn && !(filtering && run) {
+                self.ofolds.collapse(&self.outline, i);
+            }
+            if filtering && (turn || run) && (fresh || refilter) {
+                self.ofolds.expand(&self.outline, i);
+            }
         }
-        (self.events, self.folded) = (events, folded);
+        // A key not found while remote events are still loading stays pending for when they arrive.
+        if let Some(key) = self.reveal.take()
+            && !self.reveal(&key)
+            && self.events.is_empty()
+        {
+            self.reveal = Some(key);
+        }
+        self.oshown = self.outline.visible(&self.ofolds);
+        self.place(self.sel.clone(), pos);
+    }
+
+    /// Expands every ancestor of the outline row `key` so it is shown. False when there is no such row.
+    fn reveal(&mut self, key: &OutlineKey) -> bool {
+        let Some(i) = self.outline.nodes.iter().position(|n| &n.key == key) else { return false };
+        let mut at = self.outline.nodes.get(i).and_then(|n| n.parent);
+        while let Some(p) = at {
+            self.ofolds.expand(&self.outline, p);
+            at = self.outline.nodes.get(p).and_then(|n| n.parent);
+        }
+        true
+    }
+
+    fn filter_sig(&self) -> FilterSig {
+        (self.event_query.clone(), self.event_errors_only, self.tool_filter)
+    }
+
+    /// The selected row is a run of tool calls.
+    fn selected_run(&self) -> bool {
+        self.oshown.get(self.sel_pos()).and_then(|&n| self.outline_items.get(n)).is_some_and(|item| matches!(item, OutlineItem::Run { .. }))
+    }
+
+    /// Selects `keep` if it is shown, else the row at `pos` (clamped). With no rows shown, the selection is left as it is.
+    fn place(&mut self, keep: Option<OutlineKey>, pos: usize) {
+        if self.oshown.is_empty() {
+            return;
+        }
+        let at = keep
+            .as_ref()
+            .and_then(|k| self.oshown.iter().position(|&n| self.key_at(n) == Some(k)))
+            .unwrap_or_else(|| pos.min(self.oshown.len().saturating_sub(1)));
+        self.goto(at);
+    }
+
+    /// Re-lists the outline after a fold change on `node`, keeping the selection on it or its nearest shown ancestor.
+    fn reshow(&mut self, node: usize) {
+        self.oshown = self.outline.visible(&self.ofolds);
+        let mut at = Some(node);
+        while let Some(i) = at {
+            if self.oshown.contains(&i) {
+                break;
+            }
+            at = self.outline.nodes.get(i).and_then(|n| n.parent);
+        }
+        let keep = at.and_then(|i| self.key_at(i)).cloned();
+        let pos = self.sel_pos();
+        self.place(keep, pos);
+    }
+
+    /// Applies a fold op to the selected row. False when it changed nothing.
+    fn outline_fold(&mut self, op: impl FnOnce(&mut FoldState<OutlineKey>, &FoldTree<OutlineKey>, usize)) -> bool {
+        let Some(&node) = self.oshown.get(self.sel_pos()) else { return false };
+        let before = self.ofolds.clone();
+        op(&mut self.ofolds, &self.outline, node);
+        if self.ofolds == before {
+            return false;
+        }
+        self.reshow(node);
+        true
+    }
+
+    /// `h` / `←`: collapse the selected row; on a leaf or a collapsed row, select its parent.
+    fn outline_collapse(&mut self) -> bool {
+        let Some(&node) = self.oshown.get(self.sel_pos()) else { return false };
+        let before = self.ofolds.clone();
+        match self.ofolds.collapse(&self.outline, node) {
+            Some(parent) => {
+                self.reshow(parent);
+                true
+            }
+            None if self.ofolds != before => {
+                self.reshow(node);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Wrapped body lines per shown row (`None` for rows that are not bodies), `text_w` columns wide.
+    fn body_rows(&self, text_w: usize) -> Vec<Option<Vec<String>>> {
+        self.oshown
+            .iter()
+            .map(|&n| {
+                let depth = self.outline.nodes.get(n).map_or(0, |x| x.depth);
+                match self.outline_items.get(n) {
+                    Some(OutlineItem::Body(i)) => Some(self.body_lines(*i, text_w.saturating_sub(2 * depth))),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Loads the bodies of the rows shown at `oshown` positions `from..from + height` that are not cached:
+    /// local rows now, remote rows on a worker (at most `MAX_BODY_FETCHES` in flight). True when a body
+    /// was cached here, so the caller should measure the rows again.
+    fn ensure_bodies(&mut self, from: usize, height: usize) -> bool {
+        let Some(session) = self.session.clone() else { return false };
+        // (event index, its line): the body is cached by the line of the event that owns it.
+        let wanted: Vec<(usize, i64)> = self
+            .oshown
+            .iter()
+            .skip(from)
+            .take(height)
+            .filter_map(|&n| match self.outline_items.get(n)? {
+                OutlineItem::Body(i) => self.events.get(*i).map(|e| (*i, e.line)),
+                _ => None,
+            })
+            .collect();
+        let mut cached = false;
+        for (i, line) in wanted {
+            if self.bodies.contains_key(&line) || self.body_pending.contains(&line) || self.body_failed.contains(&line) {
+                continue;
+            }
+            let result = self.result_of(i);
+            if session.host.is_some() {
+                let Some(target) = self.target_for(&session) else { continue };
+                if self.body_pending.len() >= MAX_BODY_FETCHES {
+                    break;
+                }
+                self.body_pending.insert(line);
+                let tx = self.body_tx.clone();
+                let sid = session.id.clone();
+                std::thread::spawn(move || {
+                    let fetch = |l: i64| remote::fetch_raw(&target, remote::remote_id(&target, &sid), l).map_err(|e| e.to_string());
+                    let text = compose_body(fetch(line), result.map(|(l, error)| (fetch(l), error)));
+                    let _ = tx.send(BodyMsg { session_id: sid, line, text });
+                });
+            } else {
+                let text = match &self.index {
+                    Some(index) => {
+                        let fetch = |l: i64| index.raw_line(&session.id, l).map_err(|e| e.to_string());
+                        compose_body(fetch(line), result.map(|(l, error)| (fetch(l), error)))
+                    }
+                    None => continue,
+                };
+                cached |= self.settle_body(line, text);
+            }
+        }
+        cached
+    }
+
+    /// Takes a loaded body. A failure is not cached: the row shows nothing until `l` retries it.
+    fn settle_body(&mut self, line: i64, text: Result<String, String>) -> bool {
+        self.body_pending.remove(&line);
+        match text {
+            Ok(text) => {
+                self.bodies.insert(line, text);
+                true
+            }
+            Err(e) => {
+                self.body_failed.insert(line);
+                self.status = Some(format!("(could not read #{line}: {e}, press l to retry)"));
+                false
+            }
+        }
+    }
+
+    /// `l` on a row that did not fold: forget failed body reads so the next render reads them again.
+    fn retry_bodies(&mut self) -> bool {
+        if self.body_failed.is_empty() {
+            return false;
+        }
+        self.body_failed.clear();
+        if self.status.as_deref().is_some_and(|s| s.starts_with("(could not read")) {
+            self.status = None;
+        }
+        true
+    }
+
+    /// The result folded into event `i`'s call row: its line and whether it failed.
+    fn result_of(&self, i: usize) -> Option<(i64, bool)> {
+        let fold = self.folded.get(i)?.as_ref()?;
+        Some((self.events.get(i + 1)?.line, fold.error))
+    }
+
+    /// The body text of event `ev` wrapped to `width`; a placeholder until a remote body arrives.
+    fn body_lines(&self, ev: usize, width: usize) -> Vec<String> {
+        let Some(line) = self.events.get(ev).map(|e| e.line) else { return vec!["loading…".to_string()] };
+        match self.bodies.get(&line) {
+            Some(text) => wrap_body(text, width),
+            None if self.body_failed.contains(&line) => vec!["(could not read, press l to retry)".to_string()],
+            None => vec!["loading…".to_string()],
+        }
     }
 
     /// The child session a dispatch row (Agent/Task tool call) started, if one matches.
@@ -618,8 +1176,8 @@ impl TracesModalState {
     }
 
     fn enter_child(&mut self, child: SessionRow) {
-        if let Some(open) = self.session.clone() {
-            self.trail.push((open, self.event_selected));
+        if let Some(session) = self.session.clone() {
+            self.trail.push(Trail { session, sel: self.sel.clone(), folds: self.ofolds.clone(), seen: self.oseen.clone() });
         }
         self.open_session(child);
     }
@@ -628,10 +1186,9 @@ impl TracesModalState {
         if self.session.as_ref().is_some_and(|s| s.host.is_some()) {
             return self.open_remote_inspector();
         }
-        let (Some(index), Some(session), Some(ev)) = (&self.index, &self.session, self.events.get(self.event_selected)) else {
-            return;
-        };
-        self.raw = Some(pretty(index.raw_line(&session.id, ev.line).map_err(|e| e.to_string())));
+        let Some(line) = self.selected_event().and_then(|i| self.events.get(i)).map(|e| e.line) else { return };
+        let (Some(index), Some(session)) = (&self.index, &self.session) else { return };
+        self.raw = Some(pretty(index.raw_line(&session.id, line).map_err(|e| e.to_string())));
         self.raw_scroll = 0;
         self.mode = Mode::Inspector;
     }
@@ -641,8 +1198,10 @@ impl TracesModalState {
         if self.session.as_ref().is_some_and(|s| s.host.is_some()) {
             return self.raw_source.clone();
         }
-        let (index, session, ev) = (self.index.as_ref()?, self.session.as_ref()?, self.events.get(self.event_selected)?);
-        index.raw_line(&session.id, ev.line).ok().flatten()
+        let index = self.index.as_ref()?;
+        let session = self.session.as_ref()?;
+        let line = self.events.get(self.selected_event()?)?.line;
+        index.raw_line(&session.id, line).ok().flatten()
     }
 
     fn resume(&self, row: Option<&SessionRow>) -> InputOutcome {
@@ -718,6 +1277,12 @@ impl TracesModalState {
                 redraw = true;
             }
         }
+        while let Ok(m) = self.body_rx.try_recv() {
+            if self.session.as_ref().is_some_and(|s| s.id == m.session_id) {
+                self.settle_body(m.line, m.text);
+                redraw = true;
+            }
+        }
         if let Some(rx) = &self.raw_rx
             && let Ok(text) = rx.try_recv()
         {
@@ -731,7 +1296,7 @@ impl TracesModalState {
 
     /// Merge one host's answer; on failure keep showing its last good rows and say so.
     fn apply_host(&mut self, h: HostResult) {
-        let keep = self.selected_session().map(|s| s.id.clone());
+        let keep = self.selected_key();
         match h.result {
             Ok(Fetched { rows, note }) => {
                 self.remote_err.remove(&h.target);
@@ -750,9 +1315,7 @@ impl TracesModalState {
             }
         }
         self.rebuild_ledger();
-        if let Some(i) = keep.and_then(|id| self.ledger.iter().position(|it| matches!(it, Item::Row { row, .. } if row.id == id))) {
-            self.selected = i;
-        }
+        self.keep_selection(keep);
     }
 
     /// Fetch the open remote session's events, or refilter the ones we have.
@@ -795,9 +1358,9 @@ impl TracesModalState {
     }
 
     fn open_remote_inspector(&mut self) {
-        let (Some(session), Some(ev)) = (self.session.clone(), self.events.get(self.event_selected)) else { return };
+        let Some(line) = self.selected_event().and_then(|i| self.events.get(i)).map(|e| e.line) else { return };
+        let Some(session) = self.session.clone() else { return };
         let Some(target) = self.target_for(&session) else { return };
-        let line = ev.line;
         let (tx, rx) = mpsc::channel();
         self.raw_rx = Some(rx);
         self.raw_source = None;
@@ -826,6 +1389,53 @@ struct RemoteEvents {
     result: Result<Vec<EventRow>, remote::Error>,
 }
 
+/// A body read for a trajectory row; `session_id` lets a stale one be dropped.
+struct BodyMsg {
+    session_id: String,
+    line: i64,
+    text: Result<String, String>,
+}
+
+/// Wraps `text` to `width` columns (one entry per screen line), capped at `BODY_LINES` plus a tail line.
+fn wrap_body(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let mut cur = String::new();
+        let mut w = 0;
+        for c in line.chars() {
+            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+            if w + cw > width && !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+                w = 0;
+            }
+            cur.push(c);
+            w += cw;
+        }
+        out.push(cur);
+        if out.len() > BODY_LINES {
+            break;
+        }
+    }
+    if out.len() > BODY_LINES {
+        out.truncate(BODY_LINES);
+        out.push("… Enter for inspector".to_string());
+    }
+    out
+}
+
+/// Scrolls so row `sel` sits fully inside `height` lines, where row `i` is `heights[i]` lines tall.
+fn fit_rows(sel: usize, scroll: &mut usize, heights: &[usize], height: usize) {
+    if sel < *scroll {
+        *scroll = sel;
+    }
+    let mut total: usize = heights.iter().skip(*scroll).take(sel + 1 - *scroll).sum();
+    while total > height && *scroll < sel {
+        total -= heights.get(*scroll).copied().unwrap_or(0);
+        *scroll += 1;
+    }
+}
+
 fn pretty(raw: Result<Option<String>, String>) -> String {
     match raw {
         Ok(Some(line)) if !line.is_empty() => serde_json::from_str::<serde_json::Value>(&line)
@@ -834,6 +1444,78 @@ fn pretty(raw: Result<Option<String>, String>) -> String {
             .unwrap_or(line),
         Ok(_) => "(line no longer in the source file)".to_string(),
         Err(e) => format!("(could not read source: {e})"),
+    }
+}
+
+/// String values under these keys are body text, in any harness format.
+const TEXT_KEYS: [&str; 6] = ["text", "thinking", "output", "result", "stdout", "stderr"];
+/// Tool inputs under these keys render as JSON (or as the string, when it already is one).
+const INPUT_KEYS: [&str; 4] = ["input", "arguments", "args", "params"];
+
+/// The human text of one raw trajectory line: message text, thinking, tool inputs and tool output, in
+/// order, found by key across Claude, Codex and Pi shapes. Falls back to `pretty()` when none is found.
+fn body_text(raw: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+        collect_text(&v, &mut out);
+    }
+    if out.is_empty() {
+        return pretty(Ok(Some(raw.to_string())));
+    }
+    out.join("\n\n")
+}
+
+fn collect_text(v: &serde_json::Value, out: &mut Vec<String>) {
+    use serde_json::Value;
+    match v {
+        Value::Array(items) => items.iter().for_each(|x| collect_text(x, out)),
+        Value::Object(map) => {
+            for (key, x) in map {
+                let key = key.as_str();
+                match x {
+                    Value::String(s) if TEXT_KEYS.contains(&key) || key == "content" || key == "message" => push_chunk(out, s),
+                    Value::String(s) if INPUT_KEYS.contains(&key) => push_chunk(out, s),
+                    _ if INPUT_KEYS.contains(&key) => {
+                        if let Ok(pretty) = serde_json::to_string_pretty(x) {
+                            push_chunk(out, &pretty);
+                        }
+                    }
+                    _ => collect_text(x, out),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Appends a non-blank chunk, skipping it when it repeats the one before.
+fn push_chunk(out: &mut Vec<String>, s: &str) {
+    let t = s.trim_end();
+    if t.trim().is_empty() || out.last().is_some_and(|last| last.as_str() == t) {
+        return;
+    }
+    out.push(t.to_string());
+}
+
+/// Body text of one raw line; a line that is gone reads as a placeholder, a failed read as its error.
+fn body_of(raw: Result<Option<String>, String>) -> Result<String, String> {
+    match raw {
+        Ok(Some(line)) if !line.is_empty() => Ok(body_text(&line)),
+        Ok(_) => Ok(pretty(Ok(None))),
+        Err(e) => Err(e),
+    }
+}
+
+/// A body row: the event's own text, then its folded result under a separator (`✗` when it failed).
+/// Any read that failed fails the whole body, so nothing half-read gets cached.
+fn compose_body(own: Result<Option<String>, String>, result: Option<(Result<Option<String>, String>, bool)>) -> Result<String, String> {
+    let text = body_of(own)?;
+    match result {
+        Some((raw, error)) => {
+            let sep = if error { RESULT_ERR_SEP } else { RESULT_SEP };
+            Ok(format!("{text}\n\n{sep}\n\n{}", body_of(raw)?))
+        }
+        None => Ok(text),
     }
 }
 
@@ -864,12 +1546,17 @@ type Trajectory = (Vec<EventRow>, Option<SessionRow>, Vec<SessionRow>);
 /// Roots (running ones first when sorted by update) and, when browsing, each root's children.
 fn query_ledger(index: &TraceIndex, filter: &SessionFilter, browse: bool) -> Result<Ledger, xai_grok_traces::Error> {
     let mut sessions = index.list_sessions(filter)?;
-    let mut children = HashMap::new();
+    let mut children: HashMap<String, Vec<SessionRow>> = HashMap::new();
     if browse {
-        for r in sessions.iter().filter(|r| r.children > 0) {
-            if let Ok(kids) = index.children(&r.id) {
-                children.insert(r.id.clone(), kids);
+        // Children of children too, down to MAX_DEPTH; a parent already fetched is skipped, so cycles end.
+        let mut open: Vec<(String, usize)> = sessions.iter().filter(|r| r.children > 0).map(|r| (r.id.clone(), 0)).collect();
+        while let Some((id, depth)) = open.pop() {
+            if depth >= MAX_DEPTH || children.contains_key(&id) {
+                continue;
             }
+            let Ok(kids) = index.children(&id) else { continue };
+            open.extend(kids.iter().filter(|k| k.children > 0).map(|k| (k.id.clone(), depth + 1)));
+            children.insert(id, kids);
         }
         if filter.sort == Sort::Updated {
             // A finished parent with a running child counts as running.
@@ -1007,11 +1694,14 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                 _ if edit_line(&mut state.event_query, key) => {}
                 _ => return InputOutcome::Unchanged,
             }
-            state.event_selected = 0;
             state.load_events();
             return InputOutcome::Changed;
         }
         Typing::No => {}
+    }
+    // Plain-letter nav keys ignore Ctrl/Alt chords (Ctrl+E is not `e`, Ctrl+R is not `r`).
+    if matches!(key.code, KeyCode::Char(_)) && key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        return InputOutcome::Unchanged;
     }
     let page = 10;
     match state.mode {
@@ -1032,7 +1722,7 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                     state.refresh();
                 }
                 KeyCode::Char('/') => state.typing = Typing::Ledger,
-                KeyCode::Char('e') => {
+                KeyCode::Char('x') => {
                     state.errors_only = !state.errors_only;
                     state.refresh();
                 }
@@ -1052,6 +1742,31 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                 }
                 KeyCode::Right | KeyCode::Char('l') => {
                     if !state.expand_selected() {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    if !state.collapse_selected() {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('e' | ' ') => {
+                    if !state.toggle_selected() {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('E') => {
+                    if !state.fold_with(|f, t, _| f.toggle_all(t)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('>') => {
+                    if !state.fold_with(|f, t, n| f.expand_subtree(t, n)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('<') => {
+                    if !state.fold_with(|f, t, n| f.collapse_subtree(t, n)) {
                         return InputOutcome::Unchanged;
                     }
                 }
@@ -1079,18 +1794,48 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
             }
         }
         Mode::Trajectory => {
-            let len = state.events.len();
+            let len = state.oshown.len();
             match key.code {
                 KeyCode::Esc => state.leave_trajectory(),
-                KeyCode::Char('j') | KeyCode::Down => move_sel(&mut state.event_selected, len, 1),
-                KeyCode::Char('k') | KeyCode::Up => move_sel(&mut state.event_selected, len, -1),
-                KeyCode::PageDown => move_sel(&mut state.event_selected, len, page),
-                KeyCode::PageUp => move_sel(&mut state.event_selected, len, -page),
-                KeyCode::Char('g') | KeyCode::Home => state.event_selected = 0,
-                KeyCode::Char('G') | KeyCode::End => move_sel(&mut state.event_selected, len, isize::MAX / 2),
-                KeyCode::Char('e') => {
+                KeyCode::Char('j') | KeyCode::Down => state.step(1),
+                KeyCode::Char('k') | KeyCode::Up => state.step(-1),
+                KeyCode::PageDown => state.step(page),
+                KeyCode::PageUp => state.step(-page),
+                KeyCode::Char('g') | KeyCode::Home => state.goto(0),
+                KeyCode::Char('G') | KeyCode::End => state.goto(len.saturating_sub(1)),
+                KeyCode::Char('e' | ' ') => {
+                    if !state.outline_fold(|f, t, n| f.toggle(t, n)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    // On a row that cannot expand, `l` retries any body that failed to read.
+                    if !state.outline_fold(|f, t, n| f.expand(t, n)) && !state.retry_bodies() {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    if !state.outline_collapse() {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('E') => {
+                    if !state.outline_fold(|f, t, _| f.toggle_all(t)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('>') => {
+                    if !state.outline_fold(|f, t, n| f.expand_subtree(t, n)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('<') => {
+                    if !state.outline_fold(|f, t, n| f.collapse_subtree(t, n)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Char('x') => {
                     state.event_errors_only = !state.event_errors_only;
-                    state.event_selected = 0;
                     state.load_events();
                 }
                 KeyCode::Char('n') => {
@@ -1104,12 +1849,17 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                         Some(i) if i + 1 < state.tools.len() => Some(i + 1),
                         Some(_) => None,
                     };
-                    state.event_selected = 0;
                     state.load_events();
                 }
                 KeyCode::Char('/') => state.typing = Typing::Events,
                 KeyCode::Char('r') => return state.resume(state.session.as_ref()),
-                KeyCode::Enter => match state.child_of(state.event_selected).cloned() {
+                // A run's Enter expands or collapses it; on a dispatch row, Enter opens the child; otherwise the inspector.
+                KeyCode::Enter if state.selected_run() => {
+                    if !state.outline_fold(|f, t, n| f.toggle(t, n)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
+                KeyCode::Enter => match state.selected_event().and_then(|i| state.child_of(i)).cloned() {
                     Some(child) => state.enter_child(child),
                     None => state.open_inspector(),
                 },
@@ -1227,10 +1977,13 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
             plain("/ search"),
             plain("a all"),
             plain("A active"),
-            plain("e errors"),
+            plain("x errors"),
             plain("H host"),
             plain("s sort"),
             plain("Enter open"),
+            plain("e fold"),
+            plain("E all"),
+            plain("</> more/less"),
             plain("→ expand"),
             plain("r resume"),
             plain("R rescan"),
@@ -1239,8 +1992,11 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
         Mode::Trajectory => vec![
             plain("j/k move"),
             plain("Enter inspect/open agent"),
+            plain("e fold"),
+            plain("E all"),
+            plain("</> more/less"),
             plain("n noise"),
-            plain("e errors"),
+            plain("x errors"),
             plain("t tool"),
             plain("/ search"),
             plain("r resume"),
@@ -1472,40 +2228,44 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
     }
     keep_visible(state.selected, &mut state.scroll, list.height as usize);
     let now = now_ms();
-    for (i, item) in state.ledger.iter().enumerate().skip(state.scroll).take(list.height as usize) {
+    for (i, &n) in state.ledger.iter().enumerate().skip(state.scroll).take(list.height as usize) {
         let y = list.y + (i - state.scroll) as u16;
         let selected = i == state.selected;
         let base = if selected { Style::default().bg(theme.bg_highlight).fg(theme.text_primary) } else { Style::default().fg(theme.text_primary) };
         if selected {
             fill(buf, list, y, base);
         }
-        match item {
-            Item::More { hidden, .. } => put_row(
-                buf,
-                list,
-                y,
-                &{
-                    let mut v = vec![(" ".into(), 1, base), ("".into(), 7, base)];
-                    if show_host {
-                        v.push(("".into(), 8, base));
-                    }
-                    v.push((format!("└─ +{hidden} more (→)"), c.name, base.fg(theme.gray)));
-                    v
-                },
-            ),
-            Item::Row { row: s, branch } => {
+        let Some(node) = state.nodes.get(n) else { continue };
+        match &node.item {
+            Item::More { hidden, .. } => put_row(buf, list, y, &{
+                let mut v = vec![(" ".into(), 1, base), ("".into(), 7, base)];
+                if show_host {
+                    v.push(("".into(), 8, base));
+                }
+                v.push((format!("{}  +{hidden} more (→)", guide_prefix(&node.guides)), c.name, base.fg(theme.gray)));
+                v
+            }),
+            Item::Row { row: s } => {
                 let (glyph, glyph_color) = status_glyph(s, theme);
-                let prefix = match branch {
-                    Branch::Root => "",
-                    Branch::Mid => "├─ ",
-                    Branch::Last => "└─ ",
+                let foldable = state.tree.has_children(n);
+                let collapsed = foldable && state.tree.nodes.get(n).is_some_and(|x| state.folds.is_collapsed(&x.key));
+                let fold = match (foldable, collapsed) {
+                    (false, _) => "  ".to_string(),
+                    (true, true) => format!("{} ", crate::glyphs::chevron()),
+                    (true, false) => format!("{} ", crate::glyphs::chevron_down()),
                 };
+                let mut name = format!("{}{fold}{}", guide_prefix(&node.guides), clean_name(s));
+                if collapsed {
+                    // The hidden count stays visible; the name gives way to it.
+                    let tag = format!(" (+{})", node.hidden);
+                    name = format!("{}{tag}", truncate_str(&name, c.name.saturating_sub(tag.width())).as_str());
+                }
                 let running = s.status == Status::Active;
                 let now_text = one_line(s.now.as_deref().unwrap_or_default());
                 let mut v = vec![
                     (glyph.to_string(), 1, base.fg(glyph_color)),
                     (source_label(&s.source).to_string(), 7, base.fg(source_color(&s.source, theme))),
-                    (format!("{prefix}{}", clean_name(s)), c.name, base),
+                    (name, c.name, base),
                     (now_text, c.now, base.fg(if running { theme.text_secondary } else { theme.gray })),
                     (format!("{:>4}", age_of(s, now)), 4, base.fg(theme.text_secondary)),
                     (format!("{:>5}", s.tool_count), 5, base.fg(theme.accent_tool)),
@@ -1668,7 +2428,7 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         buf.set_span(x, area.y + 1, &Span::styled(truncate_str(text, w as usize).as_str(), *style), w);
         x += w;
     }
-    render_strip(buf, Rect { y: area.y + 2, height: 2, ..area }, &state.events, state.event_selected, theme);
+    render_strip(buf, Rect { y: area.y + 2, height: 2, ..area }, &state.events, state.selected_event().unwrap_or(0), theme);
 
     let mut filters = Vec::new();
     if state.event_errors_only {
@@ -1691,69 +2451,164 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
     let line = if filters.is_empty() {
         session.cwd.clone().unwrap_or_else(|| session.file_path.display().to_string())
     } else {
-        format!("{} · {} matching", filters.join(" · "), state.events.len())
+        format!("{} · {} matching", filters.join(" · "), state.hidden.iter().filter(|h| !**h).count())
     };
     buf.set_span(area.x, area.y + 4, &Span::styled(truncate_str(&line, area.width as usize).as_str(), Style::default().fg(theme.fuzzy_accent)), area.width);
 
     let status_rows = u16::from(state.status.is_some());
     let list = Rect { y: area.y + 5, height: area.height.saturating_sub(5 + status_rows), ..area };
-    if state.events.is_empty() {
+    if state.oshown.is_empty() {
         let msg = if state.remote_loading { "Fetching events over ssh…" } else { "No events match." };
         buf.set_span(list.x, list.y, &Span::styled(msg, dim), list.width);
     }
-    keep_visible(state.event_selected, &mut state.event_scroll, list.height as usize);
+    // Body rows are as tall as their wrapped text, so scrolling works in lines, not rows.
+    let text_w = (list.width as usize).saturating_sub(TEXT_COL);
+    let height = list.height as usize;
+    let mut bodies = state.body_rows(text_w);
+    let mut heights = row_heights(&bodies);
+    fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, height);
+    // Load the bodies on screen; one cached right here changes row heights, so measure again.
+    if state.ensure_bodies(state.event_scroll, height) {
+        bodies = state.body_rows(text_w);
+        heights = row_heights(&bodies);
+        fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, height);
+    }
+
     let summary_w = (list.width as usize).saturating_sub(7 + 7 + 9 + 2);
-    let mut prev_turn = None;
-    for (i, e) in state.events.iter().enumerate().skip(state.event_scroll).take(list.height as usize) {
-        let y = list.y + (i - state.event_scroll) as u16;
-        let selected = i == state.event_selected;
+    let bottom = list.y + list.height;
+    let sel = state.sel_pos();
+    let mut y = list.y;
+    for (k, &n) in state.oshown.iter().enumerate().skip(state.event_scroll) {
+        let h = heights.get(k).copied().unwrap_or(1) as u16;
+        if y >= bottom {
+            break;
+        }
+        let span = h.min(bottom - y);
+        let selected = k == sel;
         let base = if selected { Style::default().bg(theme.bg_highlight).fg(theme.text_primary) } else { Style::default().fg(theme.text_primary) };
         if selected {
-            fill(buf, list, y, base);
-        }
-        // Noise (only present when `n` is on) is dimmed.
-        let (text_style, chip_fg) = if e.noise { (base.fg(theme.gray_dim), theme.gray_dim) } else { (base, chip_color(e, theme)) };
-        let indent = "  ".repeat(e.depth.clamp(0, 2) as usize);
-        let one = one_line(e.detail.as_deref().filter(|d| !d.is_empty()).unwrap_or(&e.preview));
-        let body = if is_call(e) { format!("{indent}{}  {}", e.title, one) } else { format!("{indent}{one}") };
-        // Suffix: where a dispatch went, and how the call ended.
-        let mut suffix = String::new();
-        if let Some(c) = state.child_of(i) {
-            suffix.push_str(&format!("→ {} {}", truncate_str(&clean_name(c), 28), status_glyph(c, theme).0));
-        }
-        let mut failed = e.is_error;
-        if let Some(Some(f)) = state.folded.get(i) {
-            failed |= f.error;
-            if !suffix.is_empty() {
-                suffix.push(' ');
-            }
-            suffix.push_str(if f.error { "✗" } else { "✓" });
-            if f.error && let Some(d) = f.detail.as_deref().filter(|d| !d.is_empty()) {
-                suffix.push_str(&format!(" {}", truncate_str(&one_line(d), 24)));
+            for dy in 0..span {
+                fill(buf, list, y + dy, base);
             }
         }
-        let sw = suffix.width().min(summary_w / 2);
-        let body_w = summary_w.saturating_sub(if sw > 0 { sw + 1 } else { 0 });
-        let turn_mark = if e.turn.is_some() && e.turn != prev_turn { "┊" } else { " " };
-        prev_turn = e.turn.or(prev_turn);
-        let body_style = if is_result(e) && e.is_error { text_style.fg(theme.accent_error) } else { text_style };
-        let mut cells = vec![
-            (format!("{:>6}", format!("#{}", e.line)), 6, base.fg(theme.gray)),
-            (role_chip(e).to_string(), 6, base.fg(chip_fg).add_modifier(Modifier::BOLD)),
-            (format!("{turn_mark}{body}"), body_w, body_style),
-        ];
-        if sw > 0 {
-            cells.push((suffix, sw, base.fg(if failed { theme.accent_error } else { theme.accent_success })));
+        let depth = state.outline.nodes.get(n).map_or(0, |x| x.depth);
+        let indent = "  ".repeat(depth);
+        let mark = state.fold_mark(n);
+        let collapsed = state.outline.has_children(n) && state.key_at(n).is_some_and(|key| state.ofolds.is_collapsed(key));
+        match state.outline_items.get(n) {
+            Some(OutlineItem::Turn { event, tools, msgs, errors }) => {
+                let Some(e) = state.events.get(*event) else {
+                    y += h;
+                    continue;
+                };
+                let preview = one_line(e.detail.as_deref().filter(|d| !d.is_empty()).unwrap_or(&e.preview));
+                let mut text = format!("{indent}{mark}{preview}");
+                if collapsed {
+                    let mut parts = Vec::new();
+                    if *tools > 0 {
+                        parts.push(count_of(*tools, "tool", "tools"));
+                    }
+                    if *msgs > 0 {
+                        parts.push(count_of(*msgs, "msg", "msgs"));
+                    }
+                    if *errors > 0 {
+                        parts.push(format!("✗{errors}"));
+                    }
+                    if !parts.is_empty() {
+                        text.push_str(&format!("  · {}", parts.join(" · ")));
+                    }
+                }
+                put_row(
+                    buf,
+                    list,
+                    y,
+                    &[
+                        (format!("{:>6}", format!("#{}", e.line)), 6, base.fg(theme.gray)),
+                        (role_chip(e).to_string(), 6, base.fg(chip_color(e, theme)).add_modifier(Modifier::BOLD)),
+                        (text, text_w, base.add_modifier(Modifier::BOLD)),
+                    ],
+                );
+            }
+            Some(OutlineItem::Run { count, errors, .. }) => {
+                let mut text = format!("{indent}{mark}{}", count_of(*count, "tool call", "tool calls"));
+                if *errors > 0 {
+                    text.push_str(&format!("  · ✗{errors}"));
+                }
+                put_row(buf, list, y, &[(String::new(), 6, base), (String::new(), 6, base), (text, text_w, base.fg(theme.accent_tool))]);
+            }
+            Some(OutlineItem::Event(i)) => {
+                let Some(e) = state.events.get(*i) else {
+                    y += h;
+                    continue;
+                };
+                // Noise (only present when `n` is on) is dimmed.
+                let (text_style, chip_fg) = if e.noise { (base.fg(theme.gray_dim), theme.gray_dim) } else { (base, chip_color(e, theme)) };
+                let one = one_line(e.detail.as_deref().filter(|d| !d.is_empty()).unwrap_or(&e.preview));
+                let body = if is_call(e) { format!("{indent}{mark}{}  {}", e.title, one) } else { format!("{indent}{mark}{one}") };
+                // Suffix: where a dispatch went, and how the call ended.
+                let mut suffix = String::new();
+                if let Some(c) = state.child_of(*i) {
+                    suffix.push_str(&format!("→ {} {}", truncate_str(&clean_name(c), 28), status_glyph(c, theme).0));
+                }
+                let mut failed = e.is_error;
+                if let Some(Some(f)) = state.folded.get(*i) {
+                    failed |= f.error;
+                    if !suffix.is_empty() {
+                        suffix.push(' ');
+                    }
+                    suffix.push_str(if f.error { "✗" } else { "✓" });
+                    if f.error
+                        && let Some(d) = f.detail.as_deref().filter(|d| !d.is_empty())
+                    {
+                        suffix.push_str(&format!(" {}", truncate_str(&one_line(d), 24)));
+                    }
+                }
+                let sw = suffix.width().min(summary_w / 2);
+                let body_w = summary_w.saturating_sub(if sw > 0 { sw + 1 } else { 0 });
+                let body_style = if is_result(e) && e.is_error { text_style.fg(theme.accent_error) } else { text_style };
+                let mut cells = vec![
+                    (format!("{:>6}", format!("#{}", e.line)), 6, base.fg(theme.gray)),
+                    (role_chip(e).to_string(), 6, base.fg(chip_fg).add_modifier(Modifier::BOLD)),
+                    (body, body_w, body_style),
+                ];
+                if sw > 0 {
+                    cells.push((suffix, sw, base.fg(if failed { theme.accent_error } else { theme.accent_success })));
+                }
+                cells.push((fmt_time(e.timestamp, false), 8, base.fg(theme.text_secondary)));
+                put_row(buf, list, y, &cells);
+            }
+            Some(OutlineItem::Body(_)) => {
+                let indent_w = (2 * depth).min(text_w);
+                // A failed call's result section (after its separator) is drawn in the error colour.
+                let failed = matches!(state.outline_items.get(n), Some(OutlineItem::Body(i)) if state.folded.get(*i).and_then(Option::as_ref).is_some_and(|f| f.error));
+                let mut in_result = false;
+                for (dy, line) in bodies.get(k).into_iter().flatten().flatten().take(span as usize).enumerate() {
+                    in_result |= line.as_str() == RESULT_SEP || line.as_str() == RESULT_ERR_SEP;
+                    let fg = if in_result && failed { theme.accent_error } else { theme.text_secondary };
+                    let text = format!("{}{line}", " ".repeat(indent_w));
+                    put_row(buf, list, y + dy as u16, &[(String::new(), 6, base), (String::new(), 6, base), (text, text_w, base.fg(fg))]);
+                }
+            }
+            None => {}
         }
-        cells.push((fmt_time(e.timestamp, false), 8, base.fg(theme.text_secondary)));
-        put_row(buf, list, y, &cells);
+        y += h;
     }
     render_status(buf, area, state, theme);
 }
 
+/// Lines per shown row: a body is as tall as its wrapped text, every other row is one line.
+fn row_heights(bodies: &[Option<Vec<String>>]) -> Vec<usize> {
+    bodies.iter().map(|b| b.as_ref().map_or(1, |v| v.len().max(1))).collect()
+}
+
+/// `1 tool` / `3 tools`.
+fn count_of(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 fn render_inspector(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, theme: &Theme) {
     let dim = Style::default().fg(theme.gray);
-    if let Some(e) = state.events.get(state.event_selected) {
+    if let Some(e) = state.selected_event().and_then(|i| state.events.get(i)) {
         let head = format!("{} · line {} · {} · {}", e.event_type, e.line, fmt_time(e.timestamp, true), fmt_duration(e.duration_ms));
         buf.set_span(area.x, area.y, &Span::styled(truncate_str(&head, area.width as usize).as_str(), Style::default().fg(theme.text_primary).add_modifier(Modifier::BOLD)), area.width);
     }
@@ -1892,15 +2747,16 @@ mod tests {
         state.selected = 2; // task a
         state.open_selected();
         assert_eq!(state.events.len(), 1);
+        state.goto(state.oshown.len() - 1);
 
         hook(&mut writer, &roots, &a, &line("2026-10-01T00:00:05Z", "second"));
         assert!(settle(&mut state));
-        assert_eq!((state.events.len(), state.event_selected), (2, 1), "at the bottom: follows");
+        assert_eq!((state.events.len(), state.selected_event()), (2, Some(1)), "at the bottom: follows");
 
-        state.event_selected = 0;
+        state.goto(0);
         hook(&mut writer, &roots, &a, &line("2026-10-01T00:00:06Z", "third"));
         assert!(settle(&mut state));
-        assert_eq!((state.events.len(), state.event_selected), (3, 0), "mid-list: stays put");
+        assert_eq!((state.events.len(), state.selected_event()), (3, Some(0)), "mid-list: stays put");
     }
 
     /// `TRACES_DB=<copy of traces.sqlite> cargo test -p xai-grok-pager --lib traces_perf -- --ignored --nocapture`
@@ -2042,9 +2898,9 @@ mod tests {
         let (_tmp, mut state) = claude_fixture();
         assert_eq!(state.sessions.len(), 1, "roots only by default");
         assert_eq!(state.ledger.len(), 2, "parent then its child");
-        assert!(matches!(&state.ledger[1], Item::Row { row, branch: Branch::Last } if row.parent_id.is_some()));
+        assert!(matches!(&state.nodes[state.ledger[1]].item, Item::Row { row } if row.parent_id.is_some()));
         let screen = draw(&mut state, 140, 20);
-        assert!(screen.contains("└─ Explore index code"), "{screen}");
+        assert!(screen.lines().any(|l| l.contains("└─") && l.contains("Explore index code")), "{screen}");
         assert!(screen.contains("index everything please"), "{screen}");
         assert!(screen.contains("2 sessions"), "{screen}");
 
@@ -2056,22 +2912,143 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_and_alt_chords_do_not_fire_nav_letters() {
+        let (_tmp, mut state) = claude_fixture();
+        let before = state.show_all;
+        handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
+        assert_eq!(state.show_all, before);
+        press(&mut state, KeyCode::Char('x'));
+        assert!(state.errors_only);
+        handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(state.errors_only, "Ctrl+X must not toggle the errors filter");
+    }
+
+    #[test]
     fn many_children_collapse_until_expanded() {
         let (_tmp, mut state) = claude_fixture();
-        let kid = match &state.ledger[1] {
-            Item::Row { row, .. } => row.clone(),
+        let kid = match &state.nodes[state.ledger[1]].item {
+            Item::Row { row } => row.clone(),
             _ => unreachable!(),
         };
         let parent = state.sessions[0].id.clone();
         state.children.insert(parent.clone(), (0..9).map(|i| SessionRow { id: format!("k{i}"), ..kid.clone() }).collect());
         state.rebuild_ledger();
         assert_eq!(state.ledger.len(), 1 + MAX_KIDS + 1);
-        assert!(matches!(state.ledger.last(), Some(Item::More { hidden: 3, .. })));
+        assert!(matches!(state.nodes[*state.ledger.last().unwrap()].item, Item::More { hidden: 3, .. }));
         assert!(draw(&mut state, 140, 20).contains("+3 more"));
         state.selected = state.ledger.len() - 1;
         press(&mut state, KeyCode::Enter);
         assert_eq!(state.mode, Mode::List, "Enter on +N more expands instead of opening");
         assert_eq!(state.ledger.len(), 1 + 9);
+    }
+
+    /// A ledger from `(id, parent)` edges; parents must come before their children.
+    fn tree_state(edges: &[(&str, Option<&str>)]) -> TracesModalState {
+        let mut state = TracesModalState::open_with_hosts(None, vec![]);
+        let mut children: HashMap<String, Vec<SessionRow>> = HashMap::new();
+        for &(id, parent) in edges {
+            let r = SessionRow { id: id.into(), title: format!("task {id}"), ..row("claude", "/h/x.jsonl") };
+            match parent {
+                None => state.sessions.push(r),
+                Some(p) => children.entry(p.into()).or_default().push(r),
+            }
+        }
+        state.children = children;
+        state.rebuild_ledger();
+        state
+    }
+
+    /// Session ids of the visible ledger lines, in order.
+    fn shown(state: &TracesModalState) -> Vec<String> {
+        state.ledger.iter().map(|&n| state.tree.nodes[n].key.clone()).collect()
+    }
+
+    fn select(state: &mut TracesModalState, id: &str) {
+        state.selected = state.position_of(id).expect("row is shown");
+    }
+
+    #[test]
+    fn nested_tree_renders_and_folds() {
+        // r ─┬─ c1 ── g1 ── gg1
+        //    └─ c2
+        let mut state = tree_state(&[("r", None), ("c1", Some("r")), ("g1", Some("c1")), ("gg1", Some("g1")), ("c2", Some("r"))]);
+        assert_eq!(shown(&state), ["r", "c1", "c2"], "roots open, deeper parents start folded");
+        let screen = draw(&mut state, 140, 20);
+        assert!(screen.lines().any(|l| l.contains("├─ ›") && l.contains("(+2)")), "{screen}");
+
+        select(&mut state, "c1");
+        press(&mut state, KeyCode::Char('l'));
+        assert_eq!(shown(&state), ["r", "c1", "g1", "c2"]);
+        select(&mut state, "g1");
+        press(&mut state, KeyCode::Right);
+        assert_eq!(shown(&state), ["r", "c1", "g1", "gg1", "c2"]);
+        let screen = draw(&mut state, 140, 20);
+        assert!(screen.lines().any(|l| l.contains("│     └─") && l.contains("task gg1")), "{screen}");
+
+        // `h` on a leaf selects its parent; on an open parent it folds; on a folded one it moves up.
+        select(&mut state, "gg1");
+        press(&mut state, KeyCode::Char('h'));
+        assert_eq!(state.selected_session().unwrap().id, "g1");
+        assert_eq!(shown(&state), ["r", "c1", "g1", "gg1", "c2"], "parent stays open");
+        press(&mut state, KeyCode::Char('h'));
+        assert_eq!(shown(&state), ["r", "c1", "g1", "c2"], "open parent folds");
+        assert_eq!(state.selected_session().unwrap().id, "g1");
+        press(&mut state, KeyCode::Char('h'));
+        assert_eq!(state.selected_session().unwrap().id, "c1", "folded parent: selection moves up");
+        press(&mut state, KeyCode::Char('e'));
+        assert_eq!(shown(&state), ["r", "c1", "c2"], "e folds the open node");
+        let screen = draw(&mut state, 140, 20);
+        assert!(screen.lines().any(|l| l.contains("├─ ›") && l.contains("task c1") && l.contains("(+2)")), "{screen}");
+    }
+
+    #[test]
+    fn angle_brackets_fold_a_subtree_and_leave_siblings_alone() {
+        let mut state = tree_state(&[
+            ("r", None),
+            ("c1", Some("r")),
+            ("g1", Some("c1")),
+            ("gg1", Some("g1")),
+            ("c2", Some("r")),
+            ("r2", None),
+            ("s1", Some("r2")),
+            ("s1a", Some("s1")),
+        ]);
+        assert_eq!(shown(&state), ["r", "c1", "c2", "r2", "s1"]);
+        press(&mut state, KeyCode::Char('E'));
+        assert_eq!(shown(&state).len(), 8, "E expands everything when anything is folded");
+
+        select(&mut state, "c1");
+        press(&mut state, KeyCode::Char('<'));
+        assert_eq!(shown(&state), ["r", "c1", "c2", "r2", "s1", "s1a"], "< folds c1 and g1, nothing else");
+
+        select(&mut state, "r2");
+        press(&mut state, KeyCode::Char('<'));
+        assert_eq!(shown(&state), ["r", "c1", "c2", "r2"], "< on r2 folds its branch only");
+
+        select(&mut state, "r");
+        press(&mut state, KeyCode::Char('>'));
+        assert_eq!(shown(&state), ["r", "c1", "g1", "gg1", "c2", "r2"], "> opens r's branch; r2 stays folded");
+
+        press(&mut state, KeyCode::Char('E'));
+        assert_eq!(shown(&state).len(), 8, "E expands everything since r2 is folded");
+    }
+
+    #[test]
+    fn selection_and_folds_survive_a_live_requery() {
+        let mut state = tree_state(&[("r", None), ("c1", Some("r")), ("g1", Some("c1")), ("c2", Some("r"))]);
+        select(&mut state, "c1");
+        press(&mut state, KeyCode::Char('e'));
+        assert_eq!(shown(&state), ["r", "c1", "g1", "c2"]);
+        select(&mut state, "c2");
+
+        // A requery that adds a root in front of the others.
+        let mut sessions = vec![SessionRow { id: "new".into(), ..state.sessions[0].clone() }];
+        sessions.extend(state.sessions.clone());
+        let snap = Snapshot { generation: state.generation, ledger: Ok((sessions, state.children.clone())), trajectory: None };
+        assert!(state.apply(snap));
+        assert_eq!(state.selected_session().unwrap().id, "c2", "selection follows its session id");
+        assert_eq!(shown(&state), ["new", "r", "c1", "g1", "c2"], "c1 stays expanded");
     }
 
     #[test]
@@ -2094,10 +3071,11 @@ mod tests {
         let (_tmp, mut state) = claude_fixture();
         let parent = state.selected_session().unwrap().id.clone();
         press(&mut state, KeyCode::Enter);
-        assert!(state.events.iter().all(|e| !is_result(e)), "adjacent results are folded away");
+        assert!(state.hidden.iter().zip(&state.events).all(|(&h, e)| h || !is_result(e)), "adjacent results are hidden");
+        assert!(shown_events(&state).iter().all(|&i| !is_result(&state.events[i])), "and get no row of their own");
         let at = state.events.iter().position(is_dispatch).expect("an Agent row");
         assert!(matches!(&state.folded[at], Some(Fold { error: false, .. })));
-        state.event_selected = at;
+        state.sel = Some(OutlineKey::Ev(state.events[at].line));
         let screen = draw(&mut state, 140, 24);
         assert!(screen.contains("Agent  Explore index code"), "{screen}");
         assert!(screen.contains("→ Explore index code") && screen.contains("✓"), "{screen}");
@@ -2110,7 +3088,7 @@ mod tests {
 
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.session.as_ref().unwrap().id, parent, "Esc returns to the parent");
-        assert_eq!(state.event_selected, at, "at the row we left");
+        assert_eq!(state.selected_event(), Some(at), "at the row we left");
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.mode, Mode::List);
     }
@@ -2134,7 +3112,7 @@ mod tests {
         assert_eq!(state.shown_roots[0].host.as_deref(), Some("sab-air"), "newest first across hosts");
         let screen = draw(&mut state, 140, 20);
         assert!(screen.contains("HOST") && screen.contains("sab-air") && screen.contains("remote refactor job"), "{screen}");
-        assert!(screen.contains("└─ remote kid"), "{screen}");
+        assert!(screen.lines().any(|l| l.contains("└─") && l.contains("remote kid")), "{screen}");
 
         // Resume is refused for remote rows.
         state.selected = 0;
@@ -2152,6 +3130,175 @@ mod tests {
         press(&mut state, KeyCode::Char('H'));
         assert_eq!(state.shown_roots.len(), 1);
         assert!(state.shown_roots[0].host.is_none());
+    }
+
+    /// Outline rows as `Turn(1)`-style keys, in order.
+    fn shown_rows(state: &TracesModalState) -> Vec<String> {
+        state.oshown.iter().filter_map(|&n| state.key_at(n)).map(|k| format!("{k:?}")).collect()
+    }
+
+    /// Event indices of the visible event rows.
+    fn shown_events(state: &TracesModalState) -> Vec<usize> {
+        state
+            .oshown
+            .iter()
+            .filter_map(|&n| match state.outline_items.get(n)? {
+                OutlineItem::Event(i) => Some(*i),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ev(line: i64, kind: &str, role: &str, text: &str) -> EventRow {
+        EventRow {
+            line,
+            event_type: "x".into(),
+            kind: kind.into(),
+            role: Some(role.into()),
+            title: if kind == "tool" { "Bash".into() } else { String::new() },
+            preview: text.into(),
+            timestamp: None,
+            duration_ms: None,
+            input_tokens: None,
+            output_tokens: None,
+            turn: None,
+            step: None,
+            depth: 0,
+            model: None,
+            is_error: false,
+            noise: false,
+            detail: None,
+        }
+    }
+
+    /// A trajectory over `rows` with no index behind it.
+    fn trajectory(rows: Vec<EventRow>) -> TracesModalState {
+        let mut state = TracesModalState::open_with_hosts(None, vec![]);
+        state.session = Some(row("claude", "/h/x.jsonl"));
+        state.mode = Mode::Trajectory;
+        state.install_trajectory(rows, None, vec![]);
+        state
+    }
+
+    /// A user prompt, three Bash calls with their results (lines 2, 4, 6), and a reply.
+    fn three_calls() -> Vec<EventRow> {
+        vec![
+            ev(1, "message", "user", "fix it"),
+            ev(2, "tool", "tool", "ls"),
+            ev(3, "tool", "tool_result", "a"),
+            ev(4, "tool", "tool", "pwd"),
+            ev(5, "tool", "tool_result", "b"),
+            ev(6, "tool", "tool", "date"),
+            ev(7, "tool", "tool_result", "c"),
+            ev(8, "message", "assistant", "done"),
+        ]
+    }
+
+    #[test]
+    fn turn_collapses_to_a_summary_and_back() {
+        let mut state = trajectory(three_calls());
+        assert_eq!(shown_rows(&state), ["Turn(1)", "Ev(1)", "Run(2)", "Ev(8)"], "turn open, opener and run closed");
+        assert!(draw(&mut state, 140, 20).contains("3 tool calls"));
+
+        state.goto(0);
+        press(&mut state, KeyCode::Char('h'));
+        assert_eq!(shown_rows(&state), ["Turn(1)"]);
+        assert!(draw(&mut state, 140, 20).contains("3 tools · 1 msg"), "{}", draw(&mut state, 140, 20));
+
+        press(&mut state, KeyCode::Char('l'));
+        assert_eq!(shown_rows(&state).len(), 4);
+    }
+
+    #[test]
+    fn run_is_one_row_until_expanded() {
+        let mut state = trajectory(three_calls());
+        state.goto(2);
+        press(&mut state, KeyCode::Right);
+        assert_eq!(shown_rows(&state), ["Turn(1)", "Ev(1)", "Run(2)", "Ev(2)", "Ev(4)", "Ev(6)", "Ev(8)"]);
+        assert!(draw(&mut state, 140, 20).contains("Bash  ls"));
+    }
+
+    #[test]
+    fn angle_bracket_opens_runs_and_bodies_under_a_turn() {
+        let mut state = trajectory(three_calls());
+        state.goto(0);
+        press(&mut state, KeyCode::Char('>'));
+        assert_eq!(shown_rows(&state).len(), 12, "{:?}", shown_rows(&state));
+        assert!(shown_rows(&state).contains(&"Body(8)".to_string()));
+
+        press(&mut state, KeyCode::Char('G'));
+        assert_eq!(state.selected_event(), Some(7), "G lands on the last visible row");
+        press(&mut state, KeyCode::Char('g'));
+        assert_eq!(state.selected_event(), Some(0));
+    }
+
+    #[test]
+    fn body_expands_from_the_cached_text_not_the_index() {
+        let mut state = trajectory(three_calls());
+        state.bodies.insert(2, "{\n  \"cached\": \"yes\"\n}".into());
+        state.goto(2);
+        press(&mut state, KeyCode::Right);
+        state.sel = Some(OutlineKey::Ev(2));
+        press(&mut state, KeyCode::Char('l'));
+        assert!(shown_rows(&state).contains(&"Body(2)".to_string()));
+        let screen = draw(&mut state, 140, 24);
+        assert!(screen.contains("\"cached\": \"yes\""), "{screen}");
+    }
+
+    #[test]
+    fn selection_follows_its_key_through_live_growth() {
+        let mut state = trajectory(three_calls());
+        state.goto(2);
+        press(&mut state, KeyCode::Right);
+        state.sel = Some(OutlineKey::Ev(6));
+        let mut grown = three_calls();
+        grown.push(ev(9, "message", "assistant", "more"));
+        state.install_trajectory(grown, None, vec![]);
+        assert_eq!(state.sel, Some(OutlineKey::Ev(6)));
+        assert_eq!(state.selected_event(), Some(5));
+    }
+
+    #[test]
+    fn filters_open_the_runs_that_hold_matches() {
+        let mut state = trajectory(three_calls());
+        assert!(!shown_rows(&state).contains(&"Ev(4)".to_string()));
+        state.event_query = "pwd".into();
+        state.rebuild_outline();
+        assert!(shown_rows(&state).contains(&"Ev(4)".to_string()), "a filter opens the run");
+        state.event_query.clear();
+        state.rebuild_outline();
+        assert!(shown_rows(&state).contains(&"Ev(4)".to_string()), "and it stays open once seen");
+    }
+
+    #[test]
+    fn e_toggles_one_row_and_capital_e_toggles_all() {
+        let mut state = trajectory(three_calls());
+        state.goto(0);
+        press(&mut state, KeyCode::Char('e'));
+        assert_eq!(shown_rows(&state), ["Turn(1)"]);
+        press(&mut state, KeyCode::Char('E'));
+        assert_eq!(shown_rows(&state).len(), 12, "anything folded: expand all");
+        press(&mut state, KeyCode::Char('E'));
+        assert_eq!(shown_rows(&state), ["Turn(1)"], "nothing folded: collapse all");
+    }
+
+    #[test]
+    fn fit_rows_keeps_the_selected_row_on_screen() {
+        let mut scroll = 0;
+        fit_rows(5, &mut scroll, &[1, 1, 1, 1, 1, 1], 3);
+        assert_eq!(scroll, 3);
+        let mut scroll = 0;
+        fit_rows(2, &mut scroll, &[1, 4, 1], 3);
+        assert_eq!(scroll, 2, "a tall row above pushes the top down");
+    }
+
+    #[test]
+    fn bodies_wrap_to_width_and_cap() {
+        assert_eq!(wrap_body("abcdef\nxy", 4), ["abcd", "ef", "xy"]);
+        let long = "x\n".repeat(300);
+        let lines = wrap_body(&long, 10);
+        assert_eq!(lines.len(), BODY_LINES + 1);
+        assert_eq!(lines.last().map(String::as_str), Some("… Enter for inspector"));
     }
 
     #[test]
@@ -2178,5 +3325,111 @@ mod tests {
         let events = [mk(0, false, 1), mk(10, false, 1), mk(11, false, 1), mk(100, true, 2)];
         let b = bucket_events(&events, 11);
         assert_eq!((b[0], b[1], b[10]), ((1, false, true), (2, false, false), (1, true, true)));
+    }
+
+    #[test]
+    fn body_text_reads_each_harness_shape() {
+        // Claude assistant: the text block, then the tool input as JSON.
+        let claude = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me check."},{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#;
+        assert_eq!(body_text(claude), "Let me check.\n\n{\n  \"command\": \"ls\"\n}");
+        // Claude tool result: content as a string, then as an array of text blocks.
+        let plain = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"file.txt"}]}}"#;
+        assert_eq!(body_text(plain), "file.txt");
+        let blocks = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"out 1"},{"type":"text","text":"out 2"}]}]}}"#;
+        assert_eq!(body_text(blocks), "out 1\n\nout 2");
+        // Codex response item.
+        let codex = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}"#;
+        assert_eq!(body_text(codex), "Done.");
+        // Pi tool call: arguments as JSON.
+        let pi = r#"{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"read","arguments":{"path":"a.rs"}}]}}"#;
+        assert_eq!(body_text(pi), "{\n  \"path\": \"a.rs\"\n}");
+    }
+
+    #[test]
+    fn body_text_dedupes_and_falls_back_to_pretty() {
+        let dup = r#"{"message":{"role":"user","content":"same"},"toolUseResult":{"stdout":"same","stderr":""}}"#;
+        assert_eq!(body_text(dup), "same");
+        assert_eq!(body_text(r#"{"type":"x"}"#), "{\n  \"type\": \"x\"\n}");
+        assert_eq!(body_text("not json"), "not json");
+    }
+
+    #[test]
+    fn guides_cut_levels_deeper_than_three() {
+        assert_eq!(guide_prefix(&[true]), "└─ ");
+        assert_eq!(guide_prefix(&[false, false, true]), "│  │  └─ ");
+        assert_eq!(guide_prefix(&[false, true, false, true]), "…    │  └─ ");
+    }
+
+    #[test]
+    fn a_skipped_sibling_does_not_leave_the_last_drawn_one_open() {
+        let mk = |id: &str| SessionRow { id: id.into(), ..row("claude", "/h/x.jsonl") };
+        // The second `a` repeats the first, so `session` skips it: `b` is the last line drawn.
+        let kids: HashMap<String, Vec<SessionRow>> = HashMap::from([("p".to_string(), vec![mk("a"), mk("a"), mk("b")])]);
+        let all_kids = HashSet::new();
+        let mut flat = Flatten { kids: &kids, all_kids: &all_kids, tree: Vec::new(), nodes: Vec::new(), seen: HashSet::new() };
+        flat.session(&mk("p"), None, Vec::new());
+        let (_, nodes) = flat.finish();
+        let guides: Vec<String> = nodes.iter().map(|n| guide_prefix(&n.guides)).collect();
+        assert_eq!(guides, ["", "├─ ", "└─ "]);
+    }
+
+    #[test]
+    fn esc_from_a_child_restores_the_parent_folds_and_selects_its_agent_row() {
+        // Calls on lines 2, 4 and 6 form a run; line 6 is the Agent dispatch that opens the child.
+        let mut rows = three_calls();
+        if let Some(agent) = rows.get_mut(5) {
+            agent.title = "Agent".into();
+        }
+        let mut state = trajectory(rows);
+        state.session_children = vec![SessionRow { id: "child".into(), ..row("claude", "/h/child.jsonl") }];
+        state.dispatch_child = state.match_dispatches();
+        state.goto(2);
+        press(&mut state, KeyCode::Right);
+        state.sel = Some(OutlineKey::Ev(6));
+        assert!(shown_rows(&state).contains(&"Ev(6)".to_string()));
+        let before = state.ofolds.clone();
+
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(state.session.as_ref().map(|s| s.id.as_str()), Some("child"));
+        press(&mut state, KeyCode::Char('E'));
+        assert_ne!(state.ofolds, before, "the child's folds are its own");
+
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.session.as_ref().map(|s| s.id.as_str()), Some("x"));
+        assert_eq!(state.ofolds, before, "the parent's folds come back");
+        assert_eq!(state.sel, Some(OutlineKey::Ev(6)));
+        assert!(shown_rows(&state).contains(&"Ev(6)".to_string()), "the Agent row is shown inside its run");
+        assert!(state.trail.is_empty());
+    }
+
+    #[test]
+    fn a_failed_body_read_is_not_cached_and_l_retries_it() {
+        let mut state = trajectory(three_calls());
+        state.body_pending.insert(2);
+        state.body_tx.send(BodyMsg { session_id: "x".into(), line: 2, text: Err("boom".into()) }).unwrap();
+        state.poll_remote();
+        assert!(!state.bodies.contains_key(&2), "an error is not cached");
+        assert!(!state.body_pending.contains(&2));
+        assert!(state.status.as_deref().is_some_and(|s| s.contains("press l to retry")), "{:?}", state.status);
+
+        // The row is skipped while its failure stands; `l` on a row that cannot fold clears it.
+        state.goto(0);
+        press(&mut state, KeyCode::Char('l'));
+        assert!(state.body_failed.is_empty());
+        assert!(!state.bodies.contains_key(&2));
+    }
+
+    #[test]
+    fn a_filter_does_not_reopen_a_run_the_user_collapsed() {
+        let mut state = trajectory(three_calls());
+        state.event_errors_only = true;
+        state.rebuild_outline();
+        assert!(shown_rows(&state).contains(&"Ev(4)".to_string()), "the filter opens the run");
+        state.goto(2);
+        press(&mut state, KeyCode::Char('h'));
+        assert!(!shown_rows(&state).contains(&"Ev(4)".to_string()));
+
+        state.install_trajectory(three_calls(), None, vec![]);
+        assert!(!shown_rows(&state).contains(&"Ev(4)".to_string()), "a live poll keeps the manual collapse");
     }
 }

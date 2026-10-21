@@ -26,6 +26,8 @@ pub mod managed_connectors_wait;
 pub mod mcps_modal;
 pub mod memory_modal;
 pub mod traces_modal;
+pub(crate) mod traces_fold;
+pub(crate) mod traces_outline;
 pub mod modal;
 pub(crate) mod modal_list;
 pub mod modal_window;
