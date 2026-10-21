@@ -213,7 +213,14 @@ pub struct TracesModalState {
     live_return: bool,
     live_exit: bool,
     live_gen: u64,
-    live_fold: Option<mpsc::Receiver<LiveFold>>,
+    live_worker: Option<FoldWorker>,
+    live_inflight: bool,
+    /// When the local rows were folded: their ages advance by the time since.
+    live_fold_at: Instant,
+    /// Empty-state receipt counts, from the fold worker; the total is asked for only until nonzero.
+    live_folded: bool,
+    live_receipts_hour: i64,
+    live_receipts_any: bool,
     live_rx: Option<mpsc::Receiver<LiveHostResult>>,
     live_pending: usize,
     live_at: Option<Instant>,
@@ -452,7 +459,12 @@ impl TracesModalState {
             live_return: false,
             live_exit: false,
             live_gen: 0,
-            live_fold: None,
+            live_worker: None,
+            live_inflight: false,
+            live_fold_at: Instant::now(),
+            live_folded: false,
+            live_receipts_hour: 0,
+            live_receipts_any: false,
             live_rx: None,
             live_pending: 0,
             live_at: None,
@@ -498,7 +510,9 @@ impl TracesModalState {
         let health = index.health();
         redraw |= live != self.live || health != self.health;
         (self.live, self.health) = (live, health);
-        if mark != self.watermark && self.inflight.is_none() {
+        // `grok live` never shows the ledger: its refresh runs only for an open trajectory.
+        let ledger_idle = self.standalone && self.mode == Mode::Live;
+        if mark != self.watermark && self.inflight.is_none() && !ledger_idle {
             self.watermark = mark;
             self.spawn_refresh();
         }
@@ -1533,7 +1547,7 @@ impl TracesModalState {
         }
         if self.remote_pending == 0 {
             self.remote_rx = None;
-            if self.mode != Mode::Live && !self.hosts.is_empty() && self.remote_at.is_none_or(|t| t.elapsed() >= REMOTE_EVERY) {
+            if !(self.mode == Mode::Live || self.live_return) && !self.hosts.is_empty() && self.remote_at.is_none_or(|t| t.elapsed() >= REMOTE_EVERY) {
                 self.remote_at = Some(Instant::now());
                 let (tx, rx) = mpsc::channel();
                 self.remote_rx = Some(rx);
@@ -1679,6 +1693,8 @@ struct RemoteLive {
     fetched_at: Instant,
     ok: bool,
     note: Option<String>,
+    /// The last answer was an empty one with a note (schema gate): stale rows from before must not come back.
+    gated: bool,
 }
 
 struct LiveHostResult {
@@ -1689,9 +1705,72 @@ struct LiveHostResult {
 /// A finished local fold; `generation` lets a stale one be dropped.
 struct LiveFold {
     generation: u64,
+    /// When the fold was requested: the instant its ages are measured at.
+    at: Instant,
     rows: Result<Vec<LiveRow>, String>,
     /// Titles of parents that are not among the rows (for `↑ <parent>`).
     titles: HashMap<String, String>,
+    /// Hook receipts in the last hour, for the empty state.
+    receipts_hour: i64,
+    /// Whether any receipt exists; asked only while the state does not know yet.
+    receipts_any: Option<bool>,
+}
+
+struct FoldReq {
+    now_ms: i64,
+    at: Instant,
+    generation: u64,
+    need_total: bool,
+}
+
+/// One long-lived thread that folds on request; it opens the index once and again only after an error.
+struct FoldWorker {
+    tx: mpsc::Sender<FoldReq>,
+    rx: mpsc::Receiver<LiveFold>,
+}
+
+fn spawn_fold_worker(path: std::path::PathBuf) -> FoldWorker {
+    let (tx, req_rx) = mpsc::channel::<FoldReq>();
+    let (out_tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut index: Option<TraceIndex> = None;
+        while let Ok(req) = req_rx.recv() {
+            let ix = match index.take() {
+                Some(ix) => ix,
+                None => match TraceIndex::open(&path) {
+                    Ok(ix) => ix,
+                    Err(e) => {
+                        let f = LiveFold::failed(&req, e.to_string());
+                        if out_tx.send(f).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                },
+            };
+            let f = compute_fold(&ix, &req);
+            if f.rows.is_ok() {
+                index = Some(ix);
+            }
+            if out_tx.send(f).is_err() {
+                break;
+            }
+        }
+    });
+    FoldWorker { tx, rx }
+}
+
+impl LiveFold {
+    fn failed(req: &FoldReq, e: String) -> Self {
+        Self {
+            generation: req.generation,
+            at: req.at,
+            rows: Err(e),
+            titles: HashMap::new(),
+            receipts_hour: 0,
+            receipts_any: None,
+        }
+    }
 }
 
 /// One displayed row: ages already advanced, state rendered, title composed.
@@ -1865,12 +1944,12 @@ fn remote_session(row: &LiveRow) -> SessionRow {
     }
 }
 
-fn compute_fold(index: &TraceIndex, now_ms: i64, generation: u64) -> LiveFold {
+fn compute_fold(index: &TraceIndex, req: &FoldReq) -> LiveFold {
     let alive = |pid: i64, start: Option<i64>| match start {
         Some(s) => live::alive(pid, s),
         None => live::alive_pid(pid),
     };
-    match live::fold_all(index, now_ms, alive) {
+    match live::fold_all(index, req.now_ms, alive) {
         Ok(rows) => {
             let ids: HashSet<&str> = rows.iter().map(|r| r.session_id.as_str()).collect();
             let titles = rows
@@ -1882,16 +1961,19 @@ fn compute_fold(index: &TraceIndex, now_ms: i64, generation: u64) -> LiveFold {
                 })
                 .collect();
             LiveFold {
-                generation,
+                generation: req.generation,
+                at: req.at,
                 rows: Ok(rows),
                 titles,
+                receipts_hour: index
+                    .receipt_count_since(req.now_ms - HOUR_MS)
+                    .unwrap_or(0),
+                receipts_any: req
+                    .need_total
+                    .then(|| index.receipt_count_since(0).unwrap_or(0) > 0),
             }
         }
-        Err(e) => LiveFold {
-            generation,
-            rows: Err(e.to_string()),
-            titles: HashMap::new(),
-        },
+        Err(e) => LiveFold::failed(req, e.to_string()),
     }
 }
 
@@ -1909,29 +1991,39 @@ impl TracesModalState {
         self.live_exit
     }
 
+    /// Ask the standalone live screen to close (Ctrl-C).
+    pub fn request_live_exit(&mut self) {
+        self.live_exit = true;
+    }
+
     fn enter_live(&mut self) {
         self.mode = Mode::Live;
         self.live_gen += 1;
-        self.live_fold = None;
         self.kick_fold(now_ms());
         self.poll_remote_live();
     }
 
-    /// Start a fold on a worker unless one is running.
+    /// Ask the worker for a fold unless one is already out.
     fn kick_fold(&mut self, now_ms: i64) {
-        if self.live_fold.is_some() {
+        if self.live_inflight {
             return;
         }
         let Some(index) = &self.index else { return };
-        let path = index.db_path().to_path_buf();
-        let generation = self.live_gen;
-        let (tx, rx) = mpsc::channel();
-        self.live_fold = Some(rx);
-        std::thread::spawn(move || {
-            if let Ok(index) = TraceIndex::open(&path) {
-                let _ = tx.send(compute_fold(&index, now_ms, generation));
-            }
-        });
+        let worker = self
+            .live_worker
+            .get_or_insert_with(|| spawn_fold_worker(index.db_path().to_path_buf()));
+        let req = FoldReq {
+            now_ms,
+            at: Instant::now(),
+            generation: self.live_gen,
+            need_total: !self.live_receipts_any,
+        };
+        if worker.tx.send(req).is_ok() {
+            self.live_inflight = true;
+        } else {
+            self.live_worker = None;
+            self.status = Some("fold: worker stopped".into());
+        }
     }
 
     fn apply_fold(&mut self, f: LiveFold) {
@@ -1939,6 +2031,10 @@ impl TracesModalState {
             Ok(rows) => {
                 self.live_rows = rows;
                 self.live_titles = f.titles;
+                self.live_fold_at = f.at;
+                self.live_folded = true;
+                self.live_receipts_hour = f.receipts_hour;
+                self.live_receipts_any |= f.receipts_any.unwrap_or(false);
                 if self
                     .status
                     .as_deref()
@@ -1954,18 +2050,21 @@ impl TracesModalState {
     /// Live mode's share of the 1s poll: take a finished fold, start the next, collect remote answers.
     /// Always true: ages move every second.
     fn poll_live_screen(&mut self, now_ms: i64) -> bool {
-        if let Some(rx) = &self.live_fold {
-            match rx.try_recv() {
+        if self.live_inflight
+            && let Some(w) = &self.live_worker
+        {
+            match w.rx.try_recv() {
                 Ok(f) => {
-                    self.live_fold = None;
+                    self.live_inflight = false;
                     if f.generation == self.live_gen {
                         self.apply_fold(f);
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    self.live_fold = None;
-                    self.status = Some("fold: index unavailable".into());
+                    self.live_inflight = false;
+                    self.live_worker = None;
+                    self.status = Some("fold: worker stopped".into());
                 }
             }
         }
@@ -2014,25 +2113,29 @@ impl TracesModalState {
     fn apply_live_host(&mut self, h: LiveHostResult) {
         let now = Instant::now();
         let old_note = self.remote_live.get(&h.target).and_then(|r| r.note.clone());
+        let was_gated = self.remote_live.get(&h.target).is_some_and(|r| r.gated);
         let entry = match h.result {
             Ok(Fetched { rows, note }) => RemoteLive {
+                gated: rows.is_empty() && note.is_some(),
                 rows,
                 fetched_at: now,
                 ok: true,
                 note,
             },
-            Err(_) => match remote::cached_live(&h.target) {
+            Err(_) => match remote::cached_live(&h.target).filter(|_| !was_gated) {
                 Some((elapsed, rows)) => RemoteLive {
                     rows,
                     fetched_at: now.checked_sub(elapsed).unwrap_or(now),
                     ok: false,
                     note: old_note,
+                    gated: false,
                 },
                 None => RemoteLive {
                     rows: Vec::new(),
                     fetched_at: now,
                     ok: false,
                     note: old_note,
+                    gated: was_gated,
                 },
             },
         };
@@ -2042,7 +2145,13 @@ impl TracesModalState {
     #[cfg(test)]
     fn fold_now(&mut self, now_ms: i64) {
         let Some(index) = &self.index else { return };
-        let f = compute_fold(index, now_ms, self.live_gen);
+        let req = FoldReq {
+            now_ms,
+            at: Instant::now(),
+            generation: self.live_gen,
+            need_total: !self.live_receipts_any,
+        };
+        let f = compute_fold(index, &req);
         self.apply_fold(f);
     }
 
@@ -2053,6 +2162,8 @@ impl TracesModalState {
         remote: Vec<(&str, Vec<LiveRow>, Instant, bool, Option<&str>)>,
     ) {
         self.live_rows = local;
+        self.live_fold_at = Instant::now();
+        self.live_folded = true;
         self.hosts = remote.iter().map(|r| r.0.to_string()).collect();
         self.remote_live = remote
             .into_iter()
@@ -2064,6 +2175,7 @@ impl TracesModalState {
                         fetched_at,
                         ok,
                         note: note.map(String::from),
+                        gated: false,
                     },
                 )
             })
@@ -2109,7 +2221,12 @@ impl TracesModalState {
 
     /// Local and remote rows merged at `now`, ordered, filtered by the search, then collapsed.
     fn live_view(&self, now: Instant) -> LiveView {
-        let mut all: Vec<LiveRow> = self.live_rows.iter().map(|r| advance(r, 0)).collect();
+        let local_extra = now.saturating_duration_since(self.live_fold_at).as_millis() as i64;
+        let mut all: Vec<LiveRow> = self
+            .live_rows
+            .iter()
+            .map(|r| advance(r, local_extra))
+            .collect();
         for target in &self.hosts {
             if let Some(rl) = self.remote_live.get(target) {
                 let extra = now.saturating_duration_since(rl.fetched_at).as_millis() as i64;
@@ -2190,24 +2307,24 @@ impl TracesModalState {
     }
 
     /// Index of the selected line; the selection follows its session id, else keeps its position.
+    /// Only user moves change `live_sel`: a fallback row is shown selected without replacing it.
     fn live_pos(&mut self, lines: &[LiveLine]) -> Option<usize> {
         if lines.is_empty() {
-            self.live_sel = None;
-            self.live_sel_idx = 0;
             return None;
         }
         let found = self
             .live_sel
             .as_ref()
             .and_then(|id| lines.iter().position(|l| l.row.session_id == *id));
-        let idx = found.unwrap_or(if self.live_sel.is_some() {
+        if let Some(i) = found {
+            self.live_sel_idx = i;
+            return Some(i);
+        }
+        Some(if self.live_sel.is_some() {
             self.live_sel_idx.min(lines.len() - 1)
         } else {
             0
-        });
-        self.live_sel = Some(lines[idx].row.session_id.clone());
-        self.live_sel_idx = idx;
-        Some(idx)
+        })
     }
 
     fn live_move(&mut self, delta: isize) {
@@ -2271,6 +2388,7 @@ impl TracesModalState {
         if self.standalone {
             self.live_exit = true;
         } else {
+            self.live_query.clear();
             self.mode = Mode::List;
         }
     }
@@ -2329,18 +2447,21 @@ pub fn render_live_at(
             .sum::<usize>()
             + n.saturating_sub(1)
     };
-    let shown = (1..=hosts.len())
+    // The local host always stays: remote hosts drop first, then the left text is cut.
+    let fits = (1..=hosts.len())
         .rev()
-        .find(|&n| left.width() + 1 + host_w(n) + 1 <= w)
-        .unwrap_or(0);
-    let left = if shown == 0 {
-        fit(&left, w).trim_end().to_string()
+        .find(|&n| left.width() + 1 + host_w(n) + 1 <= w);
+    let shown = fits.unwrap_or(1);
+    let left = if fits.is_none() {
+        fit(&left, w.saturating_sub(host_w(1) + 2))
+            .trim_end()
+            .to_string()
     } else {
         left
     };
     buf.set_stringn(area.x, area.y, &left, w, left_style);
-    if shown > 0 {
-        let mut x = area.x + (w - 1 - host_w(shown)) as u16;
+    {
+        let mut x = area.x + w.saturating_sub(1 + host_w(shown)) as u16;
         for (i, (label, mark, color)) in hosts[..shown].iter().enumerate() {
             if i > 0 {
                 x += 1;
@@ -2440,15 +2561,18 @@ fn live_empty(state: &TracesModalState) -> Vec<String> {
     if !state.live_query.is_empty() {
         return vec![" no match".into()];
     }
-    let Some(index) = &state.index else {
+    if state.index.is_none() {
         return vec![" no live agents · no index".into()];
-    };
-    let n = index.receipt_count_since(now_ms() - HOUR_MS).unwrap_or(0);
+    }
+    if !state.live_folded {
+        return vec![" no live agents".into()];
+    }
+    let n = state.live_receipts_hour;
     let noun = if n == 1 { "receipt" } else { "receipts" };
     let mut rows = vec![format!(
         " no live agents · {n} hook {noun} in the last hour · grok-traces doctor"
     )];
-    if index.receipt_count_since(0).unwrap_or(0) == 0 {
+    if !state.live_receipts_any {
         rows.push(INSTALL_LINE.into());
     }
     rows
@@ -2476,7 +2600,7 @@ fn draw_live_line(
             let head = fit(&l.title, title_w.saturating_sub(tag.width()))
                 .trim_end()
                 .to_string();
-            pad_to(&format!("{head}{tag}"), title_w)
+            fit(&format!("{head}{tag}"), title_w)
         }
     };
     let text_color = if l.row.state == LiveState::Prompt || l.glyph == "◌" {
@@ -5853,7 +5977,7 @@ mod live_tests {
             (
                 "w36",
                 vec![
-                    r#" grok live · 10 agents · 2 waiting"#,
+                    r#" grok live · 10 agents…  sab-mini ●"#,
                     r#" ⚠  Traces packet… permis…   2m"#,
                     r#" ⚠? long wait      permis…   8m"#,
                     r#" ○  snapshot tests your…     1m"#,
@@ -6090,6 +6214,8 @@ mod live_tests {
         let tmp = tempfile::tempdir().unwrap();
         let (mut writer, reader) = idx(&tmp);
         let mut s = with_index(Some(reader));
+        assert_eq!(snap(&mut s, 100, 4, t0)[1], " no live agents", "before the first fold");
+        s.fold_now(now_ms());
         let rows = snap(&mut s, 100, 4, t0);
         assert_eq!(
             rows[1],
@@ -6100,6 +6226,7 @@ mod live_tests {
             " install hooks: crates/codegen/xai-grok-traces/hooks/install.sh --apply"
         );
         receipt(&mut writer);
+        s.fold_now(now_ms());
         let rows = snap(&mut s, 100, 4, t0);
         assert_eq!(
             rows[1],
@@ -6108,6 +6235,7 @@ mod live_tests {
         assert_eq!(rows[2], "");
         receipt(&mut writer);
         receipt(&mut writer);
+        s.fold_now(now_ms());
         assert_eq!(
             snap(&mut s, 100, 4, t0)[1],
             " no live agents · 3 hook receipts in the last hour · grok-traces doctor"
@@ -6280,25 +6408,112 @@ mod live_tests {
             lr("c", "claude", "C", LiveState::Working, "x", 3),
         ];
         s.apply_fold(LiveFold {
-            generation: 0,
             rows: Ok(rows),
-            titles: HashMap::new(),
+            ..fold0()
         });
         let v = s.live_view(Instant::now());
         assert_eq!(s.live_pos(&v.lines), Some(0));
         assert_eq!(s.live_sel.as_deref(), Some("b"));
         // The selected row vanishes: the row now at the same position is selected.
         s.apply_fold(LiveFold {
-            generation: 0,
             rows: Ok(vec![
                 lr("a", "claude", "A", LiveState::Working, "x", 9),
                 lr("c", "claude", "C", LiveState::Working, "x", 3),
             ]),
-            titles: HashMap::new(),
+            ..fold0()
         });
         let v = s.live_view(Instant::now());
         assert_eq!(s.live_pos(&v.lines), Some(0));
-        assert_eq!(s.live_sel.as_deref(), Some("c"));
+        assert_eq!(
+            s.live_sel.as_deref(),
+            Some("b"),
+            "a fallback row does not replace the user's selection"
+        );
+        // It comes back, and is selected again.
+        s.apply_fold(LiveFold {
+            rows: Ok(vec![
+                lr("a", "claude", "A", LiveState::Working, "x", 9),
+                lr("b", "claude", "B", LiveState::Working, "x", 0),
+            ]),
+            ..fold0()
+        });
+        let v = s.live_view(Instant::now());
+        assert_eq!(s.live_pos(&v.lines).map(|i| v.lines[i].row.session_id.as_str()), Some("b"));
+    }
+
+    fn fold0() -> LiveFold {
+        LiveFold {
+            generation: 0,
+            at: Instant::now(),
+            rows: Ok(Vec::new()),
+            titles: HashMap::new(),
+            receipts_hour: 0,
+            receipts_any: None,
+        }
+    }
+
+    #[test]
+    fn local_rows_age_since_their_fold() {
+        let t0 = Instant::now();
+        let mut s = state();
+        s.set_live(vec![lr("a", "claude", "A", LiveState::Working, "x", 5)], vec![]);
+        s.live_fold_at = t0 - Duration::from_secs(8);
+        let v = s.live_view(t0);
+        assert_eq!(live::fmt_age(live::age_ms(&v.lines[0].row, 0)), "13s");
+        s.live_fold_at = t0;
+        let v = s.live_view(t0);
+        assert_eq!(live::fmt_age(live::age_ms(&v.lines[0].row, 0)), "5s");
+    }
+
+    #[test]
+    fn q_in_traces_clears_the_live_query() {
+        let mut s = state();
+        s.live_query = "bash".into();
+        press(&mut s, KeyCode::Char('q'));
+        assert_eq!(s.mode, Mode::List);
+        assert!(s.live_query.is_empty());
+    }
+
+    #[test]
+    fn narrow_header_keeps_the_local_host_and_drops_remotes_first() {
+        let t0 = Instant::now();
+        let mut s = state();
+        s.set_live(
+            states(),
+            vec![("sab@sab-air", vec![], t0, true, None)],
+        );
+        let wide = snap(&mut s, 60, 2, t0);
+        assert!(wide[0].ends_with("sab-mini ● sab-air ●"), "{:?}", wide[0]);
+        let mid = snap(&mut s, 50, 2, t0);
+        assert!(mid[0].ends_with("sab-mini ●") && !mid[0].contains("sab-air"), "{:?}", mid[0]);
+        let tight = snap(&mut s, 30, 2, t0);
+        assert!(tight[0].ends_with("sab-mini ●"), "{:?}", tight[0]);
+        assert!(tight[0].contains("grok live"), "{:?}", tight[0]);
+        let tiny = snap(&mut s, 8, 2, t0);
+        assert!(tiny[0].width() <= 8);
+    }
+
+    #[test]
+    fn a_gated_host_shows_no_cached_rows_after_a_later_error() {
+        let mut s = state();
+        s.hosts = vec!["sab@sab-air.invalid".into()];
+        let ok = |rows: Vec<LiveRow>, note: Option<&str>| LiveHostResult {
+            target: "sab@sab-air.invalid".into(),
+            result: Ok(Fetched { rows, note: note.map(String::from) }),
+        };
+        let err = || LiveHostResult {
+            target: "sab@sab-air.invalid".into(),
+            result: Err(remote::Error::Unreachable { host: "sab@sab-air.invalid".into(), detail: "down".into() }),
+        };
+        s.apply_live_host(ok(vec![], Some("sab-air: update grok-traces")));
+        assert!(s.remote_live["sab@sab-air.invalid"].gated);
+        s.apply_live_host(err());
+        let r = &s.remote_live["sab@sab-air.invalid"];
+        assert!(r.rows.is_empty() && !r.ok && r.gated);
+        assert!(r.note.is_some(), "the note is kept");
+        s.apply_live_host(ok(remote_rows(), None));
+        let r = &s.remote_live["sab@sab-air.invalid"];
+        assert!(!r.gated && r.ok && r.rows.len() == 3);
     }
 
     fn pi_state() -> (tempfile::TempDir, TracesModalState, String) {
@@ -6382,9 +6597,9 @@ mod live_tests {
         assert_eq!(s.mode, Mode::List);
         press(&mut s, KeyCode::Char('L'));
         assert_eq!(s.mode, Mode::Live);
-        assert!(s.live_fold.is_some(), "first fold starts at once");
+        assert!(s.live_inflight, "first fold starts at once");
         let end = Instant::now() + Duration::from_secs(10);
-        while s.live_fold.is_some() && Instant::now() < end {
+        while s.live_inflight && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(5));
             assert!(s.poll_live_at(now_ms()), "Live repaints every tick");
         }
