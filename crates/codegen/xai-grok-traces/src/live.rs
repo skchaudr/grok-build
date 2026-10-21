@@ -95,6 +95,88 @@ pub fn alive(pid: i64, start: i64) -> bool {
     }
 }
 
+// ---- receipts as the live signal ----
+
+/// One hook receipt as the live screen reads it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveReceipt {
+    pub id: i64,
+    pub session_id: Option<String>,
+    pub native_session: Option<String>,
+    pub agent_id: Option<String>,
+    pub event: String,
+    pub tool: Option<String>,
+    pub detail: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub at_ms: i64,
+}
+
+/// A turn boundary: what the session did when a receipt of this kind arrived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Boundary {
+    Idle,
+    Prompt,
+    End,
+}
+
+/// Subagent lifetime events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Child {
+    Start,
+    Stop,
+}
+
+/// Every event name `boundary` can map; the SQL prefilter (it still decides on `detail`).
+pub const BOUNDARY_EVENTS: &[&str] = &[
+    "SessionStart",
+    "Stop",
+    "StopFailure",
+    "Notification",
+    "UserPromptSubmit",
+    "SessionEnd",
+    "session_start",
+    "agent_end",
+    "agent_start",
+    "session_shutdown",
+    "sessionStart",
+    "stop",
+    "beforeSubmitPrompt",
+    "sessionEnd",
+];
+
+/// Every event name `child_kind` can map.
+pub const CHILD_EVENTS: &[&str] = &["SubagentStart", "SubagentStop", "subagentStart", "subagentStop"];
+
+/// The turn boundary an event is, per source. Event names are case-sensitive per source.
+/// A Claude `SessionStart` with detail `compact` fires mid-turn and is no boundary;
+/// a Claude `Notification` is one only as `idle_prompt`.
+pub fn boundary(source: &str, event: &str, detail: Option<&str>) -> Option<Boundary> {
+    use Boundary::{End, Idle, Prompt};
+    match (source, event) {
+        ("claude", "SessionStart") => (detail != Some("compact")).then_some(Idle),
+        ("claude", "Stop" | "StopFailure") => Some(Idle),
+        ("claude", "Notification") => (detail == Some("idle_prompt")).then_some(Idle),
+        ("claude", "UserPromptSubmit") => Some(Prompt),
+        ("claude", "SessionEnd") => Some(End),
+        ("pi", "session_start" | "agent_end") => Some(Idle),
+        ("pi", "agent_start") => Some(Prompt),
+        ("pi", "session_shutdown") => Some(End),
+        ("cursor", "sessionStart" | "stop") => Some(Idle),
+        ("cursor", "beforeSubmitPrompt") => Some(Prompt),
+        ("cursor", "sessionEnd") => Some(End),
+        _ => None,
+    }
+}
+
+/// Subagent start/stop events: Claude `SubagentStart/Stop`, Cursor `subagentStart/Stop`.
+pub fn child_kind(source: &str, event: &str) -> Option<Child> {
+    match (source, event) {
+        ("claude", "SubagentStart") | ("cursor", "subagentStart") => Some(Child::Start),
+        ("claude", "SubagentStop") | ("cursor", "subagentStop") => Some(Child::Stop),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +193,58 @@ mod tests {
         assert_eq!(harness_in_chain(&chain(&["claude"])), Some(100));
         assert_eq!(harness_in_chain(&chain(&["sh", "-bash", "fish"])), None);
         assert_eq!(harness_in_chain(&[]), None);
+    }
+
+    #[test]
+    fn boundary_table() {
+        use Boundary::*;
+        let b = boundary;
+        assert_eq!(b("claude", "SessionStart", Some("startup")), Some(Idle));
+        assert_eq!(b("claude", "SessionStart", None), Some(Idle));
+        assert_eq!(b("claude", "SessionStart", Some("compact")), None, "mid-turn after auto-compaction");
+        assert_eq!(b("claude", "Notification", Some("idle_prompt")), Some(Idle));
+        assert_eq!(b("claude", "Notification", Some("permission_prompt")), None);
+        assert_eq!(b("claude", "Notification", None), None);
+        assert_eq!((b("claude", "Stop", None), b("claude", "StopFailure", None)), (Some(Idle), Some(Idle)));
+        assert_eq!((b("claude", "UserPromptSubmit", None), b("claude", "SessionEnd", None)), (Some(Prompt), Some(End)));
+        assert_eq!((b("pi", "agent_end", None), b("pi", "agent_start", None), b("pi", "session_shutdown", None)), (Some(Idle), Some(Prompt), Some(End)));
+        assert_eq!(b("pi", "session_start", None), Some(Idle));
+        assert_eq!((b("cursor", "stop", None), b("cursor", "beforeSubmitPrompt", None), b("cursor", "sessionEnd", None)), (Some(Idle), Some(Prompt), Some(End)));
+        assert_eq!(b("cursor", "sessionStart", None), Some(Idle));
+        // Case-sensitive per source; tools and ticks are no boundary.
+        assert_eq!((b("cursor", "Stop", None), b("claude", "stop", None), b("claude", "PreToolUse", None), b("codex", "Stop", None)), (None, None, None, None));
+        assert_eq!(b("cursor", "afterAgentResponse", None), None);
+    }
+
+    #[test]
+    fn boundary_events_cover_the_table() {
+        for (source, event) in [("claude", "Notification"), ("claude", "Stop"), ("pi", "agent_end"), ("cursor", "sessionEnd")] {
+            assert!(BOUNDARY_EVENTS.contains(&event), "{source} {event}");
+        }
+        // Every name the table can map is prefiltered in.
+        for source in ["claude", "pi", "cursor"] {
+            for event in BOUNDARY_EVENTS {
+                let _ = boundary(source, event, Some("idle_prompt"));
+            }
+        }
+        let mapped: Vec<&str> = BOUNDARY_EVENTS
+            .iter()
+            .copied()
+            .filter(|e| ["claude", "pi", "cursor"].iter().any(|s| boundary(s, e, Some("idle_prompt")).is_some()))
+            .collect();
+        assert_eq!(mapped.len(), BOUNDARY_EVENTS.len(), "no dead names in the prefilter");
+    }
+
+    #[test]
+    fn child_kinds_are_case_sensitive_per_source() {
+        assert_eq!(child_kind("claude", "SubagentStart"), Some(Child::Start));
+        assert_eq!(child_kind("claude", "SubagentStop"), Some(Child::Stop));
+        assert_eq!(child_kind("cursor", "subagentStart"), Some(Child::Start));
+        assert_eq!(child_kind("cursor", "subagentStop"), Some(Child::Stop));
+        assert_eq!((child_kind("claude", "subagentStart"), child_kind("cursor", "SubagentStop"), child_kind("pi", "SubagentStart")), (None, None, None));
+        for e in CHILD_EVENTS {
+            assert!(["claude", "cursor"].iter().any(|s| child_kind(s, e).is_some()), "{e}");
+        }
     }
 
     #[cfg(unix)]
