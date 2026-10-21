@@ -93,6 +93,8 @@ pub struct Receipt {
     /// The harness process (payload `harness_pid`, else the ancestry walk) and its start, Unix seconds.
     pub harness_pid: Option<i64>,
     pub harness_start: Option<i64>,
+    /// The harness and its ancestors up to pid 1 as `a>b>c`, at most 12 entries (see `live::via_of`).
+    pub harness_chain: Option<String>,
 }
 
 impl TraceIndex {
@@ -101,11 +103,11 @@ impl TraceIndex {
         let at = if r.at_ms == 0 { now_ms() } else { r.at_ms };
         self.conn().execute(
             "INSERT INTO trace_receipts (at_ms, source, event, native_session, path, session_id, tool, cwd,
-             detail, tool_use_id, agent_id, harness_pid, harness_start)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             detail, tool_use_id, agent_id, harness_pid, harness_start, harness_chain)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 at, r.source, r.event, r.native_session, r.path, r.session_id, r.tool, r.cwd, r.detail, r.tool_use_id, r.agent_id,
-                r.harness_pid, r.harness_start
+                r.harness_pid, r.harness_start, r.harness_chain
             ],
         )?;
         let id = self.conn().last_insert_rowid();
@@ -115,6 +117,14 @@ impl TraceIndex {
             self.conn().execute(
                 "UPDATE trace_sessions SET harness_pid = ?2, harness_start = ?3 WHERE id = ?1",
                 params![sid, pid, r.harness_start],
+            )?;
+        }
+        // `via` follows the chain alone: it is kept even when the process start could not be read.
+        if let (Some(sid), Some(chain)) = (&r.session_id, &r.harness_chain) {
+            // Never clobbers: a truncated chain (no `launchd`) or one naming no host keeps a stored via.
+            self.conn().execute(
+                "UPDATE trace_sessions SET via = COALESCE(?2, via) WHERE id = ?1 AND (?3 OR via IS NULL)",
+                params![sid, crate::live::via_of(chain), chain.ends_with("launchd")],
             )?;
         }
         if id % SAMPLE_EVERY == 0 {

@@ -59,27 +59,163 @@ pub fn proc_start(pid: i64) -> Option<i64> {
     proc_info(pid).map(|(_, _, start, _)| start)
 }
 
-/// The harness above the hook: walks up from this process's parent, past shells.
-/// Returns `(pid, start)`; `None` when the chain is unreadable or all shells.
-pub fn find_harness() -> Option<(i64, i64)> {
+/// Entries kept in a `harness_chain`.
+const MAX_CHAIN: usize = 12;
+/// Interpreters whose `comm` says nothing; the script they run names the process.
+fn is_interpreter(comm: &str) -> bool {
+    let c = comm.to_ascii_lowercase();
+    c == "node" || c == "bun" || c.starts_with("python")
+}
+
+/// Options that take the next argument as a value (not a script).
+const VALUE_FLAGS: [&str; 10] = ["-m", "-r", "--require", "--import", "--loader", "-W", "-X", "--conditions", "--eval", "--print"];
+/// Inline code: the arguments are code, never a script, and may hold anything.
+const INLINE_FLAGS: [&str; 5] = ["-e", "-p", "-c", "--eval", "--print"];
+/// `bun` subcommands that precede the script.
+const BUN_SUBCOMMANDS: [&str; 4] = ["run", "x", "test", "exec"];
+
+/// `argv` of a process from a `KERN_PROCARGS2` buffer: `argc: i32`, the exec path, NUL padding, then the
+/// NUL-terminated arguments (argv[0] first). Tolerates `argc` larger than the strings present; a final
+/// string cut off by the buffer's end is dropped.
+pub fn parse_procargs2(buf: &[u8]) -> Vec<String> {
+    let Some(head) = buf.get(..4) else { return Vec::new() };
+    let argc = i32::from_ne_bytes([head[0], head[1], head[2], head[3]]).max(0) as usize;
+    let mut rest = &buf[4..];
+    let Some(end) = rest.iter().position(|b| *b == 0) else { return Vec::new() };
+    rest = &rest[end..];
+    let skip = rest.iter().position(|b| *b != 0).unwrap_or(rest.len());
+    rest = &rest[skip..];
+    let mut out = Vec::new();
+    while out.len() < argc {
+        let Some(end) = rest.iter().position(|b| *b == 0) else { break };
+        out.push(String::from_utf8_lossy(&rest[..end]).into_owned());
+        rest = &rest[end + 1..];
+    }
+    out
+}
+
+/// The script (or `-m` module) an interpreter runs: the first argument after argv[0] that is not an option.
+/// `-e`/`-p` run inline code, so no script resolves; the other value-taking options skip their value.
+pub fn script_of(argv: &[String]) -> Option<String> {
+    let bun = argv.first().is_some_and(|a| a.rsplit('/').next() == Some("bun"));
+    let mut skipped_sub = false;
+    let mut args = argv.iter().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-m" => return args.next().cloned().and_then(plain_name),
+            f if INLINE_FLAGS.contains(&f) => return None,
+            f if VALUE_FLAGS.contains(&f) => {
+                args.next();
+            }
+            f if f.starts_with('-') => {}
+            f if bun && !skipped_sub && BUN_SUBCOMMANDS.contains(&f) => skipped_sub = true,
+            _ => return plain_name(a.rsplit('/').next().unwrap_or(a).to_string()),
+        }
+    }
+    None
+}
+
+/// A name safe to show: not empty, at most 64 chars, no whitespace (else it is likely code or a secret).
+fn plain_name(n: String) -> Option<String> {
+    (!n.is_empty() && n.chars().count() <= 64 && !n.chars().any(char::is_whitespace)).then_some(n)
+}
+
+/// One chain entry: the `comm` basename without a login-shell `-`; for interpreters (after the harness) the script instead.
+fn chain_name(comm: &str, argv: impl FnOnce() -> Option<Vec<String>>, substitute: bool) -> String {
+    let base = comm.rsplit('/').next().unwrap_or(comm);
+    let base = base.strip_prefix('-').unwrap_or(base);
+    let name = if substitute && is_interpreter(base) { argv().and_then(|a| script_of(&a)) } else { None };
+    name.unwrap_or_else(|| base.to_string()).replace('>', "_")
+}
+
+/// `argv` of a live process via `KERN_PROCARGS2`; `None` on EPERM, a vanished process or a zombie.
+#[cfg(target_os = "macos")]
+fn proc_argv(pid: i64) -> Option<Vec<String>> {
+    let pid32 = i32::try_from(pid).ok().filter(|p| *p > 0)?;
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid32];
+    let mut size: libc::size_t = 0;
+    // SAFETY: a null buffer asks sysctl only for the size.
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) } != 0 || size == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; size];
+    // SAFETY: sysctl writes at most `size` bytes into `buf` and updates `size`.
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+        return None;
+    }
+    buf.truncate(size);
+    Some(parse_procargs2(&buf))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn proc_argv(_pid: i64) -> Option<Vec<String>> {
+    None
+}
+
+/// The processes from `from` up to and including pid 1: `(pid, ppid, comm, start, zombie)`.
+fn ancestry(from: i64) -> Vec<(i64, i64, String, i64, bool)> {
+    let mut nodes: Vec<(i64, i64, String, i64, bool)> = Vec::new();
+    let mut pid = from;
+    while pid >= 1 && nodes.len() < MAX_WALK && !nodes.iter().any(|n| n.0 == pid) {
+        // pid 1 can be unreadable for an unprivileged caller; it is launchd all the same.
+        let info = proc_info(pid).or_else(|| (pid == 1 && cfg!(target_os = "macos")).then(|| (0, "launchd".to_string(), 0, false)));
+        let Some((ppid, comm, start, zombie)) = info else { break };
+        nodes.push((pid, ppid, comm, start, zombie));
+        pid = ppid;
+    }
+    nodes
+}
+
+/// `nodes[first..]` as `a>b>c`, at most [`MAX_CHAIN`] entries. The first keeps its `comm`; later interpreters
+/// are named by their script.
+fn chain_of(nodes: &[(i64, i64, String, i64, bool)], first: usize) -> Option<String> {
+    let names: Vec<String> = nodes
+        .iter()
+        .skip(first)
+        .take(MAX_CHAIN)
+        .enumerate()
+        .map(|(i, (pid, _, comm, _, zombie))| chain_name(comm, || if *zombie { None } else { proc_argv(*pid) }, i > 0))
+        .collect();
+    (!names.is_empty()).then(|| names.join(">"))
+}
+
+/// The harness above the hook (the first non-shell ancestor, never pid 1) as `(pid, start, harness_chain)`.
+/// The chain runs from the harness up to pid 1. `None` when the ancestry is unreadable or all shells.
+pub fn find_harness_chain() -> Option<(i64, i64, Option<String>)> {
     #[cfg(unix)]
     {
         // SAFETY: getppid has no preconditions.
-        let mut pid = i64::from(unsafe { libc::getppid() });
-        let mut chain: Vec<Proc> = Vec::new();
-        let mut starts = Vec::new();
-        while pid > 1 && chain.len() < MAX_WALK && !chain.iter().any(|(p, _, _)| *p == pid) {
-            let Some((ppid, comm, start, _)) = proc_info(pid) else { break };
-            chain.push((pid, ppid, comm));
-            starts.push(start);
-            pid = ppid;
-        }
-        let harness = harness_in_chain(&chain)?;
-        let i = chain.iter().position(|(p, _, _)| *p == harness)?;
-        Some((harness, starts[i]))
+        let nodes = ancestry(i64::from(unsafe { libc::getppid() }));
+        let procs: Vec<Proc> = nodes.iter().filter(|n| n.0 > 1).map(|n| (n.0, n.1, n.2.clone())).collect();
+        let harness = harness_in_chain(&procs)?;
+        let i = nodes.iter().position(|n| n.0 == harness)?;
+        Some((harness, nodes[i].3, chain_of(&nodes, i)))
     }
     #[cfg(not(unix))]
     None
+}
+
+/// The chain for a harness whose pid the payload gave (Pi): that pid first, then its ancestors.
+pub fn chain_from(pid: i64) -> Option<String> {
+    chain_of(&ancestry(pid), 0)
+}
+
+/// The harness above the hook: walks up from this process's parent, past shells.
+/// Returns `(pid, start)`; `None` when the chain is unreadable or all shells.
+pub fn find_harness() -> Option<(i64, i64)> {
+    find_harness_chain().map(|(pid, start, _)| (pid, start))
+}
+
+/// Where a session was launched from: the first entry after the harness that names a host.
+pub fn via_of(chain: &str) -> Option<String> {
+    chain.split('>').skip(1).find_map(|e| match e {
+        "bb-host-daemon.js" => Some("bb"),
+        "bb-acp.mjs" | "zed" | "Zed" => Some("zed"),
+        "herdr" => Some("herdr"),
+        _ if e.starts_with("Cursor") => Some("cursor"),
+        _ => None,
+    })
+    .map(str::to_string)
 }
 
 /// The process exists and is not a zombie (no start time to compare).
@@ -340,6 +476,9 @@ pub struct LiveRow {
     pub context_window: Option<i64>,
     #[serde(default)]
     pub host: Option<String>,
+    /// Where the harness was launched from (`bb`, `zed`, `herdr`, `cursor`), from its receipts' `harness_chain`.
+    #[serde(default)]
+    pub via: Option<String>,
 }
 
 /// What `grok-traces live --json` prints, one line. `live_schema` must equal [`LIVE_SCHEMA`] to be read.
@@ -626,6 +765,7 @@ pub fn fold_session(source: &str, row: &SessionRow, receipts: &[LiveReceipt], ki
         native_id: row.native_id.clone(),
         context_tokens: row.context_tokens,
         context_window: row.context_window,
+        via: row.via.clone(),
         ..Default::default()
     };
     Folded { open_tools, open_children, row: Some(live) }
@@ -675,6 +815,7 @@ pub fn fold_children(source: &str, parent: &SessionRow, receipts: &[LiveReceipt]
             native_id: kid.native_id.clone(),
             context_tokens: kid.context_tokens,
             context_window: kid.context_window,
+            via: parent.via.clone(),
             ..Default::default()
         });
     }
@@ -858,6 +999,120 @@ mod tests {
         }
         assert!(!alive(pid, start), "an exited, unreaped child is not alive");
         child.wait().unwrap();
+    }
+
+    fn procargs(argc: i32, exec: &str, pad: usize, args: &[&str]) -> Vec<u8> {
+        let mut b = argc.to_ne_bytes().to_vec();
+        b.extend(exec.as_bytes());
+        b.extend(std::iter::repeat_n(0u8, pad));
+        for a in args {
+            b.extend(a.as_bytes());
+            b.push(0);
+        }
+        b
+    }
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn procargs2_parses_padding_short_argc_and_truncation() {
+        let buf = procargs(3, "/usr/local/bin/node", 5, &["node", "/x/bb-host-daemon.js", "--flag"]);
+        assert_eq!(parse_procargs2(&buf), argv(&["node", "/x/bb-host-daemon.js", "--flag"]));
+        // argc larger than the strings present (env follows in a real buffer): stops at the end.
+        let buf = procargs(9, "/bin/node", 1, &["node", "a.js"]);
+        assert_eq!(parse_procargs2(&buf), argv(&["node", "a.js"]));
+        // argc smaller than the strings: only argc are argv.
+        assert_eq!(parse_procargs2(&procargs(1, "/bin/node", 1, &["node", "FOO=1"])), argv(&["node"]));
+        // Truncated mid-string: the cut string is dropped.
+        let mut buf = procargs(2, "/bin/node", 1, &["node", "script.js"]);
+        buf.truncate(buf.len() - 4);
+        assert_eq!(parse_procargs2(&buf), argv(&["node"]));
+        // Truncated in the exec path, in the header, and empty.
+        assert!(parse_procargs2(&procargs(2, "/bin/no", 0, &[])).is_empty());
+        assert!(parse_procargs2(&[1, 0]).is_empty());
+        assert!(parse_procargs2(&[]).is_empty());
+        assert!(parse_procargs2(&(-4i32).to_ne_bytes()).is_empty());
+    }
+
+    #[test]
+    fn script_of_skips_options_and_resolves_m() {
+        assert_eq!(script_of(&argv(&["node", "/a/b/bb-host-daemon.js"])).as_deref(), Some("bb-host-daemon.js"));
+        assert_eq!(script_of(&argv(&["node", "--no-warnings", "--import", "x.mjs", "-r", "y", "bb-acp.mjs"])).as_deref(), Some("bb-acp.mjs"));
+        assert_eq!(script_of(&argv(&["node", "--loader", "l", "--require", "r", "s.js"])).as_deref(), Some("s.js"));
+        assert_eq!(script_of(&argv(&["python3", "-m", "http.server", "8000"])).as_deref(), Some("http.server"));
+        assert_eq!(script_of(&argv(&["python3", "-u", "-m", "pkg.mod"])).as_deref(), Some("pkg.mod"));
+        assert_eq!(script_of(&argv(&["node", "-e", "console.log(1)", "x"])), None);
+        assert_eq!(script_of(&argv(&["python3", "-p", "1"])), None);
+        assert_eq!(script_of(&argv(&["node", "--inspect"])), None);
+        assert_eq!(script_of(&argv(&["node"])), None);
+        assert_eq!(script_of(&argv(&["python3", "-c", "import os; x/y"])), None);
+        assert_eq!(script_of(&argv(&["node", "--eval", "x", "s.js"])), None);
+        assert_eq!(script_of(&argv(&["python3", "-W", "ignore", "-X", "dev", "t.py"])).as_deref(), Some("t.py"));
+        assert_eq!(script_of(&argv(&["node", "--conditions", "dev", "s.js"])).as_deref(), Some("s.js"));
+        assert_eq!(script_of(&argv(&["node", &"a".repeat(65)])), None);
+        assert_eq!(script_of(&argv(&["node", "my script.js"])), None);
+        assert_eq!(script_of(&argv(&["python3", "-m", "a b"])), None);
+        assert_eq!(script_of(&argv(&["bun", "run", "/p/x.ts"])).as_deref(), Some("x.ts"));
+        assert_eq!(script_of(&argv(&["bun", "x", "pkg"])).as_deref(), Some("pkg"));
+        assert_eq!(script_of(&argv(&["bun", "test"])), None);
+        assert_eq!(script_of(&argv(&["bun", "--hot", "exec", "srv.ts"])).as_deref(), Some("srv.ts"));
+        assert_eq!(script_of(&argv(&["node", "run"])).as_deref(), Some("run"));
+        assert_eq!(script_of(&argv(&["node", "-m"])), None);
+    }
+
+    #[test]
+    fn chain_names_strip_dash_substitute_scripts_and_fall_back() {
+        let none = || None::<Vec<String>>;
+        assert_eq!(chain_name("-zsh", none, true), "zsh");
+        assert_eq!(chain_name("-zsh", none, false), "zsh");
+        let a = || Some(argv(&["node", "/x/bb-acp.mjs"]));
+        assert_eq!(chain_name("node", a, true), "bb-acp.mjs");
+        assert_eq!(chain_name("node", a, false), "node", "the harness keeps its comm");
+        assert_eq!(chain_name("Python", || Some(argv(&["python", "tool.py"])), true), "tool.py");
+        // EPERM / zombie / vanished: comm.
+        assert_eq!(chain_name("node", none, true), "node");
+        assert_eq!(chain_name("bun", || Some(argv(&["bun"])), true), "bun");
+        assert_eq!(chain_name("zed", a, true), "zed", "argv is read only for interpreters");
+        assert_eq!(chain_name("a>b", none, true), "a_b");
+    }
+
+    #[test]
+    fn via_of_reads_the_first_host_after_the_harness() {
+        assert_eq!(via_of("claude>bb-host-daemon.js>launchd").as_deref(), Some("bb"));
+        assert_eq!(via_of("claude>zsh>herdr").as_deref(), Some("herdr"));
+        assert_eq!(via_of("claude>bb-acp.mjs>zed").as_deref(), Some("zed"));
+        assert_eq!(via_of("claude>zsh>Zed>launchd").as_deref(), Some("zed"));
+        assert_eq!(via_of("claude>zsh>Cursor Helper (Plugin)>Cursor").as_deref(), Some("cursor"));
+        assert_eq!(via_of("claude>zsh>tmux>launchd"), None);
+        assert_eq!(via_of("claude"), None);
+        assert_eq!(via_of("herdr"), None, "the harness itself never counts");
+        assert_eq!(via_of("claude>herdr>bb-host-daemon.js").as_deref(), Some("herdr"), "nearest first");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn chains_cap_at_twelve_and_end_at_launchd() {
+        // Own ancestry: the chain from this process ends at launchd and never exceeds the cap.
+        let me = i64::from(std::process::id());
+        let nodes = ancestry(me);
+        // The walk ends at pid 1 unless an ancestor in between is unreadable (another user's process).
+        let reached = nodes.last().map(|n| n.0) == Some(1);
+        let chain = chain_from(me).expect("own chain");
+        let n = chain.split('>').count();
+        assert!(n <= MAX_CHAIN && n == nodes.len().min(MAX_CHAIN), "{chain}");
+        if reached && nodes.len() <= MAX_CHAIN {
+            assert!(chain.ends_with("launchd"), "{chain}");
+        }
+        let init = ancestry(1);
+        assert_eq!(chain_of(&init, 0).as_deref(), Some("launchd"));
+        let long: Vec<_> = (0..20).map(|i| (100 + i, 99 + i, format!("p{i}"), 1, false)).collect();
+        let c = chain_of(&long, 0).unwrap();
+        assert_eq!(c.split('>').count(), 12);
+        assert!(c.starts_with("p0>p1>") && c.ends_with(">p11"));
+        assert_eq!(chain_of(&long, 18).as_deref(), Some("p18>p19"));
+        assert_eq!(chain_of(&long, 20), None);
     }
 
     #[cfg(target_os = "macos")]

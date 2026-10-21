@@ -168,7 +168,7 @@ pub fn session_to_json(s: &SessionRow) -> Value {
         "status": s.status.as_str(), "parent_id": s.parent_id, "label": s.label, "agent_type": s.agent_type,
         "now": s.now, "last_event_at": s.last_event_at, "children": s.children, "failed": s.failed,
         "native_id": s.native_id, "mtime_ms": s.mtime_ms, "harness_pid": s.harness_pid, "harness_start": s.harness_start,
-        "context_tokens": s.context_tokens, "context_window": s.context_window,
+        "context_tokens": s.context_tokens, "context_window": s.context_window, "via": s.via,
     })
 }
 
@@ -216,6 +216,7 @@ pub fn session_from_json(v: &Value) -> Option<SessionRow> {
         harness_start: i64_of(v, "harness_start"),
         context_tokens: i64_of(v, "context_tokens"),
         context_window: i64_of(v, "context_window"),
+        via: str_of(v, "via"),
     })
 }
 

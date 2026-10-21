@@ -197,6 +197,51 @@ fn receipt_only_rows_group_by_chat_and_yield_to_the_session_row() {
 }
 
 #[test]
+fn via_follows_the_newest_chain_and_survives_a_missing_start() {
+    let mut e = env();
+    e.rcpt("cursor", "sessionStart", 10, |r| {
+        r.native_session = Some("zzz".into());
+        r.harness_chain = Some("Cursor>zsh>launchd".into());
+    });
+    e.rcpt("cursor", "preToolUse", 20, |r| r.native_session = Some("zzz".into()));
+    let rows = e.idx.live_sessions().unwrap();
+    assert_eq!((rows.len(), rows[0].via.as_deref()), (1, None), "the harness itself (Cursor) is not a host");
+    e.rcpt("cursor", "preToolUse", 30, |r| {
+        r.native_session = Some("zzz".into());
+        r.harness_chain = Some("Cursor>zsh>herdr".into());
+    });
+    e.rcpt("cursor", "preToolUse", 40, |r| r.native_session = Some("zzz".into()));
+    assert_eq!(e.idx.live_sessions().unwrap()[0].via.as_deref(), Some("herdr"), "newest non-NULL chain");
+
+    let tr = "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"<user_query>\\nhi\\n</user_query>\"}]}}\n";
+    write(&e.home.join(".cursor/projects/w-proj/agent-transcripts/zzz/zzz.jsonl"), tr);
+    e.scan();
+    let sess = e.session("cursor");
+    assert_eq!(e.idx.session(&sess.id).unwrap().unwrap().via.as_deref(), Some("herdr"), "write_aggregate adopts the chain");
+    // A receipt with a chain and no readable start updates via but not the pid pair.
+    e.rcpt("cursor", "preToolUse", 50, |r| {
+        r.session_id = Some(sess.id.clone());
+        r.harness_chain = Some("claude>bb-host-daemon.js>launchd".into());
+    });
+    let after = e.idx.session(&sess.id).unwrap().unwrap();
+    assert_eq!((after.via.as_deref(), after.harness_start), (Some("bb"), None));
+    // A truncated chain, or one naming no host, never clobbers a good via.
+    for chain in ["claude>zsh>herdr", "claude>zsh>launchd"] {
+        e.rcpt("cursor", "preToolUse", 60, |r| {
+            r.session_id = Some(sess.id.clone());
+            r.harness_chain = Some(chain.into());
+        });
+        let kept = e.idx.session(&sess.id).unwrap().unwrap().via;
+        assert_eq!(kept.as_deref(), Some("bb"), "{chain}");
+    }
+    let json = xai_grok_traces::remote::session_to_json(&after);
+    assert_eq!(xai_grok_traces::remote::session_from_json(&json).unwrap().via.as_deref(), Some("bb"));
+    let mut old = json.clone();
+    old.as_object_mut().unwrap().remove("via");
+    assert_eq!(xai_grok_traces::remote::session_from_json(&old).unwrap().via, None);
+}
+
+#[test]
 fn last_receipt_orders_by_time_then_id_and_counts_since() {
     let mut e = env();
     write(&e.home.join(".cursor/projects/w-proj/agent-transcripts/abc/abc.jsonl"), CURSOR);
