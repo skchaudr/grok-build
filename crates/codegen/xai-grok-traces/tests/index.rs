@@ -790,3 +790,20 @@ fn a_receipt_without_a_start_never_overwrites_the_stored_pair() {
     idx.record_receipt(&xai_grok_traces::Receipt { source: "codex".into(), event: "x".into(), session_id: Some(sid.clone()), harness_pid: Some(1234), harness_start: None, ..Default::default() }).unwrap();
     assert_eq!(pair(), before);
 }
+
+#[test]
+fn a_payload_harness_pid_still_builds_the_chain() {
+    use xai_grok_traces::hook::{extract, ingest};
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let me = std::process::id();
+    ingest(&mut idx, &e.roots, extract("pi", format!(r#"{{"event":"session_start","harness_pid":{me}}}"#).as_bytes())).unwrap();
+    let chain: Option<String> = rusqlite::Connection::open(&e.db).unwrap().query_row("SELECT harness_chain FROM trace_receipts ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+    if cfg!(target_os = "macos") {
+        let chain = chain.expect("chain");
+        assert!(chain.split('>').count() >= 2 && chain.split('>').count() <= 12, "{chain}");
+    } else {
+        assert_eq!(chain, None);
+    }
+}

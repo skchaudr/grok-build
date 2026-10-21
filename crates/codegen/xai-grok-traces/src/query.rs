@@ -127,6 +127,8 @@ pub struct SessionRow {
     /// Size of the last prompt, and the model's window when recorded.
     pub context_tokens: Option<i64>,
     pub context_window: Option<i64>,
+    /// Where the harness was launched from, per `live::via_of`.
+    pub via: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -176,7 +178,7 @@ const SESSION_COLS: &str = "s.id, s.source_id, s.title, s.file_path, s.model, s.
 
 pub(crate) fn session_cols() -> String {
     format!("{SESSION_COLS}, {}, {}, {PARENT_ID}, s.label, s.agent_type, s.now_text, s.last_event_at, {CHILDREN}, s.failed,
-  s.native_id, s.harness_pid, s.harness_start, s.context_tokens, s.context_window", *LAST_RECEIPT_AT, *LAST_RECEIPT_EVENT)
+  s.native_id, s.harness_pid, s.harness_start, s.context_tokens, s.context_window, s.via", *LAST_RECEIPT_AT, *LAST_RECEIPT_EVENT)
 }
 
 fn terminal_list() -> String {
@@ -229,6 +231,7 @@ pub(crate) fn session_row(r: &Row<'_>, now: i64) -> rusqlite::Result<SessionRow>
         harness_start: r.get(29)?,
         context_tokens: r.get(30)?,
         context_window: r.get(31)?,
+        via: r.get(32)?,
     })
 }
 
@@ -349,6 +352,11 @@ impl TraceIndex {
             "SELECT r.cwd FROM trace_receipts r WHERE r.source = 'cursor' AND r.session_id IS NULL AND r.native_session = ?1 AND r.cwd IS NOT NULL
              ORDER BY r.at_ms DESC, r.id DESC LIMIT 1",
         )?;
+        let mut chain = conn.prepare_cached(
+            "SELECT r.harness_chain FROM trace_receipts r
+             WHERE r.source = 'cursor' AND r.session_id IS NULL AND r.native_session = ?1 AND r.harness_chain IS NOT NULL
+             ORDER BY r.at_ms DESC, r.id DESC LIMIT 1",
+        )?;
         let mut pid = conn.prepare_cached(
             "SELECT r.harness_pid, r.harness_start FROM trace_receipts r
              WHERE r.source = 'cursor' AND r.session_id IS NULL AND r.native_session = ?1 AND r.harness_pid IS NOT NULL
@@ -360,6 +368,7 @@ impl TraceIndex {
             }
             let cwd: Option<String> = cwd.query_row([&native], |r| r.get(0)).optional()?;
             let (harness_pid, harness_start) = pid.query_row([&native], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.unwrap_or_default();
+            let via = chain.query_row([&native], |r| r.get::<_, String>(0)).optional()?.and_then(|c| crate::live::via_of(&c));
             let title = cwd
                 .as_deref()
                 .and_then(|c| Path::new(c).file_name())
@@ -377,6 +386,7 @@ impl TraceIndex {
                 native_id: Some(native),
                 harness_pid,
                 harness_start,
+                via,
                 ..Default::default()
             });
         }

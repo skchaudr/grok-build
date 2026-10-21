@@ -94,7 +94,9 @@ CREATE TABLE IF NOT EXISTS trace_sessions (sk INTEGER PRIMARY KEY, id TEXT NOT N
   -- What the session is doing: last meaningful event (`Tool: arg` or assistant text), its time, and whether it ended in failure.
   signal_count INTEGER NOT NULL DEFAULT 0, now_text TEXT, last_event_at INTEGER, failed INTEGER NOT NULL DEFAULT 0,
   -- Live: the harness process of the newest receipt (start in Unix seconds), and the last context size seen.
-  harness_pid INTEGER, harness_start INTEGER, context_tokens INTEGER, context_window INTEGER);
+  harness_pid INTEGER, harness_start INTEGER, context_tokens INTEGER, context_window INTEGER,
+  -- Where the harness was launched from (`bb`, `zed`, `herdr`, `cursor`), from the newest receipt's `harness_chain`.
+  via TEXT);
 -- Event types, titles and models are few and repeat on every row, so rows store ids into this table.
 CREATE TABLE IF NOT EXISTS trace_names (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
 -- kind/role are `Kind::code`/`Role::code`. No cwd here: it is session-level. `preview` is '' when it equals the
@@ -110,7 +112,7 @@ CREATE TABLE IF NOT EXISTS trace_event_usage (sk INTEGER NOT NULL, line_number I
 CREATE TABLE IF NOT EXISTS trace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS trace_receipts (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
   event TEXT NOT NULL, native_session TEXT, path TEXT, session_id TEXT, tool TEXT, cwd TEXT,
-  detail TEXT, tool_use_id TEXT, agent_id TEXT, harness_pid INTEGER, harness_start INTEGER);
+  detail TEXT, tool_use_id TEXT, agent_id TEXT, harness_pid INTEGER, harness_start INTEGER, harness_chain TEXT);
 CREATE INDEX IF NOT EXISTS trace_receipts_session ON trace_receipts(session_id, at_ms, id);
 CREATE INDEX IF NOT EXISTS trace_receipts_at ON trace_receipts(at_ms, id);
 -- Receipts not yet keyed to a session row: the native-id branch of every receipt match, and the receipt-only grouping.
@@ -1246,6 +1248,18 @@ impl TraceIndex {
             ),
             [sid],
         )?;
+        // `via` has its own newest-non-NULL-chain subquery: a receipt with a chain but no readable start still counts.
+        let chain: Option<String> = tx
+            .query_row(
+                "SELECT r.harness_chain FROM trace_receipts r WHERE r.harness_chain IS NOT NULL AND r.session_id = ?1
+                 ORDER BY r.at_ms DESC, r.id DESC LIMIT 1",
+                [sid],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(chain) = chain {
+            tx.execute("UPDATE trace_sessions SET via = ?2 WHERE id = ?1", params![sid, crate::live::via_of(&chain)])?;
+        }
         Ok(())
     }
 
