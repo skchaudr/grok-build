@@ -13,6 +13,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use xai_grok_traces::live::{self, LiveRow, LiveState};
 use xai_grok_traces::remote::{self, EventQuery, Fetched, RemoteFilter};
 use xai_grok_traces::{EventFilter, EventRow, RECEIPT_WINDOW_MS, SOURCES, SessionFilter, SessionRow, Sort, Status, TraceIndex, source_label};
 
@@ -58,6 +59,8 @@ pub enum Mode {
     List,
     Trajectory,
     Inspector,
+    /// `grok live` / `L`: the running agents, one row each.
+    Live,
 }
 
 /// Which line editor has the keyboard, if any.
@@ -66,6 +69,7 @@ enum Typing {
     No,
     Ledger,
     Events,
+    Live,
 }
 
 /// A parent trajectory parked while its dispatch child is open: the session, the selected row and the outline folds.
@@ -195,6 +199,25 @@ pub struct TracesModalState {
 
     pub raw: Option<String>,
     raw_scroll: usize,
+
+    /// Live screen: local rows as last folded, and the titles of parents the fold did not return.
+    live_rows: Vec<LiveRow>,
+    live_titles: HashMap<String, String>,
+    remote_live: HashMap<String, RemoteLive>,
+    live_collapsed: HashSet<String>,
+    live_sel: Option<String>,
+    live_sel_idx: usize,
+    live_scroll: usize,
+    live_query: String,
+    standalone: bool,
+    live_return: bool,
+    live_exit: bool,
+    live_gen: u64,
+    live_fold: Option<mpsc::Receiver<LiveFold>>,
+    live_rx: Option<mpsc::Receiver<LiveHostResult>>,
+    live_pending: usize,
+    live_at: Option<Instant>,
+    local_host: String,
 }
 
 #[derive(Clone, Debug)]
@@ -417,6 +440,23 @@ impl TracesModalState {
             tool_filter: None,
             raw: None,
             raw_scroll: 0,
+            live_rows: Vec::new(),
+            live_titles: HashMap::new(),
+            remote_live: HashMap::new(),
+            live_collapsed: HashSet::new(),
+            live_sel: None,
+            live_sel_idx: 0,
+            live_scroll: 0,
+            live_query: String::new(),
+            standalone: false,
+            live_return: false,
+            live_exit: false,
+            live_gen: 0,
+            live_fold: None,
+            live_rx: None,
+            live_pending: 0,
+            live_at: None,
+            local_host: short_hostname(),
         };
         s.watermark = s.index.as_ref().and_then(|i| i.receipts_watermark().ok()).unwrap_or(0);
         s.refresh();
@@ -449,6 +489,9 @@ impl TracesModalState {
             }
         }
         redraw |= self.poll_remote();
+        if self.mode == Mode::Live {
+            redraw |= self.poll_live_screen(now_ms);
+        }
         let Some(index) = &self.index else { return redraw };
         let mark = index.receipts_watermark().unwrap_or(self.watermark);
         let live = index.last_receipt_at().ok().flatten().is_some_and(|at| now_ms - at < RECEIPT_WINDOW_MS);
@@ -797,6 +840,7 @@ impl TracesModalState {
     fn open_selected(&mut self) {
         let Some(row) = self.selected_session().cloned() else { return };
         self.trail.clear();
+        self.live_return = false;
         self.open_session(row);
     }
 
@@ -844,11 +888,18 @@ impl TracesModalState {
             self.sel = t.sel;
             self.rebuild_outline();
         } else {
-            self.mode = Mode::List;
+            self.mode = if self.live_return {
+                Mode::Live
+            } else {
+                Mode::List
+            };
             self.session = None;
             self.set_events(Vec::new());
             self.remote_loading = false;
             self.remote_ev = None;
+            if std::mem::take(&mut self.live_return) {
+                self.kick_fold(now_ms());
+            }
         }
     }
 
@@ -1482,7 +1533,7 @@ impl TracesModalState {
         }
         if self.remote_pending == 0 {
             self.remote_rx = None;
-            if !self.hosts.is_empty() && self.remote_at.is_none_or(|t| t.elapsed() >= REMOTE_EVERY) {
+            if self.mode != Mode::Live && !self.hosts.is_empty() && self.remote_at.is_none_or(|t| t.elapsed() >= REMOTE_EVERY) {
                 self.remote_at = Some(Instant::now());
                 let (tx, rx) = mpsc::channel();
                 self.remote_rx = Some(rx);
@@ -1612,6 +1663,868 @@ impl TracesModalState {
             };
             let _ = tx.send(text);
         });
+    }
+}
+
+// ---------------------------------------------------------------- live screen
+
+const HOUR_MS: i64 = 3_600_000;
+const HINTS: &str = " enter open   j/k   c children   / search   q quit";
+const INSTALL_LINE: &str =
+    " install hooks: crates/codegen/xai-grok-traces/hooks/install.sh --apply";
+
+/// The last answer from one remote host: rows as fetched, when, and whether the latest fetch succeeded.
+struct RemoteLive {
+    rows: Vec<LiveRow>,
+    fetched_at: Instant,
+    ok: bool,
+    note: Option<String>,
+}
+
+struct LiveHostResult {
+    target: String,
+    result: Result<Fetched<LiveRow>, remote::Error>,
+}
+
+/// A finished local fold; `generation` lets a stale one be dropped.
+struct LiveFold {
+    generation: u64,
+    rows: Result<Vec<LiveRow>, String>,
+    /// Titles of parents that are not among the rows (for `↑ <parent>`).
+    titles: HashMap<String, String>,
+}
+
+/// One displayed row: ages already advanced, state rendered, title composed.
+struct LiveLine {
+    row: LiveRow,
+    child: bool,
+    glyph: &'static str,
+    title: String,
+    text: String,
+    marks: Vec<&'static str>,
+    /// Collapsed root: number of hidden children.
+    hidden: usize,
+}
+
+struct LiveView {
+    lines: Vec<LiveLine>,
+    agents: usize,
+    waiting: usize,
+}
+
+/// Short host name: up to the first dot; `local` when it cannot be read.
+fn short_hostname() -> String {
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        // SAFETY: `buf` is valid for `buf.len()` bytes and gethostname NUL-terminates within it on success.
+        let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+        if rc == 0 {
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            let name = String::from_utf8_lossy(&buf[..end]).into_owned();
+            if let Some(short) = name.split('.').next().filter(|s| !s.is_empty()) {
+                return short.to_string();
+            }
+        }
+    }
+    "local".into()
+}
+
+/// `row` as it will be at render time: `extra_ms` added to its age, time in state and quiet time.
+fn advance(row: &LiveRow, extra_ms: i64) -> LiveRow {
+    let mut r = row.clone();
+    if extra_ms != 0 {
+        r.age_ms += extra_ms;
+        r.since_ms = Some(r.since_ms.unwrap_or(0) + extra_ms);
+        r.quiet_ms += extra_ms;
+    }
+    r
+}
+
+fn pad_to(s: &str, w: usize) -> String {
+    let sw = s.width();
+    if sw >= w {
+        s.to_string()
+    } else {
+        format!("{s}{}", " ".repeat(w - sw))
+    }
+}
+
+/// `s` cut to `w - 1` columns plus `…`, padded to exactly `w`.
+fn ellipsize(s: &str, w: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let c = ch.width().unwrap_or(0);
+        if used + c > w.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        used += c;
+    }
+    let mut out = out.trim_end().to_string();
+    out.push('…');
+    pad_to(&out, w)
+}
+
+/// Hard cut to exactly `w` columns, ending in `…` when text was dropped.
+fn cut(s: &str, w: usize) -> String {
+    if w == 0 {
+        return String::new();
+    }
+    if s.width() <= w {
+        pad_to(s, w)
+    } else {
+        ellipsize(s, w)
+    }
+}
+
+/// Exactly `w` columns: the first wrapped line of `text`; `…` (inside `w`) when text was dropped.
+/// A single word longer than `w` is hard-cut.
+fn fit(text: &str, w: usize) -> String {
+    if w == 0 {
+        return String::new();
+    }
+    let t = text.replace(['\r', '\n', '\t'], " ");
+    if t.width() <= w {
+        return pad_to(&t, w);
+    }
+    let first = modal_window::word_wrap(&t, w)
+        .first()
+        .copied()
+        .unwrap_or("");
+    ellipsize(first, w)
+}
+
+struct LiveCols {
+    source: bool,
+    ctx: bool,
+    marks: bool,
+    title: usize,
+    fill: usize,
+}
+
+fn live_cols(width: usize) -> LiveCols {
+    let title = if width >= 100 {
+        28
+    } else if width >= 60 {
+        20
+    } else {
+        14
+    };
+    let (source, ctx, marks) = (width >= 48, width >= 100, width >= 36);
+    // indent, glyph, then `sep + cell` per column: title, [source], [ctx], text, age, [marks].
+    let fixed = 1
+        + 2
+        + if source { 8 } else { 0 }
+        + 1
+        + title
+        + if ctx { 14 } else { 0 }
+        + 1
+        + 5
+        + if marks { 5 } else { 0 };
+    LiveCols {
+        source,
+        ctx,
+        marks,
+        title,
+        fill: width.saturating_sub(fixed),
+    }
+}
+
+fn ctx_text(row: &LiveRow) -> String {
+    let k = |n: i64| (n + 500) / 1000;
+    match (row.context_tokens, row.context_window) {
+        (Some(t), Some(w)) => format!("ctx {}k/{}k", k(t), k(w)),
+        (Some(t), None) => format!("ctx {}k", k(t)),
+        _ => String::new(),
+    }
+}
+
+fn glyph_color(glyph: &str, theme: &Theme) -> Color {
+    match glyph {
+        "⚠" | "⚠?" => theme.accent_error,
+        "▶" | "⏳" | "⟳" => theme.accent_tool,
+        "●" => theme.accent_running,
+        _ => theme.gray,
+    }
+}
+
+/// A `SessionRow` for a remote live row, enough for the ledger's remote open path.
+fn remote_session(row: &LiveRow) -> SessionRow {
+    SessionRow {
+        id: row.session_id.clone(),
+        host: row.host.clone(),
+        source: row.source.clone(),
+        title: row.title.clone(),
+        parent_id: row.parent_id.clone(),
+        native_id: row.native_id.clone(),
+        context_tokens: row.context_tokens,
+        context_window: row.context_window,
+        ..Default::default()
+    }
+}
+
+fn compute_fold(index: &TraceIndex, now_ms: i64, generation: u64) -> LiveFold {
+    let alive = |pid: i64, start: Option<i64>| match start {
+        Some(s) => live::alive(pid, s),
+        None => live::alive_pid(pid),
+    };
+    match live::fold_all(index, now_ms, alive) {
+        Ok(rows) => {
+            let ids: HashSet<&str> = rows.iter().map(|r| r.session_id.as_str()).collect();
+            let titles = rows
+                .iter()
+                .filter_map(|r| r.parent_id.as_deref())
+                .filter(|p| !ids.contains(p))
+                .filter_map(|p| {
+                    Some((p.to_string(), clean_name(&index.session(p).ok().flatten()?)))
+                })
+                .collect();
+            LiveFold {
+                generation,
+                rows: Ok(rows),
+                titles,
+            }
+        }
+        Err(e) => LiveFold {
+            generation,
+            rows: Err(e.to_string()),
+            titles: HashMap::new(),
+        },
+    }
+}
+
+impl TracesModalState {
+    /// `grok live`'s state: Live mode from the start, and the first fold under way.
+    pub fn open_live(index: Option<TraceIndex>, hosts: Vec<String>, standalone: bool) -> Self {
+        let mut s = Self::open_with_hosts(index, hosts);
+        s.standalone = standalone;
+        s.enter_live();
+        s
+    }
+
+    /// True once the user asked to leave the standalone live screen (q, or Esc with no query).
+    pub fn live_wants_exit(&self) -> bool {
+        self.live_exit
+    }
+
+    fn enter_live(&mut self) {
+        self.mode = Mode::Live;
+        self.live_gen += 1;
+        self.live_fold = None;
+        self.kick_fold(now_ms());
+        self.poll_remote_live();
+    }
+
+    /// Start a fold on a worker unless one is running.
+    fn kick_fold(&mut self, now_ms: i64) {
+        if self.live_fold.is_some() {
+            return;
+        }
+        let Some(index) = &self.index else { return };
+        let path = index.db_path().to_path_buf();
+        let generation = self.live_gen;
+        let (tx, rx) = mpsc::channel();
+        self.live_fold = Some(rx);
+        std::thread::spawn(move || {
+            if let Ok(index) = TraceIndex::open(&path) {
+                let _ = tx.send(compute_fold(&index, now_ms, generation));
+            }
+        });
+    }
+
+    fn apply_fold(&mut self, f: LiveFold) {
+        match f.rows {
+            Ok(rows) => {
+                self.live_rows = rows;
+                self.live_titles = f.titles;
+                if self
+                    .status
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("fold: "))
+                {
+                    self.status = None;
+                }
+            }
+            Err(e) => self.status = Some(format!("fold: {e}")),
+        }
+    }
+
+    /// Live mode's share of the 1s poll: take a finished fold, start the next, collect remote answers.
+    /// Always true: ages move every second.
+    fn poll_live_screen(&mut self, now_ms: i64) -> bool {
+        if let Some(rx) = &self.live_fold {
+            match rx.try_recv() {
+                Ok(f) => {
+                    self.live_fold = None;
+                    if f.generation == self.live_gen {
+                        self.apply_fold(f);
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.live_fold = None;
+                    self.status = Some("fold: index unavailable".into());
+                }
+            }
+        }
+        self.kick_fold(now_ms);
+        self.poll_remote_live();
+        true
+    }
+
+    fn poll_remote_live(&mut self) {
+        let mut done = Vec::new();
+        if let Some(rx) = &self.live_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(h) => done.push(h),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.live_pending = 0;
+                        break;
+                    }
+                }
+            }
+        }
+        for h in done {
+            self.live_pending = self.live_pending.saturating_sub(1);
+            self.apply_live_host(h);
+        }
+        if self.live_pending == 0 {
+            self.live_rx = None;
+            if !self.hosts.is_empty() && self.live_at.is_none_or(|t| t.elapsed() >= REMOTE_EVERY) {
+                self.live_at = Some(Instant::now());
+                let (tx, rx) = mpsc::channel();
+                self.live_rx = Some(rx);
+                self.live_pending = self.hosts.len();
+                for target in self.hosts.clone() {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let result = remote::fetch_live(&target);
+                        let _ = tx.send(LiveHostResult { target, result });
+                    });
+                }
+            }
+        }
+    }
+
+    /// Ok replaces rows and note. Err shows the fetch cache (ages keep advancing from the fetch time) and keeps the note.
+    fn apply_live_host(&mut self, h: LiveHostResult) {
+        let now = Instant::now();
+        let old_note = self.remote_live.get(&h.target).and_then(|r| r.note.clone());
+        let entry = match h.result {
+            Ok(Fetched { rows, note }) => RemoteLive {
+                rows,
+                fetched_at: now,
+                ok: true,
+                note,
+            },
+            Err(_) => match remote::cached_live(&h.target) {
+                Some((elapsed, rows)) => RemoteLive {
+                    rows,
+                    fetched_at: now.checked_sub(elapsed).unwrap_or(now),
+                    ok: false,
+                    note: old_note,
+                },
+                None => RemoteLive {
+                    rows: Vec::new(),
+                    fetched_at: now,
+                    ok: false,
+                    note: old_note,
+                },
+            },
+        };
+        self.remote_live.insert(h.target, entry);
+    }
+
+    #[cfg(test)]
+    fn fold_now(&mut self, now_ms: i64) {
+        let Some(index) = &self.index else { return };
+        let f = compute_fold(index, now_ms, self.live_gen);
+        self.apply_fold(f);
+    }
+
+    #[cfg(test)]
+    fn set_live(
+        &mut self,
+        local: Vec<LiveRow>,
+        remote: Vec<(&str, Vec<LiveRow>, Instant, bool, Option<&str>)>,
+    ) {
+        self.live_rows = local;
+        self.hosts = remote.iter().map(|r| r.0.to_string()).collect();
+        self.remote_live = remote
+            .into_iter()
+            .map(|(t, rows, fetched_at, ok, note)| {
+                (
+                    t.to_string(),
+                    RemoteLive {
+                        rows,
+                        fetched_at,
+                        ok,
+                        note: note.map(String::from),
+                    },
+                )
+            })
+            .collect();
+    }
+
+    fn row_title(&self, row: &LiveRow, child: bool, orphan: bool) -> String {
+        let base = if orphan {
+            let p = row.parent_id.as_deref().unwrap_or_default();
+            let bare = row
+                .host
+                .as_deref()
+                .and_then(|h| p.strip_prefix(h).and_then(|r| r.strip_prefix(':')))
+                .unwrap_or(p);
+            let title = if row.host.is_some() {
+                bare.to_string()
+            } else {
+                self.live_titles
+                    .get(p)
+                    .cloned()
+                    .unwrap_or_else(|| bare.to_string())
+            };
+            format!("↑ {title}")
+        } else if child {
+            one_line(
+                row.label
+                    .as_deref()
+                    .filter(|l| !l.trim().is_empty())
+                    .unwrap_or(&row.title),
+            )
+        } else {
+            clean_name(&SessionRow {
+                title: row.title.clone(),
+                source: row.source.clone(),
+                ..Default::default()
+            })
+        };
+        match &row.host {
+            Some(h) => format!("{h}: {base}"),
+            None => base,
+        }
+    }
+
+    /// Local and remote rows merged at `now`, ordered, filtered by the search, then collapsed.
+    fn live_view(&self, now: Instant) -> LiveView {
+        let mut all: Vec<LiveRow> = self.live_rows.iter().map(|r| advance(r, 0)).collect();
+        for target in &self.hosts {
+            if let Some(rl) = self.remote_live.get(target) {
+                let extra = now.saturating_duration_since(rl.fetched_at).as_millis() as i64;
+                all.extend(rl.rows.iter().map(|r| advance(r, extra)));
+            }
+        }
+        live::order(&mut all);
+        let ids: HashSet<String> = all.iter().map(|r| r.session_id.clone()).collect();
+        let mut lines: Vec<LiveLine> = all
+            .into_iter()
+            .map(|row| {
+                let parent = row.parent_id.as_deref().filter(|p| **p != row.session_id);
+                let child = parent.is_some_and(|p| ids.contains(p));
+                let orphan = parent.is_some_and(|p| !ids.contains(p));
+                let r = live::render(&row, 0);
+                LiveLine {
+                    child,
+                    glyph: r.glyph,
+                    title: self.row_title(&row, child, orphan),
+                    text: r.text,
+                    marks: r.marks,
+                    hidden: 0,
+                    row,
+                }
+            })
+            .collect();
+        let q = self.live_query.to_lowercase();
+        if !q.is_empty() {
+            let hit: Vec<bool> = lines
+                .iter()
+                .map(|l| l.title.to_lowercase().contains(&q) || l.text.to_lowercase().contains(&q))
+                .collect();
+            let mut keep = hit.clone();
+            for (i, l) in lines.iter().enumerate() {
+                if hit[i]
+                    && l.child
+                    && let Some(p) = lines
+                        .iter()
+                        .position(|x| Some(&x.row.session_id) == l.row.parent_id.as_ref())
+                {
+                    keep[p] = true;
+                }
+            }
+            let mut i = 0;
+            lines.retain(|_| {
+                i += 1;
+                keep[i - 1]
+            });
+        }
+        let agents = lines.len();
+        let waiting = lines
+            .iter()
+            .filter(|l| l.row.state == LiveState::Waiting)
+            .count();
+        let mut out: Vec<LiveLine> = Vec::new();
+        let mut folded: Option<usize> = None;
+        for l in lines {
+            if !l.child {
+                folded = self
+                    .live_collapsed
+                    .contains(&l.row.session_id)
+                    .then_some(out.len());
+                out.push(l);
+            } else if let Some(r) = folded {
+                out[r].hidden += 1;
+                if l.row.state == LiveState::Waiting && out[r].row.state != LiveState::Waiting {
+                    out[r].glyph = "⚠";
+                }
+            } else {
+                out.push(l);
+            }
+        }
+        LiveView {
+            lines: out,
+            agents,
+            waiting,
+        }
+    }
+
+    /// Index of the selected line; the selection follows its session id, else keeps its position.
+    fn live_pos(&mut self, lines: &[LiveLine]) -> Option<usize> {
+        if lines.is_empty() {
+            self.live_sel = None;
+            self.live_sel_idx = 0;
+            return None;
+        }
+        let found = self
+            .live_sel
+            .as_ref()
+            .and_then(|id| lines.iter().position(|l| l.row.session_id == *id));
+        let idx = found.unwrap_or(if self.live_sel.is_some() {
+            self.live_sel_idx.min(lines.len() - 1)
+        } else {
+            0
+        });
+        self.live_sel = Some(lines[idx].row.session_id.clone());
+        self.live_sel_idx = idx;
+        Some(idx)
+    }
+
+    fn live_move(&mut self, delta: isize) {
+        let view = self.live_view(Instant::now());
+        let Some(i) = self.live_pos(&view.lines) else {
+            return;
+        };
+        let j = (i as isize + delta).clamp(0, view.lines.len() as isize - 1) as usize;
+        self.live_sel = Some(view.lines[j].row.session_id.clone());
+        self.live_sel_idx = j;
+    }
+
+    /// Mouse wheel on the live screen (three rows a notch, as in the other modals).
+    pub fn live_wheel(&mut self, down: bool) {
+        self.live_move(if down { 3 } else { -3 });
+    }
+
+    /// `c`: collapse or expand the selected row's root. From a child, collapse moves the selection to the root.
+    fn live_toggle(&mut self) {
+        let view = self.live_view(Instant::now());
+        let Some(i) = self.live_pos(&view.lines) else {
+            return;
+        };
+        let root = if view.lines[i].child {
+            view.lines[..i].iter().rposition(|l| !l.child).unwrap_or(i)
+        } else {
+            i
+        };
+        let id = view.lines[root].row.session_id.clone();
+        if !self.live_collapsed.remove(&id) {
+            self.live_collapsed.insert(id.clone());
+            self.live_sel = Some(id);
+            self.live_sel_idx = root;
+        }
+    }
+
+    fn live_open(&mut self) {
+        let view = self.live_view(Instant::now());
+        let Some(i) = self.live_pos(&view.lines) else {
+            return;
+        };
+        let row = &view.lines[i].row;
+        let session = if row.host.is_some() {
+            Some(remote_session(row))
+        } else {
+            self.index
+                .as_ref()
+                .and_then(|ix| ix.session(&row.session_id).ok().flatten())
+        };
+        match session {
+            Some(s) => {
+                self.live_return = true;
+                self.trail.clear();
+                self.open_session(s);
+            }
+            None => self.status = Some(format!("cannot open {}", row.session_id)),
+        }
+    }
+
+    fn live_back(&mut self) {
+        if self.standalone {
+            self.live_exit = true;
+        } else {
+            self.mode = Mode::List;
+        }
+    }
+}
+
+// ---- live render
+
+/// The live screen into `area`, no modal chrome.
+pub fn render_live(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, theme: &Theme) {
+    render_live_at(buf, area, state, theme, Instant::now());
+}
+
+pub fn render_live_at(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &mut TracesModalState,
+    theme: &Theme,
+    now: Instant,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let w = area.width as usize;
+    let dim = Style::default().fg(theme.gray);
+    let view = state.live_view(now);
+
+    // Header.
+    let health = state.index.as_ref().and_then(|i| i.health());
+    let (left, left_style) = if health.is_some() {
+        (
+            " index tripped · grok-traces doctor --reset".to_string(),
+            Style::default().fg(theme.accent_error),
+        )
+    } else {
+        let noun = if view.agents == 1 { "agent" } else { "agents" };
+        let mut t = format!(" grok live · {} {noun}", view.agents);
+        if view.waiting > 0 {
+            t.push_str(&format!(" · {} waiting", view.waiting));
+        }
+        (t, Style::default().fg(theme.text_primary))
+    };
+    let mut hosts: Vec<(String, &str, Color)> =
+        vec![(state.local_host.clone(), "●", theme.accent_running)];
+    for t in &state.hosts {
+        let (mark, color) = match state.remote_live.get(t) {
+            None => ("…", theme.gray),
+            Some(r) if r.ok => ("●", theme.accent_running),
+            Some(_) => ("✗", theme.accent_error),
+        };
+        hosts.push((remote::label(t).to_string(), mark, color));
+    }
+    let host_w = |n: usize| {
+        hosts[..n]
+            .iter()
+            .map(|(l, m, _)| l.width() + 1 + m.width())
+            .sum::<usize>()
+            + n.saturating_sub(1)
+    };
+    let shown = (1..=hosts.len())
+        .rev()
+        .find(|&n| left.width() + 1 + host_w(n) + 1 <= w)
+        .unwrap_or(0);
+    let left = if shown == 0 {
+        fit(&left, w).trim_end().to_string()
+    } else {
+        left
+    };
+    buf.set_stringn(area.x, area.y, &left, w, left_style);
+    if shown > 0 {
+        let mut x = area.x + (w - 1 - host_w(shown)) as u16;
+        for (i, (label, mark, color)) in hosts[..shown].iter().enumerate() {
+            if i > 0 {
+                x += 1;
+            }
+            buf.set_stringn(
+                x,
+                area.y,
+                label,
+                w,
+                Style::default().fg(theme.text_secondary),
+            );
+            x += label.width() as u16 + 1;
+            buf.set_stringn(x, area.y, mark, w, Style::default().fg(*color));
+            x += mark.width() as u16;
+        }
+    }
+
+    // Notes (schema gate), then the last row: typing, status, the committed query or the hints.
+    let notes: Vec<String> = state
+        .hosts
+        .iter()
+        .filter_map(|t| state.remote_live.get(t)?.note.clone())
+        .collect();
+    let (foot, foot_style) = if state.typing == Typing::Live {
+        (
+            Some(format!(" /{}▏", state.live_query)),
+            Style::default().fg(theme.text_primary),
+        )
+    } else if let Some(s) = &state.status {
+        (
+            Some(format!(" {s}")),
+            Style::default().fg(theme.accent_error),
+        )
+    } else if !state.live_query.is_empty() {
+        (
+            Some(format!(" /{}   esc clear", state.live_query)),
+            Style::default().fg(theme.fuzzy_accent),
+        )
+    } else if state.standalone {
+        (Some(HINTS.to_string()), dim)
+    } else {
+        (None, dim)
+    };
+    let foot_rows = usize::from(foot.is_some());
+    let top = 1 + notes
+        .len()
+        .min((area.height as usize).saturating_sub(1 + foot_rows));
+    for (i, note) in notes.iter().enumerate().take(top - 1) {
+        buf.set_stringn(area.x, area.y + 1 + i as u16, fit(note, w), w, dim);
+    }
+    let body_h = (area.height as usize).saturating_sub(top + foot_rows);
+    if let Some(f) = &foot
+        && area.height as usize > top
+    {
+        buf.set_stringn(area.x, area.y + area.height - 1, fit(f, w), w, foot_style);
+    }
+
+    // Body.
+    let body = Rect {
+        y: area.y + top as u16,
+        height: body_h as u16,
+        ..area
+    };
+    if view.lines.is_empty() {
+        for (i, r) in live_empty(state).iter().enumerate().take(body_h) {
+            buf.set_stringn(body.x, body.y + i as u16, fit(r, w), w, dim);
+        }
+        return;
+    }
+    let sel = state.live_pos(&view.lines).unwrap_or(0);
+    keep_visible(sel, &mut state.live_scroll, body_h);
+    state.live_scroll = state
+        .live_scroll
+        .min(view.lines.len().saturating_sub(body_h));
+    let c = live_cols(w);
+    for (i, l) in view
+        .lines
+        .iter()
+        .enumerate()
+        .skip(state.live_scroll)
+        .take(body_h)
+    {
+        let y = body.y + (i - state.live_scroll) as u16;
+        let base = if i == sel {
+            Style::default().bg(theme.bg_highlight)
+        } else {
+            Style::default()
+        };
+        if i == sel {
+            fill(buf, body, y, base);
+        }
+        draw_live_line(buf, body, y, l, &c, base, theme);
+    }
+}
+
+fn live_empty(state: &TracesModalState) -> Vec<String> {
+    if !state.live_query.is_empty() {
+        return vec![" no match".into()];
+    }
+    let Some(index) = &state.index else {
+        return vec![" no live agents · no index".into()];
+    };
+    let n = index.receipt_count_since(now_ms() - HOUR_MS).unwrap_or(0);
+    let noun = if n == 1 { "receipt" } else { "receipts" };
+    let mut rows = vec![format!(
+        " no live agents · {n} hook {noun} in the last hour · grok-traces doctor"
+    )];
+    if index.receipt_count_since(0).unwrap_or(0) == 0 {
+        rows.push(INSTALL_LINE.into());
+    }
+    rows
+}
+
+fn draw_live_line(
+    buf: &mut Buffer,
+    area: Rect,
+    y: u16,
+    l: &LiveLine,
+    c: &LiveCols,
+    base: Style,
+    theme: &Theme,
+) {
+    let indent = if l.child { 3 } else { 1 };
+    let title_w = if l.child {
+        c.title.saturating_sub(2).max(1)
+    } else {
+        c.title
+    };
+    let title = match l.hidden {
+        0 => fit(&l.title, title_w),
+        n => {
+            let tag = format!(" +{n}");
+            let head = fit(&l.title, title_w.saturating_sub(tag.width()))
+                .trim_end()
+                .to_string();
+            pad_to(&format!("{head}{tag}"), title_w)
+        }
+    };
+    let text_color = if l.row.state == LiveState::Prompt || l.glyph == "◌" {
+        theme.gray
+    } else {
+        theme.text_secondary
+    };
+    let mut cells: Vec<(String, Style)> = vec![
+        (" ".repeat(indent), base),
+        (pad_to(l.glyph, 2), base.fg(glyph_color(l.glyph, theme))),
+        (" ".into(), base),
+    ];
+    if c.source {
+        cells.push((
+            fit(&source_label(&l.row.source).to_lowercase(), 7),
+            base.fg(source_color(&l.row.source, theme)),
+        ));
+        cells.push((" ".into(), base));
+    }
+    cells.push((title, base.fg(theme.text_primary)));
+    cells.push((" ".into(), base));
+    if c.ctx {
+        cells.push((fit(&ctx_text(&l.row), 13), base.fg(theme.gray)));
+        cells.push((" ".into(), base));
+    }
+    cells.push((fit(&l.text, c.fill), base.fg(text_color)));
+    cells.push((" ".into(), base));
+    cells.push((
+        format!("{:>4}", live::fmt_age(live::age_ms(&l.row, 0))),
+        base.fg(theme.text_secondary),
+    ));
+    if c.marks {
+        cells.push((" ".into(), base));
+        let color = if l.marks.contains(&"✗") {
+            theme.accent_error
+        } else {
+            theme.gray
+        };
+        cells.push((cut(&l.marks.join(" "), 4), base.fg(color)));
+    }
+    let right = area.x + area.width;
+    let mut x = area.x;
+    for (text, style) in cells {
+        if x >= right {
+            break;
+        }
+        buf.set_stringn(x, y, &text, (right - x) as usize, style);
+        x = x.saturating_add(text.width() as u16);
     }
 }
 
@@ -1948,6 +2861,18 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
             state.load_events();
             return InputOutcome::Changed;
         }
+        Typing::Live => {
+            match key.code {
+                KeyCode::Esc => {
+                    state.typing = Typing::No;
+                    state.live_query.clear();
+                }
+                KeyCode::Enter => state.typing = Typing::No,
+                _ if edit_line(&mut state.live_query, key) => {}
+                _ => return InputOutcome::Unchanged,
+            }
+            return InputOutcome::Changed;
+        }
         Typing::No => {}
     }
     // Plain-letter nav keys ignore Ctrl/Alt chords (Ctrl+E is not `e`, Ctrl+R is not `r`).
@@ -1973,6 +2898,7 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                     state.refresh();
                 }
                 KeyCode::Char('/') => state.typing = Typing::Ledger,
+                KeyCode::Char('L') => state.enter_live(),
                 KeyCode::Char('x') => {
                     state.errors_only = !state.errors_only;
                     state.refresh();
@@ -2041,6 +2967,24 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                         state.open_selected();
                     }
                 }
+                _ => return InputOutcome::Unchanged,
+            }
+        }
+        Mode::Live => {
+            state.status = None;
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => state.live_move(1),
+                KeyCode::Char('k') | KeyCode::Up => state.live_move(-1),
+                KeyCode::PageDown => state.live_move(page),
+                KeyCode::PageUp => state.live_move(-page),
+                KeyCode::Char('g') | KeyCode::Home => state.live_move(isize::MIN / 2),
+                KeyCode::Char('G') | KeyCode::End => state.live_move(isize::MAX / 2),
+                KeyCode::Char('c') => state.live_toggle(),
+                KeyCode::Char('o') | KeyCode::Enter => state.live_open(),
+                KeyCode::Char('/') => state.typing = Typing::Live,
+                KeyCode::Char('q') => state.live_back(),
+                KeyCode::Esc if !state.live_query.is_empty() => state.live_query.clear(),
+                KeyCode::Esc => state.live_back(),
                 _ => return InputOutcome::Unchanged,
             }
         }
@@ -2153,6 +3097,7 @@ fn source_color(source: &str, theme: &Theme) -> Color {
         "omp" => theme.accent_plan,
         "dsh" => theme.accent_user,
         "grok" => theme.accent_model,
+        "cursor" => theme.accent_user,
         _ => theme.gray_bright,
     }
 }
@@ -2222,6 +3167,9 @@ fn keep_visible(sel: usize, scroll: &mut usize, height: usize) {
 
 fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
     let plain = |label: &'static str| Shortcut { label, clickable: false, id: 0 };
+    if state.typing == Typing::Live {
+        return vec![plain("type to filter"), plain("Enter keep"), plain("Esc clear")];
+    }
     if state.typing != Typing::No {
         return vec![plain("type to filter"), plain("Enter search events"), plain("Esc clear")];
     }
@@ -2242,6 +3190,7 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
             plain("→ expand"),
             plain("r resume"),
             plain("R rescan"),
+            plain("L live"),
             plain("Esc close"),
         ],
         Mode::Trajectory => vec![
@@ -2255,6 +3204,13 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
             plain("t tool"),
             plain("/ search"),
             plain("r resume"),
+            plain("Esc back"),
+        ],
+        Mode::Live => vec![
+            plain("j/k move"),
+            plain("Enter open"),
+            plain("c children"),
+            plain("/ search"),
             plain("Esc back"),
         ],
         Mode::Inspector => vec![plain("j/k scroll"), plain("y copy line"), plain("Esc back")],
@@ -2283,6 +3239,7 @@ pub fn render_traces_modal(buf: &mut Buffer, full_area: Rect, state: &mut Traces
         Mode::List => render_ledger(buf, content, state, &theme),
         Mode::Trajectory => render_trajectory(buf, content, state, &theme),
         Mode::Inspector => render_inspector(buf, content, state, &theme),
+        Mode::Live => render_live(buf, content, state, &theme),
     }
 }
 
@@ -4394,5 +5351,1044 @@ mod tests {
         press(&mut state, KeyCode::Char('l'));
         let rows = rows_at(&mut state, 26, SNAP_H);
         assert!(!row_with(&rows, "#2").trim().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    fn lr(
+        id: &str,
+        source: &str,
+        title: &str,
+        state: LiveState,
+        text: &str,
+        age_s: i64,
+    ) -> LiveRow {
+        LiveRow {
+            session_id: id.into(),
+            source: source.into(),
+            title: title.into(),
+            state,
+            text: text.into(),
+            age_ms: age_s * 1000,
+            ..Default::default()
+        }
+    }
+
+    fn kid(
+        parent: &str,
+        id: &str,
+        label: &str,
+        state: LiveState,
+        text: &str,
+        age_s: i64,
+    ) -> LiveRow {
+        LiveRow {
+            parent_id: Some(parent.into()),
+            label: Some(label.into()),
+            ..lr(id, "claude", label, state, text, age_s)
+        }
+    }
+
+    fn state() -> TracesModalState {
+        let mut s = TracesModalState::open_with_hosts(None, vec![]);
+        s.mode = Mode::Live;
+        s.local_host = "sab-mini".into();
+        s.status = None;
+        s
+    }
+
+    fn rows_of(buf: &Buffer, w: u16, h: u16) -> Vec<String> {
+        (0..h)
+            .map(|y| {
+                let mut line = String::new();
+                let mut x = 0;
+                while x < w {
+                    let sym = buf[(x, y)].symbol();
+                    x += sym.width().max(1) as u16;
+                    line.push_str(sym);
+                }
+                line.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    fn snap(s: &mut TracesModalState, w: u16, h: u16, now: Instant) -> Vec<String> {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        render_live_at(&mut buf, area, s, &Theme::current(), now);
+        rows_of(&buf, w, h)
+    }
+
+    fn states() -> Vec<LiveRow> {
+        let mut v = vec![
+            lr(
+                "w",
+                "claude",
+                "Traces packet on Mini",
+                LiveState::Waiting,
+                "permission: Bash cargo build --release",
+                120,
+            ),
+            lr(
+                "p",
+                "claude",
+                "snapshot tests",
+                LiveState::Prompt,
+                "your turn",
+                60,
+            ),
+            lr(
+                "t",
+                "cursor",
+                "grok-build",
+                LiveState::Tool,
+                "Shell cargo test -p xai-grok-traces",
+                8,
+            ),
+            lr("c", "claude", "compactor", LiveState::Compacting, "", 5),
+            lr(
+                "k",
+                "pi",
+                "khoj worker",
+                LiveState::Working,
+                "Bash rg --files",
+                1,
+            ),
+            lr(
+                "q",
+                "claude",
+                "fork lead",
+                LiveState::Working,
+                "Edit src/views/traces_modal.rs",
+                240,
+            ),
+            lr(
+                "f",
+                "claude",
+                "failed one",
+                LiveState::Working,
+                "Read x",
+                30,
+            ),
+            lr(
+                "u",
+                "claude",
+                "stuck tool",
+                LiveState::Tool,
+                "Bash sleep",
+                400,
+            ),
+            lr("d", "pi", "no pid", LiveState::Working, "Read y", 50),
+            lr(
+                "ww",
+                "claude",
+                "long wait",
+                LiveState::Waiting,
+                "permission: Edit a",
+                500,
+            ),
+        ];
+        v[0].since_ms = Some(5_000);
+        v[2].since_ms = Some(8_000);
+        v[2].context_tokens = Some(142_300);
+        v[2].context_window = Some(200_000);
+        v[3].since_ms = Some(5_000);
+        v[5].quiet_ms = 240_000;
+        v[5].context_tokens = Some(142_000);
+        v[6].failed = true;
+        v[7].since_ms = Some(400_000);
+        v[7].quiet_ms = 400_000;
+        v[8].pid_unknown = true;
+        v[9].since_ms = Some(500_000);
+        v[9].quiet_ms = 10_000;
+        v
+    }
+
+    fn idx(tmp: &tempfile::TempDir) -> (TraceIndex, TraceIndex) {
+        let db = tmp.path().join("idx/t.sqlite");
+        (
+            TraceIndex::open(&db).unwrap(),
+            TraceIndex::open(&db).unwrap(),
+        )
+    }
+
+    fn receipt(writer: &mut TraceIndex) {
+        let r = xai_grok_traces::Receipt {
+            source: "claude".into(),
+            event: "UserPromptSubmit".into(),
+            ..Default::default()
+        };
+        writer.record_receipt(&r).unwrap();
+    }
+
+    fn with_index(index: Option<TraceIndex>) -> TracesModalState {
+        let mut s = TracesModalState::open_with_hosts(index, vec![]);
+        s.mode = Mode::Live;
+        s.local_host = "sab-mini".into();
+        s.status = None;
+        s
+    }
+
+    fn family() -> Vec<LiveRow> {
+        vec![
+            lr(
+                "r",
+                "claude",
+                "Traces packet on Mini",
+                LiveState::Working,
+                "Read docs/SPEC.md",
+                4,
+            ),
+            kid(
+                "r",
+                "k1",
+                "Explore index code",
+                LiveState::Waiting,
+                "permission: Bash rg x",
+                3,
+            ),
+            kid("r", "k2", "review spec", LiveState::Working, "Grep live", 9),
+            lr("s", "claude", "other", LiveState::Prompt, "your turn", 70),
+        ]
+    }
+
+    fn remote_rows() -> Vec<LiveRow> {
+        let mk =
+            |id: &str, source: &str, title: &str, st: LiveState, text: &str, age: i64| LiveRow {
+                host: Some("sab-air".into()),
+                ..lr(&format!("sab-air:{id}"), source, title, st, text, age)
+            };
+        let mut waiting = mk(
+            "a",
+            "claude",
+            "fork lead",
+            LiveState::Waiting,
+            "permission: Bash cargo build",
+            5,
+        );
+        waiting.since_ms = Some(5_000);
+        let mut tool = mk(
+            "b",
+            "pi",
+            "khoj worker",
+            LiveState::Tool,
+            "Bash rg --files",
+            2,
+        );
+        tool.since_ms = Some(25_000);
+        vec![
+            waiting,
+            tool,
+            mk(
+                "c",
+                "claude",
+                "docs sweep",
+                LiveState::Working,
+                "Read README.md",
+                40,
+            ),
+        ]
+    }
+
+    fn scenarios() -> Vec<(&'static str, Vec<String>)> {
+        let t0 = Instant::now();
+        let ago = |s: u64| t0 - Duration::from_secs(s);
+        let mut out = Vec::new();
+        let mut s = state();
+        s.set_live(states(), vec![]);
+        out.push(("w120", snap(&mut s, 120, 11, t0)));
+        out.push(("w80", snap(&mut s, 80, 11, t0)));
+        out.push(("w50", snap(&mut s, 50, 11, t0)));
+        out.push(("w36", snap(&mut s, 36, 4, t0)));
+
+        let mut s = state();
+        s.set_live(family(), vec![]);
+        out.push(("children expanded, waiting child", snap(&mut s, 100, 6, t0)));
+        s.live_collapsed.insert("r".into());
+        out.push((
+            "children collapsed (+2, root shows warn)",
+            snap(&mut s, 100, 6, t0),
+        ));
+        s.live_collapsed.clear();
+        s.live_sel = Some("k1".into());
+        out.push(("child selected", snap(&mut s, 100, 6, t0)));
+
+        let mut s = state();
+        let mut parent = lr("p1", "claude", "bg parent", LiveState::Working, "Read x", 3);
+        parent.bg = 2;
+        parent.context_tokens = Some(90_400);
+        let mut idle = lr(
+            "p2",
+            "claude",
+            "idle parent",
+            LiveState::Prompt,
+            "your turn",
+            20,
+        );
+        idle.bg = 1;
+        s.set_live(vec![parent, idle], vec![]);
+        out.push(("bg parents", snap(&mut s, 100, 4, t0)));
+
+        let mut s = state();
+        let mut rcpt = lr(
+            "cursor:rcpt:abc",
+            "cursor",
+            "grok-build",
+            LiveState::Working,
+            "Shell ls",
+            2,
+        );
+        rcpt.context_tokens = None;
+        let mut chat = lr(
+            "cur2",
+            "cursor",
+            "chat with transcript",
+            LiveState::Working,
+            "Edit a.rs",
+            6,
+        );
+        chat.context_tokens = Some(33_000);
+        chat.context_window = Some(128_000);
+        s.set_live(vec![rcpt, chat], vec![]);
+        out.push(("cursor receipt-only and with ctx", snap(&mut s, 100, 4, t0)));
+
+        let mut s = state();
+        s.set_live(
+            vec![lr(
+                "l1",
+                "claude",
+                "local one",
+                LiveState::Working,
+                "Read a",
+                20,
+            )],
+            vec![("sab@sab-air", remote_rows(), ago(0), true, None)],
+        );
+        out.push(("remote ok, interleaved", snap(&mut s, 100, 6, t0)));
+        s.live_sel = Some("sab-air:b".into());
+        out.push(("remote selected", snap(&mut s, 100, 6, t0)));
+
+        let mut s = state();
+        s.set_live(
+            vec![lr(
+                "l1",
+                "claude",
+                "local one",
+                LiveState::Working,
+                "Read a",
+                20,
+            )],
+            vec![("sab@sab-air", remote_rows(), ago(3), true, None)],
+        );
+        out.push((
+            "remote fresh fetch 3s ago: waiting first, age 8s",
+            snap(&mut s, 100, 6, t0),
+        ));
+
+        let mut s = state();
+        s.set_live(
+            vec![lr(
+                "l1",
+                "claude",
+                "local one",
+                LiveState::Working,
+                "Read a",
+                20,
+            )],
+            vec![("sab@sab-air", remote_rows(), ago(8), false, None)],
+        );
+        out.push((
+            "remote failed, cached rows advanced 8s",
+            snap(&mut s, 100, 6, t0),
+        ));
+
+        let mut s = state();
+        s.set_live(
+            vec![lr(
+                "l1",
+                "claude",
+                "local one",
+                LiveState::Working,
+                "Read a",
+                20,
+            )],
+            vec![(
+                "sab@sab-air",
+                vec![],
+                ago(0),
+                true,
+                Some("sab-air: update grok-traces (live_schema none)"),
+            )],
+        );
+        out.push(("remote gated note", snap(&mut s, 100, 5, t0)));
+
+        let mut s = state();
+        s.set_live(
+            vec![lr(
+                "l1",
+                "claude",
+                "local one",
+                LiveState::Working,
+                "Read a",
+                20,
+            )],
+            vec![],
+        );
+        s.hosts = vec!["sab@sab-air".into()];
+        out.push(("host before first result", snap(&mut s, 100, 3, t0)));
+
+        let mut s = state();
+        s.set_live(
+            vec![lr(
+                "o",
+                "claude",
+                "child of gone",
+                LiveState::Working,
+                "Read a",
+                5,
+            )],
+            vec![],
+        );
+        s.live_rows[0].parent_id = Some("gone".into());
+        s.live_titles
+            .insert("gone".into(), "the parent title".into());
+        out.push(("orphan", snap(&mut s, 100, 3, t0)));
+
+        let mut s = state();
+        s.set_live(states(), vec![]);
+        s.live_query = "BASH".into();
+        out.push(("filter bash", snap(&mut s, 100, 6, t0)));
+        s.live_query = "zzz".into();
+        out.push(("no match", snap(&mut s, 100, 3, t0)));
+        s.live_query.clear();
+        s.typing = Typing::Live;
+        s.live_query = "fo".into();
+        out.push(("typing line", snap(&mut s, 100, 8, t0)));
+
+        let mut s = state();
+        s.standalone = true;
+        s.set_live(
+            vec![lr(
+                "l1",
+                "claude",
+                "local one",
+                LiveState::Working,
+                "Read a",
+                20,
+            )],
+            vec![],
+        );
+        out.push(("standalone hints", snap(&mut s, 100, 4, t0)));
+
+        let mut s = state();
+        s.set_live(
+            vec![lr(
+                "a",
+                "claude",
+                "日本語のタイトルがとても長い",
+                LiveState::Tool,
+                "Shell echo ünïcode",
+                3,
+            )],
+            vec![],
+        );
+        s.live_rows[0].since_ms = Some(40_000);
+        out.push(("wide chars align", snap(&mut s, 80, 3, t0)));
+        out
+    }
+
+    fn frozen() -> Vec<(&'static str, Vec<&'static str>)> {
+        vec![
+            (
+                "w120",
+                vec![
+                    r#" grok live · 10 agents · 2 waiting                                                                           sab-mini ●"#,
+                    r#" ⚠  claude  Traces packet on Mini                      permission: Bash cargo build --release                    2m"#,
+                    r#" ⚠? claude  long wait                                  permission: Edit a                                        8m"#,
+                    r#" ○  claude  snapshot tests                             your turn                                                 1m"#,
+                    r#" ●  pi      khoj worker                                Bash rg --files                                           1s"#,
+                    r#" ⟳  claude  compactor                                  compacting · 5s                                           5s"#,
+                    r#" ▶  cursor  grok-build                   ctx 142k/200k Shell cargo test -p xai-grok-traces · 8s                  8s"#,
+                    r#" ●  claude  failed one                                 Read x                                                   30s ✗"#,
+                    r#" ●  pi      no pid                                     Read y                                                   50s pid?"#,
+                    r#" ◌  claude  fork lead                    ctx 142k      quiet · Edit src/views/traces_modal.rs                    4m"#,
+                    r#" ⏳ claude  stuck tool                                 Bash sleep · 6m                                           6m ?"#,
+                ],
+            ),
+            (
+                "w80",
+                vec![
+                    r#" grok live · 10 agents · 2 waiting                                   sab-mini ●"#,
+                    r#" ⚠  claude  Traces packet on…    permission: Bash cargo build…           2m"#,
+                    r#" ⚠? claude  long wait            permission: Edit a                      8m"#,
+                    r#" ○  claude  snapshot tests       your turn                               1m"#,
+                    r#" ●  pi      khoj worker          Bash rg --files                         1s"#,
+                    r#" ⟳  claude  compactor            compacting · 5s                         5s"#,
+                    r#" ▶  cursor  grok-build           Shell cargo test -p xai-grok-traces…    8s"#,
+                    r#" ●  claude  failed one           Read x                                 30s ✗"#,
+                    r#" ●  pi      no pid               Read y                                 50s pid?"#,
+                    r#" ◌  claude  fork lead            quiet · Edit…                           4m"#,
+                    r#" ⏳ claude  stuck tool           Bash sleep · 6m                         6m ?"#,
+                ],
+            ),
+            (
+                "w50",
+                vec![
+                    r#" grok live · 10 agents · 2 waiting     sab-mini ●"#,
+                    r#" ⚠  claude  Traces packet… permission:…    2m"#,
+                    r#" ⚠? claude  long wait      permission:…    8m"#,
+                    r#" ○  claude  snapshot tests your turn       1m"#,
+                    r#" ●  pi      khoj worker    Bash rg…        1s"#,
+                    r#" ⟳  claude  compactor      compacting ·…   5s"#,
+                    r#" ▶  cursor  grok-build     Shell cargo…    8s"#,
+                    r#" ●  claude  failed one     Read x         30s ✗"#,
+                    r#" ●  pi      no pid         Read y         50s pid?"#,
+                    r#" ◌  claude  fork lead      quiet · Edit…   4m"#,
+                    r#" ⏳ claude  stuck tool     Bash sleep ·…   6m ?"#,
+                ],
+            ),
+            (
+                "w36",
+                vec![
+                    r#" grok live · 10 agents · 2 waiting"#,
+                    r#" ⚠  Traces packet… permis…   2m"#,
+                    r#" ⚠? long wait      permis…   8m"#,
+                    r#" ○  snapshot tests your…     1m"#,
+                ],
+            ),
+            (
+                "children expanded, waiting child",
+                vec![
+                    r#" grok live · 4 agents · 1 waiting                                                        sab-mini ●"#,
+                    r#" ○  claude  other                                      your turn                             1m"#,
+                    r#" ●  claude  Traces packet on Mini                      Read docs/SPEC.md                     4s"#,
+                    r#"   ⚠  claude  Explore index code                       permission: Bash rg x                 3s"#,
+                    r#"   ●  claude  review spec                              Grep live                             9s"#,
+                    r#""#,
+                ],
+            ),
+            (
+                "children collapsed (+2, root shows warn)",
+                vec![
+                    r#" grok live · 4 agents · 1 waiting                                                        sab-mini ●"#,
+                    r#" ○  claude  other                                      your turn                             1m"#,
+                    r#" ⚠  claude  Traces packet on Mini +2                   Read docs/SPEC.md                     4s"#,
+                    r#""#,
+                    r#""#,
+                    r#""#,
+                ],
+            ),
+            (
+                "child selected",
+                vec![
+                    r#" grok live · 4 agents · 1 waiting                                                        sab-mini ●"#,
+                    r#" ○  claude  other                                      your turn                             1m"#,
+                    r#" ●  claude  Traces packet on Mini                      Read docs/SPEC.md                     4s"#,
+                    r#"   ⚠  claude  Explore index code                       permission: Bash rg x                 3s"#,
+                    r#"   ●  claude  review spec                              Grep live                             9s"#,
+                    r#""#,
+                ],
+            ),
+            (
+                "bg parents",
+                vec![
+                    r#" grok live · 2 agents                                                                    sab-mini ●"#,
+                    r#" ○  claude  idle parent                                your turn · 1 bg                     20s"#,
+                    r#" ●  claude  bg parent                    ctx 90k       2 bg · Read x                         3s"#,
+                    r#""#,
+                ],
+            ),
+            (
+                "cursor receipt-only and with ctx",
+                vec![
+                    r#" grok live · 2 agents                                                                    sab-mini ●"#,
+                    r#" ●  cursor  grok-build                                 Shell ls                              2s"#,
+                    r#" ●  cursor  chat with transcript         ctx 33k/128k  Edit a.rs                             6s"#,
+                    r#""#,
+                ],
+            ),
+            (
+                "remote ok, interleaved",
+                vec![
+                    r#" grok live · 4 agents · 1 waiting                                              sab-mini ● sab-air ●"#,
+                    r#" ⚠  claude  sab-air: fork lead                         permission: Bash cargo build          5s"#,
+                    r#" ▶  pi      sab-air: khoj worker                       Bash rg --files · 25s                 2s"#,
+                    r#" ●  claude  local one                                  Read a                               20s"#,
+                    r#" ●  claude  sab-air: docs sweep                        Read README.md                       40s"#,
+                    r#""#,
+                ],
+            ),
+            (
+                "remote selected",
+                vec![
+                    r#" grok live · 4 agents · 1 waiting                                              sab-mini ● sab-air ●"#,
+                    r#" ⚠  claude  sab-air: fork lead                         permission: Bash cargo build          5s"#,
+                    r#" ▶  pi      sab-air: khoj worker                       Bash rg --files · 25s                 2s"#,
+                    r#" ●  claude  local one                                  Read a                               20s"#,
+                    r#" ●  claude  sab-air: docs sweep                        Read README.md                       40s"#,
+                    r#""#,
+                ],
+            ),
+            (
+                "remote fresh fetch 3s ago: waiting first, age 8s",
+                vec![
+                    r#" grok live · 4 agents · 1 waiting                                              sab-mini ● sab-air ●"#,
+                    r#" ⚠  claude  sab-air: fork lead                         permission: Bash cargo build          8s"#,
+                    r#" ▶  pi      sab-air: khoj worker                       Bash rg --files · 28s                 5s"#,
+                    r#" ●  claude  local one                                  Read a                               20s"#,
+                    r#" ●  claude  sab-air: docs sweep                        Read README.md                       43s"#,
+                    r#""#,
+                ],
+            ),
+            (
+                "remote failed, cached rows advanced 8s",
+                vec![
+                    r#" grok live · 4 agents · 1 waiting                                              sab-mini ● sab-air ✗"#,
+                    r#" ⚠  claude  sab-air: fork lead                         permission: Bash cargo build         13s"#,
+                    r#" ⏳ pi      sab-air: khoj worker                       Bash rg --files · 33s                10s"#,
+                    r#" ●  claude  local one                                  Read a                               20s"#,
+                    r#" ●  claude  sab-air: docs sweep                        Read README.md                       48s"#,
+                    r#""#,
+                ],
+            ),
+            (
+                "remote gated note",
+                vec![
+                    r#" grok live · 1 agent                                                           sab-mini ● sab-air ●"#,
+                    r#"sab-air: update grok-traces (live_schema none)"#,
+                    r#" ●  claude  local one                                  Read a                               20s"#,
+                    r#""#,
+                    r#""#,
+                ],
+            ),
+            (
+                "host before first result",
+                vec![
+                    r#" grok live · 1 agent                                                           sab-mini ● sab-air …"#,
+                    r#" ●  claude  local one                                  Read a                               20s"#,
+                    r#""#,
+                ],
+            ),
+            (
+                "orphan",
+                vec![
+                    r#" grok live · 1 agent                                                                     sab-mini ●"#,
+                    r#" ●  claude  ↑ the parent title                         Read a                                5s"#,
+                    r#""#,
+                ],
+            ),
+            (
+                "filter bash",
+                vec![
+                    r#" grok live · 3 agents · 1 waiting                                                        sab-mini ●"#,
+                    r#" ⚠  claude  Traces packet on Mini                      permission: Bash cargo build…         2m"#,
+                    r#" ●  pi      khoj worker                                Bash rg --files                       1s"#,
+                    r#" ⏳ claude  stuck tool                                 Bash sleep · 6m                       6m ?"#,
+                    r#""#,
+                    r#" /BASH   esc clear"#,
+                ],
+            ),
+            (
+                "no match",
+                vec![
+                    r#" grok live · 0 agents                                                                    sab-mini ●"#,
+                    r#" no match"#,
+                    r#" /zzz   esc clear"#,
+                ],
+            ),
+            (
+                "typing line",
+                vec![
+                    r#" grok live · 1 agent                                                                     sab-mini ●"#,
+                    r#" ◌  claude  fork lead                    ctx 142k      quiet · Edit…                         4m"#,
+                    r#""#,
+                    r#""#,
+                    r#""#,
+                    r#""#,
+                    r#""#,
+                    r#" /fo▏"#,
+                ],
+            ),
+            (
+                "standalone hints",
+                vec![
+                    r#" grok live · 1 agent                                                                     sab-mini ●"#,
+                    r#" ●  claude  local one                                  Read a                               20s"#,
+                    r#""#,
+                    r#" enter open   j/k   c children   / search   q quit"#,
+                ],
+            ),
+            (
+                "wide chars align",
+                vec![
+                    r#" grok live · 1 agent                                                 sab-mini ●"#,
+                    r#" ⏳ claude  日本語のタイトルが…  Shell echo ünïcode · 40s                3s"#,
+                    r#""#,
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    #[ignore = "regenerates the frozen snapshots: cargo test live_tests::dump -- --ignored --nocapture"]
+    fn dump() {
+        for (name, rows) in scenarios() {
+            eprintln!("@@ {name}");
+            for r in rows {
+                eprintln!("|{r}");
+            }
+        }
+    }
+
+    #[test]
+    fn snapshots_match() {
+        let got = scenarios();
+        let want = frozen();
+        assert_eq!(got.len(), want.len());
+        for ((gn, g), (wn, w)) in got.iter().zip(&want) {
+            assert_eq!(gn, wn);
+            assert_eq!(
+                g.iter().map(String::as_str).collect::<Vec<_>>(),
+                *w,
+                "snapshot {gn}"
+            );
+        }
+    }
+
+    fn press(s: &mut TracesModalState, code: KeyCode) -> InputOutcome {
+        handle_traces_key(s, &KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn ids(s: &TracesModalState) -> Vec<String> {
+        s.live_view(Instant::now())
+            .lines
+            .iter()
+            .map(|l| l.row.session_id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn fit_is_exact_width_and_never_panics() {
+        assert_eq!(fit("", 5), "     ");
+        assert_eq!(fit("abc", 0), "");
+        assert_eq!(fit("abc", 5), "abc  ");
+        assert_eq!(fit("hello world foo", 8), "hello…  ");
+        assert_eq!(fit("averyveryverylongword", 8), "averyve…");
+        assert_eq!(fit("日本語のタイトル", 7), "日本語…");
+        assert_eq!(fit("日本語のタイトル", 8).width(), 8);
+        assert_eq!(fit("abcdef", 1), "…");
+        assert_eq!(cut("✗ ? pid?", 4), "✗ ?…");
+        assert_eq!(cut("✗", 4), "✗   ");
+    }
+
+    #[test]
+    fn empty_states() {
+        let t0 = Instant::now();
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut writer, reader) = idx(&tmp);
+        let mut s = with_index(Some(reader));
+        let rows = snap(&mut s, 100, 4, t0);
+        assert_eq!(
+            rows[1],
+            " no live agents · 0 hook receipts in the last hour · grok-traces doctor"
+        );
+        assert_eq!(
+            rows[2],
+            " install hooks: crates/codegen/xai-grok-traces/hooks/install.sh --apply"
+        );
+        receipt(&mut writer);
+        let rows = snap(&mut s, 100, 4, t0);
+        assert_eq!(
+            rows[1],
+            " no live agents · 1 hook receipt in the last hour · grok-traces doctor"
+        );
+        assert_eq!(rows[2], "");
+        receipt(&mut writer);
+        receipt(&mut writer);
+        assert_eq!(
+            snap(&mut s, 100, 4, t0)[1],
+            " no live agents · 3 hook receipts in the last hour · grok-traces doctor"
+        );
+        let mut none = with_index(None);
+        assert_eq!(snap(&mut none, 100, 3, t0)[1], " no live agents · no index");
+        none.live_query = "x".into();
+        assert_eq!(snap(&mut none, 100, 3, t0)[1], " no match");
+    }
+
+    #[test]
+    fn tripped_index_says_so_and_the_body_still_renders() {
+        let t0 = Instant::now();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("idx/t.sqlite");
+        let limits = xai_grok_traces::Limits {
+            ceiling: 1,
+            ..Default::default()
+        };
+        let ix = TraceIndex::open_with_limits(&db, None, limits).unwrap();
+        assert!(ix.health().is_some());
+        let mut s = with_index(Some(ix));
+        s.set_live(
+            vec![lr(
+                "l1",
+                "claude",
+                "local one",
+                LiveState::Working,
+                "Read a",
+                20,
+            )],
+            vec![],
+        );
+        let rows = snap(&mut s, 100, 3, t0);
+        eprintln!("tripped: {rows:#?}");
+        assert!(rows[0].starts_with(" index tripped · grok-traces doctor --reset"));
+        assert!(rows[1].contains("local one"));
+    }
+
+    #[test]
+    fn overflow_keeps_the_selected_last_row_visible_and_highlighted() {
+        let t0 = Instant::now();
+        let mut s = state();
+        let rows: Vec<LiveRow> = (0..50)
+            .map(|i| {
+                lr(
+                    &format!("a{i:02}"),
+                    "claude",
+                    &format!("agent {i:02}"),
+                    LiveState::Working,
+                    "Read x",
+                    i,
+                )
+            })
+            .collect();
+        s.set_live(rows, vec![]);
+        s.live_sel = Some("a49".into());
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::current();
+        render_live_at(&mut buf, area, &mut s, &theme, t0);
+        let out = rows_of(&buf, 100, 20);
+        assert!(out[19].contains("agent 49"), "{out:#?}");
+        assert!(out[1].contains("agent 31"), "{out:#?}");
+        assert_eq!(buf[(5, 19)].bg, theme.bg_highlight);
+        assert_ne!(buf[(5, 18)].bg, theme.bg_highlight);
+    }
+
+    #[test]
+    fn keys_collapse_move_and_back() {
+        let mut s = state();
+        s.set_live(family(), vec![]);
+        assert_eq!(ids(&s), ["s", "r", "k1", "k2"]);
+        press(&mut s, KeyCode::Char('j'));
+        assert_eq!(s.live_sel.as_deref(), Some("r"));
+        press(&mut s, KeyCode::Char('c'));
+        assert_eq!(ids(&s), ["s", "r"], "collapsed");
+        press(&mut s, KeyCode::Char('c'));
+        assert_eq!(ids(&s), ["s", "r", "k1", "k2"], "expanded again");
+        press(&mut s, KeyCode::Char('j'));
+        assert_eq!(s.live_sel.as_deref(), Some("k1"));
+        press(&mut s, KeyCode::Char('c'));
+        assert_eq!(
+            s.live_sel.as_deref(),
+            Some("r"),
+            "c on a child collapses the root and selects it"
+        );
+        assert_eq!(ids(&s), ["s", "r"]);
+        s.live_wheel(true);
+        assert_eq!(s.live_sel.as_deref(), Some("r"), "clamped at the last row");
+        s.live_wheel(false);
+        assert_eq!(s.live_sel.as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn q_goes_back_in_traces_and_exits_standalone() {
+        let mut s = state();
+        press(&mut s, KeyCode::Char('q'));
+        assert_eq!(s.mode, Mode::List);
+        assert!(!s.live_wants_exit());
+        let mut s = state();
+        s.standalone = true;
+        press(&mut s, KeyCode::Char('q'));
+        assert_eq!(s.mode, Mode::Live);
+        assert!(s.live_wants_exit());
+    }
+
+    #[test]
+    fn esc_standalone_sets_wants_exit() {
+        let mut s = state();
+        s.standalone = true;
+        press(&mut s, KeyCode::Esc);
+        assert!(s.live_wants_exit());
+    }
+
+    #[test]
+    fn esc_with_query_clears_not_exits() {
+        let mut s = state();
+        s.standalone = true;
+        s.live_query = "bash".into();
+        press(&mut s, KeyCode::Esc);
+        assert!(s.live_query.is_empty());
+        assert!(!s.live_wants_exit());
+        press(&mut s, KeyCode::Esc);
+        assert!(s.live_wants_exit());
+    }
+
+    #[test]
+    fn slash_filters_and_keeps_parents_of_matching_children() {
+        let mut s = state();
+        s.set_live(family(), vec![]);
+        press(&mut s, KeyCode::Char('/'));
+        assert_eq!(s.typing, Typing::Live);
+        for c in "explore".chars() {
+            press(&mut s, KeyCode::Char(c));
+        }
+        assert_eq!(ids(&s), ["r", "k1"], "child match keeps its parent");
+        press(&mut s, KeyCode::Enter);
+        assert_eq!(s.typing, Typing::No);
+        assert_eq!(s.live_query, "explore");
+        press(&mut s, KeyCode::Esc);
+        assert_eq!(ids(&s).len(), 4);
+        press(&mut s, KeyCode::Char('/'));
+        press(&mut s, KeyCode::Char('x'));
+        press(&mut s, KeyCode::Esc);
+        assert_eq!(
+            (s.typing, s.live_query.as_str()),
+            (Typing::No, ""),
+            "Esc while typing clears and stops"
+        );
+    }
+
+    #[test]
+    fn selection_survives_a_refold_that_reorders_rows() {
+        let mut s = state();
+        s.set_live(
+            vec![
+                lr("a", "claude", "A", LiveState::Working, "x", 1),
+                lr("b", "claude", "B", LiveState::Working, "x", 2),
+                lr("c", "claude", "C", LiveState::Working, "x", 3),
+            ],
+            vec![],
+        );
+        s.live_sel = Some("b".into());
+        s.live_pos(&s.live_view(Instant::now()).lines);
+        assert_eq!(s.live_sel_idx, 1);
+        let rows = vec![
+            lr("a", "claude", "A", LiveState::Working, "x", 9),
+            lr("b", "claude", "B", LiveState::Working, "x", 0),
+            lr("c", "claude", "C", LiveState::Working, "x", 3),
+        ];
+        s.apply_fold(LiveFold {
+            generation: 0,
+            rows: Ok(rows),
+            titles: HashMap::new(),
+        });
+        let v = s.live_view(Instant::now());
+        assert_eq!(s.live_pos(&v.lines), Some(0));
+        assert_eq!(s.live_sel.as_deref(), Some("b"));
+        // The selected row vanishes: the row now at the same position is selected.
+        s.apply_fold(LiveFold {
+            generation: 0,
+            rows: Ok(vec![
+                lr("a", "claude", "A", LiveState::Working, "x", 9),
+                lr("c", "claude", "C", LiveState::Working, "x", 3),
+            ]),
+            titles: HashMap::new(),
+        });
+        let v = s.live_view(Instant::now());
+        assert_eq!(s.live_pos(&v.lines), Some(0));
+        assert_eq!(s.live_sel.as_deref(), Some("c"));
+    }
+
+    fn pi_state() -> (tempfile::TempDir, TracesModalState, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pi");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.jsonl"), "{\"type\":\"message\",\"timestamp\":\"2026-10-01T00:00:01Z\",\"message\":{\"role\":\"user\",\"content\":\"task a\"}}\n").unwrap();
+        let roots = [xai_grok_traces::Root {
+            id: "pi".into(),
+            source: "pi".into(),
+            path: dir,
+            format: xai_grok_traces::Format::Jsonl,
+            file_name: None,
+        }];
+        let db = tmp.path().join("idx/t.sqlite");
+        TraceIndex::open(&db).unwrap().scan(&roots).unwrap();
+        let mut s = with_index(Some(TraceIndex::open(&db).unwrap()));
+        s.show_all = true;
+        s.refresh();
+        let id = s.sessions[0].id.clone();
+        (tmp, s, id)
+    }
+
+    #[test]
+    fn o_opens_the_trajectory_and_esc_returns_to_live_with_the_selection() {
+        let (_tmp, mut s, id) = pi_state();
+        s.set_live(
+            vec![
+                lr(&id, "pi", "task a", LiveState::Working, "x", 1),
+                lr("zz", "pi", "other", LiveState::Working, "x", 5),
+            ],
+            vec![],
+        );
+        press(&mut s, KeyCode::Char('j'));
+        assert_eq!(s.live_sel.as_deref(), Some("zz"));
+        press(&mut s, KeyCode::Char('k'));
+        press(&mut s, KeyCode::Char('o'));
+        assert_eq!(s.mode, Mode::Trajectory);
+        assert_eq!(s.session.as_ref().map(|x| x.id.as_str()), Some(id.as_str()));
+        press(&mut s, KeyCode::Esc);
+        assert_eq!(s.mode, Mode::Live);
+        assert!(!s.live_return && s.session.is_none());
+        assert_eq!(s.live_sel.as_deref(), Some(id.as_str()));
+        // A row the index does not know cannot be opened.
+        press(&mut s, KeyCode::Char('j'));
+        press(&mut s, KeyCode::Enter);
+        assert_eq!(s.mode, Mode::Live);
+        assert_eq!(s.status.as_deref(), Some("cannot open zz"));
+    }
+
+    #[test]
+    fn o_on_a_remote_row_opens_with_the_host_set() {
+        let mut s = state();
+        s.set_live(
+            vec![],
+            vec![(
+                "nobody@sab-air.invalid",
+                remote_rows(),
+                Instant::now(),
+                true,
+                None,
+            )],
+        );
+        s.live_sel = Some("sab-air:b".into());
+        // The row's host label is what the ledger matches on; this target's label differs, so no ssh is attempted.
+        press(&mut s, KeyCode::Char('o'));
+        assert_eq!(s.mode, Mode::Trajectory);
+        let sess = s.session.as_ref().unwrap();
+        assert_eq!(
+            (sess.id.as_str(), sess.host.as_deref(), sess.source.as_str()),
+            ("sab-air:b", Some("sab-air"), "pi")
+        );
+        assert!(s.live_return);
+    }
+
+    #[test]
+    fn l_enters_live_from_the_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_w, r) = idx(&tmp);
+        let mut s = TracesModalState::open_with_hosts(Some(r), vec![]);
+        assert_eq!(s.mode, Mode::List);
+        press(&mut s, KeyCode::Char('L'));
+        assert_eq!(s.mode, Mode::Live);
+        assert!(s.live_fold.is_some(), "first fold starts at once");
+        let end = Instant::now() + Duration::from_secs(10);
+        while s.live_fold.is_some() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(5));
+            assert!(s.poll_live_at(now_ms()), "Live repaints every tick");
+        }
+        s.fold_now(now_ms());
+        assert!(s.live_rows.is_empty() && s.status.is_none());
     }
 }
