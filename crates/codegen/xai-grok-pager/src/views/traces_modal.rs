@@ -3006,26 +3006,21 @@ fn split_result(text: &str) -> (&str, &str) {
     }
 }
 
-/// What `full` has past `header`, the first line of its header text (`header` is the same one-line source,
-/// wrapped). Whitespace runs compare equal, and a header cut mid-token still matches. The matched text and
-/// the whitespace after it are dropped; the rest keeps its own lines. `full` comes back unchanged when the
-/// two disagree, so no text is lost to a mismatch.
-fn continuation(header: &str, full: &str) -> String {
-    let header = one_line(header);
-    let want: Vec<char> = header.strip_suffix('…').unwrap_or(&header).chars().collect();
+/// Byte offset where `want` ends inside `full`, matching from the start with whitespace runs equal. `None`
+/// when they disagree or `full` runs out first. The offset is past the last matched non-space char.
+fn match_end(want: &str, full: &str) -> Option<usize> {
+    let want: Vec<char> = want.chars().collect();
     let mut matched = 0;
     let mut end = 0;
     let mut chars = full.char_indices().peekable();
     while let Some(&w) = want.get(matched) {
-        let Some((at, c)) = chars.next() else {
-            return full.to_string();
-        };
+        let (at, c) = chars.next()?;
         if c.is_whitespace() {
             if matched == 0 {
                 continue;
             }
             if w != ' ' {
-                return full.to_string();
+                return None;
             }
             matched += 1;
             while chars.peek().is_some_and(|&(_, d)| d.is_whitespace()) {
@@ -3033,12 +3028,51 @@ fn continuation(header: &str, full: &str) -> String {
             }
         } else {
             if w != c {
-                return full.to_string();
+                return None;
             }
             matched += 1;
             end = at + c.len_utf8();
         }
     }
+    Some(end)
+}
+
+/// Where a cut at `end` lands on a word: when `full` continues mid-token there, the start of that token,
+/// so the continuation begins with the whole word. Otherwise `end`.
+fn whole_token_at(full: &str, end: usize) -> usize {
+    let mid_token = full
+        .get(end..)
+        .and_then(|s| s.chars().next())
+        .is_some_and(|c| !c.is_whitespace());
+    if !mid_token {
+        return end;
+    }
+    full.get(..end)
+        .unwrap_or_default()
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(0, |(i, c)| i + c.len_utf8())
+}
+
+/// What `full` has past `header`, the first line of its header text (`header` is the same one-line source,
+/// wrapped). Whitespace runs compare equal, and a header cut mid-token still matches. The matched text and
+/// the whitespace after it are dropped; the rest keeps its own lines. A trailing `…` on the header is a
+/// preview cut, not text: when the header as-is does not match, it is retried without the `…`, and the
+/// continuation then starts at the whole word the cut landed in. `full` comes back unchanged when nothing
+/// matches, so no text is lost to a mismatch.
+fn continuation(header: &str, full: &str) -> String {
+    let header = one_line(header);
+    let end = match match_end(&header, full) {
+        Some(end) => end,
+        None => match header
+            .strip_suffix('…')
+            .and_then(|bare| match_end(bare, full))
+        {
+            Some(end) => whole_token_at(full, end),
+            None => return full.to_string(),
+        },
+    };
     full.get(end..).unwrap_or_default().trim_start().to_string()
 }
 
@@ -4008,6 +4042,8 @@ mod tests {
     fn continuation_drops_the_preview_ellipsis_and_the_wrappers() {
         assert_eq!(continuation("abc def…", "abc def ghi jkl"), "ghi jkl", "the preview's cut marker is not text");
         assert_eq!(continuation("abc def…", "abc def"), "", "a whole preview leaves nothing");
+        assert_eq!(continuation("abc de…", "abc def ghi"), "def ghi", "the cut lands mid-word: the word is whole");
+        assert_eq!(continuation("wait…", "wait… then more"), "then more", "a typed ellipsis is text when it matches");
         assert_eq!(continuation_full(None, "hello world…"), "hello world", "uncached: the index text without its marker");
         assert_eq!(continuation_full(Some(&"hello world".to_string()), "hello"), "hello world");
 
@@ -4048,7 +4084,7 @@ mod tests {
         let turn = row("#1");
         assert!(turn.contains("fix it") && !turn.contains("Bash ls"), "{turn}");
         assert!(row("#2").contains("Bash  ls -la"), "{screen}");
-        let answer = row("#4");
+        let answer = row("#3");
         assert!(answer.contains("wrapup") && !answer.contains("Bash pwd"), "{answer}");
     }
 
@@ -4204,7 +4240,8 @@ mod tests {
         }
         let i = all.iter().position(|r| r.contains("https://")).expect("url row");
         let piece = all[i].trim_start();
-        let next = all[i + 1].trim_start().split(' ').next().unwrap_or_default();
+        assert!(all[i + 1].contains("more lines"), "{all:#?}");
+        let next = all[i + 2].trim_start().split(' ').next().unwrap_or_default();
         assert_eq!(format!("{piece}{next}"), URL, "{all:#?}");
     }
 
