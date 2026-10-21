@@ -28,7 +28,7 @@ WRITE=0; [ "$MODE" = apply ] && WRITE=1
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 
 # name matcher? (matcher "*" only where the event takes one)
-CLAUDE_EVENTS='[["SessionStart",1],["UserPromptSubmit",0],["PreToolUse",1],["PostToolUse",1],["PostToolUseFailure",1],["Stop",0],["SubagentStop",1],["SessionEnd",1]]'
+CLAUDE_EVENTS='[["SessionStart",1],["UserPromptSubmit",0],["PreToolUse",1],["PostToolUse",1],["PostToolUseFailure",1],["Stop",0],["SubagentStop",1],["SessionEnd",1],["PermissionRequest",1],["PermissionDenied",1],["Notification",1],["SubagentStart",1],["PreCompact",1],["PostCompact",1],["StopFailure",1]]'
 # Cursor hooks.json is flat ({"hooks":{"<event>":[{"command":..}]}}). Non-gating events only: `{}` is a no-op reply for
 # every one of them. beforeSubmitPrompt/preToolUse/before* gate and need {"continue":true}/{"permission":"allow"}: not wired.
 CURSOR_EVENTS='[["afterAgentResponse",0],["postToolUse",0],["postToolUseFailure",0],["stop",0]]'
