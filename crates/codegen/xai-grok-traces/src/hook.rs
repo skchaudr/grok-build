@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::bb::thread_key;
 use crate::classify::call_detail;
-use crate::live::{find_harness, proc_start};
+use crate::live::{chain_from, find_harness_chain, proc_start};
 use crate::index::{Result, TraceIndex, now_ms, session_id};
 use crate::receipts::Receipt;
 use crate::roots::{Format, Root, resolve};
@@ -130,8 +130,15 @@ pub fn ingest(idx: &mut TraceIndex, roots: &[Root], mut r: Receipt) -> Result<i6
 /// A payload `harness_pid` gets its start time; without one, the ancestry walk finds the harness.
 fn fill_harness(r: &mut Receipt) {
     match r.harness_pid {
-        Some(pid) => r.harness_start = proc_start(pid),
-        None => (r.harness_pid, r.harness_start) = find_harness().unzip(),
+        Some(pid) => {
+            r.harness_start = proc_start(pid);
+            r.harness_chain = chain_from(pid);
+        }
+        None => {
+            if let Some((pid, start, chain)) = find_harness_chain() {
+                (r.harness_pid, r.harness_start, r.harness_chain) = (Some(pid), Some(start), chain);
+            }
+        }
     }
 }
 
