@@ -44,6 +44,8 @@ const RESULT_ERR_SEP: &str = "── ✗ result ──";
 const MORE_KEY: &str = "\u{1}more:";
 /// How often remote hosts are refetched while the modal is open.
 const REMOTE_EVERY: Duration = Duration::from_secs(10);
+/// Remote body fetches allowed in flight at once; the rest wait for a later render.
+const MAX_BODY_FETCHES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -59,6 +61,17 @@ enum Typing {
     Ledger,
     Events,
 }
+
+/// A parent trajectory parked while its dispatch child is open: the session, the selected row and the outline folds.
+struct Trail {
+    session: SessionRow,
+    sel: Option<OutlineKey>,
+    folds: FoldState<OutlineKey>,
+    seen: HashSet<OutlineKey>,
+}
+
+/// The event filters (search text, errors only, tool); a change re-opens the matching turns and runs.
+type FilterSig = (String, bool, Option<usize>);
 
 pub struct TracesModalState {
     pub window: ModalWindowState,
@@ -124,6 +137,8 @@ pub struct TracesModalState {
     /// Full text per event line (pretty JSON of its raw line), loaded when its row shows.
     bodies: HashMap<i64, String>,
     body_pending: HashSet<i64>,
+    /// Lines whose last read failed; not cached, so `l` retries them.
+    body_failed: HashSet<i64>,
     body_tx: mpsc::Sender<BodyMsg>,
     body_rx: mpsc::Receiver<BodyMsg>,
     /// Children of the open session (dispatch targets), oldest first.
@@ -157,8 +172,12 @@ pub struct TracesModalState {
     shown_roots: Vec<SessionRow>,
     shown_children: HashMap<String, Vec<SessionRow>>,
     parent_name: Option<String>,
-    /// Sessions we descended from with Enter on a dispatch row, and the row we were on.
-    trail: Vec<(SessionRow, Option<OutlineKey>)>,
+    /// Sessions we descended from with Enter on a dispatch row.
+    trail: Vec<Trail>,
+    /// Outline row to reveal once the restored trajectory has its events (remote loads are async).
+    reveal: Option<OutlineKey>,
+    /// Filters as the outline last saw them.
+    filter_seen: FilterSig,
     tools: Vec<String>,
     pub tool_filter: Option<usize>,
 
@@ -341,6 +360,7 @@ impl TracesModalState {
             sel: None,
             bodies: HashMap::new(),
             body_pending: HashSet::new(),
+            body_failed: HashSet::new(),
             body_tx,
             body_rx,
             session_children: Vec::new(),
@@ -364,6 +384,8 @@ impl TracesModalState {
             shown_children: HashMap::new(),
             parent_name: None,
             trail: Vec::new(),
+            reveal: None,
+            filter_seen: FilterSig::default(),
             tools: Vec::new(),
             tool_filter: None,
             raw: None,
@@ -760,9 +782,15 @@ impl TracesModalState {
         };
         self.session = Some(row);
         self.sel = None;
+        self.reveal = None;
         self.event_scroll = 0;
         self.bodies.clear();
         self.body_pending.clear();
+        self.body_failed.clear();
+        // Folds belong to one session: a new one starts with its defaults.
+        self.ofolds = FoldState::new();
+        self.oseen.clear();
+        self.filter_seen = FilterSig::default();
         self.event_errors_only = false;
         self.event_query.clear();
         self.tool_filter = None;
@@ -780,9 +808,14 @@ impl TracesModalState {
 
     /// Esc in a trajectory: back up the dispatch trail, else to the ledger.
     fn leave_trajectory(&mut self) {
-        if let Some((parent, selected)) = self.trail.pop() {
-            self.open_session(parent);
-            self.sel = selected;
+        if let Some(t) = self.trail.pop() {
+            self.open_session(t.session);
+            // Back where we left: the same folds and row. The row's ancestors open so it shows.
+            self.ofolds = t.folds;
+            self.oseen = t.seen;
+            self.reveal = t.sel.clone();
+            self.sel = t.sel;
+            self.rebuild_outline();
         } else {
             self.mode = Mode::List;
             self.session = None;
@@ -891,29 +924,69 @@ impl TracesModalState {
         let pos = self.sel_pos();
         let (tree, items) = traces_outline::outline(&self.events, &self.hidden);
         (self.outline, self.outline_items) = (tree, items);
-        self.ofolds.retain(&self.outline);
-        let live: HashSet<OutlineKey> = self.outline.nodes.iter().map(|n| n.key.clone()).collect();
-        self.oseen.retain(|k| live.contains(k));
-        // Defaults on first sight: turns open, runs and event rows closed. A filter opens turns and runs.
+        // An empty outline (remote events still loading, or no match) keeps the folds and selection for when rows return.
+        if !self.outline.nodes.is_empty() {
+            self.ofolds.retain(&self.outline);
+            let live: HashSet<OutlineKey> = self.outline.nodes.iter().map(|n| n.key.clone()).collect();
+            self.oseen.retain(|k| live.contains(k));
+        }
+        // Defaults on first sight: turns open, runs and event rows closed. Under a filter, turns and runs open
+        // on first sight and again when the filter itself changes, so a manual collapse survives live polls.
+        let sig = self.filter_sig();
+        let refilter = sig != self.filter_seen;
+        self.filter_seen = sig;
         let filtering = self.filtering();
         for i in 0..self.outline.nodes.len() {
             let Some(key) = self.key_at(i).cloned() else { continue };
+            if !self.outline.has_children(i) {
+                continue;
+            }
             let turn = matches!(key, OutlineKey::Turn(_));
             let run = matches!(key, OutlineKey::Run(_));
-            if self.outline.has_children(i) && self.oseen.insert(key) && !turn && !(filtering && run) {
+            let fresh = self.oseen.insert(key);
+            if fresh && !turn && !(filtering && run) {
                 self.ofolds.collapse(&self.outline, i);
             }
-            if filtering && (turn || run) {
+            if filtering && (turn || run) && (fresh || refilter) {
                 self.ofolds.expand(&self.outline, i);
             }
         }
+        // A key not found while remote events are still loading stays pending for when they arrive.
+        if let Some(key) = self.reveal.take()
+            && !self.reveal(&key)
+            && self.events.is_empty()
+        {
+            self.reveal = Some(key);
+        }
         self.oshown = self.outline.visible(&self.ofolds);
         self.place(self.sel.clone(), pos);
-        self.ensure_bodies();
     }
 
-    /// Selects `keep` if it is shown, else the row at `pos` (clamped).
+    /// Expands every ancestor of the outline row `key` so it is shown. False when there is no such row.
+    fn reveal(&mut self, key: &OutlineKey) -> bool {
+        let Some(i) = self.outline.nodes.iter().position(|n| &n.key == key) else { return false };
+        let mut at = self.outline.nodes.get(i).and_then(|n| n.parent);
+        while let Some(p) = at {
+            self.ofolds.expand(&self.outline, p);
+            at = self.outline.nodes.get(p).and_then(|n| n.parent);
+        }
+        true
+    }
+
+    fn filter_sig(&self) -> FilterSig {
+        (self.event_query.clone(), self.event_errors_only, self.tool_filter)
+    }
+
+    /// The selected row is a run of tool calls.
+    fn selected_run(&self) -> bool {
+        self.oshown.get(self.sel_pos()).and_then(|&n| self.outline_items.get(n)).is_some_and(|item| matches!(item, OutlineItem::Run { .. }))
+    }
+
+    /// Selects `keep` if it is shown, else the row at `pos` (clamped). With no rows shown, the selection is left as it is.
     fn place(&mut self, keep: Option<OutlineKey>, pos: usize) {
+        if self.oshown.is_empty() {
+            return;
+        }
         let at = keep
             .as_ref()
             .and_then(|k| self.oshown.iter().position(|&n| self.key_at(n) == Some(k)))
@@ -934,7 +1007,6 @@ impl TracesModalState {
         let keep = at.and_then(|i| self.key_at(i)).cloned();
         let pos = self.sel_pos();
         self.place(keep, pos);
-        self.ensure_bodies();
     }
 
     /// Applies a fold op to the selected row. False when it changed nothing.
@@ -966,25 +1038,47 @@ impl TracesModalState {
         }
     }
 
-    /// Loads the full text of each visible body row not cached yet: local rows now, remote rows on a worker.
-    fn ensure_bodies(&mut self) {
-        let Some(session) = self.session.clone() else { return };
+    /// Wrapped body lines per shown row (`None` for rows that are not bodies), `text_w` columns wide.
+    fn body_rows(&self, text_w: usize) -> Vec<Option<Vec<String>>> {
+        self.oshown
+            .iter()
+            .map(|&n| {
+                let depth = self.outline.nodes.get(n).map_or(0, |x| x.depth);
+                match self.outline_items.get(n) {
+                    Some(OutlineItem::Body(i)) => Some(self.body_lines(*i, text_w.saturating_sub(2 * depth))),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Loads the bodies of the rows shown at `oshown` positions `from..from + height` that are not cached:
+    /// local rows now, remote rows on a worker (at most `MAX_BODY_FETCHES` in flight). True when a body
+    /// was cached here, so the caller should measure the rows again.
+    fn ensure_bodies(&mut self, from: usize, height: usize) -> bool {
+        let Some(session) = self.session.clone() else { return false };
         // (event index, its line): the body is cached by the line of the event that owns it.
         let wanted: Vec<(usize, i64)> = self
             .oshown
             .iter()
+            .skip(from)
+            .take(height)
             .filter_map(|&n| match self.outline_items.get(n)? {
                 OutlineItem::Body(i) => self.events.get(*i).map(|e| (*i, e.line)),
                 _ => None,
             })
             .collect();
+        let mut cached = false;
         for (i, line) in wanted {
-            if self.bodies.contains_key(&line) || self.body_pending.contains(&line) {
+            if self.bodies.contains_key(&line) || self.body_pending.contains(&line) || self.body_failed.contains(&line) {
                 continue;
             }
             let result = self.result_of(i);
             if session.host.is_some() {
                 let Some(target) = self.target_for(&session) else { continue };
+                if self.body_pending.len() >= MAX_BODY_FETCHES {
+                    break;
+                }
                 self.body_pending.insert(line);
                 let tx = self.body_tx.clone();
                 let sid = session.id.clone();
@@ -993,12 +1087,46 @@ impl TracesModalState {
                     let text = compose_body(fetch(line), result.map(|(l, error)| (fetch(l), error)));
                     let _ = tx.send(BodyMsg { session_id: sid, line, text });
                 });
-            } else if let Some(index) = &self.index {
-                let fetch = |l: i64| index.raw_line(&session.id, l).map_err(|e| e.to_string());
-                let text = compose_body(fetch(line), result.map(|(l, error)| (fetch(l), error)));
-                self.bodies.insert(line, text);
+            } else {
+                let text = match &self.index {
+                    Some(index) => {
+                        let fetch = |l: i64| index.raw_line(&session.id, l).map_err(|e| e.to_string());
+                        compose_body(fetch(line), result.map(|(l, error)| (fetch(l), error)))
+                    }
+                    None => continue,
+                };
+                cached |= self.settle_body(line, text);
             }
         }
+        cached
+    }
+
+    /// Takes a loaded body. A failure is not cached: the row shows nothing until `l` retries it.
+    fn settle_body(&mut self, line: i64, text: Result<String, String>) -> bool {
+        self.body_pending.remove(&line);
+        match text {
+            Ok(text) => {
+                self.bodies.insert(line, text);
+                true
+            }
+            Err(e) => {
+                self.body_failed.insert(line);
+                self.status = Some(format!("(could not read #{line}: {e}, press l to retry)"));
+                false
+            }
+        }
+    }
+
+    /// `l` on a row that did not fold: forget failed body reads so the next render reads them again.
+    fn retry_bodies(&mut self) -> bool {
+        if self.body_failed.is_empty() {
+            return false;
+        }
+        self.body_failed.clear();
+        if self.status.as_deref().is_some_and(|s| s.starts_with("(could not read")) {
+            self.status = None;
+        }
+        true
     }
 
     /// The result folded into event `i`'s call row: its line and whether it failed.
@@ -1009,8 +1137,10 @@ impl TracesModalState {
 
     /// The body text of event `ev` wrapped to `width`; a placeholder until a remote body arrives.
     fn body_lines(&self, ev: usize, width: usize) -> Vec<String> {
-        match self.events.get(ev).and_then(|e| self.bodies.get(&e.line)) {
+        let Some(line) = self.events.get(ev).map(|e| e.line) else { return vec!["loading…".to_string()] };
+        match self.bodies.get(&line) {
             Some(text) => wrap_body(text, width),
+            None if self.body_failed.contains(&line) => vec!["(could not read, press l to retry)".to_string()],
             None => vec!["loading…".to_string()],
         }
     }
@@ -1046,8 +1176,8 @@ impl TracesModalState {
     }
 
     fn enter_child(&mut self, child: SessionRow) {
-        if let Some(open) = self.session.clone() {
-            self.trail.push((open, self.sel.clone()));
+        if let Some(session) = self.session.clone() {
+            self.trail.push(Trail { session, sel: self.sel.clone(), folds: self.ofolds.clone(), seen: self.oseen.clone() });
         }
         self.open_session(child);
     }
@@ -1149,8 +1279,7 @@ impl TracesModalState {
         }
         while let Ok(m) = self.body_rx.try_recv() {
             if self.session.as_ref().is_some_and(|s| s.id == m.session_id) {
-                self.body_pending.remove(&m.line);
-                self.bodies.insert(m.line, m.text);
+                self.settle_body(m.line, m.text);
                 redraw = true;
             }
         }
@@ -1260,11 +1389,11 @@ struct RemoteEvents {
     result: Result<Vec<EventRow>, remote::Error>,
 }
 
-/// A remote body fetched for a trajectory row; `session_id` lets a stale one be dropped.
+/// A body read for a trajectory row; `session_id` lets a stale one be dropped.
 struct BodyMsg {
     session_id: String,
     line: i64,
-    text: String,
+    text: Result<String, String>,
 }
 
 /// Wraps `text` to `width` columns (one entry per screen line), capped at `BODY_LINES` plus a tail line.
@@ -1368,24 +1497,25 @@ fn push_chunk(out: &mut Vec<String>, s: &str) {
     out.push(t.to_string());
 }
 
-/// Body text of one raw line, or the pretty raw text / read error when it cannot be read.
-fn body_of(raw: Result<Option<String>, String>) -> String {
-    let text = match &raw {
-        Ok(Some(line)) if !line.is_empty() => Some(body_text(line)),
-        _ => None,
-    };
-    text.unwrap_or_else(|| pretty(raw))
+/// Body text of one raw line; a line that is gone reads as a placeholder, a failed read as its error.
+fn body_of(raw: Result<Option<String>, String>) -> Result<String, String> {
+    match raw {
+        Ok(Some(line)) if !line.is_empty() => Ok(body_text(&line)),
+        Ok(_) => Ok(pretty(Ok(None))),
+        Err(e) => Err(e),
+    }
 }
 
 /// A body row: the event's own text, then its folded result under a separator (`✗` when it failed).
-fn compose_body(own: Result<Option<String>, String>, result: Option<(Result<Option<String>, String>, bool)>) -> String {
-    let text = body_of(own);
+/// Any read that failed fails the whole body, so nothing half-read gets cached.
+fn compose_body(own: Result<Option<String>, String>, result: Option<(Result<Option<String>, String>, bool)>) -> Result<String, String> {
+    let text = body_of(own)?;
     match result {
         Some((raw, error)) => {
             let sep = if error { RESULT_ERR_SEP } else { RESULT_SEP };
-            format!("{text}\n\n{sep}\n\n{}", body_of(raw))
+            Ok(format!("{text}\n\n{sep}\n\n{}", body_of(raw)?))
         }
-        None => text,
+        None => Ok(text),
     }
 }
 
@@ -1679,7 +1809,8 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                     }
                 }
                 KeyCode::Right | KeyCode::Char('l') => {
-                    if !state.outline_fold(|f, t, n| f.expand(t, n)) {
+                    // On a row that cannot expand, `l` retries any body that failed to read.
+                    if !state.outline_fold(|f, t, n| f.expand(t, n)) && !state.retry_bodies() {
                         return InputOutcome::Unchanged;
                     }
                 }
@@ -1722,6 +1853,12 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                 }
                 KeyCode::Char('/') => state.typing = Typing::Events,
                 KeyCode::Char('r') => return state.resume(state.session.as_ref()),
+                // A run's Enter expands or collapses it; on a dispatch row, Enter opens the child; otherwise the inspector.
+                KeyCode::Enter if state.selected_run() => {
+                    if !state.outline_fold(|f, t, n| f.toggle(t, n)) {
+                        return InputOutcome::Unchanged;
+                    }
+                }
                 KeyCode::Enter => match state.selected_event().and_then(|i| state.child_of(i)).cloned() {
                     Some(child) => state.enter_child(child),
                     None => state.open_inspector(),
@@ -2326,16 +2463,16 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
     }
     // Body rows are as tall as their wrapped text, so scrolling works in lines, not rows.
     let text_w = (list.width as usize).saturating_sub(TEXT_COL);
-    let mut bodies: Vec<Option<Vec<String>>> = Vec::with_capacity(state.oshown.len());
-    for &n in &state.oshown {
-        let depth = state.outline.nodes.get(n).map_or(0, |x| x.depth);
-        bodies.push(match state.outline_items.get(n) {
-            Some(OutlineItem::Body(i)) => Some(state.body_lines(*i, text_w.saturating_sub(2 * depth))),
-            _ => None,
-        });
+    let height = list.height as usize;
+    let mut bodies = state.body_rows(text_w);
+    let mut heights = row_heights(&bodies);
+    fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, height);
+    // Load the bodies on screen; one cached right here changes row heights, so measure again.
+    if state.ensure_bodies(state.event_scroll, height) {
+        bodies = state.body_rows(text_w);
+        heights = row_heights(&bodies);
+        fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, height);
     }
-    let heights: Vec<usize> = bodies.iter().map(|b| b.as_ref().map_or(1, |v| v.len().max(1))).collect();
-    fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, list.height as usize);
 
     let summary_w = (list.width as usize).saturating_sub(7 + 7 + 9 + 2);
     let bottom = list.y + list.height;
@@ -2457,6 +2594,11 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         y += h;
     }
     render_status(buf, area, state, theme);
+}
+
+/// Lines per shown row: a body is as tall as its wrapped text, every other row is one line.
+fn row_heights(bodies: &[Option<Vec<String>>]) -> Vec<usize> {
+    bodies.iter().map(|b| b.as_ref().map_or(1, |v| v.len().max(1))).collect()
 }
 
 /// `1 tool` / `3 tools`.
@@ -3229,5 +3371,65 @@ mod tests {
         let (_, nodes) = flat.finish();
         let guides: Vec<String> = nodes.iter().map(|n| guide_prefix(&n.guides)).collect();
         assert_eq!(guides, ["", "├─ ", "└─ "]);
+    }
+
+    #[test]
+    fn esc_from_a_child_restores_the_parent_folds_and_selects_its_agent_row() {
+        // Calls on lines 2, 4 and 6 form a run; line 6 is the Agent dispatch that opens the child.
+        let mut rows = three_calls();
+        if let Some(agent) = rows.get_mut(5) {
+            agent.title = "Agent".into();
+        }
+        let mut state = trajectory(rows);
+        state.session_children = vec![SessionRow { id: "child".into(), ..row("claude", "/h/child.jsonl") }];
+        state.dispatch_child = state.match_dispatches();
+        state.goto(2);
+        press(&mut state, KeyCode::Right);
+        state.sel = Some(OutlineKey::Ev(6));
+        assert!(shown_rows(&state).contains(&"Ev(6)".to_string()));
+        let before = state.ofolds.clone();
+
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(state.session.as_ref().map(|s| s.id.as_str()), Some("child"));
+        press(&mut state, KeyCode::Char('E'));
+        assert_ne!(state.ofolds, before, "the child's folds are its own");
+
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.session.as_ref().map(|s| s.id.as_str()), Some("x"));
+        assert_eq!(state.ofolds, before, "the parent's folds come back");
+        assert_eq!(state.sel, Some(OutlineKey::Ev(6)));
+        assert!(shown_rows(&state).contains(&"Ev(6)".to_string()), "the Agent row is shown inside its run");
+        assert!(state.trail.is_empty());
+    }
+
+    #[test]
+    fn a_failed_body_read_is_not_cached_and_l_retries_it() {
+        let mut state = trajectory(three_calls());
+        state.body_pending.insert(2);
+        state.body_tx.send(BodyMsg { session_id: "x".into(), line: 2, text: Err("boom".into()) }).unwrap();
+        state.poll_remote();
+        assert!(!state.bodies.contains_key(&2), "an error is not cached");
+        assert!(!state.body_pending.contains(&2));
+        assert!(state.status.as_deref().is_some_and(|s| s.contains("press l to retry")), "{:?}", state.status);
+
+        // The row is skipped while its failure stands; `l` on a row that cannot fold clears it.
+        state.goto(0);
+        press(&mut state, KeyCode::Char('l'));
+        assert!(state.body_failed.is_empty());
+        assert!(!state.bodies.contains_key(&2));
+    }
+
+    #[test]
+    fn a_filter_does_not_reopen_a_run_the_user_collapsed() {
+        let mut state = trajectory(three_calls());
+        state.event_errors_only = true;
+        state.rebuild_outline();
+        assert!(shown_rows(&state).contains(&"Ev(4)".to_string()), "the filter opens the run");
+        state.goto(2);
+        press(&mut state, KeyCode::Char('h'));
+        assert!(!shown_rows(&state).contains(&"Ev(4)".to_string()));
+
+        state.install_trajectory(three_calls(), None, vec![]);
+        assert!(!shown_rows(&state).contains(&"Ev(4)".to_string()), "a live poll keeps the manual collapse");
     }
 }

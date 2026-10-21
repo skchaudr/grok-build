@@ -146,7 +146,7 @@ async fn traces_modal_ledger_trajectory_inspector() {
     assert!(h.contains_text("→ ptychildjob"), "dispatch row names its child\n{}", h.screen_contents());
 
     // Enter on the Agent row jumps into the child; Esc comes back to the same trajectory.
-    // Rows: the turn, its prompt body, the Bash call, then the Agent call.
+    // Rows: the turn, its opener (the prompt, folded), the Bash call, then the Agent call.
     h.inject_keys(b"jjj").expect("move to the Agent row");
     h.inject_keys(keys::ENTER).expect("open the child");
     h.wait_for_text("ptychildcmd", Duration::from_secs(5)).expect("child trajectory shows its own tool row");
@@ -183,7 +183,9 @@ async fn traces_modal_ledger_trajectory_inspector() {
     // Message and tool rows start folded; `E` expands everything, a second `E` folds everything, leaving the turn as one summary row.
     h.inject_keys(b"E").expect("expand all");
     h.inject_keys(b"E").expect("fold all");
-    h.wait_for_text("2 tools · ✗1", Duration::from_secs(5)).expect("collapsed turn summary");
+    // The turn has two tool calls, one failed, and the reply the live append added: `2 tools · 1 msg · ✗1`.
+    h.wait_for_text("2 tools", Duration::from_secs(5)).expect("collapsed turn counts its tools");
+    h.wait_for_text("✗1", Duration::from_secs(5)).expect("collapsed turn counts its failure");
     h.inject_keys(keys::ESC).expect("back to ledger");
     h.wait_for_text_absent("ACTIVITY", Duration::from_secs(5)).expect("ledger again");
 
