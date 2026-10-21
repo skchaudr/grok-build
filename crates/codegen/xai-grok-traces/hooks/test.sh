@@ -109,9 +109,10 @@ cmp -s "$H" "$T/H.orig" && cmp -s "$HOME/.dsh/profiles/web/cordis.patch.yml" "$T
 echo "$out" | G -q 'would run: bb plugin install' && ok "bb dry-run prints install command" || bad "bb dry-run output"
 "$HERE/install.sh" --apply --dsh-profile web --dsh-profile tui >/dev/null
 "$HERE/install.sh" --apply --dsh-profile web --dsh-profile tui >/dev/null   # idempotent
-expect 4 "$(cnt "$H" 'grok-traces" hook cursor')" "cursor: 4 non-gating events wired, once after two applies"
-expect "afterAgentResponse,postToolUse,postToolUseFailure,stop" "$(jq -r '[.hooks|to_entries[]|select(.value|any(.command|contains("grok-traces")))|.key]|sort|join(",")' "$H")" "cursor: event set"
-expect 0 "$(jq '[.hooks.beforeSubmitPrompt[]|select(.command|contains("grok-traces"))]|length' "$H")" "cursor: gating beforeSubmitPrompt not wired"
+expect 18 "$(cnt "$H" 'grok-traces" hook cursor')" "cursor: 18 events wired, once after two applies"
+expect "afterAgentResponse,afterAgentThought,afterFileEdit,afterMCPExecution,afterShellExecution,beforeMCPExecution,beforeReadFile,beforeShellExecution,beforeSubmitPrompt,postToolUse,postToolUseFailure,preCompact,preToolUse,sessionEnd,sessionStart,stop,subagentStart,subagentStop" "$(jq -r '[.hooks|to_entries[]|select(.value|any(.command|contains("grok-traces")))|.key]|sort|join(",")' "$H")" "cursor: event set"
+expect 1 "$(jq '[.hooks.beforeSubmitPrompt[]|select(.command|contains("grok-traces"))]|length' "$H")" "cursor: gating beforeSubmitPrompt wired"
+expect 1 "$(jq '[.hooks.beforeSubmitPrompt[]|select(.command=="orca-cursor")]|length' "$H")" "cursor: orca beforeSubmitPrompt hook survives"
 expect 1 "$(cnt "$H" moshi-hook)" "cursor: moshi untouched"
 expect 2 "$(cnt "$H" orca-cursor)" "cursor: orca untouched"
 expect 1 "$(jq .version "$H")" "cursor: version preserved"
