@@ -19,11 +19,16 @@ const CHILD: &[&str] = &[
     r#"{"type":"assistant","timestamp":"2026-10-01T00:00:08Z","message":{"role":"assistant","content":"the child job is finished"}}"#,
 ];
 const CHILD_META: &str = r#"{"agentType":"Explore","description":"ptychildjob"}"#;
+// Three non-noise events: a one-line session is trivial and hidden in browse mode.
 const CODEX: &[&str] = &[
     r#"{"timestamp":"2026-10-02T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"ptycodextask"}]}}"#,
+    r#"{"timestamp":"2026-10-02T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"working on it"}]}}"#,
+    r#"{"timestamp":"2026-10-02T00:00:03Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"keep going"}]}}"#,
 ];
 const PI: &[&str] = &[
     r#"{"type":"message","timestamp":"2026-10-03T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"ptypitask"}]}}"#,
+    r#"{"type":"message","timestamp":"2026-10-03T00:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"working on it"}]}}"#,
+    r#"{"type":"message","timestamp":"2026-10-03T00:00:03Z","message":{"role":"user","content":[{"type":"text","text":"keep going"}]}}"#,
 ];
 
 fn seed(path: PathBuf, lines: &[&str]) {
@@ -118,7 +123,14 @@ async fn traces_modal_ledger_trajectory_inspector() {
     }
     h.wait_for_text("live", Duration::from_secs(5)).expect("live marker");
     let fresh = home.join(".claude/projects/-w-claude/0b7e1c2a-0000-4000-8000-000000000009.jsonl");
-    seed(fresh.clone(), &[r#"{"type":"user","timestamp":"2026-09-01T00:00:00Z","message":{"role":"user","content":"ptylivetask"}}"#]);
+    seed(
+        fresh.clone(),
+        &[
+            r#"{"type":"user","timestamp":"2026-09-01T00:00:00Z","message":{"role":"user","content":"ptylivetask"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-09-01T00:00:01Z","message":{"role":"assistant","content":"working on it"}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T00:00:02Z","message":{"role":"user","content":"keep going"}}"#,
+        ],
+    );
     run_hook(&hook_bin, &home, &fresh);
     h.wait_for_text("ptylivetask", Duration::from_secs(10)).expect("new session appears without a key press");
 

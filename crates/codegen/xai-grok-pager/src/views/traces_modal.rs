@@ -171,6 +171,10 @@ fn tab_source(tab: usize) -> Option<&'static str> {
 
 impl TracesModalState {
     pub fn open(index: Option<TraceIndex>) -> Self {
+        Self::open_with_hosts(index, remote::hosts())
+    }
+
+    pub fn open_with_hosts(index: Option<TraceIndex>, hosts: Vec<String>) -> Self {
         let mut s = Self {
             window: ModalWindowState::new(),
             mode: Mode::List,
@@ -206,7 +210,7 @@ impl TracesModalState {
             dispatch_child: Vec::new(),
             generation: 0,
             inflight: None,
-            hosts: remote::hosts(),
+            hosts,
             host_filter: 0,
             remote_rows: HashMap::new(),
             remote_err: HashMap::new(),
@@ -251,7 +255,11 @@ impl TracesModalState {
                     redraw |= self.apply(snap);
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => self.inflight = None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // The worker failed before answering (index open); retry on the next poll.
+                    self.inflight = None;
+                    self.watermark = -1;
+                }
             }
         }
         redraw |= self.poll_remote();
@@ -275,7 +283,7 @@ impl TracesModalState {
         let req = Request {
             generation: self.generation,
             sessions: self.session_filter(),
-            browse: self.browse(),
+            browse: self.roots_only(),
             open: (self.mode != Mode::List).then(|| self.session.as_ref().map(|s| (s.id.clone(), s.event_count))).flatten(),
             events: self.event_filter(),
         };
@@ -291,6 +299,8 @@ impl TracesModalState {
     /// Install a worker snapshot unless the user changed filters since it was requested.
     fn apply(&mut self, snap: Snapshot) -> bool {
         if snap.generation != self.generation {
+            // Filters moved on while it ran; make the next poll request again.
+            self.watermark = -1;
             return false;
         }
         if let Ok((sessions, children)) = snap.ledger {
@@ -329,6 +339,12 @@ impl TracesModalState {
         !self.show_all && self.query.is_empty()
     }
 
+    /// The tree view nests children; the active and error filters list matches flat, so a
+    /// child that matches is not lost behind a parent that does not.
+    fn roots_only(&self) -> bool {
+        self.browse() && !self.active_only && !self.errors_only
+    }
+
     fn session_filter(&self) -> SessionFilter {
         let browse = self.browse();
         SessionFilter {
@@ -339,7 +355,7 @@ impl TracesModalState {
             active_only: self.active_only,
             sort: self.sort,
             limit: PAGE,
-            roots_only: browse,
+            roots_only: self.roots_only(),
             hide_trivial: browse,
             ..Default::default()
         }
@@ -360,7 +376,7 @@ impl TracesModalState {
         let Some(index) = &self.index else { return };
         self.generation += 1;
         self.health = index.health();
-        match query_ledger(index, &self.session_filter(), self.browse()) {
+        match query_ledger(index, &self.session_filter(), self.roots_only()) {
             Ok((sessions, children)) => (self.sessions, self.children) = (sessions, children),
             Err(e) => self.status = Some(format!("query failed: {e}")),
         }
@@ -368,7 +384,7 @@ impl TracesModalState {
     }
 
     fn rebuild_ledger(&mut self) {
-        let browse = self.browse();
+        let browse = self.roots_only();
         let local_ok = self.host_filter <= 1;
         let (remote_roots, remote_kids) = if self.host_filter == 1 { (Vec::new(), HashMap::new()) } else { self.remote_view(browse) };
         let mut roots = if local_ok { self.sessions.clone() } else { Vec::new() };
@@ -501,6 +517,8 @@ impl TracesModalState {
         self.event_query.clear();
         self.tool_filter = None;
         self.remote_all.clear();
+        self.remote_loading = false;
+        self.remote_ev = None;
         self.tools = match (&self.index, &self.session) {
             _ if remote => Vec::new(),
             (Some(i), Some(s)) => i.facets(&s.id).map(|f| f.tools.into_iter().map(|(t, _)| t).collect()).unwrap_or_default(),
@@ -520,6 +538,8 @@ impl TracesModalState {
             self.session = None;
             self.events.clear();
             self.folded.clear();
+            self.remote_loading = false;
+            self.remote_ev = None;
         }
     }
 
@@ -647,8 +667,16 @@ impl TracesModalState {
         let mut redraw = false;
         let mut done = Vec::new();
         if let Some(rx) = &self.remote_rx {
-            while let Ok(h) = rx.try_recv() {
-                done.push(h);
+            loop {
+                match rx.try_recv() {
+                    Ok(h) => done.push(h),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    // Every host thread has exited; one that panicked never answered, so stop waiting for it.
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.remote_pending = 0;
+                        break;
+                    }
+                }
             }
         }
         for h in done {
@@ -756,7 +784,7 @@ impl TracesModalState {
             .remote_all
             .iter()
             .filter(|e| !self.event_errors_only || e.is_error)
-            .filter(|e| tool.as_deref().is_none_or(|t| e.title == t))
+            .filter(|e| tool.as_deref().is_none_or(|t| e.kind == "tool" && e.title == t))
             .filter(|e| {
                 q.is_empty() || [Some(&e.title), Some(&e.preview), e.detail.as_ref()].into_iter().flatten().any(|f| f.to_lowercase().contains(&q))
             })
@@ -1810,7 +1838,7 @@ mod tests {
         let db = tmp.path().join("idx/t.sqlite");
         let mut writer = TraceIndex::open(&db).unwrap();
         writer.scan(&roots).unwrap();
-        let mut state = TracesModalState::open(Some(TraceIndex::open(&db).unwrap()));
+        let mut state = TracesModalState::open_with_hosts(Some(TraceIndex::open(&db).unwrap()), vec![]);
         // One-line fixtures count as trivial; this fixture is about ordering and live updates.
         state.show_all = true;
         state.refresh();
@@ -1892,7 +1920,7 @@ mod tests {
             });
         }
         let mut state = None;
-        t("open (ledger query)", &mut || state = Some(TracesModalState::open(Some(TraceIndex::open(std::path::Path::new(&db)).unwrap()))));
+        t("open (ledger query)", &mut || state = Some(TracesModalState::open_with_hosts(Some(TraceIndex::open(std::path::Path::new(&db)).unwrap()), vec![])));
         let mut state = state.unwrap();
         eprintln!("ledger items {} roots {}", state.ledger.len(), state.sessions.len());
         t("render ledger (warm theme)", &mut || {
@@ -1990,7 +2018,7 @@ mod tests {
         }];
         let db = tmp.path().join("idx/t.sqlite");
         TraceIndex::open(&db).unwrap().scan(&roots).unwrap();
-        let state = TracesModalState::open(Some(TraceIndex::open(&db).unwrap()));
+        let state = TracesModalState::open_with_hosts(Some(TraceIndex::open(&db).unwrap()), vec![]);
         (tmp, state)
     }
 
