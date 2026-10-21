@@ -1,6 +1,7 @@
 //! Trajectory outline: one session's events as a `FoldTree`. A turn starts at each user message
 //! (events before the first one form a synthetic turn), runs of consecutive tool calls are grouped,
-//! and every message or tool event gets a `Body` child holding its full text.
+//! and every message or tool event gets a `Body` child holding its full text. A user-message turn
+//! has no row of its own for that message: its prompt continues the turn row (`Prompt` rows).
 //!
 //! `items[i]` describes `tree.nodes[i]`, in preorder.
 
@@ -10,6 +11,8 @@ use super::traces_fold::{FoldNode, FoldTree};
 
 /// Runs of at least this many consecutive tool calls are grouped.
 const MIN_RUN: usize = 3;
+/// Prompt continuation rows shown before the `… N more lines` row.
+pub const PROMPT_LEAD: usize = 3;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum OutlineKey {
@@ -19,12 +22,17 @@ pub enum OutlineKey {
     Run(i64),
     Ev(i64),
     Body(i64),
+    /// The opener's first `PROMPT_LEAD` continuation rows (a leaf).
+    Prompt(i64),
+    /// `… N more lines`: foldable, its child `PromptRest` holds the remaining rows.
+    PromptMore(i64),
+    PromptRest(i64),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum OutlineItem {
-    /// `event` indexes the turn's first event; `opener` says it is a user message (its first child
-    /// is then that message, not a synthetic turn's first event); `tools` counts visible tool calls,
+    /// `event` indexes the turn's first event; `opener` says it is a user message (that message is
+    /// then the turn row itself, with no child row of its own); `tools` counts visible tool calls,
     /// `msgs` visible user/assistant messages after the opener, `errors` visible rows that failed.
     Turn {
         event: usize,
@@ -40,6 +48,10 @@ pub enum OutlineItem {
     },
     Event(usize),
     Body(usize),
+    /// The three `Prompt*` variants hold the opener's event index.
+    Prompt(usize),
+    PromptMore(usize),
+    PromptRest(usize),
 }
 
 /// Same classification as `traces_modal.rs` (`is_result`, `is_call`, the USER chip).
@@ -66,9 +78,15 @@ fn has_body(e: &EventRow) -> bool {
 
 /// Builds the outline of `events`. `hidden[i]` marks a tool result already folded into the call row
 /// before it; hidden rows are skipped, and an error on one is charged to the visible row it folds into.
+/// `prompt_rows(opener, tools, msgs, errors)` is the number of continuation rows the opener turn's
+/// prompt has; 0 emits no prompt rows.
 // `events[..]` lookups use event indices from this fn's own enumerate/turn bookkeeping, always in bounds.
 #[allow(clippy::indexing_slicing)]
-pub fn outline(events: &[EventRow], hidden: &[bool]) -> (FoldTree<OutlineKey>, Vec<OutlineItem>) {
+pub fn outline(
+    events: &[EventRow],
+    hidden: &[bool],
+    prompt_rows: impl Fn(usize, usize, usize, usize) -> usize,
+) -> (FoldTree<OutlineKey>, Vec<OutlineItem>) {
     let is_hidden = |i: usize| hidden.get(i).copied().unwrap_or(false);
 
     // Visible row failed: its own error, or a folded result that errored.
@@ -107,6 +125,9 @@ pub fn outline(events: &[EventRow], hidden: &[bool]) -> (FoldTree<OutlineKey>, V
         };
         let opener = is_user(&events[head]);
         let rest = turn.get(usize::from(opener)..).unwrap_or_default();
+        let tools = turn.iter().filter(|&&i| is_call(&events[i])).count();
+        let msgs = rest.iter().filter(|&&i| is_message(&events[i])).count();
+        let errors = turn.iter().filter(|&&i| failed_at(i)).count();
         let turn_node = push(
             &mut nodes,
             &mut items,
@@ -116,14 +137,43 @@ pub fn outline(events: &[EventRow], hidden: &[bool]) -> (FoldTree<OutlineKey>, V
             OutlineItem::Turn {
                 event: head,
                 opener,
-                tools: turn.iter().filter(|&&i| is_call(&events[i])).count(),
-                msgs: rest.iter().filter(|&&i| is_message(&events[i])).count(),
-                errors: turn.iter().filter(|&&i| failed_at(i)).count(),
+                tools,
+                msgs,
+                errors,
             },
         );
         if opener {
-            // The opener is the turn's first child; its body stays collapsed until expanded.
-            push_event(&mut nodes, &mut items, events, head, turn_node);
+            // The prompt's rows past the turn row come first; the turn row shows the prompt's start.
+            let rows = prompt_rows(head, tools, msgs, errors);
+            let line = events[head].line;
+            if rows > 0 {
+                push(
+                    &mut nodes,
+                    &mut items,
+                    OutlineKey::Prompt(line),
+                    Some(turn_node),
+                    1,
+                    OutlineItem::Prompt(head),
+                );
+            }
+            if rows > PROMPT_LEAD {
+                let more = push(
+                    &mut nodes,
+                    &mut items,
+                    OutlineKey::PromptMore(line),
+                    Some(turn_node),
+                    1,
+                    OutlineItem::PromptMore(head),
+                );
+                push(
+                    &mut nodes,
+                    &mut items,
+                    OutlineKey::PromptRest(line),
+                    Some(more),
+                    2,
+                    OutlineItem::PromptRest(head),
+                );
+            }
         }
 
         let mut k = 0;
@@ -288,9 +338,13 @@ mod tests {
         hidden
     }
 
+    fn no_prompt(_: usize, _: usize, _: usize, _: usize) -> usize {
+        0
+    }
+
     fn run(events: &[EventRow]) -> (FoldTree<OutlineKey>, Vec<OutlineItem>) {
         let hidden = folded(events);
-        let (tree, items) = outline(events, &hidden);
+        let (tree, items) = outline(events, &hidden, no_prompt);
         check(events, &tree, &items);
         (tree, items)
     }
@@ -318,7 +372,10 @@ mod tests {
                 (OutlineKey::Turn(l), OutlineItem::Turn { event, .. }) => *l == line(*event),
                 (OutlineKey::Run(l), OutlineItem::Run { first, .. }) => *l == line(*first),
                 (OutlineKey::Ev(l), OutlineItem::Event(e))
-                | (OutlineKey::Body(l), OutlineItem::Body(e)) => *l == line(*e),
+                | (OutlineKey::Body(l), OutlineItem::Body(e))
+                | (OutlineKey::Prompt(l), OutlineItem::Prompt(e))
+                | (OutlineKey::PromptMore(l), OutlineItem::PromptMore(e))
+                | (OutlineKey::PromptRest(l), OutlineItem::PromptRest(e)) => *l == line(*e),
                 _ => false,
             };
             assert!(ok, "key {:?} does not match item {:?}", n.key, items[i]);
@@ -351,6 +408,9 @@ mod tests {
                 OutlineItem::Run { .. } => "run",
                 OutlineItem::Event(_) => "ev",
                 OutlineItem::Body(_) => "body",
+                OutlineItem::Prompt(_) => "prompt",
+                OutlineItem::PromptMore(_) => "more",
+                OutlineItem::PromptRest(_) => "rest",
             })
             .collect()
     }
@@ -376,15 +436,43 @@ mod tests {
     }
 
     #[test]
-    fn opener_is_the_turn_first_child_with_its_body_under_it() {
+    fn opener_has_no_row_of_its_own() {
         let ev = [user(1), says(2)];
         let (tree, _) = run(&ev);
-        let turn = tree.nodes.iter().position(|n| n.key == OutlineKey::Turn(1)).unwrap();
-        assert_eq!(tree.nodes[turn + 1].key, OutlineKey::Ev(1));
-        assert_eq!((tree.nodes[turn + 1].parent, tree.nodes[turn + 1].depth), (Some(turn), 1));
-        assert_eq!(tree.nodes[turn + 2].key, OutlineKey::Body(1));
-        assert_eq!(tree.nodes[turn + 2].parent, Some(turn + 1));
-        assert!(tree.has_children(turn + 1), "the opener folds to hide its body");
+        let keys: Vec<_> = tree.nodes.iter().map(|n| n.key.clone()).collect();
+        assert_eq!(
+            keys,
+            [OutlineKey::Turn(1), OutlineKey::Ev(2), OutlineKey::Body(2)]
+        );
+    }
+
+    #[test]
+    fn prompt_rows_hang_under_the_turn_and_long_ones_add_a_foldable_rest() {
+        let ev = [user(1), says(2)];
+        let hidden = folded(&ev);
+        let (tree, items) = outline(&ev, &hidden, |_, _, _, _| 5);
+        check(&ev, &tree, &items);
+        assert_eq!(
+            kinds(&items),
+            ["turn", "prompt", "more", "rest", "ev", "body"]
+        );
+        assert_eq!(
+            tree.nodes[2].parent,
+            Some(0),
+            "the more row is the turn's child"
+        );
+        assert_eq!(
+            tree.nodes[3].parent,
+            Some(2),
+            "the rest is the more row's child"
+        );
+        let (tree, items) = outline(&ev, &hidden, |_, _, _, _| 3);
+        assert_eq!(
+            kinds(&items),
+            ["turn", "prompt", "ev", "body"],
+            "three rows fit the leaf"
+        );
+        assert_eq!(tree.nodes.len(), 4);
     }
 
     #[test]
@@ -446,9 +534,7 @@ mod tests {
         assert_eq!(turns(&items), vec![(0, 3, 0, 0)]);
         assert_eq!(
             kinds(&items),
-            vec![
-                "turn", "ev", "body", "run", "ev", "body", "ev", "body", "ev", "body"
-            ]
+            vec!["turn", "run", "ev", "body", "ev", "body", "ev", "body"]
         );
         assert!(items.contains(&OutlineItem::Run {
             first: 1,
@@ -487,10 +573,7 @@ mod tests {
                 .iter()
                 .all(|it| !matches!(it, OutlineItem::Run { .. }))
         );
-        assert_eq!(
-            kinds(&items),
-            vec!["turn", "ev", "body", "ev", "body", "ev", "body"]
-        );
+        assert_eq!(kinds(&items), vec!["turn", "ev", "body", "ev", "body"]);
     }
 
     #[test]
@@ -520,7 +603,7 @@ mod tests {
             result(9, false),
         ];
         let hidden = [false, false, true, false, false, false, true, false, true];
-        let (tree, items) = outline(&ev, &hidden);
+        let (tree, items) = outline(&ev, &hidden, no_prompt);
         check(&ev, &tree, &items);
         assert!(
             items
@@ -558,7 +641,7 @@ mod tests {
     #[test]
     fn short_hidden_slice_treats_the_rest_as_visible() {
         let ev = [user(1), call(2), result(3, false)];
-        let (_, items) = outline(&ev, &[]);
+        let (_, items) = outline(&ev, &[], no_prompt);
         assert!(items.contains(&OutlineItem::Event(2)));
     }
 
@@ -573,8 +656,8 @@ mod tests {
             row(6, "step", None),
         ];
         let (tree, items) = run(&ev);
-        // Opener, assistant and call bodies; the folded result has no node of its own; telemetry and
-        // step rows have no body.
+        // Assistant and call bodies (the opener's text is the turn's prompt, not a body); the folded
+        // result has no node of its own; telemetry and step rows have no body.
         let bodies: Vec<_> = items
             .iter()
             .filter_map(|it| {
@@ -585,7 +668,7 @@ mod tests {
                 }
             })
             .collect();
-        assert_eq!(bodies, vec![0, 1, 2]);
+        assert_eq!(bodies, vec![1, 2]);
         let parents: Vec<_> = tree
             .nodes
             .iter()
@@ -600,7 +683,7 @@ mod tests {
         );
         assert_eq!(
             kinds(&items),
-            vec!["turn", "ev", "body", "ev", "body", "ev", "body", "ev", "ev"]
+            vec!["turn", "ev", "body", "ev", "body", "ev", "ev"]
         );
     }
 
@@ -608,7 +691,7 @@ mod tests {
     fn unfolded_result_gets_a_body() {
         let ev = [user(1), result(2, true)];
         let hidden = [false, false];
-        let (tree, items) = outline(&ev, &hidden);
+        let (tree, items) = outline(&ev, &hidden, no_prompt);
         check(&ev, &tree, &items);
         assert!(items.contains(&OutlineItem::Body(1)));
     }

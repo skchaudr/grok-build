@@ -22,7 +22,7 @@ use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
 use crate::views::modal_window::{self, ModalContentArea, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut};
 use crate::views::traces_fold::{FoldNode, FoldState, FoldTree};
-use crate::views::traces_outline::{self, OutlineItem, OutlineKey};
+use crate::views::traces_outline::{self, OutlineItem, OutlineKey, PROMPT_LEAD};
 
 pub const TITLE: &str = "Traces";
 const PAGE: usize = 500;
@@ -33,6 +33,12 @@ const MAX_KIDS: usize = 6;
 const BODY_LINES: usize = 200;
 /// Columns before a trajectory row's text: `#line` and the role chip, each with a space.
 const TEXT_COL: usize = 14;
+/// Columns before a turn's header text, and before its continuation rows: the fold mark.
+const MARK_W: usize = 2;
+/// Shortest prompt header kept beside a turn's counts suffix; less than this and the counts go.
+const MIN_HEAD_W: usize = 8;
+/// Row shown for an expanded event whose text the header already holds in full.
+const NO_MORE: &str = "(no more)";
 /// Deepest ledger level: roots are 0, and nothing below depth `MAX_DEPTH` is loaded or shown.
 const MAX_DEPTH: usize = 8;
 /// Tree-guide levels drawn in the ledger (the node's own level included); deeper ones are cut to `…`.
@@ -134,6 +140,12 @@ pub struct TracesModalState {
     oshown: Vec<usize>,
     /// The selected row, by key: kept across folds, filters and live growth.
     sel: Option<OutlineKey>,
+    /// Text width the outline was last built for; 0 until the first render, so no prompt rows yet.
+    outline_w: usize,
+    /// An opener's body arrived, so its prompt may have changed: rebuild before measuring.
+    dirty_outline: bool,
+    /// Event line of every opener turn. A stored `Ev` key for one of these means its turn row.
+    opener_lines: HashSet<i64>,
     /// Full text per event line (pretty JSON of its raw line), loaded when its row shows.
     bodies: HashMap<i64, String>,
     body_pending: HashSet<i64>,
@@ -287,6 +299,18 @@ struct Fold {
     detail: Option<String>,
 }
 
+/// An event row's text parts: a call's tool title (with its two spaces), the header text, and the suffix
+/// (child session, folded result). `body_w` is the text cell, `suffix_w` the suffix cell (0 when none).
+#[derive(Default)]
+struct EventHead {
+    title: String,
+    head: String,
+    suffix: String,
+    suffix_w: usize,
+    body_w: usize,
+    failed: bool,
+}
+
 /// What `r` resumes: the harness and its own session id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResumeTarget {
@@ -358,6 +382,9 @@ impl TracesModalState {
             oseen: HashSet::new(),
             oshown: Vec::new(),
             sel: None,
+            outline_w: 0,
+            dirty_outline: false,
+            opener_lines: HashSet::new(),
             bodies: HashMap::new(),
             body_pending: HashSet::new(),
             body_failed: HashSet::new(),
@@ -896,7 +923,14 @@ impl TracesModalState {
 
     /// Position of the selected row in `oshown`; the first row when nothing is selected.
     fn sel_pos(&self) -> usize {
-        self.sel.as_ref().and_then(|k| self.oshown.iter().position(|&n| self.key_at(n) == Some(k))).unwrap_or(0)
+        let Some(key) = self.sel.clone() else {
+            return 0;
+        };
+        let key = self.canon(key);
+        self.oshown
+            .iter()
+            .position(|&n| self.key_at(n) == Some(&key))
+            .unwrap_or(0)
     }
 
     /// Selects the visible row at `pos`.
@@ -910,20 +944,178 @@ impl TracesModalState {
         self.goto(pos);
     }
 
-    /// Event index of the selected row: a turn's opener, a run's first call, or the row's own event.
+    /// Event index of the selected row: a turn's opener (its prompt rows too), a run's first call, or the row's own event.
     fn selected_event(&self) -> Option<usize> {
         match self.outline_items.get(*self.oshown.get(self.sel_pos())?)? {
             OutlineItem::Turn { event, .. } | OutlineItem::Run { first: event, .. } => Some(*event),
             OutlineItem::Event(i) | OutlineItem::Body(i) => Some(*i),
+            OutlineItem::Prompt(i) | OutlineItem::PromptMore(i) | OutlineItem::PromptRest(i) => {
+                Some(*i)
+            }
         }
+    }
+
+    /// The key a stored selection means now: an opener's event row is folded into its turn row.
+    fn canon(&self, key: OutlineKey) -> OutlineKey {
+        match key {
+            OutlineKey::Ev(line) if self.opener_lines.contains(&line) => OutlineKey::Turn(line),
+            key => key,
+        }
+    }
+
+    /// The turn row above outline node `node` (or the node itself): its event index and counts.
+    fn owning_turn(&self, node: usize) -> Option<(usize, usize, usize, usize)> {
+        let mut at = Some(node);
+        while let Some(i) = at {
+            if let Some(OutlineItem::Turn {
+                event,
+                tools,
+                msgs,
+                errors,
+                ..
+            }) = self.outline_items.get(i)
+            {
+                return Some((*event, *tools, *msgs, *errors));
+            }
+            at = self.outline.nodes.get(i).and_then(|x| x.parent);
+        }
+        None
+    }
+
+    /// Continuation rows of event `ev`'s prompt past its turn header, wrapped to `text_w` cells (the text
+    /// cell, which starts at the turn's mark). Empty when the header holds the whole prompt, or the width
+    /// is not measured yet. The full text is the cached body, else the index text.
+    fn prompt_lines(
+        &self,
+        ev: usize,
+        (tools, msgs, errors): (usize, usize, usize),
+        text_w: usize,
+    ) -> Vec<String> {
+        let Some(e) = self.events.get(ev) else {
+            return Vec::new();
+        };
+        if text_w == 0 {
+            return Vec::new();
+        }
+        let (head, _) = turn_head(
+            &one_line(index_text(e)),
+            text_w,
+            &turn_counts(tools, msgs, errors),
+        );
+        let full = self
+            .bodies
+            .get(&e.line)
+            .map_or(index_text(e), String::as_str);
+        let rest = continuation(&head, full);
+        if rest.is_empty() {
+            return Vec::new();
+        }
+        wrap_body(&rest, text_w.saturating_sub(MARK_W))
+    }
+
+    /// `prompt_lines` for the turn that owns outline node `node`.
+    fn prompt_rows_at(&self, node: usize, text_w: usize) -> Vec<String> {
+        match self.owning_turn(node) {
+            Some((ev, tools, msgs, errors)) => self.prompt_lines(ev, (tools, msgs, errors), text_w),
+            None => Vec::new(),
+        }
+    }
+
+    /// The parts of event row `i` at outline depth `depth` in a text cell `text_w` wide: a call's tool title,
+    /// the header text (the first line of its one-line text), and the suffix (child session, folded result).
+    fn event_head(&self, i: usize, depth: usize, text_w: usize) -> EventHead {
+        let Some(e) = self.events.get(i) else {
+            return EventHead::default();
+        };
+        // The ledger's summary column: the text cell less the time column and its gap.
+        let summary_w = text_w.saturating_sub(11);
+        let mut suffix = String::new();
+        let mut failed = e.is_error;
+        if let Some(c) = self.child_of(i) {
+            suffix.push_str(&format!(
+                "→ {} {}",
+                truncate_str(&clean_name(c), 28),
+                status_symbol(c)
+            ));
+        }
+        if let Some(Some(f)) = self.folded.get(i) {
+            failed |= f.error;
+            if !suffix.is_empty() {
+                suffix.push(' ');
+            }
+            suffix.push_str(if f.error { "✗" } else { "✓" });
+            if f.error
+                && let Some(d) = f.detail.as_deref().filter(|d| !d.is_empty())
+            {
+                suffix.push_str(&format!(" {}", truncate_str(&one_line(d), 24)));
+            }
+        }
+        let suffix_w = suffix.width().min(summary_w / 2);
+        let body_w = summary_w.saturating_sub(if suffix_w > 0 { suffix_w + 1 } else { 0 });
+        let title = if is_call(e) {
+            format!("{}  ", e.title)
+        } else {
+            String::new()
+        };
+        let head = first_line(
+            &one_line(index_text(e)),
+            body_w.saturating_sub(2 * depth + MARK_W + title.width()),
+        );
+        EventHead {
+            title,
+            head,
+            suffix,
+            suffix_w,
+            body_w,
+            failed,
+        }
+    }
+
+    /// Full text of the turn a turn or prompt row belongs to (for `y`): the cached body, else the index text.
+    fn turn_prompt_text(&self) -> Option<String> {
+        let &n = self.oshown.get(self.sel_pos())?;
+        let on_prompt = matches!(
+            self.outline_items.get(n)?,
+            OutlineItem::Turn { .. }
+                | OutlineItem::Prompt(_)
+                | OutlineItem::PromptMore(_)
+                | OutlineItem::PromptRest(_)
+        );
+        if !on_prompt {
+            return None;
+        }
+        let (ev, ..) = self.owning_turn(n)?;
+        let e = self.events.get(ev)?;
+        Some(
+            self.bodies
+                .get(&e.line)
+                .cloned()
+                .unwrap_or_else(|| index_text(e).to_string()),
+        )
     }
 
     /// Rebuilds the outline from `events`. The selection stays on its key when that row is still
     /// shown, else on the row at the old position.
     fn rebuild_outline(&mut self) {
         let pos = self.sel_pos();
-        let (tree, items) = traces_outline::outline(&self.events, &self.hidden);
+        let w = self.outline_w;
+        let (tree, items) =
+            traces_outline::outline(&self.events, &self.hidden, |ev, tools, msgs, errors| {
+                self.prompt_lines(ev, (tools, msgs, errors), w).len()
+            });
         (self.outline, self.outline_items) = (tree, items);
+        self.opener_lines = self
+            .outline_items
+            .iter()
+            .filter_map(|it| match it {
+                OutlineItem::Turn {
+                    event,
+                    opener: true,
+                    ..
+                } => self.events.get(*event).map(|e| e.line),
+                _ => None,
+            })
+            .collect();
         // An empty outline (remote events still loading, or no match) keeps the folds and selection for when rows return.
         if !self.outline.nodes.is_empty() {
             self.ofolds.retain(&self.outline);
@@ -964,7 +1156,10 @@ impl TracesModalState {
 
     /// Expands every ancestor of the outline row `key` so it is shown. False when there is no such row.
     fn reveal(&mut self, key: &OutlineKey) -> bool {
-        let Some(i) = self.outline.nodes.iter().position(|n| &n.key == key) else { return false };
+        let key = self.canon(key.clone());
+        let Some(i) = self.outline.nodes.iter().position(|n| n.key == key) else {
+            return false;
+        };
         let mut at = self.outline.nodes.get(i).and_then(|n| n.parent);
         while let Some(p) = at {
             self.ofolds.expand(&self.outline, p);
@@ -987,6 +1182,7 @@ impl TracesModalState {
         if self.oshown.is_empty() {
             return;
         }
+        let keep = keep.map(|k| self.canon(k));
         let at = keep
             .as_ref()
             .and_then(|k| self.oshown.iter().position(|&n| self.key_at(n) == Some(k)))
@@ -1038,14 +1234,30 @@ impl TracesModalState {
         }
     }
 
-    /// Wrapped body lines per shown row (`None` for rows that are not bodies), `text_w` columns wide.
+    /// Wrapped rows per shown row (`None` for rows that are one line), `text_w` cells wide.
     fn body_rows(&self, text_w: usize) -> Vec<Option<Vec<String>>> {
         self.oshown
             .iter()
             .map(|&n| {
                 let depth = self.outline.nodes.get(n).map_or(0, |x| x.depth);
                 match self.outline_items.get(n) {
-                    Some(OutlineItem::Body(i)) => Some(self.body_lines(*i, text_w.saturating_sub(2 * depth))),
+                    Some(OutlineItem::Body(i)) => {
+                        // The event row above holds the header; its text continues under it.
+                        let head = self.event_head(*i, depth.saturating_sub(1), text_w).head;
+                        Some(self.body_lines(*i, &head, text_w.saturating_sub(2 * depth)))
+                    }
+                    Some(OutlineItem::Prompt(_)) => Some(
+                        self.prompt_rows_at(n, text_w)
+                            .into_iter()
+                            .take(PROMPT_LEAD)
+                            .collect(),
+                    ),
+                    Some(OutlineItem::PromptRest(_)) => Some(
+                        self.prompt_rows_at(n, text_w)
+                            .into_iter()
+                            .skip(PROMPT_LEAD)
+                            .collect(),
+                    ),
                     _ => None,
                 }
             })
@@ -1065,6 +1277,11 @@ impl TracesModalState {
             .take(height)
             .filter_map(|&n| match self.outline_items.get(n)? {
                 OutlineItem::Body(i) => self.events.get(*i).map(|e| (*i, e.line)),
+                OutlineItem::Turn {
+                    event,
+                    opener: true,
+                    ..
+                } => self.events.get(*event).map(|e| (*event, e.line)),
                 _ => None,
             })
             .collect();
@@ -1106,6 +1323,9 @@ impl TracesModalState {
         self.body_pending.remove(&line);
         match text {
             Ok(text) => {
+                if self.opener_lines.contains(&line) {
+                    self.dirty_outline = true;
+                }
                 self.bodies.insert(line, text);
                 true
             }
@@ -1135,11 +1355,25 @@ impl TracesModalState {
         Some((self.events.get(i + 1)?.line, fold.error))
     }
 
-    /// The body text of event `ev` wrapped to `width`; a placeholder until a remote body arrives.
-    fn body_lines(&self, ev: usize, width: usize) -> Vec<String> {
+    /// The body of event `ev` wrapped to `width`, minus what its header `head` already shows, then its folded
+    /// result. A placeholder until the body is read.
+    fn body_lines(&self, ev: usize, head: &str, width: usize) -> Vec<String> {
         let Some(line) = self.events.get(ev).map(|e| e.line) else { return vec!["loading…".to_string()] };
         match self.bodies.get(&line) {
-            Some(text) => wrap_body(text, width),
+            Some(text) => {
+                let (own, result) = split_result(text);
+                let rest = continuation(head, own);
+                let mut rows = if rest.is_empty() {
+                    vec![NO_MORE.to_string()]
+                } else {
+                    wrap_body(&rest, width)
+                };
+                if !result.is_empty() {
+                    rows.push(String::new());
+                    rows.extend(wrap_body(result, width));
+                }
+                rows
+            }
             None if self.body_failed.contains(&line) => vec!["(could not read, press l to retry)".to_string()],
             None => vec!["loading…".to_string()],
         }
@@ -1867,6 +2101,10 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                 }
                 KeyCode::Char('/') => state.typing = Typing::Events,
                 KeyCode::Char('r') => return state.resume(state.session.as_ref()),
+                KeyCode::Char('y') => match state.turn_prompt_text() {
+                    Some(text) => return InputOutcome::Action(Action::TracesCopy { text }),
+                    None => return InputOutcome::Unchanged,
+                },
                 // A run's Enter expands or collapses it; on a dispatch row, Enter opens the child; otherwise the inspector.
                 KeyCode::Enter if state.selected_run() => {
                     if !state.outline_fold(|f, t, n| f.toggle(t, n)) {
@@ -2097,13 +2335,23 @@ pub fn clean_name(s: &SessionRow) -> String {
 }
 
 /// ● running, ✗ failed, ✓ done, ○ idle.
-fn status_glyph(s: &SessionRow, theme: &Theme) -> (&'static str, Color) {
+fn status_symbol(s: &SessionRow) -> &'static str {
     match s.status {
-        Status::Active => ("●", theme.accent_running),
-        _ if s.failed => ("✗", theme.accent_error),
-        Status::Completed => ("✓", theme.gray),
-        _ => ("○", theme.gray_dim),
+        Status::Active => "●",
+        _ if s.failed => "✗",
+        Status::Completed => "✓",
+        _ => "○",
     }
+}
+
+fn status_glyph(s: &SessionRow, theme: &Theme) -> (&'static str, Color) {
+    let color = match s.status {
+        Status::Active => theme.accent_running,
+        _ if s.failed => theme.accent_error,
+        Status::Completed => theme.gray,
+        _ => theme.gray_dim,
+    };
+    (status_symbol(s), color)
 }
 
 struct Cols {
@@ -2471,24 +2719,34 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
 
     let status_rows = u16::from(state.status.is_some());
     let list = Rect { y: area.y + 5, height: area.height.saturating_sub(5 + status_rows), ..area };
+    // Outline rows are built for this text width. A resize, or an opener body that changed its prompt,
+    // rebuilds them here, before anything is measured.
+    let text_w = (list.width as usize).saturating_sub(TEXT_COL);
+    if text_w != state.outline_w || state.dirty_outline {
+        state.outline_w = text_w;
+        state.dirty_outline = false;
+        state.rebuild_outline();
+    }
     if state.oshown.is_empty() {
         let msg = if state.remote_loading { "Fetching events over ssh…" } else { "No events match." };
         buf.set_span(list.x, list.y, &Span::styled(msg, dim), list.width);
     }
     // Body rows are as tall as their wrapped text, so scrolling works in lines, not rows.
-    let text_w = (list.width as usize).saturating_sub(TEXT_COL);
     let height = list.height as usize;
     let mut bodies = state.body_rows(text_w);
     let mut heights = row_heights(&bodies);
     fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, height);
     // Load the bodies on screen; one cached right here changes row heights, so measure again.
     if state.ensure_bodies(state.event_scroll, height) {
+        if state.dirty_outline {
+            state.dirty_outline = false;
+            state.rebuild_outline();
+        }
         bodies = state.body_rows(text_w);
         heights = row_heights(&bodies);
         fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, height);
     }
 
-    let summary_w = (list.width as usize).saturating_sub(7 + 7 + 9 + 2);
     let bottom = list.y + list.height;
     let sel = state.sel_pos();
     let mut y = list.y;
@@ -2508,30 +2766,40 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         let depth = state.outline.nodes.get(n).map_or(0, |x| x.depth);
         let indent = "  ".repeat(depth);
         let mark = state.fold_mark(n);
-        let collapsed = state.outline.has_children(n) && state.key_at(n).is_some_and(|key| state.ofolds.is_collapsed(key));
         match state.outline_items.get(n) {
-            Some(OutlineItem::Turn { event, opener, tools, msgs, errors }) => {
+            Some(OutlineItem::Turn {
+                event,
+                tools,
+                msgs,
+                errors,
+                ..
+            }) => {
                 let Some(e) = state.events.get(*event) else {
                     y += h;
                     continue;
                 };
-                let preview = one_line(e.detail.as_deref().filter(|d| !d.is_empty()).unwrap_or(&e.preview));
-                // The opener is the next node; when it is shown, its own row carries the line and chip.
-                let opener_shown = *opener && !collapsed && state.oshown.contains(&(n + 1)) && matches!(state.outline_items.get(n + 1), Some(OutlineItem::Event(i)) if i == event);
-                let text = format!("{indent}{mark}{}", turn_label(&preview, opener_shown, collapsed, *tools, *msgs, *errors));
-                let (line_cell, chip_cell) = if opener_shown {
-                    (String::new(), String::new())
-                } else {
-                    (format!("{:>6}", format!("#{}", e.line)), role_chip(e).to_string())
-                };
-                let chip_fg = if opener_shown { base } else { base.fg(chip_color(e, theme)) };
+                // The header is the prompt's first line; the counts follow it, in every state.
+                let (head, suffix) = turn_head(
+                    &one_line(index_text(e)),
+                    text_w,
+                    &turn_counts(*tools, *msgs, *errors),
+                );
+                let text = format!("{indent}{mark}{head}{suffix}");
                 put_row(
                     buf,
                     list,
                     y,
                     &[
-                        (line_cell, 6, base.fg(theme.gray)),
-                        (chip_cell, 6, chip_fg.add_modifier(Modifier::BOLD)),
+                        (
+                            format!("{:>6}", format!("#{}", e.line)),
+                            6,
+                            base.fg(theme.gray),
+                        ),
+                        (
+                            role_chip(e).to_string(),
+                            6,
+                            base.fg(chip_color(e, theme)).add_modifier(Modifier::BOLD),
+                        ),
                         (text, text_w, base.add_modifier(Modifier::BOLD)),
                     ],
                 );
@@ -2550,43 +2818,15 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
                 };
                 // Noise (only present when `n` is on) is dimmed.
                 let (text_style, chip_fg) = if e.noise { (base.fg(theme.gray_dim), theme.gray_dim) } else { (base, chip_color(e, theme)) };
-                let one = one_line(e.detail.as_deref().filter(|d| !d.is_empty()).unwrap_or(&e.preview));
-                // An expanded body carries the text, so the row keeps only what identifies it: the tool title, or nothing.
-                let body_shown = state.oshown.contains(&(n + 1)) && matches!(state.outline_items.get(n + 1), Some(OutlineItem::Body(j)) if j == i);
-                let body = match (body_shown, is_call(e) || is_result(e)) {
-                    (true, true) => format!("{indent}{mark}{}", e.title),
-                    (true, false) => format!("{indent}{mark}"),
-                    (false, true) if is_call(e) => format!("{indent}{mark}{}  {}", e.title, one),
-                    (false, _) => format!("{indent}{mark}{one}"),
-                };
-                // Suffix: where a dispatch went, and how the call ended.
-                let mut suffix = String::new();
-                if let Some(c) = state.child_of(*i) {
-                    suffix.push_str(&format!("→ {} {}", truncate_str(&clean_name(c), 28), status_glyph(c, theme).0));
-                }
-                let mut failed = e.is_error;
-                if let Some(Some(f)) = state.folded.get(*i) {
-                    failed |= f.error;
-                    if !suffix.is_empty() {
-                        suffix.push(' ');
-                    }
-                    suffix.push_str(if f.error { "✗" } else { "✓" });
-                    if f.error
-                        && let Some(d) = f.detail.as_deref().filter(|d| !d.is_empty())
-                    {
-                        suffix.push_str(&format!(" {}", truncate_str(&one_line(d), 24)));
-                    }
-                }
-                let sw = suffix.width().min(summary_w / 2);
-                let body_w = summary_w.saturating_sub(if sw > 0 { sw + 1 } else { 0 });
+                let eh = state.event_head(*i, depth, text_w);
                 let body_style = if is_result(e) && e.is_error { text_style.fg(theme.accent_error) } else { text_style };
                 let mut cells = vec![
                     (format!("{:>6}", format!("#{}", e.line)), 6, base.fg(theme.gray)),
                     (role_chip(e).to_string(), 6, base.fg(chip_fg).add_modifier(Modifier::BOLD)),
-                    (body, body_w, body_style),
+                    (format!("{indent}{mark}{}{}", eh.title, eh.head), eh.body_w, body_style),
                 ];
-                if sw > 0 {
-                    cells.push((suffix, sw, base.fg(if failed { theme.accent_error } else { theme.accent_success })));
+                if eh.suffix_w > 0 {
+                    cells.push((eh.suffix, eh.suffix_w, base.fg(if eh.failed { theme.accent_error } else { theme.accent_success })));
                 }
                 cells.push((fmt_time(e.timestamp, false), 8, base.fg(theme.text_secondary)));
                 put_row(buf, list, y, &cells);
@@ -2596,12 +2836,63 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
                 // A failed call's result section (after its separator) is drawn in the error colour.
                 let failed = matches!(state.outline_items.get(n), Some(OutlineItem::Body(i)) if state.folded.get(*i).and_then(Option::as_ref).is_some_and(|f| f.error));
                 let mut in_result = false;
-                for (dy, line) in bodies.get(k).into_iter().flatten().flatten().take(span as usize).enumerate() {
+                for (dy, line) in bodies
+                    .get(k)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .take(span as usize)
+                    .enumerate()
+                {
                     in_result |= line.as_str() == RESULT_SEP || line.as_str() == RESULT_ERR_SEP;
-                    let fg = if in_result && failed { theme.accent_error } else { theme.text_secondary };
+                    let fg = if line.as_str() == NO_MORE {
+                        theme.gray
+                    } else if in_result && failed {
+                        theme.accent_error
+                    } else {
+                        theme.text_secondary
+                    };
                     let text = format!("{}{line}", " ".repeat(indent_w));
                     put_row(buf, list, y + dy as u16, &[(String::new(), 6, base), (String::new(), 6, base), (text, text_w, base.fg(fg))]);
                 }
+            }
+            Some(OutlineItem::Prompt(_) | OutlineItem::PromptRest(_)) => {
+                // Continuation rows: under the turn's header text, in its style.
+                let pad = " ".repeat(MARK_W);
+                for (dy, line) in bodies
+                    .get(k)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .take(span as usize)
+                    .enumerate()
+                {
+                    let text = format!("{pad}{line}");
+                    put_row(
+                        buf,
+                        list,
+                        y + dy as u16,
+                        &[
+                            (String::new(), 6, base),
+                            (String::new(), 6, base),
+                            (text, text_w, base.add_modifier(Modifier::BOLD)),
+                        ],
+                    );
+                }
+            }
+            Some(OutlineItem::PromptMore(_)) => {
+                let total = state.prompt_rows_at(n, text_w).len();
+                let text = format!("{mark}{}", more_label(total));
+                put_row(
+                    buf,
+                    list,
+                    y,
+                    &[
+                        (String::new(), 6, base),
+                        (String::new(), 6, base),
+                        (text, text_w, base.fg(theme.gray)),
+                    ],
+                );
             }
             None => {}
         }
@@ -2620,11 +2911,8 @@ fn count_of(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// Turn row text after the indent and fold mark. Collapsed: the preview, then `  · ` and the counts.
-/// Expanded with its opener row shown: `turn`, then the counts joined by ` · `, since that row carries
-/// the prompt. Otherwise (an expanded synthetic turn): the preview alone. Counts come last, so a narrow
-/// row cuts them first.
-fn turn_label(preview: &str, opener_shown: bool, collapsed: bool, tools: usize, msgs: usize, errors: usize) -> String {
+/// A turn's counts after its header text: `  · 3 tools · 1 msg · ✗1`. Empty when there are none.
+fn turn_counts(tools: usize, msgs: usize, errors: usize) -> String {
     let mut parts = Vec::new();
     if tools > 0 {
         parts.push(count_of(tools, "tool", "tools"));
@@ -2635,17 +2923,99 @@ fn turn_label(preview: &str, opener_shown: bool, collapsed: bool, tools: usize, 
     if errors > 0 {
         parts.push(format!("✗{errors}"));
     }
-    if collapsed {
-        let mut text = preview.to_string();
-        if !parts.is_empty() {
-            text.push_str(&format!("  · {}", parts.join(" · ")));
-        }
-        text
-    } else if opener_shown {
-        std::iter::once("turn".to_string()).chain(parts).collect::<Vec<_>>().join(" · ")
+    if parts.is_empty() {
+        String::new()
     } else {
-        preview.to_string()
+        format!("  · {}", parts.join(" · "))
     }
+}
+
+/// A turn row's header at `text_w` cells: the first line of its prompt `src` (one line already), and the
+/// counts `suffix`. The suffix goes when the prompt would keep fewer than `MIN_HEAD_W` cells beside it.
+fn turn_head(src: &str, text_w: usize, suffix: &str) -> (String, String) {
+    let avail = text_w.saturating_sub(MARK_W);
+    let sw = suffix.width();
+    if sw > 0 && avail.saturating_sub(sw) >= MIN_HEAD_W {
+        (first_line(src, avail - sw), suffix.to_string())
+    } else {
+        (first_line(src, avail), String::new())
+    }
+}
+
+/// The first line `word_wrap` makes of `src` at `w` cells; empty for empty text.
+fn first_line(src: &str, w: usize) -> String {
+    modal_window::word_wrap(src, w.max(1))
+        .first()
+        .map(|l| l.to_string())
+        .unwrap_or_default()
+}
+
+/// The text an event's header and prompt are drawn from: its detail, else its index preview.
+fn index_text(e: &EventRow) -> &str {
+    e.detail
+        .as_deref()
+        .filter(|d| !d.is_empty())
+        .unwrap_or(e.preview.as_str())
+}
+
+/// `… N more lines` for a prompt of `total` continuation rows; past the `wrap_body` cap, `N+`.
+fn more_label(total: usize) -> String {
+    if total > BODY_LINES {
+        format!("… {}+ more lines", BODY_LINES - PROMPT_LEAD)
+    } else {
+        format!("… {} more lines", total.saturating_sub(PROMPT_LEAD))
+    }
+}
+
+/// Splits a composed body at its result separator: the event's own text, then the result section (empty
+/// when there is none).
+fn split_result(text: &str) -> (&str, &str) {
+    match [RESULT_SEP, RESULT_ERR_SEP]
+        .iter()
+        .filter_map(|sep| text.find(*sep))
+        .min()
+    {
+        Some(at) => (
+            text.get(..at).unwrap_or(text).trim_end(),
+            text.get(at..).unwrap_or_default(),
+        ),
+        None => (text, ""),
+    }
+}
+
+/// What `full` has past `header`, the first line of its header text (`header` is the same one-line source,
+/// wrapped). Whitespace runs compare equal, and a header cut mid-token still matches. The matched text and
+/// the whitespace after it are dropped; the rest keeps its own lines. `full` comes back unchanged when the
+/// two disagree, so no text is lost to a mismatch.
+fn continuation(header: &str, full: &str) -> String {
+    let want: Vec<char> = one_line(header).chars().collect();
+    let mut matched = 0;
+    let mut end = 0;
+    let mut chars = full.char_indices().peekable();
+    while let Some(&w) = want.get(matched) {
+        let Some((at, c)) = chars.next() else {
+            return full.to_string();
+        };
+        if c.is_whitespace() {
+            if matched == 0 {
+                continue;
+            }
+            if w != ' ' {
+                return full.to_string();
+            }
+            matched += 1;
+            while chars.peek().is_some_and(|&(_, d)| d.is_whitespace()) {
+                chars.next();
+            }
+        } else {
+            if w != c {
+                return full.to_string();
+            }
+            matched += 1;
+            end = at + c.len_utf8();
+        }
+    }
+    full.get(end..).unwrap_or_default().trim_start().to_string()
 }
 
 fn render_inspector(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, theme: &Theme) {
@@ -3239,7 +3609,11 @@ mod tests {
     #[test]
     fn turn_collapses_to_a_summary_and_back() {
         let mut state = trajectory(three_calls());
-        assert_eq!(shown_rows(&state), ["Turn(1)", "Ev(1)", "Run(2)", "Ev(8)"], "turn open, opener and run closed");
+        assert_eq!(
+            shown_rows(&state),
+            ["Turn(1)", "Run(2)", "Ev(8)"],
+            "turn open, run closed"
+        );
         assert!(draw(&mut state, 140, 20).contains("3 tool calls"));
 
         state.goto(0);
@@ -3248,7 +3622,7 @@ mod tests {
         assert!(draw(&mut state, 140, 20).contains("3 tools · 1 msg"), "{}", draw(&mut state, 140, 20));
 
         press(&mut state, KeyCode::Char('l'));
-        assert_eq!(shown_rows(&state).len(), 4);
+        assert_eq!(shown_rows(&state).len(), 3);
     }
 
     #[test]
@@ -3256,7 +3630,10 @@ mod tests {
         let mut state = trajectory(three_calls());
         state.goto(2);
         press(&mut state, KeyCode::Right);
-        assert_eq!(shown_rows(&state), ["Turn(1)", "Ev(1)", "Run(2)", "Ev(2)", "Ev(4)", "Ev(6)", "Ev(8)"]);
+        assert_eq!(
+            shown_rows(&state),
+            ["Turn(1)", "Run(2)", "Ev(2)", "Ev(4)", "Ev(6)", "Ev(8)"]
+        );
         assert!(draw(&mut state, 140, 20).contains("Bash  ls"));
     }
 
@@ -3265,7 +3642,7 @@ mod tests {
         let mut state = trajectory(three_calls());
         state.goto(0);
         press(&mut state, KeyCode::Char('>'));
-        assert_eq!(shown_rows(&state).len(), 12, "{:?}", shown_rows(&state));
+        assert_eq!(shown_rows(&state).len(), 10, "{:?}", shown_rows(&state));
         assert!(shown_rows(&state).contains(&"Body(8)".to_string()));
 
         press(&mut state, KeyCode::Char('G'));
@@ -3285,84 +3662,6 @@ mod tests {
         assert!(shown_rows(&state).contains(&"Body(2)".to_string()));
         let screen = draw(&mut state, 140, 24);
         assert!(screen.contains("\"cached\": \"yes\""), "{screen}");
-    }
-
-    const OPENER_BODY: &str = "Yoooooo please check commit\nthe fix landed as 7eb90d57 at noon, details at https://example.com/very/long/path/that/does/not/break/anywhere";
-    const URL: &str = "https://example.com/very/long/path/that/does/not/break/anywhere";
-    /// Snapshot width: the body column is `SNAP_W - TEXT_COL - 2 * 2` = 24 wide (the body sits two levels deep).
-    const SNAP_W: u16 = 42;
-
-    /// A user opener, two Bash calls, and an assistant reply: one turn.
-    fn opener_turn() -> Vec<EventRow> {
-        vec![
-            ev(1, "message", "user", "Yoooooo please check commit"),
-            ev(2, "tool", "tool", "ls"),
-            ev(4, "tool", "tool", "pwd"),
-            ev(5, "message", "assistant", "done"),
-        ]
-    }
-
-    /// The trajectory at `SNAP_W` x 30, one string per row, trailing spaces trimmed.
-    fn snapshot_rows(state: &mut TracesModalState) -> Vec<String> {
-        draw(state, SNAP_W, 30).lines().map(|l| l.trim_end().to_string()).collect()
-    }
-
-    /// The opener's body expanded: `l` on the opener row, with its body cached.
-    fn expanded_opener() -> TracesModalState {
-        let mut state = trajectory(opener_turn());
-        state.bodies.insert(1, OPENER_BODY.into());
-        state.goto(1);
-        press(&mut state, KeyCode::Char('l'));
-        assert!(shown_rows(&state).contains(&"Body(1)".to_string()), "{:?}", shown_rows(&state));
-        state
-    }
-
-    #[test]
-    fn trajectory_snapshot_expanded_turn_and_body() {
-        let mut state = expanded_opener();
-        let rows = snapshot_rows(&mut state);
-        let start = rows.iter().position(|r| r.trim_start().starts_with("⌄ turn")).expect("turn row");
-        let shown: Vec<&str> = rows.iter().skip(start).take(10).map(String::as_str).collect();
-        assert_eq!(
-            shown,
-            vec![
-                "              ⌄ turn · 2 tools · 1 msg",
-                "    #1 USER     ⌄               -",
-                "                  Yoooooo please check",
-                "                  commit",
-                "                  the fix landed as",
-                "                  7eb90d57 at noon,",
-                "                  details at",
-                "                  https://example.com/very",
-                "                  /long/path/that/does/not",
-                "                  /break/anywhere",
-            ]
-        );
-    }
-
-    #[test]
-    fn trajectory_snapshot_body_keeps_words_and_hard_splits_urls() {
-        let mut state = expanded_opener();
-        let rows = snapshot_rows(&mut state);
-        assert_eq!(rows.iter().filter(|r| r.contains("Yoooooo")).count(), 1, "the body is the only copy");
-        let body_w = SNAP_W as usize - TEXT_COL - 2 * 2;
-        for tok in OPENER_BODY.split_whitespace().filter(|t| t.chars().count() <= body_w) {
-            assert!(rows.iter().any(|r| r.contains(tok)), "`{tok}` is split across rows:\n{rows:#?}");
-        }
-        let i = rows.iter().position(|r| r.contains("https://")).expect("the url starts a row");
-        let joined: String = rows.iter().skip(i).take(3).map(|r| r.trim()).collect();
-        assert_eq!(joined, URL);
-    }
-
-    #[test]
-    fn trajectory_snapshot_collapsed_body_shows_the_preview_once() {
-        let mut state = trajectory(opener_turn());
-        let rows = snapshot_rows(&mut state);
-        let hits: Vec<&String> = rows.iter().filter(|r| r.contains("Yoooooo")).collect();
-        assert_eq!(hits.len(), 1, "{rows:#?}");
-        assert!(hits.iter().all(|r| r.contains("USER")), "{rows:#?}");
-        let turn = rows.iter().find(|r| r.contains("turn ·")).expect("turn row");
-        assert!(!turn.contains("Yoooooo"), "{turn}");
     }
 
     #[test]
@@ -3397,7 +3696,7 @@ mod tests {
         press(&mut state, KeyCode::Char('e'));
         assert_eq!(shown_rows(&state), ["Turn(1)"]);
         press(&mut state, KeyCode::Char('E'));
-        assert_eq!(shown_rows(&state).len(), 12, "anything folded: expand all");
+        assert_eq!(shown_rows(&state).len(), 10, "anything folded: expand all");
         press(&mut state, KeyCode::Char('E'));
         assert_eq!(shown_rows(&state), ["Turn(1)"], "nothing folded: collapse all");
     }
@@ -3611,46 +3910,88 @@ mod tests {
     }
 
     #[test]
-    fn turn_label_summarizes_an_expanded_turn_with_opener() {
-        assert_eq!(turn_label("Yoooooo", true, false, 14, 3, 1), "turn · 14 tools · 3 msgs · ✗1");
-        assert_eq!(turn_label("Yoooooo", true, false, 1, 0, 0), "turn · 1 tool");
-        assert_eq!(turn_label("Yoooooo", true, false, 0, 2, 0), "turn · 2 msgs");
+    fn turn_counts_list_the_nonzero_parts() {
+        assert_eq!(turn_counts(14, 3, 1), "  · 14 tools · 3 msgs · ✗1");
+        assert_eq!(turn_counts(1, 0, 0), "  · 1 tool");
+        assert_eq!(turn_counts(0, 2, 0), "  · 2 msgs");
+        assert_eq!(turn_counts(0, 0, 0), "");
     }
 
     #[test]
-    fn turn_label_has_no_separator_when_all_counts_are_zero() {
-        assert_eq!(turn_label("Yoooooo", true, false, 0, 0, 0), "turn");
+    fn turn_head_keeps_the_counts_beside_the_prompt_and_drops_them_when_narrow() {
+        let counts = turn_counts(14, 3, 1);
+        assert_eq!(
+            turn_head("alpha beta gamma", 60, &counts),
+            ("alpha beta gamma".to_string(), counts.clone())
+        );
+        // Eight cells stay for the prompt beside the counts, so it wraps there.
+        assert_eq!(
+            turn_head("alpha beta gamma", 36, &counts),
+            ("alpha".to_string(), counts.clone())
+        );
+        // One cell fewer and the counts go; the whole prompt fits in what is left.
+        assert_eq!(
+            turn_head("alpha beta gamma", 35, &counts),
+            ("alpha beta gamma".to_string(), String::new())
+        );
+        assert_eq!(
+            turn_head("alpha beta gamma", 14, &counts),
+            ("alpha beta".to_string(), String::new())
+        );
+        assert_eq!(turn_head("", 14, &counts), (String::new(), String::new()));
     }
 
     #[test]
-    fn turn_label_collapsed_is_unchanged() {
-        assert_eq!(turn_label("Yoooooo", false, true, 14, 3, 1), "Yoooooo  · 14 tools · 3 msgs · ✗1");
-        assert_eq!(turn_label("Yoooooo", false, true, 0, 0, 0), "Yoooooo");
-        assert_eq!(turn_label("bash ls", false, true, 14, 3, 1), "bash ls  · 14 tools · 3 msgs · ✗1");
+    fn continuation_is_what_the_header_does_not_show() {
+        assert_eq!(
+            continuation("hello world", "hello world and more"),
+            "and more"
+        );
+        assert_eq!(
+            continuation("a b", "a b"),
+            "",
+            "a header that is the whole text leaves nothing"
+        );
+        assert_eq!(
+            continuation("a b", "a b\n  c d\n\ne"),
+            "c d\n\ne",
+            "the rest keeps its lines"
+        );
+        assert_eq!(
+            continuation("a  b", "a b\tc"),
+            "c",
+            "whitespace runs compare equal"
+        );
+        assert_eq!(
+            continuation("https://ex.com/aa", "https://ex.com/aabb cc"),
+            "bb cc",
+            "a header cut mid-token"
+        );
+        assert_eq!(
+            continuation("foo", "bar baz"),
+            "bar baz",
+            "disagreeing texts show everything"
+        );
+        assert_eq!(
+            continuation("abc", "ab"),
+            "ab",
+            "a text shorter than the header"
+        );
+        assert_eq!(continuation("", "  x"), "x", "no header: the whole text");
     }
 
     #[test]
-    fn turn_label_expanded_synthetic_keeps_its_preview() {
-        assert_eq!(turn_label("bash ls", false, false, 14, 3, 1), "bash ls");
-    }
-
-    #[test]
-    fn turn_label_counts_are_the_first_thing_a_narrow_row_drops() {
-        for w in [12, 20] {
-            let t = truncate_str(&turn_label("Yoooooo", true, false, 14, 3, 1), w);
-            assert!(!t.is_empty() && t.starts_with("turn"), "width {w}: {t:?}");
-            let t = truncate_str(&turn_label("bash ls", false, true, 14, 3, 1), w);
-            assert!(!t.is_empty(), "width {w}");
-        }
-    }
-
-    #[test]
-    fn expanded_turn_with_opener_blanks_its_line_and_chip() {
+    fn turn_row_shows_its_line_chip_and_counts_when_expanded() {
         let mut state = trajectory(three_calls());
         let screen = draw(&mut state, 140, 20);
-        let turn = screen.lines().find(|l| l.contains("turn · 3 tools · 1 msg")).expect("turn row");
-        assert!(!turn.contains("#1"), "{turn}");
-        assert!(screen.lines().any(|l| l.contains("#1") && l.contains("fix it")), "the opener row keeps its line\n{screen}");
+        let turn = screen
+            .lines()
+            .find(|l| l.contains("fix it"))
+            .expect("turn row");
+        assert!(
+            turn.contains("#1") && turn.contains("USER") && turn.contains("· 3 tools · 1 msg"),
+            "{turn}"
+        );
     }
 
     #[test]
@@ -3664,7 +4005,7 @@ mod tests {
     }
 
     #[test]
-    fn event_row_with_expanded_body_drops_its_preview() {
+    fn event_header_reads_the_same_collapsed_and_expanded() {
         let rows = vec![
             ev(1, "message", "user", "fix it"),
             ev(2, "tool", "tool", "zzprobe"),
@@ -3674,18 +4015,12 @@ mod tests {
         let mut state = trajectory(rows);
         let row = |screen: &str, tag: &str| screen.lines().find(|l| l.contains(tag)).map(str::to_string).unwrap_or_default();
 
-        let screen = draw(&mut state, 140, 24);
-        assert!(row(&screen, "#2").contains("zzprobe"), "collapsed rows keep their preview\n{screen}");
-
+        let collapsed = row(&draw(&mut state, 140, 24), "#2");
+        assert!(collapsed.contains("Bash  zzprobe"), "{collapsed}");
         state.sel = Some(OutlineKey::Ev(2));
         press(&mut state, KeyCode::Right);
-        state.sel = Some(OutlineKey::Ev(4));
-        press(&mut state, KeyCode::Right);
         assert!(shown_rows(&state).contains(&"Body(2)".to_string()), "{:?}", shown_rows(&state));
-        let screen = draw(&mut state, 140, 24);
-        let call = row(&screen, "#2");
-        assert!(call.contains("Bash") && !call.contains("zzprobe"), "{call}");
-        let reply = row(&screen, "#4");
-        assert!(!reply.contains("wrapup") && reply.contains("#4"), "{reply}");
+        let expanded = row(&draw(&mut state, 140, 24), "#2");
+        assert!(expanded.contains("Bash  zzprobe"), "{expanded}");
     }
 }
