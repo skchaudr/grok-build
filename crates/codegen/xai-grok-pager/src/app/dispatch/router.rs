@@ -1522,6 +1522,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                     crate::app::external_editor::PendingEditorRequest::ConfigFile {
                         path,
                         refresh_agents_modal,
+                        editor: None,
                     },
                 );
             }

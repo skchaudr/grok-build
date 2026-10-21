@@ -35,6 +35,8 @@ pub(crate) enum PendingEditorRequest {
     ConfigFile {
         path: PathBuf,
         refresh_agents_modal: Option<crate::views::agents_modal::AgentsTab>,
+        /// Resolved editor command (may carry a `+N` jump); `None` uses `$VISUAL`/`$EDITOR`.
+        editor: Option<Vec<String>>,
     },
     /// Edit an attachment-free composer draft.
     PromptDraft {
@@ -184,7 +186,13 @@ pub(crate) fn prepare(
     let Some(request) = revalidate(app, request) else {
         return Ok(None);
     };
-    let argv = match editor_argv() {
+    let argv = match &request {
+        PendingEditorRequest::ConfigFile {
+            editor: Some(argv), ..
+        } => Ok(argv.clone()),
+        _ => editor_argv(),
+    };
+    let argv = match argv {
         Ok(argv) => argv,
         Err(message) => {
             return Err(PrepareError { request, message });
@@ -194,6 +202,7 @@ pub(crate) fn prepare(
         PendingEditorRequest::ConfigFile {
             path,
             refresh_agents_modal,
+            ..
         } => Ok(Some(PreparedEditorRequest::ConfigFile {
             launch: EditorLaunch { argv, path },
             refresh_agents_modal,
@@ -476,6 +485,7 @@ mod tests {
             request: PendingEditorRequest::ConfigFile {
                 path: PathBuf::from("/tmp/agent-config.md"),
                 refresh_agents_modal: None,
+                editor: None,
             },
             message: message.to_owned(),
         };

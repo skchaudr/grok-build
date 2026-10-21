@@ -18,9 +18,9 @@ Scope: features Sab can use while routing Claude Code, Codex, Cursor and Grok ag
 | `/memory` modal | `xai-grok-pager/src/views/memory_modal.rs` | Inspect and toggle | Toggle is session-scoped, not persisted (`docs/user-guide/13-memory.md:74`) |
 
 Verified in this pass:
-- Defaults: `[memory] enabled` and `[memory_v2] enabled` are both off. `v2_enabled` has no default (`memory.rs:681`), so v2 is selected only when set true (`memory.rs:692-700`). `MemoryV2Rollout::Active` (`memory.rs:71`) is the rollout field, not the enable gate. Docs (`13-memory.md:95`) are correct; the "docs vs code" concern is resolved.
+- Defaults: `[memory] enabled` and `[memory_v2] enabled` are both off. v2 is off unless local config or a remote flag (`remote_v2.enabled`) enables it (`memory.rs:681-683`, local `[memory_v2] enabled` takes precedence; `memory.rs:699` `v2_selected = v2_enabled == Some(true)`). `MemoryV2Rollout::Active` (`memory.rs:71`) is the rollout field, not the enable gate. Docs (`13-memory.md:95`) are correct; the "docs vs code" concern is resolved.
 - Local `[memory] enabled = false` disables both implementations unless `[memory_v2] enabled = true` is also in the same TOML (`memory.rs:685-695`).
-- ACP / external-agent sessions: the only `memory_capture` call site is `run_loop.rs:2343`, inside Grok's own `SessionActor`. External Claude/Codex/Cursor agents are spawned as stdio subprocesses bridged by `xai-grok-pager/src/acp/spawn.rs:362` (`spawn_external_subprocess`). No path from that bridge into `memory_capture` was found. Conclusion: memory capture does NOT cover Claude/Codex/Cursor turns. Not verified end-to-end at runtime.
+- ACP / external-agent sessions (partly verified): capture gate is `v2_capture_enabled()` (`memory_capture.rs:493`: `can_capture_v2() && !is_subagent`). `run_loop.rs:2343` is a call site inside Grok's own `SessionActor`; the "only call site" claim is not fully verified. External Claude/Codex/Cursor agents are spawned as stdio subprocesses bridged by `xai-grok-pager/src/acp/spawn.rs:362` (`spawn_external_subprocess`). No path from that bridge into `memory_capture` was found. Conclusion: memory capture does NOT cover Claude/Codex/Cursor turns. Not verified end-to-end at runtime.
 
 ## /learn (server-delivered skill, not in repo)
 

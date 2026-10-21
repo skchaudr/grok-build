@@ -2,16 +2,19 @@
 //!
 //! Editor: `$GROK_OPEN_EDITOR`, then `$VISUAL`, then `$EDITOR`, then `zed`.
 //! GUI editors (zed, code, cursor, …) are spawned detached. Terminal editors open in a new Herdr pane when running
-//! inside Herdr. Outside Herdr, a terminal editor falls back to the in-place `$VISUAL`/`$EDITOR` flow with no line
-//! jump; `$GROK_OPEN_EDITOR` is not used on that path.
+//! inside Herdr (synchronous, 2s budget, error toast on failure). Outside Herdr, a terminal editor falls back to the
+//! in-place flow using the same resolved editor, with a `+N` line jump for vi-family editors.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::ToolCallBlock;
 
 const DEFAULT_EDITOR: &str = "zed";
+/// Total budget for the herdr split + run round-trips on the UI thread.
+const HERDR_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EditorTarget {
@@ -57,10 +60,12 @@ pub(crate) enum EditorKind {
     GuiColon,
     /// `code -g path:line`
     GuiGoto,
-    /// `idea --line N path`
+    /// `idea --line N path`, `kate --line N path`
     GuiIdea,
-    /// `open path`
+    /// `open -a App path`
     GuiOpen,
+    /// `gvim +N path`, `mvim +N path`, `gedit +N path`, `bbedit +N path`
+    GuiPlus,
     /// `hx path:line`, `micro path:line`
     TerminalColon,
     /// `nvim +N path` (vim, vi, nano, emacs, kak, …)
@@ -71,24 +76,54 @@ impl EditorKind {
     pub(crate) fn is_gui(self) -> bool {
         matches!(
             self,
-            Self::GuiColon | Self::GuiGoto | Self::GuiIdea | Self::GuiOpen
+            Self::GuiColon | Self::GuiGoto | Self::GuiIdea | Self::GuiOpen | Self::GuiPlus
         )
     }
 }
 
-pub(crate) fn classify(program: &str) -> EditorKind {
-    let name = Path::new(program)
+fn base_name(program: &str) -> &str {
+    Path::new(program)
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or(program);
-    match name {
+        .unwrap_or(program)
+}
+
+pub(crate) fn classify(program: &str) -> EditorKind {
+    match base_name(program) {
         "zed" | "zed-preview" | "zeditor" | "subl" => EditorKind::GuiColon,
         "code" | "code-insiders" | "cursor" | "windsurf" | "codium" => EditorKind::GuiGoto,
-        "idea" | "rustrover" | "pycharm" | "webstorm" | "goland" => EditorKind::GuiIdea,
+        "idea" | "rustrover" | "pycharm" | "webstorm" | "goland" | "kate" => EditorKind::GuiIdea,
         "open" => EditorKind::GuiOpen,
+        "gvim" | "mvim" | "gedit" | "bbedit" => EditorKind::GuiPlus,
         "hx" | "helix" | "micro" => EditorKind::TerminalColon,
         _ => EditorKind::TerminalPlus,
     }
+}
+
+/// GUI editors detach. `emacsclient` is a GUI only when it creates its own frame.
+fn is_gui_launch(editor: &[String]) -> bool {
+    let Some(program) = editor.first() else {
+        return false;
+    };
+    if base_name(program) == "emacsclient" {
+        return editor
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "-c" | "--create-frame"));
+    }
+    classify(program).is_gui()
+}
+
+/// Editor command for the in-place fallback: a `+N` line jump for vi-family editors only.
+fn suspend_argv(editor: &[String], line: Option<usize>) -> Vec<String> {
+    let mut argv = editor.to_vec();
+    if let Some(line) = line
+        && editor
+            .first()
+            .is_some_and(|program| classify(program) == EditorKind::TerminalPlus)
+    {
+        argv.push(format!("+{line}"));
+    }
+    argv
 }
 
 /// Editor command words from the environment (first non-empty of the chain), else [`DEFAULT_EDITOR`].
@@ -134,7 +169,7 @@ pub(crate) fn build_argv(editor: &[String], target: &EditorTarget) -> Vec<String
             argv.push(line.to_string());
             argv.push(path);
         }
-        (EditorKind::TerminalPlus, Some(line)) => {
+        (EditorKind::TerminalPlus | EditorKind::GuiPlus, Some(line)) => {
             argv.push(format!("+{line}"));
             argv.push(path);
         }
@@ -152,8 +187,8 @@ fn in_herdr() -> bool {
 pub(crate) enum OpenOutcome {
     /// Launched; show this toast.
     Launched(String),
-    /// Terminal editor outside Herdr: suspend the TUI and run `$EDITOR` on this path.
-    SuspendFallback(PathBuf),
+    /// Terminal editor outside Herdr: suspend the TUI and run this editor command on this path.
+    SuspendFallback(PathBuf, Vec<String>),
     /// Could not launch; show this toast.
     Failed(String),
 }
@@ -169,23 +204,22 @@ pub(crate) fn open(target: &EditorTarget, cwd: &Path) -> OpenOutcome {
     };
     let argv = build_argv(&editor, target);
     let label = describe(target, &program);
-    if classify(&program).is_gui() {
+    if is_gui_launch(&editor) {
         return match spawn_detached(&argv) {
             Ok(()) => OpenOutcome::Launched(format!("opened {label}")),
             Err(e) => OpenOutcome::Failed(format!("{program}: {e}")),
         };
     }
     if in_herdr() {
-        let cwd = cwd.to_path_buf();
-        // Two herdr round-trips; keep them off the UI thread.
-        std::thread::spawn(move || {
-            if let Err(error) = open_in_herdr_pane(&argv, &cwd) {
+        return match open_in_herdr_pane(&argv, cwd) {
+            Ok(()) => OpenOutcome::Launched(format!("opening {label} in a Herdr pane")),
+            Err(error) => {
                 tracing::warn!(%error, "open in editor: herdr pane launch failed");
+                OpenOutcome::Failed(format!("Herdr pane launch failed: {error}"))
             }
-        });
-        return OpenOutcome::Launched(format!("opening {label} in a Herdr pane"));
+        };
     }
-    OpenOutcome::SuspendFallback(target.path.clone())
+    OpenOutcome::SuspendFallback(target.path.clone(), suspend_argv(&editor, target.line))
 }
 
 fn describe(target: &EditorTarget, program: &str) -> String {
@@ -219,37 +253,63 @@ fn spawn_detached(argv: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Run one herdr CLI call and return its stdout. Killed and reaped if it has not exited by `deadline`.
+#[allow(clippy::disallowed_methods)] // short-lived herdr CLI; killed and reaped below on timeout
+fn run_herdr(herdr: &str, args: &[&str], deadline: Instant) -> anyhow::Result<Vec<u8>> {
+    let verb = args.get(1).copied().unwrap_or_default();
+    let mut child = Command::new(herdr)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("herdr pane {verb}: timed out");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "herdr pane {verb}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(output.stdout)
+}
+
+/// Split a pane (the Herdr pane this TUI runs in, else the focused one) and run `argv` in it.
 fn open_in_herdr_pane(argv: &[String], cwd: &Path) -> anyhow::Result<()> {
     let herdr = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_owned());
-    let split = Command::new(&herdr)
-        .args([
+    let deadline = Instant::now() + HERDR_TIMEOUT;
+    let target = match std::env::var("HERDR_PANE_ID") {
+        Ok(id) if !id.is_empty() => id,
+        _ => "--current".to_owned(),
+    };
+    let cwd = cwd.display().to_string();
+    let split = run_herdr(
+        &herdr,
+        &[
             "pane",
             "split",
-            "--current",
+            &target,
             "--direction",
             "right",
             "--focus",
             "--cwd",
-        ])
-        .arg(cwd)
-        .stdin(Stdio::null())
-        .output()?;
-    anyhow::ensure!(
-        split.status.success(),
-        "herdr pane split: {}",
-        String::from_utf8_lossy(&split.stderr).trim()
-    );
-    let pane = herdr_split_pane_id(&split.stdout)?;
+            &cwd,
+        ],
+        deadline,
+    )?;
+    let pane = herdr_split_pane_id(&split)?;
     let command = shlex::try_join(argv.iter().map(String::as_str))?;
-    let run = Command::new(&herdr)
-        .args(["pane", "run", pane.as_str(), command.as_str()])
-        .stdin(Stdio::null())
-        .output()?;
-    anyhow::ensure!(
-        run.status.success(),
-        "herdr pane run: {}",
-        String::from_utf8_lossy(&run.stderr).trim()
-    );
+    run_herdr(
+        &herdr,
+        &["pane", "run", pane.as_str(), command.as_str()],
+        deadline,
+    )?;
     Ok(())
 }
 

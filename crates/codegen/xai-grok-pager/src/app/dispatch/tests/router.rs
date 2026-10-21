@@ -318,6 +318,7 @@ fn config_editor_action_still_uses_typed_request() {
         Some(crate::app::external_editor::PendingEditorRequest::ConfigFile {
             path: ref queued,
             refresh_agents_modal: Some(crate::views::agents_modal::AgentsTab::Agents),
+            ..
         }) if queued == &path
     ));
 }
