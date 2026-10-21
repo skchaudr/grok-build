@@ -64,6 +64,8 @@ fn has_body(e: &EventRow) -> bool {
 
 /// Builds the outline of `events`. `hidden[i]` marks a tool result already folded into the call row
 /// before it; hidden rows are skipped, and an error on one is charged to the visible row it folds into.
+// `events[..]` lookups use event indices from this fn's own enumerate/turn bookkeeping, always in bounds.
+#[allow(clippy::indexing_slicing)]
 pub fn outline(events: &[EventRow], hidden: &[bool]) -> (FoldTree<OutlineKey>, Vec<OutlineItem>) {
     let is_hidden = |i: usize| hidden.get(i).copied().unwrap_or(false);
 
@@ -73,13 +75,18 @@ pub fn outline(events: &[EventRow], hidden: &[bool]) -> (FoldTree<OutlineKey>, V
     for (i, e) in events.iter().enumerate() {
         if is_hidden(i) {
             if let (Some(o), true) = (owner, e.is_error) {
-                failed[o] = true;
+                if let Some(f) = failed.get_mut(o) {
+                    *f = true;
+                }
             }
         } else {
-            failed[i] = e.is_error;
+            if let Some(f) = failed.get_mut(i) {
+                *f = e.is_error;
+            }
             owner = Some(i);
         }
     }
+    let failed_at = |j: usize| failed.get(j).copied().unwrap_or(false);
 
     // Turns: each opens at a visible user message; leading non-user events open a synthetic turn.
     let mut turns: Vec<Vec<usize>> = Vec::new();
@@ -93,58 +100,65 @@ pub fn outline(events: &[EventRow], hidden: &[bool]) -> (FoldTree<OutlineKey>, V
     let mut nodes = Vec::new();
     let mut items = Vec::new();
     for turn in &turns {
-        let opener = is_user(&events[turn[0]]);
-        let rest = &turn[usize::from(opener)..];
+        let Some(&head) = turn.first() else {
+            continue;
+        };
+        let opener = is_user(&events[head]);
+        let rest = turn.get(usize::from(opener)..).unwrap_or_default();
         let turn_node = push(
             &mut nodes,
             &mut items,
-            OutlineKey::Turn(events[turn[0]].line),
+            OutlineKey::Turn(events[head].line),
             None,
             0,
             OutlineItem::Turn {
-                event: turn[0],
+                event: head,
                 tools: turn.iter().filter(|&&i| is_call(&events[i])).count(),
                 msgs: rest.iter().filter(|&&i| is_message(&events[i])).count(),
-                errors: turn.iter().filter(|&&i| failed[i]).count(),
+                errors: turn.iter().filter(|&&i| failed_at(i)).count(),
             },
         );
         if opener {
-            push_body(&mut nodes, &mut items, events, turn[0], turn_node);
+            push_body(&mut nodes, &mut items, events, head, turn_node);
         }
 
         let mut k = 0;
-        while k < rest.len() {
-            let i = rest[k];
+        while let Some(&i) = rest.get(k) {
             if !is_call(&events[i]) {
                 push_event(&mut nodes, &mut items, events, i, turn_node);
                 k += 1;
                 continue;
             }
-            let end = rest[k..]
+            let end = rest
+                .get(k..)
+                .unwrap_or_default()
                 .iter()
                 .position(|&j| !is_call(&events[j]))
                 .map_or(rest.len(), |p| k + p);
-            let run = &rest[k..end];
-            if run.len() >= MIN_RUN {
-                let item = OutlineItem::Run {
-                    first: run[0],
-                    count: run.len(),
-                    errors: run.iter().filter(|&&j| failed[j]).count(),
-                };
-                let run_node = push(
-                    &mut nodes,
-                    &mut items,
-                    OutlineKey::Run(events[run[0]].line),
-                    Some(turn_node),
-                    1,
-                    item,
-                );
-                for &c in run {
-                    push_event(&mut nodes, &mut items, events, c, run_node);
+            let run = rest.get(k..end).unwrap_or_default();
+            match run.first() {
+                Some(&first) if run.len() >= MIN_RUN => {
+                    let item = OutlineItem::Run {
+                        first,
+                        count: run.len(),
+                        errors: run.iter().filter(|&&j| failed_at(j)).count(),
+                    };
+                    let run_node = push(
+                        &mut nodes,
+                        &mut items,
+                        OutlineKey::Run(events[first].line),
+                        Some(turn_node),
+                        1,
+                        item,
+                    );
+                    for &c in run {
+                        push_event(&mut nodes, &mut items, events, c, run_node);
+                    }
                 }
-            } else {
-                for &c in run {
-                    push_event(&mut nodes, &mut items, events, c, turn_node);
+                _ => {
+                    for &c in run {
+                        push_event(&mut nodes, &mut items, events, c, turn_node);
+                    }
                 }
             }
             k = end;
@@ -167,6 +181,8 @@ fn push(
 }
 
 /// An event row, with its `Body` child when it is a message or tool event.
+// `parent` is a node index returned by `push`; `i` is an event index from `outline`. Both in bounds.
+#[allow(clippy::indexing_slicing)]
 fn push_event(
     nodes: &mut Vec<FoldNode<OutlineKey>>,
     items: &mut Vec<OutlineItem>,
@@ -188,6 +204,8 @@ fn push_event(
     }
 }
 
+// `parent` is a node index returned by `push`; `i` is an event index from `outline`. Both in bounds.
+#[allow(clippy::indexing_slicing)]
 fn push_body(
     nodes: &mut Vec<FoldNode<OutlineKey>>,
     items: &mut Vec<OutlineItem>,

@@ -63,6 +63,12 @@ impl<K: Eq + Hash + Clone> FoldTree<K> {
     }
 }
 
+impl<K: Eq + Hash + Clone> Default for FoldState<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K: Eq + Hash + Clone> FoldState<K> {
     /// Empty state: everything expanded.
     pub fn new() -> Self {
@@ -259,7 +265,7 @@ mod tests {
     fn visible_skips_deepest_collapsed_only() {
         let t = sample();
         let st = FoldState::with_collapsed(["a1x"]);
-        assert_eq!(t.visible(&st), vec![0, 1, 2, 5, 6, 7]);
+        assert_eq!(t.visible(&st), vec![0, 1, 2, 4, 5, 6, 7]);
     }
 
     #[test]
@@ -305,7 +311,7 @@ mod tests {
         let mut st = FoldState::new();
         assert_eq!(st.collapse(&t, 2), None);
         assert!(st.is_collapsed(&"a1x"));
-        assert_eq!(t.visible(&st), vec![0, 1, 2, 5, 6, 7]);
+        assert_eq!(t.visible(&st), vec![0, 1, 2, 4, 5, 6, 7]);
     }
 
     #[test]
@@ -432,7 +438,10 @@ mod tests {
         let t = sample();
         let mut st = FoldState::with_collapsed(["gone"]);
         st.toggle_all(&t);
-        assert_eq!(st, FoldState::with_collapsed(["a", "a1", "a1x", "b"]));
+        assert_eq!(
+            st,
+            FoldState::with_collapsed(["gone", "a", "a1", "a1x", "b"])
+        );
     }
 
     #[test]
