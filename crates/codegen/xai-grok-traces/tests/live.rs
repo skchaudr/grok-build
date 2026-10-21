@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::Path;
 
+use xai_grok_traces::live::{LiveRow, LiveState, fold_all, render};
 use xai_grok_traces::{Receipt, SessionFilter, SessionRow, TraceIndex, default_roots};
 
 const CURSOR: &str = "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"<user_query>\\nhello\\n</user_query>\"}]}}\n";
@@ -227,4 +228,229 @@ fn session_json_carries_live_fields_and_tolerates_old_remotes() {
     assert_eq!(session_from_json(&session_to_json(&row)).unwrap(), row);
     let old = session_from_json(&serde_json::json!({"id": "y"})).unwrap();
     assert_eq!((old.native_id, old.mtime_ms, old.harness_pid, old.context_tokens), (None, None, None, None));
+}
+
+// ---- sequence rows that go through a real index ----
+
+/// Receipt times are `B + seconds`, after every timestamp in the fixtures.
+const B: i64 = 1_800_000_000_000;
+
+fn at(s: f64) -> i64 {
+    B + (s * 1000.0).round() as i64
+}
+
+/// Writes a transcript and sets its mtime before `B` so only receipts and the fixture timestamp count.
+fn write_old(path: &Path, text: &str) {
+    write(path, text);
+    fs::File::options().write(true).open(path).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_790_900_000)).unwrap();
+}
+
+fn show(r: &LiveRow) -> String {
+    let v = render(r, 0);
+    format!("{} {}", v.glyph, v.text)
+}
+
+fn all(e: &Env, now: f64) -> Vec<LiveRow> {
+    fold_all(&e.idx, at(now), |_, _| true).unwrap()
+}
+
+fn claude_env(names: &[&str]) -> (Env, Vec<String>) {
+    let mut e = env();
+    for n in names {
+        write_old(&e.home.join(format!(".claude/projects/-w-claude/{n}.jsonl")), CLAUDE);
+    }
+    e.scan();
+    let rows = e.idx.list_sessions(&SessionFilter { source: Some("claude".into()), ..Default::default() }).unwrap();
+    let ids = names.iter().map(|n| rows.iter().find(|r| r.file_path.ends_with(format!("{n}.jsonl"))).unwrap().id.clone()).collect();
+    (e, ids)
+}
+
+fn ck(e: &mut Env, sid: &str, event: &str, t: f64, f: impl FnOnce(&mut Receipt)) {
+    e.rcpt("claude", event, at(t), |r| {
+        r.session_id = Some(sid.into());
+        r.harness_pid = Some(4242);
+        r.harness_start = Some(1_700_000_000);
+        f(r);
+    });
+}
+
+#[test]
+fn seq_07_child_stop_does_not_set_the_clock() {
+    let (mut e, ids) = claude_env(&["c1"]);
+    let s = &ids[0];
+    ck(&mut e, s, "UserPromptSubmit", 0.0, |_| {});
+    ck(&mut e, s, "SubagentStart", 1.0, |r| r.agent_id = Some("x".into()));
+    ck(&mut e, s, "Stop", 5.0, |_| {});
+    ck(&mut e, s, "SubagentStop", 6.0, |r| r.agent_id = Some("x".into()));
+    let rows = all(&e, 9.0);
+    assert_eq!(rows.len(), 1);
+    assert_eq!((show(&rows[0]), rows[0].bg, rows[0].age_ms), ("○ your turn".into(), 0, 4000));
+}
+
+#[test]
+fn seq_12_orphan_pre_before_the_boundary_is_closed() {
+    let (mut e, ids) = claude_env(&["c1"]);
+    ck(&mut e, &ids[0], "PreToolUse", 0.0, |r| r.tool = Some("A".into()));
+    ck(&mut e, &ids[0], "Stop", 5.0, |_| {});
+    let rows = all(&e, 8.0);
+    assert_eq!(show(&rows[0]), "○ your turn");
+}
+
+#[test]
+fn seq_20_child_start_with_agent_id_counts_after_the_boundary() {
+    let (mut e, ids) = claude_env(&["c1"]);
+    ck(&mut e, &ids[0], "Stop", 0.0, |_| {});
+    ck(&mut e, &ids[0], "SubagentStart", 1.0, |r| r.agent_id = Some("x".into()));
+    assert_eq!(show(&all(&e, 5.0)[0]), "○ your turn · 1 bg");
+}
+
+#[test]
+fn seq_46_child_started_before_the_boundary_runs_across_stop() {
+    let (mut e, ids) = claude_env(&["c1"]);
+    ck(&mut e, &ids[0], "UserPromptSubmit", 0.0, |_| {});
+    ck(&mut e, &ids[0], "SubagentStart", 1.0, |r| r.agent_id = Some("x".into()));
+    ck(&mut e, &ids[0], "Stop", 5.0, |_| {});
+    assert_eq!(show(&all(&e, 9.0)[0]), "○ your turn · 1 bg");
+}
+
+#[test]
+fn child_started_before_an_older_end_is_dropped() {
+    let (mut e, ids) = claude_env(&["c1"]);
+    ck(&mut e, &ids[0], "SubagentStart", -5.0, |r| r.agent_id = Some("x".into()));
+    ck(&mut e, &ids[0], "SessionEnd", 0.0, |_| {});
+    ck(&mut e, &ids[0], "UserPromptSubmit", 1.0, |_| {});
+    let got = e.idx.turn_receipts(&ids[0]).unwrap();
+    assert_eq!(got.len(), 3, "start, the older End, and the Prompt");
+    let rows = all(&e, 2.0);
+    assert_eq!((rows[0].bg, rows[0].state), (0, LiveState::Working));
+}
+
+#[test]
+fn seq_47_prompt_after_end_is_on_screen() {
+    let (mut e, ids) = claude_env(&["c1"]);
+    ck(&mut e, &ids[0], "SessionEnd", 0.0, |_| {});
+    ck(&mut e, &ids[0], "UserPromptSubmit", 1.0, |_| {});
+    let rows = all(&e, 2.0);
+    assert_eq!((rows.len(), rows[0].state), (1, LiveState::Working));
+}
+
+#[test]
+fn seq_32_old_pre_in_the_current_turn_is_returned_and_flagged() {
+    let (mut e, ids) = claude_env(&["c1"]);
+    ck(&mut e, &ids[0], "UserPromptSubmit", 0.0, |_| {});
+    ck(&mut e, &ids[0], "PreToolUse", 300.0, |r| r.tool = Some("A".into()));
+    let rows = all(&e, 1200.0);
+    let v = render(&rows[0], 0);
+    assert_eq!((show(&rows[0]), v.marks), ("⏳ A · 15m".into(), vec!["?"]));
+}
+
+#[test]
+fn seq_24_dead_pid_is_gone_and_seq_25_reused_pid_is_gone() {
+    let (mut e, ids) = claude_env(&["c1"]);
+    ck(&mut e, &ids[0], "UserPromptSubmit", 0.0, |_| {});
+    assert_eq!(fold_all(&e.idx, at(1.0), |_, _| true).unwrap().len(), 1);
+    assert!(fold_all(&e.idx, at(1.0), |_, _| false).unwrap().is_empty(), "dead");
+    let seen = std::cell::Cell::new(None);
+    let rows = fold_all(&e.idx, at(1.0), |pid, start| {
+        seen.set(Some((pid, start)));
+        start == 1_700_000_001
+    })
+    .unwrap();
+    assert!(rows.is_empty(), "same pid, different start time");
+    assert_eq!(seen.get(), Some((4242, 1_700_000_000)));
+}
+
+#[test]
+fn seq_26_alive_is_never_called_without_a_pid() {
+    let (mut e, ids) = claude_env(&["c1"]);
+    e.rcpt("claude", "UserPromptSubmit", at(0.0), |r| r.session_id = Some(ids[0].clone()));
+    let rows = fold_all(&e.idx, at(3600.0), |_, _| panic!("no pid, no liveness check")).unwrap();
+    let v = render(&rows[0], 0);
+    assert_eq!((v.glyph, v.text.as_str(), v.marks), ("◌", "quiet", vec!["pid?"]));
+}
+
+#[test]
+fn seq_48_same_process_supersede_for_claude_not_cursor_not_unknown_pid() {
+    let (mut e, ids) = claude_env(&["c1", "c2"]);
+    ck(&mut e, &ids[0], "UserPromptSubmit", 0.0, |_| {});
+    ck(&mut e, &ids[0], "Stop", 10.0, |_| {});
+    ck(&mut e, &ids[1], "UserPromptSubmit", 11.0, |_| {});
+    let rows = all(&e, 12.0);
+    assert_eq!(rows.iter().map(|r| r.session_id.as_str()).collect::<Vec<_>>(), [ids[1].as_str()]);
+
+    // Unknown pids are never superseded.
+    let (mut e, ids) = claude_env(&["c1", "c2"]);
+    for (i, t) in [(0, 0.0), (1, 11.0)] {
+        e.rcpt("claude", "UserPromptSubmit", at(t), |r| r.session_id = Some(ids[i].clone()));
+    }
+    assert_eq!(all(&e, 12.0).len(), 2);
+
+    // Cursor: same process, both stay.
+    let mut e = env();
+    write_old(&e.home.join(".cursor/projects/w-a/agent-transcripts/a1/a1.jsonl"), CURSOR);
+    write_old(&e.home.join(".cursor/projects/w-b/agent-transcripts/b1/b1.jsonl"), CURSOR);
+    e.scan();
+    let rows = e.idx.list_sessions(&SessionFilter { source: Some("cursor".into()), ..Default::default() }).unwrap();
+    for (i, r) in rows.iter().enumerate() {
+        e.rcpt("cursor", "beforeSubmitPrompt", at(i as f64), |x| {
+            x.session_id = Some(r.id.clone());
+            x.harness_pid = Some(77);
+            x.harness_start = Some(1_700_000_000);
+        });
+    }
+    assert_eq!(all(&e, 5.0).len(), 2);
+}
+
+#[test]
+fn seq_37_receipt_only_cursor_row() {
+    let mut e = env();
+    let chat = |r: &mut Receipt| {
+        r.native_session = Some("c1".into());
+        r.cwd = Some("/w/proj".into());
+    };
+    e.rcpt("cursor", "beforeSubmitPrompt", at(0.0), chat);
+    e.rcpt("cursor", "beforeShellExecution", at(1.0), |r| {
+        chat(r);
+        r.tool = Some("Shell".into());
+    });
+    let rows = all(&e, 2.0);
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].title.as_str(), show(&rows[0]).as_str(), rows[0].context_tokens), ("proj", "▶ Shell · 1s", None));
+}
+
+#[test]
+fn seq_38_a_session_row_takes_over_the_receipt_only_row() {
+    let mut e = env();
+    let chat = |r: &mut Receipt| r.native_session = Some("c1".into());
+    e.rcpt("cursor", "beforeSubmitPrompt", at(0.0), chat);
+    e.rcpt("cursor", "beforeShellExecution", at(1.0), |r| {
+        chat(r);
+        r.tool = Some("Shell".into());
+    });
+    assert!(all(&e, 2.0)[0].session_id.starts_with("cursor:rcpt:"));
+    write_old(&e.home.join(".cursor/projects/w-proj/agent-transcripts/c1/c1.jsonl"), CURSOR);
+    e.scan();
+    let sess = e.session("cursor");
+    let rows = all(&e, 2.0);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].session_id.as_str(), show(&rows[0]).as_str()), (sess.id.as_str(), "▶ Shell · 1s"));
+    assert_eq!((rows[0].title.as_str(), rows[0].context_tokens), (sess.title.as_str(), sess.context_tokens));
+}
+
+#[test]
+fn claude_subagent_rows_map_by_exact_agent_file_id() {
+    let (mut e, ids) = claude_env(&["c1"]);
+    write_old(&e.home.join(".claude/projects/-w-claude/c1/subagents/agent-ab12.jsonl"), CLAUDE);
+    e.scan();
+    ck(&mut e, &ids[0], "UserPromptSubmit", 0.0, |_| {});
+    ck(&mut e, &ids[0], "SubagentStart", 1.0, |r| r.agent_id = Some("ab12".into()));
+    ck(&mut e, &ids[0], "PreToolUse", 2.0, |r| {
+        r.agent_id = Some("ab12".into());
+        r.tool = Some("Read".into());
+        r.tool_use_id = Some("r".into());
+    });
+    let rows = all(&e, 3.0);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!((rows[1].parent_id.as_deref(), show(&rows[1]).as_str()), (Some(ids[0].as_str()), "▶ Read · 1s"));
+    assert_eq!(show(&rows[0]), "● 1 bg");
 }

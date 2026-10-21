@@ -4,7 +4,7 @@
 use rusqlite::{OptionalExtension, params};
 
 use crate::index::{Result, SAMPLE_EVERY, TraceIndex, now_ms};
-use crate::live::{BOUNDARY_EVENTS, Boundary, CHILD_EVENTS, LiveReceipt, boundary, child_kind};
+use crate::live::{BOUNDARY_EVENTS, Boundary, CHILD_EVENTS, END_EVENTS, LiveReceipt, boundary, child_kind};
 
 /// Rows kept once pruning runs (every 1000th insert).
 const KEEP_RECEIPTS: i64 = 100_000;
@@ -53,6 +53,9 @@ pub(crate) fn native_keys(source: &str, native: Option<&str>) -> Vec<String> {
 pub(crate) fn in_list(names: &[&str]) -> String {
     names.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(",")
 }
+
+/// `(source, keyed session id, unkeyed native key)`.
+type ReceiptKeys = (String, Option<String>, Option<String>);
 
 const LIVE_COLS: &str = "r.id, r.session_id, r.native_session, r.agent_id, r.event, r.tool, r.detail, r.tool_use_id, r.at_ms";
 
@@ -218,33 +221,80 @@ impl TraceIndex {
         Ok(out)
     }
 
-    /// Receipts since the session's newest turn boundary (the boundary itself included), or all of them
-    /// when it has none, plus every subagent start/stop of the session at any age; by `(at_ms, id)`.
+    /// `(source, session id for the keyed branch, receipt key for the unkeyed branch)` of a session id.
     /// `cursor:rcpt:<chat>` ids are receipt-only rows and match by `native_session`.
-    pub fn turn_receipts(&self, session_id: &str) -> Result<Vec<LiveReceipt>> {
-        let (source, id, native): (String, Option<&str>, Option<String>) = match session_id.strip_prefix(RECEIPT_ONLY_PREFIX) {
-            Some(chat) => ("cursor".into(), None, Some(chat.to_string())),
-            None => {
-                let row: Option<(String, Option<String>)> = self
-                    .conn()
-                    .query_row("SELECT source_id, native_id FROM trace_sessions WHERE id = ?1", [session_id], |r| Ok((r.get(0)?, r.get(1)?)))
-                    .optional()?;
-                let Some((source, native)) = row else { return Ok(Vec::new()) };
-                // The receipts a hook sends for this row are keyed by the key the unkeyed branch matches on.
-                (source, Some(session_id), native)
+    fn receipt_keys(&self, session_id: &str) -> Result<Option<ReceiptKeys>> {
+        if let Some(chat) = session_id.strip_prefix(RECEIPT_ONLY_PREFIX) {
+            return Ok(Some(("cursor".into(), None, Some(chat.to_string()))));
+        }
+        let row: Option<(String, Option<String>)> = self
+            .conn()
+            .query_row("SELECT source_id, native_id FROM trace_sessions WHERE id = ?1", [session_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        Ok(row.map(|(source, native)| (source, Some(session_id.to_string()), native)))
+    }
+
+    /// Newest own-thread `End` of a session at any age, as a receipt (`(at_ms, id)` newest across both branches).
+    fn newest_end(&self, source: &str, id: Option<&str>, native: Option<&str>) -> Result<Option<LiveReceipt>> {
+        let conn = self.conn();
+        let tail = format!("AND r.agent_id IS NULL AND r.event IN ({}) ORDER BY r.at_ms DESC, r.id DESC", in_list(END_EVENTS));
+        let first = |sql: String, args: &[&str]| -> Result<Option<LiveReceipt>> {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let mut rows = stmt.query(rusqlite::params_from_iter(args))?;
+            while let Some(r) = rows.next()? {
+                let rec = live_receipt(r)?;
+                if boundary(source, &rec.event, rec.detail.as_deref()) == Some(Boundary::End) {
+                    return Ok(Some(rec));
+                }
             }
+            Ok(None)
         };
-        let native = native.as_deref();
+        let keyed = match id {
+            Some(id) => first(format!("SELECT {LIVE_COLS} FROM trace_receipts r WHERE r.session_id = ?1 {tail}"), &[id])?,
+            None => None,
+        };
+        let unkeyed = match native {
+            Some(n) => first(
+                format!("SELECT {LIVE_COLS} FROM trace_receipts r WHERE r.session_id IS NULL AND r.source = ?1 AND r.native_session = ?2 {tail}"),
+                &[source, n],
+            )?,
+            None => None,
+        };
+        Ok([keyed, unkeyed].into_iter().flatten().max_by_key(|r| (r.at_ms, r.id)))
+    }
+
+    /// Receipts since the session's newest turn boundary (the boundary itself included), or all of them
+    /// when it has none, plus every subagent start/stop of the session at any age and the newest own-thread
+    /// `End` at any age (the fold drops children started before it); by `(at_ms, id)`.
+    pub fn turn_receipts(&self, session_id: &str) -> Result<Vec<LiveReceipt>> {
+        let Some((source, id, native)) = self.receipt_keys(session_id)? else { return Ok(Vec::new()) };
+        let (id, native) = (id.as_deref(), native.as_deref());
         let floor = self.newest_boundary(&source, id, native)?;
         let Some((at, bid, _)) = floor else {
             return self.branch_receipts(id, &source, native, "");
         };
         let mut out = self.branch_receipts(id, &source, native, &format!("AND (r.at_ms > {at} OR (r.at_ms = {at} AND r.id >= {bid}))"))?;
         let kids = self.branch_receipts(id, &source, native, &format!("AND r.event IN ({})", in_list(CHILD_EVENTS)))?;
-        let have: std::collections::HashSet<i64> = out.iter().map(|r| r.id).collect();
-        out.extend(kids.into_iter().filter(|r| !have.contains(&r.id) && child_kind(&source, &r.event).is_some()));
+        let mut have: std::collections::HashSet<i64> = out.iter().map(|r| r.id).collect();
+        out.extend(kids.into_iter().filter(|r| child_kind(&source, &r.event).is_some() && have.insert(r.id)));
+        if let Some(end) = self.newest_end(&source, id, native)?.filter(|e| have.insert(e.id)) {
+            out.push(end);
+        }
         out.sort_by_key(|r| (r.at_ms, r.id));
         Ok(out)
+    }
+
+    /// Every receipt of a session by `(at_ms, id)`; the replay helper folds prefixes of this.
+    pub fn session_receipts(&self, session_id: &str) -> Result<Vec<LiveReceipt>> {
+        let Some((source, id, native)) = self.receipt_keys(session_id)? else { return Ok(Vec::new()) };
+        self.branch_receipts(id.as_deref(), &source, native.as_deref(), "")
+    }
+
+    /// `(at_ms, id)` of the session's newest receipt of any kind.
+    pub fn last_receipt_key(&self, session_id: &str) -> Result<Option<(i64, i64)>> {
+        let sql = format!("SELECT {}, {} FROM trace_sessions s WHERE s.id = ?1", newest_receipt_sql("at_ms"), newest_receipt_sql("id"));
+        let row: Option<(Option<i64>, Option<i64>)> = self.conn().query_row(&sql, [session_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        Ok(row.and_then(|(at, id)| Some((at?, id?))))
     }
 
     /// Receipts at or after `ms`, for the empty state ("hooks are firing, nothing to show").
@@ -271,6 +321,9 @@ mod tests {
             ("last receipt of a session", format!("SELECT {}, {} FROM trace_sessions s WHERE s.id = 'x'", newest_receipt_sql("at_ms"), newest_receipt_sql("event"))),
             ("keyed boundary scan", "SELECT r.at_ms, r.id, r.event, r.detail FROM trace_receipts r WHERE r.session_id = 'x' AND r.agent_id IS NULL AND r.event IN ('Stop') ORDER BY r.at_ms DESC, r.id DESC".into()),
             ("unkeyed boundary scan", "SELECT r.at_ms, r.id, r.event, r.detail FROM trace_receipts r WHERE r.session_id IS NULL AND r.source = 'cursor' AND r.native_session = 'x' AND r.agent_id IS NULL AND r.event IN ('stop') ORDER BY r.at_ms DESC, r.id DESC".into()),
+            ("keyed end scan", "SELECT r.id FROM trace_receipts r WHERE r.session_id = 'x' AND r.agent_id IS NULL AND r.event IN ('SessionEnd') ORDER BY r.at_ms DESC, r.id DESC".into()),
+            ("unkeyed end scan", "SELECT r.id FROM trace_receipts r WHERE r.session_id IS NULL AND r.source = 'cursor' AND r.native_session = 'x' AND r.agent_id IS NULL AND r.event IN ('sessionEnd') ORDER BY r.at_ms DESC, r.id DESC".into()),
+            ("last receipt key", format!("SELECT {}, {} FROM trace_sessions s WHERE s.id = 'x'", newest_receipt_sql("at_ms"), newest_receipt_sql("id"))),
             ("keyed turn receipts", "SELECT r.id FROM trace_receipts r WHERE r.session_id = 'x' AND r.at_ms > 5 ORDER BY r.at_ms, r.id".into()),
             ("unkeyed turn receipts", "SELECT r.id FROM trace_receipts r WHERE r.session_id IS NULL AND r.source = 'cursor' AND r.native_session = 'x' AND r.at_ms > 5 ORDER BY r.at_ms, r.id".into()),
             ("receipt-only groups", "SELECT r.native_session, MIN(r.at_ms), MAX(r.at_ms) FROM trace_receipts r WHERE r.source = 'cursor' AND r.session_id IS NULL AND r.native_session IS NOT NULL GROUP BY r.native_session".into()),

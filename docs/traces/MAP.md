@@ -184,3 +184,13 @@ Rows 1 and 4 (PermissionRequest/PermissionDenied), 3 (granted prompt), 8 (`herdr
 | Cursor CLI | `cursor-agent -p --force --output-format json '<ls, read f.txt, append a word>'` | d4bc8505-5df3-4908-9226-dc1a468cdee6 | 11:44:25 - 11:46:11 (connection errors, edit never ran) |
 
 Each run used a throwaway dir under `$TMPDIR`, wrapped in a 120-180 s alarm (no `timeout` on macOS).
+
+## Live fold
+
+Code: `crates/codegen/xai-grok-traces/src/live.rs` (`norm`, `strict_ids`, `fold_session`, `fold_children`, `fold_all`, `render`); tests `live::seq::seq_NN_*` and `tests/live.rs` (rows through a real index); replay `tests/live_replay.rs` (ignored, `GROK_TRACES_REPLAY_DB`). Spec: `SPEC-live.md` §Event normalizer and §Live state machine.
+
+- `strict_ids`: Pi yes (row 9); Claude no (row 5 = no); Cursor no (row 5 covered Claude only; row 12 has ids).
+- Child mapping: `child.parent_id == parent.id` and the last component of `native_id` is exactly `agent-<agent_id>`.
+- `LiveRow` adds `extra_tools: u32` (the `+N`, state `Tool` only) beyond the spec's field list; `LIVE_SCHEMA` stays 1 since nothing shipped. `stale` is dropped.
+- `turn_receipts` also returns the newest own-thread `End` at any age; the fold drops children started before it.
+- `fmt_age` (age column) prints `0s`..`59s`, `Nm`, `Nh`, `Nd`; `fmt_dur` (inside text) `0s`..`59s`, `Nm`, `Nh`.
