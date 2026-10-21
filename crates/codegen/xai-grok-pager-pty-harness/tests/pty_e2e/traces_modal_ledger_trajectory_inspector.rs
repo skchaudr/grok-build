@@ -8,7 +8,17 @@ const CLAUDE: &[&str] = &[
     CLAUDE_USER,
     r#"{"type":"assistant","timestamp":"2026-10-01T00:00:05Z","message":{"role":"assistant","model":"claude-opus-5-5","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#,
     r#"{"type":"user","timestamp":"2026-10-01T00:00:06Z","message":{"role":"user","content":[{"type":"tool_result","is_error":true,"content":"boom"}]}}"#,
+    r#"{"type":"assistant","timestamp":"2026-10-01T00:00:07Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Agent","input":{"description":"ptychildjob","subagent_type":"Explore","prompt":"do the child job"}}]}}"#,
+    r#"{"type":"user","timestamp":"2026-10-01T00:00:08Z","message":{"role":"user","content":[{"type":"tool_result","content":"child done"}]}}"#,
 ];
+// The subagent transcript Claude writes beside the parent, plus its meta.
+const CHILD: &[&str] = &[
+    r#"{"type":"user","timestamp":"2026-10-01T00:00:07Z","message":{"role":"user","content":"do the child job and report back"}}"#,
+    r#"{"type":"assistant","timestamp":"2026-10-01T00:00:07Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"echo ptychildcmd"}}]}}"#,
+    r#"{"type":"user","timestamp":"2026-10-01T00:00:07Z","message":{"role":"user","content":[{"type":"tool_result","content":"ptychildcmd"}]}}"#,
+    r#"{"type":"assistant","timestamp":"2026-10-01T00:00:08Z","message":{"role":"assistant","content":"the child job is finished"}}"#,
+];
+const CHILD_META: &str = r#"{"agentType":"Explore","description":"ptychildjob"}"#;
 const CODEX: &[&str] = &[
     r#"{"timestamp":"2026-10-02T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"ptycodextask"}]}}"#,
 ];
@@ -48,8 +58,8 @@ fn run_hook(bin: &Path, home: &Path, transcript: &Path) {
     assert!(out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(), "hook: {out:?}");
 }
 
-/// `/traces` lists sessions from HOME, tab filters by source, Enter opens the trajectory,
-/// `e` filters errors, Enter shows the raw source line, `y` copies it byte for byte,
+/// `/traces` lists sessions from HOME (a subagent nests under its parent), tab filters by source,
+/// Enter opens the trajectory, Enter on an Agent row opens the child and Esc returns, `e` filters errors, Enter shows the raw source line, `y` copies it byte for byte,
 /// and `r` on a source with no resume path shows the notice instead of launching anything.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
@@ -57,6 +67,9 @@ async fn traces_modal_ledger_trajectory_inspector() {
     let content = ContentController::start().await.expect("start content");
     let home = content.home().to_path_buf();
     seed(home.join(".claude/projects/-w-claude/0b7e1c2a-0000-4000-8000-000000000001.jsonl"), CLAUDE);
+    let child_dir = home.join(".claude/projects/-w-claude/0b7e1c2a-0000-4000-8000-000000000001/subagents");
+    seed(child_dir.join("agent-x.jsonl"), CHILD);
+    std::fs::write(child_dir.join("agent-x.meta.json"), CHILD_META).unwrap();
     seed(home.join(".codex/sessions/2026/10/02/rollout-2026-10-02T00-00-00-0b7e1c2a-0000-4000-8000-000000000002.jsonl"), CODEX);
     seed(home.join(".pi/agent/sessions/--w-pi--/p.jsonl"), PI);
 
@@ -80,6 +93,8 @@ async fn traces_modal_ledger_trajectory_inspector() {
     h.wait_for_text("ptyclaudetask", Duration::from_secs(20)).expect("ledger lists the claude fixture");
     h.wait_for_text("ptycodextask", Duration::from_secs(5)).expect("ledger lists the codex fixture");
     h.wait_for_text("ptypitask", Duration::from_secs(5)).expect("ledger lists the pi fixture");
+    h.wait_for_text("ptychildjob", Duration::from_secs(5)).expect("subagent listed under its parent by dispatch label");
+    assert!(h.contains_text("└─"), "tree branch\n{}", h.screen_contents());
 
     // Live mode: hooks fire while the ledger is open and the rows change with no key press.
     let hook_bin = traces_binary(&binary);
@@ -89,7 +104,7 @@ async fn traces_modal_ledger_trajectory_inspector() {
         let row = screen.lines().find(|l| l.contains("ptyclaudetask")).unwrap_or_default();
         row.split_whitespace().map(str::to_string).collect()
     };
-    assert!(!row_tokens(&h).contains(&"4".to_string()), "3 events before\n{}", h.screen_contents());
+    assert!(!row_tokens(&h).contains(&"6".to_string()), "5 events before\n{}", h.screen_contents());
     {
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new().append(true).open(&claude_file).unwrap();
@@ -97,8 +112,8 @@ async fn traces_modal_ledger_trajectory_inspector() {
     }
     run_hook(&hook_bin, &home, &claude_file);
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !row_tokens(&h).contains(&"4".to_string()) {
-        assert!(Instant::now() < deadline, "event count never reached 4\n{}", h.screen_contents());
+    while !row_tokens(&h).contains(&"6".to_string()) {
+        assert!(Instant::now() < deadline, "event count never reached 6\n{}", h.screen_contents());
         h.update(Duration::from_millis(200));
     }
     h.wait_for_text("live", Duration::from_secs(5)).expect("live marker");
@@ -113,8 +128,19 @@ async fn traces_modal_ledger_trajectory_inspector() {
     assert!(h.contains_text("ptyclaudetask"), "{}", h.screen_contents());
 
     h.inject_keys(keys::ENTER).expect("open trajectory");
-    h.wait_for_text("INPUT", Duration::from_secs(5)).expect("timeline strip renders");
+    h.wait_for_text("ACTIVITY", Duration::from_secs(5)).expect("activity strip renders");
     assert!(h.contains_text("Bash"), "tool row\n{}", h.screen_contents());
+    assert!(h.contains_text("✗"), "the failed result is folded into its Bash call\n{}", h.screen_contents());
+    assert!(h.contains_text("→ ptychildjob"), "dispatch row names its child\n{}", h.screen_contents());
+
+    // Enter on the Agent row jumps into the child; Esc comes back to the same trajectory.
+    h.inject_keys(b"jj").expect("move to the Agent row");
+    h.inject_keys(keys::ENTER).expect("open the child");
+    h.wait_for_text("ptychildcmd", Duration::from_secs(5)).expect("child trajectory shows its own tool row");
+    assert!(h.contains_text("↑ "), "child header names its parent\n{}", h.screen_contents());
+    h.inject_keys(keys::ESC).expect("back to the parent");
+    h.wait_for_text_absent("ptychildcmd", Duration::from_secs(5)).expect("parent again");
+    assert!(h.contains_text("ptyclaudetask") || h.contains_text("#0"), "{}", h.screen_contents());
 
     h.inject_keys(b"e").expect("errors only");
     h.wait_for_text("errors only", Duration::from_secs(5)).expect("error filter on");
@@ -140,9 +166,9 @@ async fn traces_modal_ledger_trajectory_inspector() {
     assert_eq!(copied, CLAUDE_USER, "raw line copied byte for byte");
 
     h.inject_keys(keys::ESC).expect("back to trajectory");
-    h.wait_for_text("INPUT", Duration::from_secs(5)).expect("trajectory again");
+    h.wait_for_text("ACTIVITY", Duration::from_secs(5)).expect("trajectory again");
     h.inject_keys(keys::ESC).expect("back to ledger");
-    h.wait_for_text_absent("INPUT", Duration::from_secs(5)).expect("ledger again");
+    h.wait_for_text_absent("ACTIVITY", Duration::from_secs(5)).expect("ledger again");
 
     // Claude → Pi, then r: Pi has no resume path.
     h.inject_keys(b"\t").expect("tab to Pi");
