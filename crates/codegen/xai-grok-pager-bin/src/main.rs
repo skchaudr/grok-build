@@ -55,6 +55,7 @@ fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<P
     let (entrypoint, interactivity) = match command {
         Some(Command::Agent(_)) => return None,
         Some(Command::Dashboard) => return None,
+        Some(Command::Live) => (Entrypoint::Cli, Interactivity::Interactive),
         Some(Command::Login { .. }) => (Entrypoint::Cli, Interactivity::Interactive),
         Some(
             Command::Inspect { .. }
@@ -115,6 +116,7 @@ fn command_needs_pre_sandbox_policy_heal(command: Option<&Command>) -> bool {
             | Command::Update { .. }
             | Command::Version { .. }
             | Command::Completions { .. }
+            | Command::Live
             | Command::DiskUsage(_)
             | Command::Workspace(_),
         ) => false,
@@ -2143,6 +2145,10 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
     if let Some(Command::Wrap(ref wrap_args)) = args.command {
         return xai_grok_pager::wrap_cmd::run(wrap_args);
     }
+    // Standalone: no agent, auth, sandbox or tracing (nothing may print over the TUI).
+    if matches!(args.command, Some(Command::Live)) {
+        return xai_grok_pager::live_cmd::run();
+    }
     let is_interactive = args.command.is_none()
         && args.single.is_none()
         && args.prompt_json.is_none()
@@ -2423,6 +2429,7 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                 xai_grok_pager::completions_cmd::run(shell);
                 return Ok(());
             }
+            Command::Live => unreachable!("handled at the top of async_main"),
             Command::Dashboard => {
                 args.command = Some(Command::Dashboard);
                 flag_dashboard_at_startup_if_requested(&mut args)?;

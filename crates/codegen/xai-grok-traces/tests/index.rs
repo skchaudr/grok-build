@@ -98,13 +98,13 @@ fn each_source_discovers_its_fixture() {
     let x = by_source(&idx, "codex");
     assert_eq!(x.title, "codex task");
     assert_eq!((x.tool_count, x.error_count), (2, 1));
-    assert_eq!(x.status, Status::Completed);
+    assert_ne!(x.status, Status::Completed, "task_complete ends a turn, not the session");
 
     assert_eq!(by_source(&idx, "pi").model.as_deref(), Some("pi-model"));
     assert_eq!(by_source(&idx, "omp").title, "omp task");
 
     let d = by_source(&idx, "dsh");
-    assert_eq!((d.title.as_str(), d.tool_count, d.status), ("dsh task", 2, Status::Completed));
+    assert_eq!((d.title.as_str(), d.tool_count, d.status), ("dsh task", 2, d.status));
     assert_eq!(d.cwd.as_deref(), Some("/w/dsh"));
 
     let g = by_source(&idx, "grok");
@@ -469,11 +469,35 @@ fn old_schema_is_replaced_not_migrated() {
     idx.scan(&e.roots).unwrap();
     assert_eq!(all(&idx).len(), 6);
     let stats = idx.stats().unwrap();
-    assert_eq!(stats.schema_version.as_deref(), Some("6"));
-    assert_eq!(stats.parser_version.as_deref(), Some("5"));
+    assert_eq!(stats.schema_version.as_deref(), Some("7"));
+    assert_eq!(stats.parser_version.as_deref(), Some("6"));
     let names: Vec<String> = fs::read_dir(e.db.parent().unwrap()).unwrap().map(|d| d.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert!(names.iter().all(|n| !n.contains(".old.")), "old db removed: {names:?}");
     assert!(!names.iter().any(|n| n.contains(".corrupt.")));
+}
+
+#[test]
+fn schema_6_db_is_rebuilt_on_open() {
+    let e = env();
+    fs::create_dir_all(e.db.parent().unwrap()).unwrap();
+    {
+        let c = rusqlite::Connection::open(&e.db).unwrap();
+        c.execute_batch("CREATE TABLE trace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                         INSERT INTO trace_meta VALUES ('schema_version', '6'), ('parser_version', '5');
+                         CREATE TABLE trace_receipts (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
+                           event TEXT NOT NULL, native_session TEXT, path TEXT, session_id TEXT, tool TEXT, cwd TEXT);
+                         CREATE INDEX trace_receipts_session ON trace_receipts(session_id, id);").unwrap();
+    }
+    drop(TraceIndex::open(&e.db).unwrap());
+    let c = rusqlite::Connection::open(&e.db).unwrap();
+    let cols: Vec<String> = c.prepare("SELECT name FROM pragma_table_info('trace_receipts')").unwrap()
+        .query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+    for want in ["detail", "tool_use_id", "agent_id", "harness_pid", "harness_start"] {
+        assert!(cols.iter().any(|c| c == want), "{want} in {cols:?}");
+    }
+    let idx_cols: i64 = c.query_row("SELECT count(*) FROM pragma_index_info('trace_receipts_session')", [], |r| r.get(0)).unwrap();
+    assert_eq!(idx_cols, 3, "old index replaced");
+    assert!(!e.db.with_extension("sqlite.rebuild.lock").exists());
 }
 
 #[test]
@@ -532,12 +556,14 @@ fn event_cap_stops_a_runaway_file() {
 fn receipts_watermark_and_active_status() {
     use xai_grok_traces::hook::{extract, ingest};
     let e = env();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    fs::File::options().write(true).open(e.home.join(".codex/sessions/2026/10/01/rollout-x.jsonl")).unwrap().set_modified(old).unwrap();
     let mut idx = TraceIndex::open(&e.db).unwrap();
     idx.scan(&e.roots).unwrap();
     assert_eq!(idx.receipts_watermark().unwrap(), 0);
-    // The codex fixture ends in task_complete → completed, until a live receipt says otherwise.
+    // The codex fixture ends in task_complete (a turn end, not terminal) and is old → idle, until a live receipt says otherwise.
     let x = by_source(&idx, "codex");
-    assert_eq!(x.status, Status::Completed);
+    assert_eq!(x.status, Status::Idle);
     let path = e.home.join(".codex/sessions/2026/10/01/rollout-x.jsonl");
     let payload = |event: &str| format!(r#"{{"hook_event_name":"{event}","session_id":"n1","transcript_path":"{}","tool_name":"Bash","cwd":"/w"}}"#, path.display());
 
@@ -552,7 +578,7 @@ fn receipts_watermark_and_active_status() {
     assert!(active(&idx).iter().any(|s| s.source == "codex"));
 
     ingest(&mut idx, &e.roots, extract("codex", payload("Stop").as_bytes())).unwrap();
-    assert_eq!(by_source(&idx, "codex").status, Status::Completed, "terminal receipt falls back to file rules");
+    assert_eq!(by_source(&idx, "codex").status, Status::Idle, "terminal receipt falls back to file rules");
     assert!(active(&idx).iter().all(|s| s.source != "codex"));
 
     // A receipt for a path outside every root is still recorded, without a session.
@@ -589,6 +615,55 @@ fn hook_payload_fields_across_harnesses() {
     assert_eq!(extract("x", b"not json").event, "unparsed");
     assert_eq!(extract("x", b"{}").event, "unknown");
     assert_eq!(extract("x", br#"{"event":"e","cwd":""}"#).cwd, None);
+}
+
+#[test]
+fn hook_extract_live_fields() {
+    use xai_grok_traces::hook::extract;
+    let c = extract("claude", br#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls -la\nsecond"},"tool_use_id":"tu1","agent_id":"a1"}"#);
+    assert_eq!((c.detail.as_deref(), c.tool_use_id.as_deref(), c.agent_id.as_deref()), (Some("ls -la"), Some("tu1"), Some("a1")));
+    let n = extract("claude", br#"{"hook_event_name":"Notification","notification_type":"idle_prompt"}"#);
+    assert_eq!(n.detail.as_deref(), Some("idle_prompt"));
+    let s = extract("claude", br#"{"hook_event_name":"SessionStart","source":"compact"}"#);
+    assert_eq!(s.detail.as_deref(), Some("compact"));
+    let pi = extract("pi", br#"{"event":"session_start","source":"x","harness_pid":4242}"#);
+    assert_eq!((pi.harness_pid, pi.detail), (Some(4242), None));
+    assert_eq!(extract("pi", br#"{"event":"e","harness_pid":0}"#).harness_pid, None);
+    assert_eq!(extract("pi", br#"{"event":"e","harness_pid":-3}"#).harness_pid, None);
+
+    // Cursor: conversation_id wins, before* events name their own tool.
+    let sh = extract("cursor", br#"{"hook_event_name":"beforeShellExecution","conversation_id":"c1","session_id":"other","command":"git status\nmore","tool_use_id":"u1"}"#);
+    assert_eq!((sh.native_session.as_deref(), sh.tool.as_deref(), sh.detail.as_deref()), (Some("c1"), Some("Shell"), Some("git status")));
+    let after = extract("cursor", br#"{"hook_event_name":"afterShellExecution","conversation_id":"c1","command":"git status","output":"x"}"#);
+    assert_eq!((after.tool.as_deref(), after.detail.as_deref()), (Some("Shell"), Some("git status")));
+    let mcp = extract("cursor", br#"{"hook_event_name":"beforeMCPExecution","tool_name":"search","server":"docs"}"#);
+    assert_eq!((mcp.tool.as_deref(), mcp.detail.as_deref()), (Some("MCP"), Some("docs.search")));
+    let read = extract("cursor", br#"{"hook_event_name":"beforeReadFile","file_path":"/a/b/c.rs"}"#);
+    assert_eq!((read.tool.as_deref(), read.detail.as_deref()), (Some("Read"), Some("b/c.rs")));
+    let pre = extract("cursor", br#"{"hook_event_name":"preToolUse","tool_name":"Read","tool_input":{"file_path":"/a/b/c.rs"}}"#);
+    assert_eq!((pre.tool.as_deref(), pre.detail.as_deref()), (Some("Read"), Some("b/c.rs")));
+    let post = extract("cursor", br#"{"hook_event_name":"postToolUseFailure","tool_name":"Shell","tool_input":{"command":"x"}}"#);
+    assert_eq!(post.tool.as_deref(), Some("Shell"));
+}
+
+#[test]
+fn receipt_pid_refreshes_the_session_row() {
+    use xai_grok_traces::hook::{extract, ingest};
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let path = e.home.join(".codex/sessions/2026/10/01/rollout-x.jsonl");
+    let me = std::process::id();
+    let payload = |pid: &str| format!(r#"{{"hook_event_name":"PostToolUse","session_id":"n1","transcript_path":"{}"{pid}}}"#, path.display());
+    ingest(&mut idx, &e.roots, extract("codex", payload(&format!(r#","harness_pid":{me}"#)).as_bytes())).unwrap();
+    let c = rusqlite::Connection::open(&e.db).unwrap();
+    let pid = || c.query_row("SELECT harness_pid FROM trace_sessions WHERE source_id = 'codex'", [], |r| r.get::<_, Option<i64>>(0)).unwrap();
+    assert_eq!(pid(), Some(i64::from(me)));
+    // A receipt without a pid whose walk finds nothing never wipes it.
+    let mut r = extract("codex", payload("").as_bytes());
+    r.harness_pid = None;
+    idx.record_receipt(&xai_grok_traces::Receipt { session_id: Some(xai_grok_traces::session_id("codex", &path.to_string_lossy())), ..r }).unwrap();
+    assert_eq!(pid(), Some(i64::from(me)));
 }
 
 #[test]
@@ -653,4 +728,82 @@ fn compact_rows_round_trip() {
     assert_eq!((ev(7).input_tokens, ev(7).output_tokens, ev(7).model.as_deref()), (Some(7), Some(2), Some("m")));
     assert_eq!(ev(1).input_tokens, None);
     assert_eq!((ev(1).kind.as_str(), ev(1).role.as_deref(), ev(1).preview.as_str()), ("message", Some("user"), "u1"));
+}
+
+#[test]
+fn pathless_claude_and_pi_receipts_match_the_session_uuid() {
+    use xai_grok_traces::hook::{extract, ingest};
+    let e = env();
+    write(&e.home.join(".claude/projects/-w-claude/3a680ac6-2551-4c67-88d3-a18d8b3bbe73.jsonl"), CLAUDE);
+    write(&e.home.join(".pi/agent/sessions/--w-pi--/2026-10-01T00-00-00-000Z_0199aaaa-bbbb.jsonl"), PI);
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let key = |idx: &TraceIndex, id: i64| -> Option<String> {
+        rusqlite::Connection::open(idx.db_path()).unwrap().query_row("SELECT session_id FROM trace_receipts WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+    };
+    let claude = ingest(&mut idx, &e.roots, extract("claude", br#"{"hook_event_name":"PermissionRequest","session_id":"3a680ac6-2551-4c67-88d3-a18d8b3bbe73","tool_name":"Bash"}"#)).unwrap();
+    let want = idx.list_sessions(&SessionFilter { source: Some("claude".into()), ..Default::default() }).unwrap().into_iter().find(|s| s.file_path.to_string_lossy().contains("3a680ac6")).unwrap().id;
+    assert_eq!(key(&idx, claude), Some(want));
+    let pi = ingest(&mut idx, &e.roots, extract("pi", br#"{"event":"tool_execution_start","session_id":"0199aaaa-bbbb"}"#)).unwrap();
+    let pi_id = idx.list_sessions(&SessionFilter { source: Some("pi".into()), ..Default::default() }).unwrap().into_iter().find(|s| s.file_path.to_string_lossy().contains("0199aaaa")).unwrap().id;
+    assert_eq!(key(&idx, pi), Some(pi_id));
+    let miss = ingest(&mut idx, &e.roots, extract("claude", br#"{"hook_event_name":"PermissionRequest","session_id":"3a680ac6"}"#)).unwrap();
+    assert_eq!(key(&idx, miss), None, "a partial uuid is not a match");
+}
+
+#[test]
+fn orphan_receipts_are_rekeyed_when_the_session_row_is_written() {
+    use xai_grok_traces::hook::{extract, ingest};
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    // Before any session exists: stored unkeyed.
+    let c = ingest(&mut idx, &e.roots, extract("claude", br#"{"hook_event_name":"PermissionRequest","session_id":"9f0e1d2c-0000-4000-8000-aaaaaaaaaaaa"}"#)).unwrap();
+    let p = ingest(&mut idx, &e.roots, extract("pi", br#"{"event":"agent_start","session_id":"0199cccc-dddd"}"#)).unwrap();
+    let other = ingest(&mut idx, &e.roots, extract("claude", br#"{"hook_event_name":"PermissionRequest","session_id":"someone-else"}"#)).unwrap();
+    write(&e.home.join(".claude/projects/-w-claude/9f0e1d2c-0000-4000-8000-aaaaaaaaaaaa.jsonl"), CLAUDE);
+    write(&e.home.join(".pi/agent/sessions/--w-pi--/2026-10-01T00-00-00-000Z_0199cccc-dddd.jsonl"), PI);
+    idx.scan(&e.roots).unwrap();
+    let key = |id: i64| -> Option<String> {
+        rusqlite::Connection::open(&e.db).unwrap().query_row("SELECT session_id FROM trace_receipts WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+    };
+    let sid = |src: &str, needle: &str| idx.list_sessions(&SessionFilter { source: Some(src.into()), ..Default::default() }).unwrap().into_iter().find(|s| s.file_path.to_string_lossy().contains(needle)).unwrap().id;
+    assert_eq!(key(c), Some(sid("claude", "9f0e1d2c")));
+    assert_eq!(key(p), Some(sid("pi", "0199cccc")));
+    assert_eq!(key(other), None);
+}
+
+#[test]
+fn a_receipt_without_a_start_never_overwrites_the_stored_pair() {
+    use xai_grok_traces::hook::{extract, ingest};
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let path = e.home.join(".codex/sessions/2026/10/01/rollout-x.jsonl");
+    let me = std::process::id();
+    ingest(&mut idx, &e.roots, extract("codex", format!(r#"{{"hook_event_name":"PostToolUse","transcript_path":"{}","harness_pid":{me}}}"#, path.display()).as_bytes())).unwrap();
+    let sid = xai_grok_traces::session_id("codex", &path.to_string_lossy());
+    let pair = || rusqlite::Connection::open(&e.db).unwrap().query_row("SELECT harness_pid, harness_start FROM trace_sessions WHERE id = ?1", [&sid], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?))).unwrap();
+    let before = pair();
+    if cfg!(target_os = "macos") {
+        assert!(before.0.is_some() && before.1.is_some());
+    }
+    idx.record_receipt(&xai_grok_traces::Receipt { source: "codex".into(), event: "x".into(), session_id: Some(sid.clone()), harness_pid: Some(1234), harness_start: None, ..Default::default() }).unwrap();
+    assert_eq!(pair(), before);
+}
+
+#[test]
+fn a_payload_harness_pid_still_builds_the_chain() {
+    use xai_grok_traces::hook::{extract, ingest};
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let me = std::process::id();
+    ingest(&mut idx, &e.roots, extract("pi", format!(r#"{{"event":"session_start","harness_pid":{me}}}"#).as_bytes())).unwrap();
+    let chain: Option<String> = rusqlite::Connection::open(&e.db).unwrap().query_row("SELECT harness_chain FROM trace_receipts ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+    if cfg!(target_os = "macos") {
+        let chain = chain.expect("chain");
+        assert!(chain.split('>').count() >= 2 && chain.split('>').count() <= 12, "{chain}");
+    } else {
+        assert_eq!(chain, None);
+    }
 }

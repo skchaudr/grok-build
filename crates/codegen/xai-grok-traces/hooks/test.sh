@@ -59,7 +59,7 @@ expect 1 "$(cnt "$C" moshi-hook)" "codex: moshi untouched"
 expect 1 "$(cnt "$S" ORCA_TOKEN)" "claude: orca untouched"
 expect 1 "$(cnt "$C" orca-codex-hook)" "codex: orca untouched"
 expect 1 "$(cnt "$S" keep-me.sh)" "claude: sibling hook in same group kept"
-expect 8 "$(cnt "$S" 'grok-traces" hook claude')" "claude: one entry per event after two applies"
+expect 15 "$(cnt "$S" 'grok-traces" hook claude')" "claude: one entry per event after two applies"
 expect 7 "$(cnt "$C" 'grok-traces" hook codex')" "codex: one entry per event after two applies"
 expect "" "$(jq -r '.hooks | to_entries[] | select(.key == "UserPromptSubmit" or .key == "Stop") | .value[] | select(.matcher) | .matcher' "$S")" "claude: no matcher on UserPromptSubmit/Stop"
 expect x "$(jq -r .model "$S")" "claude: unrelated keys preserved"
@@ -109,9 +109,10 @@ cmp -s "$H" "$T/H.orig" && cmp -s "$HOME/.dsh/profiles/web/cordis.patch.yml" "$T
 echo "$out" | G -q 'would run: bb plugin install' && ok "bb dry-run prints install command" || bad "bb dry-run output"
 "$HERE/install.sh" --apply --dsh-profile web --dsh-profile tui >/dev/null
 "$HERE/install.sh" --apply --dsh-profile web --dsh-profile tui >/dev/null   # idempotent
-expect 4 "$(cnt "$H" 'grok-traces" hook cursor')" "cursor: 4 non-gating events wired, once after two applies"
-expect "afterAgentResponse,postToolUse,postToolUseFailure,stop" "$(jq -r '[.hooks|to_entries[]|select(.value|any(.command|contains("grok-traces")))|.key]|sort|join(",")' "$H")" "cursor: event set"
-expect 0 "$(jq '[.hooks.beforeSubmitPrompt[]|select(.command|contains("grok-traces"))]|length' "$H")" "cursor: gating beforeSubmitPrompt not wired"
+expect 18 "$(cnt "$H" 'grok-traces" hook cursor')" "cursor: 18 events wired, once after two applies"
+expect "afterAgentResponse,afterAgentThought,afterFileEdit,afterMCPExecution,afterShellExecution,beforeMCPExecution,beforeReadFile,beforeShellExecution,beforeSubmitPrompt,postToolUse,postToolUseFailure,preCompact,preToolUse,sessionEnd,sessionStart,stop,subagentStart,subagentStop" "$(jq -r '[.hooks|to_entries[]|select(.value|any(.command|contains("grok-traces")))|.key]|sort|join(",")' "$H")" "cursor: event set"
+expect 1 "$(jq '[.hooks.beforeSubmitPrompt[]|select(.command|contains("grok-traces"))]|length' "$H")" "cursor: gating beforeSubmitPrompt wired"
+expect 1 "$(jq '[.hooks.beforeSubmitPrompt[]|select(.command=="orca-cursor")]|length' "$H")" "cursor: orca beforeSubmitPrompt hook survives"
 expect 1 "$(cnt "$H" moshi-hook)" "cursor: moshi untouched"
 expect 2 "$(cnt "$H" orca-cursor)" "cursor: orca untouched"
 expect 1 "$(jq .version "$H")" "cursor: version preserved"
@@ -150,7 +151,11 @@ if (kind === 'bb') {
 } else {
   mod({ on: (e, f) => { h[e] = f } }); const c = { cwd: '/w', sessionManager: { getSessionId: () => 'S', getSessionFile: () => '/f' } }
   h.session_start({}, c); await wait(600)
-  for (let i = 0; i < 5; i++) { h.tool_result({ toolName: 'bash' }, c); await wait(20) }
+  if (kind === 'pi') {
+    h.agent_start({}, c); h.tool_execution_start({ toolName: 'bash', toolCallId: 'tc1' }, c)
+    h.tool_execution_end({ toolName: 'bash', toolCallId: 'tc1' }, c); h.agent_end({}, c); h.session_shutdown({}, c)
+    h.turn_end?.({}, c); h.tool_result?.({ toolName: 'bash' }, c)   // not subscribed: must stay silent
+  } else for (let i = 0; i < 5; i++) { h.tool_result({ toolName: 'bash' }, c); await wait(20) }
 }
 await wait(1500)
 JS
@@ -159,7 +164,12 @@ JS
     : > "$T/log"; node --experimental-strip-types --no-warnings "$T/run.mjs" "$k" "$f"
     grep -q "^hook $k " "$T/log" && ok "$k: spawns 'hook $k'" || bad "$k: no spawn"
     n="$(wc -l < "$T/log" | tr -d ' ')"
-    case $k in dsh|bb) want=2 ;; *) want=3 ;; esac   # leading + one trailing (pi/omp add session_start)
+    if [ "$k" = pi ]; then
+      expect 6 "$n" "pi: one spawn per event (session_start, agent_start, tool start/end, agent_end, session_shutdown)"
+      G -q '"event":"tool_execution_start","tool":"bash","tool_use_id":"tc1".*"harness_pid":[0-9]' "$T/log" && ok "pi: payload carries tool_use_id + harness_pid" || bad "pi payload"
+      continue
+    fi
+    case $k in dsh|bb) want=2 ;; *) want=3 ;; esac   # leading + one trailing (omp adds session_start)
     expect $want "$n" "$k: burst debounced to leading + trailing"
   done
   grep -q 'session-abc/session.jsonl.zstd' "$T/log" && ok "dsh: session file resolved" || bad "dsh: session file not resolved"

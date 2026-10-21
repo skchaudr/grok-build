@@ -15167,6 +15167,8 @@ name = "xai-grok-traces"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dunce",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

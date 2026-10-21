@@ -103,3 +103,184 @@ fn old_remote_degrades_and_filters_locally() {
     let note = f.note.unwrap();
     assert!(note.contains("older") && note.contains("version unknown"), "{note}");
 }
+
+// ---- live (tests 40-45, 53 of SPEC-live.md) ----
+
+use xai_grok_traces::live::{
+    LIVE_SCHEMA, LiveEnvelope, LiveRow, LiveState, age_ms, fmt_age, order, render,
+};
+
+fn envelope(rows: &[LiveRow]) -> String {
+    serde_json::to_string(&LiveEnvelope {
+        live_schema: LIVE_SCHEMA,
+        rows: rows.to_vec(),
+    })
+    .unwrap()
+}
+
+fn lrow(id: &str, state: LiveState, age: i64) -> LiveRow {
+    LiveRow {
+        session_id: id.into(),
+        state,
+        age_ms: age,
+        text: "t".into(),
+        ..Default::default()
+    }
+}
+
+fn serve(dir: &tempfile::TempDir, json: &str) -> Ssh {
+    fake(dir, &format!("echo '{json}'"))
+}
+
+#[test]
+fn live_40_tag_prefix_age_and_order() {
+    let d = tempfile::tempdir().unwrap();
+    let mut w = lrow("w1", LiveState::Waiting, 5000);
+    w.native_id = Some("nat".into());
+    let f = fetch_live_with(&serve(&d, &envelope(&[w])), "t40@sab-air").unwrap();
+    assert!(f.note.is_none());
+    let r = &f.rows[0];
+    assert_eq!(
+        (
+            r.session_id.as_str(),
+            r.host.as_deref(),
+            r.parent_id.as_deref(),
+            r.native_id.as_deref()
+        ),
+        ("sab-air:w1", Some("sab-air"), None, Some("nat"))
+    );
+    assert_eq!(fmt_age(age_ms(r, 3000)), "8s");
+    assert_eq!(render(r, 3000).glyph, "⚠");
+    let mut all = vec![lrow("local", LiveState::Working, 1000), r.clone()];
+    order(&mut all);
+    assert_eq!(
+        all.iter()
+            .map(|r| r.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["sab-air:w1", "local"]
+    );
+}
+
+#[test]
+fn live_41_negative_age_clamps() {
+    let d = tempfile::tempdir().unwrap();
+    let f = fetch_live_with(
+        &serve(&d, &envelope(&[lrow("n", LiveState::Working, -400)])),
+        "t41@sab-air",
+    )
+    .unwrap();
+    assert_eq!(age_ms(&f.rows[0], 0), 0);
+    assert_eq!(fmt_age(age_ms(&f.rows[0], 0)), "0s");
+}
+
+#[test]
+fn live_42_gate_exit2_and_schema_mismatch() {
+    let d = tempfile::tempdir().unwrap();
+    let note = |n: &str| format!("sab-air: update grok-traces (live_schema {n})");
+    for (body, n) in [
+        ("exit 2", "none"),
+        ("echo ''", "none"),
+        ("echo not json", "none"),
+        (r#"echo '{"rows":[]}'"#, "none"),
+        (r#"echo '{"live_schema":"1","rows":[]}'"#, "none"),
+        (r#"echo '{"live_schema":0,"rows":[]}'"#, "0"),
+        (r#"echo '{"live_schema":99,"rows":[{"bogus":1}]}'"#, "99"),
+    ] {
+        let f = fetch_live_with(&fake(&d, body), "t42@sab-air").unwrap();
+        assert!(f.rows.is_empty(), "{body}");
+        assert_eq!(f.note, Some(note(n)), "{body}");
+    }
+    assert!(cached_live("t42@sab-air").is_none(), "a gate never caches");
+    assert!(matches!(
+        fetch_live_with(&fake(&d, "exit 127"), "t42@sab-air").unwrap_err(),
+        Error::Remote { .. }
+    ));
+    assert!(matches!(
+        fetch_live_with(&fake(&d, "exit 1"), "t42@sab-air").unwrap_err(),
+        Error::Remote { .. }
+    ));
+    let bad = r#"echo '{"live_schema":1,"rows":[{"state":"nope"}]}'"#;
+    assert!(matches!(
+        fetch_live_with(&fake(&d, bad), "t42@sab-air").unwrap_err(),
+        Error::Parse { .. }
+    ));
+}
+
+#[test]
+fn live_43_unreachable_falls_back_to_cache() {
+    let d = tempfile::tempdir().unwrap();
+    let mut w = lrow("a", LiveState::Working, 1000);
+    w.quiet_ms = 1000;
+    fetch_live_with(&serve(&d, &envelope(&[w])), "t43@sab-air").unwrap();
+    let down = fake(&d, "echo 'ssh: connect refused' >&2; exit 255");
+    assert!(matches!(
+        fetch_live_with(&down, "t43@sab-air").unwrap_err(),
+        Error::Unreachable { .. }
+    ));
+    let (age, rows) = cached_live("t43@sab-air").unwrap();
+    assert!(age < Duration::from_secs(5));
+    assert_eq!(rows[0].session_id, "sab-air:a");
+    // The pager passes the cache age as `extra`; the stale glyph in the header is its job (step 2).
+    assert_eq!(fmt_age(age_ms(&rows[0], 12_000)), "13s");
+    assert!(render(&rows[0], 12_000).text.contains('t'));
+}
+
+#[test]
+fn live_44_child_nests_under_remote_parent() {
+    let d = tempfile::tempdir().unwrap();
+    let parent = lrow("p", LiveState::Working, 9000);
+    let mut kid = lrow("k", LiveState::Waiting, 100);
+    kid.parent_id = Some("p".into());
+    let f = fetch_live_with(&serve(&d, &envelope(&[kid, parent])), "t44@sab-air").unwrap();
+    assert_eq!(f.rows[0].parent_id.as_deref(), Some("sab-air:p"));
+    let mut all = f.rows;
+    all.push(lrow("local", LiveState::Prompt, 50));
+    order(&mut all);
+    let ids: Vec<_> = all.iter().map(|r| r.session_id.as_str()).collect();
+    assert_eq!(ids, ["local", "sab-air:p", "sab-air:k"]);
+    // An orphan (parent in no fetch) is a root.
+    let mut o = lrow("sab-air:o", LiveState::Waiting, 1);
+    o.parent_id = Some("sab-air:gone".into());
+    let mut all = vec![lrow("x", LiveState::Working, 5), o];
+    order(&mut all);
+    assert_eq!(all[0].session_id, "sab-air:o");
+}
+
+#[test]
+fn live_45_serde_roundtrip_and_defaults() {
+    let mut r = lrow("a", LiveState::Compacting, 7);
+    r.parent_id = Some("p".into());
+    r.since_ms = Some(3);
+    r.bg = 2;
+    r.bg_quiet = true;
+    r.failed = true;
+    r.context_window = Some(200_000);
+    r.host = Some("h".into());
+    let env = LiveEnvelope {
+        live_schema: LIVE_SCHEMA,
+        rows: vec![r.clone(), lrow("b", LiveState::Tool, 1)],
+    };
+    let json = serde_json::to_string(&env).unwrap();
+    assert!(json.contains(r#""state":"compacting""#));
+    assert_eq!(serde_json::from_str::<LiveEnvelope>(&json).unwrap(), env);
+    let mut v: serde_json::Value = serde_json::to_value(&r).unwrap();
+    v.as_object_mut().unwrap().remove("context_window");
+    v.as_object_mut().unwrap().remove("bg");
+    let back: LiveRow = serde_json::from_value(v).unwrap();
+    assert_eq!((back.context_window, back.bg), (None, 0));
+    assert_eq!(back.session_id, "a");
+}
+
+#[test]
+fn live_53_cached_tool_row_goes_stale() {
+    let d = tempfile::tempdir().unwrap();
+    let mut t = lrow("t", LiveState::Tool, 0);
+    t.text = "Bash".into();
+    t.since_ms = Some(25_000);
+    fetch_live_with(&serve(&d, &envelope(&[t])), "t53@sab-air").unwrap();
+    let down = fake(&d, "exit 255");
+    assert!(fetch_live_with(&down, "t53@sab-air").is_err());
+    let (_, rows) = cached_live("t53@sab-air").unwrap();
+    assert_eq!(render(&rows[0], 0).glyph, "▶");
+    assert_eq!(render(&rows[0], 6000).glyph, "⏳");
+}

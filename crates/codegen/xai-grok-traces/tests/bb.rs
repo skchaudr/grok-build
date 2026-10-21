@@ -92,7 +92,7 @@ fn threads_are_indexed_by_pointer_and_empty_threads_skipped() {
     assert_eq!(a.error_count, 2, "failed tool call + provider/error");
     assert_eq!((a.input_tokens, a.output_tokens), (Some(500), Some(50)));
     assert_eq!((a.model.as_deref(), a.cwd.as_deref()), (Some("gpt-5"), Some("/w/bb")));
-    assert_eq!(a.status, Status::Completed, "turn/completed is terminal; item/completed is not");
+    assert_eq!(a.status, Status::Idle, "turn/completed is no longer terminal (only session/run/agent end are)");
     assert!(a.file_path.to_string_lossy().ends_with("bb.db#thr_a"));
 
     assert_eq!(thread(&idx, "second thread").status, Status::Idle, "no terminal event, updated_at long ago");

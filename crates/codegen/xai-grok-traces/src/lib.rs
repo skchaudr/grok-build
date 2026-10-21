@@ -11,6 +11,7 @@ pub mod hook;
 mod index;
 mod lines;
 mod links;
+pub mod live;
 pub mod normalize;
 mod query;
 pub mod remote;

@@ -1,4 +1,4 @@
-//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | events <id> --json [--noise] [--limit N] | raw <id> <line> | version | doctor [--reset]`.
+//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] | raw <id> <line> | version | doctor [--reset]`.
 //!
 //! `hook` runs once per harness event: it must be fast, silent and always
 //! exit 0 so it can never block an agent.
@@ -6,8 +6,11 @@
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use xai_grok_traces::live::{self, LIVE_SCHEMA, LiveEnvelope, fold_all};
 use xai_grok_traces::hook::{MAX_STDIN_BYTES, extract, ingest};
 use xai_grok_traces::remote::{event_to_json, session_to_json};
 use xai_grok_traces::{EventFilter, SessionFilter, TraceIndex, default_db_path, user_roots};
@@ -21,6 +24,7 @@ fn main() -> ExitCode {
         Some("hook") => hook(args.get(1).map_or("unknown", String::as_str)),
         Some("scan") => finish(scan()),
         Some("list") => finish(list(&args[1..])),
+        Some("live") => live_cmd(&args[1..]),
         Some("doctor") => finish(doctor(&args[1..])),
         Some("events") => finish(events(&args[1..])),
         Some("raw") => raw(&args[1..]),
@@ -46,13 +50,35 @@ fn finish(r: Result<bool, Box<dyn std::error::Error>>) -> ExitCode {
     }
 }
 
+/// Event name for the cursor reply, stored before the first stdout write so the panic hook can use it.
+static EVENT: OnceLock<String> = OnceLock::new();
+/// Set once a reply is on stdout: exactly one reply per run.
+static REPLIED: AtomicBool = AtomicBool::new(false);
+
+/// Cursor's per-event stdout reply. Gating events need a neutral "go ahead"; everything else takes `{}`.
+fn cursor_reply(event: &str) -> &'static str {
+    match event {
+        "beforeSubmitPrompt" => "{\"continue\":true}\n",
+        "preToolUse" | "beforeShellExecution" | "beforeMCPExecution" | "beforeReadFile" => "{\"permission\":\"allow\"}\n",
+        _ => "{}\n",
+    }
+}
+
+fn reply_once(event: &str) {
+    if !REPLIED.swap(true, Ordering::SeqCst) {
+        let mut out = io::stdout().lock();
+        let _ = out.write_all(cursor_reply(event).as_bytes());
+        let _ = out.flush();
+    }
+}
+
 fn hook(source: &str) -> ExitCode {
     // A panic must not turn into a failing hook. Release builds use panic = "abort", so
-    // catch_unwind cannot see it: the hook itself exits 0 (after the cursor reply).
+    // catch_unwind cannot see it: the hook itself exits 0 (after the cursor reply, if none was sent yet).
     let cursor = source == "cursor";
     std::panic::set_hook(Box::new(move |_| {
         if cursor {
-            let _ = io::stdout().write_all(b"{}\n");
+            reply_once(EVENT.get().map_or("", String::as_str));
         }
         std::process::exit(0);
     }));
@@ -63,6 +89,11 @@ fn hook(source: &str) -> ExitCode {
         let _ = io::copy(&mut stdin, &mut io::sink());
         let receipt = extract(source, &buf);
         drop(buf);
+        if source == "cursor" {
+            // Reply before touching the index: an index failure must never change or block it.
+            let event = if receipt.event == "unparsed" { String::new() } else { receipt.event.clone() };
+            reply_once(EVENT.get_or_init(|| event));
+        }
         let db = default_db_path();
         match TraceIndex::open_with(&db, Some(HOOK_BUSY)) {
             Ok(mut idx) => {
@@ -83,7 +114,7 @@ fn hook(source: &str) -> ExitCode {
         let _ = writeln!(io::stderr(), "grok-traces hook {source}: internal error");
     }
     if source == "cursor" {
-        let _ = io::stdout().write_all(b"{}\n");
+        reply_once(EVENT.get().map_or("", String::as_str));
     }
     ExitCode::SUCCESS
 }
@@ -148,6 +179,30 @@ fn list(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
         writeln!(out, "{}", session_to_json(&s))?;
     }
     Ok(true)
+}
+
+/// One line: `{"live_schema":N,"rows":[...]}`. Exit 2 without `--json`, 1 on error (nothing on stdout).
+fn live_cmd(args: &[String]) -> ExitCode {
+    if args != ["--json"] {
+        eprintln!("usage: grok-traces live --json");
+        return ExitCode::from(2);
+    }
+    let run = || -> Result<String, Box<dyn std::error::Error>> {
+        let idx = TraceIndex::open(&default_db_path())?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let rows = fold_all(&idx, now, |pid, start| start.map_or_else(|| live::alive_pid(pid), |s| live::alive(pid, s)))?;
+        Ok(serde_json::to_string(&LiveEnvelope { live_schema: LIVE_SCHEMA, rows })?)
+    };
+    match run() {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("grok-traces: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn events(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
@@ -225,4 +280,20 @@ fn doctor(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
         println!("receipts {source:8} count={n} last={}", when(*last));
     }
     Ok(health.is_none())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cursor_reply;
+
+    #[test]
+    fn cursor_reply_per_event() {
+        assert_eq!(cursor_reply("beforeSubmitPrompt"), "{\"continue\":true}\n");
+        for e in ["preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile"] {
+            assert_eq!(cursor_reply(e), "{\"permission\":\"allow\"}\n", "{e}");
+        }
+        for e in ["stop", "postToolUse", "afterAgentResponse", "sessionStart", "unparsed", "unknown", ""] {
+            assert_eq!(cursor_reply(e), "{}\n", "{e}");
+        }
+    }
 }

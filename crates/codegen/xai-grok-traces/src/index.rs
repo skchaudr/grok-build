@@ -21,9 +21,9 @@ mod bb_index;
 
 use crate::bb::{Bb, BbThread, thread_key};
 
-pub const PARSER_VERSION: i64 = 5;
+pub const PARSER_VERSION: i64 = 6;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 /// Size the index may use (db + `-wal`). Passing it is normal: the oldest sessions are evicted
 /// down to `EVICT_TO_PERCENT` of it. It is a cache of pointers, so this is not an alert.
 pub const SIZE_BUDGET: u64 = 256 * 1024 * 1024;
@@ -92,7 +92,11 @@ CREATE TABLE IF NOT EXISTS trace_sessions (sk INTEGER PRIMARY KEY, id TEXT NOT N
   -- `parent_native` the same for its dispatcher. Both resolve within one source at query time, so scan order is free.
   native_id TEXT, parent_native TEXT, label TEXT, agent_type TEXT, done INTEGER NOT NULL DEFAULT 0,
   -- What the session is doing: last meaningful event (`Tool: arg` or assistant text), its time, and whether it ended in failure.
-  signal_count INTEGER NOT NULL DEFAULT 0, now_text TEXT, last_event_at INTEGER, failed INTEGER NOT NULL DEFAULT 0);
+  signal_count INTEGER NOT NULL DEFAULT 0, now_text TEXT, last_event_at INTEGER, failed INTEGER NOT NULL DEFAULT 0,
+  -- Live: the harness process of the newest receipt (start in Unix seconds), and the last context size seen.
+  harness_pid INTEGER, harness_start INTEGER, context_tokens INTEGER, context_window INTEGER,
+  -- Where the harness was launched from (`bb`, `zed`, `herdr`, `cursor`), from the newest receipt's `harness_chain`.
+  via TEXT);
 -- Event types, titles and models are few and repeat on every row, so rows store ids into this table.
 CREATE TABLE IF NOT EXISTS trace_names (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
 -- kind/role are `Kind::code`/`Role::code`. No cwd here: it is session-level. `preview` is '' when it equals the
@@ -103,11 +107,16 @@ CREATE TABLE IF NOT EXISTS trace_events (sk INTEGER NOT NULL, line_number INTEGE
   PRIMARY KEY (sk, line_number)) WITHOUT ROWID;
 -- Most events carry none of these; only the ones that do get a row.
 CREATE TABLE IF NOT EXISTS trace_event_usage (sk INTEGER NOT NULL, line_number INTEGER NOT NULL, duration_ms INTEGER,
-  input_tokens INTEGER, output_tokens INTEGER, turn INTEGER, step INTEGER, PRIMARY KEY (sk, line_number)) WITHOUT ROWID;
+  input_tokens INTEGER, output_tokens INTEGER, turn INTEGER, step INTEGER, context_tokens INTEGER, context_window INTEGER,
+  PRIMARY KEY (sk, line_number)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS trace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS trace_receipts (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
-  event TEXT NOT NULL, native_session TEXT, path TEXT, session_id TEXT, tool TEXT, cwd TEXT);
-CREATE INDEX IF NOT EXISTS trace_receipts_session ON trace_receipts(session_id, id);
+  event TEXT NOT NULL, native_session TEXT, path TEXT, session_id TEXT, tool TEXT, cwd TEXT,
+  detail TEXT, tool_use_id TEXT, agent_id TEXT, harness_pid INTEGER, harness_start INTEGER, harness_chain TEXT);
+CREATE INDEX IF NOT EXISTS trace_receipts_session ON trace_receipts(session_id, at_ms, id);
+CREATE INDEX IF NOT EXISTS trace_receipts_at ON trace_receipts(at_ms, id);
+-- Receipts not yet keyed to a session row: the native-id branch of every receipt match, and the receipt-only grouping.
+CREATE INDEX IF NOT EXISTS trace_receipts_native ON trace_receipts(source, native_session, at_ms, id) WHERE session_id IS NULL;
 CREATE INDEX IF NOT EXISTS trace_sessions_updated ON trace_sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS trace_sessions_source ON trace_sessions(source_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS trace_sessions_native ON trace_sessions(source_id, native_id);
@@ -308,6 +317,9 @@ struct Aggregate {
     last_signal_ts: Option<i64>,
     /// The last non-noise event is an error: nothing happened after it.
     failed: bool,
+    /// Latest per-message context size and window seen.
+    context_tokens: Option<i64>,
+    context_window: Option<i64>,
 }
 
 /// `Tool: arg`, clipped to the preview length.
@@ -379,6 +391,8 @@ impl Aggregate {
                 *total = Some(if e.usage_is_total { total.unwrap_or(0).max(v) } else { total.unwrap_or(0) + v });
             }
         };
+        self.context_tokens = e.context_tokens.or(self.context_tokens);
+        self.context_window = e.context_window.or(self.context_window);
         fold(&mut self.input, e.input_tokens);
         fold(&mut self.output, e.output_tokens);
     }
@@ -387,7 +401,7 @@ impl Aggregate {
 const INSERT_EVENT: &str = "INSERT OR REPLACE INTO trace_events (sk, line_number, byte_offset, type_id, kind, role, title_id,
   preview, timestamp, depth, model_id, is_error, noise, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 const INSERT_USAGE: &str = "INSERT OR REPLACE INTO trace_event_usage (sk, line_number, duration_ms, input_tokens, output_tokens,
-  turn, step) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+  turn, step, context_tokens, context_window) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
 /// Every Nth line keeps its byte offset.
 pub(crate) const CHECKPOINT_EVERY: i64 = 16;
 
@@ -448,8 +462,8 @@ fn insert_event(
         e.detail,
     ])?;
     let extra = [e.duration_ms, e.input_tokens, e.output_tokens, e.turn, e.step].map(round);
-    if extra.iter().any(Option::is_some) {
-        usage.execute(params![sk, line, extra[0], extra[1], extra[2], extra[3], extra[4]])?;
+    if extra.iter().any(Option::is_some) || e.context_tokens.is_some() || e.context_window.is_some() {
+        usage.execute(params![sk, line, extra[0], extra[1], extra[2], extra[3], extra[4], e.context_tokens, e.context_window])?;
     }
     Ok(())
 }
@@ -467,7 +481,7 @@ fn is_terminal(event_type: &str) -> bool {
         .chars()
         .filter(|c| !matches!(c, '/' | '_' | ' ' | '-'))
         .collect();
-    ["complete", "turnend", "sessionend", "runend"].iter().any(|w| squashed.contains(w))
+    ["sessionend", "sessionshutdown", "runend", "agentend"].iter().any(|w| squashed.ends_with(w))
 }
 
 /// What `TraceIndex::peek` found.
@@ -1127,7 +1141,7 @@ impl TraceIndex {
     fn load_aggregate(&self, sid: &str, basename: &str) -> Result<Aggregate> {
         let agg = self.conn.query_row(
             "SELECT title, model, cwd, started_at, updated_at, event_count, user_count, assistant_count, tool_count,
-             error_count, input_tokens, output_tokens, signal_count, now_text, last_event_at, failed FROM trace_sessions WHERE id = ?1",
+             error_count, input_tokens, output_tokens, signal_count, now_text, last_event_at, failed, context_tokens, context_window FROM trace_sessions WHERE id = ?1",
             [sid],
             |r| {
                 let title: String = r.get(0)?;
@@ -1149,6 +1163,8 @@ impl TraceIndex {
                     now: r.get(13)?,
                     last_signal_ts: r.get(14)?,
                     failed: r.get(15)?,
+                    context_tokens: r.get(16)?,
+                    context_window: r.get(17)?,
                     ..Default::default()
                 })
             },
@@ -1182,7 +1198,7 @@ impl TraceIndex {
         tx.execute(
             "UPDATE trace_sessions SET title=?2, model=?3, cwd=?4, started_at=?5, updated_at=?6, event_count=?7, user_count=?8,
              assistant_count=?9, tool_count=?10, error_count=?11, input_tokens=?12, output_tokens=?13, duration_ms=?14, status=?15,
-             signal_count=?16, now_text=?17, last_event_at=?18, failed=?19
+             signal_count=?16, now_text=?17, last_event_at=?18, failed=?19, context_tokens=?20, context_window=?21
              WHERE id = ?1",
             params![
                 sid,
@@ -1203,9 +1219,50 @@ impl TraceIndex {
                 agg.signals,
                 agg.now,
                 agg.last_signal_ts,
-                agg.failed || done == 2
+                agg.failed || done == 2,
+                agg.context_tokens,
+                agg.context_window
             ],
         )?;
+        // Receipts that arrived before this row existed take its key (same rule as ingest).
+        let (source, native): (String, Option<String>) =
+            tx.query_row("SELECT source_id, native_id FROM trace_sessions WHERE id = ?1", [sid], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        for key in crate::receipts::native_keys(&source, native.as_deref()) {
+            tx.execute(
+                "UPDATE trace_receipts SET session_id = ?1 WHERE session_id IS NULL AND source = ?2 AND native_session = ?3",
+                params![sid, source, key],
+            )?;
+        }
+        // The newest receipt's process; a receipt without a resolved pid and start never wipes it.
+        let newest = |col: &str| {
+            format!(
+                "(SELECT r.{col} FROM trace_receipts r WHERE r.harness_pid IS NOT NULL AND r.harness_start IS NOT NULL AND r.session_id = trace_sessions.id
+                  ORDER BY r.at_ms DESC, r.id DESC LIMIT 1)"
+            )
+        };
+        tx.execute(
+            &format!(
+                "UPDATE trace_sessions SET harness_pid = COALESCE({}, harness_pid), harness_start = COALESCE({}, harness_start) WHERE id = ?1",
+                newest("harness_pid"),
+                newest("harness_start")
+            ),
+            [sid],
+        )?;
+        // `via` has its own newest-non-NULL-chain subquery: a receipt with a chain but no readable start still counts.
+        let chain: Option<String> = tx
+            .query_row(
+                "SELECT r.harness_chain FROM trace_receipts r WHERE r.harness_chain IS NOT NULL AND r.session_id = ?1
+                 ORDER BY r.at_ms DESC, r.id DESC LIMIT 1",
+                [sid],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(chain) = chain {
+            tx.execute(
+                "UPDATE trace_sessions SET via = COALESCE(?2, via) WHERE id = ?1 AND (?3 OR via IS NULL)",
+                params![sid, crate::live::via_of(&chain), chain.ends_with("launchd")],
+            )?;
+        }
         Ok(())
     }
 
@@ -1264,5 +1321,15 @@ mod tests {
             .map(|p| Path::new(&p.unwrap()).file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(order, ["new.jsonl", "mid.jsonl", "old.jsonl", "oldest.jsonl"]);
+    }
+
+    #[test]
+    fn terminal_events() {
+        for e in ["task_complete", "turn_end", "turn/complete"] {
+            assert!(!is_terminal(e), "{e}");
+        }
+        for e in ["session_end", "session/end", "agent_end", "session_shutdown", "SessionEnd", "run_end"] {
+            assert!(is_terminal(e), "{e}");
+        }
     }
 }
