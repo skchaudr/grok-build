@@ -151,7 +151,11 @@ if (kind === 'bb') {
 } else {
   mod({ on: (e, f) => { h[e] = f } }); const c = { cwd: '/w', sessionManager: { getSessionId: () => 'S', getSessionFile: () => '/f' } }
   h.session_start({}, c); await wait(600)
-  for (let i = 0; i < 5; i++) { h.tool_result({ toolName: 'bash' }, c); await wait(20) }
+  if (kind === 'pi') {
+    h.agent_start({}, c); h.tool_execution_start({ toolName: 'bash', toolCallId: 'tc1' }, c)
+    h.tool_execution_end({ toolName: 'bash', toolCallId: 'tc1' }, c); h.agent_end({}, c); h.session_shutdown({}, c)
+    h.turn_end?.({}, c); h.tool_result?.({ toolName: 'bash' }, c)   // not subscribed: must stay silent
+  } else for (let i = 0; i < 5; i++) { h.tool_result({ toolName: 'bash' }, c); await wait(20) }
 }
 await wait(1500)
 JS
@@ -160,7 +164,12 @@ JS
     : > "$T/log"; node --experimental-strip-types --no-warnings "$T/run.mjs" "$k" "$f"
     grep -q "^hook $k " "$T/log" && ok "$k: spawns 'hook $k'" || bad "$k: no spawn"
     n="$(wc -l < "$T/log" | tr -d ' ')"
-    case $k in dsh|bb) want=2 ;; *) want=3 ;; esac   # leading + one trailing (pi/omp add session_start)
+    if [ "$k" = pi ]; then
+      expect 6 "$n" "pi: one spawn per event (session_start, agent_start, tool start/end, agent_end, session_shutdown)"
+      G -q '"event":"tool_execution_start","tool":"bash","tool_use_id":"tc1".*"harness_pid":[0-9]' "$T/log" && ok "pi: payload carries tool_use_id + harness_pid" || bad "pi payload"
+      continue
+    fi
+    case $k in dsh|bb) want=2 ;; *) want=3 ;; esac   # leading + one trailing (omp adds session_start)
     expect $want "$n" "$k: burst debounced to leading + trailing"
   done
   grep -q 'session-abc/session.jsonl.zstd' "$T/log" && ok "dsh: session file resolved" || bad "dsh: session file not resolved"

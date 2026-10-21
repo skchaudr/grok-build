@@ -6,15 +6,14 @@ import { join } from "node:path"
 
 const SOURCE = "pi"
 const BIN = join(homedir(), ".grok", "bin", "grok-traces")
-const DEBOUNCE_MS = 500
-const last = new Map<string, { at: number; timer?: ReturnType<typeof setTimeout> }>()
 
-function emit(event: string, ctx: any, tool = "") {
+function emit(event: string, ctx: any, tool = "", toolUseId = "") {
   try {
     const sm = ctx?.sessionManager
     const body = JSON.stringify({
-      event, tool, cwd: ctx?.cwd ?? process.cwd(),
+      event, tool, tool_use_id: toolUseId, cwd: ctx?.cwd ?? process.cwd(),
       session_id: String(sm?.getSessionId?.() ?? ""), session_file: String(sm?.getSessionFile?.() ?? ""),
+      harness_pid: process.pid,
     })
     const child = spawn(BIN, ["hook", SOURCE], { stdio: ["pipe", "ignore", "ignore"], detached: true })
     child.on("error", () => {})
@@ -24,31 +23,11 @@ function emit(event: string, ctx: any, tool = "") {
   } catch {}
 }
 
-// tool_result: leading spawn, then at most one trailing spawn per window so the last event is not lost.
-function debounced(event: string, ctx: any, tool: string) {
-  try {
-    const key = String(ctx?.sessionManager?.getSessionId?.() ?? "")
-    const s = last.get(key) ?? { at: 0 }
-    last.set(key, s)
-    const wait = s.at + DEBOUNCE_MS - Date.now()
-    if (wait <= 0 && !s.timer) { s.at = Date.now(); return emit(event, ctx, tool) }
-    if (s.timer) return
-    s.timer = setTimeout(() => { s.timer = undefined; s.at = Date.now(); emit(event, ctx, tool) }, Math.max(wait, 0))
-    s.timer.unref?.()
-  } catch {}
-}
-
 export default function tracesHook(pi: ExtensionAPI): void {
-  for (const ev of ["session_start", "turn_end", "agent_end"] as const) {
+  for (const ev of ["session_start", "agent_start", "agent_end", "session_shutdown"] as const) {
     pi.on(ev, (_e: any, ctx: any) => { emit(ev, ctx) })
   }
-  pi.on("tool_result", (e: any, ctx: any) => { debounced("tool_result", ctx, String(e?.toolName ?? "")) })
-  pi.on("session_shutdown", (_e: any, ctx: any) => {
-    try {
-      const k = String(ctx?.sessionManager?.getSessionId?.() ?? "")
-      clearTimeout(last.get(k)?.timer)
-      last.delete(k)
-    } catch {}
-    emit("session_shutdown", ctx)
-  })
+  for (const ev of ["tool_execution_start", "tool_execution_end"] as const) {
+    pi.on(ev, (e: any, ctx: any) => { emit(ev, ctx, String(e?.toolName ?? ""), String(e?.toolCallId ?? "")) })
+  }
 }
