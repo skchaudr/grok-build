@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
@@ -12,6 +13,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use unicode_width::UnicodeWidthStr;
+use xai_grok_traces::remote::{self, EventQuery, Fetched, RemoteFilter};
 use xai_grok_traces::{EventFilter, EventRow, RECEIPT_WINDOW_MS, SOURCES, SessionFilter, SessionRow, Sort, Status, TraceIndex, source_label};
 
 use crate::app::actions::Action;
@@ -25,6 +27,8 @@ const PAGE: usize = 500;
 const EVENT_PAGE: usize = 5000;
 /// Children shown under a parent before `+N more`.
 const MAX_KIDS: usize = 6;
+/// How often remote hosts are refetched while the modal is open.
+const REMOTE_EVERY: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -89,6 +93,29 @@ pub struct TracesModalState {
     /// Bumped by every synchronous query; a worker snapshot from an older one is dropped.
     generation: u64,
     inflight: Option<mpsc::Receiver<Snapshot>>,
+
+    /// ssh targets from `~/.grok/traces/hosts`.
+    hosts: Vec<String>,
+    /// 0 = all, 1 = this machine, 2.. = `hosts[n - 2]`.
+    pub host_filter: usize,
+    /// Last rows per host (tagged: `host` set, `host:`-prefixed ids).
+    remote_rows: HashMap<String, Vec<SessionRow>>,
+    /// Per host: why the last fetch failed.
+    remote_err: HashMap<String, String>,
+    remote_rx: Option<mpsc::Receiver<HostResult>>,
+    remote_pending: usize,
+    remote_at: Option<Instant>,
+    /// Events of the open remote session, unfiltered, as fetched with `remote_noise`.
+    remote_all: Vec<EventRow>,
+    remote_noise: bool,
+    remote_loading: bool,
+    remote_ev: Option<mpsc::Receiver<RemoteEvents>>,
+    raw_rx: Option<mpsc::Receiver<String>>,
+    /// Raw line of the inspected remote event, for `y`.
+    raw_source: Option<String>,
+    /// What the ledger shows: roots after filters and merge, with their children.
+    shown_roots: Vec<SessionRow>,
+    shown_children: HashMap<String, Vec<SessionRow>>,
     parent_name: Option<String>,
     /// Sessions we descended from with Enter on a dispatch row, and the row we were on.
     trail: Vec<(SessionRow, usize)>,
@@ -179,6 +206,21 @@ impl TracesModalState {
             dispatch_child: Vec::new(),
             generation: 0,
             inflight: None,
+            hosts: remote::hosts(),
+            host_filter: 0,
+            remote_rows: HashMap::new(),
+            remote_err: HashMap::new(),
+            remote_rx: None,
+            remote_pending: 0,
+            remote_at: None,
+            remote_all: Vec::new(),
+            remote_noise: false,
+            remote_loading: false,
+            remote_ev: None,
+            raw_rx: None,
+            raw_source: None,
+            shown_roots: Vec::new(),
+            shown_children: HashMap::new(),
             parent_name: None,
             trail: Vec::new(),
             tools: Vec::new(),
@@ -212,6 +254,7 @@ impl TracesModalState {
                 Err(mpsc::TryRecvError::Disconnected) => self.inflight = None,
             }
         }
+        redraw |= self.poll_remote();
         let Some(index) = &self.index else { return redraw };
         let mark = index.receipts_watermark().unwrap_or(self.watermark);
         let live = index.last_receipt_at().ok().flatten().is_some_and(|at| now_ms - at < RECEIPT_WINDOW_MS);
@@ -325,21 +368,74 @@ impl TracesModalState {
     }
 
     fn rebuild_ledger(&mut self) {
-        let mut out = Vec::new();
-        for r in &self.sessions {
-            out.push(Item::Row { row: r.clone(), branch: Branch::Root });
-            let Some(kids) = self.children.get(&r.id) else { continue };
-            let shown = if kids.len() > MAX_KIDS && !self.expanded.contains(&r.id) { MAX_KIDS } else { kids.len() };
-            for (i, k) in kids.iter().take(shown).enumerate() {
-                let last = i + 1 == kids.len();
-                out.push(Item::Row { row: k.clone(), branch: if last { Branch::Last } else { Branch::Mid } });
-            }
-            if shown < kids.len() {
-                out.push(Item::More { parent: r.id.clone(), hidden: kids.len() - shown });
+        let browse = self.browse();
+        let local_ok = self.host_filter <= 1;
+        let (remote_roots, remote_kids) = if self.host_filter == 1 { (Vec::new(), HashMap::new()) } else { self.remote_view(browse) };
+        let mut roots = if local_ok { self.sessions.clone() } else { Vec::new() };
+        let mut kids = if local_ok { self.children.clone() } else { HashMap::new() };
+        if !remote_roots.is_empty() {
+            roots.extend(remote_roots);
+            sort_rows(&mut roots, self.sort);
+            if browse && self.sort == Sort::Updated {
+                let running = |r: &SessionRow, k: &HashMap<String, Vec<SessionRow>>| {
+                    r.status == Status::Active || k.get(&r.id).is_some_and(|c| c.iter().any(|c| c.status == Status::Active))
+                };
+                let all: HashMap<String, Vec<SessionRow>> = kids.iter().chain(remote_kids.iter()).map(|(k, v)| (k.clone(), v.clone())).collect();
+                roots.sort_by_key(|r| !running(r, &all));
             }
         }
+        kids.extend(remote_kids);
+        let mut out = Vec::new();
+        for r in &roots {
+            out.push(Item::Row { row: r.clone(), branch: Branch::Root });
+            let Some(k) = kids.get(&r.id) else { continue };
+            let shown = if k.len() > MAX_KIDS && !self.expanded.contains(&r.id) { MAX_KIDS } else { k.len() };
+            for (i, c) in k.iter().take(shown).enumerate() {
+                let last = i + 1 == k.len();
+                out.push(Item::Row { row: c.clone(), branch: if last { Branch::Last } else { Branch::Mid } });
+            }
+            if shown < k.len() {
+                out.push(Item::More { parent: r.id.clone(), hidden: k.len() - shown });
+            }
+        }
+        (self.shown_roots, self.shown_children) = (roots, kids);
         self.ledger = out;
         self.selected = self.selected.min(self.ledger.len().saturating_sub(1));
+    }
+
+    /// Remote rows that pass the ledger filters; when browsing, grouped into roots and children.
+    fn remote_view(&self, browse: bool) -> (Vec<SessionRow>, HashMap<String, Vec<SessionRow>>) {
+        let tab = tab_source(self.source_tab);
+        let q = self.query.to_lowercase();
+        let host = self.host_filter.checked_sub(2).and_then(|i| self.hosts.get(i)).map(|t| remote::label(t).to_string());
+        let rows: Vec<&SessionRow> = self
+            .remote_rows
+            .values()
+            .flatten()
+            .filter(|r| tab.is_none_or(|t| r.source == t))
+            .filter(|r| host.as_deref().is_none_or(|h| r.host.as_deref() == Some(h)))
+            .filter(|r| !self.errors_only || r.error_count > 0)
+            .filter(|r| !self.active_only || r.status == Status::Active)
+            .filter(|r| {
+                q.is_empty()
+                    || [Some(&r.title), r.label.as_ref(), r.cwd.as_ref(), r.model.as_ref()].into_iter().flatten().any(|f| f.to_lowercase().contains(&q))
+            })
+            .collect();
+        if !browse {
+            return (rows.into_iter().cloned().collect(), HashMap::new());
+        }
+        let ids: HashSet<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        let (mut roots, mut kids) = (Vec::new(), HashMap::<String, Vec<SessionRow>>::new());
+        for r in rows {
+            match r.parent_id.as_deref().filter(|p| ids.contains(p)) {
+                Some(p) => kids.entry(p.to_string()).or_default().push(r.clone()),
+                None => roots.push(r.clone()),
+            }
+        }
+        for v in kids.values_mut() {
+            v.sort_by_key(|c| c.started_at);
+        }
+        (roots, kids)
     }
 
     pub fn selected_session(&self) -> Option<&SessionRow> {
@@ -358,7 +454,7 @@ impl TracesModalState {
     fn expand_selected(&mut self) -> bool {
         let parent = match self.ledger.get(self.selected) {
             Some(Item::More { parent, .. }) => parent.clone(),
-            Some(Item::Row { row, branch: Branch::Root }) if self.children.get(&row.id).is_some_and(|k| k.len() > MAX_KIDS) => row.id.clone(),
+            Some(Item::Row { row, branch: Branch::Root }) if self.shown_children.get(&row.id).is_some_and(|k| k.len() > MAX_KIDS) => row.id.clone(),
             _ => return false,
         };
         if !self.expanded.insert(parent.clone()) {
@@ -371,7 +467,7 @@ impl TracesModalState {
 
     /// (active, failed, total) over everything loaded, children included.
     fn counts(&self) -> (usize, usize, usize) {
-        let all = || self.sessions.iter().chain(self.children.values().flatten());
+        let all = || self.shown_roots.iter().chain(self.shown_children.values().flatten());
         (all().filter(|s| s.status == Status::Active).count(), all().filter(|s| s.failed).count(), all().count())
     }
 
@@ -392,7 +488,9 @@ impl TracesModalState {
     }
 
     fn open_session(&mut self, row: SessionRow) {
+        let remote = row.host.is_some();
         self.parent_name = match (&self.index, &row.parent_id) {
+            _ if remote => row.parent_id.as_deref().and_then(|pid| self.remote_rows.values().flatten().find(|r| r.id == pid)).map(clean_name),
             (Some(i), Some(pid)) => i.session(pid).ok().flatten().map(|p| clean_name(&p)),
             _ => None,
         };
@@ -402,7 +500,9 @@ impl TracesModalState {
         self.event_errors_only = false;
         self.event_query.clear();
         self.tool_filter = None;
+        self.remote_all.clear();
         self.tools = match (&self.index, &self.session) {
+            _ if remote => Vec::new(),
             (Some(i), Some(s)) => i.facets(&s.id).map(|f| f.tools.into_iter().map(|(t, _)| t).collect()).unwrap_or_default(),
             _ => Vec::new(),
         };
@@ -425,6 +525,9 @@ impl TracesModalState {
 
     fn load_events(&mut self) {
         self.generation += 1;
+        if self.session.as_ref().is_some_and(|s| s.host.is_some()) {
+            return self.load_remote_events();
+        }
         let loaded = {
             let (Some(index), Some(session)) = (&self.index, &self.session) else { return };
             query_trajectory(index, &session.id, &self.event_filter())
@@ -502,33 +605,228 @@ impl TracesModalState {
     }
 
     fn open_inspector(&mut self) {
+        if self.session.as_ref().is_some_and(|s| s.host.is_some()) {
+            return self.open_remote_inspector();
+        }
         let (Some(index), Some(session), Some(ev)) = (&self.index, &self.session, self.events.get(self.event_selected)) else {
             return;
         };
-        self.raw = Some(match index.raw_line(&session.id, ev.line) {
-            Ok(Some(line)) => serde_json::from_str::<serde_json::Value>(&line)
-                .ok()
-                .and_then(|v| serde_json::to_string_pretty(&v).ok())
-                .unwrap_or(line),
-            Ok(None) => "(line no longer in the source file)".to_string(),
-            Err(e) => format!("(could not read source: {e})"),
-        });
+        self.raw = Some(pretty(index.raw_line(&session.id, ev.line).map_err(|e| e.to_string())));
         self.raw_scroll = 0;
         self.mode = Mode::Inspector;
     }
 
     /// The raw source line for the inspected event, unformatted.
     fn raw_source_line(&self) -> Option<String> {
+        if self.session.as_ref().is_some_and(|s| s.host.is_some()) {
+            return self.raw_source.clone();
+        }
         let (index, session, ev) = (self.index.as_ref()?, self.session.as_ref()?, self.events.get(self.event_selected)?);
         index.raw_line(&session.id, ev.line).ok().flatten()
     }
 
     fn resume(&self, row: Option<&SessionRow>) -> InputOutcome {
         let Some(row) = row else { return InputOutcome::Unchanged };
+        if let Some(host) = &row.host {
+            return InputOutcome::Action(Action::TracesNotice { text: format!("remote session on {host}: resume it there") });
+        }
         match resume_target(row) {
             Some(t) => InputOutcome::Action(Action::TracesResume { source: t.source, native_id: t.native_id }),
             None => InputOutcome::Action(Action::TracesNotice { text: format!("no resume for {}", source_label(&row.source)) }),
         }
+    }
+
+    // ---- remote hosts: every ssh call runs on its own thread; the 1s poll collects results ----
+
+    fn target_for(&self, row: &SessionRow) -> Option<String> {
+        self.hosts.iter().find(|t| Some(remote::label(t)) == row.host.as_deref()).cloned()
+    }
+
+    /// Collect finished fetches and start the next round when due. True when something changed.
+    fn poll_remote(&mut self) -> bool {
+        let mut redraw = false;
+        let mut done = Vec::new();
+        if let Some(rx) = &self.remote_rx {
+            while let Ok(h) = rx.try_recv() {
+                done.push(h);
+            }
+        }
+        for h in done {
+            self.remote_pending = self.remote_pending.saturating_sub(1);
+            self.apply_host(h);
+            redraw = true;
+        }
+        if self.remote_pending == 0 {
+            self.remote_rx = None;
+            if !self.hosts.is_empty() && self.remote_at.is_none_or(|t| t.elapsed() >= REMOTE_EVERY) {
+                self.remote_at = Some(Instant::now());
+                let (tx, rx) = mpsc::channel();
+                self.remote_rx = Some(rx);
+                self.remote_pending = self.hosts.len();
+                for target in self.hosts.clone() {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let result = remote::fetch_sessions(&target, &RemoteFilter { limit: 200, ..Default::default() });
+                        let _ = tx.send(HostResult { target, result });
+                    });
+                }
+            }
+        }
+        if let Some(rx) = &self.remote_ev
+            && let Ok(ev) = rx.try_recv()
+        {
+            self.remote_ev = None;
+            if self.mode != Mode::List && self.session.as_ref().is_some_and(|s| s.id == ev.session_id) {
+                self.remote_loading = false;
+                match ev.result {
+                    Ok(rows) => {
+                        self.remote_noise = ev.noise;
+                        self.tools = tool_names(&rows);
+                        self.remote_all = rows;
+                        self.filter_remote();
+                    }
+                    Err(e) => self.status = Some(e.to_string()),
+                }
+                redraw = true;
+            }
+        }
+        if let Some(rx) = &self.raw_rx
+            && let Ok(text) = rx.try_recv()
+        {
+            self.raw_rx = None;
+            self.raw_source = Some(text.clone());
+            self.raw = Some(pretty(Ok(Some(text))));
+            redraw = true;
+        }
+        redraw
+    }
+
+    /// Merge one host's answer; on failure keep showing its last good rows and say so.
+    fn apply_host(&mut self, h: HostResult) {
+        let keep = self.selected_session().map(|s| s.id.clone());
+        match h.result {
+            Ok(Fetched { rows, note }) => {
+                self.remote_err.remove(&h.target);
+                self.remote_rows.insert(h.target, rows);
+                if note.is_some() {
+                    self.status = note;
+                }
+            }
+            Err(e) => {
+                let mut msg = e.to_string();
+                if let Some((age, rows)) = remote::cached_sessions(&h.target) {
+                    msg.push_str(&format!(" · cached {}s ago", age.as_secs()));
+                    self.remote_rows.insert(h.target.clone(), rows);
+                }
+                self.remote_err.insert(h.target, msg);
+            }
+        }
+        self.rebuild_ledger();
+        if let Some(i) = keep.and_then(|id| self.ledger.iter().position(|it| matches!(it, Item::Row { row, .. } if row.id == id))) {
+            self.selected = i;
+        }
+    }
+
+    /// Fetch the open remote session's events, or refilter the ones we have.
+    fn load_remote_events(&mut self) {
+        if !self.remote_all.is_empty() && self.remote_noise == self.include_noise {
+            return self.filter_remote();
+        }
+        let Some(session) = self.session.clone() else { return };
+        let Some(target) = self.target_for(&session) else {
+            self.status = Some("host is no longer configured".into());
+            return;
+        };
+        self.remote_loading = true;
+        self.install_trajectory(Vec::new(), None, Vec::new());
+        let (tx, rx) = mpsc::channel();
+        self.remote_ev = Some(rx);
+        let noise = self.include_noise;
+        std::thread::spawn(move || {
+            let result = remote::fetch_events(&target, remote::remote_id(&target, &session.id), &EventQuery { include_noise: noise, limit: EVENT_PAGE });
+            let _ = tx.send(RemoteEvents { session_id: session.id, noise, result });
+        });
+    }
+
+    /// Remote events carry no server-side filters; apply the trajectory filters here.
+    fn filter_remote(&mut self) {
+        let q = self.event_query.to_lowercase();
+        let tool = self.tool_filter.and_then(|i| self.tools.get(i)).cloned();
+        let rows: Vec<EventRow> = self
+            .remote_all
+            .iter()
+            .filter(|e| !self.event_errors_only || e.is_error)
+            .filter(|e| tool.as_deref().is_none_or(|t| e.title == t))
+            .filter(|e| {
+                q.is_empty() || [Some(&e.title), Some(&e.preview), e.detail.as_ref()].into_iter().flatten().any(|f| f.to_lowercase().contains(&q))
+            })
+            .cloned()
+            .collect();
+        let kids = self.session.as_ref().and_then(|s| self.shown_children.get(&s.id).cloned()).unwrap_or_default();
+        self.install_trajectory(rows, None, kids);
+    }
+
+    fn open_remote_inspector(&mut self) {
+        let (Some(session), Some(ev)) = (self.session.clone(), self.events.get(self.event_selected)) else { return };
+        let Some(target) = self.target_for(&session) else { return };
+        let line = ev.line;
+        let (tx, rx) = mpsc::channel();
+        self.raw_rx = Some(rx);
+        self.raw_source = None;
+        self.raw = Some("fetching from the remote host…".into());
+        self.raw_scroll = 0;
+        self.mode = Mode::Inspector;
+        std::thread::spawn(move || {
+            let text = match remote::fetch_raw(&target, remote::remote_id(&target, &session.id), line) {
+                Ok(Some(text)) => text,
+                Ok(None) => return drop(tx.send(String::new())),
+                Err(e) => return drop(tx.send(format!("{{\"error\": \"{e}\"}}"))),
+            };
+            let _ = tx.send(text);
+        });
+    }
+}
+
+struct HostResult {
+    target: String,
+    result: Result<Fetched, remote::Error>,
+}
+
+struct RemoteEvents {
+    session_id: String,
+    noise: bool,
+    result: Result<Vec<EventRow>, remote::Error>,
+}
+
+fn pretty(raw: Result<Option<String>, String>) -> String {
+    match raw {
+        Ok(Some(line)) if !line.is_empty() => serde_json::from_str::<serde_json::Value>(&line)
+            .ok()
+            .and_then(|v| serde_json::to_string_pretty(&v).ok())
+            .unwrap_or(line),
+        Ok(_) => "(line no longer in the source file)".to_string(),
+        Err(e) => format!("(could not read source: {e})"),
+    }
+}
+
+/// Distinct tool names in an event list, most used first.
+fn tool_names(rows: &[EventRow]) -> Vec<String> {
+    let mut n: HashMap<&str, usize> = HashMap::new();
+    for e in rows.iter().filter(|e| e.kind == "tool") {
+        *n.entry(e.title.as_str()).or_default() += 1;
+    }
+    let mut v: Vec<_> = n.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    v.into_iter().map(|(t, _)| t.to_string()).collect()
+}
+
+fn sort_rows(rows: &mut [SessionRow], sort: Sort) {
+    match sort {
+        Sort::Updated => rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.id.cmp(&b.id))),
+        Sort::Started => rows.sort_by(|a, b| b.started_at.cmp(&a.started_at).then_with(|| a.id.cmp(&b.id))),
+        Sort::Events => rows.sort_by(|a, b| b.event_count.cmp(&a.event_count).then_with(|| a.id.cmp(&b.id))),
+        Sort::Duration => rows.sort_by(|a, b| b.duration_ms.cmp(&a.duration_ms).then_with(|| a.id.cmp(&b.id))),
+        Sort::Errors => rows.sort_by(|a, b| b.error_count.cmp(&a.error_count).then_with(|| a.id.cmp(&b.id))),
     }
 }
 
@@ -715,6 +1013,11 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                     state.selected = 0;
                     state.refresh();
                 }
+                KeyCode::Char('H') if !state.hosts.is_empty() => {
+                    state.host_filter = (state.host_filter + 1) % (state.hosts.len() + 2);
+                    state.selected = 0;
+                    state.rebuild_ledger();
+                }
                 KeyCode::Char('A') => {
                     state.active_only = !state.active_only;
                     state.refresh();
@@ -897,6 +1200,7 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
             plain("a all"),
             plain("A active"),
             plain("e errors"),
+            plain("H host"),
             plain("s sort"),
             plain("Enter open"),
             plain("→ expand"),
@@ -1013,10 +1317,10 @@ struct Cols {
 }
 
 /// Fixed columns by priority; NAME and NOW share what is left.
-fn ledger_cols(width: usize) -> Cols {
+fn ledger_cols(width: usize, host: bool) -> Cols {
     let (counts, cwd, tokens) = (width >= 100, width >= 130, width >= 160);
     // glyph, source, age, tools (+1 separator each), plus the NAME and NOW separators.
-    let mut fixed = (1 + 1) + (7 + 1) + (4 + 1) + (5 + 1) + 2;
+    let mut fixed = (1 + 1) + (7 + 1) + (4 + 1) + (5 + 1) + 2 + if host { 9 } else { 0 };
     if counts {
         fixed += (5 + 1) + (4 + 1) + (6 + 1);
     }
@@ -1065,6 +1369,11 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
     if state.show_all {
         flags.push("all".into());
     }
+    match state.host_filter {
+        0 => {}
+        1 => flags.push("local only".into()),
+        n => flags.push(format!("host:{}", state.hosts.get(n - 2).map_or("?", |t| remote::label(t)))),
+    }
     flags.push(format!("sort:{:?}", state.sort).to_lowercase());
     let (active, failed, total) = state.counts();
     let mut counts = Vec::new();
@@ -1090,8 +1399,14 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
         (false, false) => (format!("/{}{}", state.query, if state.deep { "  (events)" } else { "" }), Style::default().fg(theme.fuzzy_accent)),
     };
     // A red health line takes the right of the search row; the search hint yields to it.
-    let health_w = state.health.as_deref().map_or(0, |h| h.width().min(area.width as usize * 2 / 3)) as u16;
-    if let Some(health) = &state.health {
+    let remote_alert = (!state.remote_err.is_empty()).then(|| {
+        let mut v: Vec<&String> = state.remote_err.values().collect();
+        v.sort();
+        v.into_iter().cloned().collect::<Vec<_>>().join(" · ")
+    });
+    let alert = state.health.clone().or(remote_alert);
+    let health_w = alert.as_deref().map_or(0, |h| h.width().min(area.width as usize * 2 / 3)) as u16;
+    if let Some(health) = &alert {
         let red = Style::default().fg(theme.accent_error).add_modifier(Modifier::BOLD);
         buf.set_span(area.x + area.width - health_w, search_y, &Span::styled(truncate_str(health, health_w as usize).as_str(), red), health_w);
     }
@@ -1100,7 +1415,8 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
 
     let status_rows = u16::from(state.status.is_some());
     let list = Rect { y: area.y + 3, height: area.height.saturating_sub(3 + status_rows), ..area };
-    let c = ledger_cols(area.width as usize);
+    let show_host = !state.hosts.is_empty();
+    let c = ledger_cols(area.width as usize, show_host);
     let mut head: Vec<(String, usize, Style)> = vec![
         (" ".into(), 1, dim),
         ("SOURCE".into(), 7, dim),
@@ -1109,6 +1425,9 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
         ("AGE".into(), 4, dim),
         ("TOOLS".into(), 5, dim),
     ];
+    if show_host {
+        head.insert(2, ("HOST".into(), 8, dim));
+    }
     if c.counts {
         head.extend([("  EVT".into(), 5, dim), (" ERR".into(), 4, dim), ("   DUR".into(), 6, dim)]);
     }
@@ -1137,7 +1456,14 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
                 buf,
                 list,
                 y,
-                &[(" ".into(), 1, base), ("".into(), 7, base), (format!("└─ +{hidden} more (→)"), c.name, base.fg(theme.gray))],
+                &{
+                    let mut v = vec![(" ".into(), 1, base), ("".into(), 7, base)];
+                    if show_host {
+                        v.push(("".into(), 8, base));
+                    }
+                    v.push((format!("└─ +{hidden} more (→)"), c.name, base.fg(theme.gray)));
+                    v
+                },
             ),
             Item::Row { row: s, branch } => {
                 let (glyph, glyph_color) = status_glyph(s, theme);
@@ -1156,6 +1482,9 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
                     (format!("{:>4}", age_of(s, now)), 4, base.fg(theme.text_secondary)),
                     (format!("{:>5}", s.tool_count), 5, base.fg(theme.accent_tool)),
                 ];
+                if show_host {
+                    v.insert(2, (s.host.clone().unwrap_or_default(), 8, base.fg(theme.accent_user)));
+                }
                 if c.counts {
                     v.push((format!("{:>5}", s.event_count), 5, base.fg(theme.text_secondary)));
                     v.push((if s.error_count > 0 { format!("{:>4}", s.error_count) } else { String::new() }, 4, base.fg(theme.accent_error)));
@@ -1341,7 +1670,8 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
     let status_rows = u16::from(state.status.is_some());
     let list = Rect { y: area.y + 5, height: area.height.saturating_sub(5 + status_rows), ..area };
     if state.events.is_empty() {
-        buf.set_span(list.x, list.y, &Span::styled("No events match.", dim), list.width);
+        let msg = if state.remote_loading { "Fetching events over ssh…" } else { "No events match." };
+        buf.set_span(list.x, list.y, &Span::styled(msg, dim), list.width);
     }
     keep_visible(state.event_selected, &mut state.event_scroll, list.height as usize);
     let summary_w = (list.width as usize).saturating_sub(7 + 7 + 9 + 2);
@@ -1441,6 +1771,7 @@ mod tests {
             last_event_at: None,
             children: 0,
             failed: false,
+            host: None,
         }
     }
 
@@ -1754,6 +2085,45 @@ mod tests {
         assert_eq!(state.event_selected, at, "at the row we left");
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.mode, Mode::List);
+    }
+
+    #[test]
+    fn remote_rows_merge_and_render_with_a_host() {
+        let (_tmp, mut state) = claude_fixture();
+        state.hosts = vec!["sab@sab-air".into()];
+        let mut r = row("codex", "/remote/x.jsonl");
+        r.id = "sab-air:codex:abc".into();
+        r.title = "remote refactor job".into();
+        r.host = Some("sab-air".into());
+        r.updated_at = Some(i64::MAX / 4);
+        r.status = Status::Active;
+        let mut kid = r.clone();
+        kid.id = "sab-air:codex:kid".into();
+        kid.title = "remote kid".into();
+        kid.parent_id = Some(r.id.clone());
+        state.apply_host(HostResult { target: "sab@sab-air".into(), result: Ok(Fetched { rows: vec![r, kid], note: None }) });
+        assert_eq!(state.shown_roots.len(), 2, "local root + remote root; the remote child nests");
+        assert_eq!(state.shown_roots[0].host.as_deref(), Some("sab-air"), "newest first across hosts");
+        let screen = draw(&mut state, 140, 20);
+        assert!(screen.contains("HOST") && screen.contains("sab-air") && screen.contains("remote refactor job"), "{screen}");
+        assert!(screen.contains("└─ remote kid"), "{screen}");
+
+        // Resume is refused for remote rows.
+        state.selected = 0;
+        assert!(matches!(state.resume(state.selected_session()), InputOutcome::Action(Action::TracesNotice { .. })));
+
+        // An unreachable host keeps its rows and says so in the header.
+        state.apply_host(HostResult {
+            target: "sab@sab-air".into(),
+            result: Err(remote::Error::Unreachable { host: "sab@sab-air".into(), detail: "timeout".into() }),
+        });
+        assert_eq!(state.shown_roots.len(), 2);
+        assert!(draw(&mut state, 160, 20).contains("sab-air unreachable"));
+
+        // H filters to this machine only.
+        press(&mut state, KeyCode::Char('H'));
+        assert_eq!(state.shown_roots.len(), 1);
+        assert!(state.shown_roots[0].host.is_none());
     }
 
     #[test]
