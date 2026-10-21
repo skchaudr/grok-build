@@ -2593,16 +2593,29 @@ fn draw_live_line(
     } else {
         c.title
     };
-    let title = match l.hidden {
-        0 => fit(&l.title, title_w),
-        n => {
-            let tag = format!(" +{n}");
-            let head = fit(&l.title, title_w.saturating_sub(tag.width()))
-                .trim_end()
-                .to_string();
-            fit(&format!("{head}{tag}"), title_w)
-        }
+    // Title cell: title text (cut first), ` via <x>` in gray, then the ` +N` tag, all inside `title_w`.
+    let tag = match l.hidden {
+        0 => String::new(),
+        n => format!(" +{n}"),
     };
+    let via = match l.row.via.as_deref() {
+        Some(v) if !v.eq_ignore_ascii_case(&l.row.source) => format!(" via {v}"),
+        _ => String::new(),
+    };
+    let via = if via.width() + tag.width() < title_w { via } else { String::new() };
+    let head = if tag.is_empty() && via.is_empty() {
+        fit(&l.title, title_w)
+    } else {
+        let room = title_w.saturating_sub(via.width() + tag.width());
+        fit(&l.title, room).trim_end().to_string()
+    };
+    let used = head.width() + via.width() + tag.width();
+    let (head, tag) = if used > title_w {
+        (fit(&format!("{head}{tag}"), title_w), String::new())
+    } else {
+        (head, tag)
+    };
+    let pad = title_w.saturating_sub(head.width() + via.width() + tag.width());
     let text_color = if l.row.state == LiveState::Prompt || l.glyph == "◌" {
         theme.gray
     } else {
@@ -2620,7 +2633,14 @@ fn draw_live_line(
         ));
         cells.push((" ".into(), base));
     }
-    cells.push((title, base.fg(theme.text_primary)));
+    cells.push((head, base.fg(theme.text_primary)));
+    if !via.is_empty() {
+        cells.push((via, base.fg(theme.gray)));
+    }
+    if !tag.is_empty() {
+        cells.push((tag, base.fg(theme.text_primary)));
+    }
+    cells.push((" ".repeat(pad), base));
     cells.push((" ".into(), base));
     if c.ctx {
         cells.push((fit(&ctx_text(&l.row), 13), base.fg(theme.gray)));
@@ -5908,6 +5928,23 @@ mod live_tests {
         out.push(("standalone hints", snap(&mut s, 100, 4, t0)));
 
         let mut s = state();
+        let mut bb = lr("v1", "claude", "docs sweep", LiveState::Working, "Read a", 4);
+        bb.via = Some("bb".into());
+        let mut herdr = lr(
+            "v2",
+            "claude",
+            "a title that is much too long for the cell",
+            LiveState::Working,
+            "Read b",
+            5,
+        );
+        herdr.via = Some("herdr".into());
+        let mut cur = lr("v3", "cursor", "grok-build", LiveState::Working, "Shell ls", 6);
+        cur.via = Some("cursor".into());
+        s.set_live(vec![bb, herdr, cur], vec![]);
+        out.push(("via bb, herdr; none on cursor", snap(&mut s, 100, 5, t0)));
+
+        let mut s = state();
         s.set_live(
             vec![lr(
                 "a",
@@ -6143,6 +6180,16 @@ mod live_tests {
                     r#" ●  claude  local one                                  Read a                               20s"#,
                     r#""#,
                     r#" enter open   j/k   c children   / search   q quit"#,
+                ],
+            ),
+            (
+                "via bb, herdr; none on cursor",
+                vec![
+                    r#" grok live · 3 agents                                                                    sab-mini ●"#,
+                    r#" ●  claude  docs sweep via bb                          Read a                                4s"#,
+                    r#" ●  claude  a title that is… via herdr                 Read b                                5s"#,
+                    r#" ●  cursor  grok-build                                 Shell ls                              6s"#,
+                    r#""#,
                 ],
             ),
             (
@@ -6450,6 +6497,23 @@ mod live_tests {
             receipts_hour: 0,
             receipts_any: None,
         }
+    }
+
+    #[test]
+    fn via_suffix_is_gray() {
+        let t0 = Instant::now();
+        let mut s = state();
+        let mut r = lr("v", "claude", "docs sweep", LiveState::Working, "x", 1);
+        r.via = Some("bb".into());
+        s.set_live(vec![r], vec![]);
+        let area = Rect::new(0, 0, 100, 3);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::current();
+        render_live_at(&mut buf, area, &mut s, &theme, t0);
+        let row = rows_of(&buf, 100, 3)[1].clone();
+        let x = row[..row.find("via").unwrap()].chars().count() as u16;
+        assert_eq!(buf[(x, 1)].fg, theme.gray);
+        assert_ne!(buf[(x - 3, 1)].fg, theme.gray);
     }
 
     #[test]
