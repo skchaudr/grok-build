@@ -2,7 +2,8 @@
 //!
 //! Editor: `$GROK_OPEN_EDITOR`, then `$VISUAL`, then `$EDITOR`, then `zed`.
 //! GUI editors (zed, code, cursor, …) are spawned detached. Terminal editors open in a new Herdr pane when running
-//! inside Herdr; otherwise the caller falls back to the suspend-the-TUI `$EDITOR` flow (no line jump).
+//! inside Herdr. Outside Herdr, a terminal editor falls back to the in-place `$VISUAL`/`$EDITOR` flow with no line
+//! jump; `$GROK_OPEN_EDITOR` is not used on that path.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -23,7 +24,7 @@ pub(crate) struct EditorTarget {
 pub(crate) fn target_for_block(block: &RenderBlock, cwd: &Path) -> Option<EditorTarget> {
     let (path, line) = match block {
         RenderBlock::ToolCall(ToolCallBlock::Read(b)) => {
-            (b.path.as_str(), b.line_range.map(|r| r.start))
+            (b.path.as_str(), b.line_range.map(|r| r.start.max(1)))
         }
         RenderBlock::ToolCall(ToolCallBlock::Edit(b)) => (
             b.path.as_str(),
@@ -38,10 +39,16 @@ pub(crate) fn target_for_block(block: &RenderBlock, cwd: &Path) -> Option<Editor
     if path.is_empty() {
         return None;
     }
-    Some(EditorTarget {
-        path: cwd.join(path),
-        line,
-    })
+    // Block `path` can be a tool-title fallback rather than a real file; only open existing files.
+    let full = match path.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME")
+            .map_or_else(|| cwd.join(path), |home| PathBuf::from(home).join(rest)),
+        None => cwd.join(path),
+    };
+    if !full.is_file() {
+        return None;
+    }
+    Some(EditorTarget { path: full, line })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +118,9 @@ fn editor_from_env() -> Option<Vec<String>> {
 pub(crate) fn build_argv(editor: &[String], target: &EditorTarget) -> Vec<String> {
     let mut argv = editor.to_vec();
     let path = target.path.display().to_string();
-    let kind = classify(&editor[0]);
+    let kind = editor
+        .first()
+        .map_or(EditorKind::TerminalPlus, |p| classify(p));
     match (kind, target.line) {
         (EditorKind::GuiColon | EditorKind::TerminalColon, Some(line)) => {
             argv.push(format!("{path}:{line}"));
@@ -151,14 +160,19 @@ pub(crate) enum OpenOutcome {
 
 pub(crate) fn open(target: &EditorTarget, cwd: &Path) -> OpenOutcome {
     let Some(editor) = editor_from_env() else {
-        return OpenOutcome::Failed("could not parse $GROK_OPEN_EDITOR / $VISUAL / $EDITOR".to_owned());
+        return OpenOutcome::Failed(
+            "could not parse $GROK_OPEN_EDITOR / $VISUAL / $EDITOR".to_owned(),
+        );
+    };
+    let Some(program) = editor.first().cloned() else {
+        return OpenOutcome::Failed("empty editor command".to_owned());
     };
     let argv = build_argv(&editor, target);
-    let label = describe(target, &editor[0]);
-    if classify(&editor[0]).is_gui() {
+    let label = describe(target, &program);
+    if classify(&program).is_gui() {
         return match spawn_detached(&argv) {
             Ok(()) => OpenOutcome::Launched(format!("opened {label}")),
-            Err(e) => OpenOutcome::Failed(format!("{}: {e}", editor[0])),
+            Err(e) => OpenOutcome::Failed(format!("{program}: {e}")),
         };
     }
     if in_herdr() {
@@ -175,10 +189,10 @@ pub(crate) fn open(target: &EditorTarget, cwd: &Path) -> OpenOutcome {
 }
 
 fn describe(target: &EditorTarget, program: &str) -> String {
-    let name = target
-        .path
-        .file_name()
-        .map_or_else(|| target.path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let name = target.path.file_name().map_or_else(
+        || target.path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
     let editor = Path::new(program)
         .file_name()
         .map_or(program.into(), |n| n.to_string_lossy());
@@ -188,23 +202,35 @@ fn describe(target: &EditorTarget, program: &str) -> String {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // GUI editor deliberately outlives the TUI; reaped on a thread
 fn spawn_detached(argv: &[String]) -> std::io::Result<()> {
-    let (program, args) = argv
-        .split_first()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty editor command"))?;
-    Command::new(program)
+    let (program, args) = argv.split_first().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty editor command")
+    })?;
+    let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
-        .map(drop)
+        .spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 fn open_in_herdr_pane(argv: &[String], cwd: &Path) -> anyhow::Result<()> {
     let herdr = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_owned());
     let split = Command::new(&herdr)
-        .args(["pane", "split", "--current", "--direction", "right", "--focus", "--cwd"])
+        .args([
+            "pane",
+            "split",
+            "--current",
+            "--direction",
+            "right",
+            "--focus",
+            "--cwd",
+        ])
         .arg(cwd)
         .stdin(Stdio::null())
         .output()?;
@@ -216,7 +242,7 @@ fn open_in_herdr_pane(argv: &[String], cwd: &Path) -> anyhow::Result<()> {
     let pane = herdr_split_pane_id(&split.stdout)?;
     let command = shlex::try_join(argv.iter().map(String::as_str))?;
     let run = Command::new(&herdr)
-        .args(["pane", "run", &pane, &command])
+        .args(["pane", "run", pane.as_str(), command.as_str()])
         .stdin(Stdio::null())
         .output()?;
     anyhow::ensure!(
@@ -254,8 +280,14 @@ mod tests {
 
     #[test]
     fn resolve_editor_prefers_grok_then_visual_then_editor_then_zed() {
-        assert_eq!(resolve_editor(Some("nvim"), Some("code -w"), Some("vi")), Some(words(&["nvim"])));
-        assert_eq!(resolve_editor(Some(" "), Some("code -w"), Some("vi")), Some(words(&["code", "-w"])));
+        assert_eq!(
+            resolve_editor(Some("nvim"), Some("code -w"), Some("vi")),
+            Some(words(&["nvim"]))
+        );
+        assert_eq!(
+            resolve_editor(Some(" "), Some("code -w"), Some("vi")),
+            Some(words(&["code", "-w"]))
+        );
         assert_eq!(resolve_editor(None, None, Some("vi")), Some(words(&["vi"])));
         assert_eq!(resolve_editor(None, None, None), Some(words(&["zed"])));
         assert_eq!(resolve_editor(Some("\"unterminated"), None, None), None);
@@ -264,18 +296,30 @@ mod tests {
     #[test]
     fn build_argv_per_editor_family() {
         let t = target(Some(42));
-        assert_eq!(build_argv(&words(&["zed"]), &t), words(&["zed", "/repo/src/main.rs:42"]));
+        assert_eq!(
+            build_argv(&words(&["zed"]), &t),
+            words(&["zed", "/repo/src/main.rs:42"])
+        );
         assert_eq!(
             build_argv(&words(&["/usr/local/bin/cursor"]), &t),
             words(&["/usr/local/bin/cursor", "-g", "/repo/src/main.rs:42"])
         );
-        assert_eq!(build_argv(&words(&["nvim"]), &t), words(&["nvim", "+42", "/repo/src/main.rs"]));
-        assert_eq!(build_argv(&words(&["hx"]), &t), words(&["hx", "/repo/src/main.rs:42"]));
+        assert_eq!(
+            build_argv(&words(&["nvim"]), &t),
+            words(&["nvim", "+42", "/repo/src/main.rs"])
+        );
+        assert_eq!(
+            build_argv(&words(&["hx"]), &t),
+            words(&["hx", "/repo/src/main.rs:42"])
+        );
         assert_eq!(
             build_argv(&words(&["idea"]), &t),
             words(&["idea", "--line", "42", "/repo/src/main.rs"])
         );
-        assert_eq!(build_argv(&words(&["nvim"]), &target(None)), words(&["nvim", "/repo/src/main.rs"]));
+        assert_eq!(
+            build_argv(&words(&["nvim"]), &target(None)),
+            words(&["nvim", "/repo/src/main.rs"])
+        );
     }
 
     #[test]
@@ -296,7 +340,10 @@ mod tests {
 
     #[test]
     fn describe_names_file_line_and_editor() {
-        assert_eq!(describe(&target(Some(7)), "/opt/bin/nvim"), "main.rs:7 in nvim");
+        assert_eq!(
+            describe(&target(Some(7)), "/opt/bin/nvim"),
+            "main.rs:7 in nvim"
+        );
         assert_eq!(describe(&target(None), "zed"), "main.rs in zed");
     }
 }

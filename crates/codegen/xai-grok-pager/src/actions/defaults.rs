@@ -390,7 +390,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Opens a Read or Edit block's file in your editor at the read or first changed line.\nEditor: $GROK_OPEN_EDITOR, else $VISUAL, else $EDITOR, else zed.\nGUI editors (zed, code, cursor) open detached; terminal editors open in a new Herdr pane inside Herdr, otherwise in place of the TUI.",
+                "Opens a Read or Edit block's file in your editor at the read or first changed line.\nEditor: $GROK_OPEN_EDITOR, else $VISUAL, else $EDITOR, else zed. GUI editors (zed, code, cursor) open detached.\nTerminal editors open in a new Herdr pane inside Herdr. Outside Herdr they run in place via $VISUAL/$EDITOR with no line jump; $GROK_OPEN_EDITOR is not used there.",
             ),
         },
         ActionDef {

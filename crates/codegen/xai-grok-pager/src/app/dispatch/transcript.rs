@@ -599,13 +599,19 @@ pub(super) fn dispatch_open_in_editor(app: &mut AppView) {
             OpenOutcome::SuspendFallback(path) => fallback = Some(path),
         }
     });
-    if let Some(path) = fallback
-        && app.pending_editor.is_none()
-    {
-        app.pending_editor = Some(crate::app::external_editor::PendingEditorRequest::ConfigFile {
-            path,
-            refresh_agents_modal: None,
-        });
+    if let Some(path) = fallback {
+        if app.pending_editor.is_some() {
+            with_active_agent(app, |agent| {
+                agent.show_toast("an editor is already pending")
+            });
+        } else {
+            app.pending_editor = Some(
+                crate::app::external_editor::PendingEditorRequest::ConfigFile {
+                    path,
+                    refresh_agents_modal: None,
+                },
+            );
+        }
     }
 }
 

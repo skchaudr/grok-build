@@ -62,13 +62,13 @@ mod event_loop;
 mod event_loop_stall;
 mod exit_timeout;
 pub(crate) mod external_editor;
-pub(crate) mod open_in_editor;
 mod foreign_sessions;
 #[cfg(all(test, unix))]
 mod leader_cluster;
 mod modals;
 pub(crate) mod mode_switch;
 mod mouse;
+pub(crate) mod open_in_editor;
 mod queue_edit;
 mod reader_thread;
 pub(crate) mod screen_mode_relaunch;
