@@ -3287,6 +3287,84 @@ mod tests {
         assert!(screen.contains("\"cached\": \"yes\""), "{screen}");
     }
 
+    const OPENER_BODY: &str = "Yoooooo please check commit\nthe fix landed as 7eb90d57 at noon, details at https://example.com/very/long/path/that/does/not/break/anywhere";
+    const URL: &str = "https://example.com/very/long/path/that/does/not/break/anywhere";
+    /// Snapshot width: the body column is `SNAP_W - TEXT_COL - 2 * 2` = 24 wide (the body sits two levels deep).
+    const SNAP_W: u16 = 42;
+
+    /// A user opener, two Bash calls, and an assistant reply: one turn.
+    fn opener_turn() -> Vec<EventRow> {
+        vec![
+            ev(1, "message", "user", "Yoooooo please check commit"),
+            ev(2, "tool", "tool", "ls"),
+            ev(4, "tool", "tool", "pwd"),
+            ev(5, "message", "assistant", "done"),
+        ]
+    }
+
+    /// The trajectory at `SNAP_W` x 30, one string per row, trailing spaces trimmed.
+    fn snapshot_rows(state: &mut TracesModalState) -> Vec<String> {
+        draw(state, SNAP_W, 30).lines().map(|l| l.trim_end().to_string()).collect()
+    }
+
+    /// The opener's body expanded: `l` on the opener row, with its body cached.
+    fn expanded_opener() -> TracesModalState {
+        let mut state = trajectory(opener_turn());
+        state.bodies.insert(1, OPENER_BODY.into());
+        state.goto(1);
+        press(&mut state, KeyCode::Char('l'));
+        assert!(shown_rows(&state).contains(&"Body(1)".to_string()), "{:?}", shown_rows(&state));
+        state
+    }
+
+    #[test]
+    fn trajectory_snapshot_expanded_turn_and_body() {
+        let mut state = expanded_opener();
+        let rows = snapshot_rows(&mut state);
+        let start = rows.iter().position(|r| r.trim_start().starts_with("⌄ turn")).expect("turn row");
+        let shown: Vec<&str> = rows.iter().skip(start).take(10).map(String::as_str).collect();
+        assert_eq!(
+            shown,
+            vec![
+                "              ⌄ turn · 2 tools · 1 msg",
+                "    #1 USER     ⌄               -",
+                "                  Yoooooo please check",
+                "                  commit",
+                "                  the fix landed as",
+                "                  7eb90d57 at noon,",
+                "                  details at",
+                "                  https://example.com/very",
+                "                  /long/path/that/does/not",
+                "                  /break/anywhere",
+            ]
+        );
+    }
+
+    #[test]
+    fn trajectory_snapshot_body_keeps_words_and_hard_splits_urls() {
+        let mut state = expanded_opener();
+        let rows = snapshot_rows(&mut state);
+        assert_eq!(rows.iter().filter(|r| r.contains("Yoooooo")).count(), 1, "the body is the only copy");
+        let body_w = SNAP_W as usize - TEXT_COL - 2 * 2;
+        for tok in OPENER_BODY.split_whitespace().filter(|t| t.chars().count() <= body_w) {
+            assert!(rows.iter().any(|r| r.contains(tok)), "`{tok}` is split across rows:\n{rows:#?}");
+        }
+        let i = rows.iter().position(|r| r.contains("https://")).expect("the url starts a row");
+        let joined: String = rows.iter().skip(i).take(3).map(|r| r.trim()).collect();
+        assert_eq!(joined, URL);
+    }
+
+    #[test]
+    fn trajectory_snapshot_collapsed_body_shows_the_preview_once() {
+        let mut state = trajectory(opener_turn());
+        let rows = snapshot_rows(&mut state);
+        let hits: Vec<&String> = rows.iter().filter(|r| r.contains("Yoooooo")).collect();
+        assert_eq!(hits.len(), 1, "{rows:#?}");
+        assert!(hits.iter().all(|r| r.contains("USER")), "{rows:#?}");
+        let turn = rows.iter().find(|r| r.contains("turn ·")).expect("turn row");
+        assert!(!turn.contains("Yoooooo"), "{turn}");
+    }
+
     #[test]
     fn selection_follows_its_key_through_live_growth() {
         let mut state = trajectory(three_calls());
