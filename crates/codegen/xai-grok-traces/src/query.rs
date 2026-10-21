@@ -17,6 +17,9 @@ pub const RECEIPT_WINDOW_MS: i64 = 2 * 60 * 1000;
 /// Hook events that end a run (any harness).
 pub const TERMINAL_EVENTS: [&str; 5] = ["SessionEnd", "Stop", "stop", "session_shutdown", "agent_end"];
 
+/// The dispatcher, resolved inside the source; a missing or evicted parent leaves a root.
+const PARENT_ID: &str = "(SELECT p.id FROM trace_sessions p WHERE p.source_id = s.source_id AND p.native_id = s.parent_native LIMIT 1)";
+const CHILDREN: &str = "(SELECT COUNT(*) FROM trace_sessions c WHERE c.source_id = s.source_id AND c.parent_native = s.native_id)";
 const LAST_RECEIPT_AT: &str = "(SELECT r.at_ms FROM trace_receipts r WHERE r.session_id = s.id ORDER BY r.id DESC LIMIT 1)";
 const LAST_RECEIPT_EVENT: &str = "(SELECT r.event FROM trace_receipts r WHERE r.session_id = s.id ORDER BY r.id DESC LIMIT 1)";
 
@@ -35,6 +38,15 @@ impl Status {
             Status::Idle => "idle",
             Status::Completed => "done",
             Status::Unknown => "-",
+        }
+    }
+
+    pub fn parse(s: &str) -> Status {
+        match s {
+            "active" => Status::Active,
+            "idle" => Status::Idle,
+            "done" => Status::Completed,
+            _ => Status::Unknown,
         }
     }
 }
@@ -56,6 +68,12 @@ pub struct SessionFilter {
     pub errors_only: bool,
     pub active_only: bool,
     pub has_tools: bool,
+    /// Only sessions nobody dispatched (no resolvable `parent_id`).
+    pub roots_only: bool,
+    /// Hide pings: fewer than 3 non-noise events and no tools.
+    pub hide_trivial: bool,
+    /// Only sessions updated at or after this time (ms).
+    pub since_ms: Option<i64>,
     /// Also match event titles and previews (a scan of trace_events).
     pub deep: bool,
     pub sort: Sort,
@@ -82,6 +100,20 @@ pub struct SessionRow {
     pub output_tokens: Option<i64>,
     pub duration_ms: Option<i64>,
     pub status: Status,
+    /// The dispatching session, when known and indexed.
+    pub parent_id: Option<String>,
+    /// Short human label: the dispatch description, when the harness recorded one.
+    pub label: Option<String>,
+    pub agent_type: Option<String>,
+    /// Last meaningful event: `Tool: arg` or the last assistant text, at most 100 chars.
+    pub now: Option<String>,
+    pub last_event_at: Option<i64>,
+    /// Sessions dispatched by this one.
+    pub children: u32,
+    /// Ended in failure: a trailing error with nothing after it, or a finished-with-error sidecar.
+    pub failed: bool,
+    /// `None` = this machine. Remote rows (see `remote`) carry the host label and a `host:`-prefixed id.
+    pub host: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -89,6 +121,8 @@ pub struct EventFilter {
     pub text: Option<String>,
     pub errors_only: bool,
     pub tool: Option<String>,
+    /// Include bookkeeping, telemetry and injected context (hidden by default).
+    pub include_noise: bool,
     pub limit: usize,
     pub offset: usize,
 }
@@ -110,6 +144,9 @@ pub struct EventRow {
     pub depth: i64,
     pub model: Option<String>,
     pub is_error: bool,
+    pub noise: bool,
+    /// Tool call: compact argument summary. Tool result: `exit N` or the first error line.
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -125,7 +162,7 @@ const SESSION_COLS: &str = "s.id, s.source_id, s.title, s.file_path, s.model, s.
   s.duration_ms, s.status, f.mtime_ms";
 
 fn session_cols() -> String {
-    format!("{SESSION_COLS}, {LAST_RECEIPT_AT}, {LAST_RECEIPT_EVENT}")
+    format!("{SESSION_COLS}, {LAST_RECEIPT_AT}, {LAST_RECEIPT_EVENT}, {PARENT_ID}, s.label, s.agent_type, s.now_text, s.last_event_at, {CHILDREN}, s.failed")
 }
 
 fn terminal_list() -> String {
@@ -164,6 +201,14 @@ fn session_row(r: &Row<'_>, now: i64) -> rusqlite::Result<SessionRow> {
         output_tokens: r.get(14)?,
         duration_ms: r.get(15)?,
         status,
+        parent_id: r.get(20)?,
+        label: r.get(21)?,
+        agent_type: r.get(22)?,
+        now: r.get(23)?,
+        last_event_at: r.get(24)?,
+        children: r.get::<_, i64>(25)?.max(0) as u32,
+        failed: r.get(26)?,
+        host: None,
     })
 }
 
@@ -187,7 +232,7 @@ impl TraceIndex {
             if filter.deep {
                 sql.push_str(
                     " OR s.sk IN (SELECT e.sk FROM trace_events e JOIN trace_names ti ON ti.id = e.title_id
-                   WHERE e.preview LIKE ?1x ESCAPE '\\' OR ti.name LIKE ?1x ESCAPE '\\')",
+                   WHERE e.preview LIKE ?1x ESCAPE '\\' OR e.detail LIKE ?1x ESCAPE '\\' OR ti.name LIKE ?1x ESCAPE '\\')",
                 );
             }
             sql.push(')');
@@ -197,11 +242,28 @@ impl TraceIndex {
             sql = sql.replace("?1x", "?");
             args.extend(std::iter::repeat_n(Sql::Text(pat), n));
         }
+        if let Some(since) = filter.since_ms {
+            sql.push_str(" AND COALESCE(s.updated_at,0) >= ?");
+            args.push(Sql::Integer(since));
+        }
         if filter.errors_only {
             sql.push_str(" AND s.error_count > 0");
         }
         if filter.has_tools {
             sql.push_str(" AND s.tool_count > 0");
+        }
+        if filter.roots_only {
+            sql.push_str(&format!(" AND {PARENT_ID} IS NULL"));
+        }
+        if filter.hide_trivial {
+            // A just-dispatched agent is trivial until it has done something;
+            // keep live sessions visible so new work shows up immediately.
+            sql.push_str(&format!(
+                " AND (NOT (s.signal_count < 3 AND s.tool_count = 0) OR (s.status = 'open' AND f.mtime_ms > ?) OR ({LAST_RECEIPT_AT} > ? AND {LAST_RECEIPT_EVENT} NOT IN ({})))",
+                terminal_list()
+            ));
+            args.push(Sql::Integer(now - ACTIVE_WINDOW_MS));
+            args.push(Sql::Integer(now - RECEIPT_WINDOW_MS));
         }
         if filter.active_only {
             sql.push_str(&format!(
@@ -232,10 +294,26 @@ impl TraceIndex {
         Ok(self.conn().query_row(&sql, [id], |r| session_row(r, now)).optional()?)
     }
 
+    /// Sessions this one dispatched, oldest first.
+    pub fn children(&self, session_id: &str) -> Result<Vec<SessionRow>> {
+        let now = now_ms();
+        let sql = format!(
+            "SELECT {} FROM trace_sessions s LEFT JOIN trace_files f ON f.path = s.file_path
+             WHERE s.parent_native IS NOT NULL AND s.parent_native = (SELECT native_id FROM trace_sessions WHERE id = ?1)
+               AND s.source_id = (SELECT source_id FROM trace_sessions WHERE id = ?1)
+             ORDER BY COALESCE(s.started_at, s.updated_at, 0), s.file_path",
+            session_cols()
+        );
+        let mut stmt = self.conn().prepare(&sql)?;
+        let rows = stmt.query_map([session_id], |r| session_row(r, now))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn list_events(&self, session_id: &str, filter: &EventFilter) -> Result<Vec<EventRow>> {
         let mut sql = String::from(
             "SELECT e.line_number, ty.name, e.kind, e.role, ti.name, CASE WHEN e.preview = '' THEN ti.name ELSE e.preview END,
-             e.timestamp, u.duration_ms, u.input_tokens, u.output_tokens, u.turn, u.step, e.depth, mo.name, e.is_error
+             e.timestamp, u.duration_ms, u.input_tokens, u.output_tokens, u.turn, u.step, e.depth, mo.name, e.is_error,
+             e.noise, e.detail
              FROM trace_events e JOIN trace_names ty ON ty.id = e.type_id JOIN trace_names ti ON ti.id = e.title_id
              LEFT JOIN trace_names mo ON mo.id = e.model_id
              LEFT JOIN trace_event_usage u ON u.sk = e.sk AND u.line_number = e.line_number
@@ -245,13 +323,16 @@ impl TraceIndex {
         if filter.errors_only {
             sql.push_str(" AND e.is_error = 1");
         }
+        if !filter.include_noise {
+            sql.push_str(" AND e.noise = 0");
+        }
         if let Some(tool) = &filter.tool {
             sql.push_str(&format!(" AND e.kind = {} AND ti.name = ?", Kind::Tool.code()));
             args.push(Sql::Text(tool.clone()));
         }
         if let Some(text) = filter.text.as_deref().filter(|t| !t.trim().is_empty()) {
-            sql.push_str(" AND (ty.name LIKE ? ESCAPE '\\' OR ti.name LIKE ? ESCAPE '\\' OR e.preview LIKE ? ESCAPE '\\')");
-            args.extend(std::iter::repeat_n(Sql::Text(like(text)), 3));
+            sql.push_str(" AND (ty.name LIKE ? ESCAPE '\\' OR ti.name LIKE ? ESCAPE '\\' OR e.preview LIKE ? ESCAPE '\\' OR e.detail LIKE ? ESCAPE '\\')");
+            args.extend(std::iter::repeat_n(Sql::Text(like(text)), 4));
         }
         sql.push_str(" ORDER BY e.line_number LIMIT ? OFFSET ?");
         args.push(Sql::Integer(if filter.limit == 0 { 2000 } else { filter.limit as i64 }));
@@ -274,6 +355,8 @@ impl TraceIndex {
                 depth: r.get(12)?,
                 model: r.get(13)?,
                 is_error: r.get(14)?,
+                noise: r.get(15)?,
+                detail: r.get(16)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

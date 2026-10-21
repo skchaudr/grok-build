@@ -54,7 +54,7 @@ impl TraceIndex {
     }
 
     pub(super) fn index_bb_thread(&mut self, root: &Root, bb: &Bb, t: &BbThread) -> Result<bool> {
-        self.check_cap()?;
+        self.check_writable()?;
         let key = thread_key(&root.path, &t.id);
         let sid = session_id(&root.source, &key);
         let last_seq = t.last_sequence.unwrap_or(0);
@@ -67,6 +67,9 @@ impl TraceIndex {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
+        if existing.is_none() && t.updated_at <= self.evict_floor() {
+            return Ok(false);
+        }
         let reset = existing.is_none_or(|(_, done, _, pv)| pv != PARSER_VERSION || last_seq < done);
         let (after, mut count) = match existing {
             Some((mtime, done, lines, _)) if !reset => {
@@ -91,12 +94,23 @@ impl TraceIndex {
 
         let tx = self.conn.transaction()?;
         let sk = upsert_session(&tx, &sid, &root.source, &t.id, &key, last_seq)?;
+        write_links(
+            &tx,
+            &sid,
+            &Links {
+                native_id: Some(t.id.clone()),
+                parent_native: t.parent_thread_id.clone(),
+                agent_type: Some(t.provider_id.clone()),
+                ..Default::default()
+            },
+        )?;
         if reset {
             delete_events(&tx, sk)?;
         }
         let mut names = Names::default();
         let mut seq = after;
         let mut capped = false;
+        let max_events = self.limits.max_events;
         {
             let mut insert = tx.prepare_cached(INSERT_EVENT)?;
             let mut usage = tx.prepare_cached(INSERT_USAGE)?;
@@ -104,7 +118,7 @@ impl TraceIndex {
                 let page = bb.events(&t.id, seq, PAGE)?;
                 let short = page.len() < PAGE;
                 for ev in page {
-                    if count >= MAX_EVENTS_PER_FILE as i64 {
+                    if count >= max_events as i64 {
                         capped = true;
                         break 'pages;
                     }
@@ -121,10 +135,16 @@ impl TraceIndex {
         // Skipped event types trail the last indexed one; everything up to the listing's
         // last sequence was examined.
         let (done, parse_error) = if capped {
-            (last_seq, Some(format!("event cap {MAX_EVENTS_PER_FILE} reached; rest of thread not indexed")))
+            (last_seq, Some(format!("event cap {max_events} reached; rest of thread not indexed")))
         } else {
             (seq.max(last_seq), None)
         };
+        if capped {
+            self.capped_files += 1;
+        }
+        if t.status == "error" {
+            agg.failed = true;
+        }
         Self::write_aggregate(&tx, &sid, &agg, t.updated_at)?;
         tx.execute(
             "INSERT INTO trace_files (path, root_id, source_id, format, size_bytes, mtime_ms, indexed_bytes, indexed_lines,

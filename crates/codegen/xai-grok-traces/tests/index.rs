@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use xai_grok_traces::{EventFilter, Format, Root, SessionFilter, Status, TraceIndex, default_roots};
+use xai_grok_traces::{EventFilter, Format, Limits, Root, SessionFilter, Status, TraceIndex, default_roots};
 
 const CLAUDE: &str = r#"{"type":"user","timestamp":"2026-10-01T00:00:00Z","cwd":"/w/claude","sessionId":"s","message":{"role":"user","content":"claude task"}}
 {"type":"assistant","timestamp":"2026-10-01T00:00:05Z","message":{"role":"assistant","model":"claude-opus-5-5","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":100,"output_tokens":20}}}
@@ -13,7 +13,7 @@ const CLAUDE: &str = r#"{"type":"user","timestamp":"2026-10-01T00:00:00Z","cwd":
 const CODEX: &str = r#"{"timestamp":"2026-10-01T00:00:00Z","type":"session_meta","payload":{"cwd":"/w/codex","model":"gpt-5"}}
 {"timestamp":"2026-10-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex task"}]}}
 {"timestamp":"2026-10-01T00:00:02Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}"}}
-{"timestamp":"2026-10-01T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","output":"error: no such file"}}
+{"timestamp":"2026-10-01T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","output":"Chunk ID: a\nProcess exited with code 1\nerror: no such file"}}
 {"timestamp":"2026-10-01T00:00:04Z","type":"event_msg","payload":{"type":"task_complete"}}
 "#;
 const PI: &str = r#"{"type":"session","version":3,"id":"p","timestamp":"2026-10-01T00:00:00Z","cwd":"/w/pi"}
@@ -135,9 +135,11 @@ fn events_facets_and_raw_line() {
     let mut idx = TraceIndex::open(&e.db).unwrap();
     idx.scan(&e.roots).unwrap();
     let x = by_source(&idx, "codex");
-    let events = idx.list_events(&x.id, &EventFilter::default()).unwrap();
+    let all_events = EventFilter { include_noise: true, ..Default::default() };
+    let events = idx.list_events(&x.id, &all_events).unwrap();
     assert_eq!(events.len(), 5);
     assert_eq!(events[3].depth, 2);
+    assert_eq!(idx.list_events(&x.id, &EventFilter::default()).unwrap().len(), 4, "session_meta is noise");
     let errs = idx.list_events(&x.id, &EventFilter { errors_only: true, ..Default::default() }).unwrap();
     assert_eq!(errs.iter().map(|e| e.line).collect::<Vec<_>>(), vec![3]);
     let shell = idx.list_events(&x.id, &EventFilter { tool: Some("shell".into()), ..Default::default() }).unwrap();
@@ -172,7 +174,7 @@ fn append_reindexes_only_new_lines_and_rewrite_reparses() {
     idx.index_file(pi_root, &path).unwrap();
     let p = by_source(&idx, "pi");
     assert_eq!(p.event_count, 4);
-    let events = idx.list_events(&p.id, &EventFilter::default()).unwrap();
+    let events = idx.list_events(&p.id, &EventFilter { include_noise: true, ..Default::default() }).unwrap();
     let lines: Vec<i64> = events.iter().map(|e| e.line).collect();
     assert_eq!(lines, vec![0, 1, 2, 3], "no duplicates");
     assert_eq!(p.title, "pi task", "title kept across append");
@@ -195,7 +197,7 @@ fn zstd_matches_plain() {
     idx.scan(&[plain, packed]).unwrap();
     let rows = all(&idx);
     assert_eq!(rows.len(), 2);
-    let ev = |r: &xai_grok_traces::SessionRow| idx.list_events(&r.id, &EventFilter::default()).unwrap();
+    let ev = |r: &xai_grok_traces::SessionRow| idx.list_events(&r.id, &EventFilter { include_noise: true, ..Default::default() }).unwrap();
     assert_eq!(ev(&rows[0]), ev(&rows[1]));
     assert_eq!((rows[0].title.clone(), rows[0].event_count), (rows[1].title.clone(), rows[1].event_count));
 }
@@ -261,29 +263,197 @@ fn preview_is_flat_and_clipped() {
     assert!(!ev[0].preview.contains('\n'));
 }
 
+/// `n` pi sessions of `lines` events each, file i `age(i)` seconds old.
+fn pi_sessions(e: &Env, from: usize, n: usize, lines: usize, age: impl Fn(usize) -> u64) {
+    for i in from..from + n {
+        let p = e.home.join(format!(".pi/agent/sessions/--w-pi--/bulk{i:03}.jsonl"));
+        let line = format!("{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"session {i} some text to index\"}}}}\n");
+        write(&p, &line.repeat(lines));
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(age(i));
+        fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+    }
+}
+
+fn pi_only(e: &Env) -> Vec<Root> {
+    let _ = fs::remove_file(e.home.join(".pi/agent/sessions/--w-pi--/p.jsonl"));
+    e.roots.iter().filter(|r| r.source == "pi").cloned().collect()
+}
+
+fn small(budget: u64) -> Limits {
+    Limits { budget, ceiling: budget * 2, ..Default::default() }
+}
+
+fn titles(idx: &TraceIndex) -> Vec<String> {
+    all(idx).into_iter().map(|s| s.title).collect()
+}
+
 #[test]
-fn over_cap_refuses_writes_and_reports_health() {
+fn past_budget_evicts_oldest_sessions_and_shrinks_the_file() {
+    let e = env();
+    let roots = pi_only(&e);
+    // File i is (i+1)*100s old: bulk000 is the newest.
+    pi_sessions(&e, 0, 40, 250, |i| (i as u64 + 1) * 100);
+    let mut big = TraceIndex::open(&e.db).unwrap();
+    big.scan(&roots).unwrap();
+    assert_eq!(all(&big).len(), 40);
+    drop(big);
+    let full = fs::metadata(&e.db).unwrap().len();
+    fs::remove_file(&e.db).unwrap();
+    let _ = fs::remove_file(format!("{}-wal", e.db.display()));
+    let _ = fs::remove_file(format!("{}-shm", e.db.display()));
+
+    let budget = full / 2;
+    let mut idx = TraceIndex::open_with_limits(&e.db, None, small(budget)).unwrap();
+    let report = idx.scan(&roots).unwrap();
+    assert_eq!(report.tripped, None);
+    assert_eq!(idx.health(), None, "eviction is not an alert");
+    assert!(idx.db_bytes() <= budget * 85 / 100 + 64 * 1024, "{} vs {budget}", idx.db_bytes());
+    assert!(fs::metadata(&e.db).unwrap().len() < full, "file shrank");
+    let kept = titles(&idx);
+    assert!(kept.len() < 40 && kept.len() > 5, "{}", kept.len());
+    assert!(kept.contains(&"session 0 some text to index".to_string()), "newest kept");
+    assert!(!kept.contains(&"session 39 some text to index".to_string()), "oldest evicted");
+    // The kept ones are exactly the newest k.
+    for i in 0..kept.len() {
+        assert!(kept.contains(&format!("session {i} some text to index")), "{i} in {kept:?}");
+    }
+    let events: i64 = idx.stats().unwrap().events;
+    assert_eq!(events, kept.len() as i64 * 250, "evicted sessions took their events");
+
+    // A rescan does not bring the evicted files back.
+    let again = idx.scan(&roots).unwrap();
+    assert_eq!(again.indexed, 0);
+    assert_eq!(titles(&idx).len(), kept.len());
+    assert_eq!(idx.health(), None);
+
+    // An evicted file that is written again returns.
+    let p = e.home.join(".pi/agent/sessions/--w-pi--/bulk039.jsonl");
+    let mut f = fs::OpenOptions::new().append(true).open(&p).unwrap();
+    f.write_all(b"{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"back\"}}\n").unwrap();
+    drop(f);
+    assert_eq!(idx.scan(&roots).unwrap().indexed, 1);
+    assert_eq!(idx.health(), None);
+}
+
+#[test]
+fn normal_growth_past_budget_never_sets_health() {
+    let e = env();
+    let roots = pi_only(&e);
+    let mut idx = TraceIndex::open_with_limits(&e.db, None, small(300 * 1024)).unwrap();
+    for round in 0..4 {
+        pi_sessions(&e, round * 10, 10, 100, |i| 10_000 - i as u64 * 10);
+        let r = idx.scan(&roots).unwrap();
+        assert_eq!(r.tripped, None);
+        assert_eq!(idx.health(), None, "round {round}");
+        let rc = xai_grok_traces::Receipt { source: "pi".into(), event: "Stop".into(), ..Default::default() };
+        for _ in 0..250 {
+            idx.record_receipt(&rc).unwrap();
+        }
+        assert_eq!(idx.health(), None);
+    }
+}
+
+fn expect_tripped(idx: &mut TraceIndex, roots: &[Root], e: &Env, needle: &str) {
+    let health = idx.health().unwrap_or_default();
+    assert!(health.starts_with("tripped: ") && health.contains(needle), "{health}");
+    assert!(health.contains("doctor --reset"), "{health}");
+    assert!(matches!(idx.scan(roots), Err(xai_grok_traces::Error::Tripped(_))));
+    let pi = roots.iter().find(|r| r.source == "pi").unwrap();
+    assert!(idx.index_file(pi, &e.home.join(".pi/agent/sessions/--w-pi--/bulk000.jsonl")).is_err());
+    let r = xai_grok_traces::Receipt { source: "claude".into(), event: "Stop".into(), ..Default::default() };
+    assert!(matches!(idx.record_receipt(&r), Err(xai_grok_traces::Error::Tripped(_))));
+}
+
+fn reset_and_resume(idx: &mut TraceIndex, roots: &[Root]) {
+    assert!(idx.reset_trip().unwrap().is_some());
+    assert_eq!(idx.health(), None);
+    idx.scan(roots).unwrap();
+}
+
+#[test]
+fn hard_ceiling_trips_and_reset_clears() {
+    let e = env();
+    let roots = pi_only(&e);
+    pi_sessions(&e, 0, 2, 10, |i| i as u64);
+    drop(TraceIndex::open(&e.db).unwrap());
+    grow(&e.db, 3 * 1024 * 1024);
+    let limits = Limits { budget: 1024 * 1024, ceiling: 2 * 1024 * 1024, ..Default::default() };
+    let mut idx = TraceIndex::open_with_limits(&e.db, None, limits).unwrap();
+    assert!(idx.health().unwrap().contains("hard ceiling — db 3MB > 2MB (2x the 1MB budget"));
+    assert!(matches!(idx.scan(&roots), Err(xai_grok_traces::Error::Tripped(_))));
+    expect_tripped(&mut idx, &roots, &e, "hard ceiling");
+    assert_eq!(all(&idx).len(), 0, "nothing was written");
+    drop(idx);
+    // Looked at it; the file is fine under roomier limits.
+    let mut idx = TraceIndex::open_with_limits(&e.db, None, small(64 * 1024 * 1024)).unwrap();
+    assert!(idx.health().is_some(), "trip persists across opens");
+    reset_and_resume(&mut idx, &roots);
+    assert_eq!(all(&idx).len(), 2);
+}
+
+#[test]
+fn growth_rate_trips_and_reset_clears() {
+    let e = env();
+    let roots = pi_only(&e);
+    let limits = Limits { growth_bytes: 200 * 1024, ..Default::default() };
+    let mut idx = TraceIndex::open_with_limits(&e.db, None, limits).unwrap();
+    pi_sessions(&e, 0, 1, 10, |_| 5);
+    assert_eq!(idx.scan(&roots).unwrap().tripped, None, "first scan is the baseline");
+    pi_sessions(&e, 1, 40, 250, |i| 100 + i as u64);
+    let report = idx.scan(&roots).unwrap();
+    let msg = report.tripped.unwrap();
+    assert!(msg.starts_with("tripped: growth rate — db grew ") && msg.contains("limit 0MB per 60 min"), "{msg}");
+    expect_tripped(&mut idx, &roots, &e, "growth rate");
+    reset_and_resume(&mut idx, &roots);
+}
+
+#[test]
+fn evicted_growth_still_counts() {
+    // A loop that is evicted as fast as it writes never makes the file bigger, but is still caught.
+    let e = env();
+    let roots = pi_only(&e);
+    let limits = Limits { budget: 300 * 1024, ceiling: 600 * 1024, growth_bytes: 400 * 1024, ..Default::default() };
+    let mut idx = TraceIndex::open_with_limits(&e.db, None, limits).unwrap();
+    pi_sessions(&e, 0, 1, 10, |_| 5);
+    idx.scan(&roots).unwrap();
+    let mut tripped = None;
+    for round in 0..6 {
+        pi_sessions(&e, 1 + round * 20, 20, 150, |i| 100_000 - i as u64);
+        tripped = tripped.or(match idx.scan(&roots) {
+            Ok(r) => r.tripped,
+            Err(e) => Some(e.to_string()),
+        });
+    }
+    assert!(tripped.clone().unwrap_or_default().contains("growth rate"), "{tripped:?}");
+}
+
+#[test]
+fn event_flood_trips_and_reset_clears() {
+    let e = env();
+    let roots = pi_only(&e);
+    let limits = Limits { max_events: 20, max_capped_files: 5, ..Default::default() };
+    let mut idx = TraceIndex::open_with_limits(&e.db, None, limits).unwrap();
+    pi_sessions(&e, 0, 5, 50, |i| i as u64);
+    let report = idx.scan(&roots).unwrap();
+    assert_eq!(report.tripped, None, "five capped files is still normal");
+    assert!(report.errors.is_empty());
+    let capped: Vec<_> = all(&idx).iter().map(|s| s.event_count).collect();
+    assert_eq!(capped, [20; 5], "capped files are still indexed to the cap");
+    pi_sessions(&e, 5, 6, 50, |i| 100 + i as u64);
+    let report = idx.scan(&roots).unwrap();
+    let msg = report.tripped.unwrap();
+    assert!(msg.contains("event flood — 6 files hit the 20-event cap in one scan (limit 5)"), "{msg}");
+    expect_tripped(&mut idx, &roots, &e, "event flood");
+    reset_and_resume(&mut idx, &roots);
+}
+
+#[test]
+fn db_is_created_with_incremental_auto_vacuum() {
     let e = env();
     drop(TraceIndex::open(&e.db).unwrap());
-    let small = fs::metadata(&e.db).unwrap().len();
-    grow(&e.db, xai_grok_traces::MAX_DB_BYTES + 1024 * 1024);
-    let mut idx = TraceIndex::open(&e.db).unwrap();
-    let err = idx.scan(&e.roots).unwrap_err();
-    assert!(matches!(err, xai_grok_traces::Error::OverCap { .. }), "{err}");
-    let health = idx.health().unwrap();
-    assert!(health.starts_with("over cap: 257MB / 256MB — writes paused; run grok-traces doctor"), "{health}");
-    let pi = e.roots.iter().find(|r| r.source == "pi").unwrap();
-    assert!(idx.index_file(pi, &e.home.join(".pi/agent/sessions/--w-pi--/p.jsonl")).is_err());
-    let r = xai_grok_traces::Receipt { source: "claude".into(), event: "Stop".into(), ..Default::default() };
-    assert!(matches!(idx.record_receipt(&r), Err(xai_grok_traces::Error::OverCap { .. })));
-    assert_eq!(all(&idx).len(), 0, "nothing was written");
-
-    drop(idx);
-    grow(&e.db, small);
-    let mut idx = TraceIndex::open(&e.db).unwrap();
-    idx.scan(&e.roots).unwrap();
-    assert_eq!(idx.health(), None, "cleared once under the cap");
-    assert_eq!(all(&idx).len(), 6);
+    let c = rusqlite::Connection::open(&e.db).unwrap();
+    let mode: i64 = c.query_row("PRAGMA auto_vacuum", [], |r| r.get(0)).unwrap();
+    assert_eq!(mode, 2);
 }
 
 #[test]
@@ -299,8 +469,8 @@ fn old_schema_is_replaced_not_migrated() {
     idx.scan(&e.roots).unwrap();
     assert_eq!(all(&idx).len(), 6);
     let stats = idx.stats().unwrap();
-    assert_eq!(stats.schema_version.as_deref(), Some("4"));
-    assert_eq!(stats.parser_version.as_deref(), Some("4"));
+    assert_eq!(stats.schema_version.as_deref(), Some("6"));
+    assert_eq!(stats.parser_version.as_deref(), Some("5"));
     let names: Vec<String> = fs::read_dir(e.db.parent().unwrap()).unwrap().map(|d| d.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert!(names.iter().all(|n| !n.contains(".old.")), "old db removed: {names:?}");
     assert!(!names.iter().any(|n| n.contains(".corrupt.")));

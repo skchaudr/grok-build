@@ -1,4 +1,4 @@
-//! `grok-traces hook <source> | scan | list [--limit N] [--json] | doctor`.
+//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | events <id> --json [--noise] [--limit N] | raw <id> <line> | version | doctor [--reset]`.
 //!
 //! `hook` runs once per harness event: it must be fast, silent and always
 //! exit 0 so it can never block an agent.
@@ -9,7 +9,8 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use xai_grok_traces::hook::{MAX_STDIN_BYTES, extract, ingest};
-use xai_grok_traces::{Error, MAX_DB_BYTES, SessionFilter, TraceIndex, default_db_path, user_roots};
+use xai_grok_traces::remote::{event_to_json, session_to_json};
+use xai_grok_traces::{EventFilter, SessionFilter, TraceIndex, default_db_path, user_roots};
 
 const HOOK_BUSY: Duration = Duration::from_millis(250);
 const NOTIFY_EVERY: Duration = Duration::from_secs(3600);
@@ -20,9 +21,15 @@ fn main() -> ExitCode {
         Some("hook") => hook(args.get(1).map_or("unknown", String::as_str)),
         Some("scan") => finish(scan()),
         Some("list") => finish(list(&args[1..])),
-        Some("doctor") => finish(doctor()),
+        Some("doctor") => finish(doctor(&args[1..])),
+        Some("events") => finish(events(&args[1..])),
+        Some("raw") => raw(&args[1..]),
+        Some("version") => {
+            println!("grok-traces {} remote=1", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
         _ => {
-            eprintln!("usage: grok-traces hook <source> | scan | list [--limit N] [--json] | doctor");
+            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | events <id> --json [--noise] [--limit N] | raw <id> <line> | version | doctor [--reset]");
             ExitCode::from(2)
         }
     }
@@ -40,7 +47,15 @@ fn finish(r: Result<bool, Box<dyn std::error::Error>>) -> ExitCode {
 }
 
 fn hook(source: &str) -> ExitCode {
-    // A panic must not turn into a failing hook.
+    // A panic must not turn into a failing hook. Release builds use panic = "abort", so
+    // catch_unwind cannot see it: the hook itself exits 0 (after the cursor reply).
+    let cursor = source == "cursor";
+    std::panic::set_hook(Box::new(move |_| {
+        if cursor {
+            let _ = io::stdout().write_all(b"{}\n");
+        }
+        std::process::exit(0);
+    }));
     let run = std::panic::catch_unwind(|| {
         let mut buf = Vec::new();
         let mut stdin = io::stdin().lock();
@@ -49,16 +64,23 @@ fn hook(source: &str) -> ExitCode {
         let receipt = extract(source, &buf);
         drop(buf);
         let db = default_db_path();
-        let result = TraceIndex::open_with(&db, Some(HOOK_BUSY)).and_then(|mut idx| ingest(&mut idx, &user_roots(), receipt));
-        if let Err(e) = result {
-            eprintln!("grok-traces hook {source}: {e}");
-            if matches!(e, Error::OverCap { .. }) {
-                notify_once(db.parent().unwrap_or(Path::new(".")), &e.to_string());
+        match TraceIndex::open_with(&db, Some(HOOK_BUSY)) {
+            Ok(mut idx) => {
+                if let Err(e) = ingest(&mut idx, &user_roots(), receipt) {
+                    let _ = writeln!(io::stderr(), "grok-traces hook {source}: {e}");
+                }
+                // Only a runaway tripwire is health; eviction never alerts.
+                if let Some(msg) = idx.health() {
+                    notify_once(db.parent().unwrap_or(Path::new(".")), &msg);
+                }
+            }
+            Err(e) => {
+                let _ = writeln!(io::stderr(), "grok-traces hook {source}: {e}");
             }
         }
     });
     if run.is_err() {
-        eprintln!("grok-traces hook {source}: internal error");
+        let _ = writeln!(io::stderr(), "grok-traces hook {source}: internal error");
     }
     if source == "cursor" {
         let _ = io::stdout().write_all(b"{}\n");
@@ -68,7 +90,7 @@ fn hook(source: &str) -> ExitCode {
 
 /// macOS notification, at most once an hour (stamp file next to the db).
 fn notify_once(dir: &Path, msg: &str) {
-    let stamp = dir.join("overcap.notified");
+    let stamp = dir.join("tripped.notified");
     let fresh = std::fs::metadata(&stamp)
         .and_then(|m| m.modified())
         .ok()
@@ -100,43 +122,95 @@ fn scan() -> Result<bool, Box<dyn std::error::Error>> {
     for (path, e) in report.errors.iter().take(5) {
         println!("  error {}: {e}", path.display());
     }
-    Ok(true)
+    if let Some(msg) = &report.tripped {
+        println!("  {msg}");
+    }
+    Ok(report.tripped.is_none())
 }
 
 fn list(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
-    let mut limit = 50;
+    let mut filter = SessionFilter { limit: 50, ..Default::default() };
     let mut it = args.iter();
     while let Some(a) = it.next() {
+        let mut num = |name: &str| -> Result<i64, String> { it.next().and_then(|v| v.parse().ok()).ok_or(format!("{name} needs a number")) };
         match a.as_str() {
             "--json" => {}
-            "--limit" => limit = it.next().and_then(|v| v.parse().ok()).ok_or("--limit needs a number")?,
+            "--limit" => filter.limit = num("--limit")?.max(1) as usize,
+            "--since" => filter.since_ms = Some(num("--since")?),
+            "--active" => filter.active_only = true,
+            "--roots" => filter.roots_only = true,
             other => return Err(format!("unknown flag {other}").into()),
         }
     }
     let idx = TraceIndex::open(&default_db_path())?;
     let mut out = io::stdout().lock();
-    for s in idx.list_sessions(&SessionFilter { limit, ..Default::default() })? {
-        let line = serde_json::json!({
-            "id": s.id, "source": s.source, "title": s.title, "status": s.status.as_str(),
-            "updated_at": s.updated_at, "path": s.file_path,
-        });
-        writeln!(out, "{line}")?;
+    for s in idx.list_sessions(&filter)? {
+        writeln!(out, "{}", session_to_json(&s))?;
     }
     Ok(true)
+}
+
+fn events(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
+    let id = args.first().ok_or("events needs a session id")?;
+    let mut filter = EventFilter::default();
+    let mut it = args[1..].iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--json" => {}
+            "--noise" => filter.include_noise = true,
+            "--limit" => filter.limit = it.next().and_then(|v| v.parse().ok()).ok_or("--limit needs a number")?,
+            other => return Err(format!("unknown flag {other}").into()),
+        }
+    }
+    let idx = TraceIndex::open(&default_db_path())?;
+    let mut out = io::stdout().lock();
+    for e in idx.list_events(id, &filter)? {
+        writeln!(out, "{}", event_to_json(&e))?;
+    }
+    Ok(true)
+}
+
+/// Prints the raw source line. Exit 3 = no such line.
+fn raw(args: &[String]) -> ExitCode {
+    let run = || -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let id = args.first().ok_or("raw needs a session id and a line number")?;
+        let line: i64 = args.get(1).and_then(|v| v.parse().ok()).ok_or("raw needs a line number")?;
+        Ok(TraceIndex::open(&default_db_path())?.raw_line(id, line)?)
+    };
+    match run() {
+        Ok(Some(l)) => {
+            println!("{l}");
+            ExitCode::SUCCESS
+        }
+        Ok(None) => ExitCode::from(3),
+        Err(e) => {
+            eprintln!("grok-traces: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn when(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms).map_or_else(|| ms.to_string(), |t| t.to_rfc3339())
 }
 
-/// Exit 1 unless the index is healthy.
-fn doctor() -> Result<bool, Box<dyn std::error::Error>> {
+/// Exit 1 unless the index is healthy. `--reset` first clears a tripwire (after you have looked).
+fn doctor(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
     let idx = TraceIndex::open(&default_db_path())?;
+    match args.first().map(String::as_str) {
+        None => {}
+        Some("--reset") => match idx.reset_trip()? {
+            Some(was) => println!("reset    cleared: {was}"),
+            None => println!("reset    nothing was tripped"),
+        },
+        Some(other) => return Err(format!("unknown flag {other}").into()),
+    }
     let mb = |b: u64| b / (1024 * 1024);
     let stats = idx.stats()?;
     let health = idx.health();
     println!("db       {}", idx.db_path().display());
-    println!("size     {}MB / {}MB (db + wal)", mb(idx.db_bytes()), mb(MAX_DB_BYTES));
+    let l = idx.limits();
+    println!("size     {}MB (db + wal); budget {}MB (oldest sessions evicted), hard ceiling {}MB", mb(idx.db_bytes()), mb(l.budget), mb(l.ceiling));
     println!("health   {}", health.as_deref().unwrap_or("ok"));
     println!(
         "version  schema={} parser={}",

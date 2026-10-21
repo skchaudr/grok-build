@@ -280,7 +280,25 @@ pub fn map_event(ty: &str, item_kind: Option<&str>, created_at: i64, data: &Valu
     }
     e.duration_ms = item.get("durationMs").and_then(Value::as_f64);
     let status = item.get("status").and_then(Value::as_str);
-    e.error_flag = status == Some("failed")
+    if ty == "item/completed" && TOOL_KINDS.contains(&kind) {
+        let name = tool_name(kind, item);
+        e.detail = match kind {
+            "toolCall" => {
+                let args = match item.get("arguments") {
+                    Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone())),
+                    Some(v) => v.clone(),
+                    None => Value::Null,
+                };
+                crate::classify::call_detail(name, &args)
+            }
+            "fileRead" => Some(crate::classify::short_path(&item_text(kind, item))).filter(|p| !p.is_empty()),
+            "fileChange" => item_text(kind, item).lines().next().map(crate::classify::short_path),
+            _ => crate::classify::first_line(&item_text(kind, item)),
+        };
+        e.tool = Some(name.to_string());
+    }
+    e.error_flag = matches!(ty, "provider/error" | "system/error")
+        || status == Some("failed")
         || (ty == "item/completed" && non_empty(item.get("error")))
         || (ty == "turn/completed" && (non_empty(data.get("error")) || matches!(data.get("status").and_then(Value::as_str), Some("failed" | "error"))));
     e

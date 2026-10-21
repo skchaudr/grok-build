@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use xai_sqlite_journal::JournalMode;
 
 use crate::lines;
+use crate::links::{HEADER_LINES, Links, file_sig, grok_links, grok_summary, header_links, path_links, write_links};
 use crate::normalize::{Kind, NormalizedEvent, Role, clip, normalize};
 use crate::roots::{Format, MAX_FILES, Root, discover, resolve};
 
@@ -20,13 +21,59 @@ mod bb_index;
 
 use crate::bb::{Bb, BbThread, thread_key};
 
-pub const PARSER_VERSION: i64 = 4;
+pub const PARSER_VERSION: i64 = 5;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
-pub const SCHEMA_VERSION: i64 = 4;
-/// Writes pause once the db plus its `-wal` pass this.
-pub const MAX_DB_BYTES: u64 = 256 * 1024 * 1024;
+pub const SCHEMA_VERSION: i64 = 6;
+/// Size the index may use (db + `-wal`). Passing it is normal: the oldest sessions are evicted
+/// down to `EVICT_TO_PERCENT` of it. It is a cache of pointers, so this is not an alert.
+pub const SIZE_BUDGET: u64 = 256 * 1024 * 1024;
+/// Eviction stops at this share of the budget, so it runs rarely rather than on every write.
+pub const EVICT_TO_PERCENT: u64 = 85;
+/// Eviction failed to keep the db under this (2x budget): something is wrong, writes pause.
+pub const HARD_CEILING: u64 = 2 * SIZE_BUDGET;
+/// Gross growth (size plus bytes evicted) within `GROWTH_WINDOW_MS` that trips: a feedback loop.
+pub const GROWTH_LIMIT: u64 = 128 * 1024 * 1024;
+pub const GROWTH_WINDOW_MS: i64 = 3_600_000;
 /// Events indexed per file; the rest of a runaway file is left to the source.
 pub const MAX_EVENTS_PER_FILE: usize = 200_000;
+/// More files than this hitting the event cap in one scan trips.
+pub const MAX_CAPPED_FILES: usize = 5;
+/// Growth is sampled on every Nth hook receipt (and at the end of each scan).
+pub(crate) const SAMPLE_EVERY: i64 = 100;
+const MAX_SAMPLES: usize = 100;
+const MIN_SAMPLE_GAP_MS: i64 = 60_000;
+/// Sessions deleted per eviction transaction.
+const EVICT_BATCH: i64 = 25;
+
+/// Thresholds; `Default` is production. Tests pass small ones instead of building huge files.
+#[derive(Clone, Debug)]
+pub struct Limits {
+    pub budget: u64,
+    pub ceiling: u64,
+    pub growth_bytes: u64,
+    pub growth_window_ms: i64,
+    pub max_events: usize,
+    pub max_capped_files: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            budget: SIZE_BUDGET,
+            ceiling: HARD_CEILING,
+            growth_bytes: GROWTH_LIMIT,
+            growth_window_ms: GROWTH_WINDOW_MS,
+            max_events: MAX_EVENTS_PER_FILE,
+            max_capped_files: MAX_CAPPED_FILES,
+        }
+    }
+}
+
+fn mb(b: u64) -> u64 {
+    b / (1024 * 1024)
+}
+
+const TRIP_HELP: &str = "writes paused; run grok-traces doctor, then doctor --reset";
 const TITLE_CHARS: usize = 180;
 
 const SCHEMA: &str = "
@@ -35,18 +82,24 @@ CREATE TABLE IF NOT EXISTS trace_roots (id TEXT PRIMARY KEY, source_id TEXT NOT 
 CREATE TABLE IF NOT EXISTS trace_files (path TEXT PRIMARY KEY, root_id TEXT NOT NULL, source_id TEXT NOT NULL,
   format TEXT NOT NULL, size_bytes INTEGER NOT NULL, mtime_ms INTEGER NOT NULL, indexed_bytes INTEGER NOT NULL DEFAULT 0,
   indexed_lines INTEGER NOT NULL DEFAULT 0, parser_version INTEGER NOT NULL DEFAULT 0, content_hash TEXT,
-  session_id TEXT NOT NULL, indexed_at INTEGER NOT NULL, parse_error TEXT);
+  session_id TEXT NOT NULL, indexed_at INTEGER NOT NULL, parse_error TEXT, aux_sig TEXT);
 CREATE TABLE IF NOT EXISTS trace_sessions (sk INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, source_id TEXT NOT NULL,
   title TEXT NOT NULL, file_path TEXT NOT NULL UNIQUE, model TEXT, cwd TEXT, started_at INTEGER, updated_at INTEGER,
   event_count INTEGER NOT NULL DEFAULT 0, user_count INTEGER NOT NULL DEFAULT 0, assistant_count INTEGER NOT NULL DEFAULT 0,
   tool_count INTEGER NOT NULL DEFAULT 0, error_count INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER, output_tokens INTEGER,
-  duration_ms INTEGER, status TEXT NOT NULL DEFAULT 'unknown', file_size_bytes INTEGER NOT NULL DEFAULT 0);
+  duration_ms INTEGER, status TEXT NOT NULL DEFAULT 'unknown', file_size_bytes INTEGER NOT NULL DEFAULT 0,
+  -- Dispatch tree: `native_id` is how the harness names this session (a path under the root, a uuid, a thread id),
+  -- `parent_native` the same for its dispatcher. Both resolve within one source at query time, so scan order is free.
+  native_id TEXT, parent_native TEXT, label TEXT, agent_type TEXT, done INTEGER NOT NULL DEFAULT 0,
+  -- What the session is doing: last meaningful event (`Tool: arg` or assistant text), its time, and whether it ended in failure.
+  signal_count INTEGER NOT NULL DEFAULT 0, now_text TEXT, last_event_at INTEGER, failed INTEGER NOT NULL DEFAULT 0);
 -- Event types, titles and models are few and repeat on every row, so rows store ids into this table.
 CREATE TABLE IF NOT EXISTS trace_names (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
 -- kind/role are `Kind::code`/`Role::code`. No cwd here: it is session-level. `preview` is '' when it equals the
 -- title. `byte_offset` is kept only on every `CHECKPOINT_EVERY`th line; a raw line is found by scanning on from there.
 CREATE TABLE IF NOT EXISTS trace_events (sk INTEGER NOT NULL, line_number INTEGER NOT NULL, byte_offset INTEGER, type_id INTEGER NOT NULL, kind INTEGER NOT NULL, role INTEGER, title_id INTEGER NOT NULL, preview TEXT NOT NULL,
   timestamp INTEGER, depth INTEGER NOT NULL DEFAULT 0, model_id INTEGER, is_error INTEGER NOT NULL DEFAULT 0,
+  noise INTEGER NOT NULL DEFAULT 0, detail TEXT,
   PRIMARY KEY (sk, line_number)) WITHOUT ROWID;
 -- Most events carry none of these; only the ones that do get a row.
 CREATE TABLE IF NOT EXISTS trace_event_usage (sk INTEGER NOT NULL, line_number INTEGER NOT NULL, duration_ms INTEGER,
@@ -57,21 +110,27 @@ CREATE TABLE IF NOT EXISTS trace_receipts (id INTEGER PRIMARY KEY, at_ms INTEGER
 CREATE INDEX IF NOT EXISTS trace_receipts_session ON trace_receipts(session_id, id);
 CREATE INDEX IF NOT EXISTS trace_sessions_updated ON trace_sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS trace_sessions_source ON trace_sessions(source_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS trace_sessions_native ON trace_sessions(source_id, native_id);
+CREATE INDEX IF NOT EXISTS trace_sessions_parent ON trace_sessions(source_id, parent_native);
 ";
 
 #[derive(Debug)]
 pub enum Error {
     Sqlite(rusqlite::Error),
     Io(io::Error),
-    /// The db is past `MAX_DB_BYTES`; writes are refused until it is rebuilt.
-    OverCap { bytes: u64 },
+    /// A runaway tripwire fired (see `Limits`); writes are refused until `reset_trip`.
+    Tripped(String),
     /// A path that is not a trace source of the given root.
     Rejected(PathBuf),
 }
 
-pub fn over_cap_message(bytes: u64) -> String {
-    let mb = |b: u64| b / (1024 * 1024);
-    format!("over cap: {}MB / {}MB — writes paused; run grok-traces doctor", mb(bytes), mb(MAX_DB_BYTES))
+fn ceiling_message(bytes: u64, l: &Limits) -> String {
+    format!(
+        "tripped: hard ceiling — db {}MB > {}MB (2x the {}MB budget; eviction could not keep up) — {TRIP_HELP}",
+        mb(bytes),
+        mb(l.ceiling),
+        mb(l.budget)
+    )
 }
 
 impl std::fmt::Display for Error {
@@ -79,7 +138,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Sqlite(e) => write!(f, "sqlite: {e}"),
             Error::Io(e) => write!(f, "io: {e}"),
-            Error::OverCap { bytes } => f.write_str(&over_cap_message(*bytes)),
+            Error::Tripped(msg) => f.write_str(msg),
             Error::Rejected(p) => write!(f, "not a trace source: {}", p.display()),
         }
     }
@@ -193,6 +252,8 @@ pub struct ScanReport {
     pub roots: Vec<RootReport>,
     pub indexed: usize,
     pub errors: Vec<(PathBuf, String)>,
+    /// Set when this scan tripped a runaway tripwire (also in `TraceIndex::health`).
+    pub tripped: Option<String>,
 }
 
 /// One unit of scan work, ordered by recency.
@@ -219,6 +280,7 @@ struct FileRow {
     indexed_lines: i64,
     parser_version: i64,
     content_hash: Option<String>,
+    aux_sig: Option<String>,
 }
 
 #[derive(Default)]
@@ -236,6 +298,25 @@ struct Aggregate {
     errors: i64,
     input: Option<i64>,
     output: Option<i64>,
+    /// A title the harness recorded itself; wins over the first user message.
+    session_title: Option<String>,
+    /// Non-noise events.
+    signals: i64,
+    /// Last meaningful event: `Tool: arg` or assistant text.
+    now: Option<String>,
+    /// Newest timestamp among non-noise events.
+    last_signal_ts: Option<i64>,
+    /// The last non-noise event is an error: nothing happened after it.
+    failed: bool,
+}
+
+/// `Tool: arg`, clipped to the preview length.
+fn now_line(tool: &str, detail: Option<&str>) -> String {
+    let line = match detail {
+        Some(d) => format!("{tool}: {d}"),
+        None => tool.to_string(),
+    };
+    crate::normalize::preview(&line)
 }
 
 impl Aggregate {
@@ -256,9 +337,30 @@ impl Aggregate {
             self.first_ts = Some(self.first_ts.map_or(ts, |f| f.min(ts)));
             self.last_ts = Some(self.last_ts.map_or(ts, |l| l.max(ts)));
         }
+        if !e.noise {
+            self.signals += 1;
+            if let Some(ts) = e.timestamp_ms {
+                self.last_signal_ts = Some(self.last_signal_ts.map_or(ts, |l| l.max(ts)));
+            }
+            if e.role == Some(Role::Tool) || e.tool.is_some() {
+                self.now = Some(now_line(e.tool.as_deref().unwrap_or(&e.title), e.detail.as_deref()));
+            } else if e.role == Some(Role::Assistant) && e.kind == Kind::Message && e.text != e.title {
+                self.now = Some(e.preview.clone());
+            }
+        }
+        // An error stands until anything else happens (a later turn, call or prompt).
+        if e.is_error() {
+            self.failed = true;
+        } else if !e.noise {
+            self.failed = false;
+        }
+        if let Some(t) = &e.session_title {
+            self.session_title = Some(t.clone());
+        }
         // Injected context (`<user_info>`, `<system-reminder>`, `<command-name>`) is not a title.
         if self.user_title.is_none()
             && e.role == Some(Role::User)
+            && !e.noise
             && !e.text.is_empty()
             && !e.text.trim_start().starts_with('<')
         {
@@ -283,7 +385,7 @@ impl Aggregate {
 }
 
 const INSERT_EVENT: &str = "INSERT OR REPLACE INTO trace_events (sk, line_number, byte_offset, type_id, kind, role, title_id,
-  preview, timestamp, depth, model_id, is_error) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)";
+  preview, timestamp, depth, model_id, is_error, noise, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 const INSERT_USAGE: &str = "INSERT OR REPLACE INTO trace_event_usage (sk, line_number, duration_ms, input_tokens, output_tokens,
   turn, step) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 /// Every Nth line keeps its byte offset.
@@ -336,11 +438,14 @@ fn insert_event(
         e.kind.code(),
         e.role.map(Role::code),
         names.id(conn, &e.title)?,
-        if e.preview == e.title { "" } else { e.preview.as_str() },
+        // A call's detail already says what it did; its raw arguments are not kept.
+        if e.preview == e.title || (e.role == Some(Role::Tool) && e.detail.is_some()) { "" } else { e.preview.as_str() },
         e.timestamp_ms,
         e.depth,
         model,
         e.is_error(),
+        e.noise,
+        e.detail,
     ])?;
     let extra = [e.duration_ms, e.input_tokens, e.output_tokens, e.turn, e.step].map(round);
     if extra.iter().any(Option::is_some) {
@@ -365,17 +470,82 @@ fn is_terminal(event_type: &str) -> bool {
     ["complete", "turnend", "sessionend", "runend"].iter().any(|w| squashed.contains(w))
 }
 
-/// Grok's `chat_history.jsonl` carries no cwd; its sibling `summary.json` does.
-fn grok_cwd(file: &Path) -> Option<String> {
-    let text = fs::read_to_string(file.with_file_name("summary.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.pointer("/info/cwd")?.as_str().map(str::to_string)
+/// What `TraceIndex::peek` found.
+enum Peek {
+    Ready,
+    /// No tables yet: new, or just quarantined.
+    Empty,
+    /// Written by an older schema or parser.
+    Stale,
+    /// Written by a newer one; leave it alone.
+    Newer(String),
+}
+
+/// The most a process waits for another's rebuild before giving up (a hook then skips).
+const REBUILD_WAIT: Duration = Duration::from_secs(2);
+/// A lock this old belongs to a crashed process.
+const LOCK_STALE: Duration = Duration::from_secs(60);
+
+/// `<db>.rebuild.lock`, created exclusively; removed on drop.
+struct RebuildLock(PathBuf);
+
+impl RebuildLock {
+    fn path(db: &Path) -> PathBuf {
+        PathBuf::from(format!("{}.rebuild.lock", db.display()))
+    }
+
+    /// Waits (bounded) while someone else holds the lock; a stale lock does not count.
+    fn wait_free(db: &Path) {
+        let path = Self::path(db);
+        let deadline = std::time::Instant::now() + REBUILD_WAIT;
+        while std::time::Instant::now() < deadline {
+            let held = fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age <= LOCK_STALE);
+            if !held {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn acquire(db: &Path) -> io::Result<Self> {
+        let path = Self::path(db);
+        let deadline = std::time::Instant::now() + REBUILD_WAIT;
+        loop {
+            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut f) => {
+                    let _ = io::Write::write_all(&mut f, std::process::id().to_string().as_bytes());
+                    return Ok(Self(path));
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    let stale = fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > LOCK_STALE);
+                    if stale {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(io::Error::new(io::ErrorKind::WouldBlock, "index is being rebuilt by another process"));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl Drop for RebuildLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 pub struct TraceIndex {
     conn: Connection,
     /// The db file actually opened (per-host on network mounts).
     db: PathBuf,
+    limits: Limits,
+    /// Files that hit the event cap since the last scan began.
+    capped_files: usize,
 }
 
 impl TraceIndex {
@@ -385,32 +555,72 @@ impl TraceIndex {
 
     /// `busy`: lock wait for short-lived writers (hooks); `None` keeps the shared default.
     pub fn open_with(path: &Path, busy: Option<Duration>) -> Result<Self> {
+        Self::open_with_limits(path, busy, Limits::default())
+    }
+
+    pub fn open_with_limits(path: &Path, busy: Option<Duration>, limits: Limits) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let mode = JournalMode::for_db_path(path);
         let db = mode.effective_db_path(path);
-        // At most one quarantine or version rebuild, then a fresh file.
-        for _ in 0..2 {
-            match Self::try_open(mode, &db, busy) {
-                Ok(Some(idx)) => return Ok(idx),
-                Ok(None) => {
-                    tracing::info!(?db, "traces: index schema changed, rebuilding");
-                    retire(&db);
+        // Looking is read-only and never sets a journal mode, so it cannot disturb a rebuild in
+        // progress. Building, quarantining and version rebuilds are serialized by a lock file (see
+        // `rebuild`). A few rounds, then an error rather than a loop.
+        let mut last: Option<rusqlite::Error> = None;
+        for _ in 0..6 {
+            match Self::peek(&db, busy) {
+                Ok(Peek::Ready) => {
+                    let mut idx = Self::attach(mode, &db, busy)?;
+                    idx.limits = limits;
+                    return Ok(idx);
                 }
-                Err(e) if is_unusable(&e) => {
-                    tracing::warn!(?db, %e, "traces: index unusable, rebuilding");
-                    quarantine(&db);
+                Ok(Peek::Newer(msg)) => return Err(io::Error::other(msg).into()),
+                Ok(Peek::Stale | Peek::Empty) => Self::rebuild(mode, &db, busy)?,
+                Err(e) if is_unusable(&e) => Self::rebuild(mode, &db, busy)?,
+                Err(e) => {
+                    // Mid-rebuild states look like I/O errors or locks: wait for the lock, look again.
+                    last = Some(e);
+                    RebuildLock::wait_free(&db);
+                    std::thread::sleep(Duration::from_millis(25));
                 }
-                Err(e) => return Err(e.into()),
             }
         }
-        Ok(Self::try_open(mode, &db, busy)?.ok_or_else(|| io::Error::other("index rebuild did not stick"))?)
+        Err(last.map_or_else(|| io::Error::other("index rebuild did not stick").into(), Error::from))
     }
 
-    /// `None` when the db was written by another schema or parser version.
-    fn try_open(mode: JournalMode, db: &Path, busy: Option<Duration>) -> rusqlite::Result<Option<Self>> {
-        let conn = match busy {
+    /// Reads the version keys with a plain connection: no pragma, no write.
+    fn peek(db: &Path, busy: Option<Duration>) -> rusqlite::Result<Peek> {
+        let conn = Connection::open(db)?;
+        conn.busy_timeout(busy.unwrap_or(Duration::from_secs(5)))?;
+        // No integrity scan here: it is O(db) and the pager opens on the UI thread.
+        // A garbage file fails on the first query below.
+        let has_meta = conn
+            .query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trace_meta'", [], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !has_meta {
+            return Ok(Peek::Empty);
+        }
+        let stored = |key: &str| -> Option<i64> {
+            conn.query_row("SELECT value FROM trace_meta WHERE key = ?1", [key], |r| r.get::<_, String>(0)).ok()?.parse().ok()
+        };
+        let (schema, parser) = (stored("schema_version"), stored("parser_version"));
+        if schema == Some(SCHEMA_VERSION) && parser == Some(PARSER_VERSION) {
+            return Ok(Peek::Ready);
+        }
+        // An older index is replaced. A newer one belongs to a newer binary: replacing it would make
+        // two versions rebuild each other forever, so this one steps aside.
+        if schema > Some(SCHEMA_VERSION) || parser > Some(PARSER_VERSION) {
+            return Ok(Peek::Newer(format!(
+                "index is from a newer grok-traces (schema {schema:?}, parser {parser:?}; this is {SCHEMA_VERSION}, {PARSER_VERSION}); not touching it"
+            )));
+        }
+        Ok(Peek::Stale)
+    }
+
+    fn connect(mode: JournalMode, db: &Path, busy: Option<Duration>) -> rusqlite::Result<Connection> {
+        Ok(match busy {
             None => mode.open(db)?,
             Some(wait) => {
                 let conn = Connection::open(db)?;
@@ -418,27 +628,43 @@ impl TraceIndex {
                 mode.apply(&conn)?;
                 conn
             }
-        };
-        // No integrity scan here: it is O(db) and the pager opens on the UI thread.
-        // A garbage file fails on the first query below.
-        let has_meta = conn
-            .query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trace_meta'", [], |_| Ok(()))
-            .optional()?
-            .is_some();
-        let idx = Self { conn, db: db.to_path_buf() };
-        if has_meta {
-            let same = |key: &str, want: i64| idx.meta(key).ok().flatten().and_then(|v| v.parse::<i64>().ok()) == Some(want);
-            if !same("schema_version", SCHEMA_VERSION) || !same("parser_version", PARSER_VERSION) {
-                return Ok(None);
+        })
+    }
+
+    /// Opens a db that `peek` found current.
+    fn attach(mode: JournalMode, db: &Path, busy: Option<Duration>) -> Result<Self> {
+        let conn = Self::connect(mode, db, busy)?;
+        Ok(Self { conn, db: db.to_path_buf(), limits: Limits::default(), capped_files: 0 })
+    }
+
+    /// Creates, replaces or quarantines the db while holding the rebuild lock. Whoever loses the race
+    /// waits (at most `REBUILD_WAIT`) and finds the finished db; it never builds a second one over it.
+    fn rebuild(mode: JournalMode, db: &Path, busy: Option<Duration>) -> Result<()> {
+        let _lock = RebuildLock::acquire(db)?;
+        match Self::peek(db, busy) {
+            Ok(Peek::Ready | Peek::Newer(_)) => return Ok(()),
+            Ok(Peek::Stale) => {
+                tracing::info!(?db, "traces: index schema changed, rebuilding");
+                retire(db);
             }
-        } else {
-            idx.conn.execute_batch(&format!(
-                "BEGIN; {SCHEMA}
-                 INSERT INTO trace_meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}'), ('parser_version', '{PARSER_VERSION}');
-                 COMMIT;"
-            ))?;
+            Ok(Peek::Empty) => {}
+            Err(e) if is_unusable(&e) => {
+                tracing::warn!(?db, %e, "traces: index unusable, rebuilding");
+                quarantine(db);
+            }
+            Err(e) => return Err(e.into()),
         }
-        Ok(Some(idx))
+        let conn = Self::connect(mode, db, busy)?;
+        // Lets eviction give pages back to the filesystem. The journal mode has already written the
+        // header, so the mode only takes effect through a VACUUM (free here: the db is empty).
+        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        conn.execute_batch("VACUUM;")?;
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA}
+             INSERT OR REPLACE INTO trace_meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}'), ('parser_version', '{PARSER_VERSION}');
+             COMMIT;"
+        ))?;
+        Ok(())
     }
 
     pub fn db_path(&self) -> &Path {
@@ -463,30 +689,172 @@ impl TraceIndex {
         Ok(())
     }
 
-    /// Refuses a write batch while the db is over `MAX_DB_BYTES`, recording why in
-    /// `trace_meta.health`; clears the record once under the cap again.
-    pub fn check_cap(&self) -> Result<()> {
-        let bytes = self.db_bytes();
-        if bytes > MAX_DB_BYTES {
-            let msg = over_cap_message(bytes);
-            if self.meta("health").ok().flatten().as_deref() != Some(msg.as_str()) {
-                let _ = self.set_meta("health", &msg);
-            }
-            return Err(Error::OverCap { bytes });
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
+    /// Gate for every write. A tripped index refuses. Past the budget the oldest sessions are
+    /// evicted first (silently); only if the db is still past the hard ceiling does it trip.
+    pub fn check_writable(&self) -> Result<()> {
+        if let Some(msg) = self.meta("tripped")? {
+            return Err(Error::Tripped(msg));
         }
-        if self.meta("health")?.is_some_and(|h| h != "ok") {
-            self.set_meta("health", "ok")?;
+        if self.db_bytes() > self.limits.budget {
+            self.evict_if_over()?;
+            let bytes = self.db_bytes();
+            if bytes > self.limits.ceiling {
+                return Err(self.trip(ceiling_message(bytes, &self.limits)));
+            }
         }
         Ok(())
     }
 
-    /// Why the index is unhealthy, or `None` when it is fine.
+    /// Records a tripwire; stays until `reset_trip`.
+    fn trip(&self, msg: String) -> Error {
+        let _ = self.set_meta("tripped", &msg);
+        Error::Tripped(msg)
+    }
+
+    /// Why writes are paused, or `None`. Eviction never shows up here.
     pub fn health(&self) -> Option<String> {
-        let bytes = self.db_bytes();
-        if bytes > MAX_DB_BYTES {
-            return Some(over_cap_message(bytes));
+        if let Some(msg) = self.meta("tripped").ok().flatten() {
+            return Some(msg);
         }
-        self.meta("health").ok().flatten().filter(|h| h != "ok")
+        let bytes = self.db_bytes();
+        (bytes > self.limits.ceiling).then(|| ceiling_message(bytes, &self.limits))
+    }
+
+    /// Clears a trip (and the growth baseline) after the user has looked; returns what was cleared.
+    /// Then evicts if over budget, so a ceiling trip can clear.
+    pub fn reset_trip(&self) -> Result<Option<String>> {
+        let was = self.meta("tripped")?;
+        self.conn.execute("DELETE FROM trace_meta WHERE key IN ('tripped', 'growth_samples')", [])?;
+        self.evict_if_over()?;
+        Ok(was)
+    }
+
+    fn pragma_i64(&self, name: &str) -> rusqlite::Result<i64> {
+        self.conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))
+    }
+
+    /// Bytes of live pages (excludes the freelist, which `incremental_vacuum` returns to the OS).
+    fn used_bytes(&self) -> rusqlite::Result<u64> {
+        let pages = self.pragma_i64("page_count")? - self.pragma_i64("freelist_count")?;
+        Ok(pages.max(0) as u64 * self.pragma_i64("page_size")? as u64)
+    }
+
+    /// Over budget: deletes the oldest sessions (by `updated_at`: events, usage, receipts, file rows)
+    /// until live pages are under `EVICT_TO_PERCENT` of it, then shrinks the file. Records the newest
+    /// evicted file mtime as `evict_floor_ms`: files not yet in the index at or below it are not re-added
+    /// (see `index_file`), so a scan does not undo this. A file that changes later has a newer mtime and
+    /// comes back. Returns sessions evicted.
+    pub fn evict_if_over(&self) -> Result<usize> {
+        if self.db_bytes() <= self.limits.budget {
+            return Ok(0);
+        }
+        let target = self.limits.budget / 100 * EVICT_TO_PERCENT;
+        let before = self.used_bytes()?;
+        let mut evicted = 0;
+        while self.used_bytes()? > target {
+            let victims: Vec<(i64, String)> = {
+                let mut stmt =
+                    self.conn.prepare("SELECT sk, id FROM trace_sessions ORDER BY COALESCE(updated_at, 0), sk LIMIT ?1")?;
+                stmt.query_map([EVICT_BATCH], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+            };
+            if victims.is_empty() {
+                break;
+            }
+            let tx = self.conn.unchecked_transaction()?;
+            for (sk, id) in &victims {
+                // Live pages count uncommitted deletes, so the batch stops as soon as it is enough.
+                if self.used_bytes()? <= target {
+                    break;
+                }
+                evicted += 1;
+                let floor: Option<i64> =
+                    tx.query_row("SELECT MAX(mtime_ms) FROM trace_files WHERE session_id = ?1", [id], |r| r.get(0))?;
+                if let Some(floor) = floor {
+                    tx.execute(
+                        "INSERT INTO trace_meta (key, value) VALUES ('evict_floor_ms', ?1)
+                         ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), CAST(?1 AS INTEGER))",
+                        [floor],
+                    )?;
+                }
+                delete_events(&tx, *sk)?;
+                tx.execute("DELETE FROM trace_sessions WHERE sk = ?1", [sk])?;
+                tx.execute("DELETE FROM trace_files WHERE session_id = ?1", [id])?;
+                tx.execute("DELETE FROM trace_receipts WHERE session_id = ?1", [id])?;
+            }
+            tx.commit()?;
+        }
+        self.conn.execute_batch("PRAGMA incremental_vacuum;")?;
+        // Moves the vacuum's pages out of the wal and truncates it; a no-op in rollback-journal mode.
+        let _ = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        let freed = before.saturating_sub(self.used_bytes()?);
+        let total = self.meta("evicted_bytes")?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) + freed;
+        self.set_meta("evicted_bytes", &total.to_string())?;
+        Ok(evicted)
+    }
+
+    /// Files first seen at or below this mtime were evicted; they stay out.
+    fn evict_floor(&self) -> i64 {
+        self.meta("evict_floor_ms").ok().flatten().and_then(|v| v.parse().ok()).unwrap_or(0)
+    }
+
+    /// Gross index growth: size on disk plus everything evicted so far, so a loop that is evicted as
+    /// fast as it writes still shows.
+    fn gross_bytes(&self) -> u64 {
+        self.db_bytes() + self.meta("evicted_bytes").ok().flatten().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0)
+    }
+
+    fn samples(&self) -> Vec<(i64, u64)> {
+        let raw = self.meta("growth_samples").ok().flatten().unwrap_or_default();
+        raw.split(',')
+            .filter_map(|p| {
+                let (t, b) = p.split_once(':')?;
+                Some((t.parse().ok()?, b.parse().ok()?))
+            })
+            .collect()
+    }
+
+    /// Hook-side sampling: trips quietly into `health`. Nothing is sampled before the first full scan
+    /// has finished (`built`): until then the db is still being filled, which is growth, not a loop.
+    pub(crate) fn sample_growth(&self) -> Result<()> {
+        if self.meta("built")?.is_none() {
+            return Ok(());
+        }
+        self.check_growth(false).map(|_| ())
+    }
+
+    /// Compares gross size against the smallest sample inside the window and trips past
+    /// `growth_bytes`. Otherwise records a sample (always when `force`, else at most once a minute).
+    /// Returns the trip message when it tripped.
+    fn check_growth(&self, force: bool) -> Result<Option<String>> {
+        let now = now_ms();
+        let gross = self.gross_bytes();
+        let mut samples = self.samples();
+        samples.retain(|(t, _)| *t >= now - self.limits.growth_window_ms);
+        if let Some(&(t, low)) = samples.iter().min_by_key(|(_, b)| *b) {
+            let grew = gross.saturating_sub(low);
+            if grew > self.limits.growth_bytes {
+                let msg = format!(
+                    "tripped: growth rate — db grew {}MB in {} min (limit {}MB per {} min) — {TRIP_HELP}",
+                    mb(grew),
+                    ((now - t) / 60_000).max(1),
+                    mb(self.limits.growth_bytes),
+                    self.limits.growth_window_ms / 60_000
+                );
+                self.trip(msg.clone());
+                return Ok(Some(msg));
+            }
+        }
+        if force || samples.last().is_none_or(|(t, _)| now - t >= MIN_SAMPLE_GAP_MS) {
+            samples.push((now, gross));
+            let skip = samples.len().saturating_sub(MAX_SAMPLES);
+            let text: Vec<String> = samples[skip..].iter().map(|(t, b)| format!("{t}:{b}")).collect();
+            self.set_meta("growth_samples", &text.join(","))?;
+        }
+        Ok(None)
     }
 
     pub(crate) fn conn(&self) -> &Connection {
@@ -499,7 +867,10 @@ impl TraceIndex {
     }
 
     pub fn scan_with_limit(&mut self, roots: &[Root], max_files: usize) -> Result<ScanReport> {
-        self.check_cap()?;
+        self.check_writable()?;
+        self.capped_files = 0;
+        // Until a full scan has finished once (`built`), growth is the db being filled, not a runaway.
+        let built = self.meta("built")?.is_some();
         let mut report = ScanReport::default();
         // Discover every root first, then index newest-first across all of them: if the
         // cap is ever hit, what is missing is the oldest.
@@ -544,7 +915,7 @@ impl TraceIndex {
             match done {
                 Ok(true) => report.indexed += 1,
                 Ok(false) => {}
-                Err(e @ Error::OverCap { .. }) => return Err(e),
+                Err(e @ Error::Tripped(_)) => return Err(e),
                 Err(e) => report.errors.push((key, e.to_string())),
             }
         }
@@ -572,6 +943,22 @@ impl TraceIndex {
             self.prune_files(&id, |_| true)?;
             self.conn.execute("DELETE FROM trace_roots WHERE id = ?1", [&id])?;
         }
+        // Over budget is routine: evict quietly. Only the tripwires are loud.
+        self.evict_if_over()?;
+        if self.capped_files > self.limits.max_capped_files {
+            let msg = format!(
+                "tripped: event flood — {} files hit the {}-event cap in one scan (limit {}) — {TRIP_HELP}",
+                self.capped_files, self.limits.max_events, self.limits.max_capped_files
+            );
+            report.tripped = Some(self.trip(msg).to_string());
+        } else if built {
+            report.tripped = self.check_growth(true)?;
+        } else if !report.roots.iter().any(|r| r.limited) {
+            // First complete scan: its size is the baseline. Samples start here.
+            self.set_meta("growth_samples", "")?;
+            self.set_meta("built", "1")?;
+            self.check_growth(true)?;
+        }
         Ok(report)
     }
 
@@ -595,7 +982,7 @@ impl TraceIndex {
 
     /// Indexes one file. Returns whether anything was (re)parsed.
     pub fn index_file(&mut self, root: &Root, path: &Path) -> Result<bool> {
-        self.check_cap()?;
+        self.check_writable()?;
         self.guard(root, path)?;
         let meta = fs::metadata(path)?;
         let (size, mtime) = (meta.len() as i64, mtime_ms(&meta));
@@ -604,7 +991,7 @@ impl TraceIndex {
         let existing: Option<FileRow> = self
             .conn
             .query_row(
-                "SELECT size_bytes, mtime_ms, indexed_bytes, indexed_lines, parser_version, content_hash
+                "SELECT size_bytes, mtime_ms, indexed_bytes, indexed_lines, parser_version, content_hash, aux_sig
                  FROM trace_files WHERE path = ?1",
                 [&path_str],
                 |r| {
@@ -615,10 +1002,18 @@ impl TraceIndex {
                         indexed_lines: r.get(3)?,
                         parser_version: r.get(4)?,
                         content_hash: r.get(5)?,
+                        aux_sig: r.get(6)?,
                     })
                 },
             )
             .optional()?;
+        if existing.is_none() && mtime <= self.evict_floor() {
+            return Ok(false);
+        }
+        let (mut links, aux) = path_links(root, path);
+        // A sidecar (Claude's `.meta.json`) can change while the transcript does not.
+        let aux_sig = aux.as_deref().and_then(file_sig);
+        let aux_changed = existing.as_ref().is_some_and(|f| f.aux_sig != aux_sig);
 
         let tail_ok = |f: &FileRow| -> io::Result<bool> {
             Ok(f.indexed_bytes <= size && f.content_hash.as_deref() == Some(tail_hash(path, f.indexed_bytes as u64)?.as_str()))
@@ -630,11 +1025,11 @@ impl TraceIndex {
                 let complete = f.indexed_bytes >= f.size_bytes;
                 if f.size_bytes == size && (complete || root.format == Format::Zstd) {
                     if f.mtime_ms == mtime {
-                        return Ok(false);
+                        return self.refresh_aux(aux_changed, &sid, &path_str, &links, &aux_sig);
                     }
                     if tail_ok(f)? {
                         self.conn.execute("UPDATE trace_files SET mtime_ms = ?1 WHERE path = ?2", params![mtime, path_str])?;
-                        return Ok(false);
+                        return self.refresh_aux(aux_changed, &sid, &path_str, &links, &aux_sig);
                     }
                     true
                 } else {
@@ -658,12 +1053,13 @@ impl TraceIndex {
         let mut names = Names::default();
         let mut parse_error: Option<String> = None;
         let mut capped = false;
+        let max_events = self.limits.max_events;
         let (end_byte, next_line) = {
             let mut insert = tx.prepare_cached(INSERT_EVENT)?;
             let mut usage = tx.prepare_cached(INSERT_USAGE)?;
             let reader = lines::open(path, root.format, start_byte as u64, size as u64)?;
             lines::for_each(reader, start_byte, start_line, |line| {
-                if line.number >= MAX_EVENTS_PER_FILE as i64 {
+                if line.number >= max_events as i64 {
                     capped = true;
                     return Ok(false);
                 }
@@ -677,6 +1073,9 @@ impl TraceIndex {
                         return Ok(true);
                     }
                 };
+                if line.number < HEADER_LINES {
+                    header_links(root, &value, &mut links);
+                }
                 let e = normalize(&value);
                 agg.add(&e);
                 insert_event(&mut insert, &mut usage, &mut names, &tx, sk, line.number, line.start_byte, &e).map_err(io::Error::other)?;
@@ -684,26 +1083,31 @@ impl TraceIndex {
             })?
         };
         let (end_byte, next_line) = if capped {
-            parse_error = Some(format!("event cap {MAX_EVENTS_PER_FILE} reached; rest of file not indexed"));
-            (size, MAX_EVENTS_PER_FILE as i64)
+            parse_error = Some(format!("event cap {max_events} reached; rest of file not indexed"));
+            self.capped_files += 1;
+            (size, max_events as i64)
         } else {
             (end_byte, next_line)
         };
         let indexed_bytes = if root.format == Format::Zstd { size } else { end_byte };
         let content_hash = tail_hash(path, indexed_bytes as u64)?;
-        if root.source == "grok" && agg.cwd.is_none() {
-            agg.cwd = grok_cwd(path);
+        if let (true, Some(summary)) = (root.source == "grok", grok_summary(path)) {
+            if agg.cwd.is_none() {
+                agg.cwd = summary.pointer("/info/cwd").and_then(|v| v.as_str()).map(str::to_string);
+            }
+            grok_links(path, &summary, &mut links);
         }
+        write_links(&tx, &sid, &links)?;
         Self::write_aggregate(&tx, &sid, &agg, mtime)?;
         tx.execute(
             "INSERT INTO trace_files (path, root_id, source_id, format, size_bytes, mtime_ms, indexed_bytes, indexed_lines,
-             parser_version, content_hash, session_id, indexed_at, parse_error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             parser_version, content_hash, session_id, indexed_at, parse_error, aux_sig)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(path) DO UPDATE SET root_id=?2, source_id=?3, format=?4, size_bytes=?5, mtime_ms=?6, indexed_bytes=?7,
-             indexed_lines=?8, parser_version=?9, content_hash=?10, session_id=?11, indexed_at=?12, parse_error=?13",
+             indexed_lines=?8, parser_version=?9, content_hash=?10, session_id=?11, indexed_at=?12, parse_error=?13, aux_sig=?14",
             params![
                 path_str, root.id, root.source, root.format.as_str(), size, mtime, indexed_bytes, next_line,
-                PARSER_VERSION, content_hash, sid, now_ms(), parse_error
+                PARSER_VERSION, content_hash, sid, now_ms(), parse_error, aux_sig
             ],
         )?;
         tx.commit()?;
@@ -723,7 +1127,7 @@ impl TraceIndex {
     fn load_aggregate(&self, sid: &str, basename: &str) -> Result<Aggregate> {
         let agg = self.conn.query_row(
             "SELECT title, model, cwd, started_at, updated_at, event_count, user_count, assistant_count, tool_count,
-             error_count, input_tokens, output_tokens FROM trace_sessions WHERE id = ?1",
+             error_count, input_tokens, output_tokens, signal_count, now_text, last_event_at, failed FROM trace_sessions WHERE id = ?1",
             [sid],
             |r| {
                 let title: String = r.get(0)?;
@@ -741,6 +1145,11 @@ impl TraceIndex {
                     errors: r.get(9)?,
                     input: r.get(10)?,
                     output: r.get(11)?,
+                    signals: r.get(12)?,
+                    now: r.get(13)?,
+                    last_signal_ts: r.get(14)?,
+                    failed: r.get(15)?,
+                    ..Default::default()
                 })
             },
         );
@@ -760,7 +1169,10 @@ impl TraceIndex {
                 |r| r.get(0),
             )
             .optional()?;
+        // `done`: 1 = the harness says it finished, 2 = finished with an error.
+        let done: i64 = tx.query_row("SELECT done FROM trace_sessions WHERE id = ?1", [sid], |r| r.get(0))?;
         let status = match latest {
+            _ if done > 0 => "completed",
             Some(t) if is_terminal(&t) => "completed",
             Some(_) => "open",
             None => "unknown",
@@ -769,11 +1181,12 @@ impl TraceIndex {
         let duration = agg.first_ts.map(|s| (updated - s).max(0));
         tx.execute(
             "UPDATE trace_sessions SET title=?2, model=?3, cwd=?4, started_at=?5, updated_at=?6, event_count=?7, user_count=?8,
-             assistant_count=?9, tool_count=?10, error_count=?11, input_tokens=?12, output_tokens=?13, duration_ms=?14, status=?15
+             assistant_count=?9, tool_count=?10, error_count=?11, input_tokens=?12, output_tokens=?13, duration_ms=?14, status=?15,
+             signal_count=?16, now_text=?17, last_event_at=?18, failed=?19
              WHERE id = ?1",
             params![
                 sid,
-                agg.user_title.as_deref().unwrap_or(&agg.title),
+                agg.session_title.as_deref().or(agg.user_title.as_deref()).unwrap_or(&agg.title),
                 agg.model,
                 agg.cwd,
                 agg.first_ts,
@@ -786,10 +1199,32 @@ impl TraceIndex {
                 agg.input,
                 agg.output,
                 duration,
-                status
+                status,
+                agg.signals,
+                agg.now,
+                agg.last_signal_ts,
+                agg.failed || done == 2
             ],
         )?;
         Ok(())
+    }
+
+    /// The transcript is unchanged; only its sidecar moved. Updates the links and the finished state.
+    fn refresh_aux(&self, changed: bool, sid: &str, path: &str, links: &Links, sig: &Option<String>) -> Result<bool> {
+        if !changed {
+            return Ok(false);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        write_links(&tx, sid, links)?;
+        tx.execute(
+            "UPDATE trace_sessions SET status = CASE WHEN done > 0 THEN 'completed' ELSE status END,
+             failed = CASE WHEN done = 2 THEN 1 ELSE failed END WHERE id = ?1",
+            [sid],
+        )?;
+        tx.execute("UPDATE trace_files SET aux_sig = ?1 WHERE path = ?2", params![sig, path])?;
+        tx.commit()?;
+        // Nothing was parsed.
+        Ok(false)
     }
 }
 
