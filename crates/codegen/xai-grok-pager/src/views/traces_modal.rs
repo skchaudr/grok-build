@@ -3125,6 +3125,7 @@ mod tests {
             children: 0,
             failed: false,
             host: None,
+            ..Default::default()
         }
     }
 

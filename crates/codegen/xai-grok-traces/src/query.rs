@@ -7,6 +7,8 @@ use rusqlite::{OptionalExtension, Row, params};
 
 use crate::index::{Result, TraceIndex, now_ms};
 use crate::lines;
+use crate::live::Boundary;
+use crate::receipts::{RECEIPT_ONLY_PREFIX, has_receipt_sql, in_list, newest_receipt_sql};
 use crate::normalize::{Kind, Role};
 use crate::roots::Format;
 
@@ -20,12 +22,13 @@ pub const TERMINAL_EVENTS: [&str; 5] = ["SessionEnd", "Stop", "stop", "session_s
 /// The dispatcher, resolved inside the source; a missing or evicted parent leaves a root.
 const PARENT_ID: &str = "(SELECT p.id FROM trace_sessions p WHERE p.source_id = s.source_id AND p.native_id = s.parent_native LIMIT 1)";
 const CHILDREN: &str = "(SELECT COUNT(*) FROM trace_sessions c WHERE c.source_id = s.source_id AND c.parent_native = s.native_id)";
-const LAST_RECEIPT_AT: &str = "(SELECT r.at_ms FROM trace_receipts r WHERE r.session_id = s.id ORDER BY r.id DESC LIMIT 1)";
-const LAST_RECEIPT_EVENT: &str = "(SELECT r.event FROM trace_receipts r WHERE r.session_id = s.id ORDER BY r.id DESC LIMIT 1)";
+static LAST_RECEIPT_AT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| newest_receipt_sql("at_ms"));
+static LAST_RECEIPT_EVENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| newest_receipt_sql("event"));
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Status {
     Active,
+    #[default]
     Idle,
     Completed,
     Unknown,
@@ -81,7 +84,7 @@ pub struct SessionFilter {
     pub offset: usize,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionRow {
     pub id: String,
     pub source: String,
@@ -114,6 +117,16 @@ pub struct SessionRow {
     pub failed: bool,
     /// `None` = this machine. Remote rows (see `remote`) carry the host label and a `host:`-prefixed id.
     pub host: Option<String>,
+    /// How the harness names this session; hook receipts without a path match it.
+    pub native_id: Option<String>,
+    /// Mtime of the transcript file, ms.
+    pub mtime_ms: Option<i64>,
+    /// The harness process of the newest receipt (start in Unix seconds).
+    pub harness_pid: Option<i64>,
+    pub harness_start: Option<i64>,
+    /// Size of the last prompt, and the model's window when recorded.
+    pub context_tokens: Option<i64>,
+    pub context_window: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -161,15 +174,16 @@ const SESSION_COLS: &str = "s.id, s.source_id, s.title, s.file_path, s.model, s.
   s.event_count, s.user_count, s.assistant_count, s.tool_count, s.error_count, s.input_tokens, s.output_tokens,
   s.duration_ms, s.status, f.mtime_ms";
 
-fn session_cols() -> String {
-    format!("{SESSION_COLS}, {LAST_RECEIPT_AT}, {LAST_RECEIPT_EVENT}, {PARENT_ID}, s.label, s.agent_type, s.now_text, s.last_event_at, {CHILDREN}, s.failed")
+pub(crate) fn session_cols() -> String {
+    format!("{SESSION_COLS}, {}, {}, {PARENT_ID}, s.label, s.agent_type, s.now_text, s.last_event_at, {CHILDREN}, s.failed,
+  s.native_id, s.harness_pid, s.harness_start, s.context_tokens, s.context_window", *LAST_RECEIPT_AT, *LAST_RECEIPT_EVENT)
 }
 
 fn terminal_list() -> String {
     TERMINAL_EVENTS.iter().map(|e| format!("'{e}'")).collect::<Vec<_>>().join(",")
 }
 
-fn session_row(r: &Row<'_>, now: i64) -> rusqlite::Result<SessionRow> {
+pub(crate) fn session_row(r: &Row<'_>, now: i64) -> rusqlite::Result<SessionRow> {
     let status: String = r.get(16)?;
     let mtime: Option<i64> = r.get(17)?;
     let receipt_at: Option<i64> = r.get(18)?;
@@ -209,6 +223,12 @@ fn session_row(r: &Row<'_>, now: i64) -> rusqlite::Result<SessionRow> {
         children: r.get::<_, i64>(25)?.max(0) as u32,
         failed: r.get(26)?,
         host: None,
+        native_id: r.get(27)?,
+        mtime_ms: mtime,
+        harness_pid: r.get(28)?,
+        harness_start: r.get(29)?,
+        context_tokens: r.get(30)?,
+        context_window: r.get(31)?,
     })
 }
 
@@ -259,7 +279,9 @@ impl TraceIndex {
             // A just-dispatched agent is trivial until it has done something;
             // keep live sessions visible so new work shows up immediately.
             sql.push_str(&format!(
-                " AND (NOT (s.signal_count < 3 AND s.tool_count = 0) OR (s.status = 'open' AND f.mtime_ms > ?) OR ({LAST_RECEIPT_AT} > ? AND {LAST_RECEIPT_EVENT} NOT IN ({})))",
+                " AND (NOT (s.signal_count < 3 AND s.tool_count = 0) OR (s.status = 'open' AND f.mtime_ms > ?) OR ({} > ? AND {} NOT IN ({})))",
+                *LAST_RECEIPT_AT,
+                *LAST_RECEIPT_EVENT,
                 terminal_list()
             ));
             args.push(Sql::Integer(now - ACTIVE_WINDOW_MS));
@@ -267,7 +289,9 @@ impl TraceIndex {
         }
         if filter.active_only {
             sql.push_str(&format!(
-                " AND ((s.status = 'open' AND f.mtime_ms > ?) OR ({LAST_RECEIPT_AT} > ? AND {LAST_RECEIPT_EVENT} NOT IN ({})))",
+                " AND ((s.status = 'open' AND f.mtime_ms > ?) OR ({} > ? AND {} NOT IN ({})))",
+                *LAST_RECEIPT_AT,
+                *LAST_RECEIPT_EVENT,
                 terminal_list()
             ));
             args.push(Sql::Integer(now - ACTIVE_WINDOW_MS));
@@ -286,6 +310,78 @@ impl TraceIndex {
         let mut stmt = self.conn().prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| session_row(r, now))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Sessions of `claude`, `pi` and `cursor` with receipts whose newest turn boundary is not `End`,
+    /// plus receipt-only Cursor rows (chats seen in hooks whose transcript is not indexed yet).
+    /// Liveness of every row, receipt-only included, is the caller's `alive(harness_pid, harness_start)`;
+    /// a row with a NULL pid stays until its newest boundary is `End`. Same-process supersede is the caller's too.
+    pub fn live_sessions(&self) -> Result<Vec<SessionRow>> {
+        const SOURCES: [&str; 3] = ["claude", "pi", "cursor"];
+        let now = now_ms();
+        let conn = self.conn();
+        let sql = format!(
+            "SELECT {} FROM trace_sessions s LEFT JOIN trace_files f ON f.path = s.file_path
+             WHERE s.source_id IN ({}) AND {}",
+            session_cols(),
+            in_list(&SOURCES),
+            has_receipt_sql()
+        );
+        let candidates: Vec<SessionRow> = conn.prepare_cached(&sql)?.query_map([], |r| session_row(r, now))?.collect::<rusqlite::Result<_>>()?;
+        let mut out = Vec::new();
+        for row in candidates {
+            let ended = self.newest_boundary(&row.source, Some(&row.id), row.native_id.as_deref())?.is_some_and(|(_, _, b)| b == Boundary::End);
+            if !ended {
+                out.push(row);
+            }
+        }
+
+        // Cursor chats with receipts but no session row: grouped by chat id, minus any chat a row now owns.
+        // Only unkeyed receipts are read (partial index `trace_receipts_native`).
+        let mut groups = conn.prepare_cached(
+            "SELECT r.native_session, MIN(r.at_ms), MAX(r.at_ms) FROM trace_receipts r
+             WHERE r.source = 'cursor' AND r.session_id IS NULL AND r.native_session IS NOT NULL
+               AND r.native_session NOT IN (SELECT native_id FROM trace_sessions WHERE source_id = 'cursor' AND native_id IS NOT NULL)
+             GROUP BY r.native_session",
+        )?;
+        let groups: Vec<(String, i64, i64)> = groups.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+        let mut cwd = conn.prepare_cached(
+            "SELECT r.cwd FROM trace_receipts r WHERE r.source = 'cursor' AND r.session_id IS NULL AND r.native_session = ?1 AND r.cwd IS NOT NULL
+             ORDER BY r.at_ms DESC, r.id DESC LIMIT 1",
+        )?;
+        let mut pid = conn.prepare_cached(
+            "SELECT r.harness_pid, r.harness_start FROM trace_receipts r
+             WHERE r.source = 'cursor' AND r.session_id IS NULL AND r.native_session = ?1 AND r.harness_pid IS NOT NULL
+             ORDER BY r.at_ms DESC, r.id DESC LIMIT 1",
+        )?;
+        for (native, first, last) in groups {
+            if self.newest_boundary("cursor", None, Some(&native))?.is_some_and(|(_, _, b)| b == Boundary::End) {
+                continue;
+            }
+            let cwd: Option<String> = cwd.query_row([&native], |r| r.get(0)).optional()?;
+            let (harness_pid, harness_start) = pid.query_row([&native], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.unwrap_or_default();
+            let title = cwd
+                .as_deref()
+                .and_then(|c| Path::new(c).file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| "cursor".into());
+            out.push(SessionRow {
+                id: format!("{RECEIPT_ONLY_PREFIX}{native}"),
+                source: "cursor".into(),
+                title,
+                status: Status::Active,
+                cwd,
+                started_at: Some(first),
+                updated_at: Some(last),
+                native_id: Some(native),
+                harness_pid,
+                harness_start,
+                ..Default::default()
+            });
+        }
+        out.sort_by(|a, b| b.updated_at.unwrap_or(0).cmp(&a.updated_at.unwrap_or(0)).then_with(|| a.id.cmp(&b.id)));
+        Ok(out)
     }
 
     pub fn session(&self, id: &str) -> Result<Option<SessionRow>> {

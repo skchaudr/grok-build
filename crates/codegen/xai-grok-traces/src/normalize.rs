@@ -99,6 +99,10 @@ pub struct NormalizedEvent {
     pub input_tokens: Option<f64>,
     pub output_tokens: Option<f64>,
     pub usage_is_total: bool,
+    /// What this message sent the model: Claude `input + cache_read + cache_creation`, Pi `input + cacheRead + cacheWrite`.
+    pub context_tokens: Option<i64>,
+    /// The model's window, when the harness records it (none of the current sources do).
+    pub context_window: Option<i64>,
     pub turn: Option<f64>,
     pub step: Option<f64>,
     pub depth: u8,
@@ -317,6 +321,22 @@ fn usage_object(v: &Map<String, Value>) -> Option<&Map<String, Value>> {
         .or_else(|| v.get("total_token_usage").and_then(Value::as_object))
 }
 
+/// Size of the prompt behind one assistant message; per-message usage only, never a running total.
+fn context_tokens(usage: &Map<String, Value>) -> Option<i64> {
+    let sum = |keys: &[&str]| {
+        let parts: Vec<f64> = keys.iter().filter_map(|k| number_value(usage.get(*k))).collect();
+        // A zero is a synthetic or error message with no real usage: it must not replace a good value.
+        Some(parts.iter().sum::<f64>().round() as i64).filter(|n| *n > 0)
+    };
+    if usage.contains_key("input_tokens") {
+        return sum(&["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]);
+    }
+    if usage.contains_key("input") {
+        return sum(&["input", "cacheRead", "cacheWrite"]);
+    }
+    None
+}
+
 fn first_number(obj: &Map<String, Value>, keys: &[&str]) -> Option<f64> {
     keys.iter().find_map(|k| number_value(obj.get(*k)))
 }
@@ -448,6 +468,8 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         || record(payload.get("info")).get("total_token_usage").is_some_and(Value::is_object)
         || top.get("total_token_usage").is_some_and(Value::is_object);
 
+    let context_tokens = if usage_is_total { None } else { context_tokens(usage) };
+
     let timestamp_ms = timestamp_ms(top.get("timestamp"))
         .or_else(|| timestamp_ms(top.get("time")))
         .or_else(|| timestamp_ms(payload.get("timestamp")))
@@ -536,6 +558,8 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         input_tokens,
         output_tokens,
         usage_is_total,
+        context_tokens,
+        context_window: None,
         turn,
         step,
         depth,
@@ -593,6 +617,30 @@ mod tests {
         assert_eq!((e.input_tokens, e.output_tokens), (Some(10.0), Some(3.0)));
         assert_eq!(e.model.as_deref(), Some("claude-opus-5-5"));
         assert!(!e.usage_is_total);
+        assert_eq!((e.context_tokens, e.context_window), (Some(10), None));
+    }
+
+    #[test]
+    fn context_tokens_sum_the_prompt_side_per_message() {
+        let claude = normalize(&json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}],
+                "usage": {"input_tokens": 10, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 200, "output_tokens": 3}}
+        }));
+        assert_eq!((claude.context_tokens, claude.context_window), (Some(1210), None));
+        let pi = normalize(&json!({
+            "type": "message",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input": 5, "output": 2, "cacheRead": 100, "cacheWrite": 20, "totalTokens": 127}}
+        }));
+        assert_eq!(pi.context_tokens, Some(125));
+        let codex = normalize(&json!({
+            "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 500, "output_tokens": 50}}}
+        }));
+        assert_eq!(codex.context_tokens, None, "running totals are not a context size");
+        let zero = normalize(&json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "x"}], "usage": {"input_tokens": 0, "output_tokens": 0}}}));
+        assert_eq!(zero.context_tokens, None, "zero usage is no context size");
+        assert_eq!(normalize(&json!({"type": "user", "message": {"role": "user", "content": "x"}})).context_tokens, None);
     }
 
     #[test]
