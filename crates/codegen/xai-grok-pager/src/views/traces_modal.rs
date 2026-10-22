@@ -2768,16 +2768,81 @@ fn cols(s: &str) -> usize {
         .sum()
 }
 
-/// Scrolls so row `sel` sits fully inside `height` lines, where row `i` is `heights[i]` lines tall.
-fn fit_rows(sel: usize, scroll: &mut usize, heights: &[usize], height: usize) {
+/// Scrolls so row `sel` sits fully inside `height` lines. Row `i` is `heights[i]` lines tall, and
+/// `gaps[i]` is the blank lines before (`pre`) and after (`post`) it. The gap before a row and the
+/// gap after the row above it count as one line. The pre-spacer of the first drawn row is left out:
+/// nothing is painted above the first line on screen, and every later pre-spacer is counted, so the
+/// selected row keeps the spacer above it when the rows above still fit.
+fn fit_rows(sel: usize, scroll: &mut usize, heights: &[usize], gaps: &[(u16, u16)], height: usize) {
     if sel < *scroll {
         *scroll = sel;
     }
-    let mut total: usize = heights.iter().skip(*scroll).take(sel + 1 - *scroll).sum();
-    while total > height && *scroll < sel {
-        total -= heights.get(*scroll).copied().unwrap_or(0);
+    while *scroll < sel && row_span(*scroll, sel, heights, gaps) > height {
         *scroll += 1;
     }
+}
+
+/// Screen lines from shown row `from` through `to`, both inclusive.
+fn row_span(from: usize, to: usize, heights: &[usize], gaps: &[(u16, u16)]) -> usize {
+    if from > to {
+        return 0;
+    }
+    let mut total = heights.get(from).copied().unwrap_or(0);
+    for i in from + 1..=to {
+        total += gap_before(gaps, i) + heights.get(i).copied().unwrap_or(0);
+    }
+    total
+}
+
+/// The one blank line before shown row `i`: its pre-spacer, or the post-spacer of the row above.
+fn gap_before(gaps: &[(u16, u16)], i: usize) -> usize {
+    let pre = gaps.get(i).map(|g| g.0).unwrap_or(0);
+    let post = i.checked_sub(1).and_then(|p| gaps.get(p)).map(|g| g.1).unwrap_or(0);
+    usize::from(pre.max(post))
+}
+
+/// Blank lines before and after each shown row. A block is a depth-0 outline row plus the visible
+/// rows under it. A block taller than one line gets one spacer above and one below, except the first
+/// row of the list (nothing above the first drawn line) and the single shared spacer between two tall
+/// blocks. A list shorter than 8 lines gets none: the rows stay dense.
+fn row_gaps(state: &TracesModalState, heights: &[usize], list_height: usize) -> Vec<(u16, u16)> {
+    let n = state.oshown.len();
+    let mut gaps = vec![(0u16, 0u16); n];
+    if list_height < 8 || n == 0 {
+        return gaps;
+    }
+    let depth = |i: usize| {
+        state
+            .oshown
+            .get(i)
+            .and_then(|&node| state.outline.nodes.get(node))
+            .map_or(0, |node| node.depth)
+    };
+    let mut i = 0;
+    let mut prev_tall = false;
+    while i < n {
+        let start = i;
+        let mut lines = heights.get(i).copied().unwrap_or(1);
+        i += 1;
+        while i < n && depth(i) > 0 {
+            lines += heights.get(i).copied().unwrap_or(1);
+            i += 1;
+        }
+        if lines <= 1 {
+            prev_tall = false;
+            continue;
+        }
+        if start > 0 && !prev_tall {
+            if let Some(gap) = gaps.get_mut(start) {
+                gap.0 = 1;
+            }
+        }
+        if let Some(gap) = gaps.get_mut(i.saturating_sub(1)) {
+            gap.1 = 1;
+        }
+        prev_tall = true;
+    }
+    gaps
 }
 
 fn pretty(raw: Result<Option<String>, String>) -> String {
@@ -3875,10 +3940,12 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         buf.set_span(list.x, list.y, &Span::styled(msg, dim), list.width);
     }
     // Body rows are as tall as their wrapped text, so scrolling works in lines, not rows.
+    // `gaps` is render-only: spacers never enter the outline, so selection still steps by row.
     let height = list.height as usize;
     let mut bodies = state.body_rows(text_w);
     let mut heights = row_heights(&bodies);
-    fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, height);
+    let mut gaps = row_gaps(state, &heights, height);
+    fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, &gaps, height);
     // Load the bodies on screen; one cached right here changes row heights, so measure again.
     if state.ensure_bodies(state.event_scroll, height) {
         if state.dirty_outline {
@@ -3887,7 +3954,8 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         }
         bodies = state.body_rows(text_w);
         heights = row_heights(&bodies);
-        fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, height);
+        gaps = row_gaps(state, &heights, height);
+        fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, &gaps, height);
     }
 
     let bottom = list.y + list.height;
@@ -3895,6 +3963,11 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
     let mut y = list.y;
     for (k, &n) in state.oshown.iter().enumerate().skip(state.event_scroll) {
         let h = heights.get(k).copied().unwrap_or(1) as u16;
+        let (pre, post) = gaps.get(k).copied().unwrap_or((0, 0));
+        // A spacer above the first drawn line would be a blank at the top of the list.
+        if y > list.y {
+            skip_lines(&mut y, pre, bottom);
+        }
         if y >= bottom {
             break;
         }
@@ -3919,6 +3992,7 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
             }) => {
                 let Some(e) = state.events.get(*event) else {
                     y += h;
+                    skip_lines(&mut y, post, bottom);
                     continue;
                 };
                 // The header is the prompt's first line; the counts follow it, in every state.
@@ -3957,6 +4031,7 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
             Some(OutlineItem::Event(i)) => {
                 let Some(e) = state.events.get(*i) else {
                     y += h;
+                    skip_lines(&mut y, post, bottom);
                     continue;
                 };
                 // Noise (only present when `n` is on) is dimmed.
@@ -4040,8 +4115,20 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
             None => {}
         }
         y += h;
+        skip_lines(&mut y, post, bottom);
     }
     render_status(buf, area, state, theme);
+}
+
+/// Moves `y` down `n` lines, stopping at `bottom`. The cells stay untouched, so a spacer is blank
+/// and carries neither the selection fill nor a result colour.
+fn skip_lines(y: &mut u16, n: u16, bottom: u16) {
+    for _ in 0..n {
+        if *y >= bottom {
+            break;
+        }
+        *y += 1;
+    }
 }
 
 /// Lines per shown row: a body is as tall as its wrapped text, every other row is one line.
@@ -4903,10 +4990,10 @@ mod tests {
     #[test]
     fn fit_rows_keeps_the_selected_row_on_screen() {
         let mut scroll = 0;
-        fit_rows(5, &mut scroll, &[1, 1, 1, 1, 1, 1], 3);
+        fit_rows(5, &mut scroll, &[1, 1, 1, 1, 1, 1], &[], 3);
         assert_eq!(scroll, 3);
         let mut scroll = 0;
-        fit_rows(2, &mut scroll, &[1, 4, 1], 3);
+        fit_rows(2, &mut scroll, &[1, 4, 1], &[], 3);
         assert_eq!(scroll, 2, "a tall row above pushes the top down");
     }
 
@@ -5415,6 +5502,132 @@ mod tests {
             .collect();
         let want: String = BODY.chars().filter(|c| !c.is_whitespace()).collect();
         assert_eq!(got, want);
+    }
+
+    /// One turn per string, in order. Short strings stay one line at 100 columns; `three_line_prompt`
+    /// wraps to three.
+    fn user_turns(texts: &[&str]) -> TracesModalState {
+        trajectory(texts.iter().enumerate().map(|(i, t)| ev((i + 1) as i64, "message", "user", t)).collect())
+    }
+
+    /// 42 × "alpha" is three lines in the 84-column prompt cell of a 100-wide trajectory
+    /// (text column 86, minus the fold mark).
+    fn three_line_prompt() -> String {
+        std::iter::repeat("alpha").take(42).collect::<Vec<_>>().join(" ")
+    }
+
+    /// List rows of a trajectory draw. The status line anchors the bottom; the five chrome rows sit above.
+    fn list_lines(rows: &[String]) -> Vec<String> {
+        assert!(
+            rows.last().is_some_and(|l| l.contains("trace index")),
+            "status row anchors the list: {rows:#?}"
+        );
+        rows.get(5..rows.len() - 1).unwrap_or_default().to_vec()
+    }
+
+    #[test]
+    fn trajectory_snapshot_single_line_blocks_stay_dense() {
+        let mut state = user_turns(&["red", "green", "blue"]);
+        let list = list_lines(&rows_at(&mut state, 100, 24));
+        assert!(list[0].contains("#1") && list[0].contains("red"), "{list:#?}");
+        assert!(list[1].contains("#2") && list[1].contains("green"), "{list:#?}");
+        assert!(list[2].contains("#3") && list[2].contains("blue"), "{list:#?}");
+        assert!(list[3].is_empty(), "no spacer after a single-line block: {list:#?}");
+    }
+
+    #[test]
+    fn trajectory_snapshot_spacer_around_a_wrapped_turn() {
+        let long = three_line_prompt();
+        let mut state = user_turns(&["red", long.as_str(), "blue"]);
+        let list = list_lines(&rows_at(&mut state, 100, 24));
+        let mid = list.iter().position(|r| r.contains("#2")).expect("wrapped turn");
+        assert_eq!(mid, 2, "one spacer between the single-line turn and the wrapped one: {list:#?}");
+        assert!(list[0].contains("#1") && list[0].contains("red"), "{list:#?}");
+        assert!(list[1].is_empty(), "{list:#?}");
+        assert!(!list[mid + 1].is_empty() && !list[mid + 2].is_empty(), "the prompt is three lines: {list:#?}");
+        assert!(list[mid + 3].is_empty(), "one spacer below the wrapped turn: {list:#?}");
+        assert!(list[mid + 4].contains("#3") && list[mid + 4].contains("blue"), "{list:#?}");
+    }
+
+    #[test]
+    fn trajectory_snapshot_one_spacer_between_tall_blocks() {
+        let long = three_line_prompt();
+        let mut state = user_turns(&[long.as_str(), long.as_str()]);
+        let list = list_lines(&rows_at(&mut state, 100, 24));
+        assert!(list[0].contains("#1"), "the first block has no spacer above it: {list:#?}");
+        let second = list.iter().position(|r| r.contains("#2")).expect("second turn");
+        assert!(second >= 2, "{list:#?}");
+        assert!(list[second - 1].is_empty(), "{list:#?}");
+        assert!(!list[second - 2].is_empty(), "exactly one spacer between the blocks: {list:#?}");
+        assert!(!list[second].is_empty() && !list.get(second + 1).is_some_and(|l| l.is_empty()), "{list:#?}");
+    }
+
+    #[test]
+    fn trajectory_snapshot_no_spacer_above_the_first_block() {
+        let long = three_line_prompt();
+        let mut state = user_turns(&[long.as_str(), "blue"]);
+        let list = list_lines(&rows_at(&mut state, 100, 24));
+        assert!(list[0].contains("#1"), "a multi-line block first on screen has no spacer above it: {list:#?}");
+        assert!(!list[1].is_empty(), "the wrapped prompt stays against its header: {list:#?}");
+    }
+
+    #[test]
+    fn trajectory_snapshot_selection_skips_the_spacer() {
+        let long = three_line_prompt();
+        let mut state = user_turns(&["red", long.as_str(), "blue"]);
+        state.sel = Some(OutlineKey::Turn(3));
+        let rows = rows_at(&mut state, 100, 24);
+        let y = rows.iter().position(|r| r.contains("#3")).expect("selected turn");
+        assert!(y > 5 && rows[y - 1].is_empty(), "the spacer sits above the selected row: {rows:#?}");
+        // The terminal-native palette's highlight is Reset, which cannot be told from an unpainted cell.
+        let _theme = crate::theme::cache::pin_theme();
+        let was_locked = crate::theme::cache::terminal_native_locked();
+        crate::theme::cache::set_terminal_native_lock(false);
+        struct RestoreLock(bool);
+        impl Drop for RestoreLock {
+            fn drop(&mut self) {
+                crate::theme::cache::set_terminal_native_lock(self.0);
+            }
+        }
+        let _restore = RestoreLock(was_locked);
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::current();
+        render_trajectory(&mut buf, area, &mut state, &theme);
+        assert_ne!(theme.bg_highlight, Color::Reset);
+        assert_ne!(buf[(8, (y - 1) as u16)].bg, theme.bg_highlight, "the spacer is not selected");
+        assert_eq!(buf[(8, y as u16)].bg, theme.bg_highlight, "the selected row is");
+    }
+
+    #[test]
+    fn trajectory_snapshot_narrow_list_has_no_spacers() {
+        // Height 13: five chrome rows plus the status line leave a list of 7, under the cutoff of 8.
+        let long = three_line_prompt();
+        let mut state = user_turns(&["red", long.as_str(), "blue"]);
+        let list = list_lines(&rows_at(&mut state, 100, 13));
+        let mid = list.iter().position(|r| r.contains("#2")).expect("wrapped turn");
+        let next = list.iter().position(|r| r.contains("#3")).expect("following turn");
+        assert_eq!(mid, 1, "no spacer above the wrapped turn: {list:#?}");
+        assert_eq!(next, mid + 3, "three prompt lines, then the next block, with no spacer: {list:#?}");
+    }
+
+    #[test]
+    fn j_from_the_last_row_of_a_block_steps_one_outline_row() {
+        let long = three_line_prompt();
+        let mut state = user_turns(&["red", long.as_str(), "blue"]);
+        rows_at(&mut state, 100, 24);
+        let roots: Vec<usize> = (0..state.oshown.len())
+            .filter(|&i| {
+                state.oshown.get(i).and_then(|&n| state.outline.nodes.get(n)).is_some_and(|node| node.depth == 0)
+            })
+            .collect();
+        assert!(roots.len() >= 3 && roots[2] > roots[1] + 1, "the wrapped turn is more than one row: {roots:?}");
+        let last = roots[2] - 1;
+        let len = state.oshown.len();
+        state.goto(last);
+        press(&mut state, KeyCode::Char('j'));
+        assert_eq!(state.sel_pos(), last + 1);
+        assert_eq!(state.oshown.len(), len, "a spacer is not an outline row");
     }
 
     #[test]
