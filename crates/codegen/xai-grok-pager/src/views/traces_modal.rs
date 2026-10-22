@@ -1683,7 +1683,7 @@ impl TracesModalState {
 // ---------------------------------------------------------------- live screen
 
 const HOUR_MS: i64 = 3_600_000;
-const HINTS: &str = " enter open   j/k   c children   / search   q quit";
+const HINTS: &str = " enter open   j/k   h/l fold   / search   q quit";
 const INSTALL_LINE: &str =
     " install hooks: crates/codegen/xai-grok-traces/hooks/install.sh --apply";
 
@@ -2342,22 +2342,58 @@ impl TracesModalState {
         self.live_move(if down { 3 } else { -3 });
     }
 
-    /// `c`: collapse or expand the selected row's root. From a child, collapse moves the selection to the root.
-    fn live_toggle(&mut self) {
+    /// Selected root: its index, whether the selection is a child, whether it has children,
+    /// whether it is collapsed, and its session id.
+    ///
+    /// A childless root's next line is not a child, or its `hidden` count is 0 while collapsed.
+    fn live_fold_target(&mut self) -> Option<(usize, bool, bool, bool, String)> {
         let view = self.live_view(Instant::now());
-        let Some(i) = self.live_pos(&view.lines) else {
-            return;
-        };
-        let root = if view.lines[i].child {
+        let i = self.live_pos(&view.lines)?;
+        let on_child = view.lines[i].child;
+        let root = if on_child {
             view.lines[..i].iter().rposition(|l| !l.child).unwrap_or(i)
         } else {
             i
         };
+        let has_children =
+            view.lines[root].hidden > 0 || view.lines.get(root + 1).is_some_and(|l| l.child);
         let id = view.lines[root].row.session_id.clone();
-        if !self.live_collapsed.remove(&id) {
-            self.live_collapsed.insert(id.clone());
-            self.live_sel = Some(id);
-            self.live_sel_idx = root;
+        let collapsed = self.live_collapsed.contains(&id);
+        Some((root, on_child, has_children, collapsed, id))
+    }
+
+    /// `h` / `←`: collapse the selected root. From a child, that selects the root.
+    /// A collapsed root, or a root with no children, is unchanged and is not recorded.
+    fn live_collapse(&mut self) -> InputOutcome {
+        let Some((root, _on_child, has_children, collapsed, id)) = self.live_fold_target() else {
+            return InputOutcome::Unchanged;
+        };
+        if !has_children || collapsed {
+            return InputOutcome::Unchanged;
+        }
+        self.live_collapsed.insert(id.clone());
+        self.live_sel = Some(id);
+        self.live_sel_idx = root;
+        InputOutcome::Changed
+    }
+
+    /// `l` / `→`: expand a collapsed root. The selection stays. Anything else is unchanged.
+    fn live_expand(&mut self) -> InputOutcome {
+        let Some((_, on_child, has_children, collapsed, id)) = self.live_fold_target() else {
+            return InputOutcome::Unchanged;
+        };
+        if on_child || !has_children || !collapsed {
+            return InputOutcome::Unchanged;
+        }
+        self.live_collapsed.remove(&id);
+        InputOutcome::Changed
+    }
+
+    /// `c`: collapse or expand the selected row's root. From a child, collapse moves the selection to the root.
+    fn live_toggle(&mut self) -> InputOutcome {
+        match self.live_collapse() {
+            InputOutcome::Unchanged => self.live_expand(),
+            other => other,
         }
     }
 
@@ -2732,16 +2768,81 @@ fn cols(s: &str) -> usize {
         .sum()
 }
 
-/// Scrolls so row `sel` sits fully inside `height` lines, where row `i` is `heights[i]` lines tall.
-fn fit_rows(sel: usize, scroll: &mut usize, heights: &[usize], height: usize) {
+/// Scrolls so row `sel` sits fully inside `height` lines. Row `i` is `heights[i]` lines tall, and
+/// `gaps[i]` is the blank lines before (`pre`) and after (`post`) it. The gap before a row and the
+/// gap after the row above it count as one line. The pre-spacer of the first drawn row is left out:
+/// nothing is painted above the first line on screen, and every later pre-spacer is counted, so the
+/// selected row keeps the spacer above it when the rows above still fit.
+fn fit_rows(sel: usize, scroll: &mut usize, heights: &[usize], gaps: &[(u16, u16)], height: usize) {
     if sel < *scroll {
         *scroll = sel;
     }
-    let mut total: usize = heights.iter().skip(*scroll).take(sel + 1 - *scroll).sum();
-    while total > height && *scroll < sel {
-        total -= heights.get(*scroll).copied().unwrap_or(0);
+    while *scroll < sel && row_span(*scroll, sel, heights, gaps) > height {
         *scroll += 1;
     }
+}
+
+/// Screen lines from shown row `from` through `to`, both inclusive.
+fn row_span(from: usize, to: usize, heights: &[usize], gaps: &[(u16, u16)]) -> usize {
+    if from > to {
+        return 0;
+    }
+    let mut total = heights.get(from).copied().unwrap_or(0);
+    for i in from + 1..=to {
+        total += gap_before(gaps, i) + heights.get(i).copied().unwrap_or(0);
+    }
+    total
+}
+
+/// The one blank line before shown row `i`: its pre-spacer, or the post-spacer of the row above.
+fn gap_before(gaps: &[(u16, u16)], i: usize) -> usize {
+    let pre = gaps.get(i).map(|g| g.0).unwrap_or(0);
+    let post = i.checked_sub(1).and_then(|p| gaps.get(p)).map(|g| g.1).unwrap_or(0);
+    usize::from(pre.max(post))
+}
+
+/// Blank lines before and after each shown row. A block is a depth-0 outline row plus the visible
+/// rows under it. A block taller than one line gets one spacer above and one below, except the first
+/// row of the list (nothing above the first drawn line) and the single shared spacer between two tall
+/// blocks. A list shorter than 8 lines gets none: the rows stay dense.
+fn row_gaps(state: &TracesModalState, heights: &[usize], list_height: usize) -> Vec<(u16, u16)> {
+    let n = state.oshown.len();
+    let mut gaps = vec![(0u16, 0u16); n];
+    if list_height < 8 || n == 0 {
+        return gaps;
+    }
+    let depth = |i: usize| {
+        state
+            .oshown
+            .get(i)
+            .and_then(|&node| state.outline.nodes.get(node))
+            .map_or(0, |node| node.depth)
+    };
+    let mut i = 0;
+    let mut prev_tall = false;
+    while i < n {
+        let start = i;
+        let mut lines = heights.get(i).copied().unwrap_or(1);
+        i += 1;
+        while i < n && depth(i) > 0 {
+            lines += heights.get(i).copied().unwrap_or(1);
+            i += 1;
+        }
+        if lines <= 1 {
+            prev_tall = false;
+            continue;
+        }
+        if start > 0 && !prev_tall {
+            if let Some(gap) = gaps.get_mut(start) {
+                gap.0 = 1;
+            }
+        }
+        if let Some(gap) = gaps.get_mut(i.saturating_sub(1)) {
+            gap.1 = 1;
+        }
+        prev_tall = true;
+    }
+    gaps
 }
 
 fn pretty(raw: Result<Option<String>, String>) -> String {
@@ -3123,7 +3224,9 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                 KeyCode::PageUp => state.live_move(-page),
                 KeyCode::Char('g') | KeyCode::Home => state.live_move(isize::MIN / 2),
                 KeyCode::Char('G') | KeyCode::End => state.live_move(isize::MAX / 2),
-                KeyCode::Char('c') => state.live_toggle(),
+                KeyCode::Left | KeyCode::Char('h') => return state.live_collapse(),
+                KeyCode::Right | KeyCode::Char('l') => return state.live_expand(),
+                KeyCode::Char('c') => return state.live_toggle(),
                 KeyCode::Char('o') | KeyCode::Enter => state.live_open(),
                 KeyCode::Char('/') => state.typing = Typing::Live,
                 KeyCode::Char('q') => state.live_back(),
@@ -3328,10 +3431,10 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
             plain("H host"),
             plain("s sort"),
             plain("Enter open"),
-            plain("e fold"),
+            plain("e toggle"),
             plain("E all"),
             plain("</> more/less"),
-            plain("→ expand"),
+            plain("h/l fold"),
             plain("r resume"),
             plain("R rescan"),
             plain("L live"),
@@ -3339,6 +3442,7 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
         ],
         Mode::Trajectory => vec![
             plain("j/k move"),
+            plain("h/l fold"),
             plain("Enter inspect/open agent"),
             plain("e fold"),
             plain("E all"),
@@ -3353,7 +3457,7 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
         Mode::Live => vec![
             plain("j/k move"),
             plain("Enter open"),
-            plain("c children"),
+            plain("h/l fold"),
             plain("/ search"),
             plain("Esc back"),
         ],
@@ -3608,7 +3712,7 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
                 if show_host {
                     v.push(("".into(), 8, base));
                 }
-                v.push((format!("{}  +{hidden} more (→)", guide_prefix(&node.guides)), c.name, base.fg(theme.gray)));
+                v.push((format!("{}  +{hidden} more (l)", guide_prefix(&node.guides)), c.name, base.fg(theme.gray)));
                 v
             }),
             Item::Row { row: s } => {
@@ -3836,10 +3940,12 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         buf.set_span(list.x, list.y, &Span::styled(msg, dim), list.width);
     }
     // Body rows are as tall as their wrapped text, so scrolling works in lines, not rows.
+    // `gaps` is render-only: spacers never enter the outline, so selection still steps by row.
     let height = list.height as usize;
     let mut bodies = state.body_rows(text_w);
     let mut heights = row_heights(&bodies);
-    fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, height);
+    let mut gaps = row_gaps(state, &heights, height);
+    fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, &gaps, height);
     // Load the bodies on screen; one cached right here changes row heights, so measure again.
     if state.ensure_bodies(state.event_scroll, height) {
         if state.dirty_outline {
@@ -3848,7 +3954,8 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         }
         bodies = state.body_rows(text_w);
         heights = row_heights(&bodies);
-        fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, height);
+        gaps = row_gaps(state, &heights, height);
+        fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, &gaps, height);
     }
 
     let bottom = list.y + list.height;
@@ -3856,6 +3963,11 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
     let mut y = list.y;
     for (k, &n) in state.oshown.iter().enumerate().skip(state.event_scroll) {
         let h = heights.get(k).copied().unwrap_or(1) as u16;
+        let (pre, post) = gaps.get(k).copied().unwrap_or((0, 0));
+        // A spacer above the first drawn line would be a blank at the top of the list.
+        if y > list.y {
+            skip_lines(&mut y, pre, bottom);
+        }
         if y >= bottom {
             break;
         }
@@ -3880,6 +3992,7 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
             }) => {
                 let Some(e) = state.events.get(*event) else {
                     y += h;
+                    skip_lines(&mut y, post, bottom);
                     continue;
                 };
                 // The header is the prompt's first line; the counts follow it, in every state.
@@ -3918,6 +4031,7 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
             Some(OutlineItem::Event(i)) => {
                 let Some(e) = state.events.get(*i) else {
                     y += h;
+                    skip_lines(&mut y, post, bottom);
                     continue;
                 };
                 // Noise (only present when `n` is on) is dimmed.
@@ -4001,8 +4115,20 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
             None => {}
         }
         y += h;
+        skip_lines(&mut y, post, bottom);
     }
     render_status(buf, area, state, theme);
+}
+
+/// Moves `y` down `n` lines, stopping at `bottom`. The cells stay untouched, so a spacer is blank
+/// and carries neither the selection fill nor a result colour.
+fn skip_lines(y: &mut u16, n: u16, bottom: u16) {
+    for _ in 0..n {
+        if *y >= bottom {
+            break;
+        }
+        *y += 1;
+    }
 }
 
 /// Lines per shown row: a body is as tall as its wrapped text, every other row is one line.
@@ -4864,10 +4990,10 @@ mod tests {
     #[test]
     fn fit_rows_keeps_the_selected_row_on_screen() {
         let mut scroll = 0;
-        fit_rows(5, &mut scroll, &[1, 1, 1, 1, 1, 1], 3);
+        fit_rows(5, &mut scroll, &[1, 1, 1, 1, 1, 1], &[], 3);
         assert_eq!(scroll, 3);
         let mut scroll = 0;
-        fit_rows(2, &mut scroll, &[1, 4, 1], 3);
+        fit_rows(2, &mut scroll, &[1, 4, 1], &[], 3);
         assert_eq!(scroll, 2, "a tall row above pushes the top down");
     }
 
@@ -5376,6 +5502,132 @@ mod tests {
             .collect();
         let want: String = BODY.chars().filter(|c| !c.is_whitespace()).collect();
         assert_eq!(got, want);
+    }
+
+    /// One turn per string, in order. Short strings stay one line at 100 columns; `three_line_prompt`
+    /// wraps to three.
+    fn user_turns(texts: &[&str]) -> TracesModalState {
+        trajectory(texts.iter().enumerate().map(|(i, t)| ev((i + 1) as i64, "message", "user", t)).collect())
+    }
+
+    /// 42 × "alpha" is three lines in the 84-column prompt cell of a 100-wide trajectory
+    /// (text column 86, minus the fold mark).
+    fn three_line_prompt() -> String {
+        std::iter::repeat("alpha").take(42).collect::<Vec<_>>().join(" ")
+    }
+
+    /// List rows of a trajectory draw. The status line anchors the bottom; the five chrome rows sit above.
+    fn list_lines(rows: &[String]) -> Vec<String> {
+        assert!(
+            rows.last().is_some_and(|l| l.contains("trace index")),
+            "status row anchors the list: {rows:#?}"
+        );
+        rows.get(5..rows.len() - 1).unwrap_or_default().to_vec()
+    }
+
+    #[test]
+    fn trajectory_snapshot_single_line_blocks_stay_dense() {
+        let mut state = user_turns(&["red", "green", "blue"]);
+        let list = list_lines(&rows_at(&mut state, 100, 24));
+        assert!(list[0].contains("#1") && list[0].contains("red"), "{list:#?}");
+        assert!(list[1].contains("#2") && list[1].contains("green"), "{list:#?}");
+        assert!(list[2].contains("#3") && list[2].contains("blue"), "{list:#?}");
+        assert!(list[3].is_empty(), "no spacer after a single-line block: {list:#?}");
+    }
+
+    #[test]
+    fn trajectory_snapshot_spacer_around_a_wrapped_turn() {
+        let long = three_line_prompt();
+        let mut state = user_turns(&["red", long.as_str(), "blue"]);
+        let list = list_lines(&rows_at(&mut state, 100, 24));
+        let mid = list.iter().position(|r| r.contains("#2")).expect("wrapped turn");
+        assert_eq!(mid, 2, "one spacer between the single-line turn and the wrapped one: {list:#?}");
+        assert!(list[0].contains("#1") && list[0].contains("red"), "{list:#?}");
+        assert!(list[1].is_empty(), "{list:#?}");
+        assert!(!list[mid + 1].is_empty() && !list[mid + 2].is_empty(), "the prompt is three lines: {list:#?}");
+        assert!(list[mid + 3].is_empty(), "one spacer below the wrapped turn: {list:#?}");
+        assert!(list[mid + 4].contains("#3") && list[mid + 4].contains("blue"), "{list:#?}");
+    }
+
+    #[test]
+    fn trajectory_snapshot_one_spacer_between_tall_blocks() {
+        let long = three_line_prompt();
+        let mut state = user_turns(&[long.as_str(), long.as_str()]);
+        let list = list_lines(&rows_at(&mut state, 100, 24));
+        assert!(list[0].contains("#1"), "the first block has no spacer above it: {list:#?}");
+        let second = list.iter().position(|r| r.contains("#2")).expect("second turn");
+        assert!(second >= 2, "{list:#?}");
+        assert!(list[second - 1].is_empty(), "{list:#?}");
+        assert!(!list[second - 2].is_empty(), "exactly one spacer between the blocks: {list:#?}");
+        assert!(!list[second].is_empty() && !list.get(second + 1).is_some_and(|l| l.is_empty()), "{list:#?}");
+    }
+
+    #[test]
+    fn trajectory_snapshot_no_spacer_above_the_first_block() {
+        let long = three_line_prompt();
+        let mut state = user_turns(&[long.as_str(), "blue"]);
+        let list = list_lines(&rows_at(&mut state, 100, 24));
+        assert!(list[0].contains("#1"), "a multi-line block first on screen has no spacer above it: {list:#?}");
+        assert!(!list[1].is_empty(), "the wrapped prompt stays against its header: {list:#?}");
+    }
+
+    #[test]
+    fn trajectory_snapshot_selection_skips_the_spacer() {
+        let long = three_line_prompt();
+        let mut state = user_turns(&["red", long.as_str(), "blue"]);
+        state.sel = Some(OutlineKey::Turn(3));
+        let rows = rows_at(&mut state, 100, 24);
+        let y = rows.iter().position(|r| r.contains("#3")).expect("selected turn");
+        assert!(y > 5 && rows[y - 1].is_empty(), "the spacer sits above the selected row: {rows:#?}");
+        // The terminal-native palette's highlight is Reset, which cannot be told from an unpainted cell.
+        let _theme = crate::theme::cache::pin_theme();
+        let was_locked = crate::theme::cache::terminal_native_locked();
+        crate::theme::cache::set_terminal_native_lock(false);
+        struct RestoreLock(bool);
+        impl Drop for RestoreLock {
+            fn drop(&mut self) {
+                crate::theme::cache::set_terminal_native_lock(self.0);
+            }
+        }
+        let _restore = RestoreLock(was_locked);
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::current();
+        render_trajectory(&mut buf, area, &mut state, &theme);
+        assert_ne!(theme.bg_highlight, Color::Reset);
+        assert_ne!(buf[(8, (y - 1) as u16)].bg, theme.bg_highlight, "the spacer is not selected");
+        assert_eq!(buf[(8, y as u16)].bg, theme.bg_highlight, "the selected row is");
+    }
+
+    #[test]
+    fn trajectory_snapshot_narrow_list_has_no_spacers() {
+        // Height 13: five chrome rows plus the status line leave a list of 7, under the cutoff of 8.
+        let long = three_line_prompt();
+        let mut state = user_turns(&["red", long.as_str(), "blue"]);
+        let list = list_lines(&rows_at(&mut state, 100, 13));
+        let mid = list.iter().position(|r| r.contains("#2")).expect("wrapped turn");
+        let next = list.iter().position(|r| r.contains("#3")).expect("following turn");
+        assert_eq!(mid, 1, "no spacer above the wrapped turn: {list:#?}");
+        assert_eq!(next, mid + 3, "three prompt lines, then the next block, with no spacer: {list:#?}");
+    }
+
+    #[test]
+    fn j_from_the_last_row_of_a_block_steps_one_outline_row() {
+        let long = three_line_prompt();
+        let mut state = user_turns(&["red", long.as_str(), "blue"]);
+        rows_at(&mut state, 100, 24);
+        let roots: Vec<usize> = (0..state.oshown.len())
+            .filter(|&i| {
+                state.oshown.get(i).and_then(|&n| state.outline.nodes.get(n)).is_some_and(|node| node.depth == 0)
+            })
+            .collect();
+        assert!(roots.len() >= 3 && roots[2] > roots[1] + 1, "the wrapped turn is more than one row: {roots:?}");
+        let last = roots[2] - 1;
+        let len = state.oshown.len();
+        state.goto(last);
+        press(&mut state, KeyCode::Char('j'));
+        assert_eq!(state.sel_pos(), last + 1);
+        assert_eq!(state.oshown.len(), len, "a spacer is not an outline row");
     }
 
     #[test]
@@ -5958,6 +6210,14 @@ mod live_tests {
         );
         s.live_rows[0].since_ms = Some(40_000);
         out.push(("wide chars align", snap(&mut s, 80, 3, t0)));
+
+        let mut s = state();
+        s.standalone = true;
+        s.set_live(family(), vec![]);
+        out.push(("live expanded hjkl", snap(&mut s, 100, 6, t0)));
+        s.live_sel = Some("r".into());
+        press(&mut s, KeyCode::Char('h'));
+        out.push(("live after h", snap(&mut s, 100, 6, t0)));
         out
     }
 
@@ -6179,7 +6439,7 @@ mod live_tests {
                     r#" grok live · 1 agent                                                                     sab-mini ●"#,
                     r#" ●  claude  local one                                  Read a                               20s"#,
                     r#""#,
-                    r#" enter open   j/k   c children   / search   q quit"#,
+                    r#" enter open   j/k   h/l fold   / search   q quit"#,
                 ],
             ),
             (
@@ -6198,6 +6458,28 @@ mod live_tests {
                     r#" grok live · 1 agent                                                 sab-mini ●"#,
                     r#" ⏳ claude  日本語のタイトルが…  Shell echo ünïcode · 40s                3s"#,
                     r#""#,
+                ],
+            ),
+            (
+                "live expanded hjkl",
+                vec![
+                    r#" grok live · 4 agents · 1 waiting                                                        sab-mini ●"#,
+                    r#" ○  claude  other                                      your turn                             1m"#,
+                    r#" ●  claude  Traces packet on Mini                      Read docs/SPEC.md                     4s"#,
+                    r#"   ⚠  claude  Explore index code                       permission: Bash rg x                 3s"#,
+                    r#"   ●  claude  review spec                              Grep live                             9s"#,
+                    r#" enter open   j/k   h/l fold   / search   q quit"#,
+                ],
+            ),
+            (
+                "live after h",
+                vec![
+                    r#" grok live · 4 agents · 1 waiting                                                        sab-mini ●"#,
+                    r#" ○  claude  other                                      your turn                             1m"#,
+                    r#" ⚠  claude  Traces packet on Mini +2                   Read docs/SPEC.md                     4s"#,
+                    r#""#,
+                    r#""#,
+                    r#" enter open   j/k   h/l fold   / search   q quit"#,
                 ],
             ),
         ]
@@ -6375,6 +6657,109 @@ mod live_tests {
         assert_eq!(s.live_sel.as_deref(), Some("r"), "clamped at the last row");
         s.live_wheel(false);
         assert_eq!(s.live_sel.as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn hjkl_folds_the_live_screen() {
+        let mut s = state();
+        s.set_live(family(), vec![]);
+        s.live_sel = Some("r".into());
+        assert!(matches!(press(&mut s, KeyCode::Char('l')), InputOutcome::Unchanged));
+        assert_eq!(ids(&s), ["s", "r", "k1", "k2"]);
+        assert!(s.live_collapsed.is_empty());
+
+        assert!(matches!(press(&mut s, KeyCode::Char('h')), InputOutcome::Changed));
+        assert_eq!(ids(&s), ["s", "r"]);
+        assert!(s.live_collapsed.contains("r"));
+        assert_eq!(s.live_sel.as_deref(), Some("r"));
+
+        assert!(matches!(press(&mut s, KeyCode::Char('h')), InputOutcome::Unchanged));
+        assert!(s.live_collapsed.contains("r"));
+
+        assert!(matches!(press(&mut s, KeyCode::Char('l')), InputOutcome::Changed));
+        assert_eq!(ids(&s), ["s", "r", "k1", "k2"]);
+        assert!(!s.live_collapsed.contains("r"));
+        assert_eq!(s.live_sel.as_deref(), Some("r"));
+
+        assert!(matches!(press(&mut s, KeyCode::Right), InputOutcome::Unchanged));
+        assert!(matches!(press(&mut s, KeyCode::Left), InputOutcome::Changed));
+        assert_eq!(ids(&s), ["s", "r"]);
+        assert_eq!(s.live_sel.as_deref(), Some("r"));
+        assert!(matches!(press(&mut s, KeyCode::Left), InputOutcome::Unchanged));
+        assert!(matches!(press(&mut s, KeyCode::Right), InputOutcome::Changed));
+        assert_eq!(ids(&s), ["s", "r", "k1", "k2"]);
+        assert_eq!(s.live_sel.as_deref(), Some("r"));
+
+        s.live_sel = Some("k1".into());
+        assert!(matches!(press(&mut s, KeyCode::Char('l')), InputOutcome::Unchanged));
+        assert_eq!(ids(&s), ["s", "r", "k1", "k2"]);
+        assert!(matches!(press(&mut s, KeyCode::Char('h')), InputOutcome::Changed));
+        assert_eq!(s.live_sel.as_deref(), Some("r"));
+        assert_eq!(ids(&s), ["s", "r"]);
+
+        assert!(matches!(press(&mut s, KeyCode::Right), InputOutcome::Changed));
+        s.live_sel = Some("k2".into());
+        assert!(matches!(press(&mut s, KeyCode::Left), InputOutcome::Changed));
+        assert_eq!(s.live_sel.as_deref(), Some("r"));
+        assert_eq!(ids(&s), ["s", "r"]);
+
+        s.live_sel = Some("s".into());
+        assert!(matches!(press(&mut s, KeyCode::Char('h')), InputOutcome::Unchanged));
+        assert!(matches!(press(&mut s, KeyCode::Char('l')), InputOutcome::Unchanged));
+        assert!(matches!(press(&mut s, KeyCode::Left), InputOutcome::Unchanged));
+        assert!(matches!(press(&mut s, KeyCode::Right), InputOutcome::Unchanged));
+        assert!(!s.live_collapsed.contains("s"), "a childless root is not recorded");
+    }
+
+    #[test]
+    fn shortcut_labels_name_hjkl_fold() {
+        let mut s = state();
+        s.mode = Mode::List;
+        assert_eq!(
+            shortcuts(&s).iter().map(|sc| sc.label).collect::<Vec<_>>(),
+            [
+                "j/k move",
+                "Tab source",
+                "/ search",
+                "a all",
+                "A active",
+                "x errors",
+                "H host",
+                "s sort",
+                "Enter open",
+                "e toggle",
+                "E all",
+                "</> more/less",
+                "h/l fold",
+                "r resume",
+                "R rescan",
+                "L live",
+                "Esc close",
+            ]
+        );
+        s.mode = Mode::Trajectory;
+        assert_eq!(
+            shortcuts(&s).iter().map(|sc| sc.label).collect::<Vec<_>>(),
+            [
+                "j/k move",
+                "h/l fold",
+                "Enter inspect/open agent",
+                "e fold",
+                "E all",
+                "</> more/less",
+                "n noise",
+                "x errors",
+                "t tool",
+                "/ search",
+                "r resume",
+                "Esc back",
+            ]
+        );
+        s.mode = Mode::Live;
+        assert_eq!(
+            shortcuts(&s).iter().map(|sc| sc.label).collect::<Vec<_>>(),
+            ["j/k move", "Enter open", "h/l fold", "/ search", "Esc back"]
+        );
     }
 
     #[test]
