@@ -105,7 +105,7 @@ const NOISE_TYPES: &[&str] = &[
     "event_msg/user_message", "event_msg/agent_message",
     // Pi / OMP
     "session", "model_change", "thinking_level_change", "service_tier_change", "session_init", "title", "title_change",
-    "custom", "custom_message", "credential_pin", "branch_summary", "compaction", "label", "session_exit",
+    "session_state", "custom", "custom_message", "credential_pin", "branch_summary", "compaction", "label", "session_exit",
     // DSH
     "turn/start", "session/title", "session/title-llm-request", "session/end-seed", "assistant/chunk",
     "permission/preset", "sandbox/mode", "approval/policy", "request/header", "request/context",

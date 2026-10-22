@@ -39,7 +39,7 @@ Tables used (structure only; everything else in the db is out of scope):
 
 ## Wiring (as built)
 
-- Root `bb-threads` (`Format::Sqlite`, path `~/.bb/bb.db`), source `bb`, tab label `bb`. A missing db is an inaccessible root, no error; an unreadable one keeps cached rows. `SOURCES` ends with `bb`.
+- Root `bb-threads` (`Format::Sqlite`, path `~/.bb/bb.db`), source `bb`, tab label `bb`. A missing db is an inaccessible root, no error; an unreadable one keeps cached rows. `SOURCES` ends with `bb`; tab order is `dsh, claude, pi, prime, omp, codex, cursor, grok, bb` (Prime sits after Pi).
 - `scan_with_limit` hands a Sqlite root to `scan_bb_root`: open read-only (500 ms busy), list threads, index each, drop the handle. Nothing is held between scans and nothing is written to bb.db.
 - Per thread: `trace_files.path = trace_sessions.file_path = "<db>#<thread_id>"`, `format = sqlite`, `size_bytes` = last sequence, `mtime_ms` = `updated_at`, `indexed_bytes` = last examined sequence, `indexed_lines` = events indexed. Skipped when sequence and `updated_at` are unchanged; append reads `sequence > indexed_bytes`; reset on parser version change or a sequence that went backwards. Threads with no events are not indexed; deleted threads are pruned.
 - `trace_events.line_number = sequence`, `byte_offset = 0`. `raw_line` for `format = sqlite` opens bb.db and returns `Bb::raw_event` (the row as JSON).

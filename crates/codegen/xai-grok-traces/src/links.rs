@@ -12,6 +12,7 @@
 //! | grok | `summary.json` `parent_session_id` when `session_kind` starts with `subagent` |
 //! | bb | `threads.parent_thread_id` |
 //! | pi | no parent field in the files |
+//! | prime | header `parentSession` (a path under the root, or a bare id); `rlmDepth > 0` marks a subagent, else a branch; `native_id` is the file stem |
 //! | cursor | none; `native_id` is the transcript file stem |
 
 use std::fs;
@@ -85,6 +86,7 @@ pub(crate) fn path_links(root: &Root, path: &Path) -> (Links, Option<PathBuf>) {
         }
         // `agent-transcripts/<id>/<id>.jsonl`: the stem is the chat's `conversation_id` that hooks report.
         "cursor" => l.native_id = path.file_stem().map(|n| n.to_string_lossy().into_owned()),
+        "prime" => l.native_id = rel_stem(&root.path, path),
         "pi" | "omp" => {
             l.native_id = rel_stem(&root.path, path);
             // `<cwd dir>/<parent stem>/<Name>.jsonl`: a task subagent next to its parent's transcript.
@@ -147,6 +149,16 @@ pub(crate) fn header_links(root: &Root, v: &Value, l: &mut Links) {
             l.parent_native = s(v.get("parentSession"));
             if l.parent_native.is_some() {
                 l.agent_type = Some(if v.get("seedLength").is_some() { "fork" } else { "subagent" }.into());
+            }
+        }
+        ("prime", "session") if l.parent_native.is_none() => {
+            if let Some(parent) = s(v.get("parentSession")) {
+                let p = Path::new(&parent);
+                l.parent_native = rel_stem(&root.path, p)
+                    .or_else(|| root.path.canonicalize().ok().and_then(|r| rel_stem(&r, p)))
+                    .or_else(|| Some(parent.strip_suffix(".jsonl").unwrap_or(&parent).to_string()));
+                let depth = v.get("rlmDepth").and_then(Value::as_i64).unwrap_or(0);
+                l.agent_type = Some(if depth > 0 { "subagent" } else { "branch" }.into());
             }
         }
         ("pi" | "omp", "session") if l.parent_native.is_none() => {
@@ -245,6 +257,31 @@ mod tests {
         let parent = tmp.path().join("-w/2026_abc.jsonl");
         header_links(&r, &json!({"type":"session","parentSession": parent.to_string_lossy()}), &mut b);
         assert_eq!(b.parent_native.as_deref(), Some("-w/2026_abc"));
+    }
+
+    #[test]
+    fn prime_native_id_and_parent_session_forms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = root("prime", tmp.path());
+        let (l, aux) = path_links(&r, &tmp.path().join("0199-kid.jsonl"));
+        assert_eq!((l.native_id.as_deref(), l.parent_native, aux), (Some("0199-kid"), None, None));
+        let by_path = |depth: i64| {
+            let mut l = Links::default();
+            let parent = tmp.path().join("0199-mom.jsonl");
+            header_links(&r, &json!({"type":"session","rlmDepth":depth,"parentSession": parent.to_string_lossy()}), &mut l);
+            l
+        };
+        assert_eq!((by_path(0).parent_native.as_deref(), by_path(0).agent_type.as_deref()), (Some("0199-mom"), Some("branch")));
+        assert_eq!(by_path(2).agent_type.as_deref(), Some("subagent"));
+        let mut bare = Links::default();
+        header_links(&r, &json!({"type":"session","rlmDepth":1,"parentSession":"0199-mom.jsonl"}), &mut bare);
+        assert_eq!((bare.parent_native.as_deref(), bare.agent_type.as_deref()), (Some("0199-mom"), Some("subagent")));
+        let mut id = Links::default();
+        header_links(&r, &json!({"type":"session","rlmDepth":0,"parentSession":"0199-mom"}), &mut id);
+        assert_eq!((id.parent_native.as_deref(), id.agent_type.as_deref()), (Some("0199-mom"), Some("branch")));
+        let mut top = Links::default();
+        header_links(&r, &json!({"type":"session","rlmDepth":0}), &mut top);
+        assert_eq!((top.parent_native, top.agent_type), (None, None));
     }
 
     #[test]

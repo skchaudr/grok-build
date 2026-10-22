@@ -3238,6 +3238,7 @@ fn source_color(source: &str, theme: &Theme) -> Color {
         "claude" => theme.accent_assistant,
         "codex" => theme.accent_success,
         "pi" => theme.accent_thinking,
+        "prime" => theme.accent_tool,
         "omp" => theme.accent_plan,
         "dsh" => theme.accent_user,
         "grok" => theme.accent_model,
@@ -4463,6 +4464,16 @@ mod tests {
             _ => render_ledger(&mut buf, area, state, &theme),
         }
         (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn every_source_tab_fits_at_80_columns() {
+        let (_tmp, mut state) = claude_fixture();
+        let screen = draw(&mut state, 80, 20);
+        let tabs = screen.lines().next().unwrap();
+        for tab in SOURCES.iter().map(|s| source_label(s)).chain(["All"]) {
+            assert!(tabs.contains(&format!(" {tab} ")), "{tab} missing: {tabs}");
+        }
     }
 
     #[test]

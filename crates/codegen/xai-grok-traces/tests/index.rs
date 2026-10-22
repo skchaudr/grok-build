@@ -18,7 +18,7 @@ const CODEX: &str = r#"{"timestamp":"2026-10-01T00:00:00Z","type":"session_meta"
 "#;
 const PI: &str = r#"{"type":"session","version":3,"id":"p","timestamp":"2026-10-01T00:00:00Z","cwd":"/w/pi"}
 {"type":"message","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"pi task"}]}}
-{"type":"message","timestamp":"2026-10-01T00:00:02Z","message":{"role":"assistant","model":"pi-model","content":[{"type":"text","text":"ok"}]}}
+{"type":"message","timestamp":"2026-10-01T00:00:02Z","message":{"role":"assistant","model":"pi-model","content":[{"type":"text","text":"ok"}],"usage":{"input":7,"output":3,"cacheRead":50}}}
 "#;
 const OMP: &str = r#"{"type":"session","version":3,"id":"o","timestamp":"2026-10-01T00:00:00Z","cwd":"/w/omp"}
 {"type":"message","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"omp task"}]}}
@@ -101,6 +101,8 @@ fn each_source_discovers_its_fixture() {
     assert_ne!(x.status, Status::Completed, "task_complete ends a turn, not the session");
 
     assert_eq!(by_source(&idx, "pi").model.as_deref(), Some("pi-model"));
+    let p = by_source(&idx, "pi");
+    assert_eq!((p.input_tokens, p.output_tokens), (Some(7), Some(3)), "Pi usage.input/output, cache left out");
     assert_eq!(by_source(&idx, "omp").title, "omp task");
 
     let d = by_source(&idx, "dsh");
@@ -470,7 +472,7 @@ fn old_schema_is_replaced_not_migrated() {
     assert_eq!(all(&idx).len(), 6);
     let stats = idx.stats().unwrap();
     assert_eq!(stats.schema_version.as_deref(), Some("7"));
-    assert_eq!(stats.parser_version.as_deref(), Some("6"));
+    assert_eq!(stats.parser_version.as_deref(), Some("7"));
     let names: Vec<String> = fs::read_dir(e.db.parent().unwrap()).unwrap().map(|d| d.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert!(names.iter().all(|n| !n.contains(".old.")), "old db removed: {names:?}");
     assert!(!names.iter().any(|n| n.contains(".corrupt.")));
@@ -806,4 +808,57 @@ fn a_payload_harness_pid_still_builds_the_chain() {
     } else {
         assert_eq!(chain, None);
     }
+}
+
+const PRIME_ID: &str = "0199aaaa-0000-7000-8000-000000000001";
+const PRIME: &str = r#"{"type":"session","id":"0199aaaa-0000-7000-8000-000000000001","parentId":null,"timestamp":"2026-10-01T00:00:00.000Z","cwd":"/tmp/prime-fixture","version":3,"rlmDepth":0}
+{"type":"model_change","id":"m1","parentId":"s0","timestamp":"2026-10-01T00:00:00.100Z","provider":"acme","modelId":"prime-model"}
+{"type":"message","id":"u1","parentId":"m1","timestamp":"2026-10-01T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Lorem ipsum dolor sit amet"}],"timestamp":1759276801000}}
+{"type":"session_state","id":"ss1","parentId":"u1","timestamp":"2026-10-01T00:00:01.500Z","state":{"status":"running"}}
+{"type":"message","id":"a1","parentId":"ss1","timestamp":"2026-10-01T00:00:02.000Z","message":{"role":"assistant","api":"x","provider":"acme","model":"prime-model","responseId":"r1","stopReason":"toolUse","usage":{"input":10,"output":5,"cacheRead":100,"cacheWrite":20,"totalTokens":135,"cost":{"total":0.01}},"content":[{"type":"text","text":"consectetur adipiscing"},{"type":"toolCall","id":"tc1","name":"ipython","arguments":{"code":"print(1)"}}]}}
+{"type":"message","id":"t1","parentId":"a1","timestamp":"2026-10-01T00:00:03.000Z","message":{"role":"toolResult","toolCallId":"tc1","toolName":"ipython","content":[{"type":"text","text":"1"}],"details":{},"isError":false,"timestamp":1759276803000}}
+{"type":"custom_message","id":"c1","parentId":"t1","timestamp":"2026-10-01T00:00:03.500Z","customType":"note","content":"elit sed do eiusmod","details":{},"display":false}
+{"type":"compaction","id":"k1","parentId":"c1","timestamp":"2026-10-01T00:00:03.800Z","summary":"tempor incididunt","tokensBefore":1000,"usage":{"input":900,"output":90},"firstKeptEntryId":"a1"}
+{"type":"message","id":"a2","parentId":"k1","timestamp":"2026-10-01T00:00:04.000Z","message":{"role":"assistant","api":"x","provider":"acme","model":"prime-model","responseId":"r2","stopReason":"stop","usage":{"input":20,"output":8,"cacheRead":0,"cacheWrite":0,"totalTokens":28,"cost":{"total":0.01}},"content":[{"type":"text","text":"ut labore et dolore"}]}}
+"#;
+
+fn prime_env(text: &str) -> (tempfile::TempDir, Vec<Root>, TraceIndex) {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let dir = home.join(".prime/agent/sessions");
+    write(&dir.join(format!("{PRIME_ID}.jsonl")), text);
+    write(&dir.join(format!("{PRIME_ID}.window-cache.json")), r#"{"cache":true}"#);
+    let roots: Vec<Root> = default_roots(&home, &home.join(".grok")).into_iter().filter(|r| r.source == "prime").collect();
+    let idx = TraceIndex::open(&tmp.path().join("idx/t.sqlite")).unwrap();
+    (tmp, roots, idx)
+}
+
+#[test]
+fn prime_session_indexes_like_pi() {
+    let (_tmp, roots, mut idx) = prime_env(PRIME);
+    let report = idx.scan(&roots).unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let rows = all(&idx);
+    assert_eq!(rows.len(), 1, "the window-cache.json is not a transcript: {rows:?}");
+    let s = &rows[0];
+    assert_eq!(s.source, "prime");
+    assert_eq!(s.native_id.as_deref(), Some(PRIME_ID));
+    assert_eq!(s.id, xai_grok_traces::session_id("prime", &s.file_path.to_string_lossy()));
+    assert_ne!(s.id, PRIME_ID);
+    assert_eq!((s.cwd.as_deref(), s.model.as_deref()), (Some("/tmp/prime-fixture"), Some("prime-model")));
+    assert_eq!((s.input_tokens, s.output_tokens), (Some(30), Some(13)), "cache and the compaction usage are not counted");
+    assert_eq!(s.title, "Lorem ipsum dolor sit amet");
+    assert_eq!((s.user_count, s.assistant_count, s.tool_count, s.error_count), (1, 1, 2, 0), "the toolCall message counts as a Tool event");
+    assert_eq!(s.event_count, PRIME.lines().count() as i64);
+    assert!(s.started_at.is_some());
+    let events = idx.list_events(&s.id, &EventFilter::default()).unwrap();
+    assert_eq!(events.len(), 4, "session_state, custom_message, compaction, model_change and the header are noise");
+}
+
+#[test]
+fn prime_is_error_tool_result_counts_one_error() {
+    let (_tmp, roots, mut idx) = prime_env(&PRIME.replace(r#""isError":false"#, r#""isError":true"#));
+    idx.scan(&roots).unwrap();
+    let s = by_source(&idx, "prime");
+    assert_eq!((s.error_count, s.tool_count), (1, 2));
 }

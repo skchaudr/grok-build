@@ -25,6 +25,7 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
   - dsh `~/.dsh/sessions` (zstd)
   - claude `$CLAUDE_CONFIG_DIR|~/.claude/projects`
   - pi `~/.pi/agent/sessions`
+  - prime `$PRIME_AGENT_CODING_AGENT_DIR/sessions|~/.prime/agent/sessions` (flat `<uuidv7>.jsonl`; `*.window-cache.json` / `*.info-cache.json` are skipped by the walk). `settings.json` `sessionDir` is not honored yet. See Prime below
   - omp `~/.omp/agent/sessions`
   - codex `$CODEX_HOME|~/.codex/{sessions,archived_sessions}`
   - cursor `~/.cursor/projects/*/agent-transcripts/*/*.jsonl` (user text unwrapped from `<user_query>`)
@@ -36,7 +37,7 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
   - Role: explicit role first, else from the type name.
   - Kind is one of telemetry, tool, step, turn, reasoning, message, system.
   - Depth 0–2.
-  - Tokens come from `usage` / `info.total_token_usage` (the total for `token_count`).
+  - Tokens come from `usage` / `info.total_token_usage` (the total for `token_count`). Pi-shape usage (`{input, output, cacheRead, ...}`, Pi/OMP/Prime) is read from the usage object only when the `input_tokens`/`output_tokens` keys are absent; cache is not counted (Claude convention). A `compaction` record's usage is ignored (its summary call, not a turn). Parser version 7.
   - Departures from the TS:
     - `content[]` tool blocks (`tool_use`, `tool_result`, `toolCall`, `toolResult`) set the tool role, so Claude and Pi tool counts are right.
     - Errors come from structure only (`classify::structured_error`): `is_error`/`isError`/`isApiErrorMessage` on the record, its payload or a `tool_result` block (never inside a tool's input), a non-empty `error` field, `stopReason: error`, turn `status: error`, a record type ending in `error`/`failed`, and for Codex the exit header (`Process exited with code N`, `Exit code: N`, `Script failed`). Never from words in output. A user abort and DSH `TOOL_OUTCOME_UNKNOWN` are not errors. Mini real data: 3201 -> 801 error events.
@@ -201,3 +202,10 @@ Code: `crates/codegen/xai-grok-traces/src/live.rs` (`norm`, `strict_ids`, `fold_
 - `fmt_age` never prints `now`, by lead decision: the spec mock and rows 40/43 require seconds.
 - Cursor duplicate Pre: `preToolUse` and `beforeReadFile`/`beforeShellExecution` share a `tool_use_id` (and `beforeReadFile` has no `after*`). A `Pre` whose non-NULL id is already open is not pushed again (the first keeps its `since`); a `Post` with an id closes every open `Pre` with that id (close-older also closes the older ones). Strict and close-older both.
 - `fold_all`'s `alive` takes `(pid, Option<start>)`: `(pid, None)` is the pid-only `alive_pid` (signal 0 or EPERM, not a zombie).
+
+## Prime (`prime-agent`, index only)
+
+- Root `prime-sessions` (`Format::Jsonl`), source `prime`, label `Prime`, tab after Pi. Pure helper `roots::prime_dir(env, home)`: `$PRIME_AGENT_CODING_AGENT_DIR/sessions`, else `~/.prime/agent/sessions`. `settings.json` `sessionDir` is not honored yet.
+- Format is Pi's v3 tree-JSONL; no normalize change beyond the Pi-shape token fallback and `session_state` as noise. `native_id` is the file stem (`session_id("prime", path)` is the row id, not the stem).
+- Links (`links.rs`): header `parentSession` as a path under the root or a bare id (`.jsonl` stripped); `rlmDepth > 0` gives `agent_type = subagent`, else `branch`. The child-session layout on disk is unconfirmed.
+- No live: Prime has no extension or hook API, and `hooks/install.sh` is untouched. Options: a `prime-h2` wrapper hook, the outbox watcher, or scan only. The lead recommends the wrapper.

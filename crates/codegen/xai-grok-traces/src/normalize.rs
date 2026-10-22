@@ -462,8 +462,11 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
     const IN: [&str; 4] = ["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"];
     const OUT: [&str; 4] = ["output_tokens", "outputTokens", "completion_tokens", "completionTokens"];
     let usage = usage_object(top).or_else(|| usage_object(payload)).unwrap_or(&EMPTY);
-    let input_tokens = first_number(usage, &IN).or_else(|| find_number(value, &IN, 0));
-    let output_tokens = first_number(usage, &OUT).or_else(|| find_number(value, &OUT, 0));
+    // Pi/OMP/Prime usage is `{input, output, cacheRead, ...}`; cache is left out, as for Claude.
+    let input_tokens = first_number(usage, &IN).or_else(|| find_number(value, &IN, 0)).or_else(|| first_number(usage, &["input"]));
+    let output_tokens = first_number(usage, &OUT).or_else(|| find_number(value, &OUT, 0)).or_else(|| first_number(usage, &["output"]));
+    // A compaction record's usage is its summary call, not a turn: the session total is the messages'.
+    let (input_tokens, output_tokens) = if lower == "compaction" { (None, None) } else { (input_tokens, output_tokens) };
     let usage_is_total = lower.contains("token_count")
         || record(payload.get("info")).get("total_token_usage").is_some_and(Value::is_object)
         || top.get("total_token_usage").is_some_and(Value::is_object);

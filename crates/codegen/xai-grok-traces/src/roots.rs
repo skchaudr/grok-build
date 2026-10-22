@@ -28,13 +28,14 @@ impl Format {
 }
 
 /// Ledger tab order: All, then these.
-pub const SOURCES: [&str; 8] = ["dsh", "claude", "pi", "omp", "codex", "cursor", "grok", "bb"];
+pub const SOURCES: [&str; 9] = ["dsh", "claude", "pi", "prime", "omp", "codex", "cursor", "grok", "bb"];
 
 pub fn source_label(source: &str) -> &str {
     match source {
         "dsh" => "DeepSeek",
         "claude" => "Claude",
         "pi" => "Pi",
+        "prime" => "Prime",
         "omp" => "OMP",
         "codex" => "Codex",
         "cursor" => "Cursor",
@@ -64,13 +65,21 @@ fn env_dir(var: &str) -> Option<PathBuf> {
     std::env::var_os(var).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
+/// Prime keeps flat `<uuidv7>.jsonl` files (and `.json` caches the walk skips) under its agent dir.
+/// `settings.json` `sessionDir` is not honored yet.
+pub(crate) fn prime_dir(env: Option<PathBuf>, home: &Path) -> PathBuf {
+    env.map_or_else(|| home.join(".prime/agent/sessions"), |d| d.join("sessions"))
+}
+
 pub fn default_roots(home: &Path, grok_home: &Path) -> Vec<Root> {
     let claude = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
     let codex = env_dir("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
+    let prime = prime_dir(env_dir("PRIME_AGENT_CODING_AGENT_DIR"), home);
     vec![
         Root::new("dsh-sessions", "dsh", home.join(".dsh/sessions"), Format::Zstd),
         Root::new("claude-projects", "claude", claude.join("projects"), Format::Jsonl),
         Root::new("pi-sessions", "pi", home.join(".pi/agent/sessions"), Format::Jsonl),
+        Root::new("prime-sessions", "prime", prime, Format::Jsonl),
         Root::new("omp-sessions", "omp", home.join(".omp/agent/sessions"), Format::Jsonl),
         Root::new("codex-archive", "codex", codex.join("archived_sessions"), Format::Jsonl),
         Root::new("codex-sessions", "codex", codex.join("sessions"), Format::Jsonl),
@@ -183,4 +192,16 @@ pub fn discover(root: &Root, max_files: usize) -> Discovery {
     }
     d.files.sort();
     d
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prime_dir_prefers_the_env_agent_dir() {
+        let home = Path::new("/h");
+        assert_eq!(prime_dir(Some(PathBuf::from("/x/agent")), home), PathBuf::from("/x/agent/sessions"));
+        assert_eq!(prime_dir(None, home), PathBuf::from("/h/.prime/agent/sessions"));
+    }
 }
