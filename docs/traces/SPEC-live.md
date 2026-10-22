@@ -251,7 +251,7 @@ Real-session replay: the review 3 replay script is rewritten in Rust as a test h
  ● pi      sab-air: khoj worker              Bash rg --files                          1s
  ▶ cursor  grok-build                        Shell cargo test -p xai-grok-traces      8s
  ◌ claude  sab-air: fork lead  ctx 142k      quiet · Edit src/views/traces_modal.rs   4m ✗
- enter pane   o open   j/k   c children   q quit                                          ← hints
+ enter pane   o open   j/k   h/l fold   q quit                                            ← hints
 ```
 
 Header hosts: `●` latest fetch succeeded, `✗` latest fetch failed (cached rows stay, ages keep advancing); the schema-gate note is one dim row under the header. Row = `glyph source title [ctx] state-text age marks`. Columns: glyph 1, source 7 (`source_label`), title 28 (`clean_name`; `label` for children; `host:` prefix for remote rows), ctx 13 (`ctx Nk`, or `ctx Nk/Mk` when a window is known; blank when `None`), state text fills, age 4 right-aligned (`fmt_age`), marks 4. Truncation with `…` uses `modal_window.rs` `word_wrap` on one line, never splitting a token. Title and state text are identical collapsed and expanded.

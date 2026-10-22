@@ -1683,7 +1683,7 @@ impl TracesModalState {
 // ---------------------------------------------------------------- live screen
 
 const HOUR_MS: i64 = 3_600_000;
-const HINTS: &str = " enter open   j/k   c children   / search   q quit";
+const HINTS: &str = " enter open   j/k   h/l fold   / search   q quit";
 const INSTALL_LINE: &str =
     " install hooks: crates/codegen/xai-grok-traces/hooks/install.sh --apply";
 
@@ -2342,22 +2342,58 @@ impl TracesModalState {
         self.live_move(if down { 3 } else { -3 });
     }
 
-    /// `c`: collapse or expand the selected row's root. From a child, collapse moves the selection to the root.
-    fn live_toggle(&mut self) {
+    /// Selected root: its index, whether the selection is a child, whether it has children,
+    /// whether it is collapsed, and its session id.
+    ///
+    /// A childless root's next line is not a child, or its `hidden` count is 0 while collapsed.
+    fn live_fold_target(&mut self) -> Option<(usize, bool, bool, bool, String)> {
         let view = self.live_view(Instant::now());
-        let Some(i) = self.live_pos(&view.lines) else {
-            return;
-        };
-        let root = if view.lines[i].child {
+        let i = self.live_pos(&view.lines)?;
+        let on_child = view.lines[i].child;
+        let root = if on_child {
             view.lines[..i].iter().rposition(|l| !l.child).unwrap_or(i)
         } else {
             i
         };
+        let has_children =
+            view.lines[root].hidden > 0 || view.lines.get(root + 1).is_some_and(|l| l.child);
         let id = view.lines[root].row.session_id.clone();
-        if !self.live_collapsed.remove(&id) {
-            self.live_collapsed.insert(id.clone());
-            self.live_sel = Some(id);
-            self.live_sel_idx = root;
+        let collapsed = self.live_collapsed.contains(&id);
+        Some((root, on_child, has_children, collapsed, id))
+    }
+
+    /// `h` / `←`: collapse the selected root. From a child, that selects the root.
+    /// A collapsed root, or a root with no children, is unchanged and is not recorded.
+    fn live_collapse(&mut self) -> InputOutcome {
+        let Some((root, _on_child, has_children, collapsed, id)) = self.live_fold_target() else {
+            return InputOutcome::Unchanged;
+        };
+        if !has_children || collapsed {
+            return InputOutcome::Unchanged;
+        }
+        self.live_collapsed.insert(id.clone());
+        self.live_sel = Some(id);
+        self.live_sel_idx = root;
+        InputOutcome::Changed
+    }
+
+    /// `l` / `→`: expand a collapsed root. The selection stays. Anything else is unchanged.
+    fn live_expand(&mut self) -> InputOutcome {
+        let Some((_, on_child, has_children, collapsed, id)) = self.live_fold_target() else {
+            return InputOutcome::Unchanged;
+        };
+        if on_child || !has_children || !collapsed {
+            return InputOutcome::Unchanged;
+        }
+        self.live_collapsed.remove(&id);
+        InputOutcome::Changed
+    }
+
+    /// `c`: collapse or expand the selected row's root. From a child, collapse moves the selection to the root.
+    fn live_toggle(&mut self) -> InputOutcome {
+        match self.live_collapse() {
+            InputOutcome::Unchanged => self.live_expand(),
+            other => other,
         }
     }
 
@@ -3123,7 +3159,9 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                 KeyCode::PageUp => state.live_move(-page),
                 KeyCode::Char('g') | KeyCode::Home => state.live_move(isize::MIN / 2),
                 KeyCode::Char('G') | KeyCode::End => state.live_move(isize::MAX / 2),
-                KeyCode::Char('c') => state.live_toggle(),
+                KeyCode::Left | KeyCode::Char('h') => return state.live_collapse(),
+                KeyCode::Right | KeyCode::Char('l') => return state.live_expand(),
+                KeyCode::Char('c') => return state.live_toggle(),
                 KeyCode::Char('o') | KeyCode::Enter => state.live_open(),
                 KeyCode::Char('/') => state.typing = Typing::Live,
                 KeyCode::Char('q') => state.live_back(),
@@ -3328,10 +3366,10 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
             plain("H host"),
             plain("s sort"),
             plain("Enter open"),
-            plain("e fold"),
+            plain("e toggle"),
             plain("E all"),
             plain("</> more/less"),
-            plain("→ expand"),
+            plain("h/l fold"),
             plain("r resume"),
             plain("R rescan"),
             plain("L live"),
@@ -3339,6 +3377,7 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
         ],
         Mode::Trajectory => vec![
             plain("j/k move"),
+            plain("h/l fold"),
             plain("Enter inspect/open agent"),
             plain("e fold"),
             plain("E all"),
@@ -3353,7 +3392,7 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
         Mode::Live => vec![
             plain("j/k move"),
             plain("Enter open"),
-            plain("c children"),
+            plain("h/l fold"),
             plain("/ search"),
             plain("Esc back"),
         ],
@@ -3608,7 +3647,7 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
                 if show_host {
                     v.push(("".into(), 8, base));
                 }
-                v.push((format!("{}  +{hidden} more (→)", guide_prefix(&node.guides)), c.name, base.fg(theme.gray)));
+                v.push((format!("{}  +{hidden} more (l)", guide_prefix(&node.guides)), c.name, base.fg(theme.gray)));
                 v
             }),
             Item::Row { row: s } => {
@@ -5958,6 +5997,14 @@ mod live_tests {
         );
         s.live_rows[0].since_ms = Some(40_000);
         out.push(("wide chars align", snap(&mut s, 80, 3, t0)));
+
+        let mut s = state();
+        s.standalone = true;
+        s.set_live(family(), vec![]);
+        out.push(("live expanded hjkl", snap(&mut s, 100, 6, t0)));
+        s.live_sel = Some("r".into());
+        press(&mut s, KeyCode::Char('h'));
+        out.push(("live after h", snap(&mut s, 100, 6, t0)));
         out
     }
 
@@ -6179,7 +6226,7 @@ mod live_tests {
                     r#" grok live · 1 agent                                                                     sab-mini ●"#,
                     r#" ●  claude  local one                                  Read a                               20s"#,
                     r#""#,
-                    r#" enter open   j/k   c children   / search   q quit"#,
+                    r#" enter open   j/k   h/l fold   / search   q quit"#,
                 ],
             ),
             (
@@ -6198,6 +6245,28 @@ mod live_tests {
                     r#" grok live · 1 agent                                                 sab-mini ●"#,
                     r#" ⏳ claude  日本語のタイトルが…  Shell echo ünïcode · 40s                3s"#,
                     r#""#,
+                ],
+            ),
+            (
+                "live expanded hjkl",
+                vec![
+                    r#" grok live · 4 agents · 1 waiting                                                        sab-mini ●"#,
+                    r#" ○  claude  other                                      your turn                             1m"#,
+                    r#" ●  claude  Traces packet on Mini                      Read docs/SPEC.md                     4s"#,
+                    r#"   ⚠  claude  Explore index code                       permission: Bash rg x                 3s"#,
+                    r#"   ●  claude  review spec                              Grep live                             9s"#,
+                    r#" enter open   j/k   h/l fold   / search   q quit"#,
+                ],
+            ),
+            (
+                "live after h",
+                vec![
+                    r#" grok live · 4 agents · 1 waiting                                                        sab-mini ●"#,
+                    r#" ○  claude  other                                      your turn                             1m"#,
+                    r#" ⚠  claude  Traces packet on Mini +2                   Read docs/SPEC.md                     4s"#,
+                    r#""#,
+                    r#""#,
+                    r#" enter open   j/k   h/l fold   / search   q quit"#,
                 ],
             ),
         ]
@@ -6375,6 +6444,109 @@ mod live_tests {
         assert_eq!(s.live_sel.as_deref(), Some("r"), "clamped at the last row");
         s.live_wheel(false);
         assert_eq!(s.live_sel.as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn hjkl_folds_the_live_screen() {
+        let mut s = state();
+        s.set_live(family(), vec![]);
+        s.live_sel = Some("r".into());
+        assert!(matches!(press(&mut s, KeyCode::Char('l')), InputOutcome::Unchanged));
+        assert_eq!(ids(&s), ["s", "r", "k1", "k2"]);
+        assert!(s.live_collapsed.is_empty());
+
+        assert!(matches!(press(&mut s, KeyCode::Char('h')), InputOutcome::Changed));
+        assert_eq!(ids(&s), ["s", "r"]);
+        assert!(s.live_collapsed.contains("r"));
+        assert_eq!(s.live_sel.as_deref(), Some("r"));
+
+        assert!(matches!(press(&mut s, KeyCode::Char('h')), InputOutcome::Unchanged));
+        assert!(s.live_collapsed.contains("r"));
+
+        assert!(matches!(press(&mut s, KeyCode::Char('l')), InputOutcome::Changed));
+        assert_eq!(ids(&s), ["s", "r", "k1", "k2"]);
+        assert!(!s.live_collapsed.contains("r"));
+        assert_eq!(s.live_sel.as_deref(), Some("r"));
+
+        assert!(matches!(press(&mut s, KeyCode::Right), InputOutcome::Unchanged));
+        assert!(matches!(press(&mut s, KeyCode::Left), InputOutcome::Changed));
+        assert_eq!(ids(&s), ["s", "r"]);
+        assert_eq!(s.live_sel.as_deref(), Some("r"));
+        assert!(matches!(press(&mut s, KeyCode::Left), InputOutcome::Unchanged));
+        assert!(matches!(press(&mut s, KeyCode::Right), InputOutcome::Changed));
+        assert_eq!(ids(&s), ["s", "r", "k1", "k2"]);
+        assert_eq!(s.live_sel.as_deref(), Some("r"));
+
+        s.live_sel = Some("k1".into());
+        assert!(matches!(press(&mut s, KeyCode::Char('l')), InputOutcome::Unchanged));
+        assert_eq!(ids(&s), ["s", "r", "k1", "k2"]);
+        assert!(matches!(press(&mut s, KeyCode::Char('h')), InputOutcome::Changed));
+        assert_eq!(s.live_sel.as_deref(), Some("r"));
+        assert_eq!(ids(&s), ["s", "r"]);
+
+        assert!(matches!(press(&mut s, KeyCode::Right), InputOutcome::Changed));
+        s.live_sel = Some("k2".into());
+        assert!(matches!(press(&mut s, KeyCode::Left), InputOutcome::Changed));
+        assert_eq!(s.live_sel.as_deref(), Some("r"));
+        assert_eq!(ids(&s), ["s", "r"]);
+
+        s.live_sel = Some("s".into());
+        assert!(matches!(press(&mut s, KeyCode::Char('h')), InputOutcome::Unchanged));
+        assert!(matches!(press(&mut s, KeyCode::Char('l')), InputOutcome::Unchanged));
+        assert!(matches!(press(&mut s, KeyCode::Left), InputOutcome::Unchanged));
+        assert!(matches!(press(&mut s, KeyCode::Right), InputOutcome::Unchanged));
+        assert!(!s.live_collapsed.contains("s"), "a childless root is not recorded");
+    }
+
+    #[test]
+    fn shortcut_labels_name_hjkl_fold() {
+        let mut s = state();
+        s.mode = Mode::List;
+        assert_eq!(
+            shortcuts(&s).iter().map(|sc| sc.label).collect::<Vec<_>>(),
+            [
+                "j/k move",
+                "Tab source",
+                "/ search",
+                "a all",
+                "A active",
+                "x errors",
+                "H host",
+                "s sort",
+                "Enter open",
+                "e toggle",
+                "E all",
+                "</> more/less",
+                "h/l fold",
+                "r resume",
+                "R rescan",
+                "L live",
+                "Esc close",
+            ]
+        );
+        s.mode = Mode::Trajectory;
+        assert_eq!(
+            shortcuts(&s).iter().map(|sc| sc.label).collect::<Vec<_>>(),
+            [
+                "j/k move",
+                "h/l fold",
+                "Enter inspect/open agent",
+                "e fold",
+                "E all",
+                "</> more/less",
+                "n noise",
+                "x errors",
+                "t tool",
+                "/ search",
+                "r resume",
+                "Esc back",
+            ]
+        );
+        s.mode = Mode::Live;
+        assert_eq!(
+            shortcuts(&s).iter().map(|sc| sc.label).collect::<Vec<_>>(),
+            ["j/k move", "Enter open", "h/l fold", "/ search", "Esc back"]
+        );
     }
 
     #[test]
