@@ -5,10 +5,11 @@
   <key>Label</key><string>com.sab.bb-server</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/node</string>
-    <string>/Applications/bb.app/Contents/Resources/app.asar.unpacked/node_modules/bb-app/dist/bb-app.js</string>
-    <string>--server-bind-host</string>
-    <string>127.0.0.1</string>
+    <string>/Users/sab-mini/.bb/bin/bb-server</string>
+  </array>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>dev.bb.desktop</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /opt/homebrew/bin/node /Applications/bb.app/Contents/Resources/app.asar.unpacked/node_modules/bb-app/dist/bb-app.js --server-bind-host 127.0.0.1

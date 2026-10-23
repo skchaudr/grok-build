@@ -7,3 +7,5 @@
 - Status: `launchctl print gui/$(id -u)/com.sab.bb-server`
 - Collision: bb.app uses the same port and `daemon.lock`; quit it, or boot the agent out first, before opening it.
 - Mini reach: `bb-air-proxy.js` forwards `192.168.1.186:38886` -> `100.93.242.91:38886`, which does not reach a loopback-only server. Use an ssh tunnel (`ssh -L`) instead.
+
+Launchd runs `~/.bb/bin/bb-server` (`docs/bb/bb-server`, execs node) with `AssociatedBundleIdentifiers=dev.bb.desktop` so Login Items shows "bb" instead of "node".
