@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.sab.bb-server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Applications/bb.app/Contents/Resources/app.asar.unpacked/node_modules/bb-app/dist/bb-app.js</string>
+    <string>--server-bind-host</string>
+    <string>127.0.0.1</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key><string>/Users/sab-mini</string>
+    <key>BB_DATA_DIR</key><string>/Users/sab-mini/.bb</string>
+    <key>BB_SERVER_BIND_HOST</key><string>127.0.0.1</string>
+    <key>BB_SERVER_PORT</key><string>38886</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/sab-mini</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/sab-mini/Library/Logs/bb-server.log</string>
+  <key>StandardErrorPath</key><string>/Users/sab-mini/Library/Logs/bb-server.log</string>
+</dict>
+</plist>
