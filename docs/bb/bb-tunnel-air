@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/bin/ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o BatchMode=yes -L 127.0.0.1:38886:127.0.0.1:38886 sab-air
