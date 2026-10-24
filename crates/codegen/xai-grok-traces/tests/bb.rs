@@ -134,6 +134,39 @@ fn rescan_is_incremental_and_follows_deletes() {
 }
 
 #[test]
+fn cursor_over_bb_sequences() {
+    let e = env();
+    let roots = default_roots(&e.home, &e.home.join(".grok"));
+    let mut idx = TraceIndex::open(&e.idx_db).unwrap();
+    idx.scan(&roots).unwrap();
+    let id = thread(&idx, "second thread").id;
+    let at = |idx: &TraceIndex, after: Option<i64>| {
+        idx.list_events(&id, &EventFilter { include_noise: true, after_line: after, ..Default::default() }).unwrap()
+    };
+    let lines = |rows: &[xai_grok_traces::EventRow]| rows.iter().map(|ev| ev.line).collect::<Vec<_>>();
+    let bytes = |row: &xai_grok_traces::EventRow| xai_grok_traces::remote::event_to_json(row).to_string();
+
+    let anchor_rows = at(&idx, Some(1));
+    assert_eq!(lines(&anchor_rows), vec![2]);
+    let anchor = bytes(&anchor_rows[0]);
+
+    let c = rw(&e.bb);
+    add_event(&c, "thr_b", 3, "item/completed", Some("toolCall"), r#"{"item":{"tool":"grep","status":"completed"}}"#);
+    c.execute("UPDATE threads SET updated_at = 9500 WHERE id = 'thr_b'", []).unwrap();
+    idx.scan(&roots).unwrap();
+    let appended = at(&idx, Some(1));
+    assert_eq!(lines(&appended), vec![2, 3]);
+    assert_eq!(bytes(&appended[0]), anchor, "sequence 2 bytes unchanged after append");
+    assert_eq!(lines(&at(&idx, Some(2))), vec![3]);
+    assert!(at(&idx, Some(3)).is_empty());
+
+    add_event(&c, "thr_b", 7, "item/completed", Some("toolCall"), r#"{"item":{"tool":"grep","status":"completed"}}"#);
+    c.execute("UPDATE threads SET updated_at = 9700 WHERE id = 'thr_b'", []).unwrap();
+    idx.scan(&roots).unwrap();
+    assert_eq!(lines(&at(&idx, Some(3))), vec![7]);
+}
+
+#[test]
 fn missing_db_is_a_quiet_empty_root() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");

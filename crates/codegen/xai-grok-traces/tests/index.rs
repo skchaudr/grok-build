@@ -191,6 +191,81 @@ fn append_reindexes_only_new_lines_and_rewrite_reparses() {
     assert_eq!((p.event_count, p.title.as_str()), (1, "rewritten"));
 }
 
+fn row_bytes(row: &xai_grok_traces::EventRow) -> String {
+    xai_grok_traces::remote::event_to_json(row).to_string()
+}
+
+#[test]
+fn cursor_contract_append_and_reset() {
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let pi_root = e.roots.iter().find(|r| r.source == "pi").unwrap();
+    let path = e.home.join(".pi/agent/sessions/--w-pi--/p.jsonl");
+    let id = by_source(&idx, "pi").id;
+    let at = |idx: &TraceIndex, after: Option<i64>| {
+        idx.list_events(&id, &EventFilter { include_noise: true, after_line: after, ..Default::default() }).unwrap()
+    };
+    let lines = |rows: &[xai_grok_traces::EventRow]| rows.iter().map(|ev| ev.line).collect::<Vec<_>>();
+
+    // (a) Append one terminated line. The row the client already holds (line 2) keeps its bytes.
+    let anchor_rows = at(&idx, Some(1));
+    assert_eq!(lines(&anchor_rows), vec![2]);
+    let anchor = row_bytes(&anchor_rows[0]);
+    let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    f.write_all(b"{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":\"late\"}}\n").unwrap();
+    drop(f);
+    assert!(idx.index_file(pi_root, &path).unwrap(), "append changed the file");
+    let appended = at(&idx, Some(1));
+    assert_eq!(lines(&appended), vec![2, 3]);
+    assert_eq!(row_bytes(&appended[0]), anchor, "line 2 bytes unchanged after append");
+    assert_eq!(lines(&at(&idx, Some(2))), vec![3]);
+
+    // (b) Prefix rewrite: line 2 is a different assistant text, so the stored anchor no longer matches.
+    let rewritten = PI.replace("\"text\":\"ok\"", "\"text\":\"rewritten assistant\"");
+    assert!(rewritten.lines().filter(|l| !l.is_empty()).count() >= 3);
+    write(&path, &rewritten);
+    assert!(idx.index_file(pi_root, &path).unwrap(), "rewrite changed the file");
+    let after_rewrite = at(&idx, Some(1));
+    assert_eq!(lines(&after_rewrite), vec![2]);
+    assert_ne!(row_bytes(&after_rewrite[0]), anchor, "rewritten line 2 differs from the anchor");
+
+    // (c) Truncate below the cursor: line 2 is gone.
+    write(&path, "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"only\"}}\n");
+    assert!(idx.index_file(pi_root, &path).unwrap(), "truncate changed the file");
+    assert_eq!(lines(&at(&idx, None)), vec![0], "the one remaining line is still indexed");
+    assert!(at(&idx, Some(1)).is_empty(), "line 2 is gone");
+}
+
+#[test]
+fn cursor_contract_zstd_reindex_keeps_anchor() {
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let dsh_root = e.roots.iter().find(|r| r.source == "dsh").unwrap();
+    let path = e.home.join(".dsh/sessions/w-dsh/u/session.v2.jsonl.zstd");
+    let id = by_source(&idx, "dsh").id;
+    let at = |idx: &TraceIndex, after: Option<i64>| {
+        idx.list_events(&id, &EventFilter { include_noise: true, after_line: after, ..Default::default() }).unwrap()
+    };
+    let lines = |rows: &[xai_grok_traces::EventRow]| rows.iter().map(|ev| ev.line).collect::<Vec<_>>();
+
+    let anchor_rows = at(&idx, Some(3));
+    assert_eq!(lines(&anchor_rows), vec![4]);
+    let anchor = row_bytes(&anchor_rows[0]);
+    let l = anchor_rows[0].line;
+
+    let extra = "{\"type\":\"turn/end\",\"seq\":5,\"time\":1759276804000,\"data\":{\"turn\":2,\"reason\":\"stop\"}}\n";
+    zstd_write(&path, &format!("{DSH}{extra}"));
+    if !idx.index_file(dsh_root, &path).unwrap() {
+        idx.scan(&e.roots).unwrap();
+    }
+    let kept = at(&idx, Some(l - 1));
+    let same = kept.iter().find(|ev| ev.line == l).expect("anchor line still present");
+    assert_eq!(row_bytes(same), anchor, "zstd reindex keeps the anchor line's bytes");
+    assert_eq!(lines(&at(&idx, Some(l))), vec![l + 1]);
+}
+
 #[test]
 fn zstd_matches_plain() {
     let tmp = tempfile::tempdir().unwrap();
