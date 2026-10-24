@@ -8,3 +8,5 @@ Last synced upstream commit: `scripts/upstream-sync.rev`. The next xAI dump is o
 - `scripts/upstream-sync.sh finish` — record the upstream hash, `git merge --no-ff` the sync branch into `main`, `git pull --ff-only` before `git push`.
 
 `check --replay 2bdd1d6a..main` reprints that historical touched-file list and restricted stat. `UPSTREAM_SYNC_REF` points `start` at a throwaway ref such as `upstream-sim`.
+
+Mini install (`gb-build sab-mini`): after `grok-fork` is installed, `~/.dsh/scripts/grok-hub-sync` re-signs it with `grok-sign`, copies it over `~/.grok/bin/grok-team-hub` (`.new` then `mv`, `.bak` kept; that path holds the macOS privacy grant) and `launchctl kickstart -k` both `com.sab.grok-leader` and `com.sab.grok-hub`. An ad-hoc rebuild otherwise makes Pi and Claude hang on SSD paths under the leader.
