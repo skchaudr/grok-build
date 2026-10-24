@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.sab.bb-host-daemon-sab-air</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/sab-mini/.bb-machines/100.93.242.91-38886/npm/bin/bb-app</string>
+    <string>host-daemon</string>
+    <string>--auto-update</string>
+    <string>--host-daemon-port</string>
+    <string>38888</string>
+    <string>--server-url</string>
+    <string>http://127.0.0.1:38886</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BB_APP_NPM_PREFIX</key><string>/Users/sab-mini/.bb-machines/100.93.242.91-38886/npm</string>
+    <key>BB_DATA_DIR</key><string>/Users/sab-mini/.bb-machines/100.93.242.91-38886</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/sab-mini/.bb-machines/100.93.242.91-38886/logs/launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/sab-mini/.bb-machines/100.93.242.91-38886/logs/launchd.log</string>
+</dict>
+</plist>
