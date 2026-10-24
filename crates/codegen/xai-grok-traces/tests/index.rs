@@ -20,6 +20,11 @@ const PI: &str = r#"{"type":"session","version":3,"id":"p","timestamp":"2026-10-
 {"type":"message","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"pi task"}]}}
 {"type":"message","timestamp":"2026-10-01T00:00:02Z","message":{"role":"assistant","model":"pi-model","content":[{"type":"text","text":"ok"}]}}
 "#;
+const PI_GAP: &str = r#"{"type":"session","version":3,"id":"p","timestamp":"2026-10-01T00:00:00Z","cwd":"/w/pi"}
+{"type":"message","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"pi task"}]}}
+
+{"type":"message","timestamp":"2026-10-01T00:00:02Z","message":{"role":"assistant","model":"pi-model","content":[{"type":"text","text":"ok"}]}}
+"#;
 const OMP: &str = r#"{"type":"session","version":3,"id":"o","timestamp":"2026-10-01T00:00:00Z","cwd":"/w/omp"}
 {"type":"message","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"omp task"}]}}
 "#;
@@ -200,6 +205,45 @@ fn zstd_matches_plain() {
     let ev = |r: &xai_grok_traces::SessionRow| idx.list_events(&r.id, &EventFilter { include_noise: true, ..Default::default() }).unwrap();
     assert_eq!(ev(&rows[0]), ev(&rows[1]));
     assert_eq!((rows[0].title.clone(), rows[0].event_count), (rows[1].title.clone(), rows[1].event_count));
+}
+
+#[test]
+fn after_line_is_an_exclusive_line_cursor() {
+    let e = env();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let p = by_source(&idx, "pi");
+    let at = |after: Option<i64>| {
+        idx.list_events(&p.id, &EventFilter { include_noise: true, after_line: after, ..Default::default() }).unwrap()
+    };
+    let lines = |rows: &[xai_grok_traces::EventRow]| rows.iter().map(|ev| ev.line).collect::<Vec<_>>();
+    assert_eq!(lines(&at(Some(1))), vec![2]);
+    assert_eq!(at(Some(-1)), at(None));
+    assert!(at(Some(2)).is_empty());
+    assert!(at(Some(999)).is_empty());
+
+    let x = by_source(&idx, "codex");
+    let page = idx
+        .list_events(&x.id, &EventFilter { include_noise: true, after_line: Some(0), limit: 2, ..Default::default() })
+        .unwrap();
+    assert_eq!(lines(&page), vec![1, 2]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("pi");
+    write(&path.join("gap.jsonl"), PI_GAP);
+    let root = Root { id: "g".into(), source: "pi".into(), path, format: Format::Jsonl, file_name: None };
+    let mut gap = TraceIndex::open(&tmp.path().join("idx/t.sqlite")).unwrap();
+    gap.scan(&[root]).unwrap();
+    let g = by_source(&gap, "pi");
+    let past = |n: i64| {
+        gap.list_events(&g.id, &EventFilter { include_noise: true, after_line: Some(n), ..Default::default() })
+            .unwrap()
+            .into_iter()
+            .map(|ev| ev.line)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(past(1), vec![3]);
+    assert_eq!(past(2), vec![3]);
 }
 
 #[test]

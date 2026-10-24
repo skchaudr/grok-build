@@ -610,6 +610,7 @@ impl TracesModalState {
             include_noise: self.include_noise,
             limit: EVENT_PAGE,
             offset: 0,
+            after_line: None,
         }
     }
 

@@ -140,6 +140,8 @@ pub struct EventFilter {
     pub include_noise: bool,
     pub limit: usize,
     pub offset: usize,
+    /// Exclusive line cursor: only rows with line_number > this (may be -1). None = no cursor.
+    pub after_line: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -439,6 +441,10 @@ impl TraceIndex {
         if let Some(text) = filter.text.as_deref().filter(|t| !t.trim().is_empty()) {
             sql.push_str(" AND (ty.name LIKE ? ESCAPE '\\' OR ti.name LIKE ? ESCAPE '\\' OR e.preview LIKE ? ESCAPE '\\' OR e.detail LIKE ? ESCAPE '\\')");
             args.extend(std::iter::repeat_n(Sql::Text(like(text)), 4));
+        }
+        if let Some(n) = filter.after_line {
+            sql.push_str(" AND e.line_number > ?");
+            args.push(Sql::Integer(n));
         }
         sql.push_str(" ORDER BY e.line_number LIMIT ? OFFSET ?");
         args.push(Sql::Integer(if filter.limit == 0 { 2000 } else { filter.limit as i64 }));
