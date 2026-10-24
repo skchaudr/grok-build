@@ -62,6 +62,23 @@ fn after_flag_and_version_token() {
     let f = fix();
     let id = f.id.as_str();
 
+    let since = run(&f.grok, &["events", id, "--json", "--since-line", "1", "--noise"]);
+    assert_eq!(since.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&since.stderr));
+    assert_eq!(lines_of(&since.stdout), vec![2]);
+
+    let since_all = run(&f.grok, &["events", id, "--json", "--since-line", "-1", "--noise"]);
+    assert_eq!(since_all.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&since_all.stderr));
+    assert_eq!(lines_of(&since_all.stdout), vec![0, 1, 2]);
+
+    let since_bad = run(&f.grok, &["events", id, "--json", "--since-line", "x"]);
+    assert_eq!(since_bad.status.code(), Some(1));
+    assert!(since_bad.stdout.is_empty(), "stdout: {:?}", String::from_utf8_lossy(&since_bad.stdout));
+    assert!(
+        String::from_utf8_lossy(&since_bad.stderr).contains("--since-line needs a number"),
+        "stderr: {}",
+        String::from_utf8_lossy(&since_bad.stderr)
+    );
+
     let a = run(&f.grok, &["events", id, "--json", "--after", "1", "--noise"]);
     assert_eq!(a.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&a.stderr));
     assert_eq!(lines_of(&a.stdout), vec![2]);
@@ -82,4 +99,104 @@ fn after_flag_and_version_token() {
     let e = run(&f.grok, &["events", id, "--json", "--noise"]);
     assert_eq!(e.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&e.stderr));
     assert_eq!(lines_of(&e.stdout), vec![0, 1, 2]);
+}
+
+// Contract: sab-air ~/repos/trace-deck/fixtures live-events.ndjson / live-list.ndjson (key order captured from the CLI)
+const EVENT_KEYS: [&str; 17] = [
+    "line",
+    "type",
+    "kind",
+    "role",
+    "title",
+    "preview",
+    "timestamp",
+    "duration_ms",
+    "input_tokens",
+    "output_tokens",
+    "turn",
+    "step",
+    "depth",
+    "model",
+    "is_error",
+    "noise",
+    "detail",
+];
+const SESSION_KEYS: [&str; 31] = [
+    "id",
+    "source",
+    "title",
+    "path",
+    "model",
+    "cwd",
+    "started_at",
+    "updated_at",
+    "event_count",
+    "user_count",
+    "assistant_count",
+    "tool_count",
+    "error_count",
+    "input_tokens",
+    "output_tokens",
+    "duration_ms",
+    "status",
+    "parent_id",
+    "label",
+    "agent_type",
+    "now",
+    "last_event_at",
+    "children",
+    "failed",
+    "native_id",
+    "mtime_ms",
+    "harness_pid",
+    "harness_start",
+    "context_tokens",
+    "context_window",
+    "via",
+];
+
+#[test]
+fn wire_shapes_match_trace_deck_fixtures() {
+    // Cargo.toml enables serde_json preserve_order; insertion order must survive a parse.
+    let manifest = include_str!("../Cargo.toml");
+    assert!(manifest.contains("preserve_order"), "serde_json preserve_order");
+    let probe: serde_json::Value = serde_json::from_str(r#"{"z":1,"a":2}"#).unwrap();
+    let probe_keys: Vec<&str> = probe.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(probe_keys, ["z", "a"], "serde_json key order");
+
+    let f = fix();
+    let events = run(&f.grok, &["events", f.id.as_str(), "--json", "--noise"]);
+    assert_eq!(events.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&events.stderr));
+    let event_text = std::str::from_utf8(&events.stdout).unwrap();
+    let event_lines: Vec<&str> = event_text.lines().filter(|l| !l.is_empty()).collect();
+    assert!(!event_lines.is_empty(), "events");
+    for line in event_lines {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        let obj = v.as_object().unwrap();
+        let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(keys, EVENT_KEYS);
+        assert!(obj["line"].is_i64(), "line");
+        assert!(obj["noise"].is_boolean(), "noise");
+        assert!(obj["is_error"].is_boolean(), "is_error");
+    }
+
+    let sessions = run(&f.grok, &["list", "--json"]);
+    assert_eq!(sessions.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&sessions.stderr));
+    let session_text = std::str::from_utf8(&sessions.stdout).unwrap();
+    let session_lines: Vec<&str> = session_text.lines().filter(|l| !l.is_empty()).collect();
+    assert!(!session_lines.is_empty(), "sessions");
+    for line in session_lines {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        let obj = v.as_object().unwrap();
+        let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(keys, SESSION_KEYS);
+        assert!(obj["children"].is_i64(), "children");
+        assert!(obj["status"].is_string(), "status");
+    }
+
+    // sample-events.json hand-written subset. Order differs from EVENT_KEYS by design; containment only.
+    const SAMPLE_EVENT_KEYS: [&str; 11] = [
+        "line", "type", "kind", "role", "title", "preview", "detail", "depth", "noise", "is_error", "turn",
+    ];
+    assert!(SAMPLE_EVENT_KEYS.iter().all(|k| EVENT_KEYS.contains(k)));
 }
