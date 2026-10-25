@@ -13,15 +13,74 @@
 //! | bb | `threads.parent_thread_id` |
 //! | pi | no parent field in the files |
 //! | cursor | none; `native_id` is the transcript file stem |
+//!
+//! A Claude session is also the live row of a bb thread when its `native_id` equals that thread's
+//! `events.provider_thread_id` (Claude stores `<project>/<uuid>`, bb stores the uuid). See [`bb_candidates`].
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::Value;
 
+use crate::bb::Bb;
+use crate::index::{Result, TraceIndex};
 use crate::normalize::clip;
 use crate::roots::Root;
+
+/// Claude `native_id` is `<project>/<session uuid>` (or the uuid alone). bb stores that uuid on
+/// `events.provider_thread_id`.
+pub(crate) fn claude_native_matches(native_id: &str, provider_thread_id: &str) -> bool {
+    !provider_thread_id.is_empty() && (native_id == provider_thread_id || native_id.rsplit('/').next() == Some(provider_thread_id))
+}
+
+/// One non-archived bb thread the live screen may show. `None` from [`bb_candidates`] means bb.db
+/// is not open, so receipt rows stay as they are.
+#[derive(Clone, Debug)]
+pub(crate) struct BbCandidate {
+    pub thread_id: String,
+    pub bb_session_id: String,
+    pub claude_id: Option<String>,
+    pub title: Option<String>,
+    pub status: String,
+    pub updated_at: i64,
+}
+
+/// Open indexed bb threads. `None` when this index has no readable bb root.
+pub(crate) fn bb_candidates(index: &TraceIndex) -> Result<Option<Vec<BbCandidate>>> {
+    let path: Option<String> = index
+        .conn()
+        .query_row("SELECT path FROM trace_roots WHERE source_id = 'bb' AND exists_flag = 1 LIMIT 1", [], |r| r.get(0))
+        .optional()?;
+    let Some(path) = path else { return Ok(None) };
+    let bb = match Bb::open(Path::new(&path)) {
+        Ok(bb) => bb,
+        Err(_) => return Ok(None),
+    };
+    let threads = match bb.threads() {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let mut out = Vec::new();
+    for t in threads.into_iter().filter(|t| !t.archived) {
+        let Some(bb_session_id) = index.session_by_native("bb", &t.id)? else { continue };
+        let provider = bb.provider_thread_id(&t.id)?;
+        let mut claude_id = None;
+        if let Some(p) = provider.as_deref().filter(|p| !p.is_empty())
+            && let Some(id) = index.session_by_native("claude", p)?
+        {
+            let native: Option<String> = index
+                .conn()
+                .query_row("SELECT native_id FROM trace_sessions WHERE id = ?1", [&id], |r| r.get(0))
+                .optional()?;
+            if native.as_deref().is_some_and(|n| claude_native_matches(n, p)) {
+                claude_id = Some(id);
+            }
+        }
+        out.push(BbCandidate { thread_id: t.id, bb_session_id, claude_id, title: t.title, status: t.status, updated_at: t.updated_at });
+    }
+    Ok(Some(out))
+}
 
 /// Header records (`session`, `session_meta`) sit in the first few lines.
 pub(crate) const HEADER_LINES: i64 = 8;
@@ -195,6 +254,15 @@ mod tests {
 
     fn root(source: &str, path: &Path) -> Root {
         Root { id: source.into(), source: source.into(), path: path.to_path_buf(), format: Format::Jsonl, file_name: None }
+    }
+
+    #[test]
+    fn claude_native_matches_the_session_uuid() {
+        assert!(claude_native_matches("-Users-x--bb/4b298056-c7c1-406a-923f-34e7bd2838d1", "4b298056-c7c1-406a-923f-34e7bd2838d1"));
+        assert!(claude_native_matches("4b298056-c7c1-406a-923f-34e7bd2838d1", "4b298056-c7c1-406a-923f-34e7bd2838d1"));
+        assert!(!claude_native_matches("-w/other", "4b298056-c7c1-406a-923f-34e7bd2838d1"));
+        assert!(!claude_native_matches("-w/4b298056-c7c1-406a-923f-34e7bd2838d1", ""));
+        assert!(!claude_native_matches("proj/sess_4b298056", "4b298056"));
     }
 
     #[test]

@@ -129,6 +129,8 @@ pub struct SessionRow {
     pub context_window: Option<i64>,
     /// Where the harness was launched from, per `live::via_of`.
     pub via: Option<String>,
+    /// bb thread this row stands for. Set when a Claude session is linked through `events.provider_thread_id`.
+    pub bb_thread_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -232,6 +234,7 @@ pub(crate) fn session_row(r: &Row<'_>, now: i64) -> rusqlite::Result<SessionRow>
         context_tokens: r.get(30)?,
         context_window: r.get(31)?,
         via: r.get(32)?,
+        bb_thread_id: None,
     })
 }
 
@@ -315,12 +318,13 @@ impl TraceIndex {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Sessions of `claude`, `pi` and `cursor` with receipts whose newest turn boundary is not `End`,
+    /// Sessions of `claude`, `pi`, `cursor` and `bb` with receipts whose newest turn boundary is not `End`,
     /// plus receipt-only Cursor rows (chats seen in hooks whose transcript is not indexed yet).
     /// Liveness of every row, receipt-only included, is the caller's `alive(harness_pid, harness_start)`;
     /// a row with a NULL pid stays until its newest boundary is `End`. Same-process supersede is the caller's too.
+    /// Open bb threads with no receipt yet are added in `fold_all` (`links::bb_candidates`).
     pub fn live_sessions(&self) -> Result<Vec<SessionRow>> {
-        const SOURCES: [&str; 3] = ["claude", "pi", "cursor"];
+        const SOURCES: [&str; 4] = ["claude", "pi", "cursor", "bb"];
         let now = now_ms();
         let conn = self.conn();
         let sql = format!(

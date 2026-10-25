@@ -152,6 +152,20 @@ impl Bb {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Claude session id bb stored for this thread (`events.provider_thread_id`), newest event first.
+    pub fn provider_thread_id(&self, thread_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT provider_thread_id FROM events
+                 WHERE thread_id = ?1 AND provider_thread_id IS NOT NULL AND provider_thread_id != ''
+                 ORDER BY sequence DESC LIMIT 1",
+                [thread_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// The full event row as one JSON line (the analogue of a transcript's raw line).
     pub fn raw_event(&self, thread_id: &str, sequence: i64) -> Result<Option<String>> {
         Ok(self

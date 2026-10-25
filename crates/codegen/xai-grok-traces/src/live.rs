@@ -298,6 +298,11 @@ pub const BOUNDARY_EVENTS: &[&str] = &[
     "stop",
     "beforeSubmitPrompt",
     "sessionEnd",
+    "thread.active",
+    "thread.idle",
+    "thread.failed",
+    "thread.archived",
+    "thread.deleted",
 ];
 
 /// Every event name `child_kind` can map.
@@ -320,6 +325,10 @@ pub fn boundary(source: &str, event: &str, detail: Option<&str>) -> Option<Bound
         ("cursor", "sessionStart" | "stop") => Some(Idle),
         ("cursor", "beforeSubmitPrompt") => Some(Prompt),
         ("cursor", "sessionEnd") => Some(End),
+        // bb: `thread.active` is the agent working; idle/failed is the user's turn; archive/delete removes the row.
+        ("bb", "thread.active") => Some(Prompt),
+        ("bb", "thread.idle" | "thread.failed") => Some(Idle),
+        ("bb", "thread.archived" | "thread.deleted") => Some(End),
         _ => None,
     }
 }
@@ -334,7 +343,7 @@ pub fn child_kind(source: &str, event: &str) -> Option<Child> {
 }
 
 /// Every event name that maps to `Boundary::End`; the SQL prefilter for the newest-`End` lookup.
-pub const END_EVENTS: &[&str] = &["SessionEnd", "session_shutdown", "sessionEnd"];
+pub const END_EVENTS: &[&str] = &["SessionEnd", "session_shutdown", "sessionEnd", "thread.archived", "thread.deleted"];
 
 // ---- event normalizer ----
 
@@ -361,7 +370,9 @@ const ASK_NOTIFICATIONS: [&str; 4] = ["permission_prompt", "elicitation_dialog",
 pub fn norm(source: &str, event: &str, detail: Option<&str>) -> Option<Ev> {
     if let Some(b) = boundary(source, event, detail) {
         return Some(match b {
-            Boundary::Idle => Ev::Idle { failed: source == "claude" && event == "StopFailure" },
+            Boundary::Idle => Ev::Idle {
+                failed: (source == "claude" && event == "StopFailure") || (source == "bb" && event == "thread.failed"),
+            },
             Boundary::Prompt => Ev::Prompt,
             Boundary::End => Ev::End { failed: false },
         });
@@ -479,6 +490,9 @@ pub struct LiveRow {
     /// Where the harness was launched from (`bb`, `zed`, `herdr`, `cursor`), from its receipts' `harness_chain`.
     #[serde(default)]
     pub via: Option<String>,
+    /// bb thread a linked Claude row stands for. Optional, so `LIVE_SCHEMA` stays 1.
+    #[serde(default)]
+    pub bb_thread_id: Option<String>,
 }
 
 /// What `grok-traces live --json` prints, one line. `live_schema` must equal [`LIVE_SCHEMA`] to be read.
@@ -766,6 +780,7 @@ pub fn fold_session(source: &str, row: &SessionRow, receipts: &[LiveReceipt], ki
         context_tokens: row.context_tokens,
         context_window: row.context_window,
         via: row.via.clone(),
+        bb_thread_id: row.bb_thread_id.clone(),
         ..Default::default()
     };
     Folded { open_tools, open_children, row: Some(live) }
@@ -816,6 +831,7 @@ pub fn fold_children(source: &str, parent: &SessionRow, receipts: &[LiveReceipt]
             context_tokens: kid.context_tokens,
             context_window: kid.context_window,
             via: parent.via.clone(),
+            bb_thread_id: parent.bb_thread_id.clone(),
             ..Default::default()
         });
     }
@@ -863,7 +879,88 @@ pub fn arrange(groups: Vec<Vec<LiveRow>>) -> Vec<LiveRow> {
     rows
 }
 
-/// The live screen's rows: `live_sessions` → not-alive dropped (a missing pid stays; a pid without a start gets a pid-only check) → same-process supersede
+/// Receipt stand-in for a bb thread that has no hook boundary yet. `thread.active` is working;
+/// idle and failed are the user's turn; `error` is a failed idle.
+fn bb_status_event(status: &str) -> &'static str {
+    match status {
+        "active" | "starting" => "thread.active",
+        "error" => "thread.failed",
+        _ => "thread.idle",
+    }
+}
+
+struct BbSynth {
+    bb_session_id: String,
+    event: &'static str,
+    at_ms: i64,
+}
+
+/// Drop archived/deleted bb rows, add open ones, and point a linked Claude session at its bb thread
+/// (`via bb`, the bb title, no second row). `bb.db` missing leaves the receipt rows alone.
+fn attach_bb(index: &TraceIndex, sessions: &mut Vec<SessionRow>) -> Result<std::collections::HashMap<String, BbSynth>> {
+    let Some(cands) = crate::links::bb_candidates(index)? else { return Ok(std::collections::HashMap::new()) };
+    let open: std::collections::HashSet<String> = cands.iter().map(|c| c.thread_id.clone()).collect();
+    sessions.retain(|s| s.source != "bb" || s.native_id.as_ref().is_some_and(|id| open.contains(id)));
+    let mut map = std::collections::HashMap::new();
+    let mut drop_bb = std::collections::HashSet::new();
+    for c in cands {
+        let ended = index.newest_boundary("bb", Some(&c.bb_session_id), Some(&c.thread_id))?.is_some_and(|(_, _, b)| b == Boundary::End);
+        if ended {
+            drop_bb.insert(c.bb_session_id);
+            if let Some(cid) = c.claude_id {
+                sessions.retain(|s| s.id != cid);
+            }
+            continue;
+        }
+        let synth = BbSynth { bb_session_id: c.bb_session_id.clone(), event: bb_status_event(&c.status), at_ms: c.updated_at };
+        if let Some(cid) = c.claude_id.clone() {
+            drop_bb.insert(c.bb_session_id.clone());
+            if let Some(row) = sessions.iter_mut().find(|s| s.id == cid) {
+                paint_bb(row, &c);
+            } else if let Some(mut row) = index.session(&cid)? {
+                paint_bb(&mut row, &c);
+                sessions.push(row);
+            } else {
+                drop_bb.remove(&c.bb_session_id);
+                ensure_bb(index, sessions, &c)?;
+                map.insert(c.bb_session_id, synth);
+                continue;
+            }
+            map.insert(cid, synth);
+        } else {
+            ensure_bb(index, sessions, &c)?;
+            map.insert(c.bb_session_id, synth);
+        }
+    }
+    sessions.retain(|s| !drop_bb.contains(&s.id));
+    Ok(map)
+}
+
+fn paint_bb(row: &mut SessionRow, c: &crate::links::BbCandidate) {
+    row.via = Some("bb".into());
+    if let Some(title) = &c.title {
+        row.title = title.clone();
+    }
+    row.bb_thread_id = Some(c.thread_id.clone());
+    // The thread is the liveness signal. A NULL pid stays until End.
+    row.harness_pid = None;
+    row.harness_start = None;
+}
+
+fn ensure_bb(index: &TraceIndex, sessions: &mut Vec<SessionRow>, c: &crate::links::BbCandidate) -> Result<()> {
+    if let Some(row) = sessions.iter_mut().find(|s| s.id == c.bb_session_id) {
+        row.bb_thread_id = Some(c.thread_id.clone());
+        return Ok(());
+    }
+    if let Some(mut row) = index.session(&c.bb_session_id)? {
+        row.bb_thread_id = Some(c.thread_id.clone());
+        sessions.push(row);
+    }
+    Ok(())
+}
+
+/// The live screen's rows: `live_sessions` → not-alive dropped (a missing pid stays; a pid without a start gets a pid-only check) → bb link
+/// (Claude `native_id` = `provider_thread_id` renders `via bb`, one row) → same-process supersede
 /// for claude/pi → `turn_receipts` → fold → children attached → ordered.
 pub fn fold_all(index: &TraceIndex, now_ms: i64, alive: impl Fn(i64, Option<i64>) -> bool) -> Result<Vec<LiveRow>> {
     let mut sessions: Vec<SessionRow> = index
@@ -871,6 +968,7 @@ pub fn fold_all(index: &TraceIndex, now_ms: i64, alive: impl Fn(i64, Option<i64>
         .into_iter()
         .filter(|s| s.harness_pid.is_none_or(|pid| alive(pid, s.harness_start)))
         .collect();
+    let bb_live = attach_bb(index, &mut sessions)?;
     // Of sessions sharing one process, only the one with the newest receipt stays.
     type Process = (String, i64, Option<i64>);
     let mut newest: std::collections::HashMap<Process, ((i64, i64), String)> = std::collections::HashMap::new();
@@ -888,13 +986,26 @@ pub fn fold_all(index: &TraceIndex, now_ms: i64, alive: impl Fn(i64, Option<i64>
     });
     let mut groups = Vec::new();
     for s in &sessions {
-        let receipts = index.turn_receipts(&s.id)?;
-        let kids = if matches!(s.source.as_str(), "claude" | "cursor") && !s.id.starts_with(crate::receipts::RECEIPT_ONLY_PREFIX) { index.children(&s.id)? } else { Vec::new() };
-        let strict = strict_ids(&s.source);
-        let folded = fold_session(&s.source, s, &receipts, &kids, now_ms, strict);
+        let (fold_source, receipts, kids) = if let Some(link) = bb_live.get(&s.id) {
+            let mut receipts = index.turn_receipts(&link.bb_session_id)?;
+            if !receipts.iter().any(|r| boundary("bb", &r.event, r.detail.as_deref()).is_some()) {
+                receipts.push(LiveReceipt { id: i64::MAX, event: link.event.into(), at_ms: link.at_ms, ..Default::default() });
+            }
+            let kids = if s.source == "claude" && !s.id.starts_with(crate::receipts::RECEIPT_ONLY_PREFIX) { index.children(&s.id)? } else { Vec::new() };
+            ("bb", receipts, kids)
+        } else {
+            let kids = if matches!(s.source.as_str(), "claude" | "cursor") && !s.id.starts_with(crate::receipts::RECEIPT_ONLY_PREFIX) {
+                index.children(&s.id)?
+            } else {
+                Vec::new()
+            };
+            (s.source.as_str(), index.turn_receipts(&s.id)?, kids)
+        };
+        let strict = strict_ids(fold_source);
+        let folded = fold_session(fold_source, s, &receipts, &kids, now_ms, strict);
         let Some(root) = folded.row else { continue };
         let mut group = vec![root];
-        group.extend(fold_children(&s.source, s, &receipts, &kids, &folded.open_children, now_ms, strict));
+        group.extend(fold_children(fold_source, s, &receipts, &kids, &folded.open_children, now_ms, strict));
         groups.push(group);
     }
     Ok(arrange(groups))
@@ -934,6 +1045,8 @@ mod tests {
         assert_eq!(b("pi", "session_start", None), Some(Idle));
         assert_eq!((b("cursor", "stop", None), b("cursor", "beforeSubmitPrompt", None), b("cursor", "sessionEnd", None)), (Some(Idle), Some(Prompt), Some(End)));
         assert_eq!(b("cursor", "sessionStart", None), Some(Idle));
+        assert_eq!((b("bb", "thread.active", None), b("bb", "thread.idle", None), b("bb", "thread.failed", None)), (Some(Prompt), Some(Idle), Some(Idle)));
+        assert_eq!((b("bb", "thread.archived", None), b("bb", "thread.deleted", None), b("bb", "thread.created", None)), (Some(End), Some(End), None));
         // Case-sensitive per source; tools and ticks are no boundary.
         assert_eq!((b("cursor", "Stop", None), b("claude", "stop", None), b("claude", "PreToolUse", None), b("codex", "Stop", None)), (None, None, None, None));
         assert_eq!(b("cursor", "afterAgentResponse", None), None);
@@ -941,11 +1054,11 @@ mod tests {
 
     #[test]
     fn boundary_events_cover_the_table() {
-        for (source, event) in [("claude", "Notification"), ("claude", "Stop"), ("pi", "agent_end"), ("cursor", "sessionEnd")] {
+        for (source, event) in [("claude", "Notification"), ("claude", "Stop"), ("pi", "agent_end"), ("cursor", "sessionEnd"), ("bb", "thread.deleted")] {
             assert!(BOUNDARY_EVENTS.contains(&event), "{source} {event}");
         }
         // Every name the table can map is prefiltered in.
-        for source in ["claude", "pi", "cursor"] {
+        for source in ["claude", "pi", "cursor", "bb"] {
             for event in BOUNDARY_EVENTS {
                 let _ = boundary(source, event, Some("idle_prompt"));
             }
@@ -953,7 +1066,7 @@ mod tests {
         let mapped: Vec<&str> = BOUNDARY_EVENTS
             .iter()
             .copied()
-            .filter(|e| ["claude", "pi", "cursor"].iter().any(|s| boundary(s, e, Some("idle_prompt")).is_some()))
+            .filter(|e| ["claude", "pi", "cursor", "bb"].iter().any(|s| boundary(s, e, Some("idle_prompt")).is_some()))
             .collect();
         assert_eq!(mapped.len(), BOUNDARY_EVENTS.len(), "no dead names in the prefilter");
     }
@@ -1076,6 +1189,21 @@ mod tests {
         assert_eq!(chain_name("bun", || Some(argv(&["bun"])), true), "bun");
         assert_eq!(chain_name("zed", a, true), "zed", "argv is read only for interpreters");
         assert_eq!(chain_name("a>b", none, true), "a_b");
+    }
+
+    #[test]
+    fn bb_receipts_are_working_then_idle_and_delete_ends() {
+        let row = SessionRow { id: "b".into(), source: "bb".into(), now: Some("pong".into()), bb_thread_id: Some("thr".into()), ..Default::default() };
+        let at = |event: &str, t: i64| LiveReceipt { id: t, event: event.into(), at_ms: t, ..Default::default() };
+        let active = fold_session("bb", &row, &[at("thread.active", 1_000)], &[], 1_500, false).row.unwrap();
+        assert_eq!((active.state, active.text.as_str(), active.bb_thread_id.as_deref()), (LiveState::Working, "pong", Some("thr")));
+        let soon = fold_session("bb", &row, &[at("thread.idle", 1_000)], &[], 2_000, false).row.unwrap();
+        assert_eq!(soon.state, LiveState::Working, "idle waits out the debounce");
+        let idle = fold_session("bb", &row, &[at("thread.idle", 1_000)], &[], 4_000, false).row.unwrap();
+        assert_eq!(idle.state, LiveState::Prompt);
+        let failed = fold_session("bb", &row, &[at("thread.failed", 1_000)], &[], 4_000, false).row.unwrap();
+        assert_eq!((failed.state, failed.failed), (LiveState::Prompt, true));
+        assert!(fold_session("bb", &row, &[at("thread.active", 1_000), at("thread.deleted", 2_000)], &[], 3_000, false).row.is_none());
     }
 
     #[test]

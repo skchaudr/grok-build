@@ -217,6 +217,7 @@ pub fn session_from_json(v: &Value) -> Option<SessionRow> {
         context_tokens: i64_of(v, "context_tokens"),
         context_window: i64_of(v, "context_window"),
         via: str_of(v, "via"),
+        bb_thread_id: None,
     })
 }
 

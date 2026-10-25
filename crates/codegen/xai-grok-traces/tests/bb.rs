@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 use xai_grok_traces::hook::{extract, ingest};
-use xai_grok_traces::{EventFilter, MAX_EVENTS_PER_FILE, SessionFilter, SessionRow, Status, TraceIndex, default_roots, root_for};
+use xai_grok_traces::live::{LiveState, fold_all};
+use xai_grok_traces::{EventFilter, MAX_EVENTS_PER_FILE, Receipt, SessionFilter, SessionRow, Status, TraceIndex, default_roots, root_for};
 
 const BASE: i64 = 1_790_000_000_000;
 
@@ -27,8 +28,8 @@ fn env() -> Env {
            model_override TEXT, title TEXT, title_fallback TEXT, status TEXT NOT NULL, parent_thread_id TEXT,
            archived_at INTEGER, deleted_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
          CREATE TABLE events (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, sequence INTEGER NOT NULL, type TEXT NOT NULL,
-           item_id TEXT, item_kind TEXT, turn_id TEXT, parent_tool_call_id TEXT, data TEXT NOT NULL DEFAULT '{}',
-           created_at INTEGER NOT NULL);
+           item_id TEXT, item_kind TEXT, turn_id TEXT, parent_tool_call_id TEXT, provider_thread_id TEXT,
+           data TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL);
          CREATE UNIQUE INDEX events_thread_sequence_idx ON events (thread_id, sequence);
          INSERT INTO environments VALUES ('env1', '/w/bb');
          INSERT INTO threads VALUES ('thr_a', 'p', 'env1', 'codex', NULL, 'Fix the bug', NULL, 'idle', NULL, NULL, NULL, 1000, 9000);
@@ -196,6 +197,87 @@ fn event_cap_stops_a_runaway_thread() {
     idx.scan(&roots).unwrap();
     assert_eq!(thread(&idx, "second thread").event_count, MAX_EVENTS_PER_FILE as i64);
     assert_eq!(idx.scan(&roots).unwrap().indexed, 0, "capped thread is not rescanned");
+}
+
+#[test]
+fn claude_session_linked_by_provider_thread_id_is_one_via_bb_row() {
+    let e = env();
+    let uuid = "4b298056-c7c1-406a-923f-34e7bd2838d1";
+    let c = rw(&e.bb);
+    c.execute(
+        "INSERT INTO threads (id, project_id, environment_id, provider_id, title, status, created_at, updated_at)
+         VALUES ('thr_zed', 'p', 'env1', 'claude-code', 'Get BB running in Zed', 'idle', 1000, 1700000000000)",
+        [],
+    )
+    .unwrap();
+    add_event(&c, "thr_zed", 1, "item/completed", Some("agentMessage"), r#"{"item":{"id":"z","text":"done"}}"#);
+    c.execute("UPDATE events SET provider_thread_id = ?1 WHERE thread_id = 'thr_zed'", [uuid]).unwrap();
+    c.execute(
+        "INSERT INTO threads (id, project_id, environment_id, provider_id, title, status, created_at, updated_at)
+         VALUES ('thr_acp', 'p', 'env1', 'acp-cursor', 'cursor probe', 'error', 1000, 1700000000000)",
+        [],
+    )
+    .unwrap();
+    add_event(&c, "thr_acp", 1, "item/completed", Some("agentMessage"), r#"{"item":{"id":"c","text":"nope"}}"#);
+    c.execute(
+        "INSERT INTO threads (id, project_id, environment_id, provider_id, title, status, archived_at, created_at, updated_at)
+         VALUES ('thr_old', 'p', 'env1', 'claude-code', 'archived thread', 'idle', 1, 1000, 1700000000000)",
+        [],
+    )
+    .unwrap();
+    add_event(&c, "thr_old", 1, "item/completed", Some("agentMessage"), r#"{"item":{"id":"o","text":"old"}}"#);
+    drop(c);
+    let claude = e.home.join(format!(".claude/projects/-w/{uuid}.jsonl"));
+    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    std::fs::write(
+        &claude,
+        "{\"type\":\"assistant\",\"timestamp\":\"2026-10-01T00:00:06Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"from transcript\"}]}}\n",
+    )
+    .unwrap();
+    let roots = default_roots(&e.home, &e.home.join(".grok"));
+    let mut idx = TraceIndex::open(&e.idx_db).unwrap();
+    idx.scan(&roots).unwrap();
+    let old = sessions(&idx).into_iter().find(|s| s.native_id.as_deref() == Some("thr_old")).unwrap();
+    idx.record_receipt(&Receipt { at_ms: 1_700_000_000_000, source: "bb".into(), event: "thread.idle".into(), session_id: Some(old.id), ..Default::default() }).unwrap();
+
+    let now = 1_700_000_060_000;
+    let rows = fold_all(&idx, now, |_, _| false).unwrap();
+    let zed: Vec<_> = rows.iter().filter(|r| r.bb_thread_id.as_deref() == Some("thr_zed")).collect();
+    assert_eq!(zed.len(), 1, "linked claude and bb thread are one row: {rows:?}");
+    assert_eq!(zed[0].source.as_str(), "claude");
+    assert_eq!(zed[0].via.as_deref(), Some("bb"));
+    assert_eq!(zed[0].title.as_str(), "Get BB running in Zed");
+    assert_eq!(zed[0].state, LiveState::Prompt, "idle thread is your turn");
+    assert!(rows.iter().all(|r| r.title != "archived thread"), "archived thread is gone");
+    let acp = rows.iter().find(|r| r.title == "cursor probe").unwrap();
+    assert_eq!((acp.source.as_str(), acp.via.as_deref(), acp.state, acp.failed), ("bb", None, LiveState::Prompt, true));
+
+    let bb_zed = sessions(&idx).into_iter().find(|s| s.native_id.as_deref() == Some("thr_zed")).unwrap();
+    idx.record_receipt(&Receipt {
+        at_ms: now - 500,
+        source: "bb".into(),
+        event: "thread.active".into(),
+        session_id: Some(bb_zed.id.clone()),
+        native_session: Some("thr_zed".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let rows = fold_all(&idx, now, |_, _| false).unwrap();
+    let zed = rows.iter().find(|r| r.bb_thread_id.as_deref() == Some("thr_zed")).unwrap();
+    assert_eq!((zed.state, zed.text.as_str()), (LiveState::Working, "from transcript"));
+
+    let acp_id = sessions(&idx).into_iter().find(|s| s.native_id.as_deref() == Some("thr_acp")).unwrap().id;
+    idx.record_receipt(&Receipt {
+        at_ms: now,
+        source: "bb".into(),
+        event: "thread.deleted".into(),
+        session_id: Some(acp_id),
+        native_session: Some("thr_acp".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let rows = fold_all(&idx, now + 1_000, |_, _| false).unwrap();
+    assert!(rows.iter().all(|r| r.title != "cursor probe"), "thread.deleted removes the row");
 }
 
 #[test]

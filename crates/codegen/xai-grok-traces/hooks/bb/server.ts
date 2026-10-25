@@ -14,7 +14,7 @@ interface Api {
 
 const BIN = join(homedir(), ".grok", "bin", "grok-traces");
 const THROTTLE_MS = 1000;
-const EVENTS = ["thread.created", "thread.active", "thread.idle", "thread.failed", "thread.archived"];
+const EVENTS = ["thread.created", "thread.active", "thread.idle", "thread.failed", "thread.archived", "thread.deleted"];
 
 export default async function plugin(bb: Api) {
   const state = new Map<string, { at: number; timer?: ReturnType<typeof setTimeout> }>();
