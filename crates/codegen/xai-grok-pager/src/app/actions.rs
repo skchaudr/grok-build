@@ -958,6 +958,8 @@ pub enum Action {
         source: String,
         native_id: String,
     },
+    /// Tell, stop, approve, or deny the bb thread behind a `/traces` row.
+    TracesBb(xai_grok_traces::bbctl::Op),
     /// Open the hidden `/gboom` easter egg (DOOM-style raycaster modal).
     OpenGboom,
     /// Suspend the TUI and open a configuration file in `$EDITOR`.

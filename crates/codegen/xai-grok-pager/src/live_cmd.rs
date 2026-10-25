@@ -72,6 +72,8 @@ fn step(state: &mut TracesModalState, ev: &Event) -> bool {
             }
             match handle_traces_key(state, key) {
                 InputOutcome::Action(Action::TracesNotice { text }) => state.status = Some(text),
+                // bb rows are controlled from here; the linked live row is proven once live lists bb.
+                InputOutcome::Action(Action::TracesBb(op)) => state.launch_bb(op),
                 // No agent here: resume, copy, rescan and the rest have nothing to act on.
                 InputOutcome::Action(_) | InputOutcome::ActionThenForward(_) => {
                     state.status = Some(NOT_HERE.into());
@@ -191,5 +193,42 @@ mod tests {
         let mut s = state();
         assert!(step(&mut s, &Event::Resize(80, 24)));
         assert!(!s.live_wants_exit());
+    }
+
+    #[test]
+    fn bb_tell_runs_instead_of_not_here() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let args = dir.path().join("args");
+        let bin = dir.path().join("bb");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\necho '---' >> '{}'\necho '{{\"ok\":true}}'\n",
+                args.display(),
+                args.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut s = state();
+        s.test_select_bb("thr_probe1");
+        s.set_bb_bin(bin.to_string_lossy().to_string());
+        step(&mut s, &key(KeyCode::Char('m'), KeyModifiers::NONE, KeyEventKind::Press));
+        for c in "pong".chars() {
+            step(&mut s, &key(KeyCode::Char(c), KeyModifiers::NONE, KeyEventKind::Press));
+        }
+        step(&mut s, &key(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press));
+        assert_ne!(s.status.as_deref(), Some(NOT_HERE));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && s.status.as_deref() != Some("told thr_probe1") {
+            s.poll_live();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(s.status.as_deref(), Some("told thr_probe1"), "{:?}", s.status);
+        let log = std::fs::read_to_string(&args).unwrap();
+        assert!(log.contains("thr_probe1"), "{log}");
+        assert!(log.contains("pong"), "{log}");
     }
 }

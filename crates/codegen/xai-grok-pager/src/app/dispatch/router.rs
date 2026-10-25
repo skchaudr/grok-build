@@ -1471,6 +1471,14 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::TracesResume { source, native_id } => dispatch_traces_resume(app, &source, native_id),
+        Action::TracesBb(op) => {
+            with_active_agent(app, |agent| {
+                if let Some(crate::views::modal::ActiveModal::Traces { state }) = agent.active_modal.as_mut() {
+                    state.launch_bb(op);
+                }
+            });
+            vec![]
+        }
         Action::OpenMemoryModal => {
             if let ActiveView::Agent(id) = app.active_view
                 && let Some(agent) = app.agents.get(&id)

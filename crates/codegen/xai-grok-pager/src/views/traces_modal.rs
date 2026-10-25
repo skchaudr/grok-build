@@ -13,6 +13,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use xai_grok_traces::bbctl::{self, Op};
 use xai_grok_traces::live::{self, LiveRow, LiveState};
 use xai_grok_traces::remote::{self, EventQuery, Fetched, RemoteFilter};
 use xai_grok_traces::{EventFilter, EventRow, RECEIPT_WINDOW_MS, SOURCES, SessionFilter, SessionRow, Sort, Status, TraceIndex, source_label};
@@ -70,6 +71,8 @@ enum Typing {
     Ledger,
     Events,
     Live,
+    /// `m` on a bb row: the draft is sent with Enter.
+    Tell,
 }
 
 /// A parent trajectory parked while its dispatch child is open: the session, the selected row and the outline folds.
@@ -89,6 +92,19 @@ pub struct TracesModalState {
     index: Option<TraceIndex>,
     pub scanning: bool,
     pub status: Option<String>,
+    /// Draft for `m` tell on a bb row.
+    tell: String,
+    /// Thread id armed by `X`; `y` confirms the stop.
+    bb_stop: Option<String>,
+    /// In-flight tell/stop/approve/deny. The 1s poll takes the status line.
+    bb_rx: Option<mpsc::Receiver<String>>,
+    /// Pending interaction ids for the focused bb thread (`interactions list`).
+    bb_pending_thread: Option<String>,
+    bb_pending_ids: Vec<String>,
+    bb_pending_at: Option<Instant>,
+    bb_pending_rx: Option<mpsc::Receiver<(String, std::result::Result<Vec<String>, String>)>>,
+    /// Test hook: `bb` binary. `None` is `bb` on `PATH`.
+    bb_bin: Option<String>,
     /// Index health problem (over cap, ...); shown red under the tabs.
     pub health: Option<String>,
     /// Hook receipts arrived within `RECEIPT_WINDOW_MS`.
@@ -348,6 +364,13 @@ pub struct ResumeTarget {
     pub native_id: String,
 }
 
+fn thread_of_row(row: &SessionRow) -> Option<String> {
+    if row.source != "bb" || row.host.is_some() {
+        return None;
+    }
+    bbctl::thread_id(row.file_path.to_str()?).map(str::to_string)
+}
+
 pub fn resume_target(row: &SessionRow) -> Option<ResumeTarget> {
     let stem = row.file_path.file_stem()?.to_str()?;
     let native_id = match row.source.as_str() {
@@ -375,6 +398,14 @@ impl TracesModalState {
             window: ModalWindowState::new(),
             mode: Mode::List,
             status: index.is_none().then(|| "trace index unavailable".to_string()),
+            tell: String::new(),
+            bb_stop: None,
+            bb_rx: None,
+            bb_pending_thread: None,
+            bb_pending_ids: Vec::new(),
+            bb_pending_at: None,
+            bb_pending_rx: None,
+            bb_bin: None,
             index,
             health: None,
             live: false,
@@ -501,6 +532,7 @@ impl TracesModalState {
             }
         }
         redraw |= self.poll_remote();
+        redraw |= self.poll_bb();
         if self.mode == Mode::Live {
             redraw |= self.poll_live_screen(now_ms);
         }
@@ -1504,6 +1536,192 @@ impl TracesModalState {
         let session = self.session.as_ref()?;
         let line = self.events.get(self.selected_event()?)?.line;
         index.raw_line(&session.id, line).ok().flatten()
+    }
+
+    /// Local bb thread for the focused row. Remote rows and other harnesses are not targets.
+    fn bb_target(&self) -> Option<String> {
+        match self.mode {
+            Mode::List => thread_of_row(self.selected_session()?),
+            Mode::Trajectory | Mode::Inspector => thread_of_row(self.session.as_ref()?),
+            Mode::Live => self.live_bb_thread(),
+        }
+    }
+
+    fn live_bb_thread(&self) -> Option<String> {
+        let view = self.live_view(Instant::now());
+        let lines = &view.lines;
+        if lines.is_empty() {
+            return None;
+        }
+        let i = self
+            .live_sel
+            .as_ref()
+            .and_then(|id| lines.iter().position(|l| l.row.session_id == *id))
+            .unwrap_or_else(|| if self.live_sel.is_some() { self.live_sel_idx.min(lines.len() - 1) } else { 0 });
+        let row = &lines.get(i)?.row;
+        if row.source != "bb" || row.host.is_some() {
+            return None;
+        }
+        if let Some(id) = row.native_id.as_deref().filter(|id| bbctl::valid_thread(id)) {
+            return Some((*id).to_string());
+        }
+        let session = self.index.as_ref()?.session(&row.session_id).ok().flatten()?;
+        thread_of_row(&session)
+    }
+
+    fn bb_has_pending(&self) -> bool {
+        let Some(thread) = self.bb_target() else { return false };
+        self.bb_pending_thread.as_deref() == Some(thread.as_str()) && !self.bb_pending_ids.is_empty()
+    }
+
+    fn on_bb_key(&mut self, code: KeyCode) -> Option<InputOutcome> {
+        match code {
+            KeyCode::Char('m') if self.bb_target().is_some() => {
+                self.typing = Typing::Tell;
+                self.tell.clear();
+                self.bb_stop = None;
+                self.status = Some("tell: ▏".into());
+                Some(InputOutcome::Changed)
+            }
+            KeyCode::Char('X') if self.bb_target().is_some() => {
+                let thread = self.bb_target()?;
+                self.bb_stop = Some(thread.clone());
+                self.status = Some(format!("stop {thread}? y"));
+                Some(InputOutcome::Changed)
+            }
+            KeyCode::Char('a') if self.bb_has_pending() => {
+                let thread = self.bb_target()?;
+                Some(InputOutcome::Action(Action::TracesBb(Op::Approve { thread })))
+            }
+            KeyCode::Char('d') if self.bb_has_pending() => {
+                let thread = self.bb_target()?;
+                Some(InputOutcome::Action(Action::TracesBb(Op::Deny { thread })))
+            }
+            KeyCode::Char('r') if self.bb_target().is_some() => Some(InputOutcome::Unchanged),
+            _ => None,
+        }
+    }
+
+    fn bb_runner(&self) -> bbctl::Runner {
+        match &self.bb_bin {
+            Some(bin) => bbctl::Runner {
+                bin: bin.clone(),
+                timeout: Duration::from_secs(2),
+                poll: Duration::from_millis(20),
+                self_id: None,
+            },
+            None => bbctl::Runner::default(),
+        }
+    }
+
+    /// Run a bb action off the UI thread. `poll_live` (1s) writes the status line.
+    pub fn launch_bb(&mut self, op: Op) {
+        let runner = self.bb_runner();
+        let thread = match &op {
+            Op::Tell { thread, .. } | Op::Stop { thread } | Op::Approve { thread } | Op::Deny { thread } => thread.clone(),
+        };
+        let verb = match &op {
+            Op::Tell { .. } => "telling",
+            Op::Stop { .. } => "stopping",
+            Op::Approve { .. } => "approving",
+            Op::Deny { .. } => "denying",
+        };
+        self.bb_stop = None;
+        self.status = Some(format!("{verb} {thread}"));
+        let (tx, rx) = mpsc::channel();
+        self.bb_rx = Some(rx);
+        std::thread::spawn(move || {
+            let text = bbctl::run_with(&runner, &op).unwrap_or_else(|e| e);
+            let _ = tx.send(text);
+        });
+    }
+
+    /// Collect a finished bb call and refresh pending interactions for the focused thread.
+    fn poll_bb(&mut self) -> bool {
+        let mut redraw = false;
+        let bb_msg = self.bb_rx.as_ref().map(|rx| rx.try_recv());
+        match bb_msg {
+            Some(Ok(text)) => {
+                self.bb_rx = None;
+                if self.typing != Typing::Tell && self.bb_stop.is_none() {
+                    self.status = Some(text);
+                }
+                redraw = true;
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.bb_rx = None;
+                if self.typing != Typing::Tell && self.bb_stop.is_none() {
+                    self.status = Some("bb stopped".into());
+                }
+                redraw = true;
+            }
+            _ => {}
+        }
+        let pending_msg = self.bb_pending_rx.as_ref().map(|rx| rx.try_recv());
+        match pending_msg {
+            Some(Ok((thread, res))) => {
+                self.bb_pending_rx = None;
+                if self.bb_target().as_deref() == Some(thread.as_str()) {
+                    self.bb_pending_thread = Some(thread);
+                    if let Ok(ids) = res {
+                        self.bb_pending_ids = ids;
+                    }
+                    self.bb_pending_at = Some(Instant::now());
+                    redraw = true;
+                }
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => self.bb_pending_rx = None,
+            _ => {}
+        }
+        let Some(thread) = self.bb_target() else {
+            if self.bb_pending_thread.take().is_some() {
+                self.bb_pending_ids.clear();
+                redraw = true;
+            }
+            return redraw;
+        };
+        if self.bb_pending_thread.as_deref().is_some_and(|t| t != thread) {
+            self.bb_pending_ids.clear();
+            self.bb_pending_thread = None;
+            self.bb_pending_at = None;
+            self.bb_pending_rx = None;
+            redraw = true;
+        }
+        let due = self.bb_pending_at.is_none_or(|t| t.elapsed() >= bbctl::POLL);
+        if self.bb_pending_rx.is_none() && due {
+            let (tx, rx) = mpsc::channel();
+            self.bb_pending_rx = Some(rx);
+            let runner = self.bb_runner();
+            std::thread::spawn(move || {
+                let res = bbctl::pending_with(&runner, &thread);
+                let _ = tx.send((thread, res));
+            });
+        }
+        redraw
+    }
+
+    #[cfg(test)]
+    pub fn test_select_bb(&mut self, thread: &str) {
+        self.mode = Mode::List;
+        self.standalone = false;
+        self.sessions = vec![SessionRow {
+            id: "bb1".into(),
+            source: "bb".into(),
+            title: "probe".into(),
+            file_path: format!("/h/.bb/bb.db#{thread}").into(),
+            ..Default::default()
+        }];
+        self.children.clear();
+        self.selected = 0;
+        self.rebuild_ledger();
+        self.typing = Typing::No;
+        self.status = None;
+        self.bb_bin = None;
+    }
+
+    #[cfg(test)]
+    pub fn set_bb_bin(&mut self, bin: impl Into<String>) {
+        self.bb_bin = Some(bin.into());
     }
 
     fn resume(&self, row: Option<&SessionRow>) -> InputOutcome {
@@ -2884,8 +3102,14 @@ fn collect_text(v: &serde_json::Value, out: &mut Vec<String>) {
                 match x {
                     Value::String(s) if TEXT_KEYS.contains(&key) || key == "content" || key == "message" => push_chunk(out, s),
                     Value::String(s) if INPUT_KEYS.contains(&key) => push_chunk(out, s),
+                    // bb user turns store the prompt under `input` as `{text}` or `[{text}]`.
+                    // Descend to that prose; pretty-print only input that has none.
                     _ if INPUT_KEYS.contains(&key) => {
-                        if let Ok(pretty) = serde_json::to_string_pretty(x) {
+                        let before = out.len();
+                        collect_text(x, out);
+                        if out.len() == before
+                            && let Ok(pretty) = serde_json::to_string_pretty(x)
+                        {
                             push_chunk(out, &pretty);
                         }
                     }
@@ -3067,7 +3291,7 @@ fn edit_line(text: &mut String, key: &KeyEvent) -> bool {
 
 /// Esc in a sub-view or an editor is handled here; only the ledger's Esc closes the modal.
 pub fn wants_esc(state: &TracesModalState) -> bool {
-    state.typing != Typing::No || state.mode != Mode::List
+    state.typing != Typing::No || state.mode != Mode::List || state.bb_stop.is_some()
 }
 
 pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
@@ -3118,11 +3342,56 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
             }
             return InputOutcome::Changed;
         }
+        Typing::Tell => {
+            match key.code {
+                KeyCode::Esc => {
+                    state.typing = Typing::No;
+                    state.tell.clear();
+                    state.status = None;
+                }
+                KeyCode::Enter => {
+                    let Some(thread) = state.bb_target() else {
+                        state.typing = Typing::No;
+                        return InputOutcome::Unchanged;
+                    };
+                    let text = std::mem::take(&mut state.tell);
+                    state.typing = Typing::No;
+                    if text.trim().is_empty() {
+                        state.status = Some("empty tell".into());
+                        return InputOutcome::Changed;
+                    }
+                    return InputOutcome::Action(Action::TracesBb(Op::Tell { thread, text }));
+                }
+                _ if edit_line(&mut state.tell, key) => state.status = Some(format!("tell: {}▏", state.tell)),
+                _ => return InputOutcome::Unchanged,
+            }
+            return InputOutcome::Changed;
+        }
         Typing::No => {}
     }
     // Plain-letter nav keys ignore Ctrl/Alt chords (Ctrl+E is not `e`, Ctrl+R is not `r`).
     if matches!(key.code, KeyCode::Char(_)) && key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
         return InputOutcome::Unchanged;
+    }
+    if state.bb_stop.is_some() {
+        match key.code {
+            KeyCode::Char('y') => {
+                let thread = state.bb_stop.take().unwrap();
+                return InputOutcome::Action(Action::TracesBb(Op::Stop { thread }));
+            }
+            KeyCode::Esc => {
+                state.bb_stop = None;
+                state.status = None;
+                return InputOutcome::Changed;
+            }
+            _ => {
+                state.bb_stop = None;
+                state.status = None;
+            }
+        }
+    }
+    if let Some(out) = state.on_bb_key(key.code) {
+        return out;
     }
     let page = 10;
     match state.mode {
@@ -3414,53 +3683,86 @@ fn keep_visible(sel: usize, scroll: &mut usize, height: usize) {
 
 fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
     let plain = |label: &'static str| Shortcut { label, clickable: false, id: 0 };
+    if state.typing == Typing::Tell {
+        return vec![plain("type a message"), plain("Enter send"), plain("Esc cancel")];
+    }
     if state.typing == Typing::Live {
         return vec![plain("type to filter"), plain("Enter keep"), plain("Esc clear")];
     }
     if state.typing != Typing::No {
         return vec![plain("type to filter"), plain("Enter search events"), plain("Esc clear")];
     }
+    let bb = state.bb_target().is_some();
+    let pending = state.bb_has_pending();
     match state.mode {
-        Mode::List => vec![
-            plain("j/k move"),
-            plain("Tab source"),
-            plain("/ search"),
-            plain("a all"),
-            plain("A active"),
-            plain("x errors"),
-            plain("H host"),
-            plain("s sort"),
-            plain("Enter open"),
-            plain("e toggle"),
-            plain("E all"),
-            plain("</> more/less"),
-            plain("h/l fold"),
-            plain("r resume"),
-            plain("R rescan"),
-            plain("L live"),
-            plain("Esc close"),
-        ],
-        Mode::Trajectory => vec![
-            plain("j/k move"),
-            plain("h/l fold"),
-            plain("Enter inspect/open agent"),
-            plain("e fold"),
-            plain("E all"),
-            plain("</> more/less"),
-            plain("n noise"),
-            plain("x errors"),
-            plain("t tool"),
-            plain("/ search"),
-            plain("r resume"),
-            plain("Esc back"),
-        ],
-        Mode::Live => vec![
-            plain("j/k move"),
-            plain("Enter open"),
-            plain("h/l fold"),
-            plain("/ search"),
-            plain("Esc back"),
-        ],
+        Mode::List => {
+            let mut v = vec![plain("j/k move"), plain("Tab source"), plain("/ search")];
+            if !pending {
+                v.push(plain("a all"));
+            }
+            v.extend([
+                plain("A active"),
+                plain("x errors"),
+                plain("H host"),
+                plain("s sort"),
+                plain("Enter open"),
+                plain("e toggle"),
+                plain("E all"),
+                plain("</> more/less"),
+                plain("h/l fold"),
+            ]);
+            if bb {
+                v.push(plain("m tell"));
+                v.push(plain("X stop"));
+                if pending {
+                    v.push(plain("a approve"));
+                    v.push(plain("d deny"));
+                }
+            } else {
+                v.push(plain("r resume"));
+            }
+            v.extend([plain("R rescan"), plain("L live"), plain("Esc close")]);
+            v
+        }
+        Mode::Trajectory => {
+            let mut v = vec![
+                plain("j/k move"),
+                plain("h/l fold"),
+                plain("Enter inspect/open agent"),
+                plain("e fold"),
+                plain("E all"),
+                plain("</> more/less"),
+                plain("n noise"),
+                plain("x errors"),
+                plain("t tool"),
+                plain("/ search"),
+            ];
+            if bb {
+                v.push(plain("m tell"));
+                v.push(plain("X stop"));
+                if pending {
+                    v.push(plain("a approve"));
+                    v.push(plain("d deny"));
+                }
+            } else {
+                v.push(plain("r resume"));
+            }
+            v.push(plain("Esc back"));
+            v
+        }
+        Mode::Live => {
+            let mut v = vec![plain("j/k move"), plain("Enter open"), plain("h/l fold"), plain("/ search")];
+            if bb {
+                v.push(plain("m tell"));
+                v.push(plain("X stop"));
+                if pending {
+                    v.push(plain("a approve"));
+                    v.push(plain("d deny"));
+                }
+            }
+            v.push(plain("Esc back"));
+            v
+        }
         Mode::Inspector => vec![plain("j/k scroll"), plain("y copy line"), plain("Esc back")],
     }
 }
@@ -3647,10 +3949,14 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
 
     // Search line.
     let search_y = area.y + 1;
-    let (text, style) = match (state.typing == Typing::Ledger, state.query.is_empty()) {
-        (true, _) => (format!("/{}▏", state.query), Style::default().fg(theme.text_primary)),
-        (false, true) => ("/ to search titles, cwd, model · Enter searches events too".into(), dim),
-        (false, false) => (format!("/{}{}", state.query, if state.deep { "  (events)" } else { "" }), Style::default().fg(theme.fuzzy_accent)),
+    let (text, style) = if state.typing == Typing::Tell {
+        (format!("tell: {}▏", state.tell), Style::default().fg(theme.text_primary))
+    } else {
+        match (state.typing == Typing::Ledger, state.query.is_empty()) {
+            (true, _) => (format!("/{}▏", state.query), Style::default().fg(theme.text_primary)),
+            (false, true) => ("/ to search titles, cwd, model · Enter searches events too".into(), dim),
+            (false, false) => (format!("/{}{}", state.query, if state.deep { "  (events)" } else { "" }), Style::default().fg(theme.fuzzy_accent)),
+        }
     };
     // A red health line takes the right of the search row; the search hint yields to it.
     let remote_alert = (!state.remote_err.is_empty()).then(|| {
@@ -5113,6 +5419,65 @@ mod tests {
         assert_eq!(body_text(dup), "same");
         assert_eq!(body_text(r#"{"type":"x"}"#), "{\n  \"type\": \"x\"\n}");
         assert_eq!(body_text("not json"), "not json");
+    }
+
+    #[test]
+    fn body_text_reads_bb_prompt_prose() {
+        let raw = r#"{"type":"client/turn/requested","data":{"input":[{"type":"text","text":"wait for instructions"}],"execution":{"model":"gpt-5"}}}"#;
+        assert_eq!(body_text(raw), "wait for instructions");
+        let obj = r#"{"data":{"input":{"text":"reply with the word pong"}}}"#;
+        assert_eq!(body_text(obj), "reply with the word pong");
+    }
+
+    fn outcome(state: &mut TracesModalState, code: KeyCode) -> InputOutcome {
+        handle_traces_key(state, &KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn bb_row_tells_stops_and_drops_resume() {
+        let mut state = TracesModalState::open_with_hosts(None, vec![]);
+        state.test_select_bb("thr_probe1");
+        let labels: Vec<_> = shortcuts(&state).iter().map(|sc| sc.label).collect();
+        assert!(labels.contains(&"m tell"), "{labels:?}");
+        assert!(labels.contains(&"X stop"), "{labels:?}");
+        assert!(!labels.contains(&"r resume"), "{labels:?}");
+        assert!(labels.contains(&"a all"), "{labels:?}");
+
+        assert!(matches!(outcome(&mut state, KeyCode::Char('r')), InputOutcome::Unchanged));
+        assert!(matches!(outcome(&mut state, KeyCode::Char('m')), InputOutcome::Changed));
+        assert_eq!(state.typing, Typing::Tell);
+        for c in "reply with the word pong".chars() {
+            outcome(&mut state, KeyCode::Char(c));
+        }
+        match outcome(&mut state, KeyCode::Enter) {
+            InputOutcome::Action(Action::TracesBb(Op::Tell { thread, text })) => {
+                assert_eq!(thread, "thr_probe1");
+                assert_eq!(text, "reply with the word pong");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        outcome(&mut state, KeyCode::Char('X'));
+        assert_eq!(state.status.as_deref(), Some("stop thr_probe1? y"));
+        assert!(wants_esc(&state));
+        match outcome(&mut state, KeyCode::Char('y')) {
+            InputOutcome::Action(Action::TracesBb(Op::Stop { thread })) => assert_eq!(thread, "thr_probe1"),
+            other => panic!("{other:?}"),
+        }
+
+        state.bb_pending_thread = Some("thr_probe1".into());
+        state.bb_pending_ids = vec!["int_ok".into()];
+        let labels: Vec<_> = shortcuts(&state).iter().map(|sc| sc.label).collect();
+        assert!(labels.contains(&"a approve") && labels.contains(&"d deny"), "{labels:?}");
+        assert!(!labels.contains(&"a all"), "{labels:?}");
+        match outcome(&mut state, KeyCode::Char('a')) {
+            InputOutcome::Action(Action::TracesBb(Op::Approve { thread })) => assert_eq!(thread, "thr_probe1"),
+            other => panic!("{other:?}"),
+        }
+        match outcome(&mut state, KeyCode::Char('d')) {
+            InputOutcome::Action(Action::TracesBb(Op::Deny { thread })) => assert_eq!(thread, "thr_probe1"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

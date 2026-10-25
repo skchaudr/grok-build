@@ -5,6 +5,7 @@
 //! truth and raw lines are re-read from them on demand. traces-ledger-v1
 
 pub mod bb;
+pub mod bbctl;
 mod classify;
 mod cursor;
 pub mod hook;
