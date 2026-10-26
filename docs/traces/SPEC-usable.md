@@ -2,7 +2,7 @@
 
 Draft 2 (Sonnet 5.5, 2026-10-26). Sab's direction: "of course I want a working Pi in the GROK TUI with all the features it comes with"; "Pi should be as native as possible home for it"; "I do not care how it's done I just want it to work just as much as I want Claude in it to work." Two independent tracks run in parallel: **Track A** makes `/traces` usable (slices T0-T10, Phases 1-3); **Track B** brings the native Pi host into grok-build (slices B0-B9). They share no files. Codex is a note (B9), not a port.
 
-Sourcing: facts below come from code, repo history, or CLI output run on sab-mini. A claim that comes from an agent-written doc is phrased "an agent wrote X (file)" and is context, not a constraint.
+Per-harness facts (log paths, intent fields, tool shapes, hook deny formats) live in `docs/HARNESS-FACTS.md`; check and update it instead of re-researching. Sourcing: facts below come from code, repo history, or CLI output run on sab-mini. A claim that comes from an agent-written doc is phrased "an agent wrote X (file)" and is context, not a constraint.
 
 Read `MAP.md` first, then the slice you were handed. Paths under `crates/codegen/`. `P` = `xai-grok-pager/src`, `T` = `xai-grok-traces/src`, `MODAL` = `P/views/traces_modal.rs` (7058 lines). (U) = unverified; Step 0 of that slice closes it before code.
 
@@ -176,8 +176,8 @@ UI states:
 | Cursor | `Write` | `input.path`, `input.contents` | seen (`contents`, not `content`) |
 | Grok | `search_replace` | `rawInput.file_path`, `old_string`, `new_string` | seen in `updates.jsonl` |
 | Codex | `apply_patch` | patch text (`*** Begin Patch` / `*** Update File:` / `*** Add File:`), `payload.input` of a `custom_tool_call` (U) | verify on zstd rollouts: `zstd -dc <rollout>.jsonl.zst \| rg -m1 apply_patch` ; note `classify.rs` `patch_path` already parses these headers |
-| Pi | `edit` | `arguments.path` + `arguments.edits[]` each `{oldText,newText}` (tool description says "edits[].oldText") | (U) tool schema seen; no call in sampled logs. `rg -m1 '"name":"edit"' ~/.pi/agent/sessions` for a `toolCall` |
-| Pi | `write` | `arguments.path`, `arguments.content` | (U) same check |
+| Pi | `edit` | `arguments.path` + `arguments.edits[]` each `{oldText,newText}`; legacy top-level `{path,oldText,newText}` also accepted | verified: Pi schema + real Air log, see `docs/HARNESS-FACTS.md` |
+| Pi | `write` | `arguments.path`, `arguments.content` | verified: see `docs/HARNESS-FACTS.md` |
 
   If a shape is absent in real logs, keep the parser, mark the fixture "synthetic from schema", and say so in the test name (`*_schema_only`). Cases the payload cannot support: Codex patch with binary hunks (skip, no counts); tool result says failure (counts still index the *attempted* change; the row shows `✗`).
 - **Accept:** each row of the table with a verified shape has a passing fixture test; counts equal `git diff --numstat` on the fixture's real before/after.
@@ -244,8 +244,8 @@ UI states:
 - **Claude (verified shape; same as `~/.claude/hooks/guard-bash.sh`):** `PreToolUse` matcher `Bash`; on violation print
   `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Add a brief description (what and why, 8+ chars) to this Bash call, then retry."}}` and exit 0. `install.sh` adds the entry beside the traces entries without touching other hooks (existing idempotent-edit rules).
 - **Pi:** extension `pi.on("tool_call", …)` returns `{ block: true, reason }` for `bash` calls lacking intent (`extensions.md` ~282-290 in the installed Pi docs). (U) first: does stock Pi's `bash` schema accept an extra `task_name` argument, or strip/reject it? Test: run `pi -p` with the extension that logs `event.input` for a call the model made with `task_name`. If stripped, the Pi rule is the `# why:` comment only, and the reason text says so.
-- **Codex (verify first, no code until closed):** `~/.codex/hooks.json` has `PreToolUse`; the deny output format is unverified. Capture with the traces `capture.sh` pattern: one session where a PreToolUse hook prints candidate deny JSON; closing question: does the call get blocked and the reason reach the model. Record in MAP.md Gate-0 style.
-- **Cursor (verify first):** `preToolUse`/`beforeShellExecution` reply `{"permission":"allow"}` today (`grok-traces hook cursor`). Candidate deny `{"permission":"deny","userMessage":"…","agentMessage":"…"}` is unverified. Same capture; the multi-hook caveat in MAP.md row 11 applies.
+- **Codex:** `~/.codex/hooks.json` `PreToolUse` (shell only); deny = stdout `{"decision":"deny","reason":"…"}`, exit 2, documented in `agent-harness-hooks` (see `docs/HARNESS-FACTS.md`). Not yet live-tested: Step 0 runs one session proving the call is blocked and the reason reaches the model, then records it in HARNESS-FACTS.
+- **Cursor:** `preToolUse`/`beforeShellExecution` reply `{"permission":"allow"}` today; no deny path exists in any repo (see `docs/HARNESS-FACTS.md`). Step 0: one live session testing `{"permission":"deny","userMessage":"…","agentMessage":"…"}`; record the result in HARNESS-FACTS before code.
 - **Grok:** none; its bash tool fills `description` 100% already.
 - **UI states (the hook's own):** allow (silent), deny (reason visible to the model), disabled via env, hook error (fail open, one stderr line), already-labeled call, exempt short command, retry after deny (second call with description passes), non-shell tool (never touched).
 - **Accept:** in a Claude session, `Bash` with no description and a 5-line script is denied once; the retry with a description runs; traces then shows `◆ Run <description>`. `ls` runs unprompted.
