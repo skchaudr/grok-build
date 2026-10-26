@@ -17,7 +17,7 @@ Must be restored after the wipe (grok-build depends on them):
 
 Known consequence (Sab accepted): GDAD dispatch in `~/gddp-runtime` / `~/gddp-config` (`runtime/settings.env`, `scripts/test_gdad_run.py`) points at `~/.local/pi-1.0.4` and pi-durable-subagents; it breaks until repointed.
 
-Proof of done (all three on disk in a repo, never /tmp). All three proofs go in this repo under `docs/`, next to `picker-live-proof.md`, where the Air and Mini proofs already live. Any adapter change goes to `~/repos/Pi-Coding-Agent/pi-acp-patched/`, not to grok-build.
+Proof of done (all three on disk in a repo, never /tmp). All three proofs go in this repo under `docs/`, next to `picker-live-proof.md`, where the Air and Mini proofs already live.
 1. `pi --version` on khoj prints 1.3.0 and `pi --mode rpc` starts without exiting.
 2. `grok pi` on khoj via the leader completes one turn (the picker-live script's khoj case).
 3. `diff <(ssh sab-air cat ~/.pi/agent/settings.json) ~/.pi/agent/settings.json` is empty.
