@@ -50,4 +50,15 @@ Open: for every harness, one live session proving the deny **reason** reaches th
 
 ## Pi workflow packages
 
-_Pending: filled from the workflow-packages lookup (2026-10-26)._
+Both installed on the Air under `~/.pi/agent/npm/node_modules/` (not on the mini). Air `~/.pi/agent/settings.json` excludes pi-extensible-workflows' `-dist/src/index.js` (the entry that registers `workflow`).
+
+| | pi-extensible-workflows (6.2.2 on Air; 6.3.0 on npm) | @osolmaz/pi-workflows (0.17.7) |
+|---|---|---|
+| Workflow format | inline JS: `workflow` tool with `name` + `script` or `scriptPath` (`README.md:21-35`) | `.pi/workflows/<name>.workflow.ts` (project) or `~/.pi/agent/workflows/` (global); `defineWorkflow({name, startAt, nodes, edges})` + `agent({prompt, expectedOutput})` (`README.md:94-115`, `examples/workflows/echo.workflow.ts`) |
+| Launch | tool `workflow` (background unless `foreground: true`); slash `/workflow`, `/scout`, `/oracle`, `/review`, `/parallel-review`, `/review-loop`, `/deep-research` (`dist/src/host-navigator.js:1136`) | `/workflow <name-or-path> [task or --input-json]` (`src/extension/index.ts:359`); `workflow` tool with actions list/start/status/pause/resume/cancel/answer/update/submit (`index.ts:542`); `/workflow-channel`, `/resource-manager`, `/piw` |
+| Tools registered | `workflow`, `workflow_status`, `workflow_retry`, `workflow_resume`, `workflow_respond`, `workflow_stop`, `workflow_catalog`, `workflow_result`, `agent`, `get_subagent_result`, `steer_subagent`, `subagents_*` (`dist/src/index.js`, `dist/src/host.js:32`) | `workflow` |
+| Progress / state | `~/.pi/workflows/projects/<slug-hash>/sessions/<sessionId>/runs/<runId>/{state,journal,snapshot,result,summary}.json`, `workflow.js`, `evidence/` (`dist/src/index.js:428-437, 1581`); widget messages `customType: "workflow"` (`dist/src/host.js:147`) | `~/.pi/agent/workflows/state.sqlite` via a global server (`README.md:79, 236-241`); viewers `pi-workflows view`, `runs`, `view --once`; progress `session-run-adapter.ts:176-192` |
+
+Sources: package files on the Air (read 2026-10-26). Status: code/docs, not launched in this lookup.
+
+**Duplicate `workflow` tool.** Both packages register `workflow` unconditionally (`dist/src/index.js:13773`; `src/extension/index.ts:542`). Pi's `detectExtensionConflicts` (`resource-loader.js:974-987`, read from Pi 1.2.0 on the mini) records a diagnostic and does not throw. The `pi --mode rpc` exit was observed live on 2026-10-13 with pi-extensible-workflows 6.2.0 (`OBSERVATIONS.md:587`, workaround `PI_ACP_PI_COMMAND` pointing at a `pi -ne` wrapper); not re-run on Pi 1.4.0. grok-pi's gate: `pi -ne --mode rpc --extension <bundle>` exits 0 (grok-pi `AGENTS.md:151`).
