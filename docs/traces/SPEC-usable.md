@@ -13,6 +13,8 @@ Constraints on every slice:
 - Real session text is never committed. Fixtures are synthetic.
 - The traces index has no `ALTER TABLE` (`rg 'ALTER TABLE' xai-grok-traces/src` is empty); `SCHEMA_VERSION = 7`, `PARSER_VERSION = 6` (`T/index.rs:24-26`). A bump rebuilds the db on open (MAP.md describes that path). T1 and T6 share one bump (schema 8, parser 7). Land both before either merges, or let T1 own the bump and T6 rebase onto it.
 
+# Track A: usable traces
+
 ## 1. Problems, tied to the screenshots
 
 | # | Complaint | Root cause (verified) |
@@ -26,7 +28,7 @@ Constraints on every slice:
 | 7 | Dead or misleading UI | `r resume`: `resume_target` (`MODAL` 351-361) returns a target only for claude/codex/grok; Pi/OMP/Cursor/DSH get "no resume for Pi". `H host` is shown but does nothing when `~/.grok/traces/hosts` is empty (3156). "indexed N changed files" (`P/app/effects/mod.rs:2788`, scan on every `OpenTraces`, `P/app/dispatch/router.rs:1441-1453`) never clears. Empty `› Assistant` rows: assistant records with no text and no tool call fall through to the role title (`T/normalize.rs` title match ~494-498, text := title ~547-548). Working but unlisted keys: Space (alias of `e`, 3175/3248), `g`/`G`, trajectory `y` (copy prompt, 3298), Live `c`. Inspector `y` copies the raw line. All other hint keys are real. |
 | 8 | Newest hosts | grok-build reaches Pi only through external `pi-acp` (agent choice `name = pi, cmd = pi-acp`, as in the `P/app/cli.rs:1425` test; `scripts/acp-matrix.sh` lists `pi-acp`). The native adapter, the Pi extension bundle and the workflow, eval and F2 pieces exist only in grok-pi (Track B). Codex runs through external `codex-acp` and imports via `xai-grok-foreign-sessions`. |
 
-## 2. Architecture rules (all phases)
+## 2. Architecture rules (Track A)
 
 1. **New rendering goes in new modules** under `P/views/`, not `MODAL`: `traces_body.rs` (blocks, command/diff/result rendering), `traces_payload.rs` (Enter view), `traces_rows.rs` (display-row model, labels, grouping), `traces_hints.rs` (hint list). `MODAL` keeps state, keys and calls into them. Each slice's edits to `MODAL` are limited to: `mod` lines, delegations, and new state fields.
 2. **Pure functions in `xai-grok-traces`** for anything derived from harness JSON (labels, edit payloads). The pager crate consumes typed values; it does not re-parse harness shapes.
@@ -203,7 +205,7 @@ UI states:
 - **States:** running (state.json re-read on the 1s live poll when status is running), done, failed, cancelled, paused (`pause_message`), no history yet (header only), agents list > 256 (cap note), state.json unreadable/partial (row `workflow state unreadable`, no panic), remote session (fetched via the existing `events` subcommand: events are in the index, so no new wire).
 - **Accept:** a scratch run with 3 phases and 4 logs yields 1 header + 3 phase rows + 4 log rows + completion in order; the live modal shows rows appear while the run runs.
 - **Tests:** unit fixture of `state.json` -> events (each status); index test for scan + append (state file changes size, not the jsonl); PTY `traces_workflow.rs` seeded `workflows/wf_1/state.json`.
-- **Note:** this ingests what the shell persists. Whether Pi workflows persist progress at all is a bug in the Pi adapter (Phase 4, H3: the `gateway_rx` drain), not something traces can fix.
+- **Note:** this ingests what the shell persists. Live Pi workflow progress that never reaches the screen is the `gateway_rx` drain in Track B (B3), not something traces can fix; once B3 lands, T10 shows Pi-engine runs too (the run header carries the engine).
 
 ## 5. Phase 3: replace the non-functional UI, require intent
 
@@ -250,3 +252,191 @@ UI states:
 - **Tests (`hooks/test.sh`):** table of stdin payloads -> expected stdout/exit for Claude (allow/deny/exempt/disabled/garbage input); Pi extension unit via node >= 22 with a fake `pi.on`.
 - **Verify:** `bash crates/codegen/xai-grok-traces/hooks/test.sh`; then `install.sh --require-intent --dry-run` diff on mini's real configs, reviewed by Sab before `--apply`.
 
+
+# Track B: native Pi host in grok-build
+
+Independent of Track A: no shared files, no ordering between the tracks. Source tree `GP` = `/Volumes/Mini-SSD/offload/repos/grok-pi` (github `skchaudr/grok-pi`; diverged ~376 commits each side from merge-base `37949780`).
+
+**Native-first rule.** The native host becomes the default way `grok pi` runs once the parity checks below pass (B8). `pi-acp` stays only as the fallback (`--acp`, and automatic when the native host cannot start), not as the goal. Until B8, the default is unchanged and `scripts/acp-matrix.sh pi` keeps passing.
+
+**Superseded context.** An agent wrote in `docs/khoj-pi-migration.md` (2026-10-19) that adapter changes go to `~/repos/Pi-Coding-Agent/pi-acp-patched/`, not to grok-build. Superseded by Sab's direction that Pi be native in grok-build.
+
+## B.1 Inventory (verified on disk, mini, 2026-10-26)
+
+| Piece | Where in `GP` | Present in grok-build? |
+|---|---|---|
+| Adapter | `crates/codegen/pi-grok-adapter`: 32 `.rs` files, ~19.3k lines (largest: `pi_adapter.rs` 1774, `model.rs` 1745, `pi_adapter/agent.rs` 1231, `pi_adapter/tools.rs` 1023, `pi_adapter/session.rs` 1009, `pi_rpc.rs` 963, `tool_projection.rs` 944) | no |
+| Composition binary | `xai-grok-pager-bin/src/bin/grok-pi.rs` (1598) + `bin/grok_pi/*.rs` (32 files, 7.9k lines: one `*_extension.rs` per bundled Pi extension, `cli.rs`, `runtime_config.rs`, `extension_self_heal.rs`, `pi_version.rs`, `migrate_home.rs`) | no |
+| Pi extensions | `extensions/pi-grok-*` (23 dirs + `_archived`): `bash` (5.3k lines TS incl. eval/mcpeval), `subagents`, `workflows`, `tools`, `web-config`, `shortcut-manager`, `plan-mode`, `goal`, `loop`, `btw`, `todo`, `recap`, `rollback`, `herdr`, `auth`, `context`, `export`, `ask-user-question`, `native-commands`, `remote-tui`, `rpc-compat`, `rust-tui-bridge`, `00-profiler` | no |
+| Shell | `xai-grok-shell/src/session/workflow/{backend.rs (218), external.rs (220)}`, `src/host_features.rs` (524) | no |
+| Pager only in GP (`diff -rq`) | `native_feature_conflicts.rs`, `pi_model_config.rs`, `pi_resource_config.rs`, `pi_resource_policy.rs` (1261), `views/{pi_config (1840), pi_models (1982), pi_settings/, shortcut_manager, subagent_catalog_pane, session_tree (1567), tree_map, fork_picker, review, cache_graph}.rs`, `scrollback/blocks/tool/{eval (603), codemode (746), hook, side_by_side_edit}.rs`, `slash/commands/{create_workflow, eval_display, pi_config, pi_models, pi_shortcut_manager, plan_mode, reload, scoped_models, tree, tree_map, clone_cmd, review, hotkeys, notify}.rs`, `app/extension_shortcuts.rs`, `app/dispatch/session/{pi_fork,tree}.rs` | no |
+| Overlapping (both forks edited) | `xai-workflow/src/{engine,journal,lib,meta}.rs`; shell `workflow/{manager,host_service,tracker,notify,registry,mod,schema_contract,store}.rs`; pager `acp/tracker.rs`, `acp/spawn.rs`, `views/tasks_pane.rs`, `views/workflows.rs`, `scrollback/blocks/workflow.rs`, `slash/commands/workflow{,s}.rs`, `app/acp_handler/settings.rs` | both |
+
+Combined `diff` line counts between the two trees today (both sides' changes together; the per-side split needs the merge-base diff that B0 produces): `workflow/manager.rs` 322, `host_service.rs` 120, `tracker.rs` 41, `notify.rs` 21, `registry.rs` 20, `mod.rs` 15, `schema_contract.rs` 13, `store.rs` 8; `xai-workflow` 6/12/2/5; pager `acp/tracker.rs` 1083, `views/tasks_pane.rs` 1066, `acp/spawn.rs` 122, `views/workflows.rs` 111, `acp_handler/settings.rs` 82, `slash/commands/workflow.rs` 22, `scrollback/blocks/workflow.rs` 13.
+
+**Conflict-resolution order** (each step compiles and passes its tests before the next): `xai-workflow` -> shell `workflow/` leaf files (`store`, `schema_contract`, `registry`, `notify`, `tracker`, `mod`) -> `manager.rs` + `host_service.rs` (three-way against `37949780`; keep grok-build behaviour where GP's change is Pi-only; grok-build's `host_service.rs:501` already maps `isolation_worktree`) -> add `backend.rs`, `external.rs`, `host_features.rs` -> pager workflow views and slash -> `acp/spawn.rs`, `acp_handler/settings.rs` -> `acp/tracker.rs` and `views/tasks_pane.rs` last.
+
+## B.2 Parity checks
+
+Measured against the B0 baseline. A check that is red in GP at baseline is fixed in grok-build as part of the slice that ports it; it is never accepted red. Run on sab-mini, real Pi where noted. `pi-acp` is the comparison only for PC1-PC6.
+
+| ID | Check |
+|---|---|
+| PC1 | `scripts/acp-matrix.sh pi-native` (B1 adds this agent id beside `pi`): launch, prompt, assistant text, tool card |
+| PC2 | a `bash` call with `task_name` shows it as the card title (GP `tool_projection.rs:402-413`); the traces label (T1) is the same string |
+| PC3 | auth-missing and bad-model errors show the same user-facing messages as `pi-acp` (scenarios recorded in `docs/pi-acp-error-surface-proof/`, agent-written) |
+| PC4 | `/resume` lists Pi sessions (`psm_session_catalog.rs`) and loads one |
+| PC5 | Esc during a long tool call cancels it and the card shows cancelled |
+| PC6 | `scripts/acp-matrix.sh pi` (fallback path) still passes after every slice |
+| PC-W1 | `/workflow <rhai script>` with 3 phases: phase and log rows appear while running (the drain fix), final summary at the end |
+| PC-W2 | a test engine (in-memory, implements `WorkflowEngine`) drives the unchanged pager workflow UI: no engine-specific pager code |
+| PC-W3 | a Pi-side workflow package (see B3) runs and its phases appear in the same UI (U until Step 0 of B3 closes) |
+| PC-W4 | schema contract: invalid output is retried once (`SCHEMA_CONTRACT_RETRIES = 1`, `schema_contract.rs:1`), then surfaced as a failed step |
+| PC-W5 | pause and stop cancel running children (`cancel_run_children`) |
+| PC-S1 | a `read-only` child cannot call `edit`, `write` or `bash` (tool list equals `CAPABILITY_TOOLS["read-only"]`) |
+| PC-S2 | child sessions are written under the parent's session directory; the parent's session file is unchanged by the child |
+| PC-S3 | `isolation = worktree` either runs the child in a separate worktree or fails loudly; never silently runs in the parent tree (today's GP behaviour, see B4) |
+| PC-S4 | `x.ai/subagent/cancel` stops a running child; rows update |
+| PC-E1 | a foreground `bash` call past its timeout is promoted to a background task shown in the task pane; `x.ai/task/kill` kills its process tree |
+| PC-E2 | Eval v2: `store()`/`load()` across cells, `parallel()`, timeout, abort (the existing `test-v2.1.mjs` cases) |
+| PC-E3 | a background Eval job reports completion and its output is retrievable |
+| PC-F1 | every setting in the bundled `grok-pi.json` manifests appears in the settings UI under its section with its default, and a toggle writes its `configPath` |
+| PC-F2 | a restart-required toggle says so and applies `startupEnv` on next start |
+| PC-F3 | with `pi_workflows` on, a package listed under it in the conflicts file is refused at resource admission; with it off, admitted |
+| PC-F4 | the user overlay `$GROK_HOME/native-feature-conflicts.toml` merges over the bundled defaults |
+
+## B.3 Slices
+
+### B0: baseline and seam gate (serial; first)
+
+- **Goal:** know what is red in GP before measuring anything against it, and know exactly what grok-build lacks.
+- **Baseline commands (GP, mini):** from `verify.sh`: `./scripts/cargo-shared.sh check -p xai-grok-pager-bin --bin grok-pi`; `./scripts/cargo-shared.sh test -p pi-grok-adapter`; `... test -p xai-grok-pager --lib external_builtin_filter_accepts_aliases_and_omits_product_commands`; `... test -p xai-grok-pager --lib slash_compact_with_context_enqueues_command`. Node suites: `node extensions/pi-grok-bash/test-v2.1.mjs`, `test-mcpeval-daemon.mjs`, `test-eval-pi-mcp.mjs`, `test-mcpeval-oauth.mjs`; the `*.test.ts` files in `extensions/pi-grok-subagents` and `extensions/pi-grok-web-config/tests` (runner not declared in `package.json`; B0 finds how they run).
+- **Baseline measured by this spec's author (mini, 2026-10-26, in GP's own target dir, not the shared one):**
+  - `cargo test -p pi-grok-adapter --lib`: **green, 191 passed, 0 failed, 0 ignored.** Only the lib target was run; the crate has no Rust integration tests (`tests/` holds `mock_pi_contract.py` and `mock_pi_rpc.py`). So the adapter's own unit tests are not broken in GP today.
+  - `python3 -I crates/codegen/pi-grok-adapter/tests/mock_pi_contract.py --pi-source pi-main`: **red**, `FileNotFoundError: pi-main/packages/coding-agent/src/modes/rpc/rpc-types.ts`; `pi-main/` is empty in this checkout, so `verify.sh` cannot pass as written.
+  - `node extensions/pi-grok-bash/{test-v2.1,test-eval-pi-mcp,test-mcpeval-daemon,test-mcpeval-oauth}.mjs`: **red, cannot run**, each fails resolving a module under `pi-main/node_modules` (`esbuild`, Pi packages). They need `pi-main` populated or their imports pointed at an installed Pi (B0 decides which).
+  - `cargo test -p xai-grok-pager --lib external_builtin_filter_accepts_aliases_and_omits_product_commands` (and the second `verify.sh` pager test): **red, the pager lib test target does not compile in GP: 48 `error[...]` lines**, e.g. test code constructing `AppView` without `screen_mode_switch_hint` / `session_picker_detail_generation`, `SessionPickerEntry` without `first_message`, `name`, `parent_session_path`, `session_kind`; `dual_config` not found; `ScrollbackState::latest_turn_marker_accepting` missing; `SubagentInfo::is_background` missing (output kept in `/tmp/pi-pager-baseline.txt` on the mini during this run). So GP's pager unit tests cannot be inherited as parity evidence; each Track B pager slice writes its pager tests fresh against grok-build, where the pager lib tests build (an agent wrote 10389 passing in `MAP.md`; T0 re-measures).
+  - Not run: `cargo check -p xai-grok-pager-bin --bin grok-pi` (long build; B0 runs it).
+  - Consequence for parity: adapter-level behaviour (191 green tests) is a valid baseline; pager-level and node-suite behaviour have no working baseline, so those checks (PC-E2 especially) are measured against the running product on mini, not against a green test run.
+- **Output:** a table in this section, one row per command: green/red/not-run, failing test names, cause. Plus `cargo check -p pi-grok-adapter` after copying the crate into grok-build, listing every missing shell/pager symbol (known from `use xai_*`: `session::workflow::{ExternalWorkflowRuntime, ExternalWorkflowRuntimeConfig, WorkflowNotifySender, WorkflowRunStore, workflow_session_notification_json, list_workflows, WorkflowAgentBackend, HostDrainOutcome, WorkflowAgentSpawnRequest, WorkflowAgentSpawnResult}`, `session::persistence::PersistenceMsg::WorkflowRunStateAndAck` (present), `session::SessionInfoResponse` (present, `acp_types.rs:566`), `config::load_effective_config{,_disk_only}` (U), `xai_workflow::{WorkflowOutcome, HostError}`, `xai_acp_lib::{AcpAgentGatewaySender, AcpClientMessage, acp_send}`), and the merge-base diffs for the overlap table.
+- **States:** none (no UI). **Accept:** baseline table committed in this file; seam list complete. **Tests:** none new.
+
+### B1: RPC, session core, launcher
+
+- **Files:** adapter `lib.rs`, `pi_rpc.rs`, `pi_adapter.rs`, `pi_adapter/{agent,session,events,recovery,replay,notifications}.rs`, `model.rs` (+`model/tests.rs`), `psm_session_catalog.rs`; `Cargo.toml` workspace member; composition: a minimal `bin/grok_pi` port (`cli.rs`, `runtime_config.rs`, `pi_version.rs`, `session_paths.rs`, `home.rs`) behind `grok pi` (soft subcommand like `Command::Live` in `P/app/cli.rs`) and an agent id `pi-native` in `scripts/acp-matrix.sh`. Pi is found on PATH; its `--mode rpc` JSONL protocol is driven in-process; the adapter serves the pager over in-memory ACP.
+- **Behaviour:** prompt, stream, cancel, model list and switch, session new/list/load/rename, `/tree` data, recovery after Pi exits. `--no-extensions` plus an explicit allowlist of bundled extensions (as GP's `grok-pi.rs` does at its lines ~634-650); user-installed packages load only through the F2/conflict policy (B6).
+- **UI states:** Pi missing on PATH (error card with install hint, not a hang); Pi version below the supported floor (message with the version found; floor from `pi_version.rs`); Pi dies mid-turn (recovery card, prompt re-enabled); auth missing; model catalog empty; session load failure; fallback engaged (`pi-acp` started because native failed: one-line notice naming the reason).
+- **Accept:** PC1, PC3, PC4, PC5, PC6. **Tests:** ported adapter unit tests for the files above; pty `host_pi_native_smoke.rs` using `tests/mock_pi_rpc.py` (GP) as the fake Pi so CI needs no Pi.
+- **Verify:** `cargo test -p pi-grok-adapter`; `cargo test -p xai-grok-pager-pty-harness --test pty_e2e_config_ui host_pi`.
+
+### B2: tool projection
+
+- **Files:** `tool_projection.rs` (+`tool_projection/tests.rs`), `pi_adapter/tools.rs`, `context_projection.rs`, `cache_metrics.rs`; pager `scrollback/blocks/tool/side_by_side_edit.rs` and `hook.rs` (both ported).
+- **Behaviour:** Pi tool events become ACP tool calls; `raw_input.description` := `task_name` when `description` is empty (`tool_projection.rs:402-413`); tool kinds and titles; terminal output deltas; grep alias `ignoreCase` -> `-i`.
+- **States:** pending, running with streaming output, completed, failed, cancelled; very long output (truncation marker); unknown tool (generic card with raw input); `task_name` only / `description` only / both (description wins) / neither (command headline).
+- **Accept:** PC2. **Tests:** `tool_projection/tests.rs` ported; add the four label cases.
+
+### B3: workflow host, engine-pluggable (a)
+
+- **Goal:** one workflow surface (`/workflow`, `/workflows`, `/create-workflow`, the `workflow` tool, phase/log rows, toasts) in front of any number of engines. Rhai (`xai-workflow`) is the first engine; Pi-side workflow packages are the second; a Rust-native engine can follow without touching the pager.
+- **Facts:** the Rhai engine is the `xai-workflow` crate (in both trees). GP wraps it as `ExternalWorkflowRuntime` (`external.rs`: `launch_named`, `launch_inline`, `pause`, `cancel`, `list_runs`, `elapsed_ms`) and spawns children through the `WorkflowAgentBackend` trait (`backend.rs:72`: `spawn_and_await`, `cancel_run_children`). Adapter `workflow_host.rs` wraps that runtime. Pager rendering is driven by `WorkflowRunState` (`tracker.rs:140`: status, phases, current_phase, history, agents, agents_used/agent_budget, result_summary) via `build_workflow_updated` (`notify.rs:97`), which is engine-agnostic already.
+- **Drain fix (root cause, `workflow_host.rs:45`):** `tokio::spawn(async move { while gateway_rx.recv().await.is_some() {} })` discards every message `WorkflowNotifySender` sends through `AcpAgentGatewaySender::new(gateway_tx)`, including live phase and log updates. Only a poll (`notification_payloads()`, `workflow_host.rs:107`, on the named-launch path) delivers progress, which is why Pi workflows only pulse. Replace the drain with a forwarder from `gateway_rx` to the adapter's ACP client channel (`xai_acp_lib::acp_send`) as the same `x.ai/workflow/*` notifications, keyed by `session_id`, de-duplicated by `WorkflowRunState.revision`; keep the poll as fallback.
+- **Interface (new `xai-grok-shell/src/session/workflow/engine.rs`):**
+  ```rust
+  #[async_trait]
+  pub trait WorkflowEngine: Send + Sync {
+      fn id(&self) -> &'static str;                         // "rhai", "pi", ...
+      fn discover(&self, cwd: &Path) -> Vec<WorkflowDescriptor>; // name, source, engine
+      async fn launch(&self, req: WorkflowLaunch) -> Result<String, HostError>; // returns run_id
+      async fn pause(&self, run_id: &str) -> bool;
+      async fn cancel(&self, run_id: &str) -> bool;
+      fn runs(&self) -> Vec<WorkflowRunState>;
+      fn events(&self) -> mpsc::UnboundedReceiver<WorkflowEvent>; // push; PhaseEntered, Log, AgentSpawned/Finished, RunStarted/Completed/Failed/Cancelled
+  }
+  ```
+  An `EngineRegistry` maps ids to engines; run ids are prefixed `<engine>:`. `WorkflowEvent` folds into `WorkflowRunState` in one place, so every engine reaches the pager through the existing notifications.
+- **Engines:** (1) `RhaiEngine` = `ExternalWorkflowRuntime` unchanged behind the trait; its children go through `WorkflowAgentBackend` implemented by B4's executor. Schema validation and lifecycle stay as in `schema_contract.rs` (256 KiB schema cap, external `$ref` rejected, one retry) and `manager.rs`/`host_service.rs`. (2) `PiWorkflowsEngine`: adapter around workflow packages that run inside Pi. Both candidates exist on npm (`npm view`, 2026-10-26): `@osolmaz/pi-workflows` 0.17.7 ("Workflow and resource manager runtime with a live terminal viewer for the pi coding agent") and `pi-extensible-workflows` 6.3.0 ("Deterministic multi-agent workflow orchestration and codemode scripts for Pi"). **Neither is installed on the mini** (`pi list` shows only `npm:pi-clinepass-provider`; `~/.pi/agent/extensions` holds `herdr-agent-state.ts`, `traces-capture.ts`, `traces.ts`). An agent wrote in `docs/khoj-pi-migration.md` that the Air has both, and in grok-build `OBSERVATIONS.md:587` (cited there) that `pi-extensible-workflows` registers a second `workflow` tool that makes `pi --mode rpc` exit. (3) Future: a Rust-native engine implements the trait; nothing else changes.
+- **Step 0 (closes the U markers before `PiWorkflowsEngine` code):** in a scratch project directory (`pi install <source> -l`, `-l` = project-local per `pi install --help`; do not touch `~/.pi/agent/settings.json`), install each candidate; record: how a workflow is defined and launched (tool, slash command, file format), whether progress is observable (Pi events, RPC, a state file), where state persists, what tool names it registers, and whether both active at once reproduce the `pi --mode rpc` exit. Write the answers into this section. Until recorded, `PiWorkflowsEngine::discover` returns empty and the registry hides it.
+- **One `workflow` tool:** the host exposes exactly one `workflow` tool to the model. A Pi package's own `workflow` tool is disabled by the host through the resource-admission policy (B6) or the package's extension toggle, whichever Step 0 shows works.
+- **Selection:** `/workflow <name>` resolves by name across engines, precedence project > user > bundled, then the order in `[ui].workflow_engines` (default `["rhai", "pi"]`). Same name in two engines: `/workflows` lists both with an engine badge and `/workflow rhai:<name>` / `pi:<name>` disambiguates; bare name runs the first by precedence and the row says which engine ran.
+- **Chat surface** (`scrollback/blocks/workflow.rs`, `views/workflows.rs`): states: no workflows found (empty state with the project/user/bundled paths searched); launching; running with `Phase N/M <name>`; log lines appended live (ring of 200); agent rows with state and tokens; budget `used/budget` (hidden when none); paused with `pause_message`; completed with `result_summary`; failed (error line); cancelled; engine unavailable (badge dim, launch refused with reason); event channel closed mid-run (state from `runs()`); two runs at once. Toast on completed/failed/cancelled. Traces shows the same run via T10, with the `engine` in the run header row.
+- **Accept:** PC-W1 to PC-W5. **Tests:** engine-registry unit tests (precedence, ambiguity, prefixing); a `MockEngine` driving `WorkflowEvent`s into `WorkflowRunState` (order, revision dedup, every status); forwarder test (messages pushed to `gateway_rx` arrive in order at the client channel; with the forwarder dropped the poll still yields the final state); schema-contract tests ported; pager reducer tests per state; pty `host_pi_workflow_live.rs` with the fake Pi.
+
+### B4: subagent and bridge execution (b)
+
+- **Files:** `extensions/pi-grok-subagents/{runtime (771), bridge (431), v2 (590), tools-v1 (276), definitions (205), teams, config-ui (355), shared, index}.ts` + `skills/`, `teams/`; `extensions/pi-grok-workflows/index.ts` (379, the SpawnAgent executor); adapter `subagent_projection.rs` (562), `subagent_transport.rs` (250, Unix socket events; Windows named pipe compiled, untested), `pi_workflow_backend.rs` (241); `bin/grok_pi/subagent_extension.rs`; pager `app/subagent.rs` (both trees), `views/subagent_catalog_pane.rs`.
+- **Facts to fix (code):** (1) capability modes `read-only | read-write | execute | all` map to tool lists in `CAPABILITY_TOOLS` (workflows `index.ts:30-35`, subagents `shared.ts:24`); the Rust bridge collapses any requested mode to `"all"` (`pi_workflow_backend.rs:100`). (2) Subagents create the child with `SessionManager.create(ctx.cwd, join(dirname(parentSessionFile), "subagent"))` (`runtime.ts:419`); the workflow executor uses `SessionManager.create(ctx.cwd)` (`pi-grok-workflows/index.ts:187`), so two code paths isolate sessions differently. (3) `isolation_worktree` is declared on the spawn request (`index.ts:46`) and sent by Rust as a bool (`pi_workflow_backend.rs:111`) but not read anywhere in the TS executor, while grok-build's native path maps it (`host_service.rs:501`).
+- **Behaviour:** one shared spawn kernel in `pi-grok-subagents` used by both the subagent tools and the workflow executor; `capability_mode` passed through as the real enum value; child session files always under the parent's `subagent/` directory; `isolation = worktree` creates a worktree for the child under the session directory, runs the child with that cwd, and removes it on completion unless it has changes (then keeps it and reports the path); if worktree creation fails the spawn fails with the error (never runs in the parent tree). `fork_context` forks the parent's context into the child. Cancel propagates to children and their process trees.
+- **UI states:** child queued; running with live tool rows (via the transport); finished; failed (error line); cancelled; capability denial (a denied tool call shows `denied by read-only mode`, not a generic failure); worktree created/kept/removed note; transport socket unavailable (rows fall back to final result only, one notice); too many children (cap from `config-ui.ts`, queued state); catalog pane empty / populated (`subagent_catalog_pane.rs`).
+- **Accept:** PC-S1 to PC-S4. **Tests:** TS: port `bridge.test.ts`, `runtime.test.ts`, `v2.test.ts` and add capability-denial and worktree cases; Rust: transport bind/accept/close in a tempdir, projection fixtures, mapping test that each `SubagentCapabilityMode` value reaches the request file unchanged; pty `host_pi_subagent.rs`.
+
+### B5: Bash and Eval execution kernels (c)
+
+- **Files:** `extensions/pi-grok-bash/{index (732), bash-tasks (459), eval (1271, `PersistentEvalKernel` at :967), eval-tasks (273), tool-bridge (441), prompts, shared}.ts`; optional resident MCP daemon `mcpeval-*.ts` + `eval-pi-mcp.ts` (B5b); adapter `background_bash_bridge.rs` (629), the `x.ai/terminal/background` and `x.ai/task/kill` handlers in `pi_adapter/agent.rs`; `bin/grok_pi/{bash_extension,tools_extension}.rs`; pager `scrollback/blocks/tool/{eval,codemode}.rs`, `slash/commands/eval_display.rs`, `views/tasks_pane.rs` (overlap file: take B3's merge first).
+- **Behaviour:** managed Bash: foreground by default, auto-promoted to a background task after a timeout (`bash-tasks.ts:359`), user-promotable (`x.ai/terminal/background`), killable by process tree (`x.ai/task/kill`), output truncated with a marker, status pushed to the task pane. Eval v1 (compat) and v2 (default): Node and Python workers, top-level await, per-cell scope reset with explicit `store()`/`load()`, `parallel()`/`pipeline()`/`agent()`, calls into active Pi tools through `tool-bridge.ts`, background jobs via `eval-tasks.ts` (`promoteEvalTask`, `armEvalAutoBackground`, `killEvalTask`). Kernel lifetime: one `PersistentEvalKernel` per session, shut down on session end.
+- **UI states:** bash running foreground; promoted to background (task pane row); background finished/failed/killed; output truncated; eval cell running / done with value / done with images (rendered or placeholder) / error with traceback / timed out / aborted; eval background job; kernel crashed (cell fails, next cell restarts it, one notice); worker missing (python not found: eval v2 Python disabled with reason, JS still works); eval disabled by F2 (tool absent, no empty card).
+- **Accept:** PC-E1 to PC-E3. **Tests:** run the existing node suites `test-v2.1.mjs` (runtime), `test-eval-pi-mcp.mjs`; Rust: `background_bash_bridge` unit tests; pager block render snapshot tests for `eval.rs` and `codemode.rs` states above; pty `host_pi_bash_background.rs` (fake Pi emits a long bash call, test sends the promote action, asserts a task-pane row, kills it).
+- **B5b (after B5, required):** resident MCP eval daemon (`mcpeval-daemon.ts` 536, `mcpeval-oauth.ts` 430, `eval-pi-mcp.ts`). Loopback only, key + OAuth. **Accept:** `test-mcpeval-daemon.mjs`, `test-mcpeval-oauth.mjs`, `test-eval-pi-mcp.mjs` green in grok-build (they are red-cannot-run in GP; B0 fixes their imports).
+
+### B6: F2 toggles, settings catalog, resource policy (d)
+
+- **Files:** shell `host_features.rs` (524: `HostFeatureSpec`, `HostFeatureManifest`, `HostFeatureCategory`, `resolve_enabled`, `startup_env_override`); pager `settings/registry.rs` (the manifest seam at ~411 and the `pi_builtin_tools.*` entries at ~559), `native_feature_conflicts.rs` + `assets/native_feature_conflicts.toml`, `pi_resource_policy.rs`, `pi_resource_config.rs`, `pi_model_config.rs`, `views/pi_settings/`, `views/pi_config.rs`, `views/pi_models.rs`, `views/shortcut_manager.rs`, `app/extension_shortcuts.rs`, `slash/commands/{pi_config,pi_models,pi_shortcut_manager,scoped_models,hotkeys,reload}.rs`; `xai-grok-pager-bin/build.rs` (`generate_host_ui_catalog`: scans `extensions/*/grok-pi.json` into `BUNDLED_HOST_UI_SOURCES`); 8 manifests declaring 10 keys (`pi_ask_user_question`, `pi_btw`, `pi_goal`, `pi_herdr`, `pi_loop`, `pi_subagents`, `pi_subagents_v2`, `pi_todo`, `pi_todo_v2`, `pi_workflows`); `extensions/pi-grok-web-config`, `extensions/pi-grok-shortcut-manager`.
+- **Behaviour:** each manifest declares `settings` (key, label, description, keywords, `f2: {category, section, order}`, kind, default, `restartRequired`, `configPath` e.g. `["ui","pi_workflows"]`, `nativeFeatureKey`, `startupEnv`) and `palette` commands. The settings registry merges manifest entries with built-in ones; enabled state resolves from the config TOML then `startupEnv`. The conflicts file lists npm packages blocked only while a native feature is on (e.g. `pi_workflows` blocks `npm:@quintinshaw/pi-dynamic-workflows`); runtime overlays `$GROK_HOME/native-feature-conflicts.toml` then `$GROK_PROJECT_DIR/native-feature-conflicts.toml` merge (package union, later reason wins). Pi package admission (`pi_resource_policy.rs`) applies it to user-installed packages.
+- **Adds for B3:** `[ui].workflow_engines`, and the conflicts entry that disables a third-party `workflow` tool while the native one is on (exact package ids from B3 Step 0).
+- **UI states:** setting on/off; restart-required marker after change; setting forced by env (shown locked with the env name); package blocked by policy (listed with the feature and reason, one key to see why); overlay file invalid TOML (error row, bundled defaults still used); manifest invalid (that extension's settings omitted with one diagnostic, others load); search by keyword; palette command present only while its feature is on; Pi not installed (settings still editable, Pi-only sections dimmed).
+- **Accept:** PC-F1 to PC-F4. **Tests:** manifest parsing (good, missing field, wrong kind, duplicate key); `resolve_enabled` precedence (default < TOML < env); conflicts merge (bundled + two overlays, invalid overlay); registry golden listing of keys/sections/order; pty `host_pi_settings.rs` toggling `pi_workflows` and asserting the restart marker and the TOML value.
+
+### B7: plan, goal, loop and the small bridges
+
+- **Files:** adapter `plan_mode.rs` (545), `goal_host.rs` (330), `loop_host.rs` (156), `queue_bridge.rs` (644), `pi_adapter/queue_runtime.rs` (339), `btw_bridge.rs` (332), `todo_bridge.rs` (304), `recap_bridge.rs` (219), `prompt_bridge.rs` (199); matching `bin/grok_pi/*_extension.rs` and `extensions/pi-grok-{plan-mode,goal,loop,btw,todo,recap,rollback,ask-user-question}`; pager `slash/commands/plan_mode.rs`, `views/session_tree.rs`, `views/tree_map.rs`, `app/dispatch/session/{pi_fork,tree}.rs`.
+- **Split into four parallel packets** sharing only `lib.rs` module lines: (a) plan/goal/loop; (b) queue/btw/todo/recap/prompt; (c) rollback/tree/fork; (d) every remaining GP extension and view so nothing Pi ships is left out: `extensions/pi-grok-{herdr,auth,context,export,native-commands,remote-tui,rpc-compat,rust-tui-bridge,00-profiler}` with their `bin/grok_pi/*_extension.rs`, and pager `views/{review,cache_graph}.rs`, `slash/commands/{review,clone_cmd,notify}.rs`. B0's seam list names any of these that need a shell/pager seam.
+- **UI states:** per feature: off (command absent), on idle, active, completed, failed/cancelled, F2 toggled mid-session (applies next session, marker shown).
+- **Accept:** each feature's handtest recorded in its PR plus PC6. **Tests:** ported unit tests per file; one pty per packet.
+
+### B8: default flip (after PC1-PC6 and the PC-* for every slice shipped)
+
+- **Behaviour:** `grok pi` starts the native host; `grok pi --acp` (and `GROK_PI_BACKEND=acp`) forces `pi-acp`; if the native host fails to start the session falls back to `pi-acp` with a one-line notice. The `pi=pi-acp` agent choice stays selectable. Docs: `04-slash-commands.md` and `docs/acp-matrix.md` updated.
+- **Accept:** a clean `grok pi` on mini opens native; `--acp` opens `pi-acp`; PC6. **Tests:** launcher unit tests for the three paths; pty `host_pi_default.rs`.
+
+### B9: Codex (note)
+
+Today: `codex-acp` via `--agent-cmd` (`scripts/acp-matrix.sh`); session import and `/resume-codex <id>` via `xai-grok-foreign-sessions` (`P/app/foreign_sessions.rs:252`); traces reads `~/.codex/{sessions,archived_sessions}` rollouts including zstd. An agent wrote in `docs/acp-matrix.md` that the last Codex smoke failed (`gpt-5.6-sol` needs a newer Codex, no tool card); re-run `scripts/acp-matrix.sh codex` on a current Codex before assuming a gap. Traces-side Codex work is T1 (`justification`) and T6 (`apply_patch`). No native Codex host is planned.
+
+# Conflict map and parallelism (both tracks)
+
+Shared hot spots: `MODAL` (T0 shrinks it), `tests/pty_e2e_config_ui.rs` (one `#[path]` + `mod` pair per new pty test), the traces schema bump (T1 owns, T6 joins, T10 adds no column), and on Track B the overlap files in B.1.
+
+```
+Track A:  T0 (serial, first)
+           ├─ crate-only, parallel:      T1   T6   T9
+           ├─ module-owned, after T0:    T2   T8      (T4 after T2's first commit)
+           ├─ core of MODAL, serial:     T3 (after T2) -> T5 (after T3, T1)
+           └─ after T5 + T6:             T7           T10 (after T1, T6; verb row after T5)
+Track B:  B0 (serial, first) -> B1 -> { B2 ‖ B3 ‖ B4 ‖ B5 -> B5b ‖ B6 ‖ B7a ‖ B7b ‖ B7c ‖ B7d } -> B8
+          B3 needs B4's executor interface (agree the `WorkflowAgentBackend` signature in B0; B3 uses MockEngine until B4 merges)
+          B5 merges `views/tasks_pane.rs` after B3 (overlap file)
+          B2 merges `acp/tracker.rs` before B3's last step
+```
+
+Rules:
+- The tracks never touch each other's files. T10 reads the state files B3 writes (`workflows/<run_id>/state.json`) but depends on the file format only, which exists today.
+- One owner per new file: `traces_body.rs` = T2 then T7; `traces_payload.rs` = T4; `traces_rows.rs` = T5 then T10's verb line; `traces_hints.rs` = T0 creates, T8 owns, others add one line in their own PR; `engine.rs` = B3; `host_features.rs` = B6.
+- Overlap files in Track B are merged in the order in B.1, by one agent at a time; a slice that needs an overlap file waits for the slice before it in that order.
+- Dispatch: one packet per slice id, each in its own worktree off current main (Cursor agents or Pi workflow workers). A packet contains only its slice section, the Constraints, and Architecture rules. The executing agent rebases, reruns its Verify commands, and ends every commit with its `Co-authored-by` trailer.
+
+Full verification (mini only):
+```
+cargo test -p xai-grok-traces
+RUST_MIN_STACK=33554432 GROK_HOME= cargo test -p xai-grok-pager --lib
+cargo build -p xai-grok-pager-bin && cargo build -p xai-grok-traces --bin grok-traces
+cargo test -p xai-grok-pager-pty-harness --test pty_e2e_config_ui
+bash crates/codegen/xai-grok-traces/hooks/test.sh
+cargo test -p pi-grok-adapter
+node extensions/pi-grok-bash/test-v2.1.mjs
+scripts/acp-matrix.sh pi && scripts/acp-matrix.sh pi-native
+```
+First pty launch of a fresh binary can time out on welcome (an agent wrote this in MAP.md; rerun before debugging).
+
+# Done means
+
+Track A: open `/traces` on the screenshot's Pi session: rows read as intents, `v` flips to raw, `l` keeps the row in place and shows the script as code, Enter shows the whole script and result with `m` for metadata, edits show `+N/-M` and expand to a highlighted diff, no hint lies, `r` on Pi copies a working command, and an opaque Bash call gets denied once with a reason. Track B: `grok pi` opens a native Pi with workflows (live phase and log rows), subagents with real capability modes, background Bash, Eval and the MCP eval daemon, the F2 feature toggles, and every other extension and view grok-pi ships (B7a-d), and `pi-acp` is the fallback. Verify each on the real screen, not on tests alone.
