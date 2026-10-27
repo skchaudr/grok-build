@@ -46,6 +46,7 @@ const MIN_HEAD_W: usize = 8;
 const MAX_DEPTH: usize = 8;
 /// Tree-guide levels drawn in the ledger (the node's own level included); deeper ones are cut to `…`.
 const GUIDE_LEVELS: usize = 3;
+const PEEK_TAIL: usize = 20;
 /// Separators between a folded call's body and its result.
 const RESULT_SEP: &str = "── result ──";
 const RESULT_ERR_SEP: &str = "── ✗ result ──";
@@ -193,6 +194,10 @@ pub struct TracesModalState {
     raw_rx: Option<mpsc::Receiver<String>>,
     /// Raw line of the inspected remote event, for `y`.
     raw_source: Option<String>,
+    /// Synthetic raw lines (event line → source) when the index has none.
+    raw_lines: HashMap<i64, String>,
+    /// Tool-call line whose peek overlay is open.
+    peek: Option<i64>,
     /// What the ledger shows: roots after filters and merge, with their children.
     shown_roots: Vec<SessionRow>,
     shown_children: HashMap<String, Vec<SessionRow>>,
@@ -448,6 +453,8 @@ impl TracesModalState {
             remote_ev: None,
             raw_rx: None,
             raw_source: None,
+            raw_lines: HashMap::new(),
+            peek: None,
             shown_roots: Vec::new(),
             shown_children: HashMap::new(),
             parent_name: None,
@@ -532,6 +539,9 @@ impl TracesModalState {
             }
         }
         redraw |= self.poll_remote();
+        if self.peek.is_some() {
+            redraw |= self.refresh_peek();
+        }
         if self.mode == Mode::Live {
             redraw |= self.poll_live_screen(now_ms);
         }
@@ -892,6 +902,7 @@ impl TracesModalState {
     }
 
     fn open_session(&mut self, row: SessionRow) {
+        self.close_peek();
         let remote = row.host.is_some();
         self.parent_name = match (&self.index, &row.parent_id) {
             _ if remote => row.parent_id.as_deref().and_then(|pid| self.remote_rows.values().flatten().find(|r| r.id == pid)).map(clean_name),
@@ -926,6 +937,7 @@ impl TracesModalState {
 
     /// Esc in a trajectory: back up the dispatch trail, else to the ledger.
     fn leave_trajectory(&mut self) {
+        self.close_peek();
         if let Some(t) = self.trail.pop() {
             self.open_session(t.session);
             // Back where we left: the same folds and row. The row's ancestors open so it shows.
@@ -1630,13 +1642,63 @@ impl TracesModalState {
 
     /// The raw source line for the inspected event, unformatted.
     fn raw_source_line(&self) -> Option<String> {
+        let line = self.events.get(self.selected_event()?)?.line;
+        self.raw_at(line)
+    }
+
+    /// Raw source line for event `line` (inspector read, else a synthetic line).
+    fn raw_at(&self, line: i64) -> Option<String> {
         if self.session.as_ref().is_some_and(|s| s.host.is_some()) {
             return self.raw_source.clone();
         }
-        let index = self.index.as_ref()?;
-        let session = self.session.as_ref()?;
-        let line = self.events.get(self.selected_event()?)?.line;
-        index.raw_line(&session.id, line).ok().flatten()
+        if let (Some(index), Some(session)) = (&self.index, &self.session)
+            && let Some(text) = index.raw_line(&session.id, line).ok().flatten()
+        {
+            return Some(text);
+        }
+        self.raw_lines.get(&line).cloned()
+    }
+
+    fn selected_tool_call(&self) -> Option<usize> {
+        let n = *self.oshown.get(self.sel_pos())?;
+        match self.outline_items.get(n)? {
+            OutlineItem::Event(i) | OutlineItem::Body(i) if self.events.get(*i).is_some_and(is_call) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// `p`: peek a tool call while its session is active, or once the call has a result.
+    fn open_peek(&mut self) -> bool {
+        let Some(i) = self.selected_tool_call() else { return false };
+        let active = self.session.as_ref().is_some_and(|s| s.status == Status::Active);
+        if !active && self.result_of(i).is_none() {
+            return false;
+        }
+        self.peek = self.events.get(i).map(|e| e.line);
+        self.raw_scroll = 0;
+        self.refresh_peek();
+        self.peek.is_some()
+    }
+
+    fn close_peek(&mut self) {
+        self.peek = None;
+        self.raw = None;
+        self.raw_scroll = 0;
+    }
+
+    fn refresh_peek(&mut self) -> bool {
+        let text = self.peek_text();
+        let changed = self.raw.as_deref() != Some(text.as_str());
+        self.raw = Some(text);
+        changed
+    }
+
+    /// Tail of the call's output. A finished call reads its result line; a running one, its own.
+    fn peek_text(&self) -> String {
+        let Some(line) = self.peek else { return "no output yet".into() };
+        let call = self.events.iter().position(|e| e.line == line && is_call(e));
+        let src = call.and_then(|i| self.result_of(i).map(|(l, _)| l).or(Some(line))).and_then(|l| self.raw_at(l));
+        src.as_deref().and_then(peek_output).filter(|t| !t.is_empty()).map(|t| tail_lines(&t, PEEK_TAIL)).unwrap_or_else(|| "no output yet".into())
     }
 
     fn resume(&self, row: Option<&SessionRow>) -> InputOutcome {
@@ -2978,6 +3040,47 @@ fn row_gaps(state: &TracesModalState, heights: &[usize], list_height: usize) -> 
     gaps
 }
 
+/// Output strings in one raw line (`output`/`stdout`/`stderr`/`result`, and `content`/`text` inside a
+/// tool result). `None` when the line has no output yet. A non-JSON line is itself the output.
+fn peek_output(raw: &str) -> Option<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return (!raw.trim().is_empty()).then(|| raw.trim().to_string());
+    };
+    fn out_key(k: &str) -> bool {
+        matches!(k, "output" | "result" | "stdout" | "stderr" | "partial_output")
+    }
+    fn resultish(t: &str) -> bool {
+        matches!(t, "tool_result" | "toolResult" | "tool-result" | "function_call_output")
+    }
+    fn walk(v: &serde_json::Value, res: bool, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::Array(xs) => xs.iter().for_each(|x| walk(x, res, out)),
+            serde_json::Value::Object(m) => {
+                let res = res || m.get("type").and_then(|t| t.as_str()).is_some_and(resultish) || m.get("role").and_then(|r| r.as_str()) == Some("tool_result");
+                for (k, x) in m {
+                    if matches!(k.as_str(), "input" | "arguments" | "args" | "params") {
+                        continue;
+                    }
+                    if let serde_json::Value::String(s) = x && (out_key(k) || (res && matches!(k.as_str(), "content" | "text"))) {
+                        push_chunk(out, s);
+                    } else {
+                        walk(x, res, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(&v, false, &mut out);
+    (!out.is_empty()).then(|| out.join("\n"))
+}
+
+fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
 /// The human text of one raw trajectory line: message text, thinking, tool inputs and tool output, in
 /// order, found by key across Claude, Codex and Pi shapes. Falls back to `pretty()` when none is found.
 fn body_text(raw: &str) -> String {
@@ -3356,6 +3459,12 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                 _ => return InputOutcome::Unchanged,
             }
         }
+        Mode::Trajectory if state.peek.is_some() => match key.code {
+            KeyCode::Esc => state.close_peek(),
+            KeyCode::Char('j') | KeyCode::Down => state.raw_scroll += 1,
+            KeyCode::Char('k') | KeyCode::Up => state.raw_scroll = state.raw_scroll.saturating_sub(1),
+            _ => return InputOutcome::Unchanged,
+        },
         Mode::Trajectory => {
             let len = state.oshown.len();
             match key.code {
@@ -3422,6 +3531,11 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                     Some(text) => return InputOutcome::Action(Action::TracesCopy { text }),
                     None => return InputOutcome::Unchanged,
                 },
+                KeyCode::Char('p') => {
+                    if !state.open_peek() {
+                        return InputOutcome::Unchanged;
+                    }
+                }
                 // A run's Enter expands or collapses it; on a dispatch row, Enter opens the child; otherwise the inspector.
                 KeyCode::Enter if state.selected_run() => {
                     if !state.outline_fold(|f, t, n| f.toggle(t, n)) {
@@ -3552,6 +3666,9 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
     }
     if state.typing != Typing::No {
         return vec![plain("type to filter"), plain("Enter search events"), plain("Esc clear")];
+    }
+    if state.peek.is_some() {
+        return vec![plain("j/k scroll"), plain("Esc back")];
     }
     let resume = |row: Option<&SessionRow>| row.is_some_and(|row| resume_target(row).is_some());
     let mut hints = match state.mode {
@@ -4026,6 +4143,10 @@ fn render_strip(buf: &mut Buffer, area: Rect, events: &[EventRow], selected: usi
 }
 
 fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, theme: &Theme) {
+    if state.peek.is_some() {
+        render_inspector(buf, area, state, theme);
+        return;
+    }
     let Some(session) = state.session.clone() else { return };
     let dim = Style::default().fg(theme.gray);
     let chip = format!(" {} ", source_label(&session.source));
@@ -5180,6 +5301,11 @@ mod tests {
             .collect()
     }
 
+    fn select_call(state: &mut TracesModalState, line: i64) {
+        let pos = state.oshown.iter().position(|&n| matches!(state.key_at(n), Some(OutlineKey::Ev(l)) if *l == line)).expect("call row");
+        state.goto(pos);
+    }
+
     fn ev(line: i64, kind: &str, role: &str, text: &str) -> EventRow {
         EventRow {
             line,
@@ -5397,6 +5523,39 @@ mod tests {
         assert_eq!(state.selected_event(), event);
         assert_eq!(state.sel, before);
         assert_eq!(state.status.as_deref(), Some("no errors"));
+    }
+
+    #[test]
+    fn peek_shows_partial_then_final_and_esc_keeps_selection() {
+        let mut state = trajectory(vec![ev(1, "message", "user", "go"), ev(2, "tool", "tool", "ls")]);
+        state.session.as_mut().unwrap().status = Status::Active;
+        select_call(&mut state, 2);
+        let sel = state.sel.clone();
+        press(&mut state, KeyCode::Char('p'));
+        assert!(draw(&mut state, 80, 16).contains("no output yet"));
+        state.raw_lines.insert(2, r#"{"input":{"command":"ls"},"output":"partial text"}"#.into());
+        assert!(state.poll_live_at(1), "peek re-reads on the poll");
+        assert!(draw(&mut state, 80, 16).contains("partial text"));
+        let many = (1..=25).map(|n| format!("row{n:02}")).collect::<Vec<_>>().join("\n");
+        state.raw_lines.insert(2, serde_json::json!({ "output": many }).to_string());
+        assert!(state.poll_live_at(1));
+        let screen = draw(&mut state, 40, 30);
+        assert!(screen.contains("row06") && screen.contains("row25") && !screen.contains("row05"), "{screen}");
+        press(&mut state, KeyCode::Char('j'));
+        press(&mut state, KeyCode::Esc);
+        assert_eq!((state.mode, state.peek, state.sel), (Mode::Trajectory, None, sel));
+
+        let mut done = trajectory(vec![ev(1, "message", "user", "go"), ev(2, "tool", "tool", "ls"), ev(3, "tool", "tool_result", "ok")]);
+        done.session.as_mut().unwrap().status = Status::Active;
+        done.raw_lines.insert(2, r#"{"output":"partial text"}"#.into());
+        done.raw_lines.insert(3, r#"{"type":"tool_result","content":"final output"}"#.into());
+        select_call(&mut done, 2);
+        let sel = done.sel.clone();
+        press(&mut done, KeyCode::Char('p'));
+        let screen = draw(&mut done, 80, 16);
+        assert!(screen.contains("final output") && !screen.contains("partial text"), "{screen}");
+        press(&mut done, KeyCode::Esc);
+        assert_eq!((done.mode, done.sel), (Mode::Trajectory, sel));
     }
 
     #[test]
