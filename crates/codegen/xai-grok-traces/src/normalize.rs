@@ -99,9 +99,10 @@ pub struct NormalizedEvent {
     pub input_tokens: Option<f64>,
     pub output_tokens: Option<f64>,
     pub usage_is_total: bool,
-    /// What this message sent the model: Claude `input + cache_read + cache_creation`, Pi `input + cacheRead + cacheWrite`.
+    /// What this message sent the model: Claude `input + cache_read + cache_creation`, Pi `input + cacheRead + cacheWrite`,
+    /// DSH `inputTokens + cacheReadTokens + cacheWriteTokens`.
     pub context_tokens: Option<i64>,
-    /// The model's window, when the harness records it (none of the current sources do).
+    /// The model's window, when the harness records it. DSH writes `request/context.data.contextWindow`.
     pub context_window: Option<i64>,
     pub turn: Option<f64>,
     pub step: Option<f64>,
@@ -334,7 +335,51 @@ fn context_tokens(usage: &Map<String, Value>) -> Option<i64> {
     if usage.contains_key("input") {
         return sum(&["input", "cacheRead", "cacheWrite"]);
     }
+    // DSH TokenUsage. `inputTokens` is the uncached prompt; cache read/write are the rest of it.
+    // `reasoningTokens` is a subset of `outputTokens`, and `totalTokens` is an informational sum.
+    if usage.contains_key("inputTokens") {
+        return sum(&["inputTokens", "cacheReadTokens", "cacheWriteTokens"]);
+    }
     None
+}
+
+/// A positive `contextWindow`. DSH logs it on `request/context`, not on the usage object.
+fn context_window(obj: &Map<String, Value>) -> Option<i64> {
+    let n = number_value(obj.get("contextWindow"))?;
+    (n > 0.0).then_some(n.round() as i64)
+}
+
+/// Usage that is not a sibling `usage` object.
+///
+/// v2+ `assistant/attempt` (and an `assistant/message` with no top-level usage) embeds it as a
+/// stream record `{type:"chunk", chunk:{type:"usage", usage}}`. v0/v1 `assistant/chunk` puts that
+/// same chunk on `data.chunk`. The last usage chunk in a stream is the one the provider settled on.
+fn usage_chunk(chunk: &Map<String, Value>) -> Option<&Map<String, Value>> {
+    if chunk.get("type").and_then(Value::as_str) != Some("usage") {
+        return None;
+    }
+    chunk.get("usage").and_then(Value::as_object)
+}
+
+fn stream_usage(rec: &Value) -> Option<&Map<String, Value>> {
+    let rec = rec.as_object()?;
+    if rec.get("type").and_then(Value::as_str) != Some("chunk") {
+        return None;
+    }
+    usage_chunk(rec.get("chunk")?.as_object()?)
+}
+
+fn embedded_usage(payload: &Map<String, Value>) -> Option<&Map<String, Value>> {
+    if let Some(u) = payload.get("chunk").and_then(Value::as_object).and_then(usage_chunk) {
+        return Some(u);
+    }
+    let mut found = None;
+    for rec in payload.get("stream").and_then(Value::as_array)? {
+        if let Some(u) = stream_usage(rec) {
+            found = Some(u);
+        }
+    }
+    found
 }
 
 fn first_number(obj: &Map<String, Value>, keys: &[&str]) -> Option<f64> {
@@ -461,7 +506,10 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
 
     const IN: [&str; 4] = ["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"];
     const OUT: [&str; 4] = ["output_tokens", "outputTokens", "completion_tokens", "completionTokens"];
-    let usage = usage_object(top).or_else(|| usage_object(payload)).unwrap_or(&EMPTY);
+    let usage = usage_object(top)
+        .or_else(|| usage_object(payload))
+        .or_else(|| embedded_usage(payload))
+        .unwrap_or(&EMPTY);
     let input_tokens = first_number(usage, &IN).or_else(|| find_number(value, &IN, 0));
     let output_tokens = first_number(usage, &OUT).or_else(|| find_number(value, &OUT, 0));
     let usage_is_total = lower.contains("token_count")
@@ -469,6 +517,7 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         || top.get("total_token_usage").is_some_and(Value::is_object);
 
     let context_tokens = if usage_is_total { None } else { context_tokens(usage) };
+    let context_window = context_window(payload).or_else(|| context_window(top));
 
     let timestamp_ms = timestamp_ms(top.get("timestamp"))
         .or_else(|| timestamp_ms(top.get("time")))
@@ -559,7 +608,7 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         output_tokens,
         usage_is_total,
         context_tokens,
-        context_window: None,
+        context_window,
         turn,
         step,
         depth,
@@ -641,6 +690,56 @@ mod tests {
         let zero = normalize(&json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "x"}], "usage": {"input_tokens": 0, "output_tokens": 0}}}));
         assert_eq!(zero.context_tokens, None, "zero usage is no context size");
         assert_eq!(normalize(&json!({"type": "user", "message": {"role": "user", "content": "x"}})).context_tokens, None);
+    }
+
+    #[test]
+    fn dsh_usage_is_prompt_side_context_and_window() {
+        let msg = normalize(&json!({
+            "type": "assistant/message",
+            "data": {
+                "turn": 1, "step": 1,
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+                "usage": {
+                    "inputTokens": 10, "outputTokens": 4,
+                    "cacheReadTokens": 100, "cacheWriteTokens": 20,
+                    "reasoningTokens": 1000, "totalTokens": 1134
+                }
+            }
+        }));
+        assert_eq!((msg.input_tokens, msg.output_tokens), (Some(10.0), Some(4.0)));
+        assert!(!msg.usage_is_total);
+        assert_eq!((msg.context_tokens, msg.context_window), (Some(130), None));
+
+        let attempt = normalize(&json!({
+            "type": "assistant/attempt",
+            "data": {"turn": 1, "step": 2, "stream": [
+                {"type": "text-chunks", "texts": ["x"]},
+                {"type": "chunk", "chunk": {"type": "usage", "usage": {"inputTokens": 40, "outputTokens": 1, "cacheReadTokens": 5}}}
+            ]}
+        }));
+        assert_eq!((attempt.context_tokens, attempt.input_tokens, attempt.output_tokens), (Some(45), Some(40.0), Some(1.0)));
+
+        let chunk = normalize(&json!({
+            "type": "assistant/chunk",
+            "data": {"chunk": {"type": "usage", "usage": {"inputTokens": 7, "outputTokens": 1, "cacheWriteTokens": 3}}}
+        }));
+        assert_eq!(chunk.context_tokens, Some(10));
+
+        let zero = normalize(&json!({
+            "type": "assistant/message",
+            "data": {"message": {"role": "assistant", "content": []}, "usage": {"inputTokens": 0, "outputTokens": 0}}
+        }));
+        assert_eq!(zero.context_tokens, None, "zero usage is no context size");
+
+        let win = normalize(&json!({
+            "type": "request/context",
+            "data": {"provider": "openrouter", "model": "deepseek-v4", "contextWindow": 131072}
+        }));
+        assert_eq!((win.context_tokens, win.context_window), (None, Some(131_072)));
+        let bare = normalize(&json!({"type": "request/context", "data": {"provider": "p", "model": "m"}}));
+        assert_eq!(bare.context_window, None);
+        let cleared = normalize(&json!({"type": "request/context", "data": {"provider": "p", "model": "m", "contextWindow": 0}}));
+        assert_eq!(cleared.context_window, None, "a zero window is not a capacity");
     }
 
     #[test]
