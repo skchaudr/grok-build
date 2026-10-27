@@ -1,7 +1,7 @@
 //! The disposable SQLite index. Source files are the truth; a corrupt index
 //! is quarantined and rebuilt.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -21,9 +21,11 @@ mod bb_index;
 
 use crate::bb::{Bb, BbThread, thread_key};
 
-pub const PARSER_VERSION: i64 = 6;
+/// 7 fills `duration_ms` from a tool call's matching result timestamp.
+pub const PARSER_VERSION: i64 = 7;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
-pub const SCHEMA_VERSION: i64 = 7;
+/// 8 adds `trace_event_usage.call_id` so an appended result can still find its call.
+pub const SCHEMA_VERSION: i64 = 8;
 /// Size the index may use (db + `-wal`). Passing it is normal: the oldest sessions are evicted
 /// down to `EVICT_TO_PERCENT` of it. It is a cache of pointers, so this is not an alert.
 pub const SIZE_BUDGET: u64 = 256 * 1024 * 1024;
@@ -106,9 +108,12 @@ CREATE TABLE IF NOT EXISTS trace_events (sk INTEGER NOT NULL, line_number INTEGE
   noise INTEGER NOT NULL DEFAULT 0, detail TEXT,
   PRIMARY KEY (sk, line_number)) WITHOUT ROWID;
 -- Most events carry none of these; only the ones that do get a row.
+-- `call_id` is the harness id that ties a tool call to its result (`tool_use_id`, `callId`, …).
 CREATE TABLE IF NOT EXISTS trace_event_usage (sk INTEGER NOT NULL, line_number INTEGER NOT NULL, duration_ms INTEGER,
   input_tokens INTEGER, output_tokens INTEGER, turn INTEGER, step INTEGER, context_tokens INTEGER, context_window INTEGER,
+  call_id TEXT,
   PRIMARY KEY (sk, line_number)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS trace_event_usage_call ON trace_event_usage(sk, call_id) WHERE call_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS trace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS trace_receipts (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
   event TEXT NOT NULL, native_session TEXT, path TEXT, session_id TEXT, tool TEXT, cwd TEXT,
@@ -401,7 +406,11 @@ impl Aggregate {
 const INSERT_EVENT: &str = "INSERT OR REPLACE INTO trace_events (sk, line_number, byte_offset, type_id, kind, role, title_id,
   preview, timestamp, depth, model_id, is_error, noise, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 const INSERT_USAGE: &str = "INSERT OR REPLACE INTO trace_event_usage (sk, line_number, duration_ms, input_tokens, output_tokens,
-  turn, step, context_tokens, context_window) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
+  turn, step, context_tokens, context_window, call_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
+const FIND_CALL: &str = "SELECT u.line_number, e.timestamp, u.duration_ms FROM trace_event_usage u
+ JOIN trace_events e ON e.sk = u.sk AND e.line_number = u.line_number
+ WHERE u.sk = ?1 AND u.call_id = ?2 ORDER BY u.line_number LIMIT 1";
+const SET_DURATION: &str = "UPDATE trace_event_usage SET duration_ms = ?1 WHERE sk = ?2 AND line_number = ?3 AND duration_ms IS NULL";
 /// Every Nth line keeps its byte offset.
 pub(crate) const CHECKPOINT_EVERY: i64 = 16;
 
@@ -462,10 +471,85 @@ fn insert_event(
         e.detail,
     ])?;
     let extra = [e.duration_ms, e.input_tokens, e.output_tokens, e.turn, e.step].map(round);
-    if extra.iter().any(Option::is_some) || e.context_tokens.is_some() || e.context_window.is_some() {
-        usage.execute(params![sk, line, extra[0], extra[1], extra[2], extra[3], extra[4], e.context_tokens, e.context_window])?;
+    let call_id = e.tool_call_id.as_deref();
+    if extra.iter().any(Option::is_some) || e.context_tokens.is_some() || e.context_window.is_some() || call_id.is_some() {
+        usage.execute(params![sk, line, extra[0], extra[1], extra[2], extra[3], extra[4], e.context_tokens, e.context_window, call_id])?;
     }
     Ok(())
+}
+
+/// A tool call waiting for its result. `explicit` means the harness already wrote `duration_ms`.
+struct OpenCall {
+    line: i64,
+    ts: Option<i64>,
+    explicit: bool,
+}
+
+/// Pairs tool calls with results inside one file pass, and with calls indexed on an earlier append.
+#[derive(Default)]
+struct ToolSpans {
+    calls: HashMap<String, OpenCall>,
+    /// Result timestamps that arrived before their call in this pass.
+    pending: HashMap<String, i64>,
+}
+
+impl ToolSpans {
+    fn observe(
+        &mut self,
+        find: &mut rusqlite::CachedStatement<'_>,
+        set: &mut rusqlite::CachedStatement<'_>,
+        sk: i64,
+        line: i64,
+        e: &NormalizedEvent,
+    ) -> rusqlite::Result<()> {
+        if let Some(id) = &e.tool_call_id {
+            self.calls.entry(id.clone()).or_insert(OpenCall { line, ts: e.timestamp_ms, explicit: e.duration_ms.is_some() });
+            if let Some(end) = self.pending.remove(id) {
+                self.write_duration(set, sk, id, end)?;
+            }
+        }
+        if let Some(id) = &e.tool_result_id {
+            let Some(end) = e.timestamp_ms else { return Ok(()) };
+            if !self.calls.contains_key(id) {
+                self.load_call(find, sk, id)?;
+            }
+            if self.calls.contains_key(id) {
+                self.write_duration(set, sk, id, end)?;
+            } else {
+                self.pending.entry(id.clone()).or_insert(end);
+            }
+        }
+        Ok(())
+    }
+
+    /// A call indexed on a previous append of this file.
+    fn load_call(&mut self, find: &mut rusqlite::CachedStatement<'_>, sk: i64, id: &str) -> rusqlite::Result<()> {
+        let found = find
+            .query_row(params![sk, id], |r| {
+                Ok(OpenCall { line: r.get(0)?, ts: r.get(1)?, explicit: r.get::<_, Option<i64>>(2)?.is_some() })
+            })
+            .optional()?;
+        if let Some(c) = found {
+            self.calls.insert(id.to_string(), c);
+        }
+        Ok(())
+    }
+
+    /// `duration_ms = result.timestamp - call.timestamp` on the call row, when the harness did not set one.
+    fn write_duration(&mut self, set: &mut rusqlite::CachedStatement<'_>, sk: i64, id: &str, end: i64) -> rusqlite::Result<()> {
+        let Some(call) = self.calls.get(id) else { return Ok(()) };
+        if call.explicit {
+            return Ok(());
+        }
+        let Some(start) = call.ts else { return Ok(()) };
+        let Some(dur) = end.checked_sub(start).filter(|d| *d >= 0) else { return Ok(()) };
+        let line = call.line;
+        set.execute(params![dur, sk, line])?;
+        if let Some(call) = self.calls.get_mut(id) {
+            call.explicit = true;
+        }
+        Ok(())
+    }
 }
 
 fn delete_events(tx: &Transaction<'_>, sk: i64) -> rusqlite::Result<()> {
@@ -1071,6 +1155,9 @@ impl TraceIndex {
         let (end_byte, next_line) = {
             let mut insert = tx.prepare_cached(INSERT_EVENT)?;
             let mut usage = tx.prepare_cached(INSERT_USAGE)?;
+            let mut find_call = tx.prepare_cached(FIND_CALL)?;
+            let mut set_duration = tx.prepare_cached(SET_DURATION)?;
+            let mut spans = ToolSpans::default();
             let reader = lines::open(path, root.format, start_byte as u64, size as u64)?;
             lines::for_each(reader, start_byte, start_line, |line| {
                 if line.number >= max_events as i64 {
@@ -1093,6 +1180,7 @@ impl TraceIndex {
                 let e = normalize(&value);
                 agg.add(&e);
                 insert_event(&mut insert, &mut usage, &mut names, &tx, sk, line.number, line.start_byte, &e).map_err(io::Error::other)?;
+                spans.observe(&mut find_call, &mut set_duration, sk, line.number, &e).map_err(io::Error::other)?;
                 Ok(true)
             })?
         };

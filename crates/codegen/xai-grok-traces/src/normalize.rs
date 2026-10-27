@@ -118,6 +118,10 @@ pub struct NormalizedEvent {
     pub tool: Option<String>,
     /// A title the harness itself recorded for the session (Claude `ai-title`, OMP `title`, DSH `session/title`).
     pub session_title: Option<String>,
+    /// Id of a tool call this event starts. The index keeps it so a later result can fill `duration_ms`.
+    pub tool_call_id: Option<String>,
+    /// Id of the tool call this result answers (`tool_use_id`, `toolCallId`, `call_id`, `callId`).
+    pub tool_result_id: Option<String>,
 }
 
 impl NormalizedEvent {
@@ -544,6 +548,7 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
     };
 
     let session_title = session_title(top, payload);
+    let (tool_call_id, tool_result_id) = correlation_ids(top, payload, role);
     let title = if title.is_empty() { "Event".to_string() } else { title };
     let text = if text.is_empty() { title.clone() } else { text };
     NormalizedEvent {
@@ -570,7 +575,69 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         detail,
         tool,
         session_title,
+        tool_call_id,
+        tool_result_id,
     }
+}
+
+/// Call id ↔ result id, one pair per line (the first id when a line carries several).
+///
+/// Claude and Cursor: `tool_use.id` / `tool_result.tool_use_id`. Pi and OMP: `toolCall.id` /
+/// `toolCallId`. Codex: `call_id` on `function_call` and `function_call_output`. DSH: `callId`
+/// on `tool/call` and `tool/result`. Grok: `tool_calls[].id` / `tool_call_id`.
+fn correlation_ids(top: &Map<String, Value>, payload: &Map<String, Value>, role: Option<Role>) -> (Option<String>, Option<String>) {
+    if role == Some(Role::ToolResult) {
+        return (None, result_id(top, payload));
+    }
+    (call_id(top, payload, role), None)
+}
+
+const CALL_BLOCKS: &[&str] = &["tool_use", "toolCall", "tool_call", "function_call"];
+const RESULT_BLOCKS: &[&str] = &["tool_result", "toolResult", "tool-result", "function_call_output"];
+/// On a call block or `tool_calls` entry, `id` is the correlation id (Claude `toolu_…`, Pi, Grok).
+const CALL_KEYS: &[&str] = &["call_id", "callId", "tool_use_id", "toolUseId", "toolCallId", "tool_call_id", "id"];
+/// On a flat call record, a bare `id` is often the message id, not the call. Specific keys only.
+const FLAT_CALL_KEYS: &[&str] = &["call_id", "callId", "tool_use_id", "toolUseId", "toolCallId", "tool_call_id"];
+const RESULT_KEYS: &[&str] = &["tool_use_id", "toolUseId", "toolCallId", "tool_call_id", "call_id", "callId"];
+
+fn id_from(obj: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|k| match obj.get(*k) {
+        Some(Value::String(s)) => {
+            let t = s.trim();
+            (!t.is_empty()).then(|| t.to_string())
+        }
+        Some(Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    })
+}
+
+fn block_id(content: Option<&Value>, types: &[&str], keys: &[&str]) -> Option<String> {
+    content?.as_array()?.iter().filter_map(Value::as_object).find_map(|b| {
+        let ty = b.get("type").and_then(Value::as_str)?;
+        types.contains(&ty).then(|| id_from(b, keys)).flatten()
+    })
+}
+
+fn list_id(list: Option<&Value>, keys: &[&str]) -> Option<String> {
+    list?.as_array()?.iter().filter_map(Value::as_object).find_map(|b| id_from(b, keys))
+}
+
+fn call_id(top: &Map<String, Value>, payload: &Map<String, Value>, role: Option<Role>) -> Option<String> {
+    block_id(payload.get("content"), CALL_BLOCKS, CALL_KEYS)
+        .or_else(|| block_id(top.get("content"), CALL_BLOCKS, CALL_KEYS))
+        .or_else(|| list_id(payload.get("tool_calls"), CALL_KEYS))
+        .or_else(|| list_id(top.get("tool_calls"), CALL_KEYS))
+        .or_else(|| (role == Some(Role::Tool)).then(|| id_from(payload, FLAT_CALL_KEYS)).flatten())
+}
+
+fn result_id(top: &Map<String, Value>, payload: &Map<String, Value>) -> Option<String> {
+    let nested = record(payload.get("message"));
+    id_from(payload, RESULT_KEYS)
+        .or_else(|| block_id(payload.get("content"), RESULT_BLOCKS, RESULT_KEYS))
+        .or_else(|| block_id(top.get("content"), RESULT_BLOCKS, RESULT_KEYS))
+        .or_else(|| block_id(nested.get("content"), RESULT_BLOCKS, RESULT_KEYS))
+        .or_else(|| id_from(nested, RESULT_KEYS))
+        .or_else(|| id_from(top, RESULT_KEYS))
 }
 
 /// A title the harness wrote itself: Claude `ai-title`, OMP `title`/`title_change`, DSH `session/title`.
@@ -736,6 +803,52 @@ mod tests {
         assert_eq!((t.kind, t.role, t.title.as_str()), (Kind::Tool, Some(Role::Tool), "Shell"));
         let end = normalize(&json!({"type": "turn_ended", "status": "success"}));
         assert_eq!(end.kind, Kind::Turn);
+    }
+
+    #[test]
+    fn correlation_ids_follow_each_harness() {
+        let pair = |call: Value, result: Value| {
+            let c = normalize(&call);
+            let r = normalize(&result);
+            (c.tool_call_id, c.tool_result_id, r.tool_call_id, r.tool_result_id)
+        };
+        let ids = |call: Value, result: Value, id: &str| {
+            assert_eq!(pair(call, result), (Some(id.into()), None, None, Some(id.into())));
+        };
+        ids(
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}),
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"ok"}]}}),
+            "tu1",
+        );
+        ids(
+            json!({"role":"assistant","message":{"content":[{"type":"tool_use","id":"cu1","name":"Shell","input":{"command":"ls"}}]}}),
+            json!({"role":"user","message":{"content":[{"type":"tool_result","id":"row","tool_use_id":"cu1","content":"ok"}]}}),
+            "cu1",
+        );
+        ids(
+            json!({"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"p1","name":"bash","arguments":{}}]}}),
+            json!({"type":"message","message":{"role":"toolResult","toolCallId":"p1","toolName":"bash","content":[{"type":"text","text":"ok"}]}}),
+            "p1",
+        );
+        ids(
+            json!({"type":"response_item","payload":{"type":"function_call","id":"item","call_id":"cx","name":"shell","arguments":"{}"}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","id":"out","call_id":"cx","output":"ok"}}),
+            "cx",
+        );
+        ids(
+            json!({"type":"tool/call","data":{"name":"read_file","callId":"c1"}}),
+            json!({"type":"tool/result","data":{"message":{"content":[{"type":"tool-result","toolCallId":"c1","content":[]}]}}}),
+            "c1",
+        );
+        ids(
+            json!({"type":"assistant","tool_calls":[{"id":"t1","name":"read_file"}]}),
+            json!({"type":"tool_result","id":"result-row","tool_call_id":"t1","content":"ok"}),
+            "t1",
+        );
+        let bare = normalize(&json!({"type":"tool_result","id":"result-row","content":"ok"}));
+        assert_eq!(bare.tool_result_id, None, "a result's own id is not the call id");
+        let flat = normalize(&json!({"type":"response_item","payload":{"type":"function_call","id":"item-only","name":"shell","arguments":"{}"}}));
+        assert_eq!(flat.tool_call_id, None, "a codex item id is not the call id");
     }
 
     #[test]
