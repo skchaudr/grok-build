@@ -5369,6 +5369,12 @@ mod tests {
             ev(5, "tool", "tool_result", "synthetic ok"),
             ev(6, "tool", "tool", "call-c"),
             ev(7, "tool", "tool_result", "synthetic ok"),
+            ev(8, "tool", "tool", "call-d"),
+            ev(9, "tool", "tool_result", "synthetic ok"),
+            ev(10, "tool", "tool", "call-e"),
+            ev(11, "tool", "tool_result", "synthetic ok"),
+            ev(12, "tool", "tool", "call-f"),
+            ev(13, "tool", "tool_result", "synthetic ok"),
         ];
         let mut state = trajectory(rows);
         assert!(!shown_events(&state).contains(&1), "the run starts collapsed");
