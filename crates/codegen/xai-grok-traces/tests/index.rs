@@ -113,6 +113,60 @@ fn each_source_discovers_its_fixture() {
     assert_eq!(g.model.as_deref(), Some("grok-5"));
     // Fresh, non-terminal file → active.
     assert_eq!(g.status, Status::Active);
+    // No usage on the chat_history rows, and no updates.jsonl.
+    assert_eq!((g.context_tokens, g.context_window), (None, None));
+    assert_eq!((c.context_tokens, c.context_window), (Some(100), None));
+    assert_eq!(x.context_tokens, None);
+}
+
+#[test]
+fn grok_model_response_usage_sets_context_and_leaves_other_sources() {
+    let e = env();
+    let dir = e.home.join(".grok/sessions/%2Fw%2Fgrok/g2");
+    write(
+        &dir.join("chat_history.jsonl"),
+        "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"with usage\"}],\"prompt_index\":0}\n{\"type\":\"assistant\",\"content\":\"x\",\"model_id\":\"grok-5\"}\n",
+    );
+    write(&dir.join("summary.json"), r#"{"info":{"id":"g2","cwd":"/w/grok"},"context_window":200000}"#);
+    write(
+        &dir.join("updates.jsonl"),
+        "{\"timestamp\":1,\"method\":\"_x.ai/session/update\",\"params\":{\"sessionId\":\"g2\",\"update\":{\"sessionUpdate\":\"response_completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":3,\"cache_read_input_tokens\":1000,\"cache_creation_input_tokens\":200}}}}\n",
+    );
+
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+    let groks = idx.list_sessions(&SessionFilter { source: Some("grok".into()), ..Default::default() }).unwrap();
+    assert_eq!(groks.len(), 2);
+    let plain = groks.iter().find(|s| s.title == "grok task").unwrap();
+    let used = groks.iter().find(|s| s.title == "with usage").unwrap();
+    assert_eq!((plain.context_tokens, plain.context_window), (None, None));
+    assert_eq!((used.context_tokens, used.context_window), (Some(1210), Some(200_000)));
+    assert_eq!(used.input_tokens, None, "a model response is context pressure, not a folded token total");
+
+    let c = by_source(&idx, "claude");
+    assert_eq!((c.context_tokens, c.context_window, c.input_tokens), (Some(100), None, Some(100)));
+    for source in ["codex", "pi", "omp", "dsh"] {
+        assert_eq!(by_source(&idx, source).context_tokens, None, "{source}");
+    }
+
+    // chat_history is unchanged. A zero usage line must not wipe a real size; the next response does.
+    let mut f = fs::OpenOptions::new().append(true).open(dir.join("updates.jsonl")).unwrap();
+    f.write_all(b"{\"timestamp\":2,\"method\":\"_x.ai/session/update\",\"params\":{\"sessionId\":\"g2\",\"update\":{\"sessionUpdate\":\"response_completed\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}}}\n").unwrap();
+    drop(f);
+    idx.scan(&e.roots).unwrap();
+    let groks = idx.list_sessions(&SessionFilter { source: Some("grok".into()), ..Default::default() }).unwrap();
+    let used = groks.iter().find(|s| s.title == "with usage").unwrap();
+    assert_eq!(used.context_tokens, Some(1210), "zero usage is not a context size");
+
+    let mut f = fs::OpenOptions::new().append(true).open(dir.join("updates.jsonl")).unwrap();
+    f.write_all(b"{\"timestamp\":3,\"method\":\"_x.ai/session/update\",\"params\":{\"sessionId\":\"g2\",\"update\":{\"sessionUpdate\":\"response_completed\",\"usage\":{\"input_tokens\":50,\"output_tokens\":1,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}}}\n").unwrap();
+    drop(f);
+    idx.scan(&e.roots).unwrap();
+    let groks = idx.list_sessions(&SessionFilter { source: Some("grok".into()), ..Default::default() }).unwrap();
+    let used = groks.iter().find(|s| s.title == "with usage").unwrap();
+    assert_eq!((used.context_tokens, used.context_window), (Some(50), Some(200_000)));
+    assert_eq!(by_source(&idx, "claude").context_tokens, Some(100));
+    assert_eq!(by_source(&idx, "codex").input_tokens, None);
 }
 
 #[test]

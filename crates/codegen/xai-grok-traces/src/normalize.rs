@@ -322,6 +322,10 @@ fn usage_object(v: &Map<String, Value>) -> Option<&Map<String, Value>> {
 }
 
 /// Size of the prompt behind one assistant message; per-message usage only, never a running total.
+///
+/// Claude and grok `ResponseUsage`: uncached `input_tokens` + `cache_read_input_tokens` +
+/// `cache_creation_input_tokens`. Pi: `input` + `cacheRead` + `cacheWrite`.
+/// Grok `TokenUsage.prompt_tokens` is already the full prompt; `cached_prompt_tokens` is a subset.
 fn context_tokens(usage: &Map<String, Value>) -> Option<i64> {
     let sum = |keys: &[&str]| {
         let parts: Vec<f64> = keys.iter().filter_map(|k| number_value(usage.get(*k))).collect();
@@ -334,7 +338,16 @@ fn context_tokens(usage: &Map<String, Value>) -> Option<i64> {
     if usage.contains_key("input") {
         return sum(&["input", "cacheRead", "cacheWrite"]);
     }
+    if usage.contains_key("prompt_tokens") {
+        return sum(&["prompt_tokens"]);
+    }
     None
+}
+
+/// Prompt size on a grok model-response record: nested `usage`, or the input fields on the record itself
+/// (`response_started`).
+pub(crate) fn prompt_context(obj: &Map<String, Value>) -> Option<i64> {
+    obj.get("usage").and_then(Value::as_object).and_then(context_tokens).or_else(|| context_tokens(obj))
 }
 
 fn first_number(obj: &Map<String, Value>, keys: &[&str]) -> Option<f64> {
@@ -641,6 +654,17 @@ mod tests {
         let zero = normalize(&json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "x"}], "usage": {"input_tokens": 0, "output_tokens": 0}}}));
         assert_eq!(zero.context_tokens, None, "zero usage is no context size");
         assert_eq!(normalize(&json!({"type": "user", "message": {"role": "user", "content": "x"}})).context_tokens, None);
+        // Grok TokenUsage: prompt_tokens is the full prompt. Cache fields are a subset, not added again.
+        let grok = normalize(&json!({
+            "type": "assistant", "content": "x", "model_id": "grok-5",
+            "usage": {"prompt_tokens": 1210, "completion_tokens": 3, "cached_prompt_tokens": 1000, "cache_creation_prompt_tokens": 200}
+        }));
+        assert_eq!(grok.context_tokens, Some(1210));
+        let response = prompt_context(json!({
+            "sessionUpdate": "response_completed",
+            "usage": {"input_tokens": 10, "output_tokens": 3, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 200}
+        }).as_object().unwrap());
+        assert_eq!(response, Some(1210));
     }
 
     #[test]

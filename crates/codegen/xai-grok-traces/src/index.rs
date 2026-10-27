@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use xai_sqlite_journal::JournalMode;
 
 use crate::lines;
-use crate::links::{HEADER_LINES, Links, file_sig, grok_links, grok_summary, header_links, path_links, write_links};
+use crate::links::{HEADER_LINES, Links, file_sig, grok_aux_sig, grok_context, grok_links, grok_summary, header_links, path_links, write_links};
 use crate::normalize::{Kind, NormalizedEvent, Role, clip, normalize};
 use crate::roots::{Format, MAX_FILES, Root, discover, resolve};
 
@@ -1025,8 +1025,8 @@ impl TraceIndex {
             return Ok(false);
         }
         let (mut links, aux) = path_links(root, path);
-        // A sidecar (Claude's `.meta.json`) can change while the transcript does not.
-        let aux_sig = aux.as_deref().and_then(file_sig);
+        // A sidecar (Claude's `.meta.json`, grok's `updates.jsonl` / `summary.json`) can change while the transcript does not.
+        let aux_sig = if root.source == "grok" { grok_aux_sig(path) } else { aux.as_deref().and_then(file_sig) };
         let aux_changed = existing.as_ref().is_some_and(|f| f.aux_sig != aux_sig);
 
         let tail_ok = |f: &FileRow| -> io::Result<bool> {
@@ -1105,11 +1105,21 @@ impl TraceIndex {
         };
         let indexed_bytes = if root.format == Format::Zstd { size } else { end_byte };
         let content_hash = tail_hash(path, indexed_bytes as u64)?;
-        if let (true, Some(summary)) = (root.source == "grok", grok_summary(path)) {
-            if agg.cwd.is_none() {
-                agg.cwd = summary.pointer("/info/cwd").and_then(|v| v.as_str()).map(str::to_string);
+        if root.source == "grok" {
+            if let Some(summary) = grok_summary(path) {
+                if agg.cwd.is_none() {
+                    agg.cwd = summary.pointer("/info/cwd").and_then(|v| v.as_str()).map(str::to_string);
+                }
+                grok_links(path, &summary, &mut links);
             }
-            grok_links(path, &summary, &mut links);
+            // Chat history has no usage. The latest model response in updates.jsonl is the context size.
+            let ctx = grok_context(path);
+            if ctx.tokens.is_some() {
+                agg.context_tokens = ctx.tokens;
+            }
+            if ctx.window.is_some() {
+                agg.context_window = ctx.window;
+            }
         }
         write_links(&tx, &sid, &links)?;
         Self::write_aggregate(&tx, &sid, &agg, mtime)?;
@@ -1279,6 +1289,15 @@ impl TraceIndex {
             [sid],
         )?;
         tx.execute("UPDATE trace_files SET aux_sig = ?1 WHERE path = ?2", params![sig, path])?;
+        if Path::new(path).file_name().is_some_and(|n| n == "chat_history.jsonl") {
+            let ctx = grok_context(Path::new(path));
+            if ctx.tokens.is_some() || ctx.window.is_some() {
+                tx.execute(
+                    "UPDATE trace_sessions SET context_tokens = COALESCE(?2, context_tokens), context_window = COALESCE(?3, context_window) WHERE id = ?1",
+                    params![sid, ctx.tokens, ctx.window],
+                )?;
+            }
+        }
         tx.commit()?;
         // Nothing was parsed.
         Ok(false)

@@ -15,13 +15,17 @@
 //! | cursor | none; `native_id` is the transcript file stem |
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Transaction, params};
 use serde_json::Value;
 
-use crate::normalize::clip;
+use crate::normalize::{clip, prompt_context};
 use crate::roots::Root;
+
+/// Usage lines are small. A chunk line that happens to mention a marker is not parsed.
+const GROK_CONTEXT_LINE_MAX: usize = 64 * 1024;
 
 /// Header records (`session`, `session_meta`) sit in the first few lines.
 pub(crate) const HEADER_LINES: i64 = 8;
@@ -168,6 +172,98 @@ pub(crate) fn grok_summary(chat_history: &Path) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// `size:mtime` of `updates.jsonl` and `summary.json`, so context can refresh when the transcript did not.
+pub(crate) fn grok_aux_sig(chat_history: &Path) -> Option<String> {
+    let part = |name: &str| file_sig(&chat_history.with_file_name(name)).unwrap_or_default();
+    let (updates, summary) = (part("updates.jsonl"), part("summary.json"));
+    if updates.is_empty() && summary.is_empty() { None } else { Some(format!("{updates}|{summary}")) }
+}
+
+/// Latest context pressure for one grok session.
+///
+/// `chat_history.jsonl` stores `ConversationItem`s. Assistant rows have no usage field, so the prompt
+/// size comes from the sibling `updates.jsonl` model-response records (`response_completed.usage` is
+/// uncached `input_tokens` plus cache read and cache creation; `response_started` carries the same
+/// input fields; `auto_compact_completed.tokens_after` is the size after a compact). The window is
+/// `summary.json` `context_window`, or the latest `model_changed.context_window_selection` when the
+/// summary has none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GrokContext {
+    pub tokens: Option<i64>,
+    pub window: Option<i64>,
+}
+
+pub(crate) fn grok_context(chat_history: &Path) -> GrokContext {
+    let mut ctx = GrokContext::default();
+    let mut window_from_summary = false;
+    if let Some(summary) = grok_summary(chat_history) {
+        if let Some(n) = pos_i64(summary.get("context_window")) {
+            ctx.window = Some(n);
+            window_from_summary = true;
+        }
+    }
+    let Ok(file) = fs::File::open(chat_history.with_file_name("updates.jsonl")) else { return ctx };
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { continue };
+        if line.len() > GROK_CONTEXT_LINE_MAX || !grok_context_marker(&line) {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let Some(update) = grok_update(&v) else { continue };
+        match update.get("sessionUpdate").and_then(Value::as_str) {
+            Some("response_completed" | "response_started") => {
+                if let Some(n) = prompt_context(update) {
+                    ctx.tokens = Some(n);
+                }
+            }
+            Some("auto_compact_completed") => {
+                if let Some(n) = pos_i64(update.get("tokens_after")) {
+                    ctx.tokens = Some(n);
+                }
+            }
+            Some("auto_compact_started") => {
+                if let Some(n) = pos_i64(update.get("tokens_used")) {
+                    ctx.tokens = Some(n);
+                }
+                if !window_from_summary {
+                    ctx.window = pos_i64(update.get("context_window")).or(ctx.window);
+                }
+            }
+            Some("model_changed") if !window_from_summary => {
+                if let Some(n) = pos_i64(update.get("context_window_selection")) {
+                    ctx.window = Some(n);
+                }
+            }
+            _ => {}
+        }
+    }
+    ctx
+}
+
+fn grok_context_marker(line: &str) -> bool {
+    line.contains("response_completed")
+        || line.contains("response_started")
+        || line.contains("auto_compact_")
+        || line.contains("model_changed")
+}
+
+/// The xAI session update inside an `updates.jsonl` envelope, or the object itself.
+fn grok_update(v: &Value) -> Option<&serde_json::Map<String, Value>> {
+    v.pointer("/params/update")
+        .and_then(Value::as_object)
+        .or_else(|| v.get("update").and_then(Value::as_object))
+        .or_else(|| v.as_object().filter(|m| m.contains_key("sessionUpdate")))
+}
+
+fn pos_i64(v: Option<&Value>) -> Option<i64> {
+    let n = match v? {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok()))?,
+        Value::String(s) => s.trim().parse().ok()?,
+        _ => return None,
+    };
+    (n > 0).then_some(n)
+}
+
 pub(crate) fn grok_links(chat_history: &Path, summary: &Value, l: &mut Links) {
     l.native_id = s(summary.pointer("/info/id")).or_else(|| chat_history.parent().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()));
     let kind = s(summary.get("session_kind")).unwrap_or_default();
@@ -263,5 +359,27 @@ mod tests {
         let mut f = Links::default();
         grok_links(Path::new("/g/sessions/x/sid/chat_history.jsonl"), &json!({"info":{"id":"sid"},"session_kind":"fork","parent_session_id":"pid"}), &mut f);
         assert_eq!(f.parent_native, None, "a fork is not a dispatch");
+    }
+
+    #[test]
+    fn grok_context_reads_response_usage_and_keeps_the_latest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sid");
+        fs::create_dir_all(&dir).unwrap();
+        let chat = dir.join("chat_history.jsonl");
+        fs::write(&chat, "{\"type\":\"assistant\",\"content\":\"x\"}\n").unwrap();
+        fs::write(dir.join("summary.json"), r#"{"info":{"id":"sid"},"context_window":200000}"#).unwrap();
+        fs::write(dir.join("updates.jsonl"), concat!(
+            r#"{"timestamp":1,"method":"_x.ai/session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"response_started","input_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#, "\n",
+            r#"{"timestamp":2,"method":"_x.ai/session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"response_completed","usage":{"input_tokens":10,"output_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"reasoning_tokens":0}}}}"#, "\n",
+            r#"{"timestamp":3,"method":"_x.ai/session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"model_changed","model_id":"grok-5","context_window_selection":128000}}}"#, "\n",
+            r#"{"timestamp":4,"method":"_x.ai/session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"auto_compact_completed","tokens_after":400,"summary_preview":"shrunk"}}}"#, "\n",
+        )).unwrap();
+        let ctx = grok_context(&chat);
+        assert_eq!((ctx.tokens, ctx.window), (Some(400), Some(200_000)), "summary window wins; compact replaces the prompt size");
+        fs::write(dir.join("summary.json"), r#"{"info":{"id":"sid"}}"#).unwrap();
+        let ctx = grok_context(&chat);
+        assert_eq!(ctx.window, Some(128_000), "model_changed fills a missing summary window");
+        assert!(grok_aux_sig(&chat).is_some());
     }
 }
