@@ -4025,9 +4025,54 @@ fn render_strip(buf: &mut Buffer, area: Rect, events: &[EventRow], selected: usi
     }
 }
 
+/// Rows in the inspector session header: chip, meta, activity strip, cwd or filter.
+const FULL_HEADER_ROWS: u16 = 5;
+
+fn ctx_pct(session: &SessionRow) -> String {
+    match (session.context_tokens, session.context_window) {
+        (Some(used), Some(window)) if window > 0 => format!("ctx {}%", (used.max(0) as i128 * 100 / window as i128).clamp(0, 100)),
+        _ => "ctx -".into(),
+    }
+}
+
+/// One muted row: `source · title · N events · K tools · ctx%`. The title clips so the counts stay.
+fn render_compact_header(buf: &mut Buffer, area: Rect, state: &TracesModalState, theme: &Theme) {
+    let Some(session) = state.session.clone() else { return };
+    if area.width == 0 { return; }
+    let mut tail = format!(" · {} · {} · {}", count_of(session.event_count.max(0) as usize, "event", "events"), count_of(session.tool_count.max(0) as usize, "tool", "tools"), ctx_pct(&session));
+    if let Some(p) = &state.parent_name { tail.push_str(&format!(" · ↑ {p}")); }
+    if state.events.len() >= EVENT_PAGE && session.event_count > state.events.len() as i64 && !state.filtering() && !(session.host.is_some() && state.remote_loading) {
+        tail.push_str(&format!(" · showing {}/{}", state.events.len(), session.event_count));
+    }
+    let mut marks: Vec<String> = Vec::new();
+    if state.event_errors_only { marks.push("errors only".into()); }
+    if state.include_noise { marks.push("noise shown".into()); }
+    if let Some(t) = state.tool_filter.and_then(|i| state.tools.get(i)) { marks.push(format!("tool:{t}")); }
+    match state.typing {
+        Typing::Events => marks.push(format!("/{}▏", state.event_query)),
+        _ if !state.event_query.is_empty() => marks.push(format!("/{}", state.event_query)),
+        _ => {}
+    }
+    if !marks.is_empty() {
+        tail.push_str(&format!(" · {} · {} matching", marks.join(" · "), state.hidden.iter().filter(|h| !**h).count()));
+    }
+    let width = area.width as usize;
+    let source = source_label(&session.source);
+    let prefix = format!("{source} · ");
+    let name = clean_name(&session);
+    let budget = width.saturating_sub(prefix.width() + tail.width());
+    let name = if budget == 0 || name.is_empty() { String::new() } else if name.width() > budget { ellipsize(&name, budget).trim_end().to_string() } else { name };
+    let line = if name.is_empty() { format!("{source}{tail}") } else { format!("{prefix}{name}{tail}") };
+    buf.set_span(area.x, area.y, &Span::styled(truncate_str(&line, width).as_str(), Style::default().fg(theme.gray)), area.width);
+}
+
 fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, theme: &Theme) {
     let Some(session) = state.session.clone() else { return };
     let dim = Style::default().fg(theme.gray);
+    // Inspector keeps the block below. Trajectory draws one muted row and skips it.
+    if state.mode != Mode::Inspector {
+        render_compact_header(buf, area, state, theme);
+    } else {
     let chip = format!(" {} ", source_label(&session.source));
     let cw = chip.width() as u16;
     buf.set_span(area.x, area.y, &Span::styled(chip.as_str(), Style::default().fg(theme.bg_base).bg(source_color(&session.source, theme)).add_modifier(Modifier::BOLD)), cw);
@@ -4095,9 +4140,11 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         format!("{} · {} matching", filters.join(" · "), state.hidden.iter().filter(|h| !**h).count())
     };
     buf.set_span(area.x, area.y + 4, &Span::styled(truncate_str(&line, area.width as usize).as_str(), Style::default().fg(theme.fuzzy_accent)), area.width);
+        return;
+    }
 
     let status_rows = u16::from(state.status.is_some());
-    let list = Rect { y: area.y + 5, height: area.height.saturating_sub(5 + status_rows), ..area };
+    let list = Rect { y: area.y + 1, height: area.height.saturating_sub(1 + status_rows), ..area };
     // Outline rows are built for this text width. A resize, or an opener body that changed its prompt,
     // rebuilds them here, before anything is measured.
     let text_w = (list.width as usize).saturating_sub(TEXT_COL);
@@ -4478,15 +4525,21 @@ fn continuation(header: &str, full: &str) -> String {
 }
 
 fn render_inspector(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, theme: &Theme) {
+    render_trajectory(buf, area, state, theme);
+    let chrome = if state.session.is_some() { FULL_HEADER_ROWS } else { 0 };
+    let pane = Rect { y: area.y + chrome, height: area.height.saturating_sub(chrome), ..area };
+    if pane.height == 0 {
+        return;
+    }
     let dim = Style::default().fg(theme.gray);
     if let Some(e) = state.selected_event().and_then(|i| state.events.get(i)) {
         let head = format!("{} · line {} · {} · {}", e.event_type, e.line, fmt_time(e.timestamp, true), fmt_duration(e.duration_ms));
-        buf.set_span(area.x, area.y, &Span::styled(truncate_str(&head, area.width as usize).as_str(), Style::default().fg(theme.text_primary).add_modifier(Modifier::BOLD)), area.width);
+        buf.set_span(pane.x, pane.y, &Span::styled(truncate_str(&head, pane.width as usize).as_str(), Style::default().fg(theme.text_primary).add_modifier(Modifier::BOLD)), pane.width);
     }
     let Some(raw) = &state.raw else { return };
     let lines: Vec<&str> = raw.lines().collect();
     let status_rows = u16::from(state.status.is_some());
-    let body = Rect { y: area.y + 2, height: area.height.saturating_sub(2 + status_rows), ..area };
+    let body = Rect { y: pane.y + 2, height: pane.height.saturating_sub(2 + status_rows), ..pane };
     state.raw_scroll = state.raw_scroll.min(lines.len().saturating_sub(body.height as usize));
     for (i, line) in lines.iter().skip(state.raw_scroll).take(body.height as usize).enumerate() {
         let style = if line.trim_start().starts_with('"') { Style::default().fg(theme.text_primary) } else { dim };
@@ -4889,6 +4942,7 @@ mod tests {
         let theme = Theme::current();
         match state.mode {
             Mode::Trajectory => render_trajectory(&mut buf, area, state, &theme),
+            Mode::Inspector => render_inspector(&mut buf, area, state, &theme),
             _ => render_ledger(&mut buf, area, state, &theme),
         }
         (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
@@ -5216,9 +5270,26 @@ mod tests {
         (1..=n).map(|i| ev(i as i64, "note", "system", "synthetic")).collect()
     }
 
-    /// The trajectory meta line (status, age, counts), wide enough that a notice is not cut off.
+    /// The trajectory header (source, title, counts), wide enough that a notice is not cut off.
     fn meta_line(state: &mut TracesModalState) -> String {
-        rows_at(state, 160, 12).get(1).cloned().unwrap_or_default()
+        rows_at(state, 160, 12).first().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn trajectory_event_row_is_within_the_first_three_rows() {
+        let mut state = trajectory(vec![ev(1, "message", "user", "first event text")]);
+        let session = state.session.as_mut().unwrap();
+        session.event_count = 4;
+        session.tool_count = 2;
+        session.context_tokens = Some(50);
+        session.context_window = Some(200);
+        session.title = "narrow terminal title that has to clip before the counts".into();
+        let rows = rows_at(&mut state, 80, 24);
+        let at = rows.iter().position(|l| l.contains("#1")).expect("event row 1");
+        assert!(at < 3, "event row 1 within the first 3 content rows, at {at}:\n{}", rows.join("\n"));
+        assert!(rows[0].contains("4 events") && rows[0].contains("2 tools") && rows[0].contains("ctx 25%"), "{}", rows[0]);
+        state.mode = Mode::Inspector;
+        assert!(rows_at(&mut state, 80, 24).iter().any(|l| l.contains("ACTIVITY")), "inspector keeps the multi-row header");
     }
 
     #[test]
@@ -6120,13 +6191,13 @@ mod tests {
         std::iter::repeat("alpha").take(42).collect::<Vec<_>>().join(" ")
     }
 
-    /// List rows of a trajectory draw. The status line anchors the bottom; the five chrome rows sit above.
+    /// List rows of a trajectory draw. The status line anchors the bottom; the one header row sits above.
     fn list_lines(rows: &[String]) -> Vec<String> {
         assert!(
             rows.last().is_some_and(|l| l.contains("trace index")),
             "status row anchors the list: {rows:#?}"
         );
-        rows.get(5..rows.len() - 1).unwrap_or_default().to_vec()
+        rows.get(1..rows.len() - 1).unwrap_or_default().to_vec()
     }
 
     #[test]
@@ -6205,10 +6276,10 @@ mod tests {
 
     #[test]
     fn trajectory_snapshot_narrow_list_has_no_spacers() {
-        // Height 13: five chrome rows plus the status line leave a list of 7, under the cutoff of 8.
+        // Height 9: one header row plus the status line leave a list of 7, under the cutoff of 8.
         let long = three_line_prompt();
         let mut state = user_turns(&["red", long.as_str(), "blue"]);
-        let list = list_lines(&rows_at(&mut state, 100, 13));
+        let list = list_lines(&rows_at(&mut state, 100, 9));
         let mid = list.iter().position(|r| r.contains("#2")).expect("wrapped turn");
         let next = list.iter().position(|r| r.contains("#3")).expect("following turn");
         assert_eq!(mid, 1, "no spacer above the wrapped turn: {list:#?}");
