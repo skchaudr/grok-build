@@ -2,16 +2,16 @@
 
 Read-only review, 2026-10-26, Claude Fable 5.1. Sources: trace-deck `.pi/` at `99629c1` on the Air; pi-subagents 0.82.1 (same version on Air and Mini, `package.json`); Pi 1.4.0 on both; `~/.pi/agent/settings.json` on both; grok-build on the Mini at `cf91b26f`.
 
-## 1. Verdict: AMEND
+## 1. Verdict: AMEND. Rebuild on pi-workflows; do not iterate on this lane.
 
-The workflow is mechanically sound for a tiny trace-deck change (Pi's `edit` does not require a prior read: `pi-coding-agent/dist/core/tools/edit.js:104-108` reads the file itself). It cannot run a SPEC-usable slice as it stands: the gate JSON overflows the engine's cap, the brief overflows `args`, the gate times out on cargo, and it is not installed in grok-build.
+The engine Sab chose is @osolmaz/pi-workflows. The lane at `99629c1`, and its copy at `6ddabdd`, run on pi-subagents. That is the finding (A0). A1-A9 document why the pi-subagents lane would also fail on SPEC-usable; they are evidence against continuing on it, not a to-do list.
 
 ## 2. Amendments, ranked
 
-**A0. Wrong engine. Everything below is conditional on pi-subagents being the chosen engine, and it was not.**
+**A0. Wrong engine. The chosen engine is pi-workflows; the lane is pi-subagents code.**
 - Evidence: Sab's direction for today was @osolmaz/pi-workflows (HARNESS-FACTS "Pi workflow packages", 2026-10-26). The lane calls `runs.run` (`lane.js:3`, `brief.js:3`) and is launched via the `subagent` tool (`lane.md:5`); on the Air that API exists only in pi-subagents (13 files use `runs.run(`; pi-workflows and pi-extensible-workflows use it in 0 files). pi-workflows is `defineWorkflow` in `.pi/workflows/<name>.workflow.ts`; it does not depend on pi-subagents. trace-deck `PLAN.md` names neither package. The switch was never stated. `6ddabdd` (2026-10-26 21:15, Sonnet 5.5) copied the lane into eight `opus-proposal-*` files that apply A1-A9 and still run on pi-subagents.
 - Consequence: A1-A9 fix a lane on an engine Sab did not pick. Applying them does not make the lane acceptable; it makes the switch look reviewed. This review's first version missed it, which is the failure the "workflow review" stage exists to catch.
-- Change: decide the engine first. If pi-workflows: neither `99629c1` nor `6ddabdd` is the starting point; the six stages get rebuilt as a `.workflow.ts`, and A1-A9 do not transfer (the 12,000-char gate cap, 16 KiB args, 120 s gate timeout and `subagent` semantics are pi-subagents facts). If pi-subagents is now the explicit choice, A1-A9 stand.
+- Change: stop work on `99629c1` and `6ddabdd`. Build the six stages as a pi-workflows `.pi/workflows/<name>.workflow.ts` (`defineWorkflow` + `agent({prompt, expectedOutput})`, HARNESS-FACTS:57). A1-A9 do not transfer: the 12,000-char gate cap, 16 KiB args, 120 s gate timeout and `subagent` semantics are pi-subagents facts. The pi-workflows build gets its own workflow review against its own limits before it touches SPEC-usable.
 
 **A1. Gate JSON exceeds the 12,000-character typed-gate cap.**
 - Evidence: `gate.sh:8` prints `output.slice(-6000)` plus `diff.slice(0, 60000)` as one JSON line. `src/runs/shared/acceptance.js:1221` `TYPED_VERIFY_OUTPUT_MAX_BYTES = 12_000`; `:1138` truncates stdout with a `...[truncated]` marker; `:1239` turns a truncated document into `structuredOutputError`, run `failed`. `lane.js:4-12` then sees no `structuredOutput`, runs the fix round, fails again, and returns `stage: "fix"` with `run.output` (worker prose) as the "gate" text.
@@ -60,7 +60,7 @@ The workflow is mechanically sound for a tiny trace-deck change (Pi's `edit` doe
 
 ## 3. First library entry
 
-Files (committed per repo under `.pi/`): `workflows/slice.js` (scout → scout review → implement → gate → one fix → build review; returns `{ ok, stage, verdict, reason }`), `prompts/slice.md` (parent: read nothing, one `subagent` call, commit on `ok`), `agents/{scout,worker,reviewer}.md`, `gate.sh` (runs `$*`, prints `{ ok, output }`).
+Stage order, verdict lines, parameters and fixed points below carry over to the pi-workflows build; the file names and APIs do not (they are pi-subagents). Files (committed per repo under `.pi/`): `workflows/slice.js` (scout → scout review → implement → gate → one fix → build review; returns `{ ok, stage, verdict, reason }`), `prompts/slice.md` (parent: read nothing, one `subagent` call, commit on `ok`), `agents/{scout,worker,reviewer}.md`, `gate.sh` (runs `$*`, prints `{ ok, output }`).
 
 Varies per repo or role: `args.verify` (gate command, from the slice's Verify line), gate `timeoutMs`, `model:` per agent file, the excluded paths in `gate.sh` (`:!.pi`).
 
