@@ -32,6 +32,8 @@ const PAGE: usize = 500;
 const EVENT_PAGE: usize = 5000;
 /// Children shown under a parent before `+N more`.
 const MAX_KIDS: usize = 6;
+/// A tool run with at most this many calls starts expanded. Longer runs stay collapsed.
+const RUN_OPEN_MAX_CALLS: usize = 5;
 /// Most wrapped lines a message body shows before its `… Enter for inspector` tail.
 const BODY_LINES: usize = 200;
 /// Columns before a trajectory row's text: `#line` and the role chip, each with a space.
@@ -1316,8 +1318,9 @@ impl TracesModalState {
             let live: HashSet<OutlineKey> = self.outline.nodes.iter().map(|n| n.key.clone()).collect();
             self.oseen.retain(|k| live.contains(k));
         }
-        // Defaults on first sight: turns open, runs and event rows closed. Under a filter, turns and runs open
-        // on first sight and again when the filter itself changes, so a manual collapse survives live polls.
+        // Defaults on first sight: turns open, short runs open, long runs and event rows closed. Under a
+        // filter, turns and runs open on first sight and again when the filter itself changes, so a manual
+        // collapse survives live polls.
         let sig = self.filter_sig();
         let refilter = sig != self.filter_seen;
         self.filter_seen = sig;
@@ -1329,8 +1332,13 @@ impl TracesModalState {
             }
             let turn = matches!(key, OutlineKey::Turn(_));
             let run = matches!(key, OutlineKey::Run(_));
+            let small_run = run
+                && matches!(
+                    self.outline_items.get(i),
+                    Some(OutlineItem::Run { count, .. }) if *count <= RUN_OPEN_MAX_CALLS
+                );
             let fresh = self.oseen.insert(key);
-            if fresh && !turn && !(filtering && run) {
+            if fresh && !turn && !(filtering && run) && !small_run {
                 self.ofolds.collapse(&self.outline, i);
             }
             if filtering && (turn || run) && (fresh || refilter) {
@@ -5250,13 +5258,27 @@ mod tests {
         ]
     }
 
+    /// A user prompt, `n` Bash calls with their results, and a reply. Call `i` is line `2 + 2i`.
+    fn n_calls(n: usize) -> Vec<EventRow> {
+        let mut rows = vec![ev(1, "message", "user", "fix it")];
+        let mut line = 2;
+        for _ in 0..n {
+            rows.push(ev(line, "tool", "tool", "ls"));
+            line += 1;
+            rows.push(ev(line, "tool", "tool_result", "a"));
+            line += 1;
+        }
+        rows.push(ev(line, "message", "assistant", "done"));
+        rows
+    }
+
     #[test]
     fn turn_collapses_to_a_summary_and_back() {
         let mut state = trajectory(three_calls());
         assert_eq!(
             shown_rows(&state),
-            ["Turn(1)", "Run(2)", "Ev(8)"],
-            "turn open, run closed"
+            ["Turn(1)", "Run(2)", "Ev(2)", "Ev(4)", "Ev(6)", "Ev(8)"],
+            "turn open, short run open"
         );
         assert!(draw(&mut state, 140, 20).contains("3 tool calls"));
 
@@ -5266,7 +5288,51 @@ mod tests {
         assert!(draw(&mut state, 140, 20).contains("3 tools · 1 msg"), "{}", draw(&mut state, 140, 20));
 
         press(&mut state, KeyCode::Char('l'));
-        assert_eq!(shown_rows(&state).len(), 3);
+        assert_eq!(shown_rows(&state).len(), 6);
+    }
+
+    #[test]
+    fn small_runs_start_open_long_runs_stay_closed() {
+        let mut state = trajectory(three_calls());
+        assert_eq!(
+            shown_rows(&state),
+            ["Turn(1)", "Run(2)", "Ev(2)", "Ev(4)", "Ev(6)", "Ev(8)"],
+            "a 3-call run shows its calls on first render"
+        );
+        assert!(draw(&mut state, 140, 24).contains("Bash  ls"), "{}", draw(&mut state, 140, 24));
+
+        let mut long = trajectory(n_calls(12));
+        assert_eq!(
+            shown_rows(&long),
+            ["Turn(1)", "Run(2)", "Ev(26)"],
+            "a 12-call run stays collapsed"
+        );
+        let screen = draw(&mut long, 140, 24);
+        assert!(screen.contains("12 tool calls"), "{screen}");
+        assert!(!screen.contains("Bash"), "{screen}");
+
+        state.goto(1);
+        press(&mut state, KeyCode::Char('h'));
+        assert!(!shown_rows(&state).contains(&"Ev(2)".to_string()), "h collapses the short run");
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Snapshot {
+            generation: state.generation,
+            ledger: Ok((state.sessions.clone(), state.children.clone())),
+            trajectory: Some(Loaded {
+                session_id: "x".into(),
+                rows: three_calls(),
+                session: None,
+                children: vec![],
+            }),
+        })
+        .unwrap();
+        state.inflight = Some(rx);
+        assert!(state.poll_live_at(1), "the queued snapshot is a requery");
+        assert!(
+            !shown_rows(&state).contains(&"Ev(2)".to_string()),
+            "a poll_live_at requery keeps the manual collapse"
+        );
     }
 
     #[test]
@@ -5342,14 +5408,13 @@ mod tests {
 
     #[test]
     fn run_is_one_row_until_expanded() {
-        let mut state = trajectory(three_calls());
+        let mut state = trajectory(n_calls(12));
+        assert_eq!(shown_rows(&state), ["Turn(1)", "Run(2)", "Ev(26)"], "a long run starts closed");
         state.goto(1);
         press(&mut state, KeyCode::Right);
-        assert_eq!(
-            shown_rows(&state),
-            ["Turn(1)", "Run(2)", "Ev(2)", "Ev(4)", "Ev(6)", "Ev(8)"]
-        );
-        assert!(draw(&mut state, 140, 20).contains("Bash  ls"));
+        assert!(shown_rows(&state).contains(&"Ev(2)".to_string()));
+        assert!(shown_rows(&state).contains(&"Ev(24)".to_string()));
+        assert!(draw(&mut state, 140, 40).contains("Bash  ls"));
     }
 
     #[test]
@@ -5394,7 +5459,7 @@ mod tests {
 
     #[test]
     fn filters_open_the_runs_that_hold_matches() {
-        let mut state = trajectory(three_calls());
+        let mut state = trajectory(n_calls(12));
         assert!(!shown_rows(&state).contains(&"Ev(4)".to_string()));
         state.event_query = "pwd".into();
         state.rebuild_outline();
