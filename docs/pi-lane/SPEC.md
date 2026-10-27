@@ -63,7 +63,7 @@ Child sessions land under the parent's session dir only when the origin Pi has a
 ## 8. Open questions
 
 1. Gate and diff wall time: run 1 measured about 6.5 min for T0's verify on the warm shared target (runner start to checkpoint, includes `diff`); the 1,800,000 ms gate and agent-node timeouts remain placeholders, and no run has reached `build_review`, `complete` or `commit` yet.
-2. After a terminal failure the origin Pi's model gets the turn back and acts (pi-workflows terminal recovery, `PW/skills/pi-workflows/SKILL.md`): in run 2 it edited `step.workflow.ts` itself, outside any node. Constrain it, or accept it?
+2. After a terminal failure the origin Pi's model gets the turn back and acts (pi-workflows terminal recovery). In run 2 it correctly fixed a `build_route` bug in `step.workflow.ts`. Accepted: it may repair the lane. Guard: the gate diff and the commit exclude `.pi/`, so a lane repair never lands inside a step's commit.
 3. Pi rows carry no token counts (`input_tokens`/`output_tokens` null) and the dispatch tree does not link pi-subagents children; fixing either is a `xai-grok-traces` change, not drafted.
 4. Per-role model defaults are picks from `enabledModels` filtered to what the proxy serves (`/v1/models`, 2026-10-26); Sab's call.
 

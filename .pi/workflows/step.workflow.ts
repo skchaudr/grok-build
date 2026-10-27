@@ -227,7 +227,7 @@ export default defineWorkflow<LaneInput>({
         command: "sh",
         args: [
           "-c",
-          'git add -N . && git diff > "$1" && printf \'{"chars":%s}\\n\' "$(wc -c < "$1" | tr -d " ")"',
+          'git add -N . && git diff -- . ":!.pi" > "$1" && printf \'{"chars":%s}\\n\' "$(wc -c < "$1" | tr -d " ")"',
           "lane-diff",
           prep(ctx).diffPatch,
         ],
@@ -291,7 +291,7 @@ export default defineWorkflow<LaneInput>({
           command: "sh",
           args: [
             "-c",
-            'git add -A && git commit -q "$@" && printf \'{"commit":"%s"}\\n\' "$(git rev-parse HEAD)"',
+            'git add -A -- . ":!.pi" && git commit -q "$@" && printf \'{"commit":"%s"}\\n\' "$(git rev-parse HEAD)"',
             "lane-commit",
             "-m",
             `lane: ${p.title}`.slice(0, 72),
