@@ -268,7 +268,8 @@ cmd_start() {
   local AUTOSTASH_SHA="" stash_rc=0
   AUTOSTASH_SHA=$(autostash_if_needed) || stash_rc=$?
   if [[ $stash_rc -eq 2 ]]; then
-    die "refusing to stash a conflicted/in-progress merge"
+    # autostash_if_needed already printed the refusal on stderr.
+    exit 1
   fi
   if [[ $stash_rc -ne 0 ]]; then
     exit "$stash_rc"
