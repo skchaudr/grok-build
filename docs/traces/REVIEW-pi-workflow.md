@@ -8,6 +8,11 @@ The workflow is mechanically sound for a tiny trace-deck change (Pi's `edit` doe
 
 ## 2. Amendments, ranked
 
+**A0. Wrong engine. Everything below is conditional on pi-subagents being the chosen engine, and it was not.**
+- Evidence: Sab's direction for today was @osolmaz/pi-workflows (HARNESS-FACTS "Pi workflow packages", 2026-10-26). The lane calls `runs.run` (`lane.js:3`, `brief.js:3`) and is launched via the `subagent` tool (`lane.md:5`); on the Air that API exists only in pi-subagents (13 files use `runs.run(`; pi-workflows and pi-extensible-workflows use it in 0 files). pi-workflows is `defineWorkflow` in `.pi/workflows/<name>.workflow.ts`; it does not depend on pi-subagents. trace-deck `PLAN.md` names neither package. The switch was never stated. `6ddabdd` (2026-10-26 21:15, Sonnet 5.5) copied the lane into eight `opus-proposal-*` files that apply A1-A9 and still run on pi-subagents.
+- Consequence: A1-A9 fix a lane on an engine Sab did not pick. Applying them does not make the lane acceptable; it makes the switch look reviewed. This review's first version missed it, which is the failure the "workflow review" stage exists to catch.
+- Change: decide the engine first. If pi-workflows: neither `99629c1` nor `6ddabdd` is the starting point; the six stages get rebuilt as a `.workflow.ts`, and A1-A9 do not transfer (the 12,000-char gate cap, 16 KiB args, 120 s gate timeout and `subagent` semantics are pi-subagents facts). If pi-subagents is now the explicit choice, A1-A9 stand.
+
 **A1. Gate JSON exceeds the 12,000-character typed-gate cap.**
 - Evidence: `gate.sh:8` prints `output.slice(-6000)` plus `diff.slice(0, 60000)` as one JSON line. `src/runs/shared/acceptance.js:1221` `TYPED_VERIFY_OUTPUT_MAX_BYTES = 12_000`; `:1138` truncates stdout with a `...[truncated]` marker; `:1239` turns a truncated document into `structuredOutputError`, run `failed`. `lane.js:4-12` then sees no `structuredOutput`, runs the fix round, fails again, and returns `stage: "fix"` with `run.output` (worker prose) as the "gate" text.
 - Consequence: any slice whose diff plus test tail exceed about 11k characters after JSON escaping fails with green tests and a misleading message. A cargo test tail alone is several thousand characters.
