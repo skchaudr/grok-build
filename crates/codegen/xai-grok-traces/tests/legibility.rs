@@ -394,6 +394,57 @@ fn dispatch_parents_for_codex_omp_dsh_and_grok() {
     assert_eq!(rows(&idx, SessionFilter { roots_only: true, ..Default::default() }).len(), 4 + 1, "four parents plus the fork");
 }
 
+/// A v2 spawn whose child header has no `parentSession`. The parent log's `subagent/catalog`
+/// event is the only link, and it has to resolve whichever file is indexed first.
+#[test]
+fn dsh_catalog_spawn_resolves_parent_either_index_order() {
+    let parent = concat!(
+        r#"{"type":"session","version":2,"id":"dsh-parent","cwd":"/w","createdAt":1,"isSeeded":false,"delegationDepth":0}"#,
+        "\n",
+        r#"{"type":"user/message","time":1759276800000,"data":{"role":"user","content":"DSH PARENT"}}"#,
+        "\n",
+        r#"{"type":"user/message","time":1759276800001,"data":{"role":"user","content":"b"}}"#,
+        "\n",
+        r#"{"type":"user/message","time":1759276800002,"data":{"role":"user","content":"c"}}"#,
+        "\n",
+        r#"{"type":"subagent/catalog","seq":9,"time":1759276800003,"data":{"version":0,"childId":"dsh-child","childCreatedAt":2,"mode":"one-shot","label":"Probe child"}}"#,
+        "\n",
+    );
+    // No parentSession: the catalog event is the whole relationship.
+    let child = concat!(
+        r#"{"type":"session","version":2,"id":"dsh-child","cwd":"/w","createdAt":2,"isSeeded":false,"delegationDepth":1}"#,
+        "\n",
+        r#"{"type":"user/message","time":1759276800010,"data":{"role":"user","content":"DSH CHILD"}}"#,
+        "\n",
+        r#"{"type":"user/message","time":1759276800011,"data":{"role":"user","content":"b"}}"#,
+        "\n",
+        r#"{"type":"user/message","time":1759276800012,"data":{"role":"user","content":"c"}}"#,
+        "\n",
+    );
+    for child_first in [true, false] {
+        let e = env();
+        let parent_path = e.home.join(".dsh/sessions/w/dp/session.v2.jsonl.zstd");
+        let child_path = e.home.join(".dsh/sessions/w/dc/session.v2.jsonl.zstd");
+        zstd_write(&parent_path, parent);
+        zstd_write(&child_path, child);
+        let root = e.roots().into_iter().find(|r| r.source == "dsh").unwrap();
+        let mut idx = TraceIndex::open(&e.db).unwrap();
+        if child_first {
+            idx.index_file(&root, &child_path).unwrap();
+            idx.index_file(&root, &parent_path).unwrap();
+        } else {
+            idx.index_file(&root, &parent_path).unwrap();
+            idx.index_file(&root, &child_path).unwrap();
+        }
+        let parent_row = by_title(&idx, "DSH PARENT");
+        assert_eq!(parent_row.children, 1, "child_first={child_first}");
+        let kids = idx.children(&parent_row.id).unwrap();
+        assert_eq!(kids.len(), 1, "child_first={child_first}");
+        assert_eq!(kids[0].parent_id.as_deref(), Some(parent_row.id.as_str()), "child_first={child_first}");
+        assert_eq!((kids[0].label.as_deref(), kids[0].agent_type.as_deref()), (Some("Probe child"), Some("one-shot")));
+    }
+}
+
 // ---- first-scan growth and the rebuild lock ----
 
 fn pi_files(e: &Env, n: usize, lines: usize) {

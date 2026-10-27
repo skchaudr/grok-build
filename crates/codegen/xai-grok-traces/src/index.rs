@@ -13,7 +13,10 @@ use sha2::{Digest, Sha256};
 use xai_sqlite_journal::JournalMode;
 
 use crate::lines;
-use crate::links::{HEADER_LINES, Links, file_sig, grok_aux_sig, grok_context, grok_links, grok_summary, header_links, path_links, write_links};
+use crate::links::{
+    HEADER_LINES, Links, Spawn, adopt_spawn, dsh_descriptor, dsh_spawn, file_sig, grok_aux_sig, grok_context, grok_links, grok_summary,
+    header_links, path_links, remember_spawns, write_links,
+};
 use crate::normalize::{Kind, NormalizedEvent, Role, clip, normalize};
 use crate::roots::{Format, MAX_FILES, Root, discover, resolve};
 
@@ -126,6 +129,9 @@ CREATE INDEX IF NOT EXISTS trace_sessions_updated ON trace_sessions(updated_at D
 CREATE INDEX IF NOT EXISTS trace_sessions_source ON trace_sessions(source_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS trace_sessions_native ON trace_sessions(source_id, native_id);
 CREATE INDEX IF NOT EXISTS trace_sessions_parent ON trace_sessions(source_id, parent_native);
+-- DSH `subagent/catalog` names the child from the parent file. Kept so a child indexed later still resolves.
+CREATE TABLE IF NOT EXISTS trace_spawn (source_id TEXT NOT NULL, child_native TEXT NOT NULL, parent_native TEXT NOT NULL,
+  label TEXT, agent_type TEXT, PRIMARY KEY (source_id, child_native));
 ";
 
 #[derive(Debug)]
@@ -1151,6 +1157,7 @@ impl TraceIndex {
         let mut names = Names::default();
         let mut parse_error: Option<String> = None;
         let mut capped = false;
+        let mut spawns: Vec<Spawn> = Vec::new();
         let max_events = self.limits.max_events;
         let (end_byte, next_line) = {
             let mut insert = tx.prepare_cached(INSERT_EVENT)?;
@@ -1176,6 +1183,13 @@ impl TraceIndex {
                 };
                 if line.number < HEADER_LINES {
                     header_links(root, &value, &mut links);
+                }
+                // Catalog and descriptor events sit well past the header (a real spawn was at seq 6517).
+                if root.source == "dsh" {
+                    dsh_descriptor(&value, &mut links);
+                    if let Some(spawn) = dsh_spawn(&value) {
+                        spawns.push(spawn);
+                    }
                 }
                 let e = normalize(&value);
                 agg.add(&e);
@@ -1210,6 +1224,12 @@ impl TraceIndex {
             }
         }
         write_links(&tx, &sid, &links)?;
+        if root.source == "dsh" {
+            if let Some(native) = links.native_id.as_deref() {
+                remember_spawns(&tx, &root.source, native, &spawns)?;
+                adopt_spawn(&tx, &root.source, &sid, native)?;
+            }
+        }
         Self::write_aggregate(&tx, &sid, &agg, mtime)?;
         tx.execute(
             "INSERT INTO trace_files (path, root_id, source_id, format, size_bytes, mtime_ms, indexed_bytes, indexed_lines,

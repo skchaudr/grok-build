@@ -315,7 +315,11 @@ fn file_cap_reports_limit_and_keeps_rows() {
     let report = idx.scan_with_limit(&e.roots, 1).unwrap();
     let pi = report.roots.iter().find(|r| r.id == "pi-sessions").unwrap();
     assert!(pi.limited);
-    assert_eq!(idx.list_sessions(&SessionFilter { source: Some("pi".into()), ..Default::default() }).unwrap().len(), 1);
+    // Discovery stops at the cap in readdir order, so the new file may or may not be the one slot.
+    // The row from the first scan has to survive either way.
+    let rows = idx.list_sessions(&SessionFilter { source: Some("pi".into()), ..Default::default() }).unwrap();
+    assert!(rows.iter().any(|s| s.file_path.ends_with("p.jsonl")), "cached row kept: {rows:?}");
+    assert!(rows.len() <= 2, "{rows:?}");
 }
 
 #[test]
@@ -748,12 +752,17 @@ fn receipt_pid_refreshes_the_session_row() {
     ingest(&mut idx, &e.roots, extract("codex", payload(&format!(r#","harness_pid":{me}"#)).as_bytes())).unwrap();
     let c = rusqlite::Connection::open(&e.db).unwrap();
     let pid = || c.query_row("SELECT harness_pid FROM trace_sessions WHERE source_id = 'codex'", [], |r| r.get::<_, Option<i64>>(0)).unwrap();
-    assert_eq!(pid(), Some(i64::from(me)));
-    // A receipt without a pid whose walk finds nothing never wipes it.
-    let mut r = extract("codex", payload("").as_bytes());
-    r.harness_pid = None;
-    idx.record_receipt(&xai_grok_traces::Receipt { session_id: Some(xai_grok_traces::session_id("codex", &path.to_string_lossy())), ..r }).unwrap();
-    assert_eq!(pid(), Some(i64::from(me)));
+    // The pid is stored only with a start time, and that read is macOS (`proc_info` is empty elsewhere).
+    if cfg!(target_os = "macos") {
+        assert_eq!(pid(), Some(i64::from(me)));
+        // A receipt without a pid whose walk finds nothing never wipes it.
+        let mut r = extract("codex", payload("").as_bytes());
+        r.harness_pid = None;
+        idx.record_receipt(&xai_grok_traces::Receipt { session_id: Some(xai_grok_traces::session_id("codex", &path.to_string_lossy())), ..r }).unwrap();
+        assert_eq!(pid(), Some(i64::from(me)));
+    } else {
+        assert_eq!(pid(), None);
+    }
 }
 
 #[test]
