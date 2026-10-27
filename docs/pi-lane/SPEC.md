@@ -17,7 +17,7 @@ The DAG runs in the origin Pi. Every `agent` node is a prompt into that one conv
 - **gate**. `shell` node (`idempotentEffect`) runs `.pi/gate.sh "<verify>"` (section 4), then `diff` (`shell`) runs `git add -N . && git diff > diff.patch` and prints `{chars}`, then `gate_route` (`compute`): gate ok and diff non-empty -> review; otherwise one `fix`, then `build_stop` (`checkpoint`). A gate node that fails or times out goes to `build_stop`.
 - **build review**. `agent` node, child `lane-build-reviewer`. Tools `read, grep, find, ls` (reads `diff.patch`, so it needs no `bash`/`watchdog_diff`); fresh; default `cliproxy/gpt-6-sol` (differs from the builder). Receives step, brief, diff, gate paths. Emits `review.md` ending `Merge verdict: OK|OK with notes|BLOCK`.
 - **complete**. `compute`: `ok` only when gate ok, `diff.chars > 0` and the verdict parsed from `review.md` is `OK` or `OK with notes` (missing = not ok). ok -> `commit`; not ok -> `fix` once (same builder child, `LANE fix`, given `review.md` and `gate.json`) -> gate again -> review again; still not ok -> `build_stop`.
-- **commit**. `shell` node (`manualEffect`): `git add -A && git commit`, subject `lane: <step title>`, trailer `Co-authored-by: <tool> <model>` (SPEC-usable.md:11): `pi <lane-worker model>` by default, `claude-code|codex|cursor-agent default` for the external builders. The model comes from the project settings override, else the frontmatter `model:`.
+- **commit**. `shell` node (`manualEffect`): `git add -A && git commit`, subject `lane: <step title>`, trailer `Co-authored-by: <tool> <model>` (SPEC-usable.md:11): `pi <lane-worker model>` by default, `claude-code|codex|cursor-agent default` for the external builders. The model comes from the project settings override, else the user one, else the frontmatter `model:`.
 
 ## 3. Payloads
 
@@ -49,7 +49,7 @@ Cuts are by dependency (`body_of` calls `pretty` and `body_text`; `compose_body`
 ## 6. Parameters
 
 - Verify command, gate timeout, builder adapter: per step, header lines in the step file (`Verify:`, `Timeout-ms:`, `Builder:`).
-- Model per role: per repo, the `model:` line of each agent file. Per-run and settings overrides exist (`PS/docs/models.md:14`); a project `subagents.agentOverrides` entry for `lane-worker` is read for the trailer, a user-level one is not. Origin Pi model (the relay for `agent` nodes) is whatever the session runs.
+- Model per role: per repo, the `model:` line of each agent file. Per-run and settings overrides exist (`PS/docs/models.md:14`); a `subagents.agentOverrides` entry for `lane-worker` (project, then user) is read for the trailer. Origin Pi model (the relay for `agent` nodes) is whatever the session runs.
 - Concurrency: serial for now, a temporary exception to AGENTS.md:7. A Pi session holds one active interactive run (`PW/docs/WORKFLOWS.md:15`) and `prepare` requires a clean tree. `worktree: true` exists on pi-subagents children (`PS/docs/tool-reference.md:70`, `PS/docs/workflows.md:462-470`); concurrent steps need it plus a patch-apply step that applies the child's patch to the main tree, which nothing does today (REVIEW A9).
 
 ## 7. Measurement
@@ -66,9 +66,8 @@ Child sessions land under the parent's session dir only when the origin Pi has a
 2. Does the pi-workflows server (a global process started on demand) have `cargo` and `node` on its PATH? Shell nodes inherit its env (`PW/src/workflows/shell.ts:75`); unchecked on the Mini.
 3. Does a child's first user message begin with the task's first line (the `LANE` title), or does pi-subagents prepend text? Unchecked; and the origin must be a persisted session for child rows to be indexed.
 4. Gate timeout (1,800,000) and agent-node timeout (1,800,000) are placeholders; the T0 verify wall time is unmeasured.
-5. Trailer model for `lane-worker` ignores a user-level `~/.pi/agent/settings.json` override.
-6. Closed: the pty test in T0's Accept is `cargo test -p xai-grok-pager-pty-harness --test pty_e2e_config_ui traces_modal_ledger_trajectory_inspector` (`tests/pty_e2e_config_ui.rs:56-57`); T0's last step adds it to its `Verify:` line after the lib tests.
-7. Per-role model defaults are picks from `enabledModels` in `~/.pi/agent/settings.json` (all three ids present, verified 2026-10-26); Sab's call.
-8. A builder reply of `BLOCKED` still runs the gate once before `gate_route` stops (edge `build -> gate` is unconditional); one wasted cargo run per blocked build.
+5. Closed: the pty test in T0's Accept is `cargo test -p xai-grok-pager-pty-harness --test pty_e2e_config_ui traces_modal_ledger_trajectory_inspector` (`tests/pty_e2e_config_ui.rs:56-57`); T0's last step adds it to its `Verify:` line after the lib tests.
+6. Per-role model defaults are picks from `enabledModels` in `~/.pi/agent/settings.json` (all three ids present, verified 2026-10-26); Sab's call.
+7. A builder reply of `BLOCKED` still runs the gate once before `gate_route` stops (edge `build -> gate` is unconditional); one wasted cargo run per blocked build.
 
 Closed in review (Fable 5.1, 2026-10-26): `.pi/opus-proposal-*` deleted (superseded, REVIEW A0); split review added as a hand-run `lane-brief-reviewer` mode; the runner process cwd is the project path (`PW/src/server/workflow-runner-supervisor.ts:61`), so `prepare`'s `process.cwd()` is right; `/workflow step <path>` arrives as `{task}` (`PW/src/extension/index.ts:177`); `acceptanceRole: writer` is a valid value (`PS/docs/agents.md:473`); shell outcomes are `ok|timed_out|failed|cancelled` (`PW/src/workflows/types.ts:571`), the gate edge now covers all four.
