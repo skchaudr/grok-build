@@ -29,6 +29,16 @@ const DSH: &str = r#"{"type":"session","version":2,"id":"d","cwd":"/w/dsh","crea
 {"type":"tool/result","seq":3,"time":1759276802000,"data":{"message":"done","step":1,"turn":1}}
 {"type":"turn/end","seq":4,"time":1759276803000,"data":{"turn":1,"reason":"stop"}}
 "#;
+/// v2 assistant usage is `data.usage` (`inputTokens` is uncached; cache read/write complete the prompt).
+/// A failed attempt has no top-level usage; the last stream `chunk` of type `usage` is the sample.
+/// The window is `request/context.data.contextWindow`, not a field of the usage object.
+const DSH_USAGE: &str = r#"{"type":"session","version":2,"id":"d2","cwd":"/w/dsh-usage","createdAt":1759276800000}
+{"type":"user/message","seq":1,"time":1759276800000,"data":{"role":"user","content":"dsh usage task","id":"u1","source":"user"}}
+{"type":"request/context","seq":2,"time":1759276800100,"data":{"provider":"openrouter","model":"deepseek-v4","contextWindow":131072}}
+{"type":"assistant/message","seq":3,"time":1759276801000,"data":{"turn":1,"step":1,"message":{"role":"assistant","content":[{"type":"text","text":"first"}]},"usage":{"inputTokens":1000,"outputTokens":40,"cacheReadTokens":200,"cacheWriteTokens":50,"reasoningTokens":8}}}
+{"type":"assistant/attempt","seq":4,"time":1759276802000,"data":{"turn":1,"step":2,"stream":[{"type":"text-chunks","texts":["x"]},{"type":"chunk","time":1759276802000,"chunk":{"type":"usage","usage":{"inputTokens":4000,"outputTokens":1,"cacheReadTokens":100}}}]}}
+{"type":"assistant/message","seq":5,"time":1759276803000,"data":{"turn":1,"step":2,"message":{"role":"assistant","content":[{"type":"text","text":"later"}]},"usage":{"inputTokens":800,"outputTokens":20,"cacheReadTokens":50,"cacheWriteTokens":0,"reasoningTokens":9,"totalTokens":879}}}
+"#;
 const GROK: &str = r#"{"type":"system","content":"sys"}
 {"type":"user","content":[{"type":"text","text":"<user_info>injected</user_info>"}],"synthetic_reason":"x"}
 {"type":"user","content":[{"type":"text","text":"grok task"}],"prompt_index":0}
@@ -106,6 +116,7 @@ fn each_source_discovers_its_fixture() {
     let d = by_source(&idx, "dsh");
     assert_eq!((d.title.as_str(), d.tool_count, d.status), ("dsh task", 2, d.status));
     assert_eq!(d.cwd.as_deref(), Some("/w/dsh"));
+    assert_eq!((d.context_tokens, d.context_window), (None, None), "a dsh log with no usage has no context");
 
     let g = by_source(&idx, "grok");
     assert_eq!((g.title.as_str(), g.event_count), ("grok task", 5));
@@ -113,6 +124,31 @@ fn each_source_discovers_its_fixture() {
     assert_eq!(g.model.as_deref(), Some("grok-5"));
     // Fresh, non-terminal file → active.
     assert_eq!(g.status, Status::Active);
+}
+
+#[test]
+fn dsh_usage_fills_context_and_leaves_other_sources() {
+    let e = env();
+    zstd_write(&e.home.join(".dsh/sessions/w-dsh/u2/session.v2.jsonl.zstd"), DSH_USAGE);
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.scan(&e.roots).unwrap();
+
+    let dsh = idx.list_sessions(&SessionFilter { source: Some("dsh".into()), ..Default::default() }).unwrap();
+    assert_eq!(dsh.len(), 2);
+    let usage = dsh.iter().find(|r| r.title == "dsh usage task").unwrap();
+    // Latest sample, not the sum and not the larger attempt (4000+100) that preceded it.
+    assert_eq!((usage.context_tokens, usage.context_window), (Some(850), Some(131_072)));
+    assert_eq!((usage.input_tokens, usage.output_tokens), (Some(1000 + 4000 + 800), Some(40 + 1 + 20)));
+    let plain = dsh.iter().find(|r| r.title == "dsh task").unwrap();
+    assert_eq!((plain.context_tokens, plain.context_window), (None, None));
+
+    let c = by_source(&idx, "claude");
+    assert_eq!((c.context_tokens, c.context_window), (Some(100), None));
+    assert_eq!((c.input_tokens, c.output_tokens), (Some(100), Some(20)));
+    for source in ["codex", "pi", "omp", "grok"] {
+        let row = by_source(&idx, source);
+        assert_eq!((row.context_tokens, row.context_window), (None, None), "{source}");
+    }
 }
 
 #[test]
@@ -470,7 +506,7 @@ fn old_schema_is_replaced_not_migrated() {
     assert_eq!(all(&idx).len(), 6);
     let stats = idx.stats().unwrap();
     assert_eq!(stats.schema_version.as_deref(), Some("7"));
-    assert_eq!(stats.parser_version.as_deref(), Some("6"));
+    assert_eq!(stats.parser_version.as_deref(), Some("7"));
     let names: Vec<String> = fs::read_dir(e.db.parent().unwrap()).unwrap().map(|d| d.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert!(names.iter().all(|n| !n.contains(".old.")), "old db removed: {names:?}");
     assert!(!names.iter().any(|n| n.contains(".corrupt.")));
