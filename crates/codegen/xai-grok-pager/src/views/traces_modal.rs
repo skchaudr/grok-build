@@ -355,6 +355,9 @@ struct EventHead {
     suffix_w: usize,
     body_w: usize,
     failed: bool,
+    chip: bool,
+    age: bool,
+    tokens: bool,
 }
 
 /// What `r` resumes: the harness and its own session id.
@@ -1238,14 +1241,13 @@ impl TracesModalState {
         }
     }
 
-    /// The parts of event row `i` at outline depth `depth` in a text cell `text_w` wide: a call's tool title,
-    /// the header text (the first line of its one-line text), and the suffix (child session, folded result).
-    fn event_head(&self, i: usize, depth: usize, text_w: usize) -> EventHead {
+    /// The parts of event row `i` at outline depth `depth` on a trajectory `width` columns wide.
+    fn event_head(&self, i: usize, depth: usize, width: usize) -> EventHead {
         let Some(e) = self.events.get(i) else {
             return EventHead::default();
         };
-        // The ledger's summary column: the text cell less the time column and its gap.
-        let summary_w = text_w.saturating_sub(11);
+        let row_text = one_line(index_text(e));
+        let (chip, age, tokens, summary_w) = event_cols(width, e, &row_text);
         let mut suffix = String::new();
         let mut failed = e.is_error;
         if let Some(c) = self.child_of(i) {
@@ -1267,15 +1269,18 @@ impl TracesModalState {
                 suffix.push_str(&format!(" {}", truncate_str(&one_line(d), 24)));
             }
         }
+        if echoed(&suffix, &row_text) {
+            suffix.clear();
+        }
         let suffix_w = suffix.width().min(summary_w / 2);
         let body_w = summary_w.saturating_sub(if suffix_w > 0 { suffix_w + 1 } else { 0 });
-        let title = if is_call(e) {
+        let title = if is_call(e) && !text_has_title(&e.title, &row_text) {
             format!("{}  ", e.title)
         } else {
             String::new()
         };
         let head = first_line(
-            &one_line(index_text(e)),
+            &row_text,
             body_w.saturating_sub(2 * depth + MARK_W + title.width()),
         );
         EventHead {
@@ -1285,6 +1290,9 @@ impl TracesModalState {
             suffix_w,
             body_w,
             failed,
+            chip,
+            age,
+            tokens,
         }
     }
 
@@ -1468,7 +1476,7 @@ impl TracesModalState {
                 match self.outline_items.get(n) {
                     Some(OutlineItem::Body(i)) => {
                         // The event row above holds the header; its text continues under it.
-                        let head = self.event_head(*i, depth.saturating_sub(1), text_w).head;
+                        let head = self.event_head(*i, depth.saturating_sub(1), text_w + TEXT_COL).head;
                         Some(self.body_lines(*i, &head, text_w.saturating_sub(2 * depth)))
                     }
                     Some(OutlineItem::Prompt(_)) => Some(
@@ -4094,6 +4102,45 @@ fn role_chip(e: &EventRow) -> &'static str {
     }
 }
 
+fn role_glyph(e: &EventRow) -> &'static str {
+    match (e.is_error, e.kind.as_str(), e.role.as_deref()) {
+        (true, _, _) => "✗",
+        (_, _, Some("tool_result")) => "✓",
+        (_, "tool", _) => "▸",
+        (_, _, Some("assistant")) => "◆",
+        (_, _, Some("user")) => "›",
+        (_, "reasoning", _) => "?",
+        (_, "telemetry", _) => "$",
+        (_, "system", _) => "*",
+        _ => "·",
+    }
+}
+
+fn fmt_token_pair(e: &EventRow) -> String {
+    format!("{:>5}/{:<6}", fmt_tokens(e.input_tokens), fmt_tokens(e.output_tokens))
+}
+
+fn echoed(column: &str, row_text: &str) -> bool {
+    let c = column.trim();
+    c.chars().any(|ch| ch != '-' && ch != '/') && row_text.to_ascii_lowercase().contains(&c.to_ascii_lowercase())
+}
+
+fn text_has_title(title: &str, text: &str) -> bool {
+    let title = title.trim();
+    let text = text.trim_start();
+    text.get(..title.len()).is_some_and(|h| !title.is_empty() && h.eq_ignore_ascii_case(title))
+        && text.get(title.len()..).is_some_and(|r| r.chars().next().is_none_or(|c| c.is_whitespace()))
+}
+
+fn event_cols(width: usize, e: &EventRow, row_text: &str) -> (bool, bool, bool, usize) {
+    let chip = width >= 100 && !echoed(role_chip(e), row_text);
+    let age = width >= 120 && !echoed(&fmt_time(e.timestamp, false), row_text);
+    let has_tokens = e.input_tokens.is_some() || e.output_tokens.is_some();
+    let tokens = width >= 120 && has_tokens && !echoed(&fmt_token_pair(e), row_text);
+    let used = 9 + usize::from(chip) * 7 + usize::from(age) * 9 + usize::from(tokens) * 13;
+    (chip, age, tokens, width.saturating_sub(used))
+}
+
 fn chip_color(e: &EventRow, theme: &Theme) -> Color {
     if e.is_error {
         theme.accent_error
@@ -4369,17 +4416,25 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
                 };
                 // Noise (only present when `n` is on) is dimmed.
                 let (text_style, chip_fg) = if e.noise { (base.fg(theme.gray_dim), theme.gray_dim) } else { (base, chip_color(e, theme)) };
-                let eh = state.event_head(*i, depth, text_w);
+                let eh = state.event_head(*i, depth, list.width as usize);
                 let body_style = if is_result(e) && e.is_error { text_style.fg(theme.accent_error) } else { text_style };
                 let mut cells = vec![
                     (format!("{:>6}", format!("#{}", e.line)), 6, base.fg(theme.gray)),
-                    (role_chip(e).to_string(), 6, base.fg(chip_fg).add_modifier(Modifier::BOLD)),
-                    (format!("{indent}{mark}{}{}", eh.title, eh.head), eh.body_w, body_style),
+                    (role_glyph(e).to_string(), 1, base.fg(chip_fg).add_modifier(Modifier::BOLD)),
                 ];
+                if eh.chip {
+                    cells.push((role_chip(e).to_string(), 6, base.fg(chip_fg).add_modifier(Modifier::BOLD)));
+                }
+                cells.push((format!("{indent}{mark}{}{}", eh.title, eh.head), eh.body_w, body_style));
                 if eh.suffix_w > 0 {
                     cells.push((eh.suffix, eh.suffix_w, base.fg(if eh.failed { theme.accent_error } else { theme.accent_success })));
                 }
-                cells.push((fmt_time(e.timestamp, false), 8, base.fg(theme.text_secondary)));
+                if eh.age {
+                    cells.push((fmt_time(e.timestamp, false), 8, base.fg(theme.text_secondary)));
+                }
+                if eh.tokens {
+                    cells.push((fmt_token_pair(e), 12, base.fg(theme.gray_bright)));
+                }
                 put_row(buf, list, y, &cells);
             }
             Some(OutlineItem::Body(_)) => {
@@ -6147,6 +6202,16 @@ mod tests {
         assert!(expanded.contains("Bash  zzprobe"), "{expanded}");
     }
 
+    #[test]
+    fn long_bash_row_at_80_cols_keeps_the_tail_the_fixed_chrome_clipped() {
+        let cmd = "alpha alpha alpha alpha alpha alpha alpha CLIPPED tail";
+        let mut call = ev(2, "tool", "tool", cmd);
+        call.detail = Some(cmd.into());
+        let mut state = trajectory(vec![ev(1, "message", "user", "run it"), call]);
+        let row = draw(&mut state, 80, 16).lines().find(|l| l.contains("#2")).unwrap_or("").to_string();
+        assert!(row.contains("CLIPPED"), "fixed chrome used to clip this tail at 80 cols:\n{row}");
+    }
+
     /// An opener and two assistant rows. The middle one's cached body is `body`.
     fn two_replies(body: &str) -> TracesModalState {
         let mut state = trajectory(vec![
@@ -6333,15 +6398,15 @@ mod tests {
             shown,
             vec![
                 "    #1 USER   ⌄ Check the build  · 1 msg",
-                "    #2 ASSIST   ⌄ https://example.com/docs/ar -",
-                "                  chitecture/index-layout/shard-0042/man",
-                "                  ifest.json lists the shards, and the",
-                "                  reader merges them at startup before",
-                "                  any query runs.",
+                "    #2 ◆   ⌄ https://example.com/docs/architecture/index",
+                "                  -layout/shard-0042/manifest.json",
+                "                  lists the shards, and the reader",
+                "                  merges them at startup before any",
+                "                  query runs.",
             ]
         );
         // Header and body, with the whitespace dropped, spell the source exactly: no word repeats at the seam.
-        let got: String = std::iter::once("https://example.com/docs/ar".to_string())
+        let got: String = std::iter::once("https://example.com/docs/architecture/index".to_string())
             .chain(rows[at + 2..at + 6].iter().map(|r| r.trim().to_string()))
             .collect::<String>()
             .chars()
@@ -6496,7 +6561,7 @@ mod tests {
         press(&mut state, KeyCode::Char('l'));
         let expanded = row_with(&snapshot_rows(&mut state), "#2");
         assert!(collapsed.contains('›') && expanded.contains('⌄'), "{collapsed}\n{expanded}");
-        assert!(collapsed.ends_with('-'), "the time column is on the row: {collapsed}");
+        assert!(!collapsed.contains("ASSIST") && !collapsed.ends_with('-'), "chip text and age stay off at 56 cols: {collapsed}");
         assert_eq!(fold_normalised(&collapsed), fold_normalised(&expanded));
     }
 
