@@ -8,7 +8,7 @@
 //! | claude | path `<session>/subagents/agent-*.jsonl` -> `<session>.jsonl`; label, type and finished from the sibling `agent-*.meta.json` |
 //! | codex | `session_meta` `payload.parent_thread_id`, or `source.subagent.thread_spawn.parent_thread_id` |
 //! | omp | path `<cwd>/<parent stem>/<Name>.jsonl` (task subagents), or the header's `parentSession` path |
-//! | dsh | header `parentSession` (a session id; `seedLength` marks a fork) |
+//! | dsh | header `parentSession` (a session id; `seedLength` or `isSeeded: true` marks a fork). A spawn the child header does not name is the parent's `subagent/catalog` event (`data.childId`, `label`, `mode`) |
 //! | grok | `summary.json` `parent_session_id` when `session_kind` starts with `subagent` |
 //! | bb | `threads.parent_thread_id` |
 //! | pi | no parent field in the files |
@@ -146,7 +146,9 @@ pub(crate) fn header_links(root: &Root, v: &Value, l: &mut Links) {
             l.native_id = s(v.get("id")).or(l.native_id.take());
             l.parent_native = s(v.get("parentSession"));
             if l.parent_native.is_some() {
-                l.agent_type = Some(if v.get("seedLength").is_some() { "fork" } else { "subagent" }.into());
+                // v0/v1 persist the cut as `seedLength`; v2+ persist `isSeeded` and derive the cut from `session/end-seed`.
+                let fork = v.get("seedLength").is_some() || v.get("isSeeded") == Some(&Value::Bool(true));
+                l.agent_type = Some(if fork { "fork" } else { "subagent" }.into());
             }
         }
         ("pi" | "omp", "session") if l.parent_native.is_none() => {
@@ -175,6 +177,71 @@ pub(crate) fn grok_links(chat_history: &Path, summary: &Value, l: &mut Links) {
         l.parent_native = s(summary.get("parent_session_id"));
         l.agent_type = s(summary.get("agent_name")).or(Some(kind));
     }
+}
+
+/// One child named by a parent's `subagent/catalog` event. The child file often repeats this as
+/// `parentSession`; when it does not (or has not been indexed yet), the event is the link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Spawn {
+    pub child: String,
+    pub label: Option<String>,
+    pub agent_type: Option<String>,
+}
+
+/// `subagent/catalog` on the parent log: `{childId, label?, mode?}`.
+pub(crate) fn dsh_spawn(v: &Value) -> Option<Spawn> {
+    if v.get("type").and_then(Value::as_str) != Some("subagent/catalog") {
+        return None;
+    }
+    let data = v.get("data")?;
+    Some(Spawn {
+        child: s(data.get("childId"))?,
+        label: s(data.get("label")).map(|t| label(&t)),
+        agent_type: s(data.get("mode")),
+    })
+}
+
+/// `subagent/descriptor` on the child log. Label only; the header already classified fork vs spawn.
+pub(crate) fn dsh_descriptor(v: &Value, l: &mut Links) {
+    if v.get("type").and_then(Value::as_str) != Some("subagent/descriptor") || l.label.is_some() {
+        return;
+    }
+    let data = v.get("data").unwrap_or(&Value::Null);
+    l.label = s(data.get("label")).map(|t| label(&t));
+}
+
+/// Remember parent→child edges and stamp any child row already indexed. Scan order is free:
+/// a child indexed later picks the edge up in [`adopt_spawn`].
+pub(crate) fn remember_spawns(tx: &Transaction<'_>, source: &str, parent_native: &str, spawns: &[Spawn]) -> rusqlite::Result<()> {
+    for sp in spawns {
+        tx.execute(
+            "INSERT INTO trace_spawn (source_id, child_native, parent_native, label, agent_type)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(source_id, child_native) DO UPDATE SET parent_native = excluded.parent_native,
+               label = COALESCE(excluded.label, trace_spawn.label), agent_type = COALESCE(excluded.agent_type, trace_spawn.agent_type)",
+            params![source, sp.child, parent_native, sp.label, sp.agent_type],
+        )?;
+        tx.execute(
+            "UPDATE trace_sessions SET parent_native = COALESCE(parent_native, ?3),
+             label = COALESCE(label, ?4), agent_type = COALESCE(agent_type, ?5)
+             WHERE source_id = ?1 AND native_id = ?2",
+            params![source, sp.child, parent_native, sp.label, sp.agent_type],
+        )?;
+    }
+    Ok(())
+}
+
+/// If this session was named as a child before its own file was indexed, take that parent.
+pub(crate) fn adopt_spawn(tx: &Transaction<'_>, source: &str, sid: &str, native_id: &str) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE trace_sessions SET
+           parent_native = COALESCE(parent_native, (SELECT parent_native FROM trace_spawn WHERE source_id = ?2 AND child_native = ?3)),
+           label = COALESCE(label, (SELECT label FROM trace_spawn WHERE source_id = ?2 AND child_native = ?3)),
+           agent_type = COALESCE(agent_type, (SELECT agent_type FROM trace_spawn WHERE source_id = ?2 AND child_native = ?3))
+         WHERE id = ?1",
+        params![sid, source, native_id],
+    )?;
+    Ok(())
 }
 
 /// Stores what is known; fields that are `None` keep their stored value.
@@ -253,6 +320,17 @@ mod tests {
         let mut l = Links::default();
         header_links(&r, &json!({"type":"session","id":"c","parentSession":"p","seedLength":25}), &mut l);
         assert_eq!((l.native_id.as_deref(), l.parent_native.as_deref(), l.agent_type.as_deref()), (Some("c"), Some("p"), Some("fork")));
+        let mut v2 = Links::default();
+        header_links(&r, &json!({"type":"session","version":2,"id":"c","parentSession":"p","isSeeded":true,"origin":"subagent","delegationDepth":1}), &mut v2);
+        assert_eq!((v2.parent_native.as_deref(), v2.agent_type.as_deref()), (Some("p"), Some("fork")));
+        let mut spawn = Links::default();
+        header_links(&r, &json!({"type":"session","version":2,"id":"c","parentSession":"p","isSeeded":false,"origin":"subagent","delegationDepth":1}), &mut spawn);
+        assert_eq!((spawn.parent_native.as_deref(), spawn.agent_type.as_deref()), (Some("p"), Some("subagent")));
+        dsh_descriptor(&json!({"type":"subagent/descriptor","data":{"version":2,"mode":"one-shot","provider":"spawn","label":"Probe child\nmore"}}), &mut v2);
+        assert_eq!((v2.label.as_deref(), v2.agent_type.as_deref()), (Some("Probe child"), Some("fork")));
+        let sp = dsh_spawn(&json!({"type":"subagent/catalog","seq":9,"data":{"version":0,"childId":"kid","childCreatedAt":2,"mode":"one-shot","label":"Probe"}})).unwrap();
+        assert_eq!((sp.child.as_str(), sp.label.as_deref(), sp.agent_type.as_deref()), ("kid", Some("Probe"), Some("one-shot")));
+        assert!(dsh_spawn(&json!({"type":"user/message","data":{"content":"x"}})).is_none());
         let mut g = Links::default();
         grok_links(
             Path::new("/g/sessions/x/sid/chat_history.jsonl"),
