@@ -27,14 +27,15 @@ Tables used (structure only; everything else in the db is out of scope):
 | `item/completed` `userMessage` | message, user |
 | `item/completed` `reasoning` | reasoning |
 | `item/completed` `toolCall` `commandExecution` `fileChange` `fileRead` `webFetch` `webSearch` `delegation` | tool, depth 1, title = tool name (`bash`, `edit`, `read` for the three built-ins), `durationMs` |
-| `thread/tokenUsage/updated` (`tokenUsage.total.{inputTokens,outputTokens}`) | telemetry, `usage_is_total` |
+| `thread/tokenUsage/updated` (`tokenUsage.total.{inputTokens,outputTokens}`) | telemetry, `usage_is_total`. The running total is not a context size: `context_tokens` stays unset |
+| `thread/contextWindowUsage/updated` (`contextWindowUsage.usedTokens`, `contextWindowUsage.modelContextWindow`) | telemetry. Root turns only (`parent_tool_call_id` empty): `context_tokens` = `usedTokens`, `context_window` = `modelContextWindow`, each only when > 0. A later null or zero leaves the previous positive value. A nested turn's sample is indexed as noise and does not set either field |
 | `turn/started`, `turn/completed` | turn; `turn/completed` ends a turn, not the thread (not terminal; only session/run/agent end are) |
 | `provider/error`, `system/error` | system, error |
 
 - A tool call is one event, not call plus result: bb writes the call and its output in one `item/completed` row.
 - Error: `item.status == "failed"`, a non-empty `item.error`, or `turn/completed` with an error or `failed`/`error` status.
 - `item/completed` rows get `event_type = "item/<kind>"`. Otherwise every finished tool call would match `is_terminal` ("complete") and mark the session done.
-- Skipped at read time: `*/delta` and `*Delta`, `item/started` (the completed row has the same item), `provider/unhandled`, and bookkeeping (`provider.env-resolved`, `system/thread-provisioning`, `thread/extensionState/updated`, `thread/contextWindowUsage/updated`, `client/thread/start`, `turn/input/accepted`). On sab-air that drops about three quarters of the rows (57k events, 29k of them `provider/unhandled`).
+- Skipped at read time: `*/delta` and `*Delta`, `item/started` (the completed row has the same item), `provider/unhandled`, and bookkeeping (`provider.env-resolved`, `system/thread-provisioning`, `thread/extensionState/updated`, `client/thread/start`, `turn/input/accepted`). `thread/contextWindowUsage/updated` is indexed (it is the context-pressure sample). On sab-air the skip list drops about three quarters of the rows (57k events, 29k of them `provider/unhandled`).
 - Never read or stored: tool arguments beyond the clipped preview, `aggregatedOutput`, `result`. Only the preview text goes in the index.
 
 ## Wiring (as built)

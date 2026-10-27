@@ -101,7 +101,7 @@ pub struct NormalizedEvent {
     pub usage_is_total: bool,
     /// What this message sent the model: Claude `input + cache_read + cache_creation`, Pi `input + cacheRead + cacheWrite`.
     pub context_tokens: Option<i64>,
-    /// The model's window, when the harness records it (none of the current sources do).
+    /// The model's window, when the harness records it (bb `modelContextWindow`).
     pub context_window: Option<i64>,
     pub turn: Option<f64>,
     pub step: Option<f64>,

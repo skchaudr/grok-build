@@ -110,7 +110,7 @@ const NOISE_TYPES: &[&str] = &[
     "turn/start", "session/title", "session/title-llm-request", "session/end-seed", "assistant/chunk",
     "permission/preset", "sandbox/mode", "approval/policy", "request/header", "request/context",
     // Grok / bb
-    "thread/tokenusage/updated", "turn/started", "provider/unhandled",
+    "thread/tokenusage/updated", "thread/contextwindowusage/updated", "turn/started", "provider/unhandled",
 ];
 
 /// Prefixes of whole families of bookkeeping records.

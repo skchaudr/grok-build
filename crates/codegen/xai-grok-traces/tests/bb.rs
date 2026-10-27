@@ -91,6 +91,7 @@ fn threads_are_indexed_by_pointer_and_empty_threads_skipped() {
     assert_eq!((a.event_count, a.user_count, a.assistant_count, a.tool_count), (7, 1, 1, 2));
     assert_eq!(a.error_count, 2, "failed tool call + provider/error");
     assert_eq!((a.input_tokens, a.output_tokens), (Some(500), Some(50)));
+    assert_eq!((a.context_tokens, a.context_window), (None, None), "tokenUsage totals are not context pressure");
     assert_eq!((a.model.as_deref(), a.cwd.as_deref()), (Some("gpt-5"), Some("/w/bb")));
     assert_eq!(a.status, Status::Idle, "turn/completed is no longer terminal (only session/run/agent end are)");
     assert!(a.file_path.to_string_lossy().ends_with("bb.db#thr_a"));
@@ -104,6 +105,61 @@ fn threads_are_indexed_by_pointer_and_empty_threads_skipped() {
     assert!(idx.raw_line(&a.id, 2).unwrap().is_none(), "skipped events are not indexed");
 
     assert!(root_for(&e.bb, &roots).is_none(), "bb.db is not a file source");
+}
+
+#[test]
+fn context_window_usage_populates_context_tokens_without_touching_other_sources() {
+    let e = env();
+    let c = rw(&e.bb);
+    let samples: [(i64, Option<&str>, &str); 3] = [
+        (3, None, r#"{"contextWindowUsage":{"usedTokens":1000,"modelContextWindow":200000,"estimated":false}}"#),
+        (4, Some("call-sub"), r#"{"contextWindowUsage":{"usedTokens":15,"modelContextWindow":999999,"estimated":true}}"#),
+        (5, None, r#"{"contextWindowUsage":{"usedTokens":90000.0,"modelContextWindow":null,"estimated":false}}"#),
+    ];
+    for (seq, parent, data) in samples {
+        c.execute(
+            "INSERT INTO events (id, thread_id, sequence, type, parent_tool_call_id, data, created_at) VALUES (?1,'thr_b',?2,'thread/contextWindowUsage/updated',?3,?4,?5)",
+            params![format!("ctx_{seq}"), seq, parent, data, BASE + seq * 1000],
+        )
+        .unwrap();
+    }
+    drop(c);
+    let proj = e.home.join(".claude/projects/-w-claude");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join("c1.jsonl"),
+        "{\"type\":\"assistant\",\"timestamp\":\"2026-10-01T00:00:05Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-5-5\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":5,\"output_tokens\":20}}}\n",
+    )
+    .unwrap();
+
+    let roots = default_roots(&e.home, &e.home.join(".grok"));
+    let mut idx = TraceIndex::open(&e.idx_db).unwrap();
+    idx.scan(&roots).unwrap();
+
+    let bb = thread(&idx, "second thread");
+    assert_eq!((bb.context_tokens, bb.context_window), (Some(90_000), Some(200_000)));
+    assert_eq!((bb.user_count, bb.assistant_count, bb.tool_count), (1, 1, 0), "context samples are not turns");
+    let shown: Vec<i64> = idx.list_events(&bb.id, &EventFilter::default()).unwrap().iter().map(|ev| ev.line).collect();
+    assert_eq!(shown, [1, 2], "context samples stay hidden with the other telemetry");
+    assert_eq!((thread(&idx, "Fix the bug").context_tokens, thread(&idx, "Fix the bug").context_window), (None, None));
+
+    let claude = idx.list_sessions(&SessionFilter { source: Some("claude".into()), ..Default::default() }).unwrap();
+    assert_eq!(claude.len(), 1);
+    assert_eq!((claude[0].context_tokens, claude[0].context_window), (Some(105), None));
+    assert_eq!((claude[0].input_tokens, claude[0].output_tokens), (Some(100), Some(20)));
+
+    let c = rw(&e.bb);
+    c.execute(
+        "INSERT INTO events (id, thread_id, sequence, type, data, created_at) VALUES ('ctx_6','thr_b',6,'thread/contextWindowUsage/updated',?1,?2)",
+        params![r#"{"contextWindowUsage":{"usedTokens":120000,"modelContextWindow":256000,"estimated":false}}"#, BASE + 6_000],
+    )
+    .unwrap();
+    c.execute("UPDATE threads SET updated_at = 9500 WHERE id = 'thr_b'", []).unwrap();
+    drop(c);
+    assert_eq!(idx.scan(&roots).unwrap().indexed, 1, "only the thread that grew");
+    assert_eq!((thread(&idx, "second thread").context_tokens, thread(&idx, "second thread").context_window), (Some(120_000), Some(256_000)));
+    let claude = idx.list_sessions(&SessionFilter { source: Some("claude".into()), ..Default::default() }).unwrap();
+    assert_eq!((claude[0].context_tokens, claude[0].context_window), (Some(105), None), "claude usage is unchanged");
 }
 
 #[test]
