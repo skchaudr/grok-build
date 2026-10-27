@@ -1,3 +1,6 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# Pi lane run dirs (.pi/lane/<run-id>/ and split steps)
+/.pi/lane/
