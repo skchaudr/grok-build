@@ -197,6 +197,14 @@ export default defineWorkflow<LaneInput>({
       expectedOutput: DELEGATED,
     }),
 
+    // A builder that reports BLOCKED or failed skips the gate: no wasted verify run.
+    build_route: compute({
+      run: (ctx) => {
+        const last = (ctx.outputs.fix ?? ctx.outputs.build) as { ok?: boolean; note?: string };
+        return { route: last.ok === false ? "stop" : "gate", note: last.note };
+      },
+    }),
+
     // Stage 4: gate. Verify command runs in a process group; the node's timeout kills the whole tree.
     gate: shell({
       effect: idempotentEffect("lane.gate"),
@@ -231,9 +239,8 @@ export default defineWorkflow<LaneInput>({
       run: (ctx) => {
         const g = ctx.outputs.gate as { ok: boolean };
         const d = ctx.outputs.diff as { chars: number };
-        const built = (ctx.outputs.build as { ok?: boolean } | undefined)?.ok !== false;
-        const route = !built ? "stop" : g.ok && d.chars > 0 ? "review" : ctx.outputs.fix === undefined ? "fix" : "stop";
-        return { route, gateOk: g.ok, diffChars: d.chars, built };
+        const route = g.ok && d.chars > 0 ? "review" : ctx.outputs.fix === undefined ? "fix" : "stop";
+        return { route, gateOk: g.ok, diffChars: d.chars };
       },
     }),
 
@@ -305,12 +312,13 @@ export default defineWorkflow<LaneInput>({
     { from: "brief_review", to: "brief_route" },
     { from: "brief_route", switch: { on: "$.route", cases: { build: "build", retry: "scout_retry", stop: "brief_stop" } } },
     { from: "scout_retry", to: "brief_review" },
-    { from: "build", to: "gate" },
+    { from: "build", to: "build_route" },
+    { from: "build_route", switch: { on: "$.route", cases: { gate: "gate", stop: "build_stop" } } },
     { from: "gate", switch: { on: "$result.outcome", cases: { ok: "diff", failed: "build_stop", timed_out: "build_stop", cancelled: "build_stop" } } },
     { from: "diff", to: "gate_route" },
     { from: "gate_route", switch: { on: "$.route", cases: { review: "build_review", fix: "fix", stop: "build_stop" } } },
     { from: "build_review", to: "complete" },
     { from: "complete", switch: { on: "$.route", cases: { commit: "commit", fix: "fix", stop: "build_stop" } } },
-    { from: "fix", to: "gate" },
+    { from: "fix", to: "build_route" },
   ],
 });

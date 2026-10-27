@@ -2,7 +2,7 @@
 name: lane-worker
 description: Lane builder. Makes the edits a brief names; the lane runs the gate and commits.
 # Model override: edit this line (must differ from lane-build-reviewer's model; a subagents.agentOverrides entry in .pi/settings.json beats it and the workflow reads that entry for the commit trailer).
-model: cliproxy/claude-sonnet-5-5-high
+model: cliproxy/grok-4.7
 tools: codemode, read, grep, find, ls, bash, edit, write
 systemPromptMode: replace
 inheritProjectContext: true
