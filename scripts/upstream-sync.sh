@@ -3,6 +3,9 @@
 # Does not edit pager source. Never runs cargo clean.
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$SCRIPT_DIR/lib/upstream-autostash.sh"
+
 usage() {
   echo "Usage: scripts/upstream-sync.sh <check|start|verify|finish>" >&2
   echo "  check [--replay <a>..<b>]   fetch upstream; stat overlap with files touched since last sync" >&2
@@ -260,8 +263,19 @@ EOF
 }
 
 cmd_start() {
+  warn_stale_autostash 7
   [[ $# -eq 0 ]] || usage
-  require_clean start
+  local AUTOSTASH_SHA="" stash_rc=0
+  AUTOSTASH_SHA=$(autostash_if_needed) || stash_rc=$?
+  if [[ $stash_rc -eq 2 ]]; then
+    die "refusing to stash a conflicted/in-progress merge"
+  fi
+  if [[ $stash_rc -ne 0 ]]; then
+    exit "$stash_rc"
+  fi
+  if [[ -n "$AUTOSTASH_SHA" ]]; then
+    echo "autostash: $AUTOSTASH_SHA"
+  fi
   if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
     die "a merge is already in progress"
   fi
@@ -275,6 +289,16 @@ cmd_start() {
   local merge_rc=$?
   set -e
   if [[ $merge_rc -eq 0 ]]; then
+    if [[ -n "$AUTOSTASH_SHA" ]]; then
+      local restore_rc=0
+      restore_autostash "$AUTOSTASH_SHA" || restore_rc=$?
+      if [[ $restore_rc -eq 1 ]]; then
+        exit 1
+      fi
+      if [[ $restore_rc -ne 0 ]]; then
+        exit "$restore_rc"
+      fi
+    fi
     local when up body
     when=$(date -u +%Y-%m-%dT%H:%MZ)
     up=$(git rev-parse --verify "${UP_REF}^{commit}")
@@ -295,6 +319,9 @@ EOF
     die "merge failed without conflicted files (exit $merge_rc)"
   fi
   summarize_conflicts
+  if [[ -n "$AUTOSTASH_SHA" ]]; then
+    echo "local changes preserved in stash: $AUTOSTASH_SHA — restore after resolving with: git stash apply $AUTOSTASH_SHA"
+  fi
   exit 1
 }
 
