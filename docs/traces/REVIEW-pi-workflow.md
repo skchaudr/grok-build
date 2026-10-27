@@ -49,7 +49,7 @@ The workflow is mechanically sound for a tiny trace-deck change (Pi's `edit` doe
 - Change: commit `.pi/{agents,workflows,prompts,gate.sh}` into grok-build (Mini checkout). `gate.sh` runs the command it is given: `eval "$*"` with `lane.js` building `command: "sh .pi/gate.sh " + args.verify` (each slice's **Verify** line, e.g. SPEC-usable:48). `brief.js` takes `args.verify` for the acceptance line.
 
 **A9. Concurrent slices in one checkout mix their diffs.**
-- Evidence: `gate.sh:6-7` stages and diffs the whole tree; `lane.md:7` commits the whole tree. Per-child `worktree: true` exists (`docs/workflows.md:462-470`), the gate runs inside it (`tool-reference.md:442`), but the worktree is removed after capture and the patch lands in a handoff manifest that nothing in `lane.js` applies. The source "independent steps run concurrently" is attributed to grok-build `AGENTS.md`, which does not exist on the Mini or the Air.
+- Evidence: `gate.sh:6-7` stages and diffs the whole tree; `lane.md:7` commits the whole tree. Per-child `worktree: true` exists (`docs/workflows.md:462-470`), the gate runs inside it (`tool-reference.md:442`), but the worktree is removed after capture and the patch lands in a handoff manifest that nothing in `lane.js` applies. grok-build `AGENTS.md:5-7` (landed in `ff10175e`, after this review started) requires independent steps to run concurrently, so serial is a temporary exception, not the end state.
 - Consequence: `runs.all` over N lanes in the shared cwd would review and commit other lanes' changes.
 - Change: run lanes serially, one `/lane` per slice, until a patch-apply step exists. Not a blocker for the first slices (T0, B0 are serial by the spec).
 
@@ -67,4 +67,4 @@ Fixed: the stage order and verdict lines (`Brief verdict:`, `Merge verdict:`), t
 - Whether `watchdog_diff` sees intent-to-add files the way `gate.sh:6` prepares them.
 - Whether a managed worktree shares the cargo target dir (relevant only once A9's worktree path is used).
 - Output file directories are created (`src/runs/shared/single-output.js:287` mkdirs), so `.pi/briefs/` missing is not a blocker; not run.
-- The "~5k diff, one file or function" rule and its source: no `AGENTS.md` exists in grok-build on either machine.
+- The Air's grok-build checkout (119 behind origin/main) was not inspected beyond `git status`; the review assumes the Mini checkout is the one the lane runs in.
