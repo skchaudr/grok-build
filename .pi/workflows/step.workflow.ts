@@ -303,7 +303,7 @@ export default defineWorkflow<LaneInput>({
     { from: "brief_route", switch: { on: "$.route", cases: { build: "build", retry: "scout_retry", stop: "brief_stop" } } },
     { from: "scout_retry", to: "brief_review" },
     { from: "build", to: "gate" },
-    { from: "gate", switch: { on: "$result.outcome", cases: { ok: "diff", failed: "build_stop", timed_out: "build_stop" } } },
+    { from: "gate", switch: { on: "$result.outcome", cases: { ok: "diff", failed: "build_stop", timed_out: "build_stop", cancelled: "build_stop" } } },
     { from: "diff", to: "gate_route" },
     { from: "gate_route", switch: { on: "$.route", cases: { review: "build_review", fix: "fix", stop: "build_stop" } } },
     { from: "build_review", to: "complete" },

@@ -18,3 +18,5 @@ Check:
 - `Expected diff` is plausible and about 5000 characters or less counting moves twice; if not, the step must be split.
 
 Your final reply is the review. List findings as bullets, then end with exactly one last line, `Brief verdict: OK` or `Brief verdict: BLOCK`. No other text after it.
+
+MODE split-review. Task lines: `LANE split-review <id>`, `slice: <path>`, `steps: <path>`. Read the slice and every `step-NN.md` next to `steps`. Check that the steps cover the slice and nothing else, that each is one file or function with an expected diff of about 5000 characters or less, that dependencies are ordered, and that every `Verify:` line is a command the slice names. Same reply format, last line `Split verdict: OK` or `Split verdict: BLOCK`.

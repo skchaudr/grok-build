@@ -31,7 +31,7 @@ Limits behind the old lane's choice: pi-subagents `args` max 16 KiB (`PS/docs/wo
 
 ## 5. From a SPEC-usable slice to steps
 
-The scout's first job on a slice is `LANE split`: it reads the slice and writes `steps.md` (numbered: file, what moves or changes, expected diff, verify, dependencies) plus one `step-NN.md` per line, each with `Verify:` and optional `Timeout-ms:`, `Builder:`. Start it by hand: `subagent` with agent `lane-scout`, task lines `LANE split <id>`, `slice: <path>`, `steps: <dir>/steps.md`. Then `/step <dir>/step-NN.md` per step, in order.
+The scout's first job on a slice is `LANE split`: it reads the slice and writes `steps.md` (numbered: file, what moves or changes, expected diff, verify, dependencies) plus one `step-NN.md` per line, each with `Verify:` and optional `Timeout-ms:`, `Builder:`. Start it by hand: `subagent` with agent `lane-scout`, task lines `LANE split <id>`, `slice: <path>`, `steps: <dir>/steps.md`. Then review the split before any step runs: `subagent` with agent `lane-brief-reviewer`, task lines `LANE split-review <id>`, `slice: <path>`, `steps: <dir>/steps.md`; proceed only on `Split verdict: OK`. Then `/step <dir>/step-NN.md` per step, in order.
 
 Worked example, T0 (SPEC-usable.md:41-48). Sizes are measured chars of `crates/codegen/xai-grok-pager/src/views/traces_modal.rs`; diff is about twice the moved text (removed plus added) plus `mod`/`use` lines. All steps use T0's line-48 verify. The SPEC's line numbers (`shortcuts` 3425-3470) have drifted; the actual range is 3415-3466, so the scout must re-read.
 
@@ -67,7 +67,8 @@ Child sessions land under the parent's session dir only when the origin Pi has a
 3. Does a child's first user message begin with the task's first line (the `LANE` title), or does pi-subagents prepend text? Unchecked; and the origin must be a persisted session for child rows to be indexed.
 4. Gate timeout (1,800,000) and agent-node timeout (1,800,000) are placeholders; the T0 verify wall time is unmeasured.
 5. Trailer model for `lane-worker` ignores a user-level `~/.pi/agent/settings.json` override.
-6. `steps.md` is not reviewed before steps run; Sab's rule is that no brief is dispatched unreviewed. Add a split-review stage?
-7. The pty test named in T0's Accept (`traces_modal_ledger_trajectory_inspector`) lives in `xai-grok-pager-pty-harness`, outside T0's Verify line; its cargo command is not in the spec.
-8. Tracked `.pi/opus-proposal-*` (pi-subagents lane, superseded per REVIEW A0) is still on `main`; delete or keep?
-9. Per-role model defaults are my picks from `enabledModels` in `~/.pi/agent/settings.json`; Sab's call.
+6. The pty test named in T0's Accept (`traces_modal_ledger_trajectory_inspector`) lives in `xai-grok-pager-pty-harness`, outside T0's Verify line; its cargo command is not in the spec.
+7. Per-role model defaults are picks from `enabledModels` in `~/.pi/agent/settings.json` (all three ids present, verified 2026-10-26); Sab's call.
+8. A builder reply of `BLOCKED` still runs the gate once before `gate_route` stops (edge `build -> gate` is unconditional); one wasted cargo run per blocked build.
+
+Closed in review (Fable 5.1, 2026-10-26): `.pi/opus-proposal-*` deleted (superseded, REVIEW A0); split review added as a hand-run `lane-brief-reviewer` mode; the runner process cwd is the project path (`PW/src/server/workflow-runner-supervisor.ts:61`), so `prepare`'s `process.cwd()` is right; `/workflow step <path>` arrives as `{task}` (`PW/src/extension/index.ts:177`); `acceptanceRole: writer` is a valid value (`PS/docs/agents.md:473`); shell outcomes are `ok|timed_out|failed|cancelled` (`PW/src/workflows/types.ts:571`), the gate edge now covers all four.
