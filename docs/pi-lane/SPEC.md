@@ -67,7 +67,7 @@ Child sessions land under the parent's session dir only when the origin Pi has a
 3. Does a child's first user message begin with the task's first line (the `LANE` title), or does pi-subagents prepend text? Unchecked; and the origin must be a persisted session for child rows to be indexed.
 4. Gate timeout (1,800,000) and agent-node timeout (1,800,000) are placeholders; the T0 verify wall time is unmeasured.
 5. Trailer model for `lane-worker` ignores a user-level `~/.pi/agent/settings.json` override.
-6. The pty test named in T0's Accept (`traces_modal_ledger_trajectory_inspector`) lives in `xai-grok-pager-pty-harness`, outside T0's Verify line; its cargo command is not in the spec.
+6. Closed: the pty test in T0's Accept is `cargo test -p xai-grok-pager-pty-harness --test pty_e2e_config_ui traces_modal_ledger_trajectory_inspector` (`tests/pty_e2e_config_ui.rs:56-57`); T0's last step adds it to its `Verify:` line after the lib tests.
 7. Per-role model defaults are picks from `enabledModels` in `~/.pi/agent/settings.json` (all three ids present, verified 2026-10-26); Sab's call.
 8. A builder reply of `BLOCKED` still runs the gate once before `gate_route` stops (edge `build -> gate` is unconditional); one wasted cargo run per blocked build.
 
