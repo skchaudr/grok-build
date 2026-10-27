@@ -6610,7 +6610,8 @@ mod live_tests {
         s.live_sel = Some("a49".into());
         let area = Rect::new(0, 0, 100, 20);
         let mut buf = Buffer::empty(area);
-        let theme = Theme::current();
+        // Pinned RGB theme: `current()` is terminal-detected and bandless (Reset colors) under TERM=dumb.
+        let theme = Theme::groknight();
         render_live_at(&mut buf, area, &mut s, &theme, t0);
         let out = rows_of(&buf, 100, 20);
         assert!(out[19].contains("agent 49"), "{out:#?}");
@@ -6879,7 +6880,8 @@ mod live_tests {
         s.set_live(vec![r], vec![]);
         let area = Rect::new(0, 0, 100, 3);
         let mut buf = Buffer::empty(area);
-        let theme = Theme::current();
+        // Pinned RGB theme: `current()` is terminal-detected and bandless (Reset colors) under TERM=dumb.
+        let theme = Theme::groknight();
         render_live_at(&mut buf, area, &mut s, &theme, t0);
         let row = rows_of(&buf, 100, 3)[1].clone();
         let x = row[..row.find("via").unwrap()].chars().count() as u16;
