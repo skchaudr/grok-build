@@ -40,8 +40,6 @@ const TEXT_COL: usize = 14;
 const MARK_W: usize = 2;
 /// Shortest prompt header kept beside a turn's counts suffix; less than this and the counts go.
 const MIN_HEAD_W: usize = 8;
-/// Row shown for an expanded event whose text the header already holds in full.
-const NO_MORE: &str = "(no more)";
 /// Deepest ledger level: roots are 0, and nothing below depth `MAX_DEPTH` is loaded or shown.
 const MAX_DEPTH: usize = 8;
 /// Tree-guide levels drawn in the ledger (the node's own level included); deeper ones are cut to `…`.
@@ -144,6 +142,9 @@ pub struct TracesModalState {
     /// Foldable outline rows that already got their default fold.
     oseen: HashSet<OutlineKey>,
     oshown: Vec<usize>,
+    /// Screen lines of each `oshown` row from the last trajectory render. `0` draws nothing and
+    /// cannot be selected. Cleared when the outline changes, until the next render measures it.
+    row_h: Vec<usize>,
     /// The selected row, by key: kept across folds, filters and live growth.
     sel: Option<OutlineKey>,
     /// Text width the outline was last built for; 0 until the first render, so no prompt rows yet.
@@ -413,6 +414,7 @@ impl TracesModalState {
             ofolds: FoldState::new(),
             oseen: HashSet::new(),
             oshown: Vec::new(),
+            row_h: Vec::new(),
             sel: None,
             outline_w: 0,
             dirty_outline: false,
@@ -1000,8 +1002,10 @@ impl TracesModalState {
             .unwrap_or(0)
     }
 
-    /// Selects the visible row at `pos`.
+    /// Selects the visible row at `pos`. A row of height 0 is not landable: search continues in the
+    /// direction of travel, then the other way.
     fn goto(&mut self, pos: usize) {
+        let pos = self.skip_unshown(pos);
         self.sel = self.oshown.get(pos).and_then(|&n| self.key_at(n)).cloned();
     }
 
@@ -1009,6 +1013,54 @@ impl TracesModalState {
         let mut pos = self.sel_pos();
         move_sel(&mut pos, self.oshown.len(), delta);
         self.goto(pos);
+    }
+
+    /// Screen lines of shown row `pos` from the last render. Until that render matches `oshown`, every
+    /// row counts as one line so a fold does not skip on stale heights.
+    fn shown_height(&self, pos: usize) -> usize {
+        if self.row_h.len() != self.oshown.len() {
+            return 1;
+        }
+        self.row_h.get(pos).copied().unwrap_or(1)
+    }
+
+    /// `pos`, or the nearest shown row that draws at least one line.
+    fn skip_unshown(&self, pos: usize) -> usize {
+        let len = self.oshown.len();
+        if len == 0 {
+            return 0;
+        }
+        let pos = pos.min(len - 1);
+        if self.shown_height(pos) > 0 {
+            return pos;
+        }
+        let origin = self.sel_pos().min(len - 1);
+        let dir: isize = if pos > origin { 1 } else { -1 };
+        self.walk_shown(pos, dir)
+            .or_else(|| self.walk_shown(pos, -dir))
+            .unwrap_or(pos)
+    }
+
+    /// The next shown row in direction `dir` whose height is not 0.
+    fn walk_shown(&self, start: usize, dir: isize) -> Option<usize> {
+        let len = self.oshown.len() as isize;
+        let mut i = start as isize + dir;
+        while i >= 0 && i < len {
+            if self.shown_height(i as usize) > 0 {
+                return Some(i as usize);
+            }
+            i += dir;
+        }
+        None
+    }
+
+    /// Remembers `heights` for selection. A selection sitting on a height-0 row moves off it.
+    fn note_heights(&mut self, heights: &[usize]) {
+        self.row_h = heights.to_vec();
+        let pos = self.sel_pos();
+        if self.row_h.get(pos).copied() == Some(0) {
+            self.goto(pos);
+        }
     }
 
     /// Event index of the selected row: a turn's opener (its prompt rows too), a run's first call, or the row's own event.
@@ -1221,6 +1273,7 @@ impl TracesModalState {
             self.reveal = Some(key);
         }
         self.oshown = self.outline.visible(&self.ofolds);
+        self.row_h.clear();
         self.place(self.sel.clone(), pos);
     }
 
@@ -1263,6 +1316,7 @@ impl TracesModalState {
     /// Re-lists the outline after a fold change on `node`, keeping the selection on it or its nearest shown ancestor.
     fn reshow(&mut self, node: usize) {
         self.oshown = self.outline.visible(&self.ofolds);
+        self.row_h.clear();
         let mut at = Some(node);
         while let Some(i) = at {
             if self.oshown.contains(&i) {
@@ -1426,18 +1480,15 @@ impl TracesModalState {
     }
 
     /// The body of event `ev` wrapped to `width`, minus what its header `head` already shows, then its folded
-    /// result. A placeholder until the body is read.
+    /// result. Empty when the header already holds the text and there is no result. A placeholder until
+    /// the body is read.
     fn body_lines(&self, ev: usize, head: &str, width: usize) -> Vec<String> {
         let Some(line) = self.events.get(ev).map(|e| e.line) else { return vec!["loading…".to_string()] };
         match self.bodies.get(&line) {
             Some(text) => {
                 let (own, result) = split_result(text);
                 let rest = continuation(head, &continuation_source(own));
-                let mut rows = if rest.is_empty() {
-                    vec![NO_MORE.to_string()]
-                } else {
-                    wrap_body(&rest, width)
-                };
+                let mut rows = if rest.is_empty() { Vec::new() } else { wrap_body(&rest, width) };
                 if !result.is_empty() {
                     rows.push(String::new());
                     rows.extend(wrap_body(result, width));
@@ -3926,10 +3977,12 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         buf.set_span(list.x, list.y, &Span::styled(msg, dim), list.width);
     }
     // Body rows are as tall as their wrapped text, so scrolling works in lines, not rows.
+    // An expanded body with nothing past the header is height 0: not drawn, not selectable.
     // `gaps` is render-only: spacers never enter the outline, so selection still steps by row.
     let height = list.height as usize;
     let mut bodies = state.body_rows(text_w);
     let mut heights = row_heights(&bodies);
+    state.note_heights(&heights);
     let mut gaps = row_gaps(state, &heights, height);
     fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, &gaps, height);
     // Load the bodies on screen; one cached right here changes row heights, so measure again.
@@ -3940,6 +3993,7 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         }
         bodies = state.body_rows(text_w);
         heights = row_heights(&bodies);
+        state.note_heights(&heights);
         gaps = row_gaps(state, &heights, height);
         fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, &gaps, height);
     }
@@ -3956,6 +4010,12 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         }
         if y >= bottom {
             break;
+        }
+        // Nothing to draw. Keep a spacer that belongs to this row (a block's trailing gap sits on
+        // its last row, which may itself be empty).
+        if h == 0 {
+            skip_lines(&mut y, post, bottom);
+            continue;
         }
         let span = h.min(bottom - y);
         let selected = k == sel;
@@ -4049,13 +4109,7 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
                     .enumerate()
                 {
                     in_result |= line.as_str() == RESULT_SEP || line.as_str() == RESULT_ERR_SEP;
-                    let fg = if line.as_str() == NO_MORE {
-                        theme.gray
-                    } else if in_result && failed {
-                        theme.accent_error
-                    } else {
-                        theme.text_secondary
-                    };
+                    let fg = if in_result && failed { theme.accent_error } else { theme.text_secondary };
                     let text = format!("{}{line}", " ".repeat(indent_w));
                     put_row(buf, list, y + dy as u16, &[(String::new(), 6, base), (String::new(), 6, base), (text, text_w, base.fg(fg))]);
                 }
@@ -4117,9 +4171,9 @@ fn skip_lines(y: &mut u16, n: u16, bottom: u16) {
     }
 }
 
-/// Lines per shown row: a body is as tall as its wrapped text, every other row is one line.
+/// Lines per shown row: a body is as tall as its wrapped text (`Some([])` is 0), every other row is one line.
 fn row_heights(bodies: &[Option<Vec<String>>]) -> Vec<usize> {
-    bodies.iter().map(|b| b.as_ref().map_or(1, |v| v.len().max(1))).collect()
+    bodies.iter().map(|b| b.as_ref().map_or(1, Vec::len)).collect()
 }
 
 /// `1 tool` / `3 tools`.
@@ -5344,6 +5398,66 @@ mod tests {
         assert!(shown_rows(&state).contains(&"Body(2)".to_string()), "{:?}", shown_rows(&state));
         let expanded = row(&draw(&mut state, 140, 24), "#2");
         assert!(expanded.contains("Bash  zzprobe"), "{expanded}");
+    }
+
+    /// An opener and two assistant rows. The middle one's cached body is `body`.
+    fn two_replies(body: &str) -> TracesModalState {
+        let mut state = trajectory(vec![
+            ev(1, "message", "user", "Check"),
+            ev(2, "message", "assistant", "done"),
+            ev(3, "message", "assistant", "later"),
+        ]);
+        assert!(state.settle_body(2, Ok(body.to_string())));
+        state.sel = Some(OutlineKey::Ev(2));
+        press(&mut state, KeyCode::Char('l'));
+        state
+    }
+
+    #[test]
+    fn row_heights_map_an_empty_body_to_zero() {
+        assert_eq!(
+            row_heights(&[None, Some(vec![]), Some(vec!["a".into(), "b".into()])]),
+            vec![1, 0, 2]
+        );
+    }
+
+    #[test]
+    fn expanded_event_whose_text_fits_draws_no_body_row() {
+        let mut state = two_replies("done");
+        assert!(
+            shown_rows(&state).contains(&"Body(2)".to_string()),
+            "the empty body stays an outline row: {:?}",
+            shown_rows(&state)
+        );
+        let screen = draw(&mut state, 80, 24);
+        assert!(!screen.contains("(no more)"), "{screen}");
+        let list = list_lines(&screen.lines().map(|l| l.trim_end().to_string()).collect::<Vec<_>>());
+        let at = list.iter().position(|l| l.contains("#2")).expect("event row");
+        assert!(list[at].contains('⌄'), "the event stays expanded: {}", list[at]);
+        assert!(
+            list[at + 1].contains("#3"),
+            "no phantom line under the event: {list:#?}"
+        );
+        press(&mut state, KeyCode::Char('j'));
+        assert_eq!(state.sel, Some(OutlineKey::Ev(3)), "j skips the empty body");
+        press(&mut state, KeyCode::Char('k'));
+        assert_eq!(state.sel, Some(OutlineKey::Ev(2)), "k skips the empty body");
+    }
+
+    #[test]
+    fn expanded_event_with_more_text_still_draws_body_rows() {
+        let mut state = two_replies("done and then some more detail");
+        let screen = draw(&mut state, 80, 24);
+        assert!(screen.contains("and then some more detail"), "{screen}");
+        assert!(!screen.contains("(no more)"), "{screen}");
+        let list = list_lines(&screen.lines().map(|l| l.trim_end().to_string()).collect::<Vec<_>>());
+        let at = list.iter().position(|l| l.contains("#2")).expect("event row");
+        assert!(
+            list[at + 1].contains("and then some more detail"),
+            "the continuation is the next line: {list:#?}"
+        );
+        press(&mut state, KeyCode::Char('j'));
+        assert_eq!(state.sel, Some(OutlineKey::Body(2)), "j lands on a real body row");
     }
 
     // ---- header stability, prompt rows, seams, snapshots ----
