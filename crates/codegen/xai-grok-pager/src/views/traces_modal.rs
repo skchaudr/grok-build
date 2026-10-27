@@ -4579,9 +4579,13 @@ mod tests {
         (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
     }
 
-    /// Right-aligned flag text on the ledger header (tabs sit on the left).
+    /// Right-aligned flag text on the ledger header (tabs sit on the left, padded by spaces).
     fn header_flags(screen: &str) -> String {
-        screen.lines().next().unwrap_or("").trim_end().split("  ").next_back().unwrap_or("").trim().to_string()
+        let line = screen.lines().next().unwrap_or("").trim_end();
+        match line.rfind("   ") {
+            Some(i) => line[i..].trim().to_string(),
+            None => line.trim().to_string(),
+        }
     }
 
     #[test]
