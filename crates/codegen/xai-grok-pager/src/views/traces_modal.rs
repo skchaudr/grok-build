@@ -1022,6 +1022,51 @@ impl TracesModalState {
         }
     }
 
+    /// A visible event failed: its own `is_error`, or a tool result folded onto that call.
+    /// Hidden rows are skipped; their failure is already on the call they fold into.
+    fn event_failed(&self, i: usize) -> bool {
+        if self.hidden.get(i).copied().unwrap_or(false) {
+            return false;
+        }
+        let folded = self.folded.get(i).and_then(|f| f.as_ref()).is_some_and(|f| f.error);
+        self.events.get(i).is_some_and(|e| e.is_error) || folded
+    }
+
+    /// `!` next error, `*` previous, wrapping. Status is `error K/N`, or `no errors` with no move.
+    fn jump_error(&mut self, forward: bool) {
+        let errors: Vec<usize> = (0..self.events.len()).filter(|&i| self.event_failed(i)).collect();
+        let n = errors.len();
+        if n == 0 {
+            self.status = Some("no errors".to_string());
+            return;
+        }
+        let cur = self.selected_event();
+        let at = if forward {
+            let start = cur.unwrap_or(usize::MAX);
+            errors.iter().position(|&i| i > start).unwrap_or(0)
+        } else {
+            let start = cur.unwrap_or(0);
+            errors.iter().rposition(|&i| i < start).unwrap_or(n - 1)
+        };
+        let Some(&i) = errors.get(at) else { return };
+        self.focus_event(i);
+        self.status = Some(format!("error {}/{n}", at + 1));
+    }
+
+    /// Reveals event `i` (expanding collapsed ancestors) and selects that outline row by key.
+    fn focus_event(&mut self, i: usize) {
+        let Some(node) = self
+            .outline_items
+            .iter()
+            .position(|it| matches!(it, OutlineItem::Event(ev) if *ev == i))
+        else {
+            return;
+        };
+        let Some(key) = self.key_at(node).cloned() else { return };
+        self.reveal(&key);
+        self.reshow(node);
+    }
+
     /// The key a stored selection means now: an opener's event row is folded into its turn row, and a
     /// prompt row that is no longer in the outline falls back to its turn.
     fn canon(&self, key: OutlineKey) -> OutlineKey {
@@ -3266,6 +3311,8 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
                     state.event_errors_only = !state.event_errors_only;
                     state.load_events();
                 }
+                KeyCode::Char('!') => state.jump_error(true),
+                KeyCode::Char('*') => state.jump_error(false),
                 KeyCode::Char('n') => {
                     state.include_noise = !state.include_noise;
                     state.load_events();
@@ -3435,6 +3482,7 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
             plain("</> more/less"),
             plain("n noise"),
             plain("x errors"),
+            plain("!/* errors"),
             plain("t tool"),
             plain("/ search"),
             plain("r resume"),
@@ -4895,6 +4943,77 @@ mod tests {
 
         press(&mut state, KeyCode::Char('l'));
         assert_eq!(shown_rows(&state).len(), 3);
+    }
+
+    #[test]
+    fn bang_and_star_jump_errors_and_wrap() {
+        let mut rows = Vec::new();
+        for i in 0..10 {
+            let role = if i == 0 { "user" } else { "assistant" };
+            let mut e = ev(i, "message", role, "synthetic");
+            e.is_error = matches!(i, 2 | 7 | 9);
+            rows.push(e);
+        }
+        let mut state = trajectory(rows);
+        assert_eq!(state.selected_event(), Some(0));
+        let jumps = [(2, "error 1/3"), (7, "error 2/3"), (9, "error 3/3"), (2, "error 1/3")];
+        for (idx, status) in jumps {
+            press(&mut state, KeyCode::Char('!'));
+            assert_eq!(state.selected_event(), Some(idx));
+            assert_eq!(state.status.as_deref(), Some(status));
+        }
+        press(&mut state, KeyCode::Char('*'));
+        assert_eq!(state.selected_event(), Some(9), "`*` from 2 wraps to the last error");
+        assert_eq!(state.status.as_deref(), Some("error 3/3"));
+    }
+
+    #[test]
+    fn bang_reveals_an_error_inside_a_collapsed_run() {
+        let mut failed = ev(3, "tool", "tool_result", "synthetic fail");
+        failed.is_error = true;
+        let rows = vec![
+            ev(1, "message", "user", "synthetic"),
+            ev(2, "tool", "tool", "call-a"),
+            failed,
+            ev(4, "tool", "tool", "call-b"),
+            ev(5, "tool", "tool_result", "synthetic ok"),
+            ev(6, "tool", "tool", "call-c"),
+            ev(7, "tool", "tool_result", "synthetic ok"),
+        ];
+        let mut state = trajectory(rows);
+        assert!(!shown_events(&state).contains(&1), "the run starts collapsed");
+        press(&mut state, KeyCode::Char('!'));
+        assert_eq!(state.selected_event(), Some(1));
+        assert!(shown_events(&state).contains(&1), "the folded error row is revealed");
+        assert_eq!(state.status.as_deref(), Some("error 1/1"));
+    }
+
+    #[test]
+    fn bang_with_no_errors_keeps_the_selection() {
+        let mut state = trajectory(three_calls());
+        let before = state.sel.clone();
+        let event = state.selected_event();
+        press(&mut state, KeyCode::Char('!'));
+        assert_eq!(state.selected_event(), event);
+        assert_eq!(state.sel, before);
+        assert_eq!(state.status.as_deref(), Some("no errors"));
+        press(&mut state, KeyCode::Char('*'));
+        assert_eq!(state.selected_event(), event);
+        assert_eq!(state.sel, before);
+        assert_eq!(state.status.as_deref(), Some("no errors"));
+    }
+
+    #[test]
+    fn bang_and_star_type_into_the_search_prompt() {
+        let mut state = trajectory(three_calls());
+        let event = state.selected_event();
+        let status = state.status.clone();
+        press(&mut state, KeyCode::Char('/'));
+        press(&mut state, KeyCode::Char('!'));
+        press(&mut state, KeyCode::Char('*'));
+        assert_eq!(state.event_query, "!*");
+        assert_eq!(state.selected_event(), event);
+        assert_eq!(state.status, status);
     }
 
     #[test]
@@ -6735,6 +6854,7 @@ mod live_tests {
                 "</> more/less",
                 "n noise",
                 "x errors",
+                "!/* errors",
                 "t tool",
                 "/ search",
                 "r resume",
