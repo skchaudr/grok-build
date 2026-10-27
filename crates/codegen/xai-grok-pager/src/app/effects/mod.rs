@@ -2785,9 +2785,15 @@ pub(crate) fn execute(
                     let started = std::time::Instant::now();
                     let mut index = xai_grok_traces::TraceIndex::open(&xai_grok_traces::default_db_path())?;
                     let report = index.scan(&xai_grok_traces::user_roots())?;
-                    let mut line = format!("indexed {} changed files in {:.1}s", report.indexed, started.elapsed().as_secs_f64());
+                    let mut line = String::new();
+                    if report.indexed > 0 {
+                        line = format!("indexed {} changed files in {:.1}s", report.indexed, started.elapsed().as_secs_f64());
+                    }
                     if !report.errors.is_empty() {
-                        line.push_str(&format!(" · {} files failed", report.errors.len()));
+                        if !line.is_empty() {
+                            line.push_str(" · ");
+                        }
+                        line.push_str(&format!("{} files failed", report.errors.len()));
                     }
                     Ok::<_, xai_grok_traces::Error>(line)
                 })

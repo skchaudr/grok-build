@@ -53,6 +53,8 @@ const RESULT_ERR_SEP: &str = "── ✗ result ──";
 const MORE_KEY: &str = "\u{1}more:";
 /// How often remote hosts are refetched while the modal is open.
 const REMOTE_EVERY: Duration = Duration::from_secs(10);
+/// A status line stays up this long, then the next poll or key clears it.
+const STATUS_TTL: Duration = Duration::from_secs(4);
 /// Remote body fetches allowed in flight at once; the rest wait for a later render.
 const MAX_BODY_FETCHES: usize = 8;
 
@@ -91,6 +93,8 @@ pub struct TracesModalState {
     index: Option<TraceIndex>,
     pub scanning: bool,
     pub status: Option<String>,
+    /// When `status` was set. Cleared with it; the line expires after [`STATUS_TTL`].
+    status_at: Option<Instant>,
     /// Index health problem (over cap, ...); shown red under the tabs.
     pub health: Option<String>,
     /// Hook receipts arrived within `RECEIPT_WINDOW_MS`.
@@ -377,6 +381,7 @@ impl TracesModalState {
             window: ModalWindowState::new(),
             mode: Mode::List,
             status: index.is_none().then(|| "trace index unavailable".to_string()),
+            status_at: index.is_none().then(Instant::now),
             index,
             health: None,
             live: false,
@@ -484,10 +489,30 @@ impl TracesModalState {
         self.poll_live_at(now)
     }
 
+    fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = Some(msg.into());
+        self.status_at = Some(Instant::now());
+    }
+
+    fn clear_status(&mut self) {
+        self.status = None;
+        self.status_at = None;
+    }
+
+    /// Clear a status line that has been up for [`STATUS_TTL`]. True when it cleared.
+    fn expire_status(&mut self) -> bool {
+        if self.status_at.is_some_and(|at| at.elapsed() >= STATUS_TTL) {
+            self.clear_status();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Cheap checks on the UI thread (three tiny queries); anything heavier runs on a worker
     /// and is applied by a later poll.
     fn poll_live_at(&mut self, now_ms: i64) -> bool {
-        let mut redraw = false;
+        let mut redraw = self.expire_status();
         if let Some(rx) = &self.inflight {
             match rx.try_recv() {
                 Ok(snap) => {
@@ -621,7 +646,7 @@ impl TracesModalState {
         self.health = index.health();
         match query_ledger(index, &self.session_filter(), self.roots_only()) {
             Ok((sessions, children)) => (self.sessions, self.children) = (sessions, children),
-            Err(e) => self.status = Some(format!("query failed: {e}")),
+            Err(e) => self.set_status(format!("query failed: {e}")),
         }
         self.rebuild_ledger();
     }
@@ -845,12 +870,14 @@ impl TracesModalState {
 
     pub fn finish_scan(&mut self, summary: String) {
         self.scanning = false;
-        self.status = Some(summary);
+        if !summary.is_empty() {
+            self.set_status(summary);
+        }
         self.refresh();
     }
 
     pub fn report_copy(&mut self, delivery: &crate::clipboard::CopyDelivery) {
-        self.status = Some(delivery.toast_message().into_owned());
+        self.set_status(delivery.toast_message().into_owned());
     }
 
     fn open_selected(&mut self) {
@@ -930,7 +957,7 @@ impl TracesModalState {
         };
         match loaded {
             Ok((rows, session, children)) => self.install_trajectory(rows, session, children),
-            Err(e) => self.status = Some(format!("query failed: {e}")),
+            Err(e) => self.set_status(format!("query failed: {e}")),
         }
     }
 
@@ -1401,7 +1428,7 @@ impl TracesModalState {
             }
             Err(e) => {
                 self.body_failed.insert(line);
-                self.status = Some(format!("(could not read #{line}: {e}, press l to retry)"));
+                self.set_status(format!("(could not read #{line}: {e}, press l to retry)"));
                 false
             }
         }
@@ -1414,7 +1441,7 @@ impl TracesModalState {
         }
         self.body_failed.clear();
         if self.status.as_deref().is_some_and(|s| s.starts_with("(could not read")) {
-            self.status = None;
+            self.clear_status();
         }
         true
     }
@@ -1576,7 +1603,7 @@ impl TracesModalState {
                         self.remote_all = rows;
                         self.filter_remote();
                     }
-                    Err(e) => self.status = Some(e.to_string()),
+                    Err(e) => self.set_status(e.to_string()),
                 }
                 redraw = true;
             }
@@ -1605,8 +1632,8 @@ impl TracesModalState {
             Ok(Fetched { rows, note }) => {
                 self.remote_err.remove(&h.target);
                 self.remote_rows.insert(h.target, rows);
-                if note.is_some() {
-                    self.status = note;
+                if let Some(note) = note {
+                    self.set_status(note);
                 }
             }
             Err(e) => {
@@ -1629,7 +1656,7 @@ impl TracesModalState {
         }
         let Some(session) = self.session.clone() else { return };
         let Some(target) = self.target_for(&session) else {
-            self.status = Some("host is no longer configured".into());
+            self.set_status("host is no longer configured");
             return;
         };
         self.remote_loading = true;
@@ -2024,7 +2051,7 @@ impl TracesModalState {
             self.live_inflight = true;
         } else {
             self.live_worker = None;
-            self.status = Some("fold: worker stopped".into());
+            self.set_status("fold: worker stopped");
         }
     }
 
@@ -2042,10 +2069,10 @@ impl TracesModalState {
                     .as_deref()
                     .is_some_and(|s| s.starts_with("fold: "))
                 {
-                    self.status = None;
+                    self.clear_status();
                 }
             }
-            Err(e) => self.status = Some(format!("fold: {e}")),
+            Err(e) => self.set_status(format!("fold: {e}")),
         }
     }
 
@@ -2066,7 +2093,7 @@ impl TracesModalState {
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.live_inflight = false;
                     self.live_worker = None;
-                    self.status = Some("fold: worker stopped".into());
+                    self.set_status("fold: worker stopped");
                 }
             }
         }
@@ -2418,7 +2445,7 @@ impl TracesModalState {
                 self.trail.clear();
                 self.open_session(s);
             }
-            None => self.status = Some(format!("cannot open {}", row.session_id)),
+            None => self.set_status(format!("cannot open {}", row.session_id)),
         }
     }
 
@@ -3057,6 +3084,14 @@ pub fn wants_esc(state: &TracesModalState) -> bool {
 }
 
 pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
+    let expired = state.expire_status();
+    match traces_key(state, key) {
+        InputOutcome::Unchanged if expired => InputOutcome::Changed,
+        other => other,
+    }
+}
+
+fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
     if key.kind == KeyEventKind::Release {
         return InputOutcome::Unchanged;
     }
@@ -3202,7 +3237,7 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
             }
         }
         Mode::Live => {
-            state.status = None;
+            state.clear_status();
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => state.live_move(1),
                 KeyCode::Char('k') | KeyCode::Up => state.live_move(-1),
@@ -5734,6 +5769,18 @@ mod tests {
         let rows = rows_at(&mut state, 26, SNAP_H);
         assert!(!row_with(&rows, "#2").trim().is_empty());
     }
+
+    #[test]
+    fn status_line_expires_after_four_seconds() {
+        let mut s = TracesModalState::open_with_hosts(None, vec![]);
+        s.set_status("indexed 3 changed files");
+        s.poll_live_at(0);
+        assert_eq!(s.status.as_deref(), Some("indexed 3 changed files"));
+        s.status_at = Some(Instant::now() - Duration::from_secs(5));
+        s.poll_live_at(0);
+        assert!(s.status.is_none());
+        assert!(s.status_at.is_none());
+    }
 }
 
 #[cfg(test)]
@@ -5778,7 +5825,7 @@ mod live_tests {
         let mut s = TracesModalState::open_with_hosts(None, vec![]);
         s.mode = Mode::Live;
         s.local_host = "sab-mini".into();
-        s.status = None;
+        s.clear_status();
         s
     }
 
@@ -5910,7 +5957,7 @@ mod live_tests {
         let mut s = TracesModalState::open_with_hosts(index, vec![]);
         s.mode = Mode::Live;
         s.local_host = "sab-mini".into();
-        s.status = None;
+        s.clear_status();
         s
     }
 
