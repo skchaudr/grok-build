@@ -18,3 +18,9 @@
   QW7 error-nav      4167985425493002352
   QW8 hint-honesty   1628328572980365257
   all 8 in Planning at fire+60s, none awaiting plan approval
+2026-10-27 03:10 QW dispatches (Cursor cloud, skchaudr/grok-build, same packets)
+  QW1 bc-05bb4135-801b-5430-a5d7-de5c857c5b93   QW5 bc-a8b97ce2-707e-5bce-9344-df8b41b2c1cc
+  QW2 bc-4f207d59-a2b5-5abd-bbd0-bfaf3196c655   QW6 bc-1edce0cb-a131-5d91-afcf-2a05d66ad524
+  QW3 bc-7640eb10-649a-54ab-9824-e82ab4ebec5e   QW7 bc-da2f3565-43db-5758-bbd8-2b1826a082df
+  QW4 bc-eb205aa1-74b0-5814-9219-095cc4108793   QW8 bc-0bb83035-ad55-5bd5-8c17-8bffe5e7fa2d
+  all 8 ACTIVE at fire+60s; key = keychain CURSOR_API_KEY (Basic auth, api.cursor.com/v1)
