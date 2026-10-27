@@ -40,6 +40,7 @@ fn cursor_transcripts_are_indexed_in_place() {
     assert_eq!(s.title, "fix the bug", "user_query wrapper is unwrapped for the title");
     assert_eq!((s.event_count, s.user_count, s.assistant_count, s.tool_count), (4, 1, 1, 1));
     assert_ne!(s.status, Status::Completed, "turn_ended ends a turn, not the session");
+    assert_eq!((s.context_tokens, s.context_window, s.input_tokens, s.output_tokens), (None, None, None, None), "no usage payload, no text-length stand-in");
 
     let events = idx.list_events(&s.id, &EventFilter::default()).unwrap();
     assert_eq!(events[0].role.as_deref(), Some("user"));
@@ -80,4 +81,43 @@ fn receipts_fall_back_to_native_id_or_stay_unkeyed() {
     let none = br#"{"hook_event_name":"stop"}"#;
     let id = ingest(&mut idx, &roots, extract("cursor", none)).unwrap();
     assert_eq!(key(&idx, id), (None, None));
+}
+
+/// Composer responses that carry usage: camelCase `inputTokens` already includes cache.
+const CURSOR_USAGE: &str = r#"{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nfix the bug\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Looking."},{"type":"tool_use","name":"Shell","input":{"command":"ls"}}],"usage":{"inputTokens":1000,"outputTokens":30,"cacheReadTokens":800,"cacheWriteTokens":50}}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Done."}],"usage":{"inputTokens":4200,"outputTokens":80,"cacheReadTokens":3000,"cacheWriteTokens":40},"contextTokenLimit":200000}}
+{"type":"turn_ended","status":"success"}
+"#;
+
+#[test]
+fn cursor_usage_payload_sets_context_tokens() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let file = home.join(".cursor/projects/w-proj/agent-transcripts/abc/abc.jsonl");
+    write(&file, CURSOR_USAGE);
+    let roots = default_roots(&home, &home.join(".grok"));
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/t.sqlite")).unwrap();
+    let report = idx.scan(&roots).unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+    let s = idx.list_sessions(&SessionFilter { source: Some("cursor".into()), ..Default::default() }).unwrap().remove(0);
+    assert_eq!(s.context_tokens, Some(4200), "latest prompt, cache not added again");
+    assert_eq!(s.context_window, Some(200_000));
+    assert_eq!((s.input_tokens, s.output_tokens), (Some(5200), Some(110)), "per-message counts accumulate");
+
+    let events = idx.list_events(&s.id, &EventFilter::default()).unwrap();
+    assert_eq!(events[1].input_tokens, Some(1000));
+    assert_eq!(events[2].input_tokens, Some(4200));
+    assert_eq!(events[0].input_tokens, None);
+
+    let c = rusqlite::Connection::open(idx.db_path()).unwrap();
+    let rows: Vec<(i64, Option<i64>, Option<i64>)> = c
+        .prepare("SELECT u.line_number, u.context_tokens, u.context_window FROM trace_event_usage u JOIN trace_sessions s ON s.sk = u.sk WHERE s.id = ?1 ORDER BY u.line_number")
+        .unwrap()
+        .query_map([&s.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(rows, vec![(1, Some(1000), None), (2, Some(4200), Some(200_000))]);
 }

@@ -99,9 +99,10 @@ pub struct NormalizedEvent {
     pub input_tokens: Option<f64>,
     pub output_tokens: Option<f64>,
     pub usage_is_total: bool,
-    /// What this message sent the model: Claude `input + cache_read + cache_creation`, Pi `input + cacheRead + cacheWrite`.
+    /// What this message sent the model: Claude `input + cache_read + cache_creation`, Pi `input + cacheRead + cacheWrite`,
+    /// Cursor `inputTokens` (cache already included).
     pub context_tokens: Option<i64>,
-    /// The model's window, when the harness records it (none of the current sources do).
+    /// The model's window, when the line records one (`contextTokenLimit`, `context_window`).
     pub context_window: Option<i64>,
     pub turn: Option<f64>,
     pub step: Option<f64>,
@@ -334,6 +335,11 @@ fn context_tokens(usage: &Map<String, Value>) -> Option<i64> {
     if usage.contains_key("input") {
         return sum(&["input", "cacheRead", "cacheWrite"]);
     }
+    // Cursor composer `usage` / `tokenCount`. `cacheReadTokens` / `cacheWriteTokens` (and the
+    // hook's `cache_read_tokens` / `cache_write_tokens`) are already inside the input figure.
+    if usage.contains_key("inputTokens") {
+        return sum(&["inputTokens"]);
+    }
     None
 }
 
@@ -461,14 +467,22 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
 
     const IN: [&str; 4] = ["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"];
     const OUT: [&str; 4] = ["output_tokens", "outputTokens", "completion_tokens", "completionTokens"];
-    let usage = usage_object(top).or_else(|| usage_object(payload)).unwrap_or(&EMPTY);
+    let usage = usage_object(top)
+        .or_else(|| usage_object(payload))
+        .or_else(|| crate::cursor::extra_usage(top, payload))
+        .unwrap_or(&EMPTY);
     let input_tokens = first_number(usage, &IN).or_else(|| find_number(value, &IN, 0));
     let output_tokens = first_number(usage, &OUT).or_else(|| find_number(value, &OUT, 0));
     let usage_is_total = lower.contains("token_count")
         || record(payload.get("info")).get("total_token_usage").is_some_and(Value::is_object)
         || top.get("total_token_usage").is_some_and(Value::is_object);
 
-    let context_tokens = if usage_is_total { None } else { context_tokens(usage) };
+    let context_tokens = if usage_is_total {
+        None
+    } else {
+        context_tokens(usage).or_else(|| crate::cursor::context_meter(top, payload))
+    };
+    let context_window = crate::cursor::context_window(top, payload, usage);
 
     let timestamp_ms = timestamp_ms(top.get("timestamp"))
         .or_else(|| timestamp_ms(top.get("time")))
@@ -559,7 +573,7 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         output_tokens,
         usage_is_total,
         context_tokens,
-        context_window: None,
+        context_window,
         turn,
         step,
         depth,
@@ -634,6 +648,32 @@ mod tests {
                 "usage": {"input": 5, "output": 2, "cacheRead": 100, "cacheWrite": 20, "totalTokens": 127}}
         }));
         assert_eq!(pi.context_tokens, Some(125));
+        let cursor = normalize(&json!({
+            "role": "assistant",
+            "message": {"content": [{"type": "text", "text": "ok"}],
+                "usage": {"inputTokens": 4200, "outputTokens": 80, "cacheReadTokens": 3000, "cacheWriteTokens": 40},
+                "contextTokenLimit": 200000}
+        }));
+        assert_eq!((cursor.input_tokens, cursor.output_tokens), (Some(4200.0), Some(80.0)));
+        assert_eq!((cursor.context_tokens, cursor.context_window), (Some(4200), Some(200_000)), "cache is already inside inputTokens");
+        let hook = normalize(&json!({
+            "type": "turn_ended", "status": "success",
+            "input_tokens": 5000, "output_tokens": 90, "cache_read_tokens": 4000, "cache_write_tokens": 100,
+            "context_window": 256000
+        }));
+        assert_eq!((hook.context_tokens, hook.context_window, hook.usage_is_total), (Some(5000), Some(256_000), false));
+        let meter = normalize(&json!({
+            "role": "assistant",
+            "message": {"content": [{"type": "text", "text": "ok"}]},
+            "promptTokenBreakdown": {"totalUsedTokens": 96716},
+            "contextTokenLimit": 256000
+        }));
+        assert_eq!((meter.context_tokens, meter.context_window, meter.input_tokens), (Some(96_716), Some(256_000), None), "the meter is context, not a billed input");
+        let counted = normalize(&json!({
+            "role": "assistant",
+            "message": {"content": [{"type": "text", "text": "ok"}], "tokenCount": {"inputTokens": 10, "outputTokens": 4}}
+        }));
+        assert_eq!((counted.context_tokens, counted.input_tokens, counted.output_tokens), (Some(10), Some(10.0), Some(4.0)));
         let codex = normalize(&json!({
             "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 500, "output_tokens": 50}}}
         }));
