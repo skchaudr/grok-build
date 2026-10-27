@@ -17,13 +17,12 @@ use crate::normalize::{Kind, NormalizedEvent, Role, normalize};
 /// Event types that carry no session content: streaming deltas, `item/started`
 /// (the `item/completed` row has the same item plus `durationMs`), provider
 /// noise and bookkeeping. Deltas are matched by `LIKE '%delta'`.
-const SKIPPED_TYPES: [&str; 8] = [
+const SKIPPED_TYPES: [&str; 7] = [
     "provider/unhandled",
     "item/started",
     "provider.env-resolved",
     "system/thread-provisioning",
     "thread/extensionState/updated",
-    "thread/contextWindowUsage/updated",
     "client/thread/start",
     "turn/input/accepted",
 ];
@@ -131,12 +130,13 @@ impl Bb {
     pub fn events(&self, thread_id: &str, after: i64, limit: usize) -> Result<Vec<BbEvent>> {
         let skipped = SKIPPED_TYPES.iter().map(|t| format!("'{t}'")).collect::<Vec<_>>().join(",");
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT id, sequence, type, item_kind, created_at, data FROM events
+            "SELECT id, sequence, type, item_kind, created_at, data, parent_tool_call_id FROM events
              WHERE thread_id = ?1 AND sequence > ?2 AND type NOT IN ({skipped}) AND type NOT LIKE '%delta'
              ORDER BY sequence LIMIT ?3"
         ))?;
         let rows = stmt.query_map(params![thread_id, after, limit as i64], |r| {
             let data: String = r.get(5)?;
+            let parent: Option<String> = r.get(6)?;
             Ok(BbEvent {
                 thread_id: thread_id.to_string(),
                 row_id: r.get(0)?,
@@ -146,6 +146,7 @@ impl Bb {
                     r.get::<_, Option<String>>(3)?.as_deref(),
                     r.get(4)?,
                     &serde_json::from_str(&data).unwrap_or(Value::Null),
+                    parent.as_deref(),
                 ),
             })
         })?;
@@ -184,6 +185,14 @@ fn flat_text(v: &Value) -> String {
         Value::Object(m) => m.get("text").map(flat_text).unwrap_or_default(),
         _ => String::new(),
     }
+}
+
+/// A positive token count. Zero, null, and non-numbers are no sample, so they do not
+/// replace an earlier one (`Aggregate` keeps the last `Some`).
+fn json_positive(obj: Option<&Value>, key: &str) -> Option<i64> {
+    let n = obj?.get(key)?;
+    let n = n.as_i64().or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok())).or_else(|| n.as_f64().map(|f| f.round() as i64))?;
+    (n > 0).then_some(n)
 }
 
 fn non_empty(v: Option<&Value>) -> bool {
@@ -232,7 +241,10 @@ fn tool_name<'a>(kind: &'a str, item: &'a Value) -> &'a str {
 /// One bb event row → the shared [`NormalizedEvent`]. `item/completed` rows are
 /// typed `item/<kind>` so the "last event is terminal" status check does not
 /// mistake a finished tool call for a finished turn.
-pub fn map_event(ty: &str, item_kind: Option<&str>, created_at: i64, data: &Value) -> NormalizedEvent {
+///
+/// `parent_tool_call_id` is the events column. A context-window sample inside a
+/// nested turn belongs to that turn, not the thread's context pressure.
+pub fn map_event(ty: &str, item_kind: Option<&str>, created_at: i64, data: &Value, parent_tool_call_id: Option<&str>) -> NormalizedEvent {
     let item = data.get("item").unwrap_or(&Value::Null);
     let kind = item_kind.unwrap_or("");
     let event_type = match (ty, item_kind) {
@@ -257,7 +269,7 @@ pub fn map_event(ty: &str, item_kind: Option<&str>, created_at: i64, data: &Valu
         ("item/completed", "agentMessage") => (Kind::Message, Some(Role::Assistant), 0, "Assistant"),
         ("item/completed", "reasoning") => (Kind::Reasoning, Some(Role::Reasoning), 1, "Reasoning"),
         ("item/completed", k) if TOOL_KINDS.contains(&k) => (Kind::Tool, Some(Role::Tool), 1, name.as_str()),
-        ("thread/tokenUsage/updated", _) => (Kind::Telemetry, None, 0, ""),
+        ("thread/tokenUsage/updated" | "thread/contextWindowUsage/updated", _) => (Kind::Telemetry, None, 0, ""),
         (t, _) if t.starts_with("turn/") => (Kind::Turn, None, 0, ""),
         _ => (Kind::System, None, 0, ""),
     };
@@ -274,6 +286,13 @@ pub fn map_event(ty: &str, item_kind: Option<&str>, created_at: i64, data: &Valu
         e.input_tokens = num("inputTokens");
         e.output_tokens = num("outputTokens");
         e.usage_is_total = true;
+    }
+    // `tokenUsage.total` is a running total, not a prompt size. Context pressure is the
+    // root turn's `contextWindowUsage` sample: `usedTokens` / `modelContextWindow`.
+    if ty == "thread/contextWindowUsage/updated" && parent_tool_call_id.unwrap_or("").is_empty() {
+        let usage = data.get("contextWindowUsage");
+        e.context_tokens = json_positive(usage, "usedTokens");
+        e.context_window = json_positive(usage, "modelContextWindow");
     }
     if ty == "client/turn/requested" {
         e.model = data.pointer("/execution/model").and_then(Value::as_str).map(str::to_string);
@@ -375,6 +394,7 @@ mod tests {
         assert_eq!((e(4).title.as_str(), e(4).is_error()), ("read_file", true));
         assert!(!e(3).is_error());
         assert_eq!((e(5).kind, e(5).usage_is_total, e(5).input_tokens, e(5).output_tokens), (Kind::Telemetry, true, Some(500.0), Some(50.0)));
+        assert_eq!((e(5).context_tokens, e(5).context_window), (None, None), "a running total is not a context size");
         assert!(e(7).is_error(), "provider/error");
         assert_eq!(e(8).event_type, "turn/completed");
         assert!(!e(8).is_error());
@@ -388,6 +408,36 @@ mod tests {
         assert_eq!(bb.events("thr_a", 9, 100).unwrap().iter().map(|e| e.sequence).collect::<Vec<_>>(), [10, 11, 12]);
         assert_eq!(bb.events("thr_a", 0, 2).unwrap().len(), 2);
         assert!(bb.events("thr_b", 0, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn context_window_usage_is_the_root_turn_sample() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("bb.db");
+        fixture(&db);
+        let c = Connection::open(&db).unwrap();
+        let rows: [(i64, Option<&str>, &str); 4] = [
+            (13, None, r#"{"contextWindowUsage":{"usedTokens":1000,"modelContextWindow":200000,"estimated":false}}"#),
+            (14, Some("call-sub"), r#"{"contextWindowUsage":{"usedTokens":15,"modelContextWindow":999999,"estimated":true}}"#),
+            (15, None, r#"{"contextWindowUsage":{"usedTokens":90000,"modelContextWindow":null,"estimated":false}}"#),
+            (16, None, r#"{"contextWindowUsage":{"usedTokens":0,"modelContextWindow":0}}"#),
+        ];
+        for (seq, parent, data) in rows {
+            c.execute(
+                "INSERT INTO events (id, thread_id, sequence, type, parent_tool_call_id, data, created_at) VALUES (?1,'thr_a',?2,'thread/contextWindowUsage/updated',?3,?4,?5)",
+                params![format!("evt_{seq}"), seq, parent, data, 1_790_000_000_000_i64 + seq * 1000],
+            )
+            .unwrap();
+        }
+        let events = Bb::open(&db).unwrap().events("thr_a", 12, 10).unwrap();
+        let ctx = |i: usize| (events[i].event.context_tokens, events[i].event.context_window);
+        assert_eq!(events.len(), 4);
+        assert_eq!(ctx(0), (Some(1000), Some(200_000)));
+        assert_eq!(ctx(1), (None, None), "a nested turn does not report the thread's context");
+        assert_eq!(ctx(2), (Some(90_000), None), "a null window is no window, not a zero");
+        assert_eq!(ctx(3), (None, None), "zero is not a context size");
+        assert!(events.iter().all(|e| e.event.kind == Kind::Telemetry && e.event.noise));
+        assert!(events.iter().all(|e| e.event.input_tokens.is_none() && !e.event.usage_is_total));
     }
 
     #[test]

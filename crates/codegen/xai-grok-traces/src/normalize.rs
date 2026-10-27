@@ -103,7 +103,8 @@ pub struct NormalizedEvent {
     /// DSH `inputTokens + cacheReadTokens + cacheWriteTokens`, Cursor `inputTokens` (cache already included).
     pub context_tokens: Option<i64>,
     /// The model's window, when the harness records it. DSH writes `request/context.data.contextWindow`;
-    /// Cursor lines carry `contextTokenLimit` / `context_window`.
+    /// Cursor lines carry `contextTokenLimit` / `context_window`; bb `thread/contextWindowUsage/updated`
+    /// carries `modelContextWindow`.
     pub context_window: Option<i64>,
     pub turn: Option<f64>,
     pub step: Option<f64>,
