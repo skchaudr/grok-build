@@ -1116,7 +1116,7 @@ impl TracesModalState {
         let errors: Vec<usize> = (0..self.events.len()).filter(|&i| self.event_failed(i)).collect();
         let n = errors.len();
         if n == 0 {
-            self.status = Some("no errors".to_string());
+            self.set_status("no errors".to_string());
             return;
         }
         let cur = self.selected_event();
@@ -1129,7 +1129,7 @@ impl TracesModalState {
         };
         let Some(&i) = errors.get(at) else { return };
         self.focus_event(i);
-        self.status = Some(format!("error {}/{n}", at + 1));
+        self.set_status(format!("error {}/{n}", at + 1));
     }
 
     /// Reveals event `i` (expanding collapsed ancestors) and selects that outline row by key.
