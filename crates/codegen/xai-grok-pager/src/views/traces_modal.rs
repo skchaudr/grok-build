@@ -3872,6 +3872,15 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
     if let Some(p) = &state.parent_name {
         segs.push((format!("↑ {p}"), Style::default().fg(theme.accent_user)));
     }
+    // A full page with more events on the session is a silent cap. A filter hides rows on purpose,
+    // and a remote fetch still in flight has not settled on this page.
+    if state.events.len() >= EVENT_PAGE
+        && session.event_count > state.events.len() as i64
+        && !state.filtering()
+        && !(session.host.is_some() && state.remote_loading)
+    {
+        segs.push((format!("showing {}/{}", state.events.len(), session.event_count), Style::default().fg(theme.accent_user)));
+    }
     let mut x = area.x;
     let right = area.x + area.width;
     for (i, (text, style)) in segs.iter().enumerate() {
@@ -4894,6 +4903,39 @@ mod tests {
         state.mode = Mode::Trajectory;
         state.install_trajectory(rows, None, vec![]);
         state
+    }
+
+    /// Bookkeeping rows: not user turns, so the outline stays one synthetic turn.
+    fn synthetic_events(n: usize) -> Vec<EventRow> {
+        (1..=n).map(|i| ev(i as i64, "note", "system", "synthetic")).collect()
+    }
+
+    /// The trajectory meta line (status, age, counts), wide enough that a notice is not cut off.
+    fn meta_line(state: &mut TracesModalState) -> String {
+        rows_at(state, 160, 12).get(1).cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn meta_line_names_a_truncated_event_page() {
+        let mut state = trajectory(synthetic_events(EVENT_PAGE));
+        state.session.as_mut().unwrap().event_count = 6000;
+        let meta = meta_line(&mut state);
+        assert!(meta.contains("showing 5000/6000"), "{meta}");
+
+        state.session.as_mut().unwrap().event_count = 5000;
+        let meta = meta_line(&mut state);
+        assert!(!meta.contains("showing"), "{meta}");
+
+        state.session.as_mut().unwrap().event_count = 6000;
+        state.event_query = "synthetic".into();
+        let meta = meta_line(&mut state);
+        assert!(!meta.contains("showing"), "{meta}");
+
+        state.event_query.clear();
+        state.session.as_mut().unwrap().host = Some("box".into());
+        state.remote_loading = true;
+        let meta = meta_line(&mut state);
+        assert!(!meta.contains("showing"), "remote fetch still in flight: {meta}");
     }
 
     /// A user prompt, three Bash calls with their results (lines 2, 4, 6), and a reply.
