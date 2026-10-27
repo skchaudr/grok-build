@@ -2,6 +2,7 @@
 // Spec: docs/pi-lane/SPEC.md. Run it with `/step <path-to-step.md>` (.pi/prompts/step.md).
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   action,
@@ -121,12 +122,14 @@ export default defineWorkflow<LaneInput>({
         const builderKey = header("Builder") ?? "worker";
         const b = BUILDERS[builderKey];
         if (!b) throw new Error(`Builder must be one of ${Object.keys(BUILDERS).join(", ")}`);
-        // Trailer model: lane-worker's model (project settings override first, then frontmatter); external CLIs use their own default.
+        // Trailer model: lane-worker's effective model (project settings override, then user, then frontmatter); external CLIs use their own default.
         let model = "default";
         if (builderKey === "worker") {
-          const settings = existsSync(".pi/settings.json") ? JSON.parse(readFileSync(".pi/settings.json", "utf8")) : {};
+          const override = (file: string): string | undefined =>
+            existsSync(file) ? JSON.parse(readFileSync(file, "utf8"))?.subagents?.agentOverrides?.["lane-worker"]?.model : undefined;
           model =
-            settings?.subagents?.agentOverrides?.["lane-worker"]?.model ??
+            override(".pi/settings.json") ??
+            override(path.join(homedir(), ".pi/agent/settings.json")) ??
             readFileSync(".pi/agents/lane-worker.md", "utf8").match(/^model:[ \t]*(\S+)/m)?.[1] ??
             "default";
         }
