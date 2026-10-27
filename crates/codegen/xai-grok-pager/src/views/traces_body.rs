@@ -10,6 +10,8 @@ pub(crate) fn pretty(raw: Result<Option<String>, String>) -> String {
 }
 
 /// String values under these keys are body text, in any harness format.
-pub(crate) const TEXT_KEYS: [&str; 6] = ["text", "thinking", "output", "result", "stdout", "stderr"];
-/// Tool inputs under these keys render as JSON (or as the string, when it already is one).
+pub(crate) const TEXT_KEYS: [&str; 9] = [
+    "text", "thinking", "output", "result", "stdout", "stderr", "command", "cmd", "script",
+];
+/// Tool inputs under these keys are walked for text. A string value is body text as-is.
 pub(crate) const INPUT_KEYS: [&str; 4] = ["input", "arguments", "args", "params"];
