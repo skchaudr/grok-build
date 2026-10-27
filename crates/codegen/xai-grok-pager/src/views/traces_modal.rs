@@ -25,6 +25,8 @@ use crate::views::modal_window::{self, ModalContentArea, ModalSizing, ModalWindo
 use crate::views::traces_fold::{FoldNode, FoldState, FoldTree};
 use crate::views::traces_outline::{self, OutlineItem, OutlineKey, PROMPT_LEAD};
 
+pub(super) use super::traces_body::{pretty, INPUT_KEYS, TEXT_KEYS};
+
 pub const TITLE: &str = "Traces";
 const PAGE: usize = 500;
 const EVENT_PAGE: usize = 5000;
@@ -2844,22 +2846,6 @@ fn row_gaps(state: &TracesModalState, heights: &[usize], list_height: usize) -> 
     }
     gaps
 }
-
-fn pretty(raw: Result<Option<String>, String>) -> String {
-    match raw {
-        Ok(Some(line)) if !line.is_empty() => serde_json::from_str::<serde_json::Value>(&line)
-            .ok()
-            .and_then(|v| serde_json::to_string_pretty(&v).ok())
-            .unwrap_or(line),
-        Ok(_) => "(line no longer in the source file)".to_string(),
-        Err(e) => format!("(could not read source: {e})"),
-    }
-}
-
-/// String values under these keys are body text, in any harness format.
-const TEXT_KEYS: [&str; 6] = ["text", "thinking", "output", "result", "stdout", "stderr"];
-/// Tool inputs under these keys render as JSON (or as the string, when it already is one).
-const INPUT_KEYS: [&str; 4] = ["input", "arguments", "args", "params"];
 
 /// The human text of one raw trajectory line: message text, thinking, tool inputs and tool output, in
 /// order, found by key across Claude, Codex and Pi shapes. Falls back to `pretty()` when none is found.
