@@ -162,7 +162,10 @@ pub fn discover(root: &Root, max_files: usize) -> Discovery {
             d.complete = false;
             continue;
         };
-        for entry in entries.flatten() {
+        // Name order, not readdir order: a cap then keeps the same files on every machine.
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        for entry in entries {
             let Ok(ft) = entry.file_type() else { continue };
             let name = entry.file_name();
             let name = name.to_string_lossy();

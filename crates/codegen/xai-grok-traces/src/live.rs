@@ -49,7 +49,47 @@ fn proc_info(pid: i64) -> Option<(i64, String, i64, bool)> {
     Some((i64::from(info.pbi_ppid), comm, i64::try_from(info.pbi_start_tvsec).ok()?, info.pbi_status == libc::SZOMB))
 }
 
-#[cfg(not(target_os = "macos"))]
+/// `(comm, state, ppid, starttime ticks)` from a `/proc/<pid>/stat` line. `comm` may contain spaces and
+/// parentheses; the last `)` closes it. `starttime` is field 22 (clock ticks since boot).
+#[cfg(target_os = "linux")]
+fn parse_proc_stat(stat: &str) -> Option<(String, char, i64, u64)> {
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+    let comm = stat[open + 1..close].to_string();
+    let mut fields = stat[close + 1..].split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let ppid: i64 = fields.next()?.parse().ok()?;
+    // state and ppid are fields 3 and 4; starttime is field 22, seventeen tokens further on.
+    let ticks: u64 = fields.nth(17)?.parse().ok()?;
+    Some((comm, state, ppid, ticks))
+}
+
+/// Unix seconds of `starttime` ticks, from `/proc/stat` `btime` and `CLK_TCK`.
+#[cfg(target_os = "linux")]
+fn ticks_to_unix(ticks: u64) -> Option<i64> {
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if hz <= 0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let btime = stat.lines().find_map(|l| l.strip_prefix("btime ")?.trim().parse::<i64>().ok())?;
+    Some(btime + (ticks / hz as u64) as i64)
+}
+
+#[cfg(target_os = "linux")]
+fn proc_info(pid: i64) -> Option<(i64, String, i64, bool)> {
+    let pid32 = i32::try_from(pid).ok().filter(|p| *p > 0)?;
+    let stat = std::fs::read_to_string(format!("/proc/{pid32}/stat")).ok()?;
+    let (comm, state, ppid, ticks) = parse_proc_stat(&stat)?;
+    let start = ticks_to_unix(ticks)?;
+    let comm = std::fs::read_to_string(format!("/proc/{pid32}/comm")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or(comm);
+    Some((ppid, comm, start, state == 'Z'))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn proc_info(_pid: i64) -> Option<(i64, String, i64, bool)> {
     None
 }
@@ -975,7 +1015,7 @@ mod tests {
     fn alive_checks_pid_and_start() {
         let me = i64::from(std::process::id());
         let start = proc_start(me);
-        if cfg!(target_os = "macos") {
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
             let start = start.expect("own start");
             assert!(alive(me, start));
             assert!(!alive(me, start + 1000), "start mismatch = reused pid");
@@ -983,6 +1023,14 @@ mod tests {
         assert!(!alive(0, 0));
         assert!(!alive(-5, 0));
         assert!(!alive(i64::from(i32::MAX), 1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_stat_starttime_is_field_22_past_a_spaced_comm() {
+        let line = "1 (my proc) S 0 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 77362 1";
+        assert_eq!(parse_proc_stat(line), Some(("my proc".into(), 'S', 0, 77362)));
+        assert_eq!(parse_proc_stat("no-paren"), None);
     }
 
     #[cfg(target_os = "macos")]
