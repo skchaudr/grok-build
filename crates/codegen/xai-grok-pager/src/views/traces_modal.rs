@@ -3527,7 +3527,17 @@ fn keep_visible(sel: usize, scroll: &mut usize, height: usize) {
     }
 }
 
-fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
+/// Footer width the shortcut bar actually gets, matching `modal_window`'s frame math.
+fn footer_hint_width(area: Rect, sizing: &ModalSizing) -> u16 {
+    let max_width = area.width.saturating_sub(4).min(sizing.max_width);
+    let preferred = (area.width as f32 * sizing.width_pct) as u16;
+    let modal_width = preferred.min(max_width).max(sizing.min_width).min(area.width);
+    modal_width.saturating_sub(2).saturating_sub(sizing.h_pad * 2)
+}
+
+/// Hints for keys that do something in `state`. `width` is the footer in columns;
+/// past two lines, drop `E`, `</>`, `n`, then `x` until the bar fits.
+fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
     let plain = |label: &'static str| Shortcut { label, clickable: false, id: 0 };
     if state.typing == Typing::Live {
         return vec![plain("type to filter"), plain("Enter keep"), plain("Esc clear")];
@@ -3535,61 +3545,87 @@ fn shortcuts(state: &TracesModalState) -> Vec<Shortcut<'static>> {
     if state.typing != Typing::No {
         return vec![plain("type to filter"), plain("Enter search events"), plain("Esc clear")];
     }
-    match state.mode {
-        Mode::List => vec![
-            plain("j/k move"),
-            plain("Tab source"),
-            plain("/ search"),
-            plain("a all"),
-            plain("A active"),
-            plain("x errors"),
-            plain("H host"),
-            plain("s sort"),
-            plain("Enter open"),
-            plain("e toggle"),
-            plain("E all"),
-            plain("</> more/less"),
-            plain("h/l fold"),
-            plain("r resume"),
-            plain("R rescan"),
-            plain("L live"),
-            plain("Esc close"),
-        ],
-        Mode::Trajectory => vec![
-            plain("j/k move"),
-            plain("h/l fold"),
-            plain("Enter inspect/open agent"),
-            plain("e fold"),
-            plain("E all"),
-            plain("</> more/less"),
-            plain("n noise"),
-            plain("x errors"),
-            plain("!/* errors"),
-            plain("t tool"),
-            plain("/ search"),
-            plain("r resume"),
-            plain("Esc back"),
-        ],
+    let resume = |row: Option<&SessionRow>| row.is_some_and(|row| resume_target(row).is_some());
+    let mut hints = match state.mode {
+        Mode::List => {
+            let mut v = vec![
+                plain("j/k move"),
+                plain("g/G ends"),
+                plain("Tab source"),
+                plain("/ search"),
+                plain("a all"),
+                plain("A active"),
+                plain("x errors"),
+            ];
+            if !state.hosts.is_empty() {
+                v.push(plain("H host"));
+            }
+            v.extend([
+                plain("s sort"),
+                plain("Enter open"),
+                plain("e toggle"),
+                plain("E all"),
+                plain("</> more/less"),
+                plain("h/l fold"),
+            ]);
+            if resume(state.selected_session()) {
+                v.push(plain("r resume"));
+            }
+            v.extend([plain("R rescan"), plain("L live"), plain("Esc close")]);
+            v
+        }
+        Mode::Trajectory => {
+            let mut v = vec![
+                plain("j/k move"),
+                plain("g/G ends"),
+                plain("h/l fold"),
+                plain("Enter inspect/open agent"),
+                plain("e fold"),
+                plain("E all"),
+                plain("</> more/less"),
+                plain("n noise"),
+                plain("x errors"),
+                plain("!/* errors"),
+                plain("t tool"),
+                plain("/ search"),
+                plain("y copy"),
+            ];
+            if resume(state.session.as_ref()) {
+                v.push(plain("r resume"));
+            }
+            v.push(plain("Esc back"));
+            v
+        }
         Mode::Live => vec![
             plain("j/k move"),
             plain("Enter open"),
+            plain("o open"),
             plain("h/l fold"),
+            plain("c fold"),
             plain("/ search"),
             plain("Esc back"),
         ],
         Mode::Inspector => vec![plain("j/k scroll"), plain("y copy line"), plain("Esc back")],
+    };
+    for label in ["E all", "</> more/less", "n noise", "x errors"] {
+        if modal_window::shortcuts_rows_needed(&hints, width) <= 2 {
+            break;
+        }
+        hints.retain(|hint| hint.label != label);
     }
+    hints
 }
 
 pub fn render_traces_modal(buf: &mut Buffer, full_area: Rect, state: &mut TracesModalState, compact: bool) {
     let theme = Theme::current();
-    let shortcuts = shortcuts(state);
+    let sizing = ModalSizing { width_pct: 1.0, max_width: u16::MAX, min_width: 44, v_margin: 0, h_pad: 2, v_pad: 0, footer_lines: 2 }
+        .with_compact(compact);
+    let shortcuts = shortcuts(state, footer_hint_width(full_area, &sizing));
     let config = ModalWindowConfig {
         title: TITLE,
         tabs: None,
         shortcuts: &shortcuts,
-        sizing: ModalSizing { width_pct: 1.0, max_width: u16::MAX, min_width: 44, v_margin: 0, h_pad: 2, v_pad: 0, footer_lines: 2 }
-            .with_compact(compact),
+        sizing,
         fold_info: None,
     };
     let Some(ModalContentArea { content, .. }) = modal_window::render_modal_window(buf, full_area, &mut state.window, &config, &theme)
@@ -4497,6 +4533,135 @@ mod tests {
         assert_eq!(resume_target(&row("dsh", "/h/.dsh/sessions/a/b/session.v2.jsonl.zstd")), None);
         assert_eq!(resume_target(&row("bb", "/h/.bb/bb.db#thr_x")), None);
         assert_eq!(source_label("bb"), "bb");
+    }
+
+    fn hint_labels(state: &TracesModalState, width: u16) -> Vec<&'static str> {
+        shortcuts(state, width).iter().map(|sc| sc.label).collect()
+    }
+
+    fn list_state(source: &str, path: &str, hosts: Vec<String>) -> TracesModalState {
+        let mut state = TracesModalState::open_with_hosts(None, hosts);
+        state.mode = Mode::List;
+        if !source.is_empty() {
+            state.sessions = vec![row(source, path)];
+            state.rebuild_ledger();
+        }
+        state
+    }
+
+    /// Synthetic paths only. Claude and grok resolve a resume target; pi and dsh do not.
+    const CLAUDE_PATH: &str = "/h/.claude/projects/-w/3a680ac6-2551-4c67-88d3-a18d8b3bbe73.jsonl";
+    const GROK_PATH: &str = "/h/.grok/sessions/%2Fw/01a10b35-4b73-7903-a589-181aba7b40f5/chat_history.jsonl";
+    const PI_PATH: &str = "/h/.pi/sessions/synthetic-pi.jsonl";
+    const DSH_PATH: &str = "/h/.dsh/sessions/a/b/session.v2.jsonl.zstd";
+
+    #[test]
+    fn hint_bar_lists_only_keys_that_work() {
+        let has = |state: &TracesModalState, label: &'static str| hint_labels(state, u16::MAX).contains(&label);
+
+        let empty = list_state("", "", vec![]);
+        assert!(!has(&empty, "H host"), "no hosts configured");
+        assert!(!has(&empty, "r resume"), "nothing selected");
+        assert!(has(&empty, "g/G ends"));
+
+        let hosts_only = list_state("", "", vec!["user@synthetic".into()]);
+        assert!(has(&hosts_only, "H host"));
+        assert!(!has(&hosts_only, "r resume"));
+
+        let pi = list_state("pi", PI_PATH, vec!["user@synthetic".into()]);
+        assert!(has(&pi, "H host"));
+        assert!(!has(&pi, "r resume"), "pi has no resume target");
+        assert!(has(&pi, "g/G ends"));
+
+        let claude = list_state("claude", CLAUDE_PATH, vec![]);
+        assert!(!has(&claude, "H host"));
+        assert!(has(&claude, "r resume"));
+
+        let claude_hosts = list_state("claude", CLAUDE_PATH, vec!["user@synthetic".into()]);
+        assert!(has(&claude_hosts, "H host"));
+        assert!(has(&claude_hosts, "r resume"));
+        assert!(has(&claude_hosts, "g/G ends"));
+
+        let mut dsh = TracesModalState::open_with_hosts(None, vec![]);
+        dsh.mode = Mode::Trajectory;
+        dsh.session = Some(row("dsh", DSH_PATH));
+        assert!(!has(&dsh, "r resume"), "dsh has no resume target");
+        assert!(has(&dsh, "g/G ends"));
+
+        let mut grok = TracesModalState::open_with_hosts(None, vec![]);
+        grok.mode = Mode::Trajectory;
+        grok.session = Some(row("grok", GROK_PATH));
+        assert!(has(&grok, "r resume"));
+        assert!(has(&grok, "g/G ends"));
+
+        let prompt = trajectory(vec![ev(1, "message", "user", "synthetic prompt")]);
+        assert!(prompt.turn_prompt_text().is_some(), "y copies only from a prompt row");
+        assert!(has(&prompt, "y copy"));
+
+        let mut live = TracesModalState::open_with_hosts(None, vec![]);
+        live.mode = Mode::Live;
+        live.set_live(
+            vec![
+                LiveRow {
+                    session_id: "root".into(),
+                    source: "claude".into(),
+                    title: "parent".into(),
+                    state: LiveState::Working,
+                    text: "synthetic".into(),
+                    age_ms: 1_000,
+                    ..Default::default()
+                },
+                LiveRow {
+                    session_id: "kid".into(),
+                    parent_id: Some("root".into()),
+                    source: "claude".into(),
+                    title: "child".into(),
+                    label: Some("child".into()),
+                    state: LiveState::Working,
+                    text: "synthetic".into(),
+                    age_ms: 500,
+                    ..Default::default()
+                },
+            ],
+            vec![],
+        );
+        live.live_sel = Some("root".into());
+        let folded = handle_traces_key(&mut live, &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(matches!(folded, InputOutcome::Changed), "c folds the open root");
+        live.live_sel = Some("root".into());
+        assert!(has(&live, "c fold"));
+        assert!(has(&live, "o open"));
+        assert!(!has(&live, "q back"), "q stays unlisted");
+    }
+
+    #[test]
+    fn hint_bar_drops_overflow_keys_in_order() {
+        let mut state = tree_state(&[("r", None), ("c", Some("r"))]);
+        state.hosts = vec!["user@synthetic".into()];
+        let wide = hint_labels(&state, 400);
+        assert!(wide.contains(&"E all") && wide.contains(&"</> more/less") && wide.contains(&"x errors"));
+        assert!(modal_window::shortcuts_rows_needed(&shortcuts(&state, 400), 400) <= 2);
+
+        let mid = hint_labels(&state, 110);
+        assert!(!mid.contains(&"E all"), "E drops first");
+        assert!(mid.contains(&"</> more/less"));
+        assert!(mid.contains(&"x errors"));
+        assert!(mid.contains(&"H host") && mid.contains(&"r resume") && mid.contains(&"g/G ends"));
+        assert!(modal_window::shortcuts_rows_needed(&shortcuts(&state, 110), 110) <= 2);
+
+        let tight = hint_labels(&state, 100);
+        assert!(!tight.contains(&"E all") && !tight.contains(&"</> more/less"));
+        assert!(tight.contains(&"x errors"), "x drops after E and </>");
+        assert!(modal_window::shortcuts_rows_needed(&shortcuts(&state, 100), 100) <= 2);
+
+        let mut grok = TracesModalState::open_with_hosts(None, vec![]);
+        grok.mode = Mode::Trajectory;
+        grok.session = Some(row("grok", GROK_PATH));
+        let traj = hint_labels(&grok, 90);
+        assert!(!traj.contains(&"E all") && !traj.contains(&"</> more/less"));
+        assert!(traj.contains(&"n noise"), "n drops after </>");
+        assert!(traj.contains(&"g/G ends") && traj.contains(&"r resume"));
+        assert!(modal_window::shortcuts_rows_needed(&shortcuts(&grok, 90), 90) <= 2);
     }
 
     fn line(ts: &str, text: &str) -> String {
@@ -7095,53 +7260,12 @@ mod live_tests {
     #[test]
     fn shortcut_labels_name_hjkl_fold() {
         let mut s = state();
-        s.mode = Mode::List;
-        assert_eq!(
-            shortcuts(&s).iter().map(|sc| sc.label).collect::<Vec<_>>(),
-            [
-                "j/k move",
-                "Tab source",
-                "/ search",
-                "a all",
-                "A active",
-                "x errors",
-                "H host",
-                "s sort",
-                "Enter open",
-                "e toggle",
-                "E all",
-                "</> more/less",
-                "h/l fold",
-                "r resume",
-                "R rescan",
-                "L live",
-                "Esc close",
-            ]
-        );
-        s.mode = Mode::Trajectory;
-        assert_eq!(
-            shortcuts(&s).iter().map(|sc| sc.label).collect::<Vec<_>>(),
-            [
-                "j/k move",
-                "h/l fold",
-                "Enter inspect/open agent",
-                "e fold",
-                "E all",
-                "</> more/less",
-                "n noise",
-                "x errors",
-                "!/* errors",
-                "t tool",
-                "/ search",
-                "r resume",
-                "Esc back",
-            ]
-        );
-        s.mode = Mode::Live;
-        assert_eq!(
-            shortcuts(&s).iter().map(|sc| sc.label).collect::<Vec<_>>(),
-            ["j/k move", "Enter open", "h/l fold", "/ search", "Esc back"]
-        );
+        s.set_live(family(), vec![]);
+        s.live_sel = Some("r".into());
+        let labels: Vec<_> = shortcuts(&s, u16::MAX).iter().map(|sc| sc.label).collect();
+        assert!(labels.contains(&"h/l fold"), "{labels:?}");
+        assert!(labels.contains(&"c fold") && labels.contains(&"o open"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label.starts_with('q')), "q stays unlisted: {labels:?}");
     }
 
     #[test]
