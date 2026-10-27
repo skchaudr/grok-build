@@ -100,9 +100,10 @@ pub struct NormalizedEvent {
     pub output_tokens: Option<f64>,
     pub usage_is_total: bool,
     /// What this message sent the model: Claude `input + cache_read + cache_creation`, Pi `input + cacheRead + cacheWrite`,
-    /// DSH `inputTokens + cacheReadTokens + cacheWriteTokens`.
+    /// DSH `inputTokens + cacheReadTokens + cacheWriteTokens`, Cursor `inputTokens` (cache already included).
     pub context_tokens: Option<i64>,
-    /// The model's window, when the harness records it. DSH writes `request/context.data.contextWindow`.
+    /// The model's window, when the harness records it. DSH writes `request/context.data.contextWindow`;
+    /// Cursor lines carry `contextTokenLimit` / `context_window`.
     pub context_window: Option<i64>,
     pub turn: Option<f64>,
     pub step: Option<f64>,
@@ -323,7 +324,7 @@ fn usage_object(v: &Map<String, Value>) -> Option<&Map<String, Value>> {
 }
 
 /// Size of the prompt behind one assistant message; per-message usage only, never a running total.
-fn context_tokens(usage: &Map<String, Value>) -> Option<i64> {
+fn context_tokens(top: &Map<String, Value>, usage: &Map<String, Value>) -> Option<i64> {
     let sum = |keys: &[&str]| {
         let parts: Vec<f64> = keys.iter().filter_map(|k| number_value(usage.get(*k))).collect();
         // A zero is a synthetic or error message with no real usage: it must not replace a good value.
@@ -335,18 +336,17 @@ fn context_tokens(usage: &Map<String, Value>) -> Option<i64> {
     if usage.contains_key("input") {
         return sum(&["input", "cacheRead", "cacheWrite"]);
     }
-    // DSH TokenUsage. `inputTokens` is the uncached prompt; cache read/write are the rest of it.
-    // `reasoningTokens` is a subset of `outputTokens`, and `totalTokens` is an informational sum.
+    // camelCase `inputTokens` is ambiguous: DSH TokenUsage has the UNCACHED prompt there and the
+    // rest of the context in `cacheReadTokens`/`cacheWriteTokens`; Cursor composer `usage` /
+    // `tokenCount` already includes cache in `inputTokens`. The usage objects can be identical,
+    // so the tell is the line itself: every DSH record carries a `type`; Cursor's never do.
     if usage.contains_key("inputTokens") {
-        return sum(&["inputTokens", "cacheReadTokens", "cacheWriteTokens"]);
+        if top.contains_key("type") {
+            return sum(&["inputTokens", "cacheReadTokens", "cacheWriteTokens"]);
+        }
+        return sum(&["inputTokens"]);
     }
     None
-}
-
-/// A positive `contextWindow`. DSH logs it on `request/context`, not on the usage object.
-fn context_window(obj: &Map<String, Value>) -> Option<i64> {
-    let n = number_value(obj.get("contextWindow"))?;
-    (n > 0.0).then_some(n.round() as i64)
 }
 
 /// Usage that is not a sibling `usage` object.
@@ -509,6 +509,7 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
     let usage = usage_object(top)
         .or_else(|| usage_object(payload))
         .or_else(|| embedded_usage(payload))
+        .or_else(|| crate::cursor::extra_usage(top, payload))
         .unwrap_or(&EMPTY);
     let input_tokens = first_number(usage, &IN).or_else(|| find_number(value, &IN, 0));
     let output_tokens = first_number(usage, &OUT).or_else(|| find_number(value, &OUT, 0));
@@ -516,8 +517,12 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         || record(payload.get("info")).get("total_token_usage").is_some_and(Value::is_object)
         || top.get("total_token_usage").is_some_and(Value::is_object);
 
-    let context_tokens = if usage_is_total { None } else { context_tokens(usage) };
-    let context_window = context_window(payload).or_else(|| context_window(top));
+    let context_tokens = if usage_is_total {
+        None
+    } else {
+        context_tokens(top, usage).or_else(|| crate::cursor::context_meter(top, payload))
+    };
+    let context_window = crate::cursor::context_window(top, payload, usage);
 
     let timestamp_ms = timestamp_ms(top.get("timestamp"))
         .or_else(|| timestamp_ms(top.get("time")))
@@ -683,6 +688,32 @@ mod tests {
                 "usage": {"input": 5, "output": 2, "cacheRead": 100, "cacheWrite": 20, "totalTokens": 127}}
         }));
         assert_eq!(pi.context_tokens, Some(125));
+        let cursor = normalize(&json!({
+            "role": "assistant",
+            "message": {"content": [{"type": "text", "text": "ok"}],
+                "usage": {"inputTokens": 4200, "outputTokens": 80, "cacheReadTokens": 3000, "cacheWriteTokens": 40},
+                "contextTokenLimit": 200000}
+        }));
+        assert_eq!((cursor.input_tokens, cursor.output_tokens), (Some(4200.0), Some(80.0)));
+        assert_eq!((cursor.context_tokens, cursor.context_window), (Some(4200), Some(200_000)), "cache is already inside inputTokens");
+        let hook = normalize(&json!({
+            "type": "turn_ended", "status": "success",
+            "input_tokens": 5000, "output_tokens": 90, "cache_read_tokens": 4000, "cache_write_tokens": 100,
+            "context_window": 256000
+        }));
+        assert_eq!((hook.context_tokens, hook.context_window, hook.usage_is_total), (Some(5000), Some(256_000), false));
+        let meter = normalize(&json!({
+            "role": "assistant",
+            "message": {"content": [{"type": "text", "text": "ok"}]},
+            "promptTokenBreakdown": {"totalUsedTokens": 96716},
+            "contextTokenLimit": 256000
+        }));
+        assert_eq!((meter.context_tokens, meter.context_window, meter.input_tokens), (Some(96_716), Some(256_000), None), "the meter is context, not a billed input");
+        let counted = normalize(&json!({
+            "role": "assistant",
+            "message": {"content": [{"type": "text", "text": "ok"}], "tokenCount": {"inputTokens": 10, "outputTokens": 4}}
+        }));
+        assert_eq!((counted.context_tokens, counted.input_tokens, counted.output_tokens), (Some(10), Some(10.0), Some(4.0)));
         let codex = normalize(&json!({
             "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 500, "output_tokens": 50}}}
         }));

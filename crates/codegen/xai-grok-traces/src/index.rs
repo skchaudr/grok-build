@@ -21,7 +21,7 @@ mod bb_index;
 
 use crate::bb::{Bb, BbThread, thread_key};
 
-/// 7: DSH prompt size (`inputTokens` + cache read/write) and `request/context.contextWindow`.
+/// 7: DSH prompt size (`inputTokens` + cache read/write) and `request/context.contextWindow`; Cursor context (`usage.inputTokens` / hook `input_tokens`) and `contextTokenLimit` window.
 pub const PARSER_VERSION: i64 = 7;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
 pub const SCHEMA_VERSION: i64 = 7;
