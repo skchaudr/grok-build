@@ -153,6 +153,8 @@ pub struct TracesModalState {
     row_h: Vec<usize>,
     /// The selected row, by key: kept across folds, filters and live growth.
     sel: Option<OutlineKey>,
+    /// `f`: after a poll appends events, select the last visible row.
+    follow: bool,
     /// Text width the outline was last built for; 0 until the first render, so no prompt rows yet.
     outline_w: usize,
     /// An opener's body arrived, so its prompt may have changed: rebuild before measuring.
@@ -423,6 +425,7 @@ impl TracesModalState {
             oshown: Vec::new(),
             row_h: Vec::new(),
             sel: None,
+            follow: false,
             outline_w: 0,
             dirty_outline: false,
             opener_lines: HashSet::new(),
@@ -588,10 +591,11 @@ impl TracesModalState {
             && self.mode != Mode::List
             && self.session.as_ref().is_some_and(|s| s.id == t.session_id)
         {
-            // Follow the bottom if the user was there.
+            // Follow the bottom if the user was there. Follow mode pins there whenever events grew.
             let at_bottom = self.sel_pos() + 1 >= self.oshown.len();
+            let had = self.events.len();
             self.install_trajectory(t.rows, t.session, t.children);
-            if at_bottom {
+            if at_bottom || (self.follow && self.events.len() > had) {
                 self.goto(self.oshown.len().saturating_sub(1));
             }
         }
@@ -900,6 +904,7 @@ impl TracesModalState {
         };
         self.session = Some(row);
         self.sel = None;
+        self.follow = false;
         self.reveal = None;
         self.event_scroll = 0;
         self.bodies.clear();
@@ -1042,6 +1047,10 @@ impl TracesModalState {
         let mut pos = self.sel_pos();
         move_sel(&mut pos, self.oshown.len(), delta);
         self.goto(pos);
+    }
+
+    fn session_active(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.status == Status::Active)
     }
 
     /// Screen lines of shown row `pos` from the last render. Until that render matches `oshown`, every
@@ -3358,6 +3367,10 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
         }
         Mode::Trajectory => {
             let len = state.oshown.len();
+            let nav = matches!(
+                key.code,
+                KeyCode::Char('j' | 'k' | 'g' | 'G') | KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp | KeyCode::Home | KeyCode::End
+            );
             match key.code {
                 KeyCode::Esc => state.leave_trajectory(),
                 KeyCode::Char('j') | KeyCode::Down => state.step(1),
@@ -3366,6 +3379,13 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                 KeyCode::PageUp => state.step(-page),
                 KeyCode::Char('g') | KeyCode::Home => state.goto(0),
                 KeyCode::Char('G') | KeyCode::End => state.goto(len.saturating_sub(1)),
+                KeyCode::Char('f') if state.session_active() => {
+                    state.follow = !state.follow;
+                    state.set_status(if state.follow { "follow on" } else { "follow off" });
+                    if state.follow {
+                        state.goto(len.saturating_sub(1));
+                    }
+                }
                 KeyCode::Char('e' | ' ') => {
                     if !state.outline_fold(|f, t, n| f.toggle(t, n)) {
                         return InputOutcome::Unchanged;
@@ -3433,6 +3453,10 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                     None => state.open_inspector(),
                 },
                 _ => return InputOutcome::Unchanged,
+            }
+            if nav && state.follow {
+                state.follow = false;
+                state.set_status("follow off");
             }
         }
         Mode::Inspector => match key.code {
@@ -3598,6 +3622,9 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
                 plain("/ search"),
                 plain("y copy"),
             ];
+            if state.session_active() {
+                v.insert(2, plain("f follow"));
+            }
             if resume(state.session.as_ref()) {
                 v.push(plain("r resume"));
             }
@@ -4031,8 +4058,13 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
     let chip = format!(" {} ", source_label(&session.source));
     let cw = chip.width() as u16;
     buf.set_span(area.x, area.y, &Span::styled(chip.as_str(), Style::default().fg(theme.bg_base).bg(source_color(&session.source, theme)).add_modifier(Modifier::BOLD)), cw);
-    let title_w = area.width.saturating_sub(cw + 1) as usize;
+    // Right-side `FOL` on this header row; width 0 when follow is off.
+    let fol_w = if state.follow { 3 } else { 0 };
+    let title_w = area.width.saturating_sub(cw + 1 + fol_w + u16::from(fol_w > 0)) as usize;
     buf.set_span(area.x + cw + 1, area.y, &Span::styled(truncate_str(&clean_name(&session), title_w).as_str(), Style::default().fg(theme.text_primary).add_modifier(Modifier::BOLD)), title_w as u16);
+    if fol_w > 0 {
+        buf.set_span(area.x + area.width - fol_w, area.y, &Span::styled("FOL", Style::default().fg(theme.accent_running).add_modifier(Modifier::BOLD)), fol_w);
+    }
 
     // Meta line: status, agent type / model, age, counts, parent.
     let (glyph, glyph_color) = status_glyph(&session, theme);
@@ -5333,6 +5365,58 @@ mod tests {
             !shown_rows(&state).contains(&"Ev(2)".to_string()),
             "a poll_live_at requery keeps the manual collapse"
         );
+    }
+
+    fn queue_trajectory(state: &mut TracesModalState, rows: Vec<EventRow>) {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Snapshot {
+            generation: state.generation,
+            ledger: Ok((Vec::new(), HashMap::new())),
+            trajectory: Some(Loaded { session_id: "x".into(), rows, session: None, children: Vec::new() }),
+        })
+        .unwrap();
+        state.inflight = Some(rx);
+    }
+
+    #[test]
+    fn follow_mode_pins_new_rows_until_a_move_key() {
+        let mut idle = trajectory(three_calls());
+        assert!(!hint_labels(&idle, u16::MAX).contains(&"f follow"));
+        press(&mut idle, KeyCode::Char('f'));
+        assert!(!idle.follow);
+
+        let mut state = trajectory(three_calls());
+        state.session.as_mut().unwrap().status = Status::Active;
+        assert!(hint_labels(&state, u16::MAX).contains(&"f follow"));
+        press(&mut state, KeyCode::Char('f'));
+        assert_eq!(state.status.as_deref(), Some("follow on"));
+        assert!(draw(&mut state, 80, 12).lines().next().is_some_and(|l| l.contains("FOL")));
+        state.goto(0);
+
+        let was = state.sel_pos();
+        let mut rows = three_calls();
+        rows.push(ev(9, "message", "assistant", "later"));
+        queue_trajectory(&mut state, rows);
+        assert!(state.poll_live_at(1));
+        assert_eq!(state.sel_pos(), state.oshown.len() - 1);
+        assert!(state.sel_pos() > was);
+
+        press(&mut state, KeyCode::Char('k'));
+        assert!(!state.follow);
+        assert_eq!(state.status.as_deref(), Some("follow off"));
+        let stayed = state.sel.clone();
+        let mut rows = three_calls();
+        rows.push(ev(9, "message", "assistant", "later"));
+        rows.push(ev(10, "message", "assistant", "again"));
+        queue_trajectory(&mut state, rows);
+        assert!(state.poll_live_at(1));
+        assert_eq!(state.sel, stayed);
+
+        press(&mut state, KeyCode::Char('f'));
+        assert_eq!(state.status.as_deref(), Some("follow on"));
+        press(&mut state, KeyCode::Char('f'));
+        assert_eq!(state.status.as_deref(), Some("follow off"));
+        assert!(!draw(&mut state, 80, 12).lines().next().is_some_and(|l| l.contains("FOL")));
     }
 
     #[test]
