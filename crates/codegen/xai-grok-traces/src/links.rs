@@ -12,7 +12,7 @@
 //! | grok | `summary.json` `parent_session_id` when `session_kind` starts with `subagent` |
 //! | bb | `threads.parent_thread_id` |
 //! | pi | no parent field in the files |
-//! | cursor | none; `native_id` is the transcript file stem |
+//! | cursor | path `agent-transcripts/<id>/subagents/<child>.jsonl` -> `<id>` (that transcript's file stem); the lines carry no parent id |
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -88,7 +88,17 @@ pub(crate) fn path_links(root: &Root, path: &Path) -> (Links, Option<PathBuf>) {
             }
         }
         // `agent-transcripts/<id>/<id>.jsonl`: the stem is the chat's `conversation_id` that hooks report.
-        "cursor" => l.native_id = path.file_stem().map(|n| n.to_string_lossy().into_owned()),
+        // A subagent is `<id>/subagents/<child>.jsonl`. Lines carry no parent id, so the directory is the link:
+        // the folder above `subagents` is the parent's file stem.
+        "cursor" => {
+            l.native_id = path.file_stem().map(|n| n.to_string_lossy().into_owned());
+            let rel = path.strip_prefix(&root.path).ok();
+            let comps: Vec<String> = rel.map(|r| r.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+            if let Some(at) = comps.iter().position(|c| c == "subagents").filter(|i| *i > 0) {
+                l.parent_native = Some(comps[at - 1].clone());
+                l.agent_type = Some("subagent".into());
+            }
+        }
         "pi" | "omp" => {
             l.native_id = rel_stem(&root.path, path);
             // `<cwd dir>/<parent stem>/<Name>.jsonl`: a task subagent next to its parent's transcript.
@@ -315,6 +325,19 @@ mod tests {
         let r = root("cursor", Path::new("/c"));
         let (l, aux) = path_links(&r, Path::new("/c/w-proj/agent-transcripts/abc/abc.jsonl"));
         assert_eq!((l.native_id.as_deref(), l.parent_native, aux), (Some("abc"), None, None));
+    }
+
+    #[test]
+    fn cursor_subagent_dir_names_its_parent() {
+        let r = root("cursor", Path::new("/c"));
+        let (l, aux) = path_links(&r, Path::new("/c/w-proj/agent-transcripts/parent-id/subagents/child-id.jsonl"));
+        assert_eq!(l.native_id.as_deref(), Some("child-id"));
+        assert_eq!(l.parent_native.as_deref(), Some("parent-id"));
+        assert_eq!(l.agent_type.as_deref(), Some("subagent"));
+        assert!(aux.is_none());
+        // A transcript that merely sits beside `subagents/` is the parent, not a child.
+        let (top, _) = path_links(&r, Path::new("/c/w-proj/agent-transcripts/parent-id/parent-id.jsonl"));
+        assert_eq!((top.native_id.as_deref(), top.parent_native.as_deref(), top.agent_type.as_deref()), (Some("parent-id"), None, None));
     }
 
     #[test]

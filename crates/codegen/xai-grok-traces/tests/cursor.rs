@@ -121,3 +121,38 @@ fn cursor_usage_payload_sets_context_tokens() {
         .collect();
     assert_eq!(rows, vec![(1, Some(1000), None), (2, Some(4200), Some(200_000))]);
 }
+
+#[test]
+fn cursor_subagent_transcript_resolves_its_parent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let parent = home.join(".cursor/projects/w-proj/agent-transcripts/parent-id/parent-id.jsonl");
+    let child = home.join(".cursor/projects/w-proj/agent-transcripts/parent-id/subagents/child-id.jsonl");
+    write(&parent, CURSOR);
+    write(&child, &CURSOR.replace("fix the bug", "look at the cache"));
+    // Same stem in another project is not this parent.
+    write(&home.join(".cursor/projects/other/agent-transcripts/child-id/child-id.jsonl"), CURSOR);
+
+    let roots = default_roots(&home, &home.join(".grok"));
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/t.sqlite")).unwrap();
+    let report = idx.scan(&roots).unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+    let rows = idx.list_sessions(&SessionFilter { source: Some("cursor".into()), ..Default::default() }).unwrap();
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    let parent_row = rows.iter().find(|s| s.file_path.ends_with("parent-id/parent-id.jsonl")).unwrap();
+    let child_row = rows.iter().find(|s| s.file_path.ends_with("subagents/child-id.jsonl")).unwrap();
+    let other = rows.iter().find(|s| s.file_path.ends_with("other/agent-transcripts/child-id/child-id.jsonl")).unwrap();
+
+    assert_eq!((parent_row.native_id.as_deref(), parent_row.parent_id.as_deref(), parent_row.children), (Some("parent-id"), None, 1));
+    assert_eq!(child_row.native_id.as_deref(), Some("child-id"));
+    assert_eq!(child_row.parent_id.as_deref(), Some(parent_row.id.as_str()));
+    assert_eq!((child_row.agent_type.as_deref(), child_row.children), (Some("subagent"), 0));
+    assert_eq!(child_row.title, "look at the cache");
+    assert_eq!(other.parent_id, None, "a top-level transcript with the same stem is not a child");
+
+    let kids = idx.children(&parent_row.id).unwrap();
+    assert_eq!(kids.len(), 1);
+    assert_eq!(kids[0].id, child_row.id);
+    assert_eq!(kids[0].parent_id.as_deref(), Some(parent_row.id.as_str()));
+}
