@@ -445,6 +445,62 @@ fn dsh_catalog_spawn_resolves_parent_either_index_order() {
     }
 }
 
+/// A fresh subagent's `summary.json` has `session_kind` but no `parent_session_id`. The parent is the
+/// spawn meta under the parent's session dir, including when the child cwd bucket differs.
+#[test]
+fn grok_subagent_parent_comes_from_spawn_meta() {
+    let e = env();
+    let gdir = |bucket: &str, id: &str| e.grok.join(format!("sessions/{bucket}/{id}"));
+    let chat = |t: &str| format!("{}\n{}\n{}\n", format!(r#"{{"type":"user","content":"{t}"}}"#), r#"{"type":"assistant","content":"x"}"#, r#"{"type":"assistant","content":"y"}"#);
+    let meta = |id: &str, desc: &str| {
+        format!(r#"{{"parent_session_id":"g-parent","child_session_id":"{id}","subagent_type":"explore","description":"{desc}","status":"completed"}}"#)
+    };
+    let parent = gdir("%2Fw", "g-parent");
+    write(&parent.join("chat_history.jsonl"), &chat("GROK PARENT"));
+    write(&parent.join("summary.json"), r#"{"info":{"id":"g-parent","cwd":"/w"}}"#);
+    write(&parent.join("subagents/g-child/meta.json"), &meta("g-child", "Find the cache"));
+    write(&parent.join("subagents/g-fork/meta.json"), &meta("g-fork", "not a dispatch"));
+    let child = gdir("%2Fother", "g-child");
+    write(&child.join("chat_history.jsonl"), &chat("GROK CHILD"));
+    write(&child.join("summary.json"), r#"{"info":{"id":"g-child","cwd":"/other"},"session_kind":"subagent"}"#);
+    let fork = gdir("%2Fw", "g-fork");
+    write(&fork.join("chat_history.jsonl"), &chat("GROK FORK"));
+    write(&fork.join("summary.json"), r#"{"info":{"id":"g-fork","cwd":"/w"},"session_kind":"fork","parent_session_id":"g-parent"}"#);
+
+    let idx = e.scan();
+    let parent_row = by_title(&idx, "GROK PARENT");
+    let child_row = by_title(&idx, "GROK CHILD");
+    assert_eq!(child_row.parent_id.as_deref(), Some(parent_row.id.as_str()));
+    assert_eq!((child_row.label.as_deref(), child_row.agent_type.as_deref(), parent_row.children), (Some("Find the cache"), Some("explore"), 1));
+    assert_eq!(by_title(&idx, "GROK FORK").parent_id, None, "a fork is not a dispatch");
+}
+
+/// The meta can land after the child transcript was indexed. The parent's next index stamps the child.
+#[test]
+fn grok_spawn_meta_arriving_later_stamps_the_child() {
+    let e = env();
+    let parent = e.grok.join("sessions/%2Fw/g-parent");
+    let child = e.grok.join("sessions/%2Fw/g-child");
+    let chat = |t: &str| format!("{}\n{}\n{}\n", format!(r#"{{"type":"user","content":"{t}"}}"#), r#"{"type":"assistant","content":"x"}"#, r#"{"type":"assistant","content":"y"}"#);
+    write(&parent.join("chat_history.jsonl"), &chat("GROK PARENT"));
+    write(&parent.join("summary.json"), r#"{"info":{"id":"g-parent","cwd":"/w"}}"#);
+    write(&child.join("chat_history.jsonl"), &chat("GROK CHILD"));
+    write(&child.join("summary.json"), r#"{"info":{"id":"g-child","cwd":"/w"},"session_kind":"subagent"}"#);
+    let root = e.roots().into_iter().find(|r| r.source == "grok").unwrap();
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    idx.index_file(&root, &child.join("chat_history.jsonl")).unwrap();
+    idx.index_file(&root, &parent.join("chat_history.jsonl")).unwrap();
+    assert_eq!(by_title(&idx, "GROK CHILD").parent_id, None);
+    write(
+        &parent.join("subagents/g-child/meta.json"),
+        r#"{"parent_session_id":"g-parent","child_session_id":"g-child","subagent_type":"explore","description":"Find the cache","status":"running"}"#,
+    );
+    idx.index_file(&root, &parent.join("chat_history.jsonl")).unwrap();
+    let (parent_row, child_row) = (by_title(&idx, "GROK PARENT"), by_title(&idx, "GROK CHILD"));
+    assert_eq!(child_row.parent_id.as_deref(), Some(parent_row.id.as_str()));
+    assert_eq!((child_row.label.as_deref(), child_row.agent_type.as_deref()), (Some("Find the cache"), Some("explore")));
+}
+
 // ---- first-scan growth and the rebuild lock ----
 
 fn pi_files(e: &Env, n: usize, lines: usize) {

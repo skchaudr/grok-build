@@ -315,11 +315,14 @@ fn file_cap_reports_limit_and_keeps_rows() {
     let report = idx.scan_with_limit(&e.roots, 1).unwrap();
     let pi = report.roots.iter().find(|r| r.id == "pi-sessions").unwrap();
     assert!(pi.limited);
-    // Discovery stops at the cap in readdir order, so the new file may or may not be the one slot.
-    // The row from the first scan has to survive either way.
+    assert_eq!(pi.files, 1, "the cap discovers one file");
+    // A limited scan does not prune. The previously indexed file stays when the one slot is the new file,
+    // so the row count is 1 or 2 depending on directory order.
     let rows = idx.list_sessions(&SessionFilter { source: Some("pi".into()), ..Default::default() }).unwrap();
-    assert!(rows.iter().any(|s| s.file_path.ends_with("p.jsonl")), "cached row kept: {rows:?}");
-    assert!(rows.len() <= 2, "{rows:?}");
+    assert!((1..=2).contains(&rows.len()), "cached rows kept under the cap, got {}", rows.len());
+    if rows.len() == 1 {
+        assert!(rows.iter().any(|s| s.file_path.ends_with("p.jsonl")), "cached row kept: {rows:?}");
+    }
 }
 
 #[test]
@@ -740,6 +743,8 @@ fn hook_extract_live_fields() {
     assert_eq!(post.tool.as_deref(), Some("Shell"));
 }
 
+/// `proc_pidinfo` is macOS-only; on other hosts a payload pid has no start time and is not stored.
+#[cfg(target_os = "macos")]
 #[test]
 fn receipt_pid_refreshes_the_session_row() {
     use xai_grok_traces::hook::{extract, ingest};
