@@ -8,3 +8,13 @@
 2026-10-20T07:47:37Z mini proof: /traces 300 sessions, dsh session + inspector captured
 2026-10-20T07:53:10Z RSYNCED air; INSTALLED air (backup grok-fork.e389c0f4006d), leader kickstarted pid 16990 on grok-fork; air proof: 6164 files 24.8s, DSH session + inspector
 2026-10-20T07:53:10Z LANDED 12524e1c mini+air
+2026-10-27 02:55 QW dispatches (Jules, skchaudr/grok-build, packets docs/traces/packets/QW*.md)
+  QW1 body-text      7548099514751019943
+  QW2 status-ttl     11504926239877194259
+  QW3 no-more        9210652456685237487
+  QW4 ledger-flags   10977681962652771264
+  QW5 runs-open      16149276594342447898
+  QW6 truncation     17066140557176316788
+  QW7 error-nav      4167985425493002352
+  QW8 hint-honesty   1628328572980365257
+  all 8 in Planning at fire+60s, none awaiting plan approval
