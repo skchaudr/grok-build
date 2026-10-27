@@ -4073,73 +4073,73 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
     if state.mode != Mode::Inspector {
         render_compact_header(buf, area, state, theme);
     } else {
-    let chip = format!(" {} ", source_label(&session.source));
-    let cw = chip.width() as u16;
-    buf.set_span(area.x, area.y, &Span::styled(chip.as_str(), Style::default().fg(theme.bg_base).bg(source_color(&session.source, theme)).add_modifier(Modifier::BOLD)), cw);
-    let title_w = area.width.saturating_sub(cw + 1) as usize;
-    buf.set_span(area.x + cw + 1, area.y, &Span::styled(truncate_str(&clean_name(&session), title_w).as_str(), Style::default().fg(theme.text_primary).add_modifier(Modifier::BOLD)), title_w as u16);
+        let chip = format!(" {} ", source_label(&session.source));
+        let cw = chip.width() as u16;
+        buf.set_span(area.x, area.y, &Span::styled(chip.as_str(), Style::default().fg(theme.bg_base).bg(source_color(&session.source, theme)).add_modifier(Modifier::BOLD)), cw);
+        let title_w = area.width.saturating_sub(cw + 1) as usize;
+        buf.set_span(area.x + cw + 1, area.y, &Span::styled(truncate_str(&clean_name(&session), title_w).as_str(), Style::default().fg(theme.text_primary).add_modifier(Modifier::BOLD)), title_w as u16);
 
-    // Meta line: status, agent type / model, age, counts, parent.
-    let (glyph, glyph_color) = status_glyph(&session, theme);
-    let mut segs: Vec<(String, Style)> = vec![(format!("{glyph} {}", if session.failed && session.status != Status::Active { "failed" } else { session.status.as_str() }), Style::default().fg(glyph_color))];
-    for t in [session.agent_type.clone(), session.model.clone()].into_iter().flatten() {
-        segs.push((t, dim));
-    }
-    let age = age_of(&session, now_ms());
-    segs.push((if age == "now" || age == "-" { age } else { format!("{age} ago") }, dim));
-    segs.push((format!("{} evt · {} tools · {}", session.event_count, session.tool_count, fmt_duration(session.duration_ms)), dim));
-    if let Some(p) = &state.parent_name {
-        segs.push((format!("↑ {p}"), Style::default().fg(theme.accent_user)));
-    }
-    // A full page with more events on the session is a silent cap. A filter hides rows on purpose,
-    // and a remote fetch still in flight has not settled on this page.
-    if state.events.len() >= EVENT_PAGE
-        && session.event_count > state.events.len() as i64
-        && !state.filtering()
-        && !(session.host.is_some() && state.remote_loading)
-    {
-        segs.push((format!("showing {}/{}", state.events.len(), session.event_count), Style::default().fg(theme.accent_user)));
-    }
-    let mut x = area.x;
-    let right = area.x + area.width;
-    for (i, (text, style)) in segs.iter().enumerate() {
-        if i > 0 {
-            if x + 3 >= right {
-                break;
-            }
-            buf.set_span(x, area.y + 1, &Span::styled(" · ", dim), 3);
-            x += 3;
+        // Meta line: status, agent type / model, age, counts, parent.
+        let (glyph, glyph_color) = status_glyph(&session, theme);
+        let mut segs: Vec<(String, Style)> = vec![(format!("{glyph} {}", if session.failed && session.status != Status::Active { "failed" } else { session.status.as_str() }), Style::default().fg(glyph_color))];
+        for t in [session.agent_type.clone(), session.model.clone()].into_iter().flatten() {
+            segs.push((t, dim));
         }
-        let w = (text.width() as u16).min(right - x);
-        buf.set_span(x, area.y + 1, &Span::styled(truncate_str(text, w as usize).as_str(), *style), w);
-        x += w;
-    }
-    render_strip(buf, Rect { y: area.y + 2, height: 2, ..area }, &state.events, state.selected_event().unwrap_or(0), theme);
+        let age = age_of(&session, now_ms());
+        segs.push((if age == "now" || age == "-" { age } else { format!("{age} ago") }, dim));
+        segs.push((format!("{} evt · {} tools · {}", session.event_count, session.tool_count, fmt_duration(session.duration_ms)), dim));
+        if let Some(p) = &state.parent_name {
+            segs.push((format!("↑ {p}"), Style::default().fg(theme.accent_user)));
+        }
+        // A full page with more events on the session is a silent cap. A filter hides rows on purpose,
+        // and a remote fetch still in flight has not settled on this page.
+        if state.events.len() >= EVENT_PAGE
+            && session.event_count > state.events.len() as i64
+            && !state.filtering()
+            && !(session.host.is_some() && state.remote_loading)
+        {
+            segs.push((format!("showing {}/{}", state.events.len(), session.event_count), Style::default().fg(theme.accent_user)));
+        }
+        let mut x = area.x;
+        let right = area.x + area.width;
+        for (i, (text, style)) in segs.iter().enumerate() {
+            if i > 0 {
+                if x + 3 >= right {
+                    break;
+                }
+                buf.set_span(x, area.y + 1, &Span::styled(" · ", dim), 3);
+                x += 3;
+            }
+            let w = (text.width() as u16).min(right - x);
+            buf.set_span(x, area.y + 1, &Span::styled(truncate_str(text, w as usize).as_str(), *style), w);
+            x += w;
+        }
+        render_strip(buf, Rect { y: area.y + 2, height: 2, ..area }, &state.events, state.selected_event().unwrap_or(0), theme);
 
-    let mut filters = Vec::new();
-    if state.event_errors_only {
-        filters.push("errors only".to_string());
-    }
-    if state.include_noise {
-        filters.push("noise shown".to_string());
-    }
-    if let Some(t) = state.tool_filter.and_then(|i| state.tools.get(i)) {
-        filters.push(format!("tool:{t}"));
-    }
-    let search = match state.typing {
-        Typing::Events => format!("/{}▏", state.event_query),
-        _ if !state.event_query.is_empty() => format!("/{}", state.event_query),
-        _ => String::new(),
-    };
-    if !search.is_empty() {
-        filters.push(search);
-    }
-    let line = if filters.is_empty() {
-        session.cwd.clone().unwrap_or_else(|| session.file_path.display().to_string())
-    } else {
-        format!("{} · {} matching", filters.join(" · "), state.hidden.iter().filter(|h| !**h).count())
-    };
-    buf.set_span(area.x, area.y + 4, &Span::styled(truncate_str(&line, area.width as usize).as_str(), Style::default().fg(theme.fuzzy_accent)), area.width);
+        let mut filters = Vec::new();
+        if state.event_errors_only {
+            filters.push("errors only".to_string());
+        }
+        if state.include_noise {
+            filters.push("noise shown".to_string());
+        }
+        if let Some(t) = state.tool_filter.and_then(|i| state.tools.get(i)) {
+            filters.push(format!("tool:{t}"));
+        }
+        let search = match state.typing {
+            Typing::Events => format!("/{}▏", state.event_query),
+            _ if !state.event_query.is_empty() => format!("/{}", state.event_query),
+            _ => String::new(),
+        };
+        if !search.is_empty() {
+            filters.push(search);
+        }
+        let line = if filters.is_empty() {
+            session.cwd.clone().unwrap_or_else(|| session.file_path.display().to_string())
+        } else {
+            format!("{} · {} matching", filters.join(" · "), state.hidden.iter().filter(|h| !**h).count())
+        };
+        buf.set_span(area.x, area.y + 4, &Span::styled(truncate_str(&line, area.width as usize).as_str(), Style::default().fg(theme.fuzzy_accent)), area.width);
         return;
     }
 
