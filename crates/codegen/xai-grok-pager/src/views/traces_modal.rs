@@ -2870,11 +2870,7 @@ fn collect_text(v: &serde_json::Value, out: &mut Vec<String>) {
                 match x {
                     Value::String(s) if TEXT_KEYS.contains(&key) || key == "content" || key == "message" => push_chunk(out, s),
                     Value::String(s) if INPUT_KEYS.contains(&key) => push_chunk(out, s),
-                    _ if INPUT_KEYS.contains(&key) => {
-                        if let Ok(pretty) = serde_json::to_string_pretty(x) {
-                            push_chunk(out, &pretty);
-                        }
-                    }
+                    _ if INPUT_KEYS.contains(&key) => collect_text(x, out),
                     _ => collect_text(x, out),
                 }
             }
@@ -5077,9 +5073,9 @@ mod tests {
 
     #[test]
     fn body_text_reads_each_harness_shape() {
-        // Claude assistant: the text block, then the tool input as JSON.
+        // Claude assistant: the text block, then the command string (not pretty JSON).
         let claude = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me check."},{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#;
-        assert_eq!(body_text(claude), "Let me check.\n\n{\n  \"command\": \"ls\"\n}");
+        assert_eq!(body_text(claude), "Let me check.\n\nls");
         // Claude tool result: content as a string, then as an array of text blocks.
         let plain = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"file.txt"}]}}"#;
         assert_eq!(body_text(plain), "file.txt");
@@ -5088,9 +5084,12 @@ mod tests {
         // Codex response item.
         let codex = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}"#;
         assert_eq!(body_text(codex), "Done.");
-        // Pi tool call: arguments as JSON.
+        // `cmd` and `script` are body text the same way `command` is.
+        assert_eq!(body_text(r#"{"input":{"cmd":"echo hi"}}"#), "echo hi");
+        assert_eq!(body_text(r#"{"arguments":{"script":"echo there"}}"#), "echo there");
+        // Pi read: arguments carry no text, so the whole line pretty-prints.
         let pi = r#"{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"read","arguments":{"path":"a.rs"}}]}}"#;
-        assert_eq!(body_text(pi), "{\n  \"path\": \"a.rs\"\n}");
+        assert_eq!(body_text(pi), pretty(Ok(Some(pi.to_string()))));
     }
 
     #[test]
@@ -5099,6 +5098,47 @@ mod tests {
         assert_eq!(body_text(dup), "same");
         assert_eq!(body_text(r#"{"type":"x"}"#), "{\n  \"type\": \"x\"\n}");
         assert_eq!(body_text("not json"), "not json");
+        // Edit/Read inputs (path, description) are not text, so the call falls back to the whole line.
+        let edit = r#"{"input":{"file_path":"a.rs","description":"edit a"}}"#;
+        assert_eq!(body_text(edit), pretty(Ok(Some(edit.to_string()))));
+        // Real text wins: the input object is not pretty-printed beside it.
+        assert_eq!(body_text(r#"{"text":"note","input":{"file_path":"a.rs"}}"#), "note");
+    }
+
+    #[test]
+    fn body_text_renders_bash_script_with_real_newlines() {
+        // Five lines and no braces, so a pretty-printed command cannot pass these asserts.
+        let script = "python3 -c \"\nimport os\nprint(1)\nprint(2)\n\"";
+        assert_eq!(script.lines().count(), 5);
+        let raw = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {"command": script}
+                }]
+            }
+        });
+        let body = body_text(&serde_json::to_string(&raw).unwrap());
+        assert!(body.contains(script), "{body:?}");
+        assert!(!body.contains("\\n"), "{body:?}");
+        assert!(!body.contains('{') && !body.contains('}'), "{body:?}");
+    }
+
+    #[test]
+    fn body_text_omits_bare_usage_numbers() {
+        let usage_only = r#"{"usage":{"input":3005,"output":0}}"#;
+        let body = body_text(usage_only);
+        assert!(body.lines().all(|line| line != "3005" && line != "0"), "{body:?}");
+        // No text anywhere: the whole record pretty-prints, and those lines are not bare numbers.
+        assert_eq!(body, pretty(Ok(Some(usage_only.to_string()))));
+
+        let with_text = r#"{"text":"hello","usage":{"input":3005,"output":0}}"#;
+        let body = body_text(with_text);
+        assert_eq!(body, "hello");
+        assert!(body.lines().all(|line| line != "3005" && line != "0"), "{body:?}");
     }
 
     #[test]
