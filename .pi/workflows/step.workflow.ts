@@ -201,7 +201,7 @@ export default defineWorkflow<LaneInput>({
     build_route: compute({
       run: (ctx) => {
         const last = (ctx.outputs.fix ?? ctx.outputs.build) as { ok?: boolean; note?: string };
-        return { route: last.ok === false ? "stop" : "gate", note: last.note };
+        return { route: last.ok === false ? "stop" : "gate", ...(last.note !== undefined ? { note: last.note } : {}) };
       },
     }),
 
