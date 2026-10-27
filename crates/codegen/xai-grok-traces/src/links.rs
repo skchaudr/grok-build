@@ -9,11 +9,12 @@
 //! | codex | `session_meta` `payload.parent_thread_id`, or `source.subagent.thread_spawn.parent_thread_id` |
 //! | omp | path `<cwd>/<parent stem>/<Name>.jsonl` (task subagents), or the header's `parentSession` path |
 //! | dsh | header `parentSession` (a session id; `seedLength` marks a fork) |
-//! | grok | `summary.json` `parent_session_id` when `session_kind` starts with `subagent` |
+//! | grok | `summary.json` `parent_session_id` when `session_kind` starts with `subagent`; a fresh subagent leaves that unset and the parent is `subagents/<child>/meta.json` (`parent_session_id`, `description`, `subagent_type`) |
 //! | bb | `threads.parent_thread_id` |
 //! | pi | no parent field in the files |
 //! | cursor | none; `native_id` is the transcript file stem |
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -177,6 +178,161 @@ pub(crate) fn grok_links(chat_history: &Path, summary: &Value, l: &mut Links) {
     }
 }
 
+/// A fresh subagent (`session_kind` starts with `subagent` and no `parent_session_id` yet). Forks do not.
+pub(crate) fn grok_dispatch_kind(kind: &str) -> bool {
+    kind.starts_with("subagent")
+}
+
+/// One row of the parent's `subagents/<child>/meta.json`.
+#[derive(Clone, Debug)]
+pub(crate) struct GrokSpawn {
+    pub parent_native: String,
+    pub label: Option<String>,
+    pub agent_type: Option<String>,
+}
+
+/// Fill a still-empty parent from a spawn meta. A specific `agent_type` already on the row is kept.
+pub(crate) fn apply_grok_spawn(spawn: &GrokSpawn, l: &mut Links) {
+    if l.parent_native.is_some() {
+        return;
+    }
+    l.parent_native = Some(spawn.parent_native.clone());
+    if l.label.is_none() {
+        l.label = spawn.label.clone();
+    }
+    let generic = match l.agent_type.as_deref() {
+        None => true,
+        Some(t) => t == "subagent" || t.starts_with("subagent_"),
+    };
+    if generic && let Some(t) = spawn.agent_type.clone() {
+        l.agent_type = Some(t);
+    }
+}
+
+/// Every child named by `subagents/*/meta.json` under one session directory.
+pub(crate) fn grok_session_spawns(session_dir: &Path) -> Vec<(String, GrokSpawn)> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(session_dir.join("subagents")) else { return out };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_dir() {
+            continue;
+        }
+        let Some((ids, spawn)) = read_spawn_meta(&entry.path().join("meta.json")) else { continue };
+        for id in ids {
+            if out.iter().any(|(k, _)| k == &id) {
+                continue;
+            }
+            out.push((id, spawn.clone()));
+        }
+    }
+    out
+}
+
+/// Child id → spawn, for every session under a grok sessions root (`<root>/<id>/` or `<root>/<cwd>/<id>/`).
+pub(crate) fn grok_spawn_index(sessions_root: &Path) -> HashMap<String, GrokSpawn> {
+    let mut out = HashMap::new();
+    for_each_session_dir(sessions_root, &mut |dir| {
+        for (id, spawn) in grok_session_spawns(dir) {
+            out.entry(id).or_insert(spawn);
+        }
+        false
+    });
+    out
+}
+
+/// The spawn whose meta directory (or `child_session_id`) is `child_id`.
+pub(crate) fn grok_spawn_for(sessions_root: &Path, child_id: &str) -> Option<GrokSpawn> {
+    if child_id.is_empty() {
+        return None;
+    }
+    let mut found = None;
+    for_each_session_dir(sessions_root, &mut |dir| {
+        let meta = dir.join("subagents").join(child_id).join("meta.json");
+        if let Some((ids, spawn)) = read_spawn_meta(&meta)
+            && ids.iter().any(|id| id == child_id)
+        {
+            found = Some(spawn);
+            return true;
+        }
+        false
+    });
+    found
+}
+
+/// Signature of `subagents/*/meta.json`, so a new spawn shows up without a transcript edit.
+pub(crate) fn subagents_sig(session_dir: &Path) -> Option<String> {
+    let Ok(entries) = fs::read_dir(session_dir.join("subagents")) else { return None };
+    let mut parts = Vec::new();
+    for entry in entries.flatten() {
+        if let Some(sig) = file_sig(&entry.path().join("meta.json")) {
+            parts.push(format!("{}={sig}", entry.file_name().to_string_lossy()));
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.sort();
+    Some(parts.join(","))
+}
+
+fn read_spawn_meta(meta: &Path) -> Option<(Vec<String>, GrokSpawn)> {
+    let f = fs::File::open(meta).ok()?;
+    let mut buf = String::new();
+    if std::io::Read::read_to_string(&mut std::io::Read::take(f, META_MAX_BYTES), &mut buf).is_err() {
+        return None;
+    }
+    let v: Value = serde_json::from_str(&buf).ok()?;
+    let parent = s(v.get("parent_session_id"))?;
+    let mut ids = Vec::new();
+    if let Some(name) = meta.parent().and_then(Path::file_name) {
+        let name = name.to_string_lossy().into_owned();
+        if !name.is_empty() && name != parent {
+            ids.push(name);
+        }
+    }
+    if let Some(id) = s(v.get("child_session_id"))
+        && id != parent
+        && !ids.iter().any(|e| e == &id)
+    {
+        ids.push(id);
+    }
+    if ids.is_empty() {
+        return None;
+    }
+    Some((ids, GrokSpawn { parent_native: parent, label: s(v.get("description")).map(|d| label(&d)), agent_type: s(v.get("subagent_type")) }))
+}
+
+fn is_session_dir(dir: &Path) -> bool {
+    dir.join("chat_history.jsonl").is_file() || dir.join("summary.json").is_file()
+}
+
+/// Walk `<root>/<bucket>/<session>` and the flat `<root>/<session>` layout. `f` returns true to stop.
+fn for_each_session_dir(root: &Path, f: &mut dyn FnMut(&Path) -> bool) {
+    fn walk(dir: &Path, depth: usize, f: &mut dyn FnMut(&Path) -> bool) -> bool {
+        if depth > 3 {
+            return false;
+        }
+        let Ok(entries) = fs::read_dir(dir) else { return false };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if !ft.is_dir() || entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            if is_session_dir(&path) {
+                if f(&path) {
+                    return true;
+                }
+            } else if walk(&path, depth + 1, f) {
+                return true;
+            }
+        }
+        false
+    }
+    let _ = walk(root, 0, f);
+}
+
 /// Stores what is known; fields that are `None` keep their stored value.
 pub(crate) fn write_links(tx: &Transaction<'_>, sid: &str, l: &Links) -> rusqlite::Result<()> {
     tx.execute(
@@ -263,5 +419,37 @@ mod tests {
         let mut f = Links::default();
         grok_links(Path::new("/g/sessions/x/sid/chat_history.jsonl"), &json!({"info":{"id":"sid"},"session_kind":"fork","parent_session_id":"pid"}), &mut f);
         assert_eq!(f.parent_native, None, "a fork is not a dispatch");
+    }
+
+    #[test]
+    fn grok_spawn_meta_names_the_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let parent = root.join("%2Fw/mom");
+        fs::create_dir_all(parent.join("subagents/kid")).unwrap();
+        fs::write(parent.join("summary.json"), r#"{"info":{"id":"mom"}}"#).unwrap();
+        fs::write(parent.join("chat_history.jsonl"), "").unwrap();
+        fs::write(
+            parent.join("subagents/kid/meta.json"),
+            r#"{"parent_session_id":"mom","child_session_id":"kid","subagent_type":"explore","description":"Find the cache\nmore","status":"completed"}"#,
+        )
+        .unwrap();
+        // Worktree children live under a different encoded cwd than the parent.
+        let child = root.join("%2Fother/kid");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(child.join("summary.json"), r#"{"info":{"id":"kid"},"session_kind":"subagent"}"#).unwrap();
+        fs::write(child.join("chat_history.jsonl"), "").unwrap();
+
+        let spawn = grok_spawn_index(root).remove("kid").unwrap();
+        assert_eq!(spawn.parent_native, "mom");
+        assert_eq!(grok_spawn_for(root, "kid").unwrap().parent_native, "mom");
+        let mut l = Links { agent_type: Some("subagent".into()), ..Links::default() };
+        apply_grok_spawn(&spawn, &mut l);
+        assert_eq!(
+            (l.parent_native.as_deref(), l.agent_type.as_deref(), l.label.as_deref()),
+            (Some("mom"), Some("explore"), Some("Find the cache"))
+        );
+        assert!(grok_dispatch_kind("subagent") && grok_dispatch_kind("subagent_fork"));
+        assert!(!grok_dispatch_kind("fork"));
     }
 }

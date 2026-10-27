@@ -1,7 +1,7 @@
 //! The disposable SQLite index. Source files are the truth; a corrupt index
 //! is quarantined and rebuilt.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -13,7 +13,10 @@ use sha2::{Digest, Sha256};
 use xai_sqlite_journal::JournalMode;
 
 use crate::lines;
-use crate::links::{HEADER_LINES, Links, file_sig, grok_links, grok_summary, header_links, path_links, write_links};
+use crate::links::{
+    HEADER_LINES, GrokSpawn, Links, apply_grok_spawn, file_sig, grok_dispatch_kind, grok_links, grok_session_spawns, grok_spawn_for,
+    grok_spawn_index, grok_summary, header_links, path_links, subagents_sig, write_links,
+};
 use crate::normalize::{Kind, NormalizedEvent, Role, clip, normalize};
 use crate::roots::{Format, MAX_FILES, Root, discover, resolve};
 
@@ -21,7 +24,8 @@ mod bb_index;
 
 use crate::bb::{Bb, BbThread, thread_key};
 
-pub const PARSER_VERSION: i64 = 6;
+/// 7 re-reads grok transcripts so a subagent's parent comes from `subagents/<id>/meta.json`.
+pub const PARSER_VERSION: i64 = 7;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
 pub const SCHEMA_VERSION: i64 = 7;
 /// Size the index may use (db + `-wal`). Passing it is normal: the oldest sessions are evicted
@@ -560,6 +564,8 @@ pub struct TraceIndex {
     limits: Limits,
     /// Files that hit the event cap since the last scan began.
     capped_files: usize,
+    /// During `scan`, child id → spawn for each grok sessions root. `None` outside a scan, so a hook re-reads disk.
+    grok_spawns: Option<HashMap<PathBuf, HashMap<String, GrokSpawn>>>,
 }
 
 impl TraceIndex {
@@ -648,7 +654,7 @@ impl TraceIndex {
     /// Opens a db that `peek` found current.
     fn attach(mode: JournalMode, db: &Path, busy: Option<Duration>) -> Result<Self> {
         let conn = Self::connect(mode, db, busy)?;
-        Ok(Self { conn, db: db.to_path_buf(), limits: Limits::default(), capped_files: 0 })
+        Ok(Self { conn, db: db.to_path_buf(), limits: Limits::default(), capped_files: 0, grok_spawns: None })
     }
 
     /// Creates, replaces or quarantines the db while holding the rebuild lock. Whoever loses the race
@@ -881,6 +887,15 @@ impl TraceIndex {
     }
 
     pub fn scan_with_limit(&mut self, roots: &[Root], max_files: usize) -> Result<ScanReport> {
+        self.grok_spawns = Some(
+            roots.iter().filter(|r| r.source == "grok").map(|r| (r.path.clone(), grok_spawn_index(&r.path))).collect(),
+        );
+        let result = self.scan_with_limit_inner(roots, max_files);
+        self.grok_spawns = None;
+        result
+    }
+
+    fn scan_with_limit_inner(&mut self, roots: &[Root], max_files: usize) -> Result<ScanReport> {
         self.check_writable()?;
         self.capped_files = 0;
         // Until a full scan has finished once (`built`), growth is the db being filled, not a runaway.
@@ -1025,8 +1040,8 @@ impl TraceIndex {
             return Ok(false);
         }
         let (mut links, aux) = path_links(root, path);
-        // A sidecar (Claude's `.meta.json`) can change while the transcript does not.
-        let aux_sig = aux.as_deref().and_then(file_sig);
+        // A sidecar (Claude's `.meta.json`, grok's `subagents/*/meta.json`) can change while the transcript does not.
+        let aux_sig = grok_aux_sig(root, path, aux.as_deref().and_then(file_sig));
         let aux_changed = existing.as_ref().is_some_and(|f| f.aux_sig != aux_sig);
 
         let tail_ok = |f: &FileRow| -> io::Result<bool> {
@@ -1039,11 +1054,11 @@ impl TraceIndex {
                 let complete = f.indexed_bytes >= f.size_bytes;
                 if f.size_bytes == size && (complete || root.format == Format::Zstd) {
                     if f.mtime_ms == mtime {
-                        return self.refresh_aux(aux_changed, &sid, &path_str, &links, &aux_sig);
+                        return self.refresh_aux(root, aux_changed, &sid, &path_str, &links, &aux_sig);
                     }
                     if tail_ok(f)? {
                         self.conn.execute("UPDATE trace_files SET mtime_ms = ?1 WHERE path = ?2", params![mtime, path_str])?;
-                        return self.refresh_aux(aux_changed, &sid, &path_str, &links, &aux_sig);
+                        return self.refresh_aux(root, aux_changed, &sid, &path_str, &links, &aux_sig);
                     }
                     true
                 } else {
@@ -1105,13 +1120,27 @@ impl TraceIndex {
         };
         let indexed_bytes = if root.format == Format::Zstd { size } else { end_byte };
         let content_hash = tail_hash(path, indexed_bytes as u64)?;
-        if let (true, Some(summary)) = (root.source == "grok", grok_summary(path)) {
+        if root.source == "grok"
+            && let Some(summary) = grok_summary(path)
+        {
             if agg.cwd.is_none() {
                 agg.cwd = summary.pointer("/info/cwd").and_then(|v| v.as_str()).map(str::to_string);
             }
             grok_links(path, &summary, &mut links);
+            let kind = summary.get("session_kind").and_then(|v| v.as_str()).unwrap_or("");
+            if links.parent_native.is_none() && grok_dispatch_kind(kind) {
+                let child = links.native_id.clone().or_else(|| path.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()));
+                if let Some(id) = child
+                    && let Some(spawn) = cached_spawn(&self.grok_spawns, &root.path, &id)
+                {
+                    apply_grok_spawn(&spawn, &mut links);
+                }
+            }
         }
         write_links(&tx, &sid, &links)?;
+        if root.source == "grok" {
+            stamp_grok_children(&tx, &root.source, path)?;
+        }
         Self::write_aggregate(&tx, &sid, &agg, mtime)?;
         tx.execute(
             "INSERT INTO trace_files (path, root_id, source_id, format, size_bytes, mtime_ms, indexed_bytes, indexed_lines,
@@ -1267,7 +1296,7 @@ impl TraceIndex {
     }
 
     /// The transcript is unchanged; only its sidecar moved. Updates the links and the finished state.
-    fn refresh_aux(&self, changed: bool, sid: &str, path: &str, links: &Links, sig: &Option<String>) -> Result<bool> {
+    fn refresh_aux(&self, root: &Root, changed: bool, sid: &str, path: &str, links: &Links, sig: &Option<String>) -> Result<bool> {
         if !changed {
             return Ok(false);
         }
@@ -1278,11 +1307,62 @@ impl TraceIndex {
              failed = CASE WHEN done = 2 THEN 1 ELSE failed END WHERE id = ?1",
             [sid],
         )?;
+        if root.source == "grok" {
+            stamp_grok_children(&tx, &root.source, Path::new(path))?;
+        }
         tx.execute("UPDATE trace_files SET aux_sig = ?1 WHERE path = ?2", params![sig, path])?;
         tx.commit()?;
         // Nothing was parsed.
         Ok(false)
     }
+}
+
+/// Child id → spawn. A scan passes the map it built up front; a hook (`None`) reads that one meta off disk.
+fn cached_spawn(cache: &Option<HashMap<PathBuf, HashMap<String, GrokSpawn>>>, root: &Path, child: &str) -> Option<GrokSpawn> {
+    match cache {
+        Some(by_root) => by_root.get(root).and_then(|m| m.get(child)).cloned(),
+        None => grok_spawn_for(root, child),
+    }
+}
+
+fn grok_aux_sig(root: &Root, path: &Path, aux: Option<String>) -> Option<String> {
+    if root.source != "grok" {
+        return aux;
+    }
+    let extra = path.parent().and_then(subagents_sig);
+    match (aux, extra) {
+        (Some(a), Some(s)) => Some(format!("{a}|{s}")),
+        (other, None) => other,
+        (None, Some(s)) => Some(s),
+    }
+}
+
+/// Point children named in this session's `subagents/*/meta.json` at it. Scan order does not matter:
+/// a child indexed earlier is updated here; one indexed later reads the same meta itself.
+fn stamp_grok_children(tx: &Transaction<'_>, source: &str, chat_history: &Path) -> rusqlite::Result<()> {
+    let Some(dir) = chat_history.parent() else { return Ok(()) };
+    for (child, spawn) in grok_session_spawns(dir) {
+        let path: Option<String> = tx
+            .query_row("SELECT file_path FROM trace_sessions WHERE source_id = ?1 AND native_id = ?2", params![source, child], |r| r.get(0))
+            .optional()?;
+        let Some(path) = path else { continue };
+        let kind = grok_summary(Path::new(&path)).and_then(|v| v.get("session_kind").and_then(|k| k.as_str()).map(str::to_string));
+        if !kind.as_deref().is_some_and(grok_dispatch_kind) {
+            continue;
+        }
+        tx.execute(
+            "UPDATE trace_sessions SET parent_native = COALESCE(parent_native, ?2),
+             label = COALESCE(label, ?3),
+             agent_type = CASE
+               WHEN ?4 IS NULL THEN agent_type
+               WHEN agent_type IS NULL OR agent_type = 'subagent' OR agent_type LIKE 'subagent%' THEN ?4
+               ELSE agent_type
+             END
+             WHERE source_id = ?1 AND native_id = ?5",
+            params![source, spawn.parent_native, spawn.label, spawn.agent_type, child],
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
