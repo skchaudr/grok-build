@@ -3614,7 +3614,9 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
         1 => flags.push("local only".into()),
         n => flags.push(format!("host:{}", state.hosts.get(n - 2).map_or("?", |t| remote::label(t)))),
     }
-    flags.push(format!("sort:{:?}", state.sort).to_lowercase());
+    if state.sort != Sort::Updated {
+        flags.push(format!("sort:{:?}", state.sort).to_lowercase());
+    }
     let (active, failed, total) = state.counts();
     let mut counts = Vec::new();
     if active > 0 {
@@ -4575,6 +4577,36 @@ mod tests {
             _ => render_ledger(&mut buf, area, state, &theme),
         }
         (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Right-aligned flag text on the ledger header (tabs sit on the left, padded by spaces).
+    fn header_flags(screen: &str) -> String {
+        let line = screen.lines().next().unwrap_or("").trim_end();
+        match line.rfind("   ") {
+            Some(i) => line[i..].trim().to_string(),
+            None => line.trim().to_string(),
+        }
+    }
+
+    #[test]
+    fn ledger_flags_omit_default_sort() {
+        let mut state = TracesModalState::open_with_hosts(None, vec![]);
+        state.scanning = false;
+        let flags = header_flags(&draw(&mut state, 160, 12));
+        assert!(flags.contains("0 sessions"), "{flags}");
+        assert!(!flags.contains("sort:"), "{flags}");
+
+        state.sort = Sort::Events;
+        let flags = header_flags(&draw(&mut state, 160, 12));
+        assert!(flags.contains("sort:events"), "{flags}");
+
+        state.errors_only = true;
+        let flags = header_flags(&draw(&mut state, 160, 12));
+        let errors_at = flags.find("errors").unwrap_or_else(|| panic!("{flags}"));
+        let sort_at = flags.find("sort:events").unwrap_or_else(|| panic!("{flags}"));
+        let counts_at = flags.rfind("0 sessions").unwrap_or_else(|| panic!("{flags}"));
+        assert!(errors_at < sort_at && sort_at < counts_at, "{flags}");
+        assert!(flags.ends_with("0 sessions"), "{flags}");
     }
 
     #[test]
