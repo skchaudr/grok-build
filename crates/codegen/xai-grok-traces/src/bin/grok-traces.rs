@@ -29,7 +29,7 @@ fn main() -> ExitCode {
         Some("events") => finish(events(&args[1..])),
         Some("raw") => raw(&args[1..]),
         Some("version") => {
-            println!("grok-traces {} remote=1", env!("CARGO_PKG_VERSION"));
+            println!("grok-traces {} remote=1", env!("VERSION_WITH_COMMIT"));
             ExitCode::SUCCESS
         }
         _ => {
