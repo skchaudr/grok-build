@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseEventKind,
 };
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -23,7 +22,7 @@ use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 use crate::theme::Theme;
 use crate::views::traces_modal::{
-    Mode, TracesModalState, handle_traces_key, render_live, render_traces_modal,
+    Mode, TracesModalState, handle_traces_key, handle_traces_mouse, render_live, render_traces_modal,
 };
 
 const TICK: Duration = Duration::from_secs(1);
@@ -80,17 +79,7 @@ fn step(state: &mut TracesModalState, ev: &Event) -> bool {
             }
             true
         }
-        Event::Mouse(m) => match m.kind {
-            MouseEventKind::ScrollUp => {
-                state.live_wheel(false);
-                true
-            }
-            MouseEventKind::ScrollDown => {
-                state.live_wheel(true);
-                true
-            }
-            _ => false,
-        },
+        Event::Mouse(m) => !matches!(handle_traces_mouse(state, m), InputOutcome::Unchanged),
         Event::Resize(..) => true,
         _ => false,
     }

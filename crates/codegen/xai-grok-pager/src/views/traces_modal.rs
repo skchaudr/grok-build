@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -29,6 +29,8 @@ pub(super) use super::traces_body::{pretty, INPUT_KEYS, TEXT_KEYS};
 
 pub const TITLE: &str = "Traces";
 const PAGE: usize = 500;
+/// Rows one scroll-wheel notch moves the selection.
+const WHEEL: isize = 3;
 const EVENT_PAGE: usize = 5000;
 /// Children shown under a parent before `+N more`.
 const MAX_KIDS: usize = 6;
@@ -151,6 +153,8 @@ pub struct TracesModalState {
     /// Screen lines of each `oshown` row from the last trajectory render. `0` draws nothing and
     /// cannot be selected. Cleared when the outline changes, until the next render measures it.
     row_h: Vec<usize>,
+    /// List or trajectory viewport from the last render, in screen cells. `None` until then.
+    hit_list: Option<HitList>,
     /// The selected row, by key: kept across folds, filters and live growth.
     sel: Option<OutlineKey>,
     /// Text width the outline was last built for; 0 until the first render, so no prompt rows yet.
@@ -422,6 +426,7 @@ impl TracesModalState {
             oseen: HashSet::new(),
             oshown: Vec::new(),
             row_h: Vec::new(),
+            hit_list: None,
             sel: None,
             outline_w: 0,
             dirty_outline: false,
@@ -3178,9 +3183,217 @@ fn edit_line(text: &mut String, key: &KeyEvent) -> bool {
     }
 }
 
+/// Viewport recorded while drawing the ledger or the trajectory, so a later click can be mapped.
+#[derive(Clone, Copy)]
+struct HitList {
+    rect: Rect,
+    mode: Mode,
+}
+
+/// A shown row under a screen cell: `index` into the visible list, `top` the row's first line
+/// (the line that draws the fold glyph).
+struct RowHit {
+    index: usize,
+    top: u16,
+}
+
+/// Shown-row index at screen row `y`. Walks `heights` and `gaps` from `scroll` the same way
+/// `render_trajectory` does: the first drawn row's pre-spacer is not painted, a height of 0 draws
+/// nothing, and a click on a spacer hits nothing.
+fn row_at_y(y: u16, list_y: u16, bottom: u16, scroll: usize, heights: &[usize], gaps: &[(u16, u16)]) -> Option<RowHit> {
+    if list_y >= bottom || y < list_y || y >= bottom {
+        return None;
+    }
+    let mut cy = list_y;
+    for k in scroll..heights.len() {
+        let h = heights.get(k).copied().unwrap_or(1) as u16;
+        let (pre, post) = gaps.get(k).copied().unwrap_or((0, 0));
+        if cy > list_y {
+            for _ in 0..pre {
+                if cy >= bottom || cy == y {
+                    return None;
+                }
+                cy += 1;
+            }
+        }
+        if cy >= bottom {
+            return None;
+        }
+        if h == 0 {
+            for _ in 0..post {
+                if cy >= bottom || cy == y {
+                    return None;
+                }
+                cy += 1;
+            }
+            continue;
+        }
+        let span = h.min(bottom.saturating_sub(cy));
+        if (cy..cy + span).contains(&y) {
+            return Some(RowHit { index: k, top: cy });
+        }
+        cy = cy.saturating_add(h);
+        for _ in 0..post {
+            if cy >= bottom || cy == y {
+                return None;
+            }
+            cy += 1;
+        }
+    }
+    None
+}
+
+/// Column of a ledger row's fold glyph. The name cell follows the glyph, source, and (when shown) host.
+fn ledger_fold_col(list_x: u16, host: bool, guides: &[bool]) -> u16 {
+    let name_x = list_x + if host { 19 } else { 10 };
+    name_x + guide_prefix(guides).width() as u16
+}
+
+impl TracesModalState {
+    fn list_rect(&self) -> Option<Rect> {
+        self.hit_list.filter(|h| h.mode == self.mode).map(|h| h.rect)
+    }
+
+    fn hit_heights(&self) -> Vec<usize> {
+        if self.mode == Mode::List {
+            return vec![1; self.ledger.len()];
+        }
+        if self.row_h.len() == self.oshown.len() { self.row_h.clone() } else { vec![1; self.oshown.len()] }
+    }
+
+    fn row_hit(&self, y: u16, list: Rect) -> Option<RowHit> {
+        let heights = self.hit_heights();
+        let gaps = if self.mode == Mode::Trajectory { row_gaps(self, &heights, list.height as usize) } else { Vec::new() };
+        let scroll = if self.mode == Mode::List { self.scroll } else { self.event_scroll };
+        row_at_y(y, list.y, list.y.saturating_add(list.height), scroll, &heights, &gaps)
+    }
+
+    /// The click is on this row's fold glyph, on the row's first line, and the glyph was drawn.
+    fn on_fold(&self, column: u16, row: u16, hit: &RowHit, list: Rect) -> bool {
+        if row != hit.top {
+            return false;
+        }
+        match self.mode {
+            Mode::List => {
+                let Some(&n) = self.ledger.get(hit.index) else { return false };
+                if !self.tree.has_children(n) {
+                    return false;
+                }
+                let host = !self.hosts.is_empty();
+                let guides = self.nodes.get(n).map(|node| node.guides.as_slice()).unwrap_or(&[]);
+                let fold_x = ledger_fold_col(list.x, host, guides);
+                let name_w = ledger_cols(list.width as usize, host).name as u16;
+                let name_x = list.x + if host { 19 } else { 10 };
+                column == fold_x && fold_x < name_x.saturating_add(name_w)
+            }
+            Mode::Trajectory => {
+                let Some(&n) = self.oshown.get(hit.index) else { return false };
+                if !self.outline.has_children(n) {
+                    return false;
+                }
+                let depth = self.outline.nodes.get(n).map_or(0, |node| node.depth);
+                let fold_x = list.x + TEXT_COL as u16 + (depth as u16) * MARK_W as u16;
+                column == fold_x && fold_x < list.x.saturating_add(list.width)
+            }
+            Mode::Inspector | Mode::Live => false,
+        }
+    }
+
+    fn select_at(&mut self, pos: usize) {
+        match self.mode {
+            Mode::List => self.selected = pos,
+            Mode::Trajectory => self.goto(pos),
+            Mode::Inspector | Mode::Live => {}
+        }
+    }
+
+    fn reveal_selection(&mut self) {
+        match self.mode {
+            Mode::List => {
+                let height = self.list_rect().map_or(0, |r| r.height as usize);
+                keep_visible(self.selected, &mut self.scroll, height);
+            }
+            Mode::Trajectory => {
+                let Some(list) = self.list_rect() else { return };
+                let heights = self.hit_heights();
+                let gaps = row_gaps(self, &heights, list.height as usize);
+                fit_rows(self.sel_pos(), &mut self.event_scroll, &heights, &gaps, list.height as usize);
+            }
+            Mode::Inspector | Mode::Live => {}
+        }
+    }
+
+    fn wheel(&mut self, delta: isize) -> InputOutcome {
+        match self.mode {
+            Mode::List => {
+                let before = (self.selected, self.scroll);
+                move_sel(&mut self.selected, self.ledger.len(), delta);
+                self.reveal_selection();
+                if before == (self.selected, self.scroll) { InputOutcome::Unchanged } else { InputOutcome::Changed }
+            }
+            Mode::Trajectory => {
+                let before = (self.sel_pos(), self.event_scroll);
+                self.step(delta);
+                self.reveal_selection();
+                if before == (self.sel_pos(), self.event_scroll) { InputOutcome::Unchanged } else { InputOutcome::Changed }
+            }
+            Mode::Inspector | Mode::Live => InputOutcome::Unchanged,
+        }
+    }
+
+    fn click(&mut self, column: u16, row: u16) -> InputOutcome {
+        let Some(list) = self.list_rect() else { return InputOutcome::Unchanged };
+        if column < list.x || column >= list.x.saturating_add(list.width) {
+            return InputOutcome::Unchanged;
+        }
+        let Some(hit) = self.row_hit(row, list) else { return InputOutcome::Unchanged };
+        // Fold wins over Enter. A second click on the selected row is Enter (a double-click lands here too).
+        if self.on_fold(column, row, &hit, list) {
+            self.select_at(hit.index);
+            return handle_traces_key(self, &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        }
+        let already = match self.mode {
+            Mode::List => hit.index == self.selected,
+            Mode::Trajectory => hit.index == self.sel_pos(),
+            Mode::Inspector | Mode::Live => false,
+        };
+        if already {
+            return handle_traces_key(self, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        }
+        self.select_at(hit.index);
+        InputOutcome::Changed
+    }
+}
+
 /// Esc in a sub-view or an editor is handled here; only the ledger's Esc closes the modal.
 pub fn wants_esc(state: &TracesModalState) -> bool {
     state.typing != Typing::No || state.mode != Mode::List
+}
+
+/// Mouse in the list and the trajectory. A click selects; a click on the selected row (a double-click)
+/// is Enter; the wheel moves by [`WHEEL`] rows; a click on a fold glyph toggles that fold.
+/// The inspector ignores the mouse.
+pub fn handle_traces_mouse(state: &mut TracesModalState, mouse: &MouseEvent) -> InputOutcome {
+    match state.mode {
+        Mode::Inspector => InputOutcome::Unchanged,
+        Mode::Live => match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                state.live_wheel(true);
+                InputOutcome::Changed
+            }
+            MouseEventKind::ScrollUp => {
+                state.live_wheel(false);
+                InputOutcome::Changed
+            }
+            _ => InputOutcome::Unchanged,
+        },
+        Mode::List | Mode::Trajectory => match mouse.kind {
+            MouseEventKind::ScrollDown => state.wheel(WHEEL),
+            MouseEventKind::ScrollUp => state.wheel(-WHEEL),
+            MouseEventKind::Down(MouseButton::Left) => state.click(mouse.column, mouse.row),
+            _ => InputOutcome::Unchanged,
+        },
+    }
 }
 
 pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
@@ -3625,6 +3838,7 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
 }
 
 pub fn render_traces_modal(buf: &mut Buffer, full_area: Rect, state: &mut TracesModalState, compact: bool) {
+    state.hit_list = None;
     let theme = Theme::current();
     let sizing = ModalSizing { width_pct: 1.0, max_width: u16::MAX, min_width: 44, v_margin: 0, h_pad: 2, v_pad: 0, footer_lines: 2 }
         .with_compact(compact);
@@ -3831,6 +4045,7 @@ fn render_ledger(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, the
 
     let status_rows = u16::from(state.status.is_some());
     let list = Rect { y: area.y + 3, height: area.height.saturating_sub(3 + status_rows), ..area };
+    state.hit_list = Some(HitList { rect: list, mode: Mode::List });
     let show_host = !state.hosts.is_empty();
     let c = ledger_cols(area.width as usize, show_host);
     let mut head: Vec<(String, usize, Style)> = vec![
@@ -4098,6 +4313,7 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
 
     let status_rows = u16::from(state.status.is_some());
     let list = Rect { y: area.y + 5, height: area.height.saturating_sub(5 + status_rows), ..area };
+    state.hit_list = Some(HitList { rect: list, mode: Mode::Trajectory });
     // Outline rows are built for this text width. A resize, or an opener body that changed its prompt,
     // rebuilds them here, before anything is measured.
     let text_w = (list.width as usize).saturating_sub(TEXT_COL);
@@ -6364,6 +6580,144 @@ mod tests {
         assert!(s.status.is_none());
         assert!(s.status_at.is_none());
     }
+
+    fn mouse_at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE }
+    }
+
+    fn click_at(state: &mut TracesModalState, column: u16, row: u16) -> InputOutcome {
+        handle_traces_mouse(state, &mouse_at(MouseEventKind::Down(MouseButton::Left), column, row))
+    }
+
+    fn ledger_rows(n: usize) -> TracesModalState {
+        let mut state = TracesModalState::open_with_hosts(None, vec![]);
+        state.clear_status();
+        state.sessions = (0..n)
+            .map(|i| SessionRow { id: format!("s{i}"), title: format!("task {i}"), ..row("claude", "/h/x.jsonl") })
+            .collect();
+        state.rebuild_ledger();
+        state
+    }
+
+    fn paint_ledger(state: &mut TracesModalState, w: u16, h: u16) -> Buffer {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        render_ledger(&mut buf, area, state, &Theme::current());
+        buf
+    }
+
+    fn paint_trajectory(state: &mut TracesModalState, w: u16, h: u16) -> Buffer {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        render_trajectory(&mut buf, area, state, &Theme::current());
+        buf
+    }
+
+    fn find_glyph(buf: &Buffer, glyph: &str) -> Option<(u16, u16)> {
+        let area = buf.area;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if buf[(x, y)].symbol() == glyph {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn row_at_y_walks_heights_gaps_and_scroll() {
+        // 2-line row, a height-0 row, then a 1-line row whose pre-spacer sits on y=12.
+        let heights = [2, 0, 1];
+        let gaps = [(0, 0), (0, 0), (1, 0)];
+        let hit = row_at_y(11, 10, 20, 0, &heights, &gaps).unwrap();
+        assert_eq!((hit.index, hit.top), (0, 10), "lower line of a tall row stays that row");
+        assert!(row_at_y(12, 10, 20, 0, &heights, &gaps).is_none(), "spacer is not a row");
+        assert_eq!(row_at_y(13, 10, 20, 0, &heights, &gaps).unwrap().index, 2);
+        // Scrolled in: the first drawn row's pre-spacer is not painted, so y=10 is row 2.
+        assert_eq!(row_at_y(10, 10, 20, 2, &[1, 1, 1], &[(0, 0), (0, 0), (1, 0)]).unwrap().index, 2);
+        assert!(row_at_y(9, 10, 20, 0, &heights, &gaps).is_none());
+        assert!(row_at_y(20, 10, 20, 0, &heights, &gaps).is_none());
+    }
+
+    #[test]
+    fn mouse_click_selects_a_ledger_row_and_second_click_opens_it() {
+        let mut state = ledger_rows(6);
+        let _ = paint_ledger(&mut state, 80, 12);
+        // Header is row 2; the first session is row 3. Row 5 is session s2.
+        assert!(matches!(click_at(&mut state, 40, 2), InputOutcome::Unchanged), "header is not a row");
+        assert!(matches!(click_at(&mut state, 90, 5), InputOutcome::Unchanged), "outside the list");
+        assert_eq!(state.selected, 0);
+        assert!(matches!(click_at(&mut state, 40, 5), InputOutcome::Changed));
+        assert_eq!(state.selected, 2);
+        assert_eq!(state.mode, Mode::List);
+        assert!(matches!(click_at(&mut state, 40, 5), InputOutcome::Changed));
+        assert_eq!(state.mode, Mode::Trajectory);
+        assert_eq!(state.session.as_ref().map(|s| s.id.as_str()), Some("s2"));
+    }
+
+    #[test]
+    fn mouse_wheel_moves_ledger_selection_by_three_and_scrolls() {
+        let mut state = ledger_rows(20);
+        let _ = paint_ledger(&mut state, 80, 8);
+        // List height is 5 (rows start at y=3). Selection 0 is already at the top.
+        let up = handle_traces_mouse(&mut state, &mouse_at(MouseEventKind::ScrollUp, 10, 4));
+        assert!(matches!(up, InputOutcome::Unchanged));
+        assert_eq!(state.selected, 0);
+        assert!(matches!(handle_traces_mouse(&mut state, &mouse_at(MouseEventKind::ScrollDown, 10, 4)), InputOutcome::Changed));
+        assert_eq!((state.selected, state.scroll), (3, 0));
+        assert!(matches!(handle_traces_mouse(&mut state, &mouse_at(MouseEventKind::ScrollDown, 10, 4)), InputOutcome::Changed));
+        assert_eq!((state.selected, state.scroll), (6, 2));
+    }
+
+    #[test]
+    fn mouse_fold_click_toggles_that_ledger_row() {
+        let mut state = tree_state(&[("r", None), ("c1", Some("r")), ("g1", Some("c1")), ("gg1", Some("g1")), ("c2", Some("r"))]);
+        state.clear_status();
+        assert_eq!(shown(&state), ["r", "c1", "c2"]);
+        let buf = paint_ledger(&mut state, 140, 20);
+        let (x, y) = find_glyph(&buf, crate::glyphs::chevron()).expect("collapsed fold glyph");
+        assert!(matches!(click_at(&mut state, x, y), InputOutcome::Changed));
+        assert_eq!(shown(&state), ["r", "c1", "g1", "c2"], "the triangle toggles, it does not open");
+        assert_eq!(state.mode, Mode::List);
+        assert_eq!(state.selected_session().map(|s| s.id.as_str()), Some("c1"));
+    }
+
+    #[test]
+    fn mouse_trajectory_selects_scrolls_and_toggles_a_fold() {
+        let mut state = user_turns(&["a", "b", "c", "d", "e", "f", "g", "h"]);
+        state.clear_status();
+        let _ = paint_trajectory(&mut state, 100, 8);
+        // List starts at y=5 and is 3 lines tall. Row 1 is "b".
+        assert!(matches!(click_at(&mut state, 40, 6), InputOutcome::Changed));
+        assert_eq!(state.sel_pos(), 1);
+        assert!(matches!(handle_traces_mouse(&mut state, &mouse_at(MouseEventKind::ScrollDown, 40, 6)), InputOutcome::Changed));
+        assert_eq!(state.sel_pos(), 4);
+        assert_eq!(state.event_scroll, 2, "the selection stays inside the 3-line viewport");
+
+        let mut state = trajectory(three_calls());
+        state.clear_status();
+        let buf = paint_trajectory(&mut state, 100, 24);
+        let (x, y) = find_glyph(&buf, crate::glyphs::chevron_down()).expect("open fold glyph");
+        let before = shown_rows(&state);
+        assert!(before.len() > 1, "{before:?}");
+        assert!(matches!(click_at(&mut state, x, y), InputOutcome::Changed));
+        assert_eq!(shown_rows(&state), ["Turn(1)"]);
+        assert_eq!(state.mode, Mode::Trajectory, "a fold click is not Enter");
+    }
+
+    #[test]
+    fn mouse_inspector_ignores_clicks_and_the_wheel() {
+        let mut state = trajectory(three_calls());
+        state.mode = Mode::Inspector;
+        let sel = state.sel.clone();
+        let scroll = state.event_scroll;
+        assert!(matches!(click_at(&mut state, 14, 5), InputOutcome::Unchanged));
+        assert!(matches!(handle_traces_mouse(&mut state, &mouse_at(MouseEventKind::ScrollDown, 14, 5)), InputOutcome::Unchanged));
+        assert_eq!(state.mode, Mode::Inspector);
+        assert_eq!(state.sel, sel);
+        assert_eq!(state.event_scroll, scroll);
+    }
 }
 
 #[cfg(test)]
@@ -7633,4 +7987,5 @@ mod live_tests {
         s.fold_now(now_ms());
         assert!(s.live_rows.is_empty() && s.status.is_none());
     }
+
 }

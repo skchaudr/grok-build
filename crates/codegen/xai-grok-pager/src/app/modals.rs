@@ -1520,20 +1520,14 @@ impl AgentView {
             }
         }
 
-        // Traces is keyboard-first; the chrome takes clicks (close button) and the wheel scrolls the live screen.
+        // Traces: chrome takes the close button. List and trajectory rows take clicks, folds and the wheel.
         if let Some(ActiveModal::Traces { state }) = &mut self.active_modal {
             return match mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row) {
                 ModalWindowOutcome::CloseRequested => {
                     self.active_modal = None;
                     InputOutcome::Changed
                 }
-                ModalWindowOutcome::Unhandled => match mouse.kind {
-                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if state.mode == crate::views::traces_modal::Mode::Live => {
-                        state.live_wheel(matches!(mouse.kind, MouseEventKind::ScrollDown));
-                        InputOutcome::Changed
-                    }
-                    _ => InputOutcome::Unchanged,
-                },
+                ModalWindowOutcome::Unhandled => crate::views::traces_modal::handle_traces_mouse(state, mouse),
                 _ => InputOutcome::Changed,
             };
         }
