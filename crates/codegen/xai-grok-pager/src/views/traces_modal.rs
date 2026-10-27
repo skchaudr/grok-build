@@ -4482,7 +4482,8 @@ mod tests {
             vec![],
         );
         live.live_sel = Some("root".into());
-        assert!(matches!(press(&mut live, KeyCode::Char('c')), InputOutcome::Changed), "c folds the open root");
+        let folded = handle_traces_key(&mut live, &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(matches!(folded, InputOutcome::Changed), "c folds the open root");
         live.live_sel = Some("root".into());
         assert!(has(&live, "c fold"));
         assert!(has(&live, "o open"));
