@@ -8,7 +8,7 @@ use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::normalize::{clean_text, normalize};
 use crate::roots::resolve;
@@ -150,6 +150,12 @@ fn body(pfx: &str, mark: &str, text: &str) -> Option<String> {
     Some(s)
 }
 
+/// A failed result's `(exit, message)` first lines; either may be empty.
+fn error_parts(ev: &EventRow) -> (&str, &str) {
+    let detail = ev.detail.as_deref().map(first_line).unwrap_or("");
+    if detail.starts_with("exit ") { (detail, first_line(&ev.preview)) } else { ("", if detail.is_empty() { first_line(&ev.preview) } else { detail }) }
+}
+
 /// One printed block for a row, or `None` when the row is not shown. `raw` is the row's source line.
 pub fn format_event(ev: &EventRow, raw: Option<&str>, depth: usize) -> Option<String> {
     if ev.noise {
@@ -168,8 +174,7 @@ pub fn format_event(ev: &EventRow, raw: Option<&str>, depth: usize) -> Option<St
             Some(format!("{pfx}→ {}  {}", ev.title, clip(what, CLIP)).trim_end().to_string())
         }
         ("tool", Some("tool_result")) if ev.is_error => {
-            let detail = ev.detail.as_deref().map(first_line).unwrap_or("");
-            let (exit, msg) = if detail.starts_with("exit ") { (detail, first_line(&ev.preview)) } else { ("", if detail.is_empty() { first_line(&ev.preview) } else { detail }) };
+            let (exit, msg) = error_parts(ev);
             let parts: Vec<String> = [exit, msg].into_iter().filter(|s| !s.is_empty()).map(|s| clip(s, CLIP)).collect();
             Some(format!("{pfx}   ✗ {}", parts.join("  ")).trim_end().to_string())
         }
@@ -191,11 +196,81 @@ pub fn format_event(ev: &EventRow, raw: Option<&str>, depth: usize) -> Option<St
     }
 }
 
+/// `follow --json` item wire version.
+const ITEM_V: u32 = 1;
+
+fn item(kind: &str, agent: &str, depth: usize, line: Option<i64>, ts: Option<i64>) -> Value {
+    json!({"v": ITEM_V, "kind": kind, "agent": agent, "depth": depth, "line": line, "ts": ts})
+}
+
+/// `agent_start`, `agent_end` or `agent_resume` (subagents only; the root's end and resume come from `live`).
+pub fn agent_item(kind: &str, agent: &str, depth: usize, ts: Option<i64>, model: Option<&str>, label: Option<&str>) -> Value {
+    let mut v = item(kind, agent, depth, None, ts);
+    if kind == "agent_start" {
+        v["model"] = json!(model);
+        v["label"] = json!(label);
+    }
+    v
+}
+
+/// A `model` item: the agent's model changed (or, for the root, is first known).
+pub fn model_item(agent: &str, depth: usize, line: Option<i64>, ts: Option<i64>, model: &str, label: Option<&str>) -> Value {
+    let mut v = item("model", agent, depth, line, ts);
+    v["model"] = json!(model);
+    v["label"] = json!(label);
+    v
+}
+
+/// The `--json` item for a row, shown exactly when [`format_event`] shows it; text is full and unwrapped.
+/// `call_id` is the tool call id (`call`) or the id of the call answered (`result`).
+pub fn json_event(ev: &EventRow, raw: Option<&str>, call_id: Option<&str>, agent: &str, depth: usize) -> Option<Value> {
+    if ev.noise {
+        return None;
+    }
+    let mut v = item("", agent, depth, Some(ev.line), ev.timestamp);
+    let text = || Some(full_text(ev, raw)).filter(|t| !t.trim().is_empty());
+    match (ev.kind.as_str(), ev.role.as_deref()) {
+        ("tool", Some("tool")) => {
+            let what = [ev.intent.as_deref(), ev.detail.as_deref()].into_iter().flatten().map(first_line).find(|s| !s.is_empty()).unwrap_or("");
+            v["kind"] = json!("call");
+            v["call_id"] = json!(call_id);
+            v["tool"] = json!(ev.title);
+            v["what"] = json!(what);
+        }
+        ("tool", Some("tool_result")) => {
+            v["kind"] = json!("result");
+            v["call_id"] = json!(call_id);
+            v["ok"] = json!(!ev.is_error);
+            if ev.is_error {
+                let (exit, msg) = error_parts(ev);
+                v["error"] = json!([exit, msg].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("  "));
+            }
+        }
+        ("reasoning", _) | (_, Some("reasoning")) => {
+            v["kind"] = json!("reasoning");
+            v["text"] = json!(text()?);
+        }
+        ("message", Some("assistant")) => {
+            v["kind"] = json!("text");
+            v["text"] = json!(text()?);
+        }
+        ("message", Some("user")) => {
+            v["kind"] = json!("user");
+            v["text"] = json!(text()?);
+        }
+        _ => return None,
+    }
+    Some(v)
+}
+
 struct Followed {
     id: String,
     depth: usize,
     last_line: i64,
     ended: bool,
+    /// Last model announced for this session (`--json` `model` items).
+    model: Option<String>,
+    label: Option<String>,
     /// Printed before this session's first row, so a subagent's start follows its parent's rows.
     announce: Option<String>,
     /// Tool call id -> line of calls with no result yet; the index puts a call's duration on the call row.
@@ -212,11 +287,34 @@ pub struct Follower {
     started: bool,
     last_activity_ms: i64,
     next_idle_s: u64,
+    json: bool,
+    backlog: usize,
 }
 
 impl Follower {
     pub fn new(idx: TraceIndex, roots: Vec<Root>, root: SessionRow, children: bool, home: Option<String>) -> Self {
-        Self { idx, roots, children, home, sessions: Vec::new(), root, started: false, last_activity_ms: 0, next_idle_s: IDLE_FIRST_S }
+        Self { idx, roots, children, home, sessions: Vec::new(), root, started: false, last_activity_ms: 0, next_idle_s: IDLE_FIRST_S, json: false, backlog: BACKLOG }
+    }
+
+    /// Emit one JSON item per line (see [`json_event`]) instead of formatted text.
+    pub fn with_json(mut self, json: bool) -> Self {
+        self.json = json;
+        self
+    }
+
+    /// Rows shown for sessions that are already running when followed.
+    pub fn with_backlog(mut self, n: usize) -> Self {
+        self.backlog = n;
+        self
+    }
+
+    /// What is printed before a subagent's first row: its start line, or its `agent_start` item.
+    fn start_block(&self, kid: &SessionRow, depth: usize) -> String {
+        if self.json {
+            agent_item("agent_start", &kid.id, depth, kid.started_at, kid.model.as_deref(), kid.label.as_deref()).to_string()
+        } else {
+            started_line(kid.model.as_deref(), depth)
+        }
     }
 
     /// Indexes the session's file alone (as a hook would); sources with no file (bb) are left to their hooks.
@@ -233,7 +331,7 @@ impl Follower {
         let rows = self.idx.list_events(id, &EventFilter { limit: MAX_EVENTS_PER_FILE, ..Default::default() })?;
         // Never start on a result whose call is out of view.
         let mut from = rows.len().saturating_sub(n);
-        while from > 0 && rows[from].role.as_deref() == Some("tool_result") {
+        while from > 0 && from < rows.len() && rows[from].role.as_deref() == Some("tool_result") {
             from -= 1;
         }
         Ok(from.checked_sub(1).map_or(-1, |i| rows[i].line))
@@ -241,7 +339,7 @@ impl Follower {
 
     fn adopt(&mut self, s: &SessionRow, depth: usize, tail: Option<usize>, announce: Option<String>) -> Result<()> {
         let last_line = self.resume_after(&s.id, tail)?;
-        self.sessions.push(Followed { id: s.id.clone(), depth, last_line, ended: false, announce, calls: HashMap::new() });
+        self.sessions.push(Followed { id: s.id.clone(), depth, last_line, ended: false, model: s.model.clone(), label: s.label.clone(), announce, calls: HashMap::new() });
         Ok(())
     }
 
@@ -279,10 +377,16 @@ impl Follower {
         if first {
             self.started = true;
             self.last_activity_ms = now_ms;
-            out.push(header(&self.root, self.home.as_deref()));
             let root = self.root.clone();
+            if self.json {
+                if let Some(m) = &root.model {
+                    out.push(model_item(&root.id, 0, None, root.started_at, m, root.label.as_deref()).to_string());
+                }
+            } else {
+                out.push(header(&root, self.home.as_deref()));
+            }
             self.index(&root.file_path)?;
-            self.adopt(&root, 0, Some(BACKLOG), None)?;
+            self.adopt(&root, 0, Some(self.backlog), None)?;
         }
         let mut printed = false;
         let mut at = 0;
@@ -295,46 +399,67 @@ impl Follower {
                 self.probe_subagents(&row.file_path, now_ms)?;
                 for kid in self.idx.children(&id)? {
                     if kid.status == Status::Active && !self.sessions.iter().any(|f| f.id == kid.id) {
-                        self.adopt(&kid, depth + 1, first.then_some(BACKLOG), Some(started_line(kid.model.as_deref(), depth + 1)))?;
+                        let start = self.start_block(&kid, depth + 1);
+                        self.adopt(&kid, depth + 1, first.then_some(self.backlog), Some(start))?;
                     }
                 }
+            }
+            // A subagent that ended and is active again resumes before its new rows (silent in text).
+            if self.json && depth > 0 && self.sessions[at].ended && row.status == Status::Active {
+                out.push(agent_item("agent_resume", &id, depth, Some(now_ms), None, None).to_string());
             }
             let filter = EventFilter { since_line: Some(self.sessions[at].last_line), limit: MAX_EVENTS_PER_FILE, ..Default::default() };
             for mut ev in self.idx.list_events(&id, &filter)? {
                 self.sessions[at].last_line = ev.line;
                 let raw = self.idx.raw_line(&id, ev.line).ok().flatten();
-                let tool_ids = || raw.as_deref().and_then(|r| serde_json::from_str::<Value>(r).ok()).map(|v| normalize(&v));
+                let ids = matches!(ev.role.as_deref(), Some("tool" | "tool_result"))
+                    .then(|| raw.as_deref().and_then(|r| serde_json::from_str::<Value>(r).ok()).map(|v| normalize(&v)))
+                    .flatten();
+                let (call_id, result_id) = ids.map_or((None, None), |n| (n.tool_call_id, n.tool_result_id));
                 match ev.role.as_deref() {
                     Some("tool") => {
-                        if let Some(call_id) = tool_ids().and_then(|n| n.tool_call_id) {
+                        if let Some(call_id) = call_id.clone() {
                             self.sessions[at].calls.insert(call_id, ev.line);
                         }
                     }
                     Some("tool_result") if ev.duration_ms.is_none() => {
-                        let result_id = tool_ids().and_then(|n| n.tool_result_id);
                         ev.duration_ms = self.call_duration(at, result_id.as_deref())?;
                     }
                     _ => {}
                 }
-                if let Some(block) = format_event(&ev, raw.as_deref(), depth) {
+                let block = if self.json {
+                    if let Some(m) = ev.model.as_ref().filter(|m| self.sessions[at].model.as_ref() != Some(*m)) {
+                        out.push(model_item(&id, depth, Some(ev.line), ev.timestamp, m, self.sessions[at].label.as_deref()).to_string());
+                        self.sessions[at].model = Some(m.clone());
+                    }
+                    json_event(&ev, raw.as_deref(), call_id.or(result_id).as_deref(), &id, depth).map(|v| v.to_string())
+                } else {
+                    format_event(&ev, raw.as_deref(), depth)
+                };
+                if let Some(block) = block {
                     out.push(block);
                     printed = true;
                 }
             }
             let live = row.status == Status::Active;
             let f = &mut self.sessions[at];
+            let sub = depth > 0;
             if live {
                 f.ended = false;
             } else if !f.ended {
                 f.ended = true;
-                out.push(ended_line(depth));
+                if !self.json {
+                    out.push(ended_line(depth));
+                } else if sub {
+                    out.push(agent_item("agent_end", &id, depth, Some(now_ms), None, None).to_string());
+                }
             }
             at += 1;
         }
         if printed {
             self.last_activity_ms = now_ms;
             self.next_idle_s = IDLE_FIRST_S;
-        } else if (now_ms - self.last_activity_ms) / 1000 >= self.next_idle_s as i64 {
+        } else if !self.json && (now_ms - self.last_activity_ms) / 1000 >= self.next_idle_s as i64 {
             out.push(idle_line(self.next_idle_s));
             self.next_idle_s += IDLE_EVERY_S;
         }
@@ -472,6 +597,55 @@ mod tests {
             assert_eq!(format_event(&ev(k, r, "T", "p"), None, 0), None, "{k}");
         }
         assert_eq!(format_event(&ev("message", Some("user"), "User", "User"), None, 0), None, "empty prompt");
+    }
+
+    fn js(v: Option<Value>) -> String {
+        v.unwrap().to_string()
+    }
+
+    #[test]
+    fn json_user_text_reasoning() {
+        let mut u = user("fix it");
+        u.timestamp = Some(1000);
+        let raw = r#"{"message":{"role":"user","content":"first\nsecond"}}"#;
+        assert_eq!(js(json_event(&u, Some(raw), None, "a1", 0)), r#"{"v":1,"kind":"user","agent":"a1","depth":0,"line":1,"ts":1000,"text":"first\nsecond"}"#);
+        let a = ev("message", Some("assistant"), "Assistant", "hi");
+        assert_eq!(js(json_event(&a, None, None, "a1", 1)), r#"{"v":1,"kind":"text","agent":"a1","depth":1,"line":1,"ts":null,"text":"hi"}"#);
+        let r = ev("reasoning", Some("reasoning"), "Reasoning", "hmm");
+        assert_eq!(js(json_event(&r, None, None, "a1", 0)), r#"{"v":1,"kind":"reasoning","agent":"a1","depth":0,"line":1,"ts":null,"text":"hmm"}"#);
+        assert_eq!(json_event(&user("User"), None, None, "a1", 0), None, "empty prompt is hidden, as in text");
+    }
+
+    #[test]
+    fn json_call_and_result() {
+        let mut c = ev("tool", Some("tool"), "Bash", "cargo test");
+        c.detail = Some("cargo test -p x".into());
+        assert_eq!(js(json_event(&c, None, Some("t1"), "a", 0)), r#"{"v":1,"kind":"call","agent":"a","depth":0,"line":1,"ts":null,"call_id":"t1","tool":"Bash","what":"cargo test -p x"}"#);
+        c.intent = Some("run the tests".into());
+        assert!(js(json_event(&c, None, Some("t1"), "a", 0)).ends_with(r#""what":"run the tests"}"#));
+        c.intent = None;
+        c.detail = None;
+        assert!(js(json_event(&c, None, None, "a", 0)).ends_with(r#""call_id":null,"tool":"Bash","what":""}"#));
+        let mut r = ev("tool", Some("tool_result"), "Tool Result", "ok");
+        assert_eq!(js(json_event(&r, None, Some("t1"), "a", 0)), r#"{"v":1,"kind":"result","agent":"a","depth":0,"line":1,"ts":null,"call_id":"t1","ok":true}"#);
+        r.is_error = true;
+        r.detail = Some("exit 2".into());
+        r.preview = "error: no such file\nmore".into();
+        assert_eq!(js(json_event(&r, None, Some("t1"), "a", 0)), r#"{"v":1,"kind":"result","agent":"a","depth":0,"line":1,"ts":null,"call_id":"t1","ok":false,"error":"exit 2  error: no such file"}"#);
+    }
+
+    #[test]
+    fn json_agent_and_model_items() {
+        assert_eq!(
+            agent_item("agent_start", "k", 1, Some(5), Some("claude-haiku-4-5"), Some("Check")).to_string(),
+            r#"{"v":1,"kind":"agent_start","agent":"k","depth":1,"line":null,"ts":5,"model":"claude-haiku-4-5","label":"Check"}"#
+        );
+        assert_eq!(agent_item("agent_end", "k", 1, Some(6), None, None).to_string(), r#"{"v":1,"kind":"agent_end","agent":"k","depth":1,"line":null,"ts":6}"#);
+        assert_eq!(agent_item("agent_resume", "k", 1, Some(7), None, None).to_string(), r#"{"v":1,"kind":"agent_resume","agent":"k","depth":1,"line":null,"ts":7}"#);
+        assert_eq!(
+            model_item("k", 1, Some(3), None, "gpt-5", None).to_string(),
+            r#"{"v":1,"kind":"model","agent":"k","depth":1,"line":3,"ts":null,"model":"gpt-5","label":null}"#
+        );
     }
 
     #[test]
