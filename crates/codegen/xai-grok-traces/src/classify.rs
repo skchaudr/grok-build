@@ -51,6 +51,26 @@ pub fn harness_prompt(text: &str) -> bool {
     HARNESS_PROMPTS.iter().any(|p| t.starts_with(p))
 }
 
+/// Whether a user message is only a client placeholder: an interrupt marker or `[Image #N]` tags.
+pub fn placeholder_prompt(text: &str) -> bool {
+    let t = text.trim();
+    if t == "[Request interrupted by user]" || t == "[Request interrupted by user for tool use]" {
+        return true;
+    }
+    let mut rest = t;
+    let mut tags = 0;
+    while !rest.is_empty() {
+        let Some(r) = rest.strip_prefix("[Image #") else { return false };
+        let Some(end) = r.find(']') else { return false };
+        if r[..end].is_empty() || !r[..end].bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        rest = r[end + 1..].trim_start();
+        tags += 1;
+    }
+    tags > 0
+}
+
 fn is_injected_tag(tag: &str) -> bool {
     let t = tag.to_ascii_lowercase();
     INJECTED_TAGS.contains(&t.as_str()) || t.ends_with("-hook") || t.ends_with("_hook")
@@ -98,7 +118,7 @@ pub fn strip_injected(s: &str) -> (Cow<'_, str>, Option<String>) {
 const NOISE_TYPES: &[&str] = &[
     // Claude
     "attachment", "file-history-snapshot", "file-history-delta", "last-prompt", "mode", "permission-mode", "summary",
-    "ai-title", "queue-operation", "atis-latch", "cost-state", "system", "progress", "custom-title", "agent-name",
+    "ai-title", "pr-link", "queue-operation", "atis-latch", "cost-state", "system", "progress", "custom-title", "agent-name",
     // Codex
     "turn_context", "world_state", "token_usage_record", "session_meta", "compacted", "inter_agent_communication_metadata",
     "event_msg/token_count", "event_msg/thread_settings_applied", "event_msg/item_completed", "event_msg/task_started",

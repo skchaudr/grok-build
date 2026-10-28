@@ -569,7 +569,7 @@ fn old_schema_is_replaced_not_migrated() {
     assert_eq!(all(&idx).len(), 6);
     let stats = idx.stats().unwrap();
     assert_eq!(stats.schema_version.as_deref(), Some("9"));
-    assert_eq!(stats.parser_version.as_deref(), Some("8"));
+    assert_eq!(stats.parser_version.as_deref(), Some("9"));
     let names: Vec<String> = fs::read_dir(e.db.parent().unwrap()).unwrap().map(|d| d.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert!(names.iter().all(|n| !n.contains(".old.")), "old db removed: {names:?}");
     assert!(!names.iter().any(|n| n.contains(".corrupt.")));
