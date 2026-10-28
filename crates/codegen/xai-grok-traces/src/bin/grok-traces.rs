@@ -1,4 +1,4 @@
-//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | version | doctor [--reset]`.
+//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] | version | doctor [--reset]`.
 //!
 //! `hook` runs once per harness event: it must be fast, silent and always
 //! exit 0 so it can never block an agent.
@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use xai_grok_traces::follow::Follower;
 use xai_grok_traces::live::{self, LIVE_SCHEMA, LiveEnvelope, fold_all};
 use xai_grok_traces::hook::{MAX_STDIN_BYTES, extract, ingest};
 use xai_grok_traces::remote::{event_to_json, session_to_json};
@@ -28,12 +29,13 @@ fn main() -> ExitCode {
         Some("doctor") => finish(doctor(&args[1..])),
         Some("events") => finish(events(&args[1..])),
         Some("raw") => raw(&args[1..]),
+        Some("follow") => finish(follow(&args[1..])),
         Some("version") => {
             println!("grok-traces {} remote=1", env!("VERSION_WITH_COMMIT"));
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | version | doctor [--reset]");
+            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] | version | doctor [--reset]");
             ExitCode::from(2)
         }
     }
@@ -224,6 +226,58 @@ fn events(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
         writeln!(out, "{}", event_to_json(&e))?;
     }
     Ok(true)
+}
+
+/// `tail -f` for one live session: prints its tool calls and decisions as they are indexed. Runs until killed.
+fn follow(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut id = None;
+    let mut children = true;
+    for a in args {
+        match a.as_str() {
+            "--no-children" => children = false,
+            other if other.starts_with('-') => return Err(format!("unknown flag {other}").into()),
+            other => id = Some(other),
+        }
+    }
+    let idx = TraceIndex::open_with(&default_db_path(), Some(Duration::from_secs(2)))?;
+    let root = match id {
+        Some(id) => idx.session(id)?.ok_or_else(|| format!("no such session {id}"))?,
+        None => {
+            let filter = SessionFilter { limit: 1, active_only: true, roots_only: true, ..Default::default() };
+            match idx.list_sessions(&filter)?.pop() {
+                Some(s) => s,
+                None => {
+                    eprintln!("no active session (grok-traces list --active)");
+                    return Ok(false);
+                }
+            }
+        }
+    };
+    let home = xai_dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
+    let mut follower = Follower::new(idx, user_roots(), root, children, home);
+    let mut last_err = String::new();
+    loop {
+        match follower.tick(chrono::Utc::now().timestamp_millis()) {
+            Ok(blocks) => {
+                let mut out = io::stdout().lock();
+                for b in blocks {
+                    if writeln!(out, "{b}").is_err() {
+                        return Ok(true);
+                    }
+                }
+                if out.flush().is_err() {
+                    return Ok(true);
+                }
+            }
+            // A busy index is transient; say each distinct error once and keep following.
+            Err(e) if e.to_string() != last_err => {
+                last_err = e.to_string();
+                eprintln!("grok-traces: {e}");
+            }
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// Prints the raw source line. Exit 3 = no such line.
