@@ -3887,6 +3887,15 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                     };
                     state.load_events();
                 }
+                KeyCode::Char('T') => {
+                    state.tool_filter = match state.tool_filter {
+                        _ if state.tools.is_empty() => None,
+                        None => Some(state.tools.len() - 1),
+                        Some(0) => None,
+                        Some(i) => Some(i - 1),
+                    };
+                    state.load_events();
+                }
                 KeyCode::Char('/') => state.typing = Typing::Events,
                 KeyCode::Char('r') => return state.resume(state.session.clone()),
                 KeyCode::Char('y') => match state.turn_prompt_text() {
@@ -4090,7 +4099,7 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
                 plain("n noise"),
                 plain("x errors"),
                 plain("!/* errors"),
-                plain("t tool"),
+                plain("t/T tool"),
                 plain("⇅ in/out"),
                 plain("/ search"),
                 plain("y copy"),
@@ -5963,6 +5972,17 @@ mod tests {
         state.session.as_mut().unwrap().model = Some("claude-sonnet-5-5-20250929".into());
         let line = rows_at(&mut state, 160, 12)[0].clone();
         assert!(line.contains("· sonnet-5-5 ·") && !line.contains("20250929"), "{line}");
+    }
+
+    #[test]
+    fn traces_capital_t_cycles_tools_backward() {
+        let mut state = trajectory(vec![ev(1, "message", "user", "hi")]);
+        state.tools = vec!["Bash".into(), "Read".into(), "Edit".into()];
+        press(&mut state, KeyCode::Char('t'));
+        press(&mut state, KeyCode::Char('t'));
+        assert_eq!(state.tool_filter, Some(1));
+        press(&mut state, KeyCode::Char('T'));
+        assert_eq!(state.tool_filter, Some(0));
     }
 
     #[test]
