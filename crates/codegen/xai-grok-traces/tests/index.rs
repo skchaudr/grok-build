@@ -230,6 +230,8 @@ fn events_facets_and_raw_line() {
     assert_eq!(events.len(), 5);
     assert_eq!(events[3].depth, 2);
     assert_eq!(idx.list_events(&x.id, &EventFilter::default()).unwrap().len(), 4, "session_meta is noise");
+    let after = idx.list_events(&x.id, &EventFilter { include_noise: true, since_line: Some(events[1].line), ..Default::default() }).unwrap();
+    assert_eq!(after.iter().map(|e| e.line).collect::<Vec<_>>(), events[2..].iter().map(|e| e.line).collect::<Vec<_>>(), "since_line is exclusive");
     let errs = idx.list_events(&x.id, &EventFilter { errors_only: true, ..Default::default() }).unwrap();
     assert_eq!(errs.iter().map(|e| e.line).collect::<Vec<_>>(), vec![3]);
     let shell = idx.list_events(&x.id, &EventFilter { tool: Some("shell".into()), ..Default::default() }).unwrap();

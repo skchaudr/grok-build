@@ -138,6 +138,8 @@ pub struct EventFilter {
     pub tool: Option<String>,
     /// Include bookkeeping, telemetry and injected context (hidden by default).
     pub include_noise: bool,
+    /// Only events after this line number (exclusive), for paging and following.
+    pub since_line: Option<i64>,
     pub limit: usize,
     pub offset: usize,
 }
@@ -431,6 +433,10 @@ impl TraceIndex {
         }
         if !filter.include_noise {
             sql.push_str(" AND e.noise = 0");
+        }
+        if let Some(line) = filter.since_line {
+            sql.push_str(" AND e.line_number > ?");
+            args.push(Sql::Integer(line));
         }
         if let Some(tool) = &filter.tool {
             sql.push_str(&format!(" AND e.kind = {} AND ti.name = ?", Kind::Tool.code()));

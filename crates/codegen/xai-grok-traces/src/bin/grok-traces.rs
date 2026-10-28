@@ -1,4 +1,4 @@
-//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] | raw <id> <line> | version | doctor [--reset]`.
+//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | version | doctor [--reset]`.
 //!
 //! `hook` runs once per harness event: it must be fast, silent and always
 //! exit 0 so it can never block an agent.
@@ -33,7 +33,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | events <id> --json [--noise] [--limit N] | raw <id> <line> | version | doctor [--reset]");
+            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | version | doctor [--reset]");
             ExitCode::from(2)
         }
     }
@@ -214,6 +214,7 @@ fn events(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
             "--json" => {}
             "--noise" => filter.include_noise = true,
             "--limit" => filter.limit = it.next().and_then(|v| v.parse().ok()).ok_or("--limit needs a number")?,
+            "--since-line" => filter.since_line = Some(it.next().and_then(|v| v.parse().ok()).ok_or("--since-line needs a number")?),
             other => return Err(format!("unknown flag {other}").into()),
         }
     }

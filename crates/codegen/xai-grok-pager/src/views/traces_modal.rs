@@ -661,6 +661,7 @@ impl TracesModalState {
             errors_only: self.event_errors_only,
             tool: self.tool_filter.and_then(|i| self.tools.get(i).cloned()),
             include_noise: self.include_noise,
+            since_line: None,
             limit: EVENT_PAGE,
             offset: 0,
         }
