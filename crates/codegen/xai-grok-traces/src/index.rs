@@ -27,7 +27,7 @@ use crate::bb::{Bb, BbThread, thread_key};
 
 /// 8: titles fall back to `(no prompt) · <cwd basename>` instead of the file name.
 /// 7: DSH prompt size (`inputTokens` + cache read/write) and `request/context.contextWindow`; Cursor context (`usage.inputTokens` / hook `input_tokens`) and `contextTokenLimit` window; bb `thread/contextWindowUsage/updated`; fills `duration_ms` from a tool call's matching result timestamp; re-reads grok transcripts so a subagent's parent comes from `subagents/<id>/meta.json`.
-pub const PARSER_VERSION: i64 = 8;
+pub const PARSER_VERSION: i64 = 9;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
 /// 8 adds `trace_event_usage.call_id` so an appended result can still find its call.
 pub const SCHEMA_VERSION: i64 = 9;

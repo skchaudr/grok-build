@@ -589,7 +589,7 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         let flagged = top.get("isMeta") == Some(&Value::Bool(true))
             || top.get("isCompactSummary") == Some(&Value::Bool(true))
             || string_value(top.get("synthetic_reason")).is_some();
-        if flagged || (!had_text && inj.0.is_some()) || crate::classify::harness_prompt(&text) {
+        if flagged || (!had_text && inj.0.is_some()) || crate::classify::harness_prompt(&text) || crate::classify::placeholder_prompt(&text) {
             noise = true;
         }
     }
@@ -1011,6 +1011,24 @@ mod tests {
         assert_eq!(bare.tool_result_id, None, "a result's own id is not the call id");
         let flat = normalize(&json!({"type":"response_item","payload":{"type":"function_call","id":"item-only","name":"shell","arguments":"{}"}}));
         assert_eq!(flat.tool_call_id, None, "a codex item id is not the call id");
+    }
+
+    #[test]
+    fn harness_placeholders_are_noise() {
+        // Real Claude line: PR link record (trimmed).
+        let pr = normalize(&json!({"type":"pr-link","sessionId":"s","prNumber":23,"prUrl":"https://github.com/skchaudr/trace-deck/pull/23","prRepository":"skchaudr/trace-deck","timestamp":"2026-10-28T12:07:47.079Z"}));
+        assert!(pr.noise, "pr-link");
+        // Real Claude line: user interrupt, both forms.
+        for text in ["[Request interrupted by user]", "[Request interrupted by user for tool use]"] {
+            let i = normalize(&json!({"parentUuid":"p","promptId":"x","type":"user","message":{"role":"user","content":[{"type":"text","text":text}]},"interruptedMessageId":"m","session_id":"s"}));
+            assert!(i.noise && i.role == Some(Role::User), "{text}");
+        }
+        // Real Claude line: image-only prompt (base64 block trimmed).
+        let img = normalize(&json!({"parentUuid":"p","type":"user","message":{"role":"user","content":[{"type":"text","text":"[Image #1] [Image #2]"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"/9j/4AAQ"}}]}}));
+        assert!(img.noise && img.role == Some(Role::User), "image placeholders");
+        // Real prose that mentions the marker stays signal.
+        let prose = normalize(&json!({"type":"user","message":{"role":"user","content":"[Image #1] fix this button"}}));
+        assert!(!prose.noise);
     }
 
     #[test]
