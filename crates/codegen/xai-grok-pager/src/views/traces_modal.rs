@@ -4575,18 +4575,29 @@ fn render_strip(buf: &mut Buffer, area: Rect, events: &[EventRow], selected: usi
 /// Rows in the inspector session header: chip, meta, activity strip, cwd or filter.
 const FULL_HEADER_ROWS: u16 = 5;
 
-fn ctx_pct(session: &SessionRow) -> String {
+/// `ctx N%`, or None when the session carries no context numbers.
+fn ctx_pct(session: &SessionRow) -> Option<String> {
     match (session.context_tokens, session.context_window) {
-        (Some(used), Some(window)) if window > 0 => format!("ctx {}%", (used.max(0) as i128 * 100 / window as i128).clamp(0, 100)),
-        _ => "ctx -".into(),
+        (Some(used), Some(window)) if window > 0 => Some(format!("ctx {}%", (used.max(0) as i128 * 100 / window as i128).clamp(0, 100))),
+        _ => None,
     }
 }
 
-/// One muted row: `source · title · N events · K tools · ctx%`. The title clips so the counts stay.
+/// `claude-sonnet-5-5-20250929` → `sonnet-5-5`.
+fn short_model(model: &str) -> &str {
+    let m = model.strip_prefix("claude-").unwrap_or(model);
+    match m.rsplit_once('-') {
+        Some((head, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => m,
+    }
+}
+
+/// One muted row: `source · model · title · N events · K tools · ctx%`. The title clips so the counts stay.
 fn render_compact_header(buf: &mut Buffer, area: Rect, state: &TracesModalState, theme: &Theme) {
     let Some(session) = state.session.clone() else { return };
     if area.width == 0 { return; }
-    let mut tail = format!(" · {} · {} · {}", count_of(session.event_count.max(0) as usize, "event", "events"), count_of(session.tool_count.max(0) as usize, "tool", "tools"), ctx_pct(&session));
+    let mut tail = format!(" · {} · {}", count_of(session.event_count.max(0) as usize, "event", "events"), count_of(session.tool_count.max(0) as usize, "tool", "tools"));
+    if let Some(ctx) = ctx_pct(&session) { tail.push_str(&format!(" · {ctx}")); }
     if state.follow { tail.push_str(" · FOL"); }
     if let Some(p) = &state.parent_name { tail.push_str(&format!(" · ↑ {p}")); }
     if state.events.len() >= EVENT_PAGE && session.event_count > state.events.len() as i64 && !state.filtering() && !(session.host.is_some() && state.remote_loading) {
@@ -4606,11 +4617,15 @@ fn render_compact_header(buf: &mut Buffer, area: Rect, state: &TracesModalState,
     }
     let width = area.width as usize;
     let source = source_label(&session.source);
-    let prefix = format!("{source} · ");
+    let head = match session.model.as_deref() {
+        Some(model) => format!("{source} · {}", short_model(model)),
+        None => source.to_string(),
+    };
+    let prefix = format!("{head} · ");
     let name = clean_name(&session);
     let budget = width.saturating_sub(prefix.width() + tail.width());
     let name = if budget == 0 || name.is_empty() { String::new() } else if name.width() > budget { ellipsize(&name, budget).trim_end().to_string() } else { name };
-    let line = if name.is_empty() { format!("{source}{tail}") } else { format!("{prefix}{name}{tail}") };
+    let line = if name.is_empty() { format!("{head}{tail}") } else { format!("{prefix}{name}{tail}") };
     buf.set_span(area.x, area.y, &Span::styled(truncate_str(&line, width).as_str(), Style::default().fg(theme.gray)), area.width);
 }
 
@@ -5932,6 +5947,21 @@ mod tests {
         assert!(rows[0].contains("4 events") && rows[0].contains("2 tools") && rows[0].contains("ctx 25%"), "{}", rows[0]);
         state.mode = Mode::Inspector;
         assert!(rows_at(&mut state, 80, 24).iter().any(|l| l.contains("ACTIVITY")), "inspector keeps the multi-row header");
+    }
+
+    #[test]
+    fn traces_header_without_context_has_no_ctx() {
+        let mut state = trajectory(vec![ev(1, "message", "user", "hi")]);
+        let line = rows_at(&mut state, 160, 12)[0].clone();
+        assert!(line.contains("events") && !line.contains("ctx"), "{line}");
+    }
+
+    #[test]
+    fn traces_header_with_model_shows_short_model() {
+        let mut state = trajectory(vec![ev(1, "message", "user", "hi")]);
+        state.session.as_mut().unwrap().model = Some("claude-sonnet-5-5-20250929".into());
+        let line = rows_at(&mut state, 160, 12)[0].clone();
+        assert!(line.contains("· sonnet-5-5 ·") && !line.contains("20250929"), "{line}");
     }
 
     #[test]
