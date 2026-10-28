@@ -3887,6 +3887,15 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                     };
                     state.load_events();
                 }
+                KeyCode::Char('T') => {
+                    state.tool_filter = match state.tool_filter {
+                        _ if state.tools.is_empty() => None,
+                        None => Some(state.tools.len() - 1),
+                        Some(0) => None,
+                        Some(i) => Some(i - 1),
+                    };
+                    state.load_events();
+                }
                 KeyCode::Char('/') => state.typing = Typing::Events,
                 KeyCode::Char('r') => return state.resume(state.session.clone()),
                 KeyCode::Char('y') => match state.turn_prompt_text() {
@@ -4090,7 +4099,8 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
                 plain("n noise"),
                 plain("x errors"),
                 plain("!/* errors"),
-                plain("t tool"),
+                plain("t/T tool"),
+                plain("⇅ in/out"),
                 plain("/ search"),
                 plain("y copy"),
             ];
@@ -4121,7 +4131,7 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
             v
         }
     };
-    for label in ["E all", "</> more/less", "n noise", "x errors"] {
+    for label in ["⇅ in/out", "E all", "</> more/less", "n noise", "x errors"] {
         if modal_window::shortcuts_rows_needed(&hints, width) <= 2 {
             break;
         }
@@ -4252,7 +4262,7 @@ fn ledger_cols(width: usize, host: bool) -> Cols {
         fixed += 12 + 1;
     }
     let flex = width.saturating_sub(fixed);
-    let name = (flex * 2 / 5).max(12).min(flex);
+    let name = (flex * 2 / 5).max(24).min(flex);
     Cols { name, now: flex - name, counts, cwd, tokens }
 }
 
@@ -4473,7 +4483,7 @@ fn role_glyph(e: &EventRow) -> &'static str {
 }
 
 fn fmt_token_pair(e: &EventRow) -> String {
-    format!("{:>5}/{:<6}", fmt_tokens(e.input_tokens), fmt_tokens(e.output_tokens))
+    format!("⇅{:>5}/{:<6}", fmt_tokens(e.input_tokens), fmt_tokens(e.output_tokens))
 }
 
 fn echoed(column: &str, row_text: &str) -> bool {
@@ -4493,7 +4503,7 @@ fn event_cols(width: usize, e: &EventRow, row_text: &str) -> (bool, bool, bool, 
     let age = width >= 120 && !echoed(&fmt_time(e.timestamp, false), row_text);
     let has_tokens = e.input_tokens.is_some() || e.output_tokens.is_some();
     let tokens = width >= 120 && has_tokens && !echoed(&fmt_token_pair(e), row_text);
-    let used = 9 + usize::from(chip) * 7 + usize::from(age) * 9 + usize::from(tokens) * 13;
+    let used = 9 + usize::from(chip) * 7 + usize::from(age) * 9 + usize::from(tokens) * 14;
     (chip, age, tokens, width.saturating_sub(used))
 }
 
@@ -4575,18 +4585,29 @@ fn render_strip(buf: &mut Buffer, area: Rect, events: &[EventRow], selected: usi
 /// Rows in the inspector session header: chip, meta, activity strip, cwd or filter.
 const FULL_HEADER_ROWS: u16 = 5;
 
-fn ctx_pct(session: &SessionRow) -> String {
+/// `ctx N%`, or None when the session carries no context numbers.
+fn ctx_pct(session: &SessionRow) -> Option<String> {
     match (session.context_tokens, session.context_window) {
-        (Some(used), Some(window)) if window > 0 => format!("ctx {}%", (used.max(0) as i128 * 100 / window as i128).clamp(0, 100)),
-        _ => "ctx -".into(),
+        (Some(used), Some(window)) if window > 0 => Some(format!("ctx {}%", (used.max(0) as i128 * 100 / window as i128).clamp(0, 100))),
+        _ => None,
     }
 }
 
-/// One muted row: `source · title · N events · K tools · ctx%`. The title clips so the counts stay.
+/// `claude-sonnet-5-5-20250929` → `sonnet-5-5`.
+fn short_model(model: &str) -> &str {
+    let m = model.strip_prefix("claude-").unwrap_or(model);
+    match m.rsplit_once('-') {
+        Some((head, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => m,
+    }
+}
+
+/// One muted row: `source · model · title · N events · K tools · ctx%`. The title clips so the counts stay.
 fn render_compact_header(buf: &mut Buffer, area: Rect, state: &TracesModalState, theme: &Theme) {
     let Some(session) = state.session.clone() else { return };
     if area.width == 0 { return; }
-    let mut tail = format!(" · {} · {} · {}", count_of(session.event_count.max(0) as usize, "event", "events"), count_of(session.tool_count.max(0) as usize, "tool", "tools"), ctx_pct(&session));
+    let mut tail = format!(" · {} · {}", count_of(session.event_count.max(0) as usize, "event", "events"), count_of(session.tool_count.max(0) as usize, "tool", "tools"));
+    if let Some(ctx) = ctx_pct(&session) { tail.push_str(&format!(" · {ctx}")); }
     if state.follow { tail.push_str(" · FOL"); }
     if let Some(p) = &state.parent_name { tail.push_str(&format!(" · ↑ {p}")); }
     if state.events.len() >= EVENT_PAGE && session.event_count > state.events.len() as i64 && !state.filtering() && !(session.host.is_some() && state.remote_loading) {
@@ -4606,11 +4627,15 @@ fn render_compact_header(buf: &mut Buffer, area: Rect, state: &TracesModalState,
     }
     let width = area.width as usize;
     let source = source_label(&session.source);
-    let prefix = format!("{source} · ");
+    let head = match session.model.as_deref() {
+        Some(model) => format!("{source} · {}", short_model(model)),
+        None => source.to_string(),
+    };
+    let prefix = format!("{head} · ");
     let name = clean_name(&session);
     let budget = width.saturating_sub(prefix.width() + tail.width());
     let name = if budget == 0 || name.is_empty() { String::new() } else if name.width() > budget { ellipsize(&name, budget).trim_end().to_string() } else { name };
-    let line = if name.is_empty() { format!("{source}{tail}") } else { format!("{prefix}{name}{tail}") };
+    let line = if name.is_empty() { format!("{head}{tail}") } else { format!("{prefix}{name}{tail}") };
     buf.set_span(area.x, area.y, &Span::styled(truncate_str(&line, width).as_str(), Style::default().fg(theme.gray)), area.width);
 }
 
@@ -4837,7 +4862,7 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
                     cells.push((fmt_time(e.timestamp, false), 8, base.fg(theme.text_secondary)));
                 }
                 if eh.tokens {
-                    cells.push((fmt_token_pair(e), 12, base.fg(theme.gray_bright)));
+                    cells.push((fmt_token_pair(e), 13, base.fg(theme.gray_bright)));
                 }
                 put_row(buf, list, y, &cells);
             }
@@ -5932,6 +5957,40 @@ mod tests {
         assert!(rows[0].contains("4 events") && rows[0].contains("2 tools") && rows[0].contains("ctx 25%"), "{}", rows[0]);
         state.mode = Mode::Inspector;
         assert!(rows_at(&mut state, 80, 24).iter().any(|l| l.contains("ACTIVITY")), "inspector keeps the multi-row header");
+    }
+
+    #[test]
+    fn traces_header_without_context_has_no_ctx() {
+        let mut state = trajectory(vec![ev(1, "message", "user", "hi")]);
+        let line = rows_at(&mut state, 160, 12)[0].clone();
+        assert!(line.contains("events") && !line.contains("ctx"), "{line}");
+    }
+
+    #[test]
+    fn traces_header_with_model_shows_short_model() {
+        let mut state = trajectory(vec![ev(1, "message", "user", "hi")]);
+        state.session.as_mut().unwrap().model = Some("claude-sonnet-5-5-20250929".into());
+        let line = rows_at(&mut state, 160, 12)[0].clone();
+        assert!(line.contains("· sonnet-5-5 ·") && !line.contains("20250929"), "{line}");
+    }
+
+    #[test]
+    fn traces_capital_t_cycles_tools_backward() {
+        let mut state = trajectory(vec![ev(1, "message", "user", "hi")]);
+        state.tools = vec!["Bash".into(), "Read".into(), "Edit".into()];
+        press(&mut state, KeyCode::Char('t'));
+        press(&mut state, KeyCode::Char('t'));
+        assert_eq!(state.tool_filter, Some(1));
+        press(&mut state, KeyCode::Char('T'));
+        assert_eq!(state.tool_filter, Some(0));
+    }
+
+    #[test]
+    fn traces_ledger_name_column_is_at_least_24_with_counts_shown() {
+        // At 100 cols the counts columns are on and the name would get 23 by the 2/5 split.
+        let c = ledger_cols(100, false);
+        assert!(c.counts && c.name >= 24, "name {} at 100 cols", c.name);
+        assert!(ledger_cols(20, false).name <= 20, "a narrow ledger still fits its flex");
     }
 
     #[test]
