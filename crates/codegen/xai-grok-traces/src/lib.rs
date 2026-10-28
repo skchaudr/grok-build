@@ -7,6 +7,7 @@
 pub mod bb;
 mod classify;
 mod cursor;
+pub mod follow;
 pub mod hook;
 mod index;
 mod lines;
