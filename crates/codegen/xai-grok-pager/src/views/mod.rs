@@ -29,6 +29,7 @@ pub mod traces_modal;
 pub(crate) mod traces_body;
 pub(crate) mod traces_fold;
 pub(crate) mod traces_outline;
+pub(crate) mod traces_payload;
 pub mod modal;
 pub(crate) mod modal_list;
 pub mod modal_window;
