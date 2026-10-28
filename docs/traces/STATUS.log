@@ -29,3 +29,4 @@
 2026-10-28 LANDED ab1a39b3 mini+air: noise rows (#28); parser 9
 2026-10-28 LANDED 15345c16 mini+air: T4 payload view (#29); grok-fork rebuilt
 2026-10-28 LANDED bb72952c mini+air: T8 resume (#30), T3 anchor (#31); grok-fork rebuilt
+2026-10-28 LANDED 532e576d mini+air: T2 body rendering (#32); grok-fork rebuilt
