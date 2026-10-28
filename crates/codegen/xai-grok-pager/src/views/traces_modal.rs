@@ -4091,6 +4091,7 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
                 plain("x errors"),
                 plain("!/* errors"),
                 plain("t tool"),
+                plain("⇅ in/out"),
                 plain("/ search"),
                 plain("y copy"),
             ];
@@ -4121,7 +4122,7 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
             v
         }
     };
-    for label in ["E all", "</> more/less", "n noise", "x errors"] {
+    for label in ["⇅ in/out", "E all", "</> more/less", "n noise", "x errors"] {
         if modal_window::shortcuts_rows_needed(&hints, width) <= 2 {
             break;
         }
@@ -4473,7 +4474,7 @@ fn role_glyph(e: &EventRow) -> &'static str {
 }
 
 fn fmt_token_pair(e: &EventRow) -> String {
-    format!("{:>5}/{:<6}", fmt_tokens(e.input_tokens), fmt_tokens(e.output_tokens))
+    format!("⇅{:>5}/{:<6}", fmt_tokens(e.input_tokens), fmt_tokens(e.output_tokens))
 }
 
 fn echoed(column: &str, row_text: &str) -> bool {
@@ -4493,7 +4494,7 @@ fn event_cols(width: usize, e: &EventRow, row_text: &str) -> (bool, bool, bool, 
     let age = width >= 120 && !echoed(&fmt_time(e.timestamp, false), row_text);
     let has_tokens = e.input_tokens.is_some() || e.output_tokens.is_some();
     let tokens = width >= 120 && has_tokens && !echoed(&fmt_token_pair(e), row_text);
-    let used = 9 + usize::from(chip) * 7 + usize::from(age) * 9 + usize::from(tokens) * 13;
+    let used = 9 + usize::from(chip) * 7 + usize::from(age) * 9 + usize::from(tokens) * 14;
     (chip, age, tokens, width.saturating_sub(used))
 }
 
@@ -4852,7 +4853,7 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
                     cells.push((fmt_time(e.timestamp, false), 8, base.fg(theme.text_secondary)));
                 }
                 if eh.tokens {
-                    cells.push((fmt_token_pair(e), 12, base.fg(theme.gray_bright)));
+                    cells.push((fmt_token_pair(e), 13, base.fg(theme.gray_bright)));
                 }
                 put_row(buf, list, y, &cells);
             }
