@@ -81,7 +81,7 @@ impl TraceIndex {
             _ => (0, 0),
         };
 
-        let mut agg = if reset { Aggregate { title: t.id.clone(), ..Default::default() } } else { self.load_aggregate(&sid, &t.id)? };
+        let mut agg = if reset { Aggregate::default() } else { self.load_aggregate(&sid, &t.id)? };
         if let Some(title) = &t.title {
             agg.user_title = Some(clip(title.lines().next().unwrap_or(title), TITLE_CHARS));
         }
