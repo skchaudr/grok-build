@@ -24,6 +24,7 @@ use crate::theme::Theme;
 use crate::views::modal_window::{self, ModalContentArea, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut};
 use crate::views::traces_fold::{FoldNode, FoldState, FoldTree};
 use crate::views::traces_outline::{self, OutlineItem, OutlineKey, PROMPT_LEAD};
+use crate::views::traces_payload::{self, Payload, Shape};
 
 pub(super) use super::traces_body::{pretty, INPUT_KEYS, TEXT_KEYS};
 
@@ -50,8 +51,8 @@ const MAX_DEPTH: usize = 8;
 const GUIDE_LEVELS: usize = 3;
 const PEEK_TAIL: usize = 20;
 /// Separators between a folded call's body and its result.
-const RESULT_SEP: &str = "── result ──";
-const RESULT_ERR_SEP: &str = "── ✗ result ──";
+pub(super) const RESULT_SEP: &str = "── result ──";
+pub(super) const RESULT_ERR_SEP: &str = "── ✗ result ──";
 /// Key prefix of a `+N more` node; it cannot collide with a session id.
 const MORE_KEY: &str = "\u{1}more:";
 /// How often remote hosts are refetched while the modal is open.
@@ -197,7 +198,7 @@ pub struct TracesModalState {
     remote_noise: bool,
     remote_loading: bool,
     remote_ev: Option<mpsc::Receiver<RemoteEvents>>,
-    raw_rx: Option<mpsc::Receiver<String>>,
+    raw_rx: Option<mpsc::Receiver<(String, Result<String, String>)>>,
     /// Raw line of the inspected remote event, for `y`.
     raw_source: Option<String>,
     /// Synthetic raw lines (event line → source) when the index has none.
@@ -219,6 +220,8 @@ pub struct TracesModalState {
 
     pub raw: Option<String>,
     raw_scroll: usize,
+    /// What Enter shows: the payload (command and result, or text); `m` flips to `raw`.
+    payload: Payload,
 
     /// Live screen: local rows as last folded, and the titles of parents the fold did not return.
     live_rows: Vec<LiveRow>,
@@ -476,6 +479,7 @@ impl TracesModalState {
             tool_filter: None,
             raw: None,
             raw_scroll: 0,
+            payload: Payload::default(),
             live_rows: Vec::new(),
             live_titles: HashMap::new(),
             remote_live: HashMap::new(),
@@ -1659,8 +1663,30 @@ impl TracesModalState {
         let Some(line) = self.selected_event().and_then(|i| self.events.get(i)).map(|e| e.line) else { return };
         let (Some(index), Some(session)) = (&self.index, &self.session) else { return };
         self.raw = Some(pretty(index.raw_line(&session.id, line).map_err(|e| e.to_string())));
+        let (call, shape) = self.payload_target().unwrap_or((line, Shape::Prose));
+        let result = self.payload_result();
+        let fetch = |l: i64| index.raw_line(&session.id, l).map_err(|e| e.to_string());
+        let body = compose_body(fetch(call), result.map(|(l, error)| (fetch(l), error)));
+        self.payload.open(Some(body), shape);
         self.raw_scroll = 0;
         self.mode = Mode::Inspector;
+    }
+
+    /// The line the payload view reads and its shape: the selected event, or the call whose folded result it is.
+    fn payload_target(&self) -> Option<(i64, Shape)> {
+        let i = self.selected_event()?;
+        let e = self.events.get(i)?;
+        if is_result(e) && i > 0 && self.result_of(i - 1).is_some_and(|(l, _)| l == e.line) {
+            return Some((self.events.get(i - 1)?.line, Shape::Call));
+        }
+        Some((e.line, if is_call(e) { Shape::Call } else if is_result(e) { Shape::Result } else { Shape::Prose }))
+    }
+
+    /// The result folded into the payload's call, if any.
+    fn payload_result(&self) -> Option<(i64, bool)> {
+        let i = self.selected_event()?;
+        let call = if self.events.get(i).is_some_and(is_result) && i > 0 { i - 1 } else { i };
+        self.result_of(call)
     }
 
     /// The raw source line for the inspected event, unformatted.
@@ -1804,11 +1830,12 @@ impl TracesModalState {
             }
         }
         if let Some(rx) = &self.raw_rx
-            && let Ok(text) = rx.try_recv()
+            && let Ok((text, body)) = rx.try_recv()
         {
             self.raw_rx = None;
             self.raw_source = Some(text.clone());
             self.raw = Some(pretty(Ok(Some(text))));
+            self.payload.body = Some(body);
             redraw = true;
         }
         redraw
@@ -1885,15 +1912,22 @@ impl TracesModalState {
         self.raw_rx = Some(rx);
         self.raw_source = None;
         self.raw = Some("fetching from the remote host…".into());
+        let (call, shape) = self.payload_target().unwrap_or((line, Shape::Prose));
+        let result = self.payload_result();
+        self.payload.open(None, shape);
         self.raw_scroll = 0;
         self.mode = Mode::Inspector;
         std::thread::spawn(move || {
-            let text = match remote::fetch_raw(&target, remote::remote_id(&target, &session.id), line) {
+            let fetch = |l: i64| remote::fetch_raw(&target, remote::remote_id(&target, &session.id), l).map_err(|e| e.to_string());
+            let raw = fetch(line);
+            let own = if call == line { raw.clone() } else { fetch(call) };
+            let body = compose_body(own, result.map(|(l, error)| (fetch(l), error)));
+            let text = match raw {
                 Ok(Some(text)) => text,
-                Ok(None) => return drop(tx.send(String::new())),
-                Err(e) => return drop(tx.send(format!("{{\"error\": \"{e}\"}}"))),
+                Ok(None) => String::new(),
+                Err(e) => format!("{{\"error\": \"{e}\"}}"),
             };
-            let _ = tx.send(text);
+            let _ = tx.send((text, body));
         });
     }
 }
@@ -3156,7 +3190,7 @@ fn body_of(raw: Result<Option<String>, String>) -> Result<String, String> {
 
 /// A body row: the event's own text, then its folded result under a separator (`✗` when it failed).
 /// Any read that failed fails the whole body, so nothing half-read gets cached.
-fn compose_body(own: Result<Option<String>, String>, result: Option<(Result<Option<String>, String>, bool)>) -> Result<String, String> {
+pub(super) fn compose_body(own: Result<Option<String>, String>, result: Option<(Result<Option<String>, String>, bool)>) -> Result<String, String> {
     let text = body_of(own)?;
     match result {
         Some((raw, error)) => {
@@ -3575,6 +3609,11 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
         }
         Typing::No => {}
     }
+    // The payload scrolls a page on Ctrl-U/D.
+    if state.mode == Mode::Inspector && key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Char('u' | 'd')) {
+        state.raw_scroll = if key.code == KeyCode::Char('d') { state.raw_scroll + 10 } else { state.raw_scroll.saturating_sub(10) };
+        return InputOutcome::Changed;
+    }
     // Plain-letter nav keys ignore Ctrl/Alt chords (Ctrl+E is not `e`, Ctrl+R is not `r`).
     if matches!(key.code, KeyCode::Char(_)) && key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
         return InputOutcome::Unchanged;
@@ -3796,6 +3835,10 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
             }
         }
         Mode::Inspector => match key.code {
+            KeyCode::Esc if state.payload.meta => {
+                state.payload.meta = false;
+                state.raw_scroll = 0;
+            }
             KeyCode::Esc => {
                 state.mode = Mode::Trajectory;
                 state.raw = None;
@@ -3805,12 +3848,21 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
             KeyCode::PageDown => state.raw_scroll += page as usize,
             KeyCode::PageUp => state.raw_scroll = state.raw_scroll.saturating_sub(page as usize),
             KeyCode::Char('g') | KeyCode::Home => state.raw_scroll = 0,
-            KeyCode::Char('y') => {
-                if let Some(text) = state.raw_source_line() {
-                    return InputOutcome::Action(Action::TracesCopy { text });
-                }
-                return InputOutcome::Unchanged;
+            KeyCode::Char('G') | KeyCode::End => state.raw_scroll = usize::MAX / 2,
+            KeyCode::Char('m') => {
+                state.payload.meta = !state.payload.meta;
+                state.raw_scroll = 0;
             }
+            KeyCode::Char('w') => state.payload.wrap = !state.payload.wrap,
+            KeyCode::Char('r') if state.payload.failed() => state.open_inspector(),
+            KeyCode::Char('y') => match state.payload.copy_text() {
+                Some(text) => return InputOutcome::Action(Action::TracesCopy { text }),
+                None => return InputOutcome::Unchanged,
+            },
+            KeyCode::Char('Y') => match state.raw_source_line() {
+                Some(text) => return InputOutcome::Action(Action::TracesCopy { text }),
+                None => return InputOutcome::Unchanged,
+            },
             _ => return InputOutcome::Unchanged,
         },
     }
@@ -3979,7 +4031,14 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
             plain("/ search"),
             plain("Esc back"),
         ],
-        Mode::Inspector => vec![plain("j/k scroll"), plain("y copy line"), plain("Esc back")],
+        Mode::Inspector => {
+            let mut v = vec![plain("j/k scroll"), plain("g/G ends"), plain("^U/^D page"), plain("w wrap"), plain(if state.payload.meta { "m payload" } else { "m metadata" }), plain("y copy"), plain("Y copy json")];
+            if state.payload.failed() {
+                v.push(plain("r retry"));
+            }
+            v.push(plain("Esc back"));
+            v
+        }
     };
     for label in ["E all", "</> more/less", "n noise", "x errors"] {
         if modal_window::shortcuts_rows_needed(&hints, width) <= 2 {
@@ -4861,7 +4920,7 @@ fn more_label(total: usize) -> String {
 
 /// Splits a composed body at its result separator: the event's own text, then the result section (empty
 /// when there is none).
-fn split_result(text: &str) -> (&str, &str) {
+pub(super) fn split_result(text: &str) -> (&str, &str) {
     match [RESULT_SEP, RESULT_ERR_SEP]
         .iter()
         .filter_map(|sep| text.find(*sep))
@@ -4955,12 +5014,28 @@ fn render_inspector(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, 
         return;
     }
     let dim = Style::default().fg(theme.gray);
+    if state.peek.is_none() && !state.payload.meta {
+        let running = state.session.as_ref().is_some_and(|s| s.status == Status::Active);
+        let head = match state.selected_event().and_then(|i| state.events.get(i)) {
+            Some(e) => traces_payload::Head {
+                title: if e.title.is_empty() { role_chip(e).to_string() } else { e.title.clone() },
+                running,
+                duration: fmt_duration(e.duration_ms),
+                time: fmt_time(e.timestamp, true),
+            },
+            None => traces_payload::Head { title: String::new(), running, duration: String::new(), time: String::new() },
+        };
+        traces_payload::render(buf, pane, &state.payload, &head, &mut state.raw_scroll, theme);
+        render_status(buf, area, state, theme);
+        return;
+    }
     if let Some(e) = state.selected_event().and_then(|i| state.events.get(i)) {
         let head = format!("{} · line {} · {} · {}", e.event_type, e.line, fmt_time(e.timestamp, true), fmt_duration(e.duration_ms));
         buf.set_span(pane.x, pane.y, &Span::styled(truncate_str(&head, pane.width as usize).as_str(), Style::default().fg(theme.text_primary).add_modifier(Modifier::BOLD)), pane.width);
     }
     let Some(raw) = &state.raw else { return };
-    let lines: Vec<&str> = raw.lines().collect();
+    let wrap = state.payload.wrap && state.peek.is_none();
+    let lines: Vec<String> = raw.lines().flat_map(|l| if wrap { traces_payload::hard_wrap(l, pane.width as usize) } else { vec![l.to_string()] }).collect();
     let status_rows = u16::from(state.status.is_some());
     let body = Rect { y: pane.y + 2, height: pane.height.saturating_sub(2 + status_rows), ..pane };
     state.raw_scroll = state.raw_scroll.min(lines.len().saturating_sub(body.height as usize));
@@ -7095,6 +7170,91 @@ mod tests {
         assert_eq!(state.mode, Mode::Inspector);
         assert_eq!(state.sel, sel);
         assert_eq!(state.event_scroll, scroll);
+    }
+
+    /// An inspector on a Bash call with script `script` and result `out`; `raw` is a fake source line.
+    fn payload_state(script: &str, out: &str) -> TracesModalState {
+        let mut state = trajectory(three_calls());
+        let own = Ok(Some(format!("{{\"input\":{{\"command\":{script:?}}}}}")));
+        let res = Some((Ok(Some(format!("{{\"output\":{out:?}}}"))), false));
+        state.payload.open(Some(compose_body(own, res)), Shape::Call);
+        state.raw = Some("{\n  \"parentId\": \"p1\"\n}".into());
+        let line = state.selected_event().map(|i| state.events[i].line).unwrap_or(1);
+        state.raw_lines.insert(line, "RAWLINE".into());
+        state.mode = Mode::Inspector;
+        state
+    }
+
+    #[test]
+    fn inspector_opens_on_the_payload_and_m_flips_to_json_and_back() {
+        let mut state = payload_state("python3 - <<EOF\nprint(1)\nEOF", "1");
+        let rows = rows_at(&mut state, 100, 24).join("\n");
+        assert!(rows.contains("1 │ python3 - <<EOF") && rows.contains("3 │ EOF") && rows.contains(RESULT_SEP), "{rows}");
+        assert!(!rows.contains("parentId"), "{rows}");
+        press(&mut state, KeyCode::Char('m'));
+        let rows = rows_at(&mut state, 100, 24).join("\n");
+        assert!(rows.contains("parentId") && rows.contains("line "), "{rows}");
+        assert!(!rows.contains("python3 -"), "{rows}");
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.mode, Mode::Inspector, "Esc leaves metadata first");
+        assert!(!state.payload.meta);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.mode, Mode::Trajectory);
+    }
+
+    #[test]
+    fn w_toggles_wrap_in_both_views() {
+        let long = "x".repeat(200);
+        let mut state = payload_state(&long, "r");
+        let count = |rows: &[String]| rows.iter().filter(|r| r.contains("xxxx")).count();
+        assert!(count(&rows_at(&mut state, 80, 24)) > 1, "payload wraps by default");
+        press(&mut state, KeyCode::Char('w'));
+        assert_eq!(count(&rows_at(&mut state, 80, 24)), 1, "w truncates");
+        state.raw = Some(format!("{{\"k\": \"{long}\"}}"));
+        press(&mut state, KeyCode::Char('m'));
+        assert_eq!(count(&rows_at(&mut state, 80, 24)), 1, "metadata honours the same toggle");
+        press(&mut state, KeyCode::Char('w'));
+        assert!(count(&rows_at(&mut state, 80, 24)) > 1, "metadata wraps when w is on");
+    }
+
+    #[test]
+    fn y_copies_the_command_and_capital_y_the_raw_line() {
+        let mut state = payload_state("echo a\necho b", "out");
+        let copied = |o: InputOutcome| match o {
+            InputOutcome::Action(Action::TracesCopy { text }) => text,
+            _ => panic!("no copy action"),
+        };
+        let y = handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(copied(y), "echo a\necho b", "no margin, no separator, no result");
+        let upper = handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+        assert_eq!(copied(upper), "RAWLINE");
+    }
+
+    #[test]
+    fn inspector_scrolls_by_page_and_to_the_ends() {
+        let out = (1..=100).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n");
+        let mut state = payload_state("c", &out);
+        rows_at(&mut state, 80, 24);
+        handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(state.raw_scroll, 10);
+        handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(state.raw_scroll, 0);
+        press(&mut state, KeyCode::Char('G'));
+        assert!(rows_at(&mut state, 80, 24).iter().any(|r| r.contains("l100")), "G reaches the last line");
+        press(&mut state, KeyCode::Char('g'));
+        assert_eq!(state.raw_scroll, 0);
+    }
+
+    #[test]
+    fn inspector_hints_list_the_keys_that_work() {
+        let mut state = payload_state("c", "o");
+        let hints = hint_labels(&state, 120);
+        for want in ["j/k scroll", "g/G ends", "w wrap", "m metadata", "y copy", "Y copy json", "Esc back"] {
+            assert!(hints.contains(&want), "{hints:?}");
+        }
+        assert!(!hints.contains(&"r retry"));
+        state.payload.open(Some(Err("io".into())), Shape::Call);
+        assert!(hint_labels(&state, 120).contains(&"r retry"));
     }
 }
 
