@@ -64,7 +64,7 @@ fn run_hook(bin: &Path, home: &Path, transcript: &Path) {
 }
 
 /// `/traces` lists sessions from HOME (a subagent nests under its parent), tab filters by source,
-/// Enter opens the trajectory, Enter on an Agent row opens the child and Esc returns, `x` filters errors, Enter shows the raw source line, `y` copies it byte for byte,
+/// Enter opens the trajectory, Enter on an Agent row opens the child and Esc returns, `x` filters errors, Enter shows the payload (text, or a call's command then its result), `y` copies it, `m` shows the raw source line and `Y` copies it byte for byte,
 /// and `r` on a source with no resume path shows the notice instead of launching anything.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
@@ -140,14 +140,14 @@ async fn traces_modal_ledger_trajectory_inspector() {
     assert!(h.contains_text("ptyclaudetask"), "{}", h.screen_contents());
 
     h.inject_keys(keys::ENTER).expect("open trajectory");
-    h.wait_for_text("ACTIVITY", Duration::from_secs(5)).expect("activity strip renders");
+    h.wait_for_text("events ·", Duration::from_secs(5)).expect("trajectory header renders");
     assert!(h.contains_text("Bash"), "tool row\n{}", h.screen_contents());
     assert!(h.contains_text("✗"), "the failed result is folded into its Bash call\n{}", h.screen_contents());
     assert!(h.contains_text("→ ptychildjob"), "dispatch row names its child\n{}", h.screen_contents());
 
     // Enter on the Agent row jumps into the child; Esc comes back to the same trajectory.
-    // Rows: the turn, its opener (the prompt, folded), the Bash call, then the Agent call.
-    h.inject_keys(b"jjj").expect("move to the Agent row");
+    // Rows: the turn (its prompt folded in), the Bash call, then the Agent call.
+    h.inject_keys(b"jj").expect("move to the Agent row");
     h.inject_keys(keys::ENTER).expect("open the child");
     h.wait_for_text("ptychildcmd", Duration::from_secs(5)).expect("child trajectory shows its own tool row");
     assert!(h.contains_text("↑ "), "child header names its parent\n{}", h.screen_contents());
@@ -162,24 +162,46 @@ async fn traces_modal_ledger_trajectory_inspector() {
 
     h.inject_keys(b"x").expect("errors off");
     h.wait_for_text("#0", Duration::from_secs(5)).expect("rows back");
-    h.inject_keys(keys::ENTER).expect("inspect first row");
-    h.wait_for_text("line 0", Duration::from_secs(5)).expect("inspector header");
-    assert!(h.contains_text("\"content\": \"ptyclaudetask\""), "pretty JSON\n{}", h.screen_contents());
-
-    h.inject_keys(b"y").expect("copy raw line");
-    // Every copy also lands in the backup file; compare it byte for byte with the source line.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let copied = loop {
-        h.update(Duration::from_millis(100));
-        let text = std::fs::read_to_string(&copy_file).unwrap_or_default();
-        if !text.is_empty() || Instant::now() >= deadline {
-            break text;
+    // Every copy also lands in the backup file; wait for it to hold `want`, byte for byte.
+    let wait_copy = |h: &mut PtyHarness, want: &str| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            h.update(Duration::from_millis(100));
+            let text = std::fs::read_to_string(&copy_file).unwrap_or_default();
+            if text == want || Instant::now() >= deadline {
+                break text;
+            }
         }
     };
-    assert_eq!(copied, CLAUDE_USER, "raw line copied byte for byte");
+    h.inject_keys(b"k").expect("select the turn row");
+    h.inject_keys(keys::ENTER).expect("inspect first row");
+    h.wait_for_text("User ·", Duration::from_secs(5)).expect("payload header");
+    assert!(h.contains_text("ptyclaudetask"), "the message text\n{}", h.screen_contents());
+    assert!(!h.contains_text("\"content\""), "JSON is behind m\n{}", h.screen_contents());
+    h.inject_keys(b"y").expect("copy payload");
+    assert_eq!(wait_copy(&mut h, "ptyclaudetask"), "ptyclaudetask", "y copies the text, not the JSON");
 
+    h.inject_keys(b"m").expect("metadata");
+    h.wait_for_text("line 0", Duration::from_secs(5)).expect("metadata header");
+    assert!(h.contains_text("\"content\": \"ptyclaudetask\""), "pretty JSON\n{}", h.screen_contents());
+    h.inject_keys(b"Y").expect("copy raw line");
+    assert_eq!(wait_copy(&mut h, CLAUDE_USER), CLAUDE_USER, "raw line copied byte for byte");
+
+    h.inject_keys(keys::ESC).expect("leave metadata");
+    h.wait_for_text_absent("line 0", Duration::from_secs(5)).expect("Esc leaves metadata first");
     h.inject_keys(keys::ESC).expect("back to trajectory");
-    h.wait_for_text("ACTIVITY", Duration::from_secs(5)).expect("trajectory again");
+    h.wait_for_text("events ·", Duration::from_secs(5)).expect("trajectory again");
+
+    // Enter on the failed Bash call: its command with a line number, the error separator, then the result.
+    h.inject_keys(b"j").expect("move to the Bash row");
+    h.inject_keys(keys::ENTER).expect("open the Bash payload");
+    h.wait_for_text("✗ error", Duration::from_secs(5)).expect("error header");
+    assert!(h.contains_text("1 │ ls"), "numbered command\n{}", h.screen_contents());
+    assert!(h.contains_text("── ✗ result ──") && h.contains_text("boom"), "error separator, then the result\n{}", h.screen_contents());
+    h.inject_keys(b"y").expect("copy command");
+    assert_eq!(wait_copy(&mut h, "ls"), "ls", "y copies the command only");
+    h.inject_keys(keys::ESC).expect("back to trajectory");
+    h.wait_for_text("events ·", Duration::from_secs(5)).expect("trajectory again");
     // Message and tool rows start folded; `E` expands everything, a second `E` folds everything, leaving the turn as one summary row.
     h.inject_keys(b"E").expect("expand all");
     h.inject_keys(b"E").expect("fold all");
@@ -187,7 +209,7 @@ async fn traces_modal_ledger_trajectory_inspector() {
     h.wait_for_text("2 tools", Duration::from_secs(5)).expect("collapsed turn counts its tools");
     h.wait_for_text("✗1", Duration::from_secs(5)).expect("collapsed turn counts its failure");
     h.inject_keys(keys::ESC).expect("back to ledger");
-    h.wait_for_text_absent("ACTIVITY", Duration::from_secs(5)).expect("ledger again");
+    h.wait_for_text_absent("events ·", Duration::from_secs(5)).expect("ledger again");
 
     // Claude → Pi, then r: Pi has no resume path.
     h.inject_keys(b"\t").expect("tab to Pi");
