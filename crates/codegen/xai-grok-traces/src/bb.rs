@@ -308,6 +308,7 @@ pub fn map_event(ty: &str, item_kind: Option<&str>, created_at: i64, data: &Valu
                     Some(v) => v.clone(),
                     None => Value::Null,
                 };
+                e.intent = crate::classify::call_intent(&args);
                 crate::classify::call_detail(name, &args)
             }
             "fileRead" => Some(crate::classify::short_path(&item_text(kind, item))).filter(|p| !p.is_empty()),

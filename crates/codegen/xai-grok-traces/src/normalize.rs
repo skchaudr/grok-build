@@ -117,6 +117,8 @@ pub struct NormalizedEvent {
     pub noise: bool,
     /// Tool call: compact argument summary. Tool result: `exit N` or the first line of an error.
     pub detail: Option<String>,
+    /// Tool call: why it was made (`description`, `task_name`, a `# why:` comment), when the call says.
+    pub intent: Option<String>,
     /// Name of the tool being called (calls only; not stored).
     pub tool: Option<String>,
     /// A title the harness itself recorded for the session (Claude `ai-title`, OMP `title`, DSH `session/title`).
@@ -610,6 +612,7 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         .then(|| crate::classify::tool_call(top, payload, flat_call))
         .flatten();
     let tool = call.as_ref().map(|(n, _)| n.clone());
+    let intent = call.as_ref().and_then(|(_, args)| crate::classify::call_intent(args));
     let detail = if let Some((name, args)) = &call {
         crate::classify::call_detail(name, args)
     } else if is_result {
@@ -644,6 +647,7 @@ pub fn normalize(value: &Value) -> NormalizedEvent {
         error_flag,
         noise,
         detail,
+        intent,
         tool,
         session_title,
         tool_call_id,
