@@ -8,7 +8,7 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
 |---|---|
 | Index crate | `xai-grok-traces/src/{roots,normalize,classify,links,lines,index,query,receipts,hook}.rs`. Tests in `tests/{index,legibility,bb,cursor}.rs`. Real-data smoke: `cargo run --release -p xai-grok-traces --example scan -- <db>` |
 | Hook CLI | `xai-grok-traces/src/bin/grok-traces.rs`: `hook <source>` (stdin JSON, always exit 0, `{}` for cursor), `scan`, `list --json`, `doctor [--reset]` (exit 1 unless healthy; `--reset` clears a tripwire). Field extraction and the receipt+index step are `hook::{extract,ingest}` |
-| Follow | `grok-traces follow [<id>] [--no-children]`: `tail -f` for one live session (default: newest active root), plain stdout, children indented under their parent. Pure formatters and the poll loop are `xai-grok-traces/src/follow.rs` (`format_event`, `Follower::tick`); tests there and in `tests/follow.rs` |
+| Follow | `grok-traces follow [<id>] [--no-children] [--json] [--backlog N]`: `tail -f` for one live session (default: newest active root), plain stdout, children indented under their parent. `--json`: one item per line (`user text reasoning call result model`, plus `agent_start agent_end agent_resume` for subagents only), no header or idle line; `--backlog` sets the rows shown at start (default 10). Pure formatters and the poll loop are `xai-grok-traces/src/follow.rs` (`format_event`, `Follower::tick`); tests there and in `tests/follow.rs` |
 | Slash command | `P/slash/commands/traces.rs`, registered in `P/slash/commands/mod.rs` `builtin_commands()`. Reserved in `xai-grok-shell/src/session/slash_commands.rs` `PAGER_COMMAND_KEYS` (test `pager_builtin_triggers_are_reserved_in_shell`) |
 | Modal state, keys, render | `P/views/traces_modal.rs` |
 | `ActiveModal::Traces` | `P/views/modal.rs` (variant, `hint_pairs`, `message`) |
@@ -197,6 +197,7 @@ Code: `crates/codegen/xai-grok-traces/src/live.rs` (`norm`, `strict_ids`, `fold_
 - Child mapping: `child.parent_id == parent.id` and the last component of `native_id` is exactly `agent-<agent_id>`.
 - `LiveRow` adds `extra_tools: u32` (the `+N`, state `Tool` only) beyond the spec's field list; `LIVE_SCHEMA` stays 1 since nothing shipped. `stale` is dropped.
 - `LiveRow.via` (`#[serde(default)]`, from `SessionRow.via`; children copy the parent's) was added the same way, `LIVE_SCHEMA` still 1.
+- `LiveRow.model` and `started_at` (`#[serde(default)]`, from `SessionRow`; children use their own) were added the same way. `LIVE_SCHEMA` stays 1: `remote::fetch_live_with` requires equality, so only a breaking change bumps it.
 - `turn_receipts` also returns the newest own-thread `End` at any age; the fold drops children started before it.
 - `fmt_age` (age column) prints `0s`..`59s`, `Nm`, `Nh`, `Nd`; `fmt_dur` (inside text) `0s`..`59s`, `Nm`, `Nh`.
 - `fmt_age` never prints `now`, by lead decision: the spec mock and rows 40/43 require seconds.

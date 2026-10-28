@@ -1,4 +1,4 @@
-//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] | version | doctor [--reset]`.
+//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--backlog N] | version | doctor [--reset]`.
 //!
 //! `hook` runs once per harness event: it must be fast, silent and always
 //! exit 0 so it can never block an agent.
@@ -35,7 +35,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] | version | doctor [--reset]");
+            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--backlog N] | version | doctor [--reset]");
             ExitCode::from(2)
         }
     }
@@ -228,13 +228,18 @@ fn events(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
     Ok(true)
 }
 
-/// `tail -f` for one live session: prints its tool calls and decisions as they are indexed. Runs until killed.
+/// `tail -f` for one live session: prints its tool calls and decisions as they are indexed (`--json`: one item per line). Runs until killed.
 fn follow(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
     let mut id = None;
     let mut children = true;
-    for a in args {
+    let mut json = false;
+    let mut backlog = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
         match a.as_str() {
             "--no-children" => children = false,
+            "--json" => json = true,
+            "--backlog" => backlog = Some(it.next().and_then(|v| v.parse().ok()).ok_or("--backlog needs a number")?),
             other if other.starts_with('-') => return Err(format!("unknown flag {other}").into()),
             other => id = Some(other),
         }
@@ -254,7 +259,10 @@ fn follow(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
         }
     };
     let home = xai_dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
-    let mut follower = Follower::new(idx, user_roots(), root, children, home);
+    let mut follower = Follower::new(idx, user_roots(), root, children, home).with_json(json);
+    if let Some(n) = backlog {
+        follower = follower.with_backlog(n);
+    }
     let mut last_err = String::new();
     loop {
         match follower.tick(chrono::Utc::now().timestamp_millis()) {

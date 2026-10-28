@@ -26,9 +26,8 @@ const CHILD: &str = r#"{"type":"user","timestamp":"2026-10-01T00:00:09Z","isSide
 const T3: &str = r#"{"type":"user","timestamp":"2026-10-01T00:00:12Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","is_error":true,"content":"Error: no such file"}]}}
 "#;
 
-#[test]
-fn follow_prints_new_rows_per_tick_and_children_under_their_parent() {
-    let tmp = tempfile::tempdir().unwrap();
+/// Parent and subagent paths plus a follower over the parent (already holding `T1`).
+fn setup(tmp: &tempfile::TempDir, json: bool, backlog: usize) -> (Follower, std::path::PathBuf, std::path::PathBuf) {
     let projects = tmp.path().join("home/.claude/projects");
     let parent = projects.join("-w/p1.jsonl");
     let kid = projects.join("-w/p1/subagents/agent-a1.jsonl");
@@ -38,7 +37,14 @@ fn follow_prints_new_rows_per_tick_and_children_under_their_parent() {
     let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
     idx.scan(std::slice::from_ref(&root)).unwrap();
     let session = idx.list_sessions(&SessionFilter::default()).unwrap().remove(0);
-    let mut f = Follower::new(idx, vec![root], session, true, Some(tmp.path().join("home").to_string_lossy().into_owned()));
+    let home = Some(tmp.path().join("home").to_string_lossy().into_owned());
+    (Follower::new(idx, vec![root], session, true, home).with_json(json).with_backlog(backlog), parent, kid)
+}
+
+#[test]
+fn follow_prints_new_rows_per_tick_and_children_under_their_parent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut f, parent, kid) = setup(&tmp, false, 10);
 
     // Tick 1: header, the backlog, nothing for bookkeeping lines.
     let one = f.tick(0).unwrap().join("\n");
@@ -79,4 +85,54 @@ fn follow_prints_new_rows_per_tick_and_children_under_their_parent() {
 
     // Ended children print once.
     assert!(f.tick(now + 1_000).unwrap().is_empty());
+}
+
+fn kinds(lines: &[String]) -> Vec<String> {
+    lines.iter().map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["kind"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn follow_json_streams_items_and_subagent_lifecycle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut f, parent, kid) = setup(&tmp, true, 10);
+
+    // No header; the root's model, then the backlog.
+    assert_eq!(kinds(&f.tick(0).unwrap()), ["model", "user", "text", "call"]);
+    assert!(f.tick(30_000).unwrap().is_empty(), "no idle item");
+
+    append(&parent, T2);
+    append(&kid, CHILD);
+    let meta = kid.with_extension("meta.json");
+    append(&meta, r#"{"agentType":"Explore","description":"Check the lexer","finished":false}"#);
+    let now = chrono::Utc::now().timestamp_millis();
+    let two = f.tick(now).unwrap();
+    assert_eq!(kinds(&two), ["result", "call", "agent_start", "user", "call"]);
+    let start: serde_json::Value = serde_json::from_str(&two[2]).unwrap();
+    assert_eq!((start["depth"].as_i64(), start["model"].as_str(), start["label"].as_str()), (Some(1), Some("claude-haiku-4-5"), Some("Check the lexer")));
+    let first: serde_json::Value = serde_json::from_str(&two[0]).unwrap();
+    assert_eq!(first["call_id"].as_str(), Some("t1"));
+
+    // A terminal last event ends it; the sidecar's `finished` flag cannot be undone, so resume rides on new rows.
+    append(&kid, T3);
+    append(&kid, "{\"type\":\"session_end\",\"timestamp\":\"2026-10-01T00:00:13Z\"}\n");
+    assert_eq!(kinds(&f.tick(now + 500).unwrap()), ["result", "agent_end"]);
+    assert!(f.tick(now + 1_000).unwrap().is_empty(), "end is emitted once");
+
+    // The subagent is dispatched again: it resumes (never an item for the root).
+    append(&kid, CHILD);
+    assert_eq!(kinds(&f.tick(now + 1_500).unwrap()), ["agent_resume", "user", "call"]);
+}
+
+#[test]
+fn follow_backlog_limits_the_first_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut f, _, _) = setup(&tmp, true, 1);
+    assert_eq!(kinds(&f.tick(0).unwrap()), ["model", "call"]);
+}
+
+#[test]
+fn follow_backlog_zero_starts_after_the_last_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut f, _, _) = setup(&tmp, true, 0);
+    assert_eq!(kinds(&f.tick(0).unwrap()), ["model"]);
 }
