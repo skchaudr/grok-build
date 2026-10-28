@@ -459,7 +459,8 @@ pub fn fmt_dur(ms: i64) -> String {
 
 // ---- rows ----
 
-/// Bumped on any `LiveRow` change. `extra_tools` was added before anything shipped, so it stays 1.
+/// Bumped on a breaking `LiveRow` change. Readers (`remote::fetch_live_with`) require equality, so additive
+/// `#[serde(default)]` fields (`extra_tools`, `via`, `model`, `started_at`) keep 1.
 pub const LIVE_SCHEMA: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -519,6 +520,12 @@ pub struct LiveRow {
     /// Where the harness was launched from (`bb`, `zed`, `herdr`, `cursor`), from its receipts' `harness_chain`.
     #[serde(default)]
     pub via: Option<String>,
+    /// The session's model as recorded in its transcript.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// First event time, ms.
+    #[serde(default)]
+    pub started_at: Option<i64>,
 }
 
 /// What `grok-traces live --json` prints, one line. `live_schema` must equal [`LIVE_SCHEMA`] to be read.
@@ -806,6 +813,8 @@ pub fn fold_session(source: &str, row: &SessionRow, receipts: &[LiveReceipt], ki
         context_tokens: row.context_tokens,
         context_window: row.context_window,
         via: row.via.clone(),
+        model: row.model.clone(),
+        started_at: row.started_at,
         ..Default::default()
     };
     Folded { open_tools, open_children, row: Some(live) }
@@ -856,6 +865,8 @@ pub fn fold_children(source: &str, parent: &SessionRow, receipts: &[LiveReceipt]
             context_tokens: kid.context_tokens,
             context_window: kid.context_window,
             via: parent.via.clone(),
+            model: kid.model.clone(),
+            started_at: kid.started_at,
             ..Default::default()
         });
     }
@@ -1772,11 +1783,15 @@ mod seq {
 
     #[test]
     fn rows_round_trip_and_default() {
-        let row = LiveRow { session_id: "s".into(), state: LiveState::Tool, text: "A".into(), since_ms: Some(5), extra_tools: 2, bg: 1, ..Default::default() };
+        let row = LiveRow { session_id: "s".into(), state: LiveState::Tool, text: "A".into(), since_ms: Some(5), extra_tools: 2, bg: 1, model: Some("m".into()), started_at: Some(7), ..Default::default() };
         let json = serde_json::to_string(&row).unwrap();
         assert_eq!(serde_json::from_str::<LiveRow>(&json).unwrap(), row);
         assert_eq!(serde_json::from_str::<LiveRow>("{\"session_id\":\"s\"}").unwrap().state, LiveState::Working);
         assert_eq!(serde_json::from_str::<LiveRow>("{}").unwrap(), LiveRow::default());
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!((v["model"].as_str(), v["started_at"].as_i64()), (Some("m"), Some(7)));
+        let old = serde_json::from_str::<LiveRow>("{\"session_id\":\"s\"}").unwrap();
+        assert_eq!((old.model, old.started_at), (None, None));
         assert_eq!(LIVE_SCHEMA, 1);
     }
 

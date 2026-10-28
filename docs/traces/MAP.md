@@ -197,6 +197,7 @@ Code: `crates/codegen/xai-grok-traces/src/live.rs` (`norm`, `strict_ids`, `fold_
 - Child mapping: `child.parent_id == parent.id` and the last component of `native_id` is exactly `agent-<agent_id>`.
 - `LiveRow` adds `extra_tools: u32` (the `+N`, state `Tool` only) beyond the spec's field list; `LIVE_SCHEMA` stays 1 since nothing shipped. `stale` is dropped.
 - `LiveRow.via` (`#[serde(default)]`, from `SessionRow.via`; children copy the parent's) was added the same way, `LIVE_SCHEMA` still 1.
+- `LiveRow.model` and `started_at` (`#[serde(default)]`, from `SessionRow`; children use their own) were added the same way. `LIVE_SCHEMA` stays 1: `remote::fetch_live_with` requires equality, so only a breaking change bumps it.
 - `turn_receipts` also returns the newest own-thread `End` at any age; the fold drops children started before it.
 - `fmt_age` (age column) prints `0s`..`59s`, `Nm`, `Nh`, `Nd`; `fmt_dur` (inside text) `0s`..`59s`, `Nm`, `Nh`.
 - `fmt_age` never prints `now`, by lead decision: the spec mock and rows 40/43 require seconds.
