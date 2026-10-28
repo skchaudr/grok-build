@@ -4262,7 +4262,7 @@ fn ledger_cols(width: usize, host: bool) -> Cols {
         fixed += 12 + 1;
     }
     let flex = width.saturating_sub(fixed);
-    let name = (flex * 2 / 5).max(12).min(flex);
+    let name = (flex * 2 / 5).max(24).min(flex);
     Cols { name, now: flex - name, counts, cwd, tokens }
 }
 
@@ -5983,6 +5983,14 @@ mod tests {
         assert_eq!(state.tool_filter, Some(1));
         press(&mut state, KeyCode::Char('T'));
         assert_eq!(state.tool_filter, Some(0));
+    }
+
+    #[test]
+    fn traces_ledger_name_column_is_at_least_24_with_counts_shown() {
+        // At 100 cols the counts columns are on and the name would get 23 by the 2/5 split.
+        let c = ledger_cols(100, false);
+        assert!(c.counts && c.name >= 24, "name {} at 100 cols", c.name);
+        assert!(ledger_cols(20, false).name <= 20, "a narrow ledger still fits its flex");
     }
 
     #[test]
