@@ -202,6 +202,11 @@ async fn traces_modal_ledger_trajectory_inspector() {
     assert_eq!(wait_copy(&mut h, "ls"), "ls", "y copies the command only");
     h.inject_keys(keys::ESC).expect("back to trajectory");
     h.wait_for_text("events ·", Duration::from_secs(5)).expect("trajectory again");
+    // `l` expands the Bash row in place: the result under a gutter, behind the error separator.
+    h.inject_keys(b"l").expect("expand the Bash row");
+    h.wait_for_text("│ ── ✗ result ──", Duration::from_secs(5)).expect("gutter separator");
+    assert!(h.contains_text("│ boom"), "result row under the gutter\n{}", h.screen_contents());
+    h.inject_keys(b"h").expect("fold the Bash row");
     // Message and tool rows start folded; `E` expands everything, a second `E` folds everything, leaving the turn as one summary row.
     h.inject_keys(b"E").expect("expand all");
     h.inject_keys(b"E").expect("fold all");
@@ -211,11 +216,11 @@ async fn traces_modal_ledger_trajectory_inspector() {
     h.inject_keys(keys::ESC).expect("back to ledger");
     h.wait_for_text_absent("events ·", Duration::from_secs(5)).expect("ledger again");
 
-    // Claude → Pi, then r: Pi has no resume path.
+    // Claude → Pi, then r: Pi has no in-pager resume, so r copies its own resume command.
     h.inject_keys(b"\t").expect("tab to Pi");
     h.wait_for_text("ptypitask", Duration::from_secs(5)).expect("Pi tab");
     h.inject_keys(b"r").expect("resume pi");
-    h.wait_for_text("no resume for Pi", Duration::from_secs(5)).expect("no-resume notice");
+    h.wait_for_text("pi --session", Duration::from_secs(5)).expect("copied resume command");
     assert!(h.contains_text("ptypitask"), "modal stays open\n{}", h.screen_contents());
 
     h.inject_keys(keys::ESC).expect("close traces");
