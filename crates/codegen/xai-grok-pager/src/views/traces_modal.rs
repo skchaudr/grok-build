@@ -138,6 +138,8 @@ pub struct TracesModalState {
     pub session: Option<SessionRow>,
     pub events: Vec<EventRow>,
     event_scroll: usize,
+    /// The selected row's key and screen line (from the list top) as last painted.
+    anchor: Option<(OutlineKey, usize)>,
     pub event_errors_only: bool,
     pub event_query: String,
     /// `n`: show system/bookkeeping rows too, dimmed.
@@ -458,6 +460,7 @@ impl TracesModalState {
             session: None,
             events: Vec::new(),
             event_scroll: 0,
+            anchor: None,
             event_errors_only: false,
             event_query: String::new(),
             include_noise: false,
@@ -964,6 +967,7 @@ impl TracesModalState {
         self.follow = false;
         self.reveal = None;
         self.event_scroll = 0;
+        self.anchor = None;
         self.bodies.clear();
         self.body_pending.clear();
         self.body_failed.clear();
@@ -3071,6 +3075,35 @@ fn fit_rows(sel: usize, scroll: &mut usize, heights: &[usize], gaps: &[(u16, u16
     }
 }
 
+/// Scroll for the next paint. While the selection is the row painted last time, its header keeps
+/// its screen line (folds and arriving bodies change heights around it); otherwise the selection
+/// is brought on screen.
+fn place_scroll(state: &mut TracesModalState, heights: &[usize], gaps: &[(u16, u16)], height: usize) {
+    let sel = state.sel_pos();
+    let key = state.oshown.get(sel).and_then(|&n| state.key_at(n));
+    let anchored = state.anchor.as_ref().filter(|(k, _)| Some(k) == key).map(|&(_, y)| y);
+    match anchored {
+        Some(y) => state.event_scroll = anchor_scroll(y, sel, heights, gaps, height),
+        None => fit_rows(sel, &mut state.event_scroll, heights, gaps, height),
+    }
+}
+
+/// The first row to draw so row `sel`'s header lands on screen line `y` (clamped into `height`), or
+/// as close above it as the rows allow. A block taller than the viewport keeps its header at `y`.
+fn anchor_scroll(y: usize, sel: usize, heights: &[usize], gaps: &[(u16, u16)], height: usize) -> usize {
+    let y = y.min(height.saturating_sub(1));
+    let (mut scroll, mut top) = (sel, 0);
+    while scroll > 0 {
+        let above = heights.get(scroll - 1).copied().unwrap_or(0) + gap_before(gaps, scroll);
+        if top + above > y {
+            break;
+        }
+        top += above;
+        scroll -= 1;
+    }
+    scroll
+}
+
 /// Screen lines from shown row `from` through `to`, both inclusive.
 fn row_span(from: usize, to: usize, heights: &[usize], gaps: &[(u16, u16)]) -> usize {
     if from > to {
@@ -4674,7 +4707,7 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
     let mut heights = row_heights(&bodies);
     state.note_heights(&heights);
     let mut gaps = row_gaps(state, &heights, height);
-    fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, &gaps, height);
+    place_scroll(state, &heights, &gaps, height);
     // Load the bodies on screen; one cached right here changes row heights, so measure again.
     if state.ensure_bodies(state.event_scroll, height) {
         if state.dirty_outline {
@@ -4685,10 +4718,11 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         heights = row_heights(&bodies);
         state.note_heights(&heights);
         gaps = row_gaps(state, &heights, height);
-        fit_rows(state.sel_pos(), &mut state.event_scroll, &heights, &gaps, height);
+        place_scroll(state, &heights, &gaps, height);
     }
 
     let bottom = list.y + list.height;
+    state.anchor = None;
     let sel = state.sel_pos();
     let mut y = list.y;
     for (k, &n) in state.oshown.iter().enumerate().skip(state.event_scroll) {
@@ -4709,6 +4743,9 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
         }
         let span = h.min(bottom - y);
         let selected = k == sel;
+        if selected {
+            state.anchor = state.outline.nodes.get(n).map(|x| (x.key.clone(), usize::from(y - list.y)));
+        }
         let base = if selected { Style::default().bg(theme.bg_highlight).fg(theme.text_primary) } else { Style::default().fg(theme.text_primary) };
         if selected {
             for dy in 0..span {
@@ -6245,6 +6282,74 @@ mod tests {
         let mut scroll = 0;
         fit_rows(2, &mut scroll, &[1, 4, 1], &[], 3);
         assert_eq!(scroll, 2, "a tall row above pushes the top down");
+    }
+
+    /// 25 identical assistant replies under one prompt (lines 2..=26), scrolled to the end and then
+    /// row `line` selected, so the list is scrolled and the selection sits mid-screen.
+    fn identical_replies(line: i64) -> TracesModalState {
+        let mut rows = vec![ev(1, "message", "user", "go")];
+        rows.extend((2..=26).map(|l| ev(l, "message", "assistant", "reply")));
+        let mut state = trajectory(rows);
+        for l in [26, line] {
+            state.sel = Some(OutlineKey::Ev(l));
+            draw(&mut state, 80, ANCHOR_H);
+        }
+        state
+    }
+
+    const ANCHOR_H: u16 = 20;
+
+    /// Screen line of event row `line`'s header.
+    fn header_y(state: &mut TracesModalState, line: i64) -> usize {
+        let tag = format!("#{line}");
+        rows_at(state, 80, ANCHOR_H)
+            .iter()
+            .position(|r| r.find(&tag).is_some_and(|i| !r[i + tag.len()..].starts_with(|c: char| c.is_ascii_digit())))
+            .unwrap_or_else(|| panic!("row #{line} is on screen"))
+    }
+
+    const LONG_BODY: &str = "reply\nsecond line\nthird line\nfourth line";
+
+    #[test]
+    fn traces_anchor_l_keeps_the_header_line_before_and_after_the_body_loads() {
+        let mut state = identical_replies(13);
+        let y = header_y(&mut state, 13);
+        press(&mut state, KeyCode::Char('l'));
+        assert_eq!(header_y(&mut state, 13), y, "loading row");
+        assert!(state.settle_body(13, Ok(LONG_BODY.to_string())));
+        assert_eq!(header_y(&mut state, 13), y, "body loaded");
+    }
+
+    #[test]
+    fn traces_anchor_capital_e_keeps_the_selected_header_line() {
+        let mut state = identical_replies(13);
+        let y = header_y(&mut state, 13);
+        press(&mut state, KeyCode::Char('E'));
+        assert_eq!(header_y(&mut state, 13), y, "everything expanded");
+        for l in 2..=26 {
+            state.settle_body(l, Ok(LONG_BODY.to_string()));
+        }
+        assert_eq!(header_y(&mut state, 13), y, "bodies loaded");
+    }
+
+    #[test]
+    fn traces_anchor_h_on_an_expanded_row_keeps_the_header_line() {
+        let mut state = identical_replies(13);
+        press(&mut state, KeyCode::Char('l'));
+        assert!(state.settle_body(13, Ok(LONG_BODY.to_string())));
+        let y = header_y(&mut state, 13);
+        press(&mut state, KeyCode::Char('h'));
+        assert_eq!(header_y(&mut state, 13), y);
+    }
+
+    #[test]
+    fn traces_anchor_body_arriving_above_does_not_move_the_selection() {
+        let mut state = identical_replies(11);
+        press(&mut state, KeyCode::Char('l'));
+        state.sel = Some(OutlineKey::Ev(13));
+        let y = header_y(&mut state, 13);
+        assert!(state.settle_body(11, Ok(LONG_BODY.to_string())));
+        assert_eq!(header_y(&mut state, 13), y);
     }
 
     #[test]
