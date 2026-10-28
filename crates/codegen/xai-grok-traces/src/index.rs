@@ -30,7 +30,7 @@ use crate::bb::{Bb, BbThread, thread_key};
 pub const PARSER_VERSION: i64 = 8;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
 /// 8 adds `trace_event_usage.call_id` so an appended result can still find its call.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 /// Size the index may use (db + `-wal`). Passing it is normal: the oldest sessions are evicted
 /// down to `EVICT_TO_PERCENT` of it. It is a cache of pointers, so this is not an alert.
 pub const SIZE_BUDGET: u64 = 256 * 1024 * 1024;
@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS trace_names (id INTEGER PRIMARY KEY, name TEXT NOT NU
 -- title. `byte_offset` is kept only on every `CHECKPOINT_EVERY`th line; a raw line is found by scanning on from there.
 CREATE TABLE IF NOT EXISTS trace_events (sk INTEGER NOT NULL, line_number INTEGER NOT NULL, byte_offset INTEGER, type_id INTEGER NOT NULL, kind INTEGER NOT NULL, role INTEGER, title_id INTEGER NOT NULL, preview TEXT NOT NULL,
   timestamp INTEGER, depth INTEGER NOT NULL DEFAULT 0, model_id INTEGER, is_error INTEGER NOT NULL DEFAULT 0,
-  noise INTEGER NOT NULL DEFAULT 0, detail TEXT,
+  noise INTEGER NOT NULL DEFAULT 0, detail TEXT, intent TEXT,
   PRIMARY KEY (sk, line_number)) WITHOUT ROWID;
 -- Most events carry none of these; only the ones that do get a row.
 -- `call_id` is the harness id that ties a tool call to its result (`tool_use_id`, `callId`, …).
@@ -421,7 +421,7 @@ impl Aggregate {
 }
 
 const INSERT_EVENT: &str = "INSERT OR REPLACE INTO trace_events (sk, line_number, byte_offset, type_id, kind, role, title_id,
-  preview, timestamp, depth, model_id, is_error, noise, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
+  preview, timestamp, depth, model_id, is_error, noise, detail, intent) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
 const INSERT_USAGE: &str = "INSERT OR REPLACE INTO trace_event_usage (sk, line_number, duration_ms, input_tokens, output_tokens,
   turn, step, context_tokens, context_window, call_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
 const FIND_CALL: &str = "SELECT u.line_number, e.timestamp, u.duration_ms FROM trace_event_usage u
@@ -486,6 +486,7 @@ fn insert_event(
         e.is_error(),
         e.noise,
         e.detail,
+        e.intent,
     ])?;
     let extra = [e.duration_ms, e.input_tokens, e.output_tokens, e.turn, e.step].map(round);
     let call_id = e.tool_call_id.as_deref();

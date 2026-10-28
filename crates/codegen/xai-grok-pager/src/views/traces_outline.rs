@@ -301,6 +301,7 @@ mod tests {
             is_error: false,
             noise: false,
             detail: None,
+            intent: None,
         }
     }
 

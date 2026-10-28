@@ -164,6 +164,8 @@ pub struct EventRow {
     pub noise: bool,
     /// Tool call: compact argument summary. Tool result: `exit N` or the first error line.
     pub detail: Option<String>,
+    /// Tool call: why it was made, when the call says.
+    pub intent: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -421,7 +423,7 @@ impl TraceIndex {
         let mut sql = String::from(
             "SELECT e.line_number, ty.name, e.kind, e.role, ti.name, CASE WHEN e.preview = '' THEN ti.name ELSE e.preview END,
              e.timestamp, u.duration_ms, u.input_tokens, u.output_tokens, u.turn, u.step, e.depth, mo.name, e.is_error,
-             e.noise, e.detail
+             e.noise, e.detail, e.intent
              FROM trace_events e JOIN trace_names ty ON ty.id = e.type_id JOIN trace_names ti ON ti.id = e.title_id
              LEFT JOIN trace_names mo ON mo.id = e.model_id
              LEFT JOIN trace_event_usage u ON u.sk = e.sk AND u.line_number = e.line_number
@@ -469,6 +471,7 @@ impl TraceIndex {
                 is_error: r.get(14)?,
                 noise: r.get(15)?,
                 detail: r.get(16)?,
+                intent: r.get(17)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
