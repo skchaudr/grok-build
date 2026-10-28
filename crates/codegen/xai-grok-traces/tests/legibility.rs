@@ -263,6 +263,46 @@ fn chrono_ms(s: &str) -> i64 {
     day + s[17..19].parse::<i64>().unwrap() * 1000
 }
 
+/// `(detail, intent)` of every tool call of the one session of `source`, in line order.
+fn calls(idx: &TraceIndex, source: &str) -> Vec<(Option<String>, Option<String>)> {
+    let s = rows(idx, SessionFilter { source: Some(source.into()), ..Default::default() }).remove(0);
+    let ev = idx.list_events(&s.id, &EventFilter::default()).unwrap();
+    ev.into_iter().filter(|v| v.role.as_deref() == Some("tool")).map(|v| (v.detail, v.intent)).collect()
+}
+
+#[test]
+fn intent_and_headline_label_calls_across_harnesses() {
+    let e = env();
+    let pi = |args: &str| format!(r##"{{"type":"message","message":{{"role":"assistant","content":[{{"type":"toolCall","name":"bash","arguments":{args}}}]}}}}"##);
+    let lines = [
+        pi(r#"{"command":"python3 -c \"\nimport json\nprint(json.load(open('a')))\""}"#),
+        pi(r#"{"command":"python3 -c \"\nimport os\nprint(os.getcwd())\""}"#),
+        pi(r#"{"command":"python3 -c \"\nimport sys\nprint(sys.argv)\""}"#),
+        pi(r#"{"command":"ls","task_name":"list the dir"}"#),
+        pi(r##"{"command":"# why: x\nls","description":"d","task_name":"t"}"##),
+        pi(r##"{"command":"# why: probe\nls"}"##),
+        pi(r#"{"command":"git status"}"#),
+    ];
+    write(&e.home.join(".pi/agent/sessions/--w--/i.jsonl"), &(lines.join("\n") + "\n"));
+    write(
+        &e.home.join(".claude/projects/-w/i.jsonl"),
+        concat!(
+            r#"{"type":"assistant","timestamp":"2026-10-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la","description":"List files"}}]}}"#, "\n",
+        ),
+    );
+    let idx = e.scan();
+    let s = |v: &str| Some(v.to_string());
+    let pi = calls(&idx, "pi");
+    let details: Vec<_> = pi[..3].iter().map(|(d, _)| d.clone().unwrap()).collect();
+    assert_eq!(details, ["python3 -c \" ⏎ print(json.load(open('a')))\"", "python3 -c \" ⏎ print(os.getcwd())\"", "python3 -c \" ⏎ print(sys.argv)\""]);
+    assert!(pi[..3].iter().all(|(_, i)| i.is_none()));
+    assert_eq!(pi[3], (s("ls"), s("list the dir")), "task_name is the intent");
+    assert_eq!(pi[4].1, s("d"), "description beats task_name and a comment");
+    assert_eq!(pi[5], (s("ls"), s("probe")), "a leading # why: comment is the intent, not the headline");
+    assert_eq!(pi[6], (s("git status"), None));
+    assert_eq!(calls(&idx, "claude"), [(s("ls -la"), s("List files"))]);
+}
+
 #[test]
 fn a_trailing_error_is_failed_until_anything_follows_it() {
     let e = env();
@@ -594,7 +634,7 @@ fn concurrent_opens_of_an_old_schema_db_rebuild_it_once() {
             .collect();
         for h in handles {
             let schema = h.join().unwrap().unwrap_or_else(|err| panic!("round {round}: {err}"));
-            assert_eq!(schema.as_deref(), Some("8"));
+            assert_eq!(schema.as_deref(), Some("9"));
         }
         assert_eq!(leftovers(&e.db), Vec::<String>::new(), "round {round}: old db and lock cleaned up");
         // And the rebuilt db is usable and consistent.
@@ -626,7 +666,7 @@ fn a_held_rebuild_lock_makes_the_loser_give_up_within_the_wait() {
     let old = SystemTime::now() - Duration::from_secs(600);
     fs::File::options().write(true).open(&lock).unwrap().set_modified(old).unwrap();
     let idx = TraceIndex::open_with(&e.db, Some(Duration::from_millis(250))).unwrap();
-    assert_eq!(idx.stats().unwrap().schema_version.as_deref(), Some("8"));
+    assert_eq!(idx.stats().unwrap().schema_version.as_deref(), Some("9"));
     assert!(!lock.exists());
 }
 

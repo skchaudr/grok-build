@@ -225,7 +225,7 @@ pub fn event_to_json(e: &EventRow) -> Value {
         "line": e.line, "type": e.event_type, "kind": e.kind, "role": e.role, "title": e.title, "preview": e.preview,
         "timestamp": e.timestamp, "duration_ms": e.duration_ms, "input_tokens": e.input_tokens,
         "output_tokens": e.output_tokens, "turn": e.turn, "step": e.step, "depth": e.depth, "model": e.model,
-        "is_error": e.is_error, "noise": e.noise, "detail": e.detail,
+        "is_error": e.is_error, "noise": e.noise, "detail": e.detail, "intent": e.intent,
     })
 }
 
@@ -248,6 +248,7 @@ pub fn event_from_json(v: &Value) -> Option<EventRow> {
         is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
         noise: v.get("noise").and_then(Value::as_bool).unwrap_or(false),
         detail: str_of(v, "detail"),
+        intent: str_of(v, "intent"),
     })
 }
 

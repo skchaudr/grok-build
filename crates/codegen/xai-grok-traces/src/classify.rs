@@ -51,6 +51,26 @@ pub fn harness_prompt(text: &str) -> bool {
     HARNESS_PROMPTS.iter().any(|p| t.starts_with(p))
 }
 
+/// Whether a user message is only a client placeholder: an interrupt marker or `[Image #N]` tags.
+pub fn placeholder_prompt(text: &str) -> bool {
+    let t = text.trim();
+    if t == "[Request interrupted by user]" || t == "[Request interrupted by user for tool use]" {
+        return true;
+    }
+    let mut rest = t;
+    let mut tags = 0;
+    while !rest.is_empty() {
+        let Some(r) = rest.strip_prefix("[Image #") else { return false };
+        let Some(end) = r.find(']') else { return false };
+        if r[..end].is_empty() || !r[..end].bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        rest = r[end + 1..].trim_start();
+        tags += 1;
+    }
+    tags > 0
+}
+
 fn is_injected_tag(tag: &str) -> bool {
     let t = tag.to_ascii_lowercase();
     INJECTED_TAGS.contains(&t.as_str()) || t.ends_with("-hook") || t.ends_with("_hook")
@@ -98,7 +118,7 @@ pub fn strip_injected(s: &str) -> (Cow<'_, str>, Option<String>) {
 const NOISE_TYPES: &[&str] = &[
     // Claude
     "attachment", "file-history-snapshot", "file-history-delta", "last-prompt", "mode", "permission-mode", "summary",
-    "ai-title", "queue-operation", "atis-latch", "cost-state", "system", "progress", "custom-title", "agent-name",
+    "ai-title", "pr-link", "queue-operation", "atis-latch", "cost-state", "system", "progress", "custom-title", "agent-name",
     // Codex
     "turn_context", "world_state", "token_usage_record", "session_meta", "compacted", "inter_agent_communication_metadata",
     "event_msg/token_count", "event_msg/thread_settings_applied", "event_msg/item_completed", "event_msg/task_started",
@@ -231,6 +251,72 @@ fn patch_path(s: &str) -> Option<String> {
     })
 }
 
+/// The shell text of a call: `command`/`cmd`/`script` as a string, or an argv array joined by spaces.
+fn command_of(m: &Map<String, Value>) -> Option<String> {
+    if let Some(c) = ["command", "cmd", "script"].iter().find_map(|k| str_of(m, k).filter(|s| !s.trim().is_empty())) {
+        return Some(c.to_string());
+    }
+    let Some(Value::Array(a)) = m.get("command").or_else(|| m.get("cmd")) else { return None };
+    Some(a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "))
+}
+
+/// `cd x && rest` → `rest`; a bare `cd x` line → empty.
+fn strip_cd(mut l: &str) -> &str {
+    while l.starts_with("cd ") {
+        match l.split_once("&&") {
+            Some((_, rest)) => l = rest.trim_start(),
+            None => return "",
+        }
+    }
+    l
+}
+
+/// A line that opens a script body on the lines after it: a heredoc, or `python3 -c "` with the quote still open.
+fn opens_body(l: &str) -> bool {
+    if l.contains("<<") {
+        return true;
+    }
+    let mut t = l.split_whitespace();
+    let (Some(bin), Some(flag)) = (t.next(), t.next()) else { return false };
+    if !matches!(bin, "python" | "python3" | "node" | "ruby" | "perl" | "bash" | "sh" | "zsh") || !matches!(flag, "-c" | "-e") {
+        return false;
+    }
+    let rest = l.split_once(flag).map_or("", |(_, r)| r.trim_start());
+    rest.chars().next().filter(|q| matches!(q, '"' | '\'')).is_some_and(|q| !rest[1..].contains(q))
+}
+
+/// What a shell command is, in one clipped line: the first line that is not blank, a comment, `set -…`,
+/// `export …` or a `cd … &&` prefix. An inline script or heredoc opener gets the first line of its body appended.
+pub fn command_headline(cmd: &str) -> String {
+    let mut lines = cmd.lines().map(str::trim).filter(|l| !l.is_empty());
+    let head = lines
+        .by_ref()
+        .map(strip_cd)
+        .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("set -") && !l.starts_with("export "));
+    let Some(head) = head else { return first_line(cmd).unwrap_or_default() };
+    if opens_body(head)
+        && let Some(body) = lines.find(|l| !["#", "import ", "from ", "set "].iter().any(|p| l.starts_with(p)))
+    {
+        return clip_line(&format!("{head} ⏎ {body}"));
+    }
+    clip_line(head)
+}
+
+/// Keys that say why a call was made, in precedence order.
+const INTENT_KEYS: [&str; 6] = ["description", "task_name", "taskName", "justification", "why", "reason"];
+
+/// Why the call was made: an intent field of its arguments, else a leading `# why: …` comment of its command.
+pub fn call_intent(args: &Value) -> Option<String> {
+    let m = args.as_object()?;
+    INTENT_KEYS.iter().find_map(|k| str_of(m, k).and_then(first_line)).or_else(|| {
+        let first = command_of(m)?;
+        let c = first.lines().map(str::trim).find(|l| !l.is_empty())?;
+        let t = c.strip_prefix('#').filter(|_| !c.starts_with("#!"))?.trim_start_matches('#').trim();
+        let t = t.get(..4).filter(|p| p.eq_ignore_ascii_case("why:")).map_or(t, |_| t[4..].trim());
+        Some(clip_line(t)).filter(|t| !t.is_empty())
+    })
+}
+
 /// A compact summary of a tool call's arguments.
 pub fn call_detail(name: &str, args: &Value) -> Option<String> {
     if let Some(mcp) = mcp_name(name) {
@@ -240,12 +326,8 @@ pub fn call_detail(name: &str, args: &Value) -> Option<String> {
         Value::String(s) => patch_path(s).or_else(|| first_line(s)),
         Value::Object(m) => {
             let get = |keys: &[&str]| keys.iter().find_map(|k| str_of(m, k).filter(|s| !s.trim().is_empty()));
-            if let Some(c) = get(&["command", "cmd", "script"]) {
-                return first_line(c);
-            }
-            if let Some(Value::Array(a)) = m.get("command").or_else(|| m.get("cmd")) {
-                let joined = a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ");
-                return first_line(&joined);
+            if let Some(c) = command_of(m) {
+                return Some(command_headline(&c)).filter(|h| !h.is_empty()).or_else(|| first_line(&c));
             }
             if let Some(p) = get(&["pattern", "glob_pattern", "regex"]) {
                 return first_line(p);
@@ -281,7 +363,7 @@ fn name_of(b: &Map<String, Value>) -> Option<String> {
 }
 
 fn args_of(b: &Map<String, Value>) -> Value {
-    let direct = ["input", "arguments", "args"].iter().find_map(|k| b.get(*k));
+    let direct = ["input", "arguments", "args", "rawInput"].iter().find_map(|k| b.get(*k));
     args_value(direct.or_else(|| b.get("function").and_then(|f| f.get("arguments"))))
 }
 
@@ -349,6 +431,7 @@ mod tests {
     fn call_details() {
         let d = |n: &str, a: Value| call_detail(n, &a);
         assert_eq!(d("Bash", json!({"command": "git status\nand more"})).as_deref(), Some("git status"));
+        assert_eq!(d("Bash", json!({"command": ["git", "status"]})).as_deref(), Some("git status"));
         assert_eq!(d("Edit", json!({"file_path": "/a/b/c/lib.rs", "old_string": "x"})).as_deref(), Some("c/lib.rs"));
         assert_eq!(d("Grep", json!({"pattern": "fn main", "path": "/x"})).as_deref(), Some("fn main"));
         assert_eq!(d("Agent", json!({"description": "Traces: evict", "prompt": "long"})).as_deref(), Some("Traces: evict"));
@@ -358,6 +441,36 @@ mod tests {
         assert_eq!(d("TodoWrite", json!({"todos": []})), None);
         let long = "x".repeat(300);
         assert_eq!(d("Bash", json!({ "command": long })).unwrap().chars().count(), DETAIL_CHARS + 1);
+    }
+
+    #[test]
+    fn headlines() {
+        let h = command_headline;
+        assert_eq!(h("git status"), "git status");
+        assert_eq!(h("python3 -c \"\nimport json\ndata = json.load(open('x'))\nprint(data)\""), "python3 -c \" ⏎ data = json.load(open('x'))");
+        assert_ne!(h("python3 -c \"\nprint(1)\""), h("python3 -c \"\nprint(2)\""));
+        assert_eq!(h("python3 -c \"print(1)\"\nmore"), "python3 -c \"print(1)\"", "a closed quote opens no body");
+        assert_eq!(h("cat <<EOF\nserver {\n}\nEOF"), "cat <<EOF ⏎ server {");
+        assert_eq!(h("cd /x && python3 -c \"\nprint(7)\""), "python3 -c \" ⏎ print(7)\"");
+        assert_eq!(h("#!/bin/sh\n# why: x\nset -e\nexport A=1\ncd /w\nls -la"), "ls -la");
+        assert_eq!(h(""), "");
+        assert_eq!(h("# only a comment"), "# only a comment");
+        assert_eq!(h(&"y".repeat(10_000)).chars().count(), DETAIL_CHARS + 1);
+    }
+
+    #[test]
+    fn intents() {
+        let i = |a: Value| call_intent(&a);
+        assert_eq!(i(json!({"command": "ls", "description": "list", "task_name": "t"})).as_deref(), Some("list"));
+        assert_eq!(i(json!({"command": "ls", "task_name": "t", "justification": "j"})).as_deref(), Some("t"));
+        assert_eq!(i(json!({"cmd": "ls", "justification": "j", "why": "w"})).as_deref(), Some("j"));
+        assert_eq!(i(json!({"taskName": "tn"})).as_deref(), Some("tn"));
+        assert_eq!(i(json!({"reason": "r", "description": "  "})).as_deref(), Some("r"));
+        assert_eq!(i(json!({"command": "# why: probe\nls"})).as_deref(), Some("probe"));
+        assert_eq!(i(json!({"command": "#!/bin/sh\n# why: x\nls"})), None, "a shebang is no intent");
+        assert_eq!(i(json!({"command": "\n## fix the build\nmake"})).as_deref(), Some("fix the build"));
+        assert_eq!(i(json!({"command": "git status"})), None);
+        assert_eq!(i(Value::String("# not args".into())), None);
     }
 
     #[test]

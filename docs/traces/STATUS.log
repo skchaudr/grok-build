@@ -25,3 +25,5 @@
   QW4 bc-eb205aa1-74b0-5814-9219-095cc4108793   QW8 bc-0bb83035-ad55-5bd5-8c17-8bffe5e7fa2d
   all 8 ACTIVE at fire+60s; key = keychain CURSOR_API_KEY (Basic auth, api.cursor.com/v1)
 2026-10-27 10:45Z — ALL 8 QW MERGED via Cursor cloud PRs #1-#8 (gate 158/158 green). Jules fleet: 100% duplicate discard — 3 stuck Planning (cloning), 2 Awaiting User Feedback, 3 Completed w/o PR at merge time. VOCAB RULE logged: "Jules" only when user says Jules; unqualified "cloud agents" = Cursor cloud only. Merged cursor/* branches deleted.
+2026-10-28 LANDED 449507cb mini+air: T1 intent (#27), title fallback (#26); grok-traces schema 9 parser 8
+2026-10-28 LANDED ab1a39b3 mini+air: noise rows (#28); parser 9

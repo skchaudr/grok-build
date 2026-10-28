@@ -1896,7 +1896,7 @@ impl TracesModalState {
             .filter(|e| !self.event_errors_only || e.is_error)
             .filter(|e| tool.as_deref().is_none_or(|t| e.kind == "tool" && e.title == t))
             .filter(|e| {
-                q.is_empty() || [Some(&e.title), Some(&e.preview), e.detail.as_ref()].into_iter().flatten().any(|f| f.to_lowercase().contains(&q))
+                q.is_empty() || [Some(&e.title), Some(&e.preview), e.detail.as_ref(), e.intent.as_ref()].into_iter().flatten().any(|f| f.to_lowercase().contains(&q))
             })
             .cloned()
             .collect();
@@ -4882,9 +4882,9 @@ fn first_line(src: &str, w: usize) -> String {
 }
 
 /// The text an event's header and prompt are drawn from. A message row shows its preview (its text, not a
-/// tool call's summary), else its detail; other rows show their detail, else their preview.
+/// tool call's summary), else its detail; other rows show their intent, else their detail, else their preview.
 fn index_text(e: &EventRow) -> &str {
-    let detail = e.detail.as_deref().filter(|d| !d.is_empty());
+    let detail = e.intent.as_deref().filter(|d| !d.is_empty()).or(e.detail.as_deref().filter(|d| !d.is_empty()));
     let preview = (!e.preview.is_empty()).then_some(e.preview.as_str());
     if traces_outline::is_message(e) {
         preview.or(detail).unwrap_or_default()
@@ -5756,6 +5756,7 @@ mod tests {
             is_error: false,
             noise: false,
             detail: None,
+            intent: None,
         }
     }
 
@@ -6242,6 +6243,7 @@ mod tests {
             is_error: err,
             noise: false,
             detail: None,
+            intent: None,
         };
         let events = [mk(0, false, 1), mk(10, false, 1), mk(11, false, 1), mk(100, true, 2)];
         let b = bucket_events(&events, 11);
@@ -6497,6 +6499,9 @@ mod tests {
         let mut call = ev(2, "tool", "tool", "ls");
         call.detail = Some("ls -la".into());
         assert_eq!(index_text(&call), "ls -la", "a tool row shows its summary");
+        call.intent = Some("List files".into());
+        assert_eq!(index_text(&call), "List files", "a tool row shows its intent over its summary");
+        call.intent = None;
         call.detail = None;
         assert_eq!(index_text(&call), "ls", "a tool row without a summary falls back to its preview");
     }
