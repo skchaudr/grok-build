@@ -99,6 +99,8 @@ pub struct TracesModalState {
     pub status: Option<String>,
     /// When `status` was set. Cleared with it; the line expires after [`STATUS_TTL`].
     status_at: Option<Instant>,
+    /// The resume command `r` just sent to `TracesCopy`; names the copy in the status line.
+    copy_note: Option<String>,
     /// Index health problem (over cap, ...); shown red under the tabs.
     pub health: Option<String>,
     /// Hook receipts arrived within `RECEIPT_WINDOW_MS`.
@@ -388,6 +390,33 @@ pub fn resume_target(row: &SessionRow) -> Option<ResumeTarget> {
     Some(ResumeTarget { source: row.source.clone(), native_id })
 }
 
+/// What `r` does for a row: resume in this pager, or copy the harness's own resume command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResumeAction {
+    InPager(ResumeTarget),
+    CopyCommand(String),
+}
+
+pub fn resume_action(row: &SessionRow) -> Option<ResumeAction> {
+    if let Some(t) = resume_target(row) {
+        return Some(ResumeAction::InPager(t));
+    }
+    let q = |s: &str| shlex::try_quote(s).map(|c| c.into_owned()).ok();
+    let path = q(row.file_path.to_str()?)?;
+    let cd = match &row.cwd {
+        Some(cwd) => format!("cd {} && ", q(cwd)?),
+        None => String::new(),
+    };
+    let cmd = match row.source.as_str() {
+        "pi" => format!("{cd}pi --session {path}"),
+        "omp" => format!("{cd}omp --resume {path}"),
+        // chat id = transcript stem
+        "cursor" => format!("cursor-agent --resume {}", q(row.file_path.file_stem()?.to_str()?)?),
+        _ => return None,
+    };
+    Some(ResumeAction::CopyCommand(cmd))
+}
+
 fn tab_source(tab: usize) -> Option<&'static str> {
     tab.checked_sub(1).and_then(|i| SOURCES.get(i).copied())
 }
@@ -404,6 +433,7 @@ impl TracesModalState {
             mode: Mode::List,
             status: index.is_none().then(|| "trace index unavailable".to_string()),
             status_at: index.is_none().then(Instant::now),
+            copy_note: None,
             index,
             health: None,
             live: false,
@@ -911,7 +941,10 @@ impl TracesModalState {
     }
 
     pub fn report_copy(&mut self, delivery: &crate::clipboard::CopyDelivery) {
-        self.set_status(delivery.toast_message().into_owned());
+        match (self.copy_note.take(), delivery) {
+            (Some(cmd), crate::clipboard::CopyDelivery::Clipboard { .. }) => self.set_status(format!("copied: {cmd}")),
+            _ => self.set_status(delivery.toast_message().into_owned()),
+        }
     }
 
     fn open_selected(&mut self) {
@@ -1754,14 +1787,18 @@ impl TracesModalState {
         src.as_deref().and_then(peek_output).filter(|t| !t.is_empty()).map(|t| tail_lines(&t, PEEK_TAIL)).unwrap_or_else(|| "no output yet".into())
     }
 
-    fn resume(&self, row: Option<&SessionRow>) -> InputOutcome {
+    fn resume(&mut self, row: Option<SessionRow>) -> InputOutcome {
         let Some(row) = row else { return InputOutcome::Unchanged };
         if let Some(host) = &row.host {
             return InputOutcome::Action(Action::TracesNotice { text: format!("remote session on {host}: resume it there") });
         }
-        match resume_target(row) {
-            Some(t) => InputOutcome::Action(Action::TracesResume { source: t.source, native_id: t.native_id }),
-            None => InputOutcome::Action(Action::TracesNotice { text: format!("no resume for {}", source_label(&row.source)) }),
+        match resume_action(&row) {
+            Some(ResumeAction::InPager(t)) => InputOutcome::Action(Action::TracesResume { source: t.source, native_id: t.native_id }),
+            Some(ResumeAction::CopyCommand(text)) => {
+                self.copy_note = Some(text.clone());
+                InputOutcome::Action(Action::TracesCopy { text })
+            }
+            None => InputOutcome::Action(Action::TracesNotice { text: format!("no resume command for {}", row.source) }),
         }
     }
 
@@ -3733,7 +3770,7 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                     state.scanning = true;
                     return InputOutcome::Action(Action::TracesRescan);
                 }
-                KeyCode::Char('r') => return state.resume(state.selected_session()),
+                KeyCode::Char('r') => return state.resume(state.selected_session().cloned()),
                 KeyCode::Enter => {
                     if !state.expand_selected_more() {
                         state.open_selected();
@@ -3840,7 +3877,7 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                     state.load_events();
                 }
                 KeyCode::Char('/') => state.typing = Typing::Events,
-                KeyCode::Char('r') => return state.resume(state.session.as_ref()),
+                KeyCode::Char('r') => return state.resume(state.session.clone()),
                 KeyCode::Char('y') => match state.turn_prompt_text() {
                     Some(text) => return InputOutcome::Action(Action::TracesCopy { text }),
                     None => return InputOutcome::Unchanged,
@@ -4001,7 +4038,7 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
     if state.peek.is_some() {
         return vec![plain("j/k scroll"), plain("Esc back")];
     }
-    let resume = |row: Option<&SessionRow>| row.is_some_and(|row| resume_target(row).is_some());
+    let resume = |row: Option<&SessionRow>| row.is_some_and(|row| resume_action(row).is_some());
     let mut hints = match state.mode {
         Mode::List => {
             let mut v = vec![
@@ -5131,6 +5168,59 @@ mod tests {
         assert_eq!(source_label("bb"), "bb");
     }
 
+    #[test]
+    fn resume_actions_copy_commands() {
+        let cmd = |source: &str, path: &str, cwd: Option<&str>| {
+            let mut r = row(source, path);
+            r.cwd = cwd.map(Into::into);
+            resume_action(&r)
+        };
+        let copy = |s: &str| Some(ResumeAction::CopyCommand(s.into()));
+        assert_eq!(cmd("pi", "/h/.pi/s/a.jsonl", Some("/w")), copy("cd /w && pi --session /h/.pi/s/a.jsonl"));
+        assert_eq!(cmd("omp", "/h/.omp/s/a.jsonl", Some("/w")), copy("cd /w && omp --resume /h/.omp/s/a.jsonl"));
+        assert_eq!(cmd("pi", "/h/.pi/s/a.jsonl", None), copy("pi --session /h/.pi/s/a.jsonl"));
+        assert_eq!(cmd("pi", "/h/my s/a.jsonl", Some("/w x")), copy("cd '/w x' && pi --session '/h/my s/a.jsonl'"));
+        assert_eq!(
+            cmd("cursor", "/h/.cursor/projects/p/agent-transcripts/c1/c1.jsonl", Some("/w")),
+            copy("cursor-agent --resume c1")
+        );
+        assert!(matches!(cmd("claude", CLAUDE_PATH, None), Some(ResumeAction::InPager(_))));
+        assert_eq!(cmd("dsh", DSH_PATH, None), None);
+        assert_eq!(cmd("bb", "/h/.bb/bb.db#thr_x", None), None);
+    }
+
+    #[test]
+    fn r_copies_pi_command_and_reports_it() {
+        let mut state = list_state("pi", PI_PATH, vec![]);
+        state.sessions[0].cwd = Some("/w".into());
+        state.rebuild_ledger();
+        let want = "cd /w && pi --session /h/.pi/sessions/synthetic-pi.jsonl";
+        match handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)) {
+            InputOutcome::Action(Action::TracesCopy { text }) => assert_eq!(text, want),
+            _ => panic!("r on a pi row must copy"),
+        }
+        state.report_copy(&crate::clipboard::CopyDelivery::Clipboard {
+            result: crate::clipboard::CopyResult {
+                message: "Copied",
+                message_lead: "Copied",
+                ticks: 30,
+                delivery: crate::clipboard::ClipboardDelivery::Confirmed,
+            },
+            file: None,
+        });
+        assert_eq!(state.status.as_deref(), Some(&*format!("copied: {want}")));
+    }
+
+    #[test]
+    fn r_without_action_says_so_and_hides_hint() {
+        let mut state = list_state("dsh", DSH_PATH, vec![]);
+        match handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)) {
+            InputOutcome::Action(Action::TracesNotice { text }) => assert_eq!(text, "no resume command for dsh"),
+            _ => panic!("r on dsh must notice"),
+        }
+        assert!(!hint_labels(&state, u16::MAX).contains(&"r resume"));
+    }
+
     fn hint_labels(state: &TracesModalState, width: u16) -> Vec<&'static str> {
         shortcuts(state, width).iter().map(|sc| sc.label).collect()
     }
@@ -5166,7 +5256,7 @@ mod tests {
 
         let pi = list_state("pi", PI_PATH, vec!["user@synthetic".into()]);
         assert!(has(&pi, "H host"));
-        assert!(!has(&pi, "r resume"), "pi has no resume target");
+        assert!(has(&pi, "r resume"), "pi copies a command");
         assert!(has(&pi, "g/G ends"));
 
         let claude = list_state("claude", CLAUDE_PATH, vec![]);
@@ -5736,7 +5826,7 @@ mod tests {
 
         // Resume is refused for remote rows.
         state.selected = 0;
-        assert!(matches!(state.resume(state.selected_session()), InputOutcome::Action(Action::TracesNotice { .. })));
+        assert!(matches!(state.resume(state.selected_session().cloned()), InputOutcome::Action(Action::TracesNotice { .. })));
 
         // An unreachable host keeps its rows and says so in the header.
         state.apply_host(HostResult {

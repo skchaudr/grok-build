@@ -27,3 +27,4 @@
 2026-10-27 10:45Z — ALL 8 QW MERGED via Cursor cloud PRs #1-#8 (gate 158/158 green). Jules fleet: 100% duplicate discard — 3 stuck Planning (cloning), 2 Awaiting User Feedback, 3 Completed w/o PR at merge time. VOCAB RULE logged: "Jules" only when user says Jules; unqualified "cloud agents" = Cursor cloud only. Merged cursor/* branches deleted.
 2026-10-28 LANDED 449507cb mini+air: T1 intent (#27), title fallback (#26); grok-traces schema 9 parser 8
 2026-10-28 LANDED ab1a39b3 mini+air: noise rows (#28); parser 9
+2026-10-28 LANDED 15345c16 mini+air: T4 payload view (#29); grok-fork rebuilt
