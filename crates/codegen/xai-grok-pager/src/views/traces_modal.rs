@@ -22,6 +22,7 @@ use crate::app::app_view::InputOutcome;
 use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
 use crate::views::modal_window::{self, ModalContentArea, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut};
+use crate::views::traces_body;
 use crate::views::traces_fold::{FoldNode, FoldState, FoldTree};
 use crate::views::traces_outline::{self, OutlineItem, OutlineKey, PROMPT_LEAD};
 use crate::views::traces_payload::{self, Payload, Shape};
@@ -1635,24 +1636,28 @@ impl TracesModalState {
         Some((self.events.get(i + 1)?.line, fold.error))
     }
 
-    /// The body of event `ev` wrapped to `width`, minus what its header `head` already shows, then its folded
-    /// result. Empty when the header already holds the text and there is no result. A placeholder until
-    /// the body is read.
+    /// The body of event `ev` at `width`, minus what its header `head` already shows: a call's command and
+    /// folded result as gutter rows (`traces_body::call_rows`), anything else as wrapped text. Empty when
+    /// the header already holds the text and there is no result. A placeholder until the body is read.
     fn body_lines(&self, ev: usize, head: &str, width: usize) -> Vec<String> {
-        let Some(line) = self.events.get(ev).map(|e| e.line) else { return vec!["loading…".to_string()] };
-        match self.bodies.get(&line) {
+        let Some(e) = self.events.get(ev) else { return traces_body::note("loading…", width) };
+        match self.bodies.get(&e.line) {
             Some(text) => {
                 let (own, result) = split_result(text);
-                let rest = continuation(head, &continuation_source(own));
-                let mut rows = if rest.is_empty() { Vec::new() } else { wrap_body(&rest, width) };
-                if !result.is_empty() {
-                    rows.push(String::new());
-                    rows.extend(wrap_body(result, width));
+                if own.trim().is_empty() && result.is_empty() {
+                    return traces_body::note("(no body)", width);
                 }
-                rows
+                let rest = continuation(head, &continuation_source(own));
+                if is_call(e) || !result.is_empty() {
+                    traces_body::call_rows(&rest, traces_body::section(result), width)
+                } else if rest.is_empty() {
+                    Vec::new()
+                } else {
+                    wrap_body(&rest, width)
+                }
             }
-            None if self.body_failed.contains(&line) => vec!["(could not read, press l to retry)".to_string()],
-            None => vec!["loading…".to_string()],
+            None if self.body_failed.contains(&e.line) => traces_body::note("(could not read, press l to retry)", width),
+            None => traces_body::note("loading…", width),
         }
     }
 
@@ -3211,6 +3216,12 @@ fn tail_lines(text: &str, n: usize) -> String {
 /// The human text of one raw trajectory line: message text, thinking, tool inputs and tool output, in
 /// order, found by key across Claude, Codex and Pi shapes. Falls back to `pretty()` when none is found.
 fn body_text(raw: &str) -> String {
+    body_text_joined(raw, "\n\n")
+}
+
+/// `body_text` with its chunks joined by `join`: a blank line between an event's blocks, a single newline
+/// inside a result.
+fn body_text_joined(raw: &str, join: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
         collect_text(&v, &mut out);
@@ -3218,7 +3229,7 @@ fn body_text(raw: &str) -> String {
     if out.is_empty() {
         return pretty(Ok(Some(raw.to_string())));
     }
-    out.join("\n\n")
+    out.join(join)
 }
 
 fn collect_text(v: &serde_json::Value, out: &mut Vec<String>) {
@@ -3250,9 +3261,9 @@ fn push_chunk(out: &mut Vec<String>, s: &str) {
 }
 
 /// Body text of one raw line; a line that is gone reads as a placeholder, a failed read as its error.
-fn body_of(raw: Result<Option<String>, String>) -> Result<String, String> {
+fn body_of(raw: Result<Option<String>, String>, join: &str) -> Result<String, String> {
     match raw {
-        Ok(Some(line)) if !line.is_empty() => Ok(body_text(&line)),
+        Ok(Some(line)) if !line.is_empty() => Ok(body_text_joined(&line, join)),
         Ok(_) => Ok(pretty(Ok(None))),
         Err(e) => Err(e),
     }
@@ -3261,11 +3272,11 @@ fn body_of(raw: Result<Option<String>, String>) -> Result<String, String> {
 /// A body row: the event's own text, then its folded result under a separator (`✗` when it failed).
 /// Any read that failed fails the whole body, so nothing half-read gets cached.
 pub(super) fn compose_body(own: Result<Option<String>, String>, result: Option<(Result<Option<String>, String>, bool)>) -> Result<String, String> {
-    let text = body_of(own)?;
+    let text = body_of(own, "\n\n")?;
     match result {
         Some((raw, error)) => {
             let sep = if error { RESULT_ERR_SEP } else { RESULT_SEP };
-            Ok(format!("{text}\n\n{sep}\n\n{}", body_of(raw)?))
+            Ok(format!("{text}\n{sep}\n{}", body_of(raw, "\n")?))
         }
         None => Ok(text),
     }
@@ -4843,7 +4854,7 @@ fn render_trajectory(buf: &mut Buffer, area: Rect, state: &mut TracesModalState,
                     .take(span as usize)
                     .enumerate()
                 {
-                    in_result |= line.as_str() == RESULT_SEP || line.as_str() == RESULT_ERR_SEP;
+                    in_result |= traces_body::is_sep(line);
                     let fg = if in_result && failed { theme.accent_error } else { theme.text_secondary };
                     let text = format!("{}{line}", " ".repeat(indent_w));
                     put_row(buf, list, y + dy as u16, &[(String::new(), 6, base), (String::new(), 6, base), (text, text_w, base.fg(fg))]);
@@ -6513,6 +6524,31 @@ mod tests {
         let body = body_text(with_text);
         assert_eq!(body, "hello");
         assert!(body.lines().all(|line| line != "3005" && line != "0"), "{body:?}");
+    }
+
+    #[test]
+    fn expanded_rows_show_a_call_as_code_and_a_message_as_prose() {
+        let mut state = trajectory(vec![ev(1, "tool", "tool", "python3 -c \""), ev(2, "message", "assistant", "Short reply")]);
+        let head = "python3 -c \"";
+        // Not read yet, then failed, then read-but-empty: each is one gutter row.
+        assert_eq!(state.body_lines(0, head, 80), ["│ loading…"]);
+        state.body_failed.insert(1);
+        assert_eq!(state.body_lines(0, head, 80), ["│ (could not read, press l to retry)"]);
+        state.body_failed.clear();
+        assert!(state.settle_body(1, Ok(String::new())));
+        assert_eq!(state.body_lines(0, head, 59), ["│(no body)"]);
+        // A call: what the header does not show as gutter rows, then the separator and the result.
+        let body = format!("{head}\nimport os\n\n\nprint(1)\n{RESULT_ERR_SEP}\nboom");
+        assert!(state.settle_body(1, Ok(body)));
+        assert_eq!(
+            state.body_lines(0, head, 80),
+            ["│ import os", "│", "│ print(1)", "", &format!("│ {RESULT_ERR_SEP}"), "│ boom"]
+        );
+        // Prose is wrapped words with no gutter; a header that holds it all leaves nothing.
+        assert!(state.settle_body(2, Ok("Short reply and then a second line of words that wraps".into())));
+        assert_eq!(state.body_lines(1, "Short reply", 20), ["and then a second", "line of words that", "wraps"]);
+        assert!(state.settle_body(2, Ok("Short reply".into())));
+        assert!(state.body_lines(1, "Short reply", 20).is_empty());
     }
 
     #[test]
