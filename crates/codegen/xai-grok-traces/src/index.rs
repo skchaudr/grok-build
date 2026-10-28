@@ -25,8 +25,9 @@ mod bb_index;
 
 use crate::bb::{Bb, BbThread, thread_key};
 
+/// 8: titles fall back to `(no prompt) · <cwd basename>` instead of the file name.
 /// 7: DSH prompt size (`inputTokens` + cache read/write) and `request/context.contextWindow`; Cursor context (`usage.inputTokens` / hook `input_tokens`) and `contextTokenLimit` window; bb `thread/contextWindowUsage/updated`; fills `duration_ms` from a tool call's matching result timestamp; re-reads grok transcripts so a subagent's parent comes from `subagents/<id>/meta.json`.
-pub const PARSER_VERSION: i64 = 7;
+pub const PARSER_VERSION: i64 = 8;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
 /// 8 adds `trace_event_usage.call_id` so an appended result can still find its call.
 pub const SCHEMA_VERSION: i64 = 8;
@@ -306,7 +307,6 @@ struct FileRow {
 
 #[derive(Default)]
 struct Aggregate {
-    title: String,
     user_title: Option<String>,
     model: Option<String>,
     cwd: Option<String>,
@@ -332,6 +332,16 @@ struct Aggregate {
     /// Latest per-message context size and window seen.
     context_tokens: Option<i64>,
     context_window: Option<i64>,
+}
+
+const NO_PROMPT: &str = "(no prompt)";
+
+/// Title for a session with no prompt or harness title; the cwd basename keeps it findable.
+fn fallback_title(cwd: Option<&str>) -> String {
+    match cwd.and_then(|c| Path::new(c).file_name()) {
+        Some(dir) => format!("{NO_PROMPT} · {}", dir.to_string_lossy()),
+        None => NO_PROMPT.to_string(),
+    }
 }
 
 /// `Tool: arg`, clipped to the preview length.
@@ -1160,7 +1170,7 @@ impl TraceIndex {
         };
 
         let basename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let mut agg = if reset { Aggregate { title: basename.clone(), ..Default::default() } } else { self.load_aggregate(&sid, &basename)? };
+        let mut agg = if reset { Aggregate::default() } else { self.load_aggregate(&sid, &basename)? };
 
         let tx = self.conn.transaction()?;
         let sk = upsert_session(&tx, &sid, &root.source, &basename, &path_str, size)?;
@@ -1290,8 +1300,7 @@ impl TraceIndex {
             |r| {
                 let title: String = r.get(0)?;
                 Ok(Aggregate {
-                    user_title: (title != basename).then(|| title.clone()),
-                    title,
+                    user_title: (title != basename && !title.starts_with(NO_PROMPT)).then(|| title.clone()),
                     model: r.get(1)?,
                     cwd: r.get(2)?,
                     first_ts: r.get(3)?,
@@ -1315,7 +1324,7 @@ impl TraceIndex {
         );
         match agg {
             Ok(a) => Ok(a),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Aggregate { title: basename.into(), ..Default::default() }),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Aggregate::default()),
             Err(e) => Err(e.into()),
         }
     }
@@ -1346,7 +1355,7 @@ impl TraceIndex {
              WHERE id = ?1",
             params![
                 sid,
-                agg.session_title.as_deref().or(agg.user_title.as_deref()).unwrap_or(&agg.title),
+                agg.session_title.clone().or_else(|| agg.user_title.clone()).unwrap_or_else(|| fallback_title(agg.cwd.as_deref())),
                 agg.model,
                 agg.cwd,
                 agg.first_ts,
@@ -1524,6 +1533,21 @@ mod tests {
             .map(|p| Path::new(&p.unwrap()).file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(order, ["new.jsonl", "mid.jsonl", "old.jsonl", "oldest.jsonl"]);
+    }
+
+    #[test]
+    fn injected_only_session_gets_no_prompt_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sessions/%2Fw%2Fproj/g1");
+        fs::create_dir_all(&dir).unwrap();
+        let line = r#"{"type":"user","content":[{"type":"text","text":"<user_info>injected</user_info>"}]}"#;
+        fs::write(dir.join("chat_history.jsonl"), format!("{line}\n")).unwrap();
+        fs::write(dir.join("summary.json"), r#"{"info":{"id":"g1","cwd":"/w/proj"}}"#).unwrap();
+        let root = Root { id: "grok".into(), source: "grok".into(), path: tmp.path().join("sessions"), format: Format::Jsonl, file_name: None };
+        let mut idx = TraceIndex::open(&tmp.path().join("idx/t.sqlite")).unwrap();
+        idx.scan(&[root]).unwrap();
+        let title: String = idx.conn().query_row("SELECT title FROM trace_sessions", [], |r| r.get(0)).unwrap();
+        assert_eq!(title, "(no prompt) · proj");
     }
 
     #[test]
