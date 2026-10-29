@@ -54,7 +54,7 @@ fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<P
     use xai_grok_telemetry::process_info::LeaderMode::Standalone;
     let (entrypoint, interactivity) = match command {
         Some(Command::Agent(_)) => return None,
-        Some(Command::Dashboard) => return None,
+        Some(Command::Dashboard) | Some(Command::Traces { .. }) => return None,
         Some(Command::Live) => (Entrypoint::Cli, Interactivity::Interactive),
         Some(Command::Login { .. }) => (Entrypoint::Cli, Interactivity::Interactive),
         Some(
@@ -117,6 +117,7 @@ fn command_needs_pre_sandbox_policy_heal(command: Option<&Command>) -> bool {
             | Command::Version { .. }
             | Command::Completions { .. }
             | Command::Live
+            | Command::Traces { .. }
             | Command::DiskUsage(_)
             | Command::Workspace(_),
         ) => false,
@@ -2149,7 +2150,7 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
     if matches!(args.command, Some(Command::Live)) {
         return xai_grok_pager::live_cmd::run();
     }
-    let is_interactive = args.command.is_none()
+    let is_interactive = (args.command.is_none() || matches!(args.command, Some(Command::Traces { .. })))
         && args.single.is_none()
         && args.prompt_json.is_none()
         && args.prompt_file.is_none();
@@ -2430,6 +2431,11 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                 return Ok(());
             }
             Command::Live => unreachable!("handled at the top of async_main"),
+            // Standalone traces: the normal pager start, minus a session, a leader and auto-update.
+            Command::Traces { session } => {
+                xai_grok_pager::app::standalone_traces::enable(session);
+                args.no_leader = true;
+            }
             Command::Dashboard => {
                 args.command = Some(Command::Dashboard);
                 flag_dashboard_at_startup_if_requested(&mut args)?;
@@ -2524,7 +2530,8 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
     type UpdateWaitHandle = tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>;
     let bg_update_wait: std::sync::Arc<tokio::sync::Mutex<Option<UpdateWaitHandle>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));
-    let check_updates = should_check_for_updates(args.no_auto_update);
+    let check_updates = should_check_for_updates(args.no_auto_update)
+        && !xai_grok_pager::app::standalone_traces::is_standalone();
     let bg_update_rx: Option<tokio::sync::oneshot::Receiver<Option<auto_update::UpdateAvailable>>> =
         if check_updates {
             let update_config = update_config.clone();

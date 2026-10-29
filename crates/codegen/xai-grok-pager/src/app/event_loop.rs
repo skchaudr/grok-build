@@ -1247,7 +1247,8 @@ pub(crate) async fn run(
     app.shell_feedback_trace_offer = connection.feedback_trace_offer;
     app.auth_methods = connection.auth_methods.clone();
     let force_login = args.force_login && !connection.auth_methods.is_empty();
-    let needs_interactive_login = connection.needs_login || force_login;
+    let standalone_traces = crate::app::standalone_traces::is_standalone();
+    let needs_interactive_login = !standalone_traces && (connection.needs_login || force_login);
     if needs_interactive_login {
         app.welcome_prompt_focused = false;
         if connection.needs_login {
@@ -1860,7 +1861,13 @@ pub(crate) async fn run(
             app.deferred_startup.new_session = true;
         }
     }
-    if should_create_home_on_authenticated_startup(&app) {
+    if standalone_traces {
+        let effs = crate::app::standalone_traces::start(&mut app);
+        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+            return Ok(finish_run(&mut app));
+        }
+        presenter.request_presentation(&mut app, terminal, false);
+    } else if should_create_home_on_authenticated_startup(&app) {
         let effs = dispatch::maybe_create_home_session(&mut app);
         if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
             return Ok(finish_run(&mut app));

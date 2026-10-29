@@ -55,6 +55,8 @@ mod subscription_watch_and_gate_verify_pty;
 mod traces_live;
 #[path = "pty_e2e/traces_modal_ledger_trajectory_inspector.rs"]
 mod traces_modal_ledger_trajectory_inspector;
+#[path = "pty_e2e/traces_standalone_entry.rs"]
+mod traces_standalone_entry;
 #[path = "pty_e2e/undo_tip_resets_each_new_session.rs"]
 mod undo_tip_resets_each_new_session;
 #[path = "pty_e2e/undo_tip_seen_count_never_persisted.rs"]

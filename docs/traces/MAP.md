@@ -17,6 +17,7 @@ Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `x
 | Dispatch | `P/app/dispatch/router.rs` (the arms beside `OpenMemoryModal`), `P/app/effects/mod.rs` `Effect::ScanTraces` (spawn_blocking scan), `P/app/dispatch/task_result.rs` `TracesScanned` |
 | Resume | `P/app/dispatch/session/load.rs`: `dispatch_traces_resume` routes to `dispatch_foreign_resume`, shared with the session picker. Claude and Codex go through `/resume-claude` or `/resume-codex <id>`. Grok goes through `resolve_local_session_any_cwd` and then `dispatch_load_session` |
 | pty proof | `xai-grok-pager-pty-harness/tests/pty_e2e/traces_modal_ledger_trajectory_inspector.rs` (family `pty_e2e_config_ui`) |
+| Standalone `grok-fork traces [id]` | `P/app/dispatch/standalone_traces.rs`, `P/views/traces_modal/standalone.rs`, `Command::Traces` in `P/app/cli.rs`, the arm in `xai-grok-pager-bin/src/main.rs`; pty `traces_standalone_entry.rs` |
 | User doc | `xai-grok-pager/docs/user-guide/04-slash-commands.md` `### /traces` |
 | `grok live` | `P/live_cmd.rs` (`run`, `step`), `Command::Live` in `P/app/cli.rs`, handled at the top of `async_main` in BIN. pty proof: `xai-grok-pager-pty-harness/tests/pty_e2e/traces_live.rs` (family `pty_e2e_config_ui`). Docs: `24-monitoring-usage.md` `## Live agents (grok live)` |
 
