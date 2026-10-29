@@ -36,3 +36,5 @@
 2026-10-28 LANDED 4eb85116 mini+air: grok-traces follow waits for an agent, --once keeps exit (#36); grok-fork rebuilt
 2026-10-28 LANDED 8c87842e mini+air: grok-traces live --json --recent N, follow idle lists recent ended sessions, follow <id> stays attached across end/resume (#37); grok-traces rebuilt
 2026-10-28 LANDED 413016f trace-deck mini+air: wall recent ended rows, follow opens ended rows (trace-deck#33); lookout rebuilt
+2026-10-29 CORRECTION trace-deck 942056d restored the byte-identical ffe5674 tree, undoing trace-deck PRs #31-#33 and the lookout/fake-lookout naming. The preceding LANDED 413016f entry is historical and superseded; trace-deck remains the full viewer product.
+2026-10-29 LANDED a02176a7 mini+air: #39 standalone traces entry, #40 modal follow screen, #38 hook wake socket; grok-fork and grok-traces installed and standalone/follow run verified. The modal still uses its 1 s poll; wake-to-modal wiring is the next slice.

@@ -2,6 +2,8 @@
 
 Read this before touching `/traces`. Paths are under `crates/codegen/`. `P` = `xai-grok-pager/src`.
 
+Product boundary: `grok-traces` is the collection/index/streaming backend, `trace-deck` is the full viewer product, and this `/traces` modal is an additional interface rather than a replacement for `trace-deck`.
+
 ## The feature
 
 | Piece | Where |
@@ -206,10 +208,10 @@ Code: `crates/codegen/xai-grok-traces/src/live.rs` (`norm`, `strict_ids`, `fold_
 - `fmt_age` never prints `now`, by lead decision: the spec mock and rows 40/43 require seconds.
 - Cursor duplicate Pre: `preToolUse` and `beforeReadFile`/`beforeShellExecution` share a `tool_use_id` (and `beforeReadFile` has no `after*`). A `Pre` whose non-NULL id is already open is not pushed again (the first keeps its `since`); a `Post` with an id closes every open `Pre` with that id (close-older also closes the older ones). Strict and close-older both.
 - `fold_all`'s `alive` takes `(pid, Option<start>)`: `(pid, None)` is the pid-only `alive_pid` (signal 0 or EPERM, not a zombie).
-- Decision-model judgments (Jev/Laya) are specified in trace-deck DECISION-MODELS.md; the traces crate only needs to emit full tool args on follow call items.
+- Decision-model judgments are not part of restored trace-deck main. If revived, they need a separately reviewed trace-deck design; the traces crate would only need to emit full tool args on follow call items.
 
 ## Tool pages
 
 - `TOOL-grok-traces-cli.md` the `grok-traces` binary.
 - `TOOL-traces-modal.md` the `/traces` modal.
-- `TOOL-lookout.md` and `TOOL-aliases.md` in trace-deck (`~/repos/trace-deck`): `fake-lookout` and the `fake-lookt`/`fake-follo` functions.
+- `README.md` and `CONFORMANCE.md` in trace-deck (`~/repos/trace-deck`): the restored viewer. The live-only `TOOL-lookout.md` and `TOOL-aliases.md` were removed by restoration commit `942056d` and are not current documentation.
