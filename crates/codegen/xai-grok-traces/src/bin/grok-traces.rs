@@ -1,4 +1,4 @@
-//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--backlog N] | version | doctor [--reset]`.
+//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]`.
 //!
 //! `hook` runs once per harness event: it must be fast, silent and always
 //! exit 0 so it can never block an agent.
@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use xai_grok_traces::follow::Follower;
+use xai_grok_traces::follow::{Follower, find_live_root};
 use xai_grok_traces::live::{self, LIVE_SCHEMA, LiveEnvelope, fold_all};
 use xai_grok_traces::hook::{MAX_STDIN_BYTES, extract, ingest};
 use xai_grok_traces::remote::{event_to_json, session_to_json};
@@ -35,7 +35,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--backlog N] | version | doctor [--reset]");
+            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]");
             ExitCode::from(2)
         }
     }
@@ -228,63 +228,84 @@ fn events(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
     Ok(true)
 }
 
-/// `tail -f` for one live session: prints its tool calls and decisions as they are indexed (`--json`: one item per line). Runs until killed.
+/// `tail -f` for live sessions: waits for an agent when none is live, follows it until it ends, then waits for the next. `--once` exits on the first end (and does not wait).
 fn follow(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
     let mut id = None;
     let mut children = true;
     let mut json = false;
+    let mut once = false;
     let mut backlog = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--no-children" => children = false,
             "--json" => json = true,
+            "--once" => once = true,
             "--backlog" => backlog = Some(it.next().and_then(|v| v.parse().ok()).ok_or("--backlog needs a number")?),
             other if other.starts_with('-') => return Err(format!("unknown flag {other}").into()),
             other => id = Some(other),
         }
     }
-    let idx = TraceIndex::open_with(&default_db_path(), Some(Duration::from_secs(2)))?;
-    let root = match id {
-        Some(id) => idx.session(id)?.ok_or_else(|| format!("no such session {id}"))?,
-        None => {
-            let filter = SessionFilter { limit: 1, active_only: true, roots_only: true, ..Default::default() };
-            match idx.list_sessions(&filter)?.pop() {
-                Some(s) => s,
-                None => {
-                    eprintln!("no active session (grok-traces list --active)");
-                    return Ok(false);
-                }
-            }
-        }
-    };
     let home = xai_dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
-    let mut follower = Follower::new(idx, user_roots(), root, children, home).with_json(json);
-    if let Some(n) = backlog {
-        follower = follower.with_backlog(n);
-    }
     let mut last_err = String::new();
     loop {
-        match follower.tick(chrono::Utc::now().timestamp_millis()) {
-            Ok(blocks) => {
-                let mut out = io::stdout().lock();
-                for b in blocks {
-                    if writeln!(out, "{b}").is_err() {
+        let idx = TraceIndex::open_with(&default_db_path(), Some(Duration::from_secs(2)))?;
+        let root = if once {
+            match id {
+                Some(id) => idx.session(id)?.ok_or_else(|| format!("no such session {id}"))?,
+                None => match find_live_root(&idx, None)? {
+                    Some(s) => s,
+                    None => {
+                        eprintln!("no active session (grok-traces list --active)");
+                        return Ok(false);
+                    }
+                },
+            }
+        } else {
+            let mut said = false;
+            loop {
+                if let Some(s) = find_live_root(&idx, id)? {
+                    break s;
+                }
+                if !std::mem::replace(&mut said, true) {
+                    eprintln!("… waiting for {}", id.map_or("an agent".to_string(), |i| format!("session {i}")));
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        };
+        let mut follower = Follower::new(idx, user_roots(), root, children, home.clone()).with_json(json);
+        if let Some(n) = backlog {
+            follower = follower.with_backlog(n);
+        }
+        loop {
+            match follower.tick(chrono::Utc::now().timestamp_millis()) {
+                Ok(blocks) => {
+                    let mut out = io::stdout().lock();
+                    for b in blocks {
+                        if writeln!(out, "{b}").is_err() {
+                            return Ok(true);
+                        }
+                    }
+                    if out.flush().is_err() {
                         return Ok(true);
                     }
                 }
-                if out.flush().is_err() {
-                    return Ok(true);
+                // A busy index is transient; say each distinct error once and keep following.
+                Err(e) if e.to_string() != last_err => {
+                    last_err = e.to_string();
+                    eprintln!("grok-traces: {e}");
                 }
+                Err(_) => {}
             }
-            // A busy index is transient; say each distinct error once and keep following.
-            Err(e) if e.to_string() != last_err => {
-                last_err = e.to_string();
-                eprintln!("grok-traces: {e}");
+            if follower.root_ended() {
+                break;
             }
-            Err(_) => {}
+            std::thread::sleep(Duration::from_millis(500));
         }
-        std::thread::sleep(Duration::from_millis(500));
+        if once {
+            return Ok(true);
+        }
+        id = None;
     }
 }
 
