@@ -33,3 +33,4 @@
 2026-10-28 LANDED 2e7284cd mini+air: chrome (#33): model in header, token label, T backward, ledger name width; grok-fork rebuilt
 2026-10-28 LANDED c44170ae mini+air: grok-traces follow (#34)
 2026-10-28 LANDED 7490f8cd mini+air: live --json model/started_at, follow --json (#35)
+2026-10-28 LANDED 4eb85116 mini+air: grok-traces follow waits for an agent, --once keeps exit (#36); grok-fork rebuilt
