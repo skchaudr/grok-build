@@ -365,7 +365,16 @@ impl AgentView {
 
         // Traces: sub-views and editors own Esc; the ledger's Esc closes.
         if let ActiveModal::Traces { state } = modal {
-            if key.code == KeyCode::Esc && !crate::views::traces_modal::wants_esc(state) {
+            let top = !crate::views::traces_modal::wants_esc(state);
+            // `grok traces` has no prompt behind the modal: leaving the ledger leaves the process.
+            if top
+                && crate::app::standalone_traces::is_standalone()
+                && matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
+                && key.modifiers.is_empty()
+            {
+                return InputOutcome::Action(Action::QuitConfirmed);
+            }
+            if key.code == KeyCode::Esc && top {
                 self.active_modal = None;
                 return InputOutcome::Changed;
             }

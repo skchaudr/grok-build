@@ -30,6 +30,8 @@ use crate::views::traces_payload::{self, Payload, Shape};
 
 pub(super) use super::traces_body::{pretty, INPUT_KEYS, TEXT_KEYS};
 
+mod standalone;
+
 pub const TITLE: &str = "Traces";
 const PAGE: usize = 500;
 /// Rows one scroll-wheel notch moves the selection.

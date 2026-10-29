@@ -29,6 +29,7 @@ mod rewind;
 mod router;
 mod session;
 mod settings;
+pub mod standalone_traces;
 mod status;
 mod task_result;
 mod transcript;

@@ -1291,6 +1291,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             {
                 state.finish_scan(summary);
             }
+            super::standalone_traces::open_pending(app, true);
             vec![]
         }
         TaskResult::MemoryListLoaded { agent_id, result } => {
