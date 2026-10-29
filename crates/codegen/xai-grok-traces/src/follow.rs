@@ -253,6 +253,10 @@ pub fn json_event(ev: &EventRow, raw: Option<&str>, call_id: Option<&str>, agent
             v["kind"] = json!("result");
             v["call_id"] = json!(call_id);
             v["ok"] = json!(!ev.is_error);
+            // Additive (v stays 1): the call's duration, when the index has one.
+            if let Some(ms) = ev.duration_ms {
+                v["ms"] = json!(ms);
+            }
             if ev.is_error {
                 let (exit, msg) = error_parts(ev);
                 v["error"] = json!([exit, msg].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("  "));
@@ -393,6 +397,13 @@ impl Follower {
         let Some(line) = result_id.and_then(|id| self.sessions[at].calls.remove(id)) else { return Ok(None) };
         let filter = EventFilter { since_line: Some(line - 1), limit: 1, include_noise: true, ..Default::default() };
         Ok(self.idx.list_events(&self.sessions[at].id, &filter)?.into_iter().find(|e| e.line == line).and_then(|e| e.duration_ms))
+    }
+
+    /// [`Self::tick`] as the structured items `--json` prints (see [`json_event`], [`agent_item`], [`model_item`]); needs [`Self::with_json`].
+    /// shortcut: parses the JSON `tick` printed instead of threading `Value`s through it; upgrade if the reparse shows up in a profile.
+    pub fn tick_items(&mut self, now_ms: i64) -> Result<Vec<Value>> {
+        debug_assert!(self.json, "tick_items needs with_json(true)");
+        Ok(self.tick(now_ms)?.iter().filter_map(|s| serde_json::from_str(s).ok()).collect())
     }
 
     /// One poll: index the followed files, find new subagents, return everything newly printable.
