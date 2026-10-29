@@ -1,4 +1,4 @@
-//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--recent N] | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]`.
+//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--watch] [--recent N] | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]`.
 //!
 //! `hook` runs once per harness event: it must be fast, silent and always
 //! exit 0 so it can never block an agent.
@@ -12,12 +12,17 @@ use std::time::Duration;
 
 use xai_grok_traces::follow::{Follower, find_live_root, recent_table};
 use xai_grok_traces::live;
+use xai_grok_traces::wake::{self, Waker};
 use xai_grok_traces::hook::{MAX_STDIN_BYTES, extract, ingest};
 use xai_grok_traces::remote::{event_to_json, session_to_json};
 use xai_grok_traces::{EventFilter, SessionFilter, TraceIndex, default_db_path, user_roots};
 
 const HOOK_BUSY: Duration = Duration::from_millis(250);
 const NOTIFY_EVERY: Duration = Duration::from_secs(3600);
+/// Slow fallback when no wake arrives (viewer without a socket, or a hook that could not send).
+const WAKE_FALLBACK: Duration = Duration::from_secs(2);
+/// `live --watch` prints at most once per this.
+const WATCH_COALESCE: Duration = Duration::from_millis(100);
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -35,7 +40,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--recent N] | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]");
+            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--watch] [--recent N] | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]");
             ExitCode::from(2)
         }
     }
@@ -184,30 +189,52 @@ fn list(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
 }
 
 /// One line: `{"live_schema":N,"rows":[...]}`. Exit 2 without `--json`, 1 on error (nothing on stdout).
+/// `--watch` keeps running: one line now, then one per wake (at most one per 100 ms) and at least every 2 s.
 fn live_cmd(args: &[String]) -> ExitCode {
-    let recent = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        ["--json"] => Some(0),
-        ["--json", "--recent", n] | ["--recent", n, "--json"] => n.parse().ok(),
-        _ => None,
-    };
-    let Some(recent) = recent else {
-        eprintln!("usage: grok-traces live --json [--recent N]");
+    let (mut json, mut watch, mut recent, mut ok) = (false, false, 0, true);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--json" => json = true,
+            "--watch" => watch = true,
+            "--recent" => match it.next().and_then(|n| n.parse().ok()) {
+                Some(n) => recent = n,
+                None => ok = false,
+            },
+            _ => ok = false,
+        }
+    }
+    if !(json && ok) {
+        eprintln!("usage: grok-traces live --json [--watch] [--recent N]");
         return ExitCode::from(2);
-    };
+    }
+    let waker = watch.then(Waker::bind_default);
     let run = || -> Result<String, Box<dyn std::error::Error>> {
         let idx = TraceIndex::open(&default_db_path())?;
         let now = chrono::Utc::now().timestamp_millis();
         let env = live::envelope(&idx, now, recent, |pid, start| start.map_or_else(|| live::alive_pid(pid), |s| live::alive(pid, s)))?;
         Ok(serde_json::to_string(&env)?)
     };
-    match run() {
-        Ok(line) => {
-            println!("{line}");
-            ExitCode::SUCCESS
+    loop {
+        let printed = std::time::Instant::now();
+        match run() {
+            Ok(line) => {
+                let mut out = io::stdout().lock();
+                if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
+                    return ExitCode::SUCCESS;
+                }
+            }
+            Err(e) => {
+                eprintln!("grok-traces: {e}");
+                if waker.is_none() {
+                    return ExitCode::from(1);
+                }
+            }
         }
-        Err(e) => {
-            eprintln!("grok-traces: {e}");
-            ExitCode::from(1)
+        let Some(w) = &waker else { return ExitCode::SUCCESS };
+        if w.wait(WAKE_FALLBACK) {
+            std::thread::sleep(WATCH_COALESCE.saturating_sub(printed.elapsed()));
+            w.drain();
         }
     }
 }
@@ -253,6 +280,8 @@ fn follow(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
     }
     let home = xai_dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
     let mut last_err = String::new();
+    // Bound before the first read so no event between read and wait is missed.
+    let waker = Waker::bind_default();
     loop {
         let idx = TraceIndex::open_with(&default_db_path(), Some(Duration::from_secs(2)))?;
         let root = if once {
@@ -286,7 +315,7 @@ fn follow(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
                     }
                     eprintln!("… waiting for {}", id.map_or("an agent".to_string(), |i| format!("session {i}")));
                 }
-                std::thread::sleep(Duration::from_millis(500));
+                waker.wait(WAKE_FALLBACK);
             }
         };
         let mut follower = Follower::new(idx, user_roots(), root, children, home.clone()).with_json(json);
@@ -317,7 +346,7 @@ fn follow(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
             if follower.root_ended() && (once || id.is_none()) {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(500));
+            waker.wait(WAKE_FALLBACK);
         }
         if once {
             return Ok(true);
@@ -379,6 +408,10 @@ fn doctor(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
     }
     for (source, n, last) in &stats.receipts {
         println!("receipts {source:8} count={n} last={}", when(*last));
+    }
+    match wake::listeners() {
+        0 => println!("wake     no listener (viewers fall back to timers)"),
+        n => println!("wake     {n} listener(s) in {}", wake::dir().display()),
     }
     Ok(health.is_none())
 }

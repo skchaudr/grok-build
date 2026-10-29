@@ -6,13 +6,13 @@ Written 2026-10-28 by Sonnet 5.5 from `git log`, `gh pr view` and the code. Deci
 
 ## What it is
 
-The `grok-traces` binary (`crates/codegen/xai-grok-traces/src/bin/grok-traces.rs`). Subcommands: `hook <source>`, `scan`, `list`, `events <id> --json`, `raw`, `live --json`, `follow`, `doctor`, `version`. It is the data source for `fake-lookout` (TOOL-lookout in trace-deck) and for `/traces`. Installed `4eb85116` at `~/.grok/bin/grok-traces` on sab-mini and sab-air.
+The `grok-traces` binary (`crates/codegen/xai-grok-traces/src/bin/grok-traces.rs`). Subcommands: `hook <source>`, `scan`, `list`, `events <id> --json`, `raw`, `live --json [--watch]`, `follow`, `doctor`, `version`. It is the data source for `fake-lookout` (TOOL-lookout in trace-deck) and for `/traces`. Installed `4eb85116` at `~/.grok/bin/grok-traces` on sab-mini and sab-air.
 
 ## How it works
 
 - Harness event -> `grok-traces hook <source>` (stdin JSON, always exit 0, 250 ms busy timeout) -> a receipt row plus that one transcript file indexed (`hook::ingest`) into `$GROK_HOME/traces/traces.sqlite`.
 - `live --json [--recent N]`: one fold of the index into `{"live_schema":1,"rows":[...]}`, then exit. No loop; the caller polls. `--recent N` (default 0) appends the N most recent ended, non-ping root sessions after the live rows: same fields plus `ended_at` (ms), `state:"ended"`.
-- `follow [<id>]`: opens the index (2 s busy timeout) and ticks every 500 ms. Default target is the newest active root session. `--json` prints one item per line, `v=1`, kinds `user text reasoning call result model agent_start agent_end agent_resume`. `--backlog N` sets rows replayed at start (default 10).
+- `follow [<id>]`: opens the index (2 s busy timeout) and ticks on each wake signal (see `## Wake signal`), at least every 2 s. Default target is the newest active root session. `--json` prints one item per line, `v=1`, kinds `user text reasoning call result model agent_start agent_end agent_resume`. `--backlog N` sets rows replayed at start (default 10).
 - `follow` with no live session prints `… waiting for an agent` (or `… waiting for session <id>`) to stderr and attaches when one appears; after the followed root ends it prints the end line and waits for the next agent. `--once` exits on the first end, and exits 1 at once with `no active session` when nothing is live. `--json` also emits `agent_end` for the root.
 - With no id and nothing live, `follow` first prints the 10 most recent ended sessions (id, model, age since end, title) to stderr once. `follow <id>` attaches to an ended session too: tail, then `■ ended` / `agent_end`, and stays attached; if the session resumes it emits `agent_resume` (text: `↻ resumed`) and keeps going.
 
@@ -39,6 +39,15 @@ grok-traces follow <id> --json
 
 Hooks are installed with `crates/codegen/xai-grok-traces/hooks/install.sh`. `doctor` exits 1 unless the index is healthy.
 
+## Wake signal
+
+- After a hook writes its event into the index, it sends one empty datagram to every `$GROK_HOME/traces/wake*.sock` (`wake::notify`). It never blocks, never creates a socket, and ignores every error: no listener is the normal case.
+- `follow` and `live --json --watch` use `wake::Waker`. The first binds `wake.sock`; a datagram socket has one receiver, so a viewer that finds it held by a live process binds `wake.<pid>.sock` instead. Dead socket files are removed when a send fails (ECONNREFUSED/ENOENT) or at bind.
+- `Waker::wait(timeout)` returns true on a datagram (a burst counts once), false on timeout. If the socket cannot be bound it sleeps instead.
+- Fallback timers: `follow` and its idle wait use 2 s; `live --json --watch` prints one envelope at start, then one per wake (at most one per 100 ms) and at least every 2 s. Each envelope honors `--recent N`.
+- `grok-traces doctor` prints a `wake` line: the number of listeners reached, or `no listener`.
+- Decided by the lead agent (Claude Fable 5.1), not Sab, from Sab's 21:52 remark above.
+
 ## Who decided what
 
 **Sab said**
@@ -51,12 +60,12 @@ Hooks are installed with `crates/codegen/xai-grok-traces/hooks/install.sh`. `doc
 - Follow text glyphs; `--backlog` default 10; `--json` `v=1` item kinds.
 - One list where live is a row state, not a filter: ended sessions follow the live rows (`live --json --recent`), and `follow` lists them when idle (Sab asked why past sessions are not displayed or loaded as traces).
 - Adding `model` and `started_at` to `live --json` without bumping LIVE_SCHEMA.
-- A hook -> viewer wake over a local datagram socket (design only, not built).
+- A hook -> viewer wake over a local datagram socket (design by the lead agent, Claude Fable 5.1, not Sab; built as `wake.rs`). Not decided by Sab: the 2 s fallback timer, the 100 ms `live --watch` coalescing, the `wake.<pid>.sock` fan-out for a second viewer.
 - Judging tool calls needs full tool args on `follow` call items (stated in MAP.md; judgments themselves are specified in trace-deck DECISION-MODELS.md).
-- Pre-today agent decision, no measurement, no input from Sab: the 500 ms follow tick.
+- Pre-today agent decision, no measurement, no input from Sab: the 500 ms follow tick (replaced by the wake signal; 2 s fallback).
 
 ## Open/unverified
 
 - trace-deck's `follow <id> --json` child: an explicit `<id>` now stays attached across its end (changed from #36, which hopped to the next agent). Not checked against trace-deck's respawn logic.
 - The 500 ms tick was never measured against the hook path. fake-lookout's backend hop was measured at median 328 ms, p95 551 ms (CONFORMANCE.md S7, n=28).
-- The datagram wake is not built; the tick is still a poll.
+- Wake latency was measured once locally (fixture session, one Waker); not measured through a real harness hook, and not on sab-air.

@@ -108,7 +108,13 @@ pub fn transcript_for(source: &str, path: &Path) -> PathBuf {
 }
 
 /// Records the receipt and, when its path is a trace source, indexes just that file.
-pub fn ingest(idx: &mut TraceIndex, roots: &[Root], mut r: Receipt) -> Result<i64> {
+pub fn ingest(idx: &mut TraceIndex, roots: &[Root], r: Receipt) -> Result<i64> {
+    let id = ingest_inner(idx, roots, r)?;
+    crate::wake::notify(); // after the write: a woken viewer must see this event
+    Ok(id)
+}
+
+fn ingest_inner(idx: &mut TraceIndex, roots: &[Root], mut r: Receipt) -> Result<i64> {
     if r.source == "bb" {
         return ingest_bb(idx, roots, r);
     }

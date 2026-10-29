@@ -18,6 +18,7 @@ mod query;
 pub mod remote;
 mod receipts;
 pub mod roots;
+pub mod wake;
 
 pub use index::{
     Error, GROWTH_LIMIT, GROWTH_WINDOW_MS, HARD_CEILING, Limits, MAX_CAPPED_FILES, MAX_EVENTS_PER_FILE, PARSER_VERSION, Result,
