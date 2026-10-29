@@ -1087,8 +1087,8 @@ pub async fn run(
     );
     apply_screen_mode_globals(screen_mode);
     finish_theme_after_probe(minimal, screen_mode);
-    if let Some(ref t) = session_title {
-        set_terminal_title(t);
+    if session_title.is_some() || args.model.is_some() {
+        set_terminal_title(session_title.as_deref().unwrap_or(""), args.model.as_deref());
     }
     let connect_ui_timeout_env = std::env::var(connect_timeout::CONNECT_UI_TIMEOUT_ENV).ok();
     let connect_ui_timeout = connect_timeout::resolve(
@@ -1577,7 +1577,7 @@ fn init_terminal(
         startup_typeahead.extend(event_loop::capture_startup_typeahead(
             std::time::Duration::from_millis(0),
         ));
-        set_terminal_title("");
+        set_terminal_title("", None);
         if want_minimal && clear_main_screen {
             xai_grok_shell::util::with_locked_stderr(|stderr| {
                 execute!(
@@ -1762,8 +1762,8 @@ fn init_terminal(
         startup_typeahead,
     })
 }
-pub(crate) fn set_terminal_title(title: &str) {
-    let full = terminal_title_string(title);
+pub(crate) fn set_terminal_title(title: &str, model: Option<&str>) {
+    let full = terminal_title_string(title, model);
     xai_grok_shell::util::with_locked_stderr(|stderr| {
         let _ = execute!(stderr, SetTitle(full));
     });
@@ -1771,14 +1771,21 @@ pub(crate) fn set_terminal_title(title: &str) {
 /// Sanitized/truncated window title.
 /// Strips control characters: crossterm's `SetTitle` emits the string raw inside an OSC sequence.
 /// An embedded BEL/ESC would terminate the OSC early and let the remainder inject arbitrary escape sequences into the terminal.
-fn terminal_title_string(title: &str) -> String {
-    let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
-    if sanitized.is_empty() {
-        "grok".into()
-    } else {
-        let truncated: String = sanitized.chars().take(80 - 6).collect();
-        format!("{} - grok", truncated)
+fn terminal_title_string(title: &str, model: Option<&str>) -> String {
+    let clean = |s: &str| -> String { s.chars().filter(|c| !c.is_control()).collect() };
+    let title: String = clean(title).chars().take(80 - 6).collect();
+    let model = model.map(clean).filter(|m| !m.is_empty());
+    let mut parts = Vec::new();
+    if !title.is_empty() {
+        parts.push(title);
     }
+    if let Some(model) = &model {
+        parts.push(model.clone());
+    } else {
+        // Keep the product name only when no model identity is available.
+        parts.push("grok".into());
+    }
+    parts.join(" - ")
 }
 #[cfg(test)]
 mod tests {
@@ -1843,12 +1850,22 @@ mod tests {
     #[test]
     fn terminal_title_strips_control_characters() {
         assert_eq!(
-            terminal_title_string("evil\x07\x1b]52;c;payload\x07title"),
+            terminal_title_string("evil\x07\x1b]52;c;payload\x07title", None),
             "evil]52;c;payloadtitle - grok"
         );
-        assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok");
-        assert_eq!(terminal_title_string(""), "grok");
-        assert_eq!(terminal_title_string("My chat"), "My chat - grok");
+        assert_eq!(terminal_title_string("\x07\x1b\x00", None), "grok");
+        assert_eq!(terminal_title_string("", None), "grok");
+        assert_eq!(terminal_title_string("My chat", None), "My chat - grok");
+    }
+
+    #[test]
+    fn terminal_title_names_the_model_when_known() {
+        assert_eq!(
+            terminal_title_string("My chat", Some("claude-fable-5-1")),
+            "My chat - claude-fable-5-1"
+        );
+        assert_eq!(terminal_title_string("", Some("claude-fable-5-1")), "claude-fable-5-1");
+        assert_eq!(terminal_title_string("", Some("\x07")), "grok");
     }
     #[test]
     fn hunk_tracker_mode_nothing_set_is_none() {

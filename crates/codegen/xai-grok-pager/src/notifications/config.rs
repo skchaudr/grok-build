@@ -78,6 +78,8 @@ impl Default for TitleConfig {
                 TitleItem::Spinner,
                 TitleItem::Activity,
                 TitleItem::SessionName,
+                TitleItem::Model,
+                TitleItem::Cwd,
                 TitleItem::Grok,
             ],
         }

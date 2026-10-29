@@ -117,6 +117,10 @@ fn write_item(
 ) -> bool {
     match item {
         TitleItem::Grok => {
+            // Once a model is known the tab names the model, not the product.
+            if state.model.is_some_and(|m| !m.is_empty()) {
+                return false;
+            }
             push_separator(buf, has_parts);
             buf.push_str("grok");
         }
@@ -312,6 +316,18 @@ mod tests {
         };
         mgr.update(&state);
         assert_eq!(mgr.last_title, "my project - grok");
+    }
+
+    #[test]
+    fn default_items_name_the_model_and_drop_grok_when_known() {
+        let mut mgr = TitleManager::new(&TitleConfig::default());
+        let state = TitleState {
+            model: Some("claude-fable-5-1"),
+            cwd: Some("/work/repo"),
+            ..idle_state()
+        };
+        mgr.update(&state);
+        assert_eq!(mgr.last_title, "claude-fable-5-1 - repo");
     }
 
     #[test]
