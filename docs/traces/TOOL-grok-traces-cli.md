@@ -9,9 +9,10 @@ The `grok-traces` binary (`crates/codegen/xai-grok-traces/src/bin/grok-traces.rs
 ## How it works
 
 - Harness event -> `grok-traces hook <source>` (stdin JSON, always exit 0, 250 ms busy timeout) -> a receipt row plus that one transcript file indexed (`hook::ingest`) into `$GROK_HOME/traces/traces.sqlite`.
-- `live --json`: one fold of the index into `{"live_schema":1,"rows":[...]}`, then exit. No loop; the caller polls.
+- `live --json [--recent N]`: one fold of the index into `{"live_schema":1,"rows":[...]}`, then exit. No loop; the caller polls. `--recent N` (default 0) appends the N most recent ended, non-ping root sessions after the live rows: same fields plus `ended_at` (ms), `state:"ended"`.
 - `follow [<id>]`: opens the index (2 s busy timeout) and ticks every 500 ms. Default target is the newest active root session. `--json` prints one item per line, `v=1`, kinds `user text reasoning call result model agent_start agent_end agent_resume`. `--backlog N` sets rows replayed at start (default 10).
 - `follow` with no live session prints `… waiting for an agent` (or `… waiting for session <id>`) to stderr and attaches when one appears; after the followed root ends it prints the end line and waits for the next agent. `--once` exits on the first end, and exits 1 at once with `no active session` when nothing is live. `--json` also emits `agent_end` for the root.
+- With no id and nothing live, `follow` first prints the 10 most recent ended sessions (id, model, age since end, title) to stderr once. `follow <id>` attaches to an ended session too: tail, then `■ ended` / `agent_end`, and stays attached; if the session resumes it emits `agent_resume` (text: `↻ resumed`) and keeps going.
 
 ## What changed today
 
@@ -20,6 +21,7 @@ The `grok-traces` binary (`crates/codegen/xai-grok-traces/src/bin/grok-traces.rs
 - #28 Pr Link records, interrupt markers, image-only prompts marked noise; PARSER_VERSION 9.
 - #34 `follow`. #35 `follow --json`, `--backlog`, `agent_resume`; `live --json` rows gain `model` and `started_at` (LIVE_SCHEMA stays 1).
 - #36 `follow` waits for an agent instead of exiting, keeps following across ends; `--once` keeps the old exit. Merged as `4eb85116`.
+- `live --json --recent N`, `follow` idle listing, `follow <id>` on ended sessions (resumes in place; an explicit id no longer hops to the next agent after its end). `live_schema` stays 1.
 
 ## Basic workflow
 
@@ -45,6 +47,7 @@ Hooks are installed with `crates/codegen/xai-grok-traces/hooks/install.sh`. `doc
 
 **Lead agent (Claude Fable 5.1) decided, not Sab**
 - Follow text glyphs; `--backlog` default 10; `--json` `v=1` item kinds.
+- One list where live is a row state, not a filter: ended sessions follow the live rows (`live --json --recent`), and `follow` lists them when idle (Sab asked why past sessions are not displayed or loaded as traces).
 - Adding `model` and `started_at` to `live --json` without bumping LIVE_SCHEMA.
 - A hook -> viewer wake over a local datagram socket (design only, not built).
 - Judging tool calls needs full tool args on `follow` call items (stated in MAP.md; judgments themselves are specified in trace-deck DECISION-MODELS.md).
@@ -52,6 +55,6 @@ Hooks are installed with `crates/codegen/xai-grok-traces/hooks/install.sh`. `doc
 
 ## Open/unverified
 
-- trace-deck's `follow <id> --json` child: after the explicit `<id>` ends, the CLI now attaches to whichever agent goes live next (`id` is cleared). Not checked against trace-deck's respawn logic.
+- trace-deck's `follow <id> --json` child: an explicit `<id>` now stays attached across its end (changed from #36, which hopped to the next agent). Not checked against trace-deck's respawn logic.
 - The 500 ms tick was never measured against the hook path. lookout's backend hop was measured at median 328 ms, p95 551 ms (CONFORMANCE.md S7, n=28).
 - The datagram wake is not built; the tick is still a poll.

@@ -308,6 +308,7 @@ fn replay(
                     LiveState::Compacting => "compacting".into(),
                     LiveState::Prompt => "your-turn".into(),
                     LiveState::Working => "working".into(),
+                    LiveState::Ended => "ended".into(),
                 };
                 (g, what)
             }

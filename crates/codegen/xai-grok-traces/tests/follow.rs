@@ -166,3 +166,42 @@ fn follow_waits_for_a_live_session_then_attaches_and_sees_the_root_end() {
     assert_eq!(kinds(&f.tick(1_000).unwrap()), ["agent_end"]);
     assert!(f.root_ended());
 }
+
+#[test]
+fn follow_an_ended_session_prints_its_tail_then_resumes_in_place() {
+    use xai_grok_traces::follow::{recent_table, ended_line};
+    use xai_grok_traces::live::recent_ended;
+    let tmp = tempfile::tempdir().unwrap();
+    let projects = tmp.path().join("home/.claude/projects");
+    let root = Root { id: "claude-projects".into(), source: "claude".into(), path: projects.clone(), format: Format::Jsonl, file_name: None };
+    let parent = projects.join("-w/p1.jsonl");
+    append(&parent, T1);
+    append(&parent, "{\"type\":\"session_end\",\"timestamp\":\"2026-10-01T00:00:13Z\"}\n");
+    // Old file: the session is ended, not active.
+    fs::File::options().write(true).open(&parent).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_790_900_000)).unwrap();
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
+    idx.scan(std::slice::from_ref(&root)).unwrap();
+    assert!(xai_grok_traces::follow::find_live_root(&idx, None).unwrap().is_none());
+
+    // The idle listing names it.
+    let now = chrono::Utc::now().timestamp_millis();
+    let recent = recent_ended(&idx, &[], 10, now).unwrap();
+    let table = recent_table(&recent, now);
+    assert!(table.starts_with("claude:") && table.contains(" ago  fix the parser"), "{table}");
+
+    // Following it by id: header, tail, then the end line, in text.
+    let session = idx.session(&recent[0].session_id).unwrap().unwrap();
+    let mut f = Follower::new(idx, vec![root], session, true, None).with_json(true).with_backlog(2);
+    let first = f.tick(0).unwrap();
+    assert_eq!(kinds(&first), ["model", "call", "agent_end"], "{first:?}");
+    assert!(f.root_ended());
+    assert_eq!(ended_line(0), "■ ended");
+
+    // New activity makes it live again: agent_resume, then the new rows; no remount.
+    append(&parent, T2);
+    fs::File::options().write(true).open(&parent).unwrap().set_modified(std::time::SystemTime::now()).unwrap();
+    f.tick(500).unwrap();
+    let again = kinds(&f.tick(1_000).unwrap());
+    assert_eq!(again.first().map(String::as_str), Some("agent_resume"), "{again:?}");
+    assert!(!f.root_ended());
+}

@@ -75,6 +75,18 @@ pub fn ended_line(depth: usize) -> String {
     if depth == 0 { "■ ended".into() } else { format!("{}↳ ended", indent(depth)) }
 }
 
+/// The idle listing: one line per recent ended session, `<id>  <model>  <age> ago  <title>`.
+pub fn recent_table(rows: &[crate::live::LiveRow], now_ms: i64) -> String {
+    rows.iter()
+        .map(|r| {
+            let model = r.model.as_deref().map_or_else(|| "-".to_string(), short_model);
+            let age = r.ended_at.map_or_else(|| "-".to_string(), |t| format!("{} ago", crate::live::fmt_age(now_ms - t)));
+            format!("{}  {model}  {age}  {}", r.session_id, clip(first_line(&r.title), 60))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn started_line(model: Option<&str>, depth: usize) -> String {
     let model = model.map(|m| format!("{} ", short_model(m))).unwrap_or_default();
     format!("{}↳ {model}started", indent(depth))
@@ -417,9 +429,13 @@ impl Follower {
                     }
                 }
             }
-            // A subagent that ended and is active again resumes before its new rows (silent in text).
-            if self.json && depth > 0 && self.sessions[at].ended && row.status == Status::Active {
-                out.push(agent_item("agent_resume", &id, depth, Some(now_ms), None, None).to_string());
+            // An ended session that is active again resumes before its new rows (a subagent's is silent in text).
+            if self.sessions[at].ended && row.status == Status::Active {
+                if self.json {
+                    out.push(agent_item("agent_resume", &id, depth, Some(now_ms), None, None).to_string());
+                } else if depth == 0 {
+                    out.push("↻ resumed".into());
+                }
             }
             let filter = EventFilter { since_line: Some(self.sessions[at].last_line), limit: MAX_EVENTS_PER_FILE, ..Default::default() };
             for mut ev in self.idx.list_events(&id, &filter)? {
