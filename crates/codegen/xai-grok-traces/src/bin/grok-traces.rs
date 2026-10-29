@@ -1,4 +1,4 @@
-//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]`.
+//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--recent N] | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]`.
 //!
 //! `hook` runs once per harness event: it must be fast, silent and always
 //! exit 0 so it can never block an agent.
@@ -10,8 +10,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use xai_grok_traces::follow::{Follower, find_live_root};
-use xai_grok_traces::live::{self, LIVE_SCHEMA, LiveEnvelope, fold_all};
+use xai_grok_traces::follow::{Follower, find_live_root, recent_table};
+use xai_grok_traces::live;
 use xai_grok_traces::hook::{MAX_STDIN_BYTES, extract, ingest};
 use xai_grok_traces::remote::{event_to_json, session_to_json};
 use xai_grok_traces::{EventFilter, SessionFilter, TraceIndex, default_db_path, user_roots};
@@ -35,7 +35,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]");
+            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--recent N] | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]");
             ExitCode::from(2)
         }
     }
@@ -185,15 +185,20 @@ fn list(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
 
 /// One line: `{"live_schema":N,"rows":[...]}`. Exit 2 without `--json`, 1 on error (nothing on stdout).
 fn live_cmd(args: &[String]) -> ExitCode {
-    if args != ["--json"] {
-        eprintln!("usage: grok-traces live --json");
+    let recent = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["--json"] => Some(0),
+        ["--json", "--recent", n] | ["--recent", n, "--json"] => n.parse().ok(),
+        _ => None,
+    };
+    let Some(recent) = recent else {
+        eprintln!("usage: grok-traces live --json [--recent N]");
         return ExitCode::from(2);
-    }
+    };
     let run = || -> Result<String, Box<dyn std::error::Error>> {
         let idx = TraceIndex::open(&default_db_path())?;
         let now = chrono::Utc::now().timestamp_millis();
-        let rows = fold_all(&idx, now, |pid, start| start.map_or_else(|| live::alive_pid(pid), |s| live::alive(pid, s)))?;
-        Ok(serde_json::to_string(&LiveEnvelope { live_schema: LIVE_SCHEMA, rows })?)
+        let env = live::envelope(&idx, now, recent, |pid, start| start.map_or_else(|| live::alive_pid(pid), |s| live::alive(pid, s)))?;
+        Ok(serde_json::to_string(&env)?)
     };
     match run() {
         Ok(line) => {
@@ -228,7 +233,7 @@ fn events(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
     Ok(true)
 }
 
-/// `tail -f` for live sessions: waits for an agent when none is live, follows it until it ends, then waits for the next. `--once` exits on the first end (and does not wait).
+/// `tail -f` for live sessions: waits for an agent when none is live (listing the recent ended ones), follows it until it ends, then waits for the next. An explicit id is followed live or ended, and stays attached across its end and resume. `--once` exits on the first end (and does not wait).
 fn follow(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
     let mut id = None;
     let mut children = true;
@@ -264,10 +269,21 @@ fn follow(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
         } else {
             let mut said = false;
             loop {
-                if let Some(s) = find_live_root(&idx, id)? {
+                // An explicit id attaches whatever its state: an ended session prints its tail and `■ ended`.
+                if let Some(s) = match id {
+                    Some(id) => idx.session(id)?,
+                    None => find_live_root(&idx, None)?,
+                } {
                     break s;
                 }
                 if !std::mem::replace(&mut said, true) {
+                    if id.is_none() {
+                        let now = chrono::Utc::now().timestamp_millis();
+                        let recent = live::recent_ended(&idx, &[], 10, now)?;
+                        if !recent.is_empty() {
+                            eprintln!("recent sessions (grok-traces follow <id>):\n{}", recent_table(&recent, now));
+                        }
+                    }
                     eprintln!("… waiting for {}", id.map_or("an agent".to_string(), |i| format!("session {i}")));
                 }
                 std::thread::sleep(Duration::from_millis(500));
@@ -297,7 +313,8 @@ fn follow(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
                 }
                 Err(_) => {}
             }
-            if follower.root_ended() {
+            // An explicit id stays attached after its end and picks up where it resumes.
+            if follower.root_ended() && (once || id.is_none()) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(500));

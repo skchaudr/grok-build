@@ -560,3 +560,50 @@ fn seq_11_and_39_ended_sessions_are_not_in_live_sessions() {
     assert!(e.idx.live_sessions().unwrap().is_empty());
     assert!(all(&e, 2.0).is_empty());
 }
+
+/// A claude transcript with a tool call (not a ping) whose last event is at `2026-10-01T00:00:<sec>Z`.
+fn worked(sec: &str, title: &str) -> String {
+    format!(
+        "{{\"type\":\"user\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"cwd\":\"/w/claude\",\"message\":{{\"role\":\"user\",\"content\":\"{title}\"}}}}\n\
+         {{\"type\":\"assistant\",\"timestamp\":\"2026-10-01T00:00:{sec}Z\",\"message\":{{\"role\":\"assistant\",\"model\":\"claude-sonnet-5-5\",\"content\":[{{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{{\"command\":\"ls\"}}}}]}}}}\n"
+    )
+}
+
+#[test]
+fn live_recent_appends_the_newest_ended_roots_after_the_live_rows() {
+    use xai_grok_traces::live::{envelope, recent_ended};
+    let mut e = env();
+    for (n, sec, title) in [("live", "50", "still going"), ("old", "10", "older job"), ("new", "30", "newer job")] {
+        write_old(&e.home.join(format!(".claude/projects/-w-claude/{n}.jsonl")), &worked(sec, title));
+    }
+    e.scan();
+    let rows = e.idx.list_sessions(&SessionFilter { source: Some("claude".into()), ..Default::default() }).unwrap();
+    let id_of = |name: &str| rows.iter().find(|r| r.file_path.ends_with(format!("{name}.jsonl"))).unwrap().id.clone();
+    let (live, old, new) = (id_of("live"), id_of("old"), id_of("new"));
+    ck(&mut e, &live, "UserPromptSubmit", 0.0, |_| {});
+    let now = at(10.0);
+
+    // 0 = today's output: no ended rows, and no `ended_at` key on any row.
+    let env0 = envelope(&e.idx, now, 0, |_, _| true).unwrap();
+    assert_eq!(env0.rows.iter().map(|r| r.session_id.as_str()).collect::<Vec<_>>(), [live.as_str()]);
+    assert!(!serde_json::to_string(&env0).unwrap().contains("ended_at"));
+
+    let env2 = envelope(&e.idx, now, 2, |_, _| true).unwrap();
+    assert_eq!(env2.live_schema, 1);
+    let got: Vec<(&str, LiveState)> = env2.rows.iter().map(|r| (r.session_id.as_str(), r.state)).collect();
+    assert_eq!(got, [(live.as_str(), LiveState::Working), (new.as_str(), LiveState::Ended), (old.as_str(), LiveState::Ended)], "live first, then newest ended first");
+    let ended = &env2.rows[1];
+    assert!(env2.rows[0].ended_at.is_none());
+    assert_eq!((ended.title.as_str(), ended.model.as_deref(), ended.source.as_str()), ("newer job", Some("claude-sonnet-5-5"), "claude"));
+    let end_ms = ended.ended_at.expect("ended_at");
+    assert_eq!(ended.age_ms, now - end_ms);
+    assert!(end_ms < env2.rows[2].ended_at.unwrap() + 60_000 && end_ms > env2.rows[2].ended_at.unwrap());
+    assert_eq!(render(ended, 0).text, "ended");
+    let line: serde_json::Value = serde_json::from_str(&serde_json::to_string(&env2).unwrap()).unwrap();
+    assert_eq!(line["rows"][1]["state"], "ended");
+    assert!(line["rows"][1]["ended_at"].is_i64());
+
+    // N caps the ended rows; a live row is never listed twice.
+    assert_eq!(recent_ended(&e.idx, &env0.rows, 1, now).unwrap().len(), 1);
+    assert_eq!(recent_ended(&e.idx, &env0.rows, 9, now).unwrap().len(), 2);
+}

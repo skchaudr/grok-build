@@ -472,6 +472,8 @@ pub enum LiveState {
     Prompt,
     #[default]
     Working,
+    /// Only in `live --json --recent N`: a root session that has ended; `ended_at` is set.
+    Ended,
 }
 
 /// One row of the live screen: state and numbers, no glyphs and no durations in `text`.
@@ -526,6 +528,9 @@ pub struct LiveRow {
     /// First event time, ms.
     #[serde(default)]
     pub started_at: Option<i64>,
+    /// When an `Ended` row ended, ms; absent on live rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<i64>,
 }
 
 /// What `grok-traces live --json` prints, one line. `live_schema` must equal [`LIVE_SCHEMA`] to be read.
@@ -576,6 +581,7 @@ pub fn render(row: &LiveRow, extra_ms: i64) -> Rendered {
         LiveState::Prompt => ("○", join(&["your turn".into(), bg_label(row)])),
         LiveState::Working if quiet >= QUIET_MS => ("◌", join(&[bg_label(row), "quiet".into(), row.text.clone()])),
         LiveState::Working => ("●", join(&[bg_label(row), row.text.clone()])),
+        LiveState::Ended => ("■", "ended".into()),
     };
     let mut marks = Vec::new();
     if row.failed {
@@ -949,6 +955,51 @@ pub fn fold_all(index: &TraceIndex, now_ms: i64, alive: impl Fn(i64, Option<i64>
         groups.push(group);
     }
     Ok(arrange(groups))
+}
+
+/// The `n` most recently ended root sessions not already in `live`, newest first, as `Ended` rows.
+/// Ended = not `Active` (so a session of a source the live fold does not cover is not shown as ended while running); pings are hidden.
+pub fn recent_ended(index: &TraceIndex, live: &[LiveRow], n: usize, now_ms: i64) -> Result<Vec<LiveRow>> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let filter = crate::SessionFilter { limit: n + live.len(), roots_only: true, hide_trivial: true, ..Default::default() };
+    Ok(index
+        .list_sessions(&filter)?
+        .into_iter()
+        .filter(|s| s.status != Status::Active && !live.iter().any(|l| l.session_id == s.id))
+        .take(n)
+        .map(|s| {
+            let ended = s.updated_at.or(s.last_event_at).or(s.mtime_ms);
+            LiveRow {
+                age_ms: ended.map_or(0, |t| (now_ms - t).max(0)),
+                quiet_ms: ended.map_or(0, |t| (now_ms - t).max(0)),
+                ended_at: ended,
+                state: LiveState::Ended,
+                text: s.now.clone().unwrap_or_default(),
+                failed: s.failed,
+                session_id: s.id,
+                source: s.source,
+                title: s.title,
+                label: s.label,
+                native_id: s.native_id,
+                context_tokens: s.context_tokens,
+                context_window: s.context_window,
+                via: s.via,
+                model: s.model,
+                started_at: s.started_at,
+                ..Default::default()
+            }
+        })
+        .collect())
+}
+
+/// What `live --json [--recent N]` prints: live rows, then up to `recent` ended ones.
+pub fn envelope(index: &TraceIndex, now_ms: i64, recent: usize, alive: impl Fn(i64, Option<i64>) -> bool) -> Result<LiveEnvelope> {
+    let mut rows = fold_all(index, now_ms, alive)?;
+    let ended = recent_ended(index, &rows, recent, now_ms)?;
+    rows.extend(ended);
+    Ok(LiveEnvelope { live_schema: LIVE_SCHEMA, rows })
 }
 
 #[cfg(test)]
