@@ -145,6 +145,12 @@ See ~/.grok/README.md for more information.
     /// Full-screen live view of running agents (Claude Code, Pi, Cursor; local and ~/.grok/traces/hosts).
     /// `grok live` is a subcommand, so it is no longer read as a prompt.
     Live,
+    /// Open the traces modal full screen, with no agent session (same view as `/traces`).
+    /// With a session id or prefix, opens that session's trajectory directly.
+    Traces {
+        /// Session id or id prefix.
+        session: Option<String>,
+    },
 }
 /// Arguments for the `wrap` subcommand: the command to run, then its args.
 #[derive(Debug, clap::Args, Clone)]
@@ -1124,6 +1130,13 @@ mod tests {
     fn live_parses_as_a_subcommand_not_a_prompt() {
         let args = PagerArgs::try_parse_from(["grok", "live"]).expect("live parses");
         assert!(matches!(args.command, Some(Command::Live)));
+    }
+    #[test]
+    fn traces_parses_with_and_without_a_session() {
+        let bare = PagerArgs::try_parse_from(["grok", "traces"]).expect("traces parses");
+        assert!(matches!(bare.command, Some(Command::Traces { session: None })));
+        let with_id = PagerArgs::try_parse_from(["grok", "traces", "abc123"]).expect("traces <id> parses");
+        assert!(matches!(with_id.command, Some(Command::Traces { session: Some(ref s) }) if s == "abc123"));
     }
     #[test]
     fn version_flags_parse_as_early_intent_without_exiting() {

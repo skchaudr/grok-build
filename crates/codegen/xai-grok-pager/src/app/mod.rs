@@ -40,6 +40,7 @@ mod connect_timeout;
 mod csi_filter;
 mod dashboard_session_picker;
 mod dispatch;
+pub use dispatch::standalone_traces;
 pub mod roster;
 pub mod session_startup;
 pub(crate) mod session_title_resolve;
@@ -941,6 +942,9 @@ pub async fn run(
         {
             session_title = Some(title);
         }
+    }
+    if standalone_traces::is_standalone() {
+        session_title = Some(standalone_traces::TITLE.to_string());
     }
     let session_cwd = match &materialized {
         session_startup::MaterializedStartup::Resume { original_cwd, .. }

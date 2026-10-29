@@ -23,6 +23,15 @@ The modal has no live follow screen yet. At 21:06 Sab said it must get the same 
 - #32 expanded tool rows show the command as code and the result as output; inline cap `INLINE_MAX_LINES` = 40.
 - #33 header shows the session model and drops ctx when absent; token column labelled `⇅`; `T` cycles the tool filter backward; ledger name column at least 24 cols.
 
+## Standalone entry
+
+- `grok-fork traces` opens the modal full screen at startup; `grok-fork traces <session-id-or-prefix>` opens that session's trajectory (code: `app/dispatch/standalone_traces.rs`, `views/traces_modal/standalone.rs`).
+- Esc or `q` at the ledger's top level exits the process (check in `app/modals.rs`). Everything inside the modal is unchanged.
+- Not started: no `session/new`, no login or folder-trust or consent prompt, no leader, no auto-update. The in-process agent thread still starts and runs `initialize`/auth only; no session, no model call. Terminal title is `traces`.
+- Requirement, Sab's words: 12:56 "it should be accessible without having to go through grok's agent TUI each time"; 00:16 "THE PATHWAY WAS THE ISSUE NOT THE PRODUCT".
+- Implementing agent's choices, not Sab's: `q` as a second exit key; keeping the embedded agent thread (skipping it is entangled with `AcpConnection` in `event_loop::run`); a process-wide static for the mode; an unknown `<id>` shows a status line in the ledger.
+- Test: `pty_e2e/traces_standalone_entry.rs` (family `pty_e2e_config_ui`). It asserts the fixture row and the `Traces` title, not the marker `traces-ledger-v1`, which the modal never renders (it is only in the `/traces` slash description).
+
 ## Basic workflow
 
 ```
