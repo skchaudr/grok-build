@@ -136,3 +136,33 @@ fn follow_backlog_zero_starts_after_the_last_row() {
     let (mut f, _, _) = setup(&tmp, true, 0);
     assert_eq!(kinds(&f.tick(0).unwrap()), ["model"]);
 }
+
+#[test]
+fn follow_waits_for_a_live_session_then_attaches_and_sees_the_root_end() {
+    use xai_grok_traces::follow::find_live_root;
+    let tmp = tempfile::tempdir().unwrap();
+    let projects = tmp.path().join("home/.claude/projects");
+    let root = Root { id: "claude-projects".into(), source: "claude".into(), path: projects.clone(), format: Format::Jsonl, file_name: None };
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
+
+    // Nothing live yet: no root, by default or by id.
+    idx.scan(std::slice::from_ref(&root)).unwrap();
+    assert!(find_live_root(&idx, None).unwrap().is_none());
+    assert!(find_live_root(&idx, Some("p1")).unwrap().is_none());
+
+    // A session appears and becomes the one to attach to.
+    let parent = projects.join("-w/p1.jsonl");
+    append(&parent, T1);
+    idx.scan(std::slice::from_ref(&root)).unwrap();
+    let live = find_live_root(&idx, None).unwrap().expect("live root");
+    assert_eq!(find_live_root(&idx, Some(&live.id)).unwrap().map(|s| s.id), Some(live.id.clone()));
+
+    // Its end flips `root_ended`, which is what sends the CLI back to waiting.
+    let mut f = Follower::new(idx, vec![root], live, true, None).with_json(true);
+    assert!(f.tick(0).is_ok() && !f.root_ended());
+    append(&parent, "{\"type\":\"session_end\",\"timestamp\":\"2026-10-01T00:00:13Z\"}\n");
+    // The status is read before the file is re-indexed, so the end shows one tick later.
+    f.tick(500).unwrap();
+    assert_eq!(kinds(&f.tick(1_000).unwrap()), ["agent_end"]);
+    assert!(f.root_ended());
+}

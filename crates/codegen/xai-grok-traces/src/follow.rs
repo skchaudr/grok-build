@@ -203,7 +203,7 @@ fn item(kind: &str, agent: &str, depth: usize, line: Option<i64>, ts: Option<i64
     json!({"v": ITEM_V, "kind": kind, "agent": agent, "depth": depth, "line": line, "ts": ts})
 }
 
-/// `agent_start`, `agent_end` or `agent_resume` (subagents only; the root's end and resume come from `live`).
+/// `agent_start`, `agent_end` or `agent_resume` (the root gets `agent_end` only; its start and resume come from `live`).
 pub fn agent_item(kind: &str, agent: &str, depth: usize, ts: Option<i64>, model: Option<&str>, label: Option<&str>) -> Value {
     let mut v = item(kind, agent, depth, None, ts);
     if kind == "agent_start" {
@@ -277,6 +277,14 @@ struct Followed {
     calls: HashMap<String, i64>,
 }
 
+/// The session to attach to: `id` if given, else the newest active root; only if it is live now.
+pub fn find_live_root(idx: &TraceIndex, id: Option<&str>) -> Result<Option<SessionRow>> {
+    Ok(match id {
+        Some(id) => idx.session(id)?.filter(|s| s.status == Status::Active),
+        None => idx.list_sessions(&crate::SessionFilter { limit: 1, active_only: true, roots_only: true, ..Default::default() })?.pop(),
+    })
+}
+
 pub struct Follower {
     idx: TraceIndex,
     roots: Vec<Root>,
@@ -306,6 +314,11 @@ impl Follower {
     pub fn with_backlog(mut self, n: usize) -> Self {
         self.backlog = n;
         self
+    }
+
+    /// The followed root session has ended (its end line or item was emitted).
+    pub fn root_ended(&self) -> bool {
+        self.sessions.first().is_some_and(|f| f.ended)
     }
 
     /// What is printed before a subagent's first row: its start line, or its `agent_start` item.
@@ -443,14 +456,13 @@ impl Follower {
             }
             let live = row.status == Status::Active;
             let f = &mut self.sessions[at];
-            let sub = depth > 0;
             if live {
                 f.ended = false;
             } else if !f.ended {
                 f.ended = true;
                 if !self.json {
                     out.push(ended_line(depth));
-                } else if sub {
+                } else {
                     out.push(agent_item("agent_end", &id, depth, Some(now_ms), None, None).to_string());
                 }
             }
