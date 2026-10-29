@@ -1,10 +1,12 @@
+fake-lookout / fake-follo are kept, unchanged, solely as a reminder of how badly Claude misinterpreted a really basic request for just invoking /traces directly. The grok-build /traces modal is the traces product. Do not invest here.
+
 # grok-traces CLI
 
 Written 2026-10-28 by Sonnet 5.5 from `git log`, `gh pr view` and the code. Decisions are attributed in `## Who decided what`; a lead-agent decision is not a requirement from Sab.
 
 ## What it is
 
-The `grok-traces` binary (`crates/codegen/xai-grok-traces/src/bin/grok-traces.rs`). Subcommands: `hook <source>`, `scan`, `list`, `events <id> --json`, `raw`, `live --json [--watch]`, `follow`, `doctor`, `version`. It is the data source for `lookout` (TOOL-lookout in trace-deck) and for `/traces`. Installed `4eb85116` at `~/.grok/bin/grok-traces` on sab-mini and sab-air.
+The `grok-traces` binary (`crates/codegen/xai-grok-traces/src/bin/grok-traces.rs`). Subcommands: `hook <source>`, `scan`, `list`, `events <id> --json`, `raw`, `live --json [--watch]`, `follow`, `doctor`, `version`. It is the data source for `fake-lookout` (TOOL-lookout in trace-deck) and for `/traces`. Installed `4eb85116` at `~/.grok/bin/grok-traces` on sab-mini and sab-air.
 
 ## How it works
 
@@ -51,7 +53,7 @@ Hooks are installed with `crates/codegen/xai-grok-traces/hooks/install.sh`. `doc
 **Sab said**
 - 05:00 "review how far along we got in grok build's traces feature and then the other repo trace-deck ... spin up some Haiku and Sonnet agents ... knock out the rest"
 - 12:56 "do one thing really well which is following along a live agent (not past session, *live sessions*) and keeping up with their tool calls, and decision making"
-- 21:50 `follo` must not exit when no agent is live: "that is so not what I would design"
+- 21:50 `fake-follo` must not exit when no agent is live: "that is so not what I would design"
 - 21:52 "every fast-paced proper observability tool does the shortest path between agent's hook to it being logged"
 
 **Lead agent (Claude Fable 5.1) decided, not Sab**
@@ -65,5 +67,5 @@ Hooks are installed with `crates/codegen/xai-grok-traces/hooks/install.sh`. `doc
 ## Open/unverified
 
 - trace-deck's `follow <id> --json` child: an explicit `<id>` now stays attached across its end (changed from #36, which hopped to the next agent). Not checked against trace-deck's respawn logic.
-- The 500 ms tick was never measured against the hook path. lookout's backend hop was measured at median 328 ms, p95 551 ms (CONFORMANCE.md S7, n=28).
+- The 500 ms tick was never measured against the hook path. fake-lookout's backend hop was measured at median 328 ms, p95 551 ms (CONFORMANCE.md S7, n=28).
 - Wake latency was measured once locally (fixture session, one Waker); not measured through a real harness hook, and not on sab-air.

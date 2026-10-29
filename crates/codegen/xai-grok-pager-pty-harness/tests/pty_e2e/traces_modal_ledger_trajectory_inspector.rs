@@ -139,7 +139,10 @@ async fn traces_modal_ledger_trajectory_inspector() {
     h.wait_for_text_absent("ptycodextask", Duration::from_secs(5)).expect("Claude tab hides codex");
     assert!(h.contains_text("ptyclaudetask"), "{}", h.screen_contents());
 
-    h.inject_keys(keys::ENTER).expect("open trajectory");
+    // The hook above made this row live, so Enter opens the follow screen; `o` goes on to the trajectory.
+    h.inject_keys(keys::ENTER).expect("open follow");
+    h.wait_for_text("j/k scroll", Duration::from_secs(5)).expect("a live row opens the follow screen");
+    h.inject_keys(b"o").expect("open trajectory");
     h.wait_for_text("events ·", Duration::from_secs(5)).expect("trajectory header renders");
     assert!(h.contains_text("Bash"), "tool row\n{}", h.screen_contents());
     assert!(h.contains_text("✗"), "the failed result is folded into its Bash call\n{}", h.screen_contents());

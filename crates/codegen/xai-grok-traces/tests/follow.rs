@@ -111,6 +111,7 @@ fn follow_json_streams_items_and_subagent_lifecycle() {
     assert_eq!((start["depth"].as_i64(), start["model"].as_str(), start["label"].as_str()), (Some(1), Some("claude-haiku-4-5"), Some("Check the lexer")));
     let first: serde_json::Value = serde_json::from_str(&two[0]).unwrap();
     assert_eq!(first["call_id"].as_str(), Some("t1"));
+    assert_eq!(first["ms"].as_i64(), Some(2000), "result items carry the call's duration");
 
     // A terminal last event ends it; the sidecar's `finished` flag cannot be undone, so resume rides on new rows.
     append(&kid, T3);
@@ -121,6 +122,17 @@ fn follow_json_streams_items_and_subagent_lifecycle() {
     // The subagent is dispatched again: it resumes (never an item for the root).
     append(&kid, CHILD);
     assert_eq!(kinds(&f.tick(now + 1_500).unwrap()), ["agent_resume", "user", "call"]);
+}
+
+#[test]
+fn tick_items_returns_the_json_items_as_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut f, _, _) = setup(&tmp, true, 10);
+    let items = f.tick_items(0).unwrap();
+    let kinds: Vec<_> = items.iter().map(|v| v["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["model", "user", "text", "call"]);
+    let call = &items[3];
+    assert_eq!((call["tool"].as_str(), call["what"].as_str(), call["call_id"].as_str()), (Some("Bash"), Some("run the parser tests"), Some("t1")));
 }
 
 #[test]

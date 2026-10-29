@@ -23,11 +23,14 @@ use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
 use crate::views::modal_window::{self, ModalContentArea, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut};
 use crate::views::traces_body;
+use crate::views::traces_follow::Follow;
 use crate::views::traces_fold::{FoldNode, FoldState, FoldTree};
 use crate::views::traces_outline::{self, OutlineItem, OutlineKey, PROMPT_LEAD};
 use crate::views::traces_payload::{self, Payload, Shape};
 
 pub(super) use super::traces_body::{pretty, INPUT_KEYS, TEXT_KEYS};
+
+mod standalone;
 
 pub const TITLE: &str = "Traces";
 const PAGE: usize = 500;
@@ -70,6 +73,8 @@ pub enum Mode {
     Inspector,
     /// `grok live` / `L`: the running agents, one row each.
     Live,
+    /// `f` / Enter on a live row: one session's tail, ticked in process by a `Follower`.
+    Follow,
 }
 
 /// Which line editor has the keyboard, if any.
@@ -227,6 +232,11 @@ pub struct TracesModalState {
     raw_scroll: usize,
     /// What Enter shows: the payload (command and result, or text); `m` flips to `raw`.
     payload: Payload,
+
+    /// The follow screen's state; `Some` in `Mode::Follow` and in the payload opened from it.
+    follow_view: Option<Follow>,
+    /// The payload view was opened from the follow screen: Esc goes back there, not to a trajectory.
+    follow_return: bool,
 
     /// Live screen: local rows as last folded, and the titles of parents the fold did not return.
     live_rows: Vec<LiveRow>,
@@ -514,6 +524,8 @@ impl TracesModalState {
             raw: None,
             raw_scroll: 0,
             payload: Payload::default(),
+            follow_view: None,
+            follow_return: false,
             live_rows: Vec::new(),
             live_titles: HashMap::new(),
             remote_live: HashMap::new(),
@@ -593,6 +605,9 @@ impl TracesModalState {
         }
         if self.mode == Mode::Live {
             redraw |= self.poll_live_screen(now_ms);
+        }
+        if let Some(f) = &mut self.follow_view {
+            redraw |= f.poll(now_ms);
         }
         let Some(index) = &self.index else { return redraw };
         let mark = index.receipts_watermark().unwrap_or(self.watermark);
@@ -946,6 +961,56 @@ impl TracesModalState {
             (Some(cmd), crate::clipboard::CopyDelivery::Clipboard { .. }) => self.set_status(format!("copied: {cmd}")),
             _ => self.set_status(delivery.toast_message().into_owned()),
         }
+    }
+
+    /// Enter on a live local row follows it instead of opening its trajectory.
+    fn selected_live(&self) -> bool {
+        self.index.is_some() && self.selected_session().is_some_and(|s| s.host.is_none() && s.status == Status::Active)
+    }
+
+    /// `f` / Enter on a live row: tail the selected session in process.
+    fn open_follow(&mut self) -> bool {
+        let Some(row) = self.selected_session().cloned() else { return false };
+        if row.host.is_some() {
+            self.set_status("follow runs on this machine only; open the row instead");
+            return true;
+        }
+        let Some(index) = &self.index else { return false };
+        self.follow_view = Some(Follow::open(index.db_path().to_path_buf(), row));
+        self.follow_return = false;
+        self.mode = Mode::Follow;
+        true
+    }
+
+    fn leave_follow(&mut self) {
+        self.follow_view = None;
+        self.follow_return = false;
+        self.mode = Mode::List;
+    }
+
+    /// Enter on the highlighted call: its full payload, back to the follow screen on Esc.
+    fn follow_inspect(&mut self) -> bool {
+        let (Some(index), Some(f)) = (&self.index, &self.follow_view) else { return false };
+        let Some((agent, call)) = f.selected_call() else { return false };
+        let (agent, call) = (agent.to_string(), call.clone());
+        let fetch = |l: i64| index.raw_line(&agent, l).map_err(|e| e.to_string());
+        self.raw = Some(pretty(fetch(call.line)));
+        self.raw_source = fetch(call.line).ok().flatten();
+        let body = compose_body(fetch(call.line), call.result.as_ref().map(|r| (fetch(r.line), !r.ok)));
+        self.payload.open(Some(body), Shape::Call);
+        self.raw_scroll = 0;
+        self.follow_return = true;
+        self.mode = Mode::Inspector;
+        true
+    }
+
+    /// `o` on the follow screen: the session's trajectory.
+    fn follow_trajectory(&mut self) {
+        let Some(row) = self.follow_view.take().map(|f| f.root) else { return };
+        self.follow_return = false;
+        self.trail.clear();
+        self.live_return = false;
+        self.open_session(row);
     }
 
     fn open_selected(&mut self) {
@@ -1733,6 +1798,9 @@ impl TracesModalState {
 
     /// The raw source line for the inspected event, unformatted.
     fn raw_source_line(&self) -> Option<String> {
+        if self.follow_return {
+            return self.raw_source.clone();
+        }
         let line = self.events.get(self.selected_event()?)?.line;
         self.raw_at(line)
     }
@@ -3531,7 +3599,7 @@ impl TracesModalState {
                 let fold_x = list.x + TEXT_COL as u16 + (depth as u16) * MARK_W as u16;
                 column == fold_x && fold_x < list.x.saturating_add(list.width)
             }
-            Mode::Inspector | Mode::Live => false,
+            Mode::Inspector | Mode::Live | Mode::Follow => false,
         }
     }
 
@@ -3539,7 +3607,7 @@ impl TracesModalState {
         match self.mode {
             Mode::List => self.selected = pos,
             Mode::Trajectory => self.goto(pos),
-            Mode::Inspector | Mode::Live => {}
+            Mode::Inspector | Mode::Live | Mode::Follow => {}
         }
     }
 
@@ -3555,7 +3623,7 @@ impl TracesModalState {
                 let gaps = row_gaps(self, &heights, list.height as usize);
                 fit_rows(self.sel_pos(), &mut self.event_scroll, &heights, &gaps, list.height as usize);
             }
-            Mode::Inspector | Mode::Live => {}
+            Mode::Inspector | Mode::Live | Mode::Follow => {}
         }
     }
 
@@ -3574,6 +3642,10 @@ impl TracesModalState {
                 if before == (self.sel_pos(), self.event_scroll) { InputOutcome::Unchanged } else { InputOutcome::Changed }
             }
             Mode::Inspector | Mode::Live => InputOutcome::Unchanged,
+            Mode::Follow => {
+                let moved = self.follow_view.as_mut().is_some_and(|f| f.step(delta));
+                if moved { InputOutcome::Changed } else { InputOutcome::Unchanged }
+            }
         }
     }
 
@@ -3591,7 +3663,7 @@ impl TracesModalState {
         let already = match self.mode {
             Mode::List => hit.index == self.selected,
             Mode::Trajectory => hit.index == self.sel_pos(),
-            Mode::Inspector | Mode::Live => false,
+            Mode::Inspector | Mode::Live | Mode::Follow => false,
         };
         if already {
             return handle_traces_key(self, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -3612,6 +3684,11 @@ pub fn wants_esc(state: &TracesModalState) -> bool {
 pub fn handle_traces_mouse(state: &mut TracesModalState, mouse: &MouseEvent) -> InputOutcome {
     match state.mode {
         Mode::Inspector => InputOutcome::Unchanged,
+        Mode::Follow => match mouse.kind {
+            MouseEventKind::ScrollDown => state.wheel(WHEEL),
+            MouseEventKind::ScrollUp => state.wheel(-WHEEL),
+            _ => InputOutcome::Unchanged,
+        },
         Mode::Live => match mouse.kind {
             MouseEventKind::ScrollDown => {
                 state.live_wheel(true);
@@ -3719,6 +3796,11 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                 }
                 KeyCode::Char('/') => state.typing = Typing::Ledger,
                 KeyCode::Char('L') => state.enter_live(),
+                KeyCode::Char('f') => {
+                    if !state.open_follow() {
+                        return InputOutcome::Unchanged;
+                    }
+                }
                 KeyCode::Char('x') => {
                     state.errors_only = !state.errors_only;
                     state.refresh();
@@ -3784,12 +3866,30 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                 KeyCode::Char('r') => return state.resume(state.selected_session().cloned()),
                 KeyCode::Enter => {
                     if !state.expand_selected_more() {
-                        state.open_selected();
+                        if state.selected_live() {
+                            state.open_follow();
+                        } else {
+                            state.open_selected();
+                        }
                     }
                 }
                 _ => return InputOutcome::Unchanged,
             }
         }
+        Mode::Follow => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => state.leave_follow(),
+            KeyCode::Enter => {
+                if !state.follow_inspect() {
+                    return InputOutcome::Unchanged;
+                }
+            }
+            KeyCode::Char('o') => state.follow_trajectory(),
+            code => {
+                if !state.follow_view.as_mut().is_some_and(|f| f.key(code)) {
+                    return InputOutcome::Unchanged;
+                }
+            }
+        },
         Mode::Live => {
             state.clear_status();
             match key.code {
@@ -3930,7 +4030,7 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                 state.raw_scroll = 0;
             }
             KeyCode::Esc => {
-                state.mode = Mode::Trajectory;
+                state.mode = if state.follow_return { Mode::Follow } else { Mode::Trajectory };
                 state.raw = None;
             }
             KeyCode::Char('j') | KeyCode::Down => state.raw_scroll += 1,
@@ -4084,6 +4184,9 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
             if resume(state.selected_session()) {
                 v.push(plain("r resume"));
             }
+            if state.index.is_some() && state.selected_session().is_some_and(|s| s.host.is_none()) {
+                v.push(plain("f follow"));
+            }
             v.extend([plain("R rescan"), plain("L live"), plain("Esc close")]);
             v
         }
@@ -4113,6 +4216,15 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
             v.push(plain("Esc back"));
             v
         }
+        Mode::Follow => vec![
+            plain("j/k scroll"),
+            plain("G live"),
+            plain("Tab agent"),
+            plain("e next error"),
+            plain("Enter open call"),
+            plain("o trajectory"),
+            plain("Esc back"),
+        ],
         Mode::Live => vec![
             plain("j/k move"),
             plain("Enter open"),
@@ -4165,6 +4277,12 @@ pub fn render_traces_modal(buf: &mut Buffer, full_area: Rect, state: &mut Traces
         Mode::Trajectory => render_trajectory(buf, content, state, &theme),
         Mode::Inspector => render_inspector(buf, content, state, &theme),
         Mode::Live => render_live(buf, content, state, &theme),
+        Mode::Follow => {
+            let now = now_ms();
+            if let Some(f) = state.follow_view.as_mut() {
+                f.render(buf, content, state.index.as_ref(), &theme, now);
+            }
+        }
     }
 }
 
@@ -5005,7 +5123,7 @@ fn index_text(e: &EventRow) -> &str {
 
 /// The text a header's continuation is cut from: `body` with its harness wrappers stripped, when that
 /// leaves text; else `body` as it is.
-fn continuation_source(body: &str) -> String {
+pub(super) fn continuation_source(body: &str) -> String {
     let clean = xai_grok_traces::normalize::clean_text(body);
     if clean.is_empty() { body.to_string() } else { clean }
 }
@@ -5099,7 +5217,7 @@ fn whole_token_at(full: &str, end: usize) -> usize {
 /// preview cut, not text: when the header as-is does not match, it is retried without the `…`, and the
 /// continuation then starts at the whole word the cut landed in. `full` comes back unchanged when nothing
 /// matches, so no text is lost to a mismatch.
-fn continuation(header: &str, full: &str) -> String {
+pub(super) fn continuation(header: &str, full: &str) -> String {
     let header = one_line(header);
     let end = match match_end(&header, full) {
         Some(end) => end,
@@ -5114,7 +5232,34 @@ fn continuation(header: &str, full: &str) -> String {
     full.get(end..).unwrap_or_default().trim_start().to_string()
 }
 
+/// The payload opened from the follow screen: the call under the whole pane, no trajectory behind it.
+fn render_follow_payload(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, theme: &Theme) {
+    let call = state.follow_view.as_ref().and_then(|f| f.selected_call()).map(|(_, c)| c.clone());
+    if state.payload.meta {
+        let Some(raw) = &state.raw else { return };
+        let wrap = state.payload.wrap;
+        let lines: Vec<String> = raw.lines().flat_map(|l| if wrap { traces_payload::hard_wrap(l, area.width as usize) } else { vec![l.to_string()] }).collect();
+        state.raw_scroll = state.raw_scroll.min(lines.len().saturating_sub(area.height as usize));
+        let dim = Style::default().fg(theme.gray);
+        for (i, line) in lines.iter().skip(state.raw_scroll).take(area.height as usize).enumerate() {
+            buf.set_span(area.x, area.y + i as u16, &Span::styled(truncate_str(line, area.width as usize).as_str(), dim), area.width);
+        }
+    } else {
+        let head = traces_payload::Head {
+            title: call.as_ref().map_or_else(String::new, |c| c.tool.clone()),
+            running: state.follow_view.as_ref().is_some_and(|f| f.is_live()),
+            duration: fmt_duration(call.as_ref().and_then(|c| c.result.as_ref()).and_then(|r| r.ms)),
+            time: fmt_time(call.as_ref().map(|c| c.started_ms), true),
+        };
+        traces_payload::render(buf, area, &state.payload, &head, &mut state.raw_scroll, theme);
+    }
+    render_status(buf, area, state, theme);
+}
+
 fn render_inspector(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, theme: &Theme) {
+    if state.follow_return {
+        return render_follow_payload(buf, area, state, theme);
+    }
     if state.peek.is_none() {
         render_trajectory(buf, area, state, theme);
     }
@@ -5800,7 +5945,7 @@ mod tests {
     #[test]
     fn noise_is_hidden_until_n() {
         let (_tmp, mut state) = claude_fixture();
-        press(&mut state, KeyCode::Enter);
+        state.open_selected();
         assert_eq!(state.mode, Mode::Trajectory);
         assert!(state.events.iter().all(|e| !e.noise), "no noise rows by default");
         let quiet = state.events.len();
@@ -5816,7 +5961,7 @@ mod tests {
     fn results_fold_into_their_call_and_agent_rows_open_the_child() {
         let (_tmp, mut state) = claude_fixture();
         let parent = state.selected_session().unwrap().id.clone();
-        press(&mut state, KeyCode::Enter);
+        state.open_selected();
         assert!(state.hidden.iter().zip(&state.events).all(|(&h, e)| h || !is_result(e)), "adjacent results are hidden");
         assert!(shown_events(&state).iter().all(|&i| !is_result(&state.events[i])), "and get no row of their own");
         let at = state.events.iter().position(is_dispatch).expect("an Agent row");
@@ -7550,6 +7695,89 @@ mod tests {
         assert!(!hints.contains(&"r retry"));
         state.payload.open(Some(Err("io".into())), Shape::Call);
         assert!(hint_labels(&state, 120).contains(&"r retry"));
+    }
+
+    fn modal_screen(state: &mut TracesModalState, w: u16, h: u16) -> String {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        render_traces_modal(&mut buf, area, state, false);
+        (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Polls until the follow worker has answered its first tick.
+    fn follow_settled(state: &mut TracesModalState) {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !state.follow_view.as_ref().is_some_and(|f| f.visible().len() > 1) && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            state.poll_live();
+        }
+    }
+
+    #[test]
+    fn f_follows_the_selected_session_and_esc_returns_to_the_list() {
+        let (_tmp, mut state) = claude_fixture();
+        assert!(state.selected_session().is_some_and(|s| s.title.contains("index everything")));
+        press(&mut state, KeyCode::Char('f'));
+        assert_eq!(state.mode, Mode::Follow);
+        follow_settled(&mut state);
+        let screen = modal_screen(&mut state, 100, 14);
+        assert!(screen.contains("▶ you  index everything please"), "{screen}");
+        assert!(screen.contains("→ Agent"), "{screen}");
+        assert!(screen.contains("● live"), "{screen}");
+        assert!(screen.contains("j/k scroll") && screen.contains("Tab agent") && screen.contains("e next error"), "hints\n{screen}");
+        // j pauses the tail; G resumes it.
+        press(&mut state, KeyCode::Char('k'));
+        assert!(modal_screen(&mut state, 100, 14).contains("paused"));
+        press(&mut state, KeyCode::Char('G'));
+        assert!(modal_screen(&mut state, 100, 14).contains("live tail"));
+        assert!(wants_esc(&state));
+        press(&mut state, KeyCode::Esc);
+        assert_eq!((state.mode, state.follow_view.is_none()), (Mode::List, true));
+    }
+
+    #[test]
+    fn enter_follows_a_live_row_and_opens_the_trajectory_of_an_ended_one() {
+        let (_tmp, mut state) = claude_fixture();
+        // The fixture's files are fresh, so its row is live.
+        assert!(state.selected_live());
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(state.mode, Mode::Follow);
+        press(&mut state, KeyCode::Esc);
+        state.sessions[0].status = Status::Completed;
+        state.rebuild_ledger();
+        assert!(!state.selected_live());
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(state.mode, Mode::Trajectory, "an ended row still opens its trajectory");
+    }
+
+    #[test]
+    fn enter_on_a_followed_call_opens_its_payload_and_esc_comes_back() {
+        let (_tmp, mut state) = claude_fixture();
+        press(&mut state, KeyCode::Char('f'));
+        follow_settled(&mut state);
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(state.mode, Mode::Follow, "nothing is highlighted while the tail is pinned");
+        // The live subagent's rows follow the parent's; up from the tail (its reply) is its Bash call.
+        press(&mut state, KeyCode::Char('k'));
+        assert!(state.follow_view.as_ref().and_then(|f| f.selected_call()).is_some());
+        let inline = modal_screen(&mut state, 100, 40);
+        assert!(inline.contains("│ ── result ──") && inline.contains("│ ok"), "the highlighted call shows its result inline\n{inline}");
+        press(&mut state, KeyCode::Enter);
+        assert_eq!((state.mode, state.follow_return), (Mode::Inspector, true));
+        let screen = modal_screen(&mut state, 100, 14);
+        assert!(screen.contains("rg index") && screen.contains("── result ──") && screen.contains("ok"), "the call, then its result\n{screen}");
+        assert!(state.raw_source_line().is_some_and(|l| l.contains("tool_use")), "Y copies the raw line");
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.mode, Mode::Follow);
+        press(&mut state, KeyCode::Char('o'));
+        assert_eq!((state.mode, state.follow_view.is_none()), (Mode::Trajectory, true));
+    }
+
+    #[test]
+    fn the_list_hint_offers_f_for_a_local_row_only() {
+        let (_tmp, state) = claude_fixture();
+        assert!(hint_labels(&state, u16::MAX).contains(&"f follow"));
+        assert!(!hint_labels(&list_state("", "", vec![]), u16::MAX).contains(&"f follow"), "nothing selected");
     }
 }
 
