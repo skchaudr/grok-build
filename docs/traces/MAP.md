@@ -209,4 +209,4 @@ Code: `crates/codegen/xai-grok-traces/src/live.rs` (`norm`, `strict_ids`, `fold_
 
 - `TOOL-grok-traces-cli.md` the `grok-traces` binary.
 - `TOOL-traces-modal.md` the `/traces` modal.
-- `TOOL-lookout.md` and `TOOL-aliases.md` in trace-deck (`~/repos/trace-deck`): `lookout` and the `lookt`/`follo` functions.
+- `TOOL-lookout.md` and `TOOL-aliases.md` in trace-deck (`~/repos/trace-deck`): `fake-lookout` and the `fake-lookt`/`fake-follo` functions.
