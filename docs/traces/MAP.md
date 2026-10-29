@@ -203,3 +203,10 @@ Code: `crates/codegen/xai-grok-traces/src/live.rs` (`norm`, `strict_ids`, `fold_
 - `fmt_age` never prints `now`, by lead decision: the spec mock and rows 40/43 require seconds.
 - Cursor duplicate Pre: `preToolUse` and `beforeReadFile`/`beforeShellExecution` share a `tool_use_id` (and `beforeReadFile` has no `after*`). A `Pre` whose non-NULL id is already open is not pushed again (the first keeps its `since`); a `Post` with an id closes every open `Pre` with that id (close-older also closes the older ones). Strict and close-older both.
 - `fold_all`'s `alive` takes `(pid, Option<start>)`: `(pid, None)` is the pid-only `alive_pid` (signal 0 or EPERM, not a zombie).
+- Decision-model judgments (Jev/Laya) are specified in trace-deck DECISION-MODELS.md; the traces crate only needs to emit full tool args on follow call items.
+
+## Tool pages
+
+- `TOOL-grok-traces-cli.md` the `grok-traces` binary.
+- `TOOL-traces-modal.md` the `/traces` modal.
+- `TOOL-lookout.md` and `TOOL-aliases.md` in trace-deck (`~/repos/trace-deck`): `lookout` and the `lookt`/`follo` functions.
