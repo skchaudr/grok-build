@@ -18,7 +18,7 @@ Done means: a 40-agent fan-out shows 40 parented, model-labelled rows as each ag
 | Wake | `xai-grok-traces/src/wake.rs`: hook → `$GROK_HOME/traces/wake.sock` | Viewer wakes, then re-reads files |
 | Live follow | `xai-grok-traces/src/follow.rs`: subagents found by `probe_subagents` (folder guessing, l.377) plus `idx.children` | Missed every Workflow agent (`subagents/workflows/wf_<id>/`) |
 | Viewers | `grok-fork traces` (pager `views/traces_modal.rs`, `traces_follow.rs`); trace-deck (`/Volumes/Mini-SSD/offload/repos/trace-deck`, `~/.local/bin/trace-deck`) | Never saw one subagent during today's swarms |
-| Control | Herdr, Rex | UNVERIFIED: what each exposes to launch, stop, send input to a pane |
+| Control | Herdr (`~/.local/bin/herdr`), Rex (`~/.local/bin/rex`); `trace_sessions.via` records the launching multiplexer | No session row stores its pane/block id yet |
 
 ## What Claude's hooks carry (25,970 payloads in `~/.grok/traces/capture/claude/`)
 
@@ -31,8 +31,21 @@ Done means: a 40-agent fan-out shows 40 parented, model-labelled rows as each ag
 
 No payload carries the model. Options: read the child transcript (path known only at SubagentStop, or as `<parent stem>/subagents/**/agent-<agent_id>.jsonl`), or Claude Code telemetry (UNVERIFIED).
 
+## Control surface (from `herdr agent|pane --help`, `rex --help`)
+
+| Action | Herdr | Rex |
+|---|---|---|
+| Launch | `herdr pane run`, `herdr agent start` | `rex run`, `rex new` |
+| Steer | `herdr agent prompt`, `herdr pane send-text` | `rex send` |
+| Stop (interrupt) | `herdr agent send-keys` | `rex send-key` |
+| Kill | `herdr pane close` | `rex kill`, `rex block` |
+| Read screen | `herdr agent read` | `rex capture` |
+| Pane ↔ agent session | `herdr pane report-agent-session` | `rex events` |
+| Wait for state | `herdr agent wait` | `rex wait` |
+
+Subagents run inside their parent's harness process, not in a pane of their own: stop/steer reach them through the parent's pane.
+
 ## Open
 
-- Herdr / Rex control surface (next to ground).
 - Other harnesses' hook payloads (Codex, Pi, Cursor, Grok): captures exist under `~/.grok/traces/capture/<source>/`, not yet read.
 - trace-deck's data path: which `grok-traces` commands it calls (UNVERIFIED).
