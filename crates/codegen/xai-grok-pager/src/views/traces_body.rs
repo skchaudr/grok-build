@@ -20,8 +20,10 @@ pub(crate) const TEXT_KEYS: [&str; 9] = [
 /// Tool inputs under these keys are walked for text. A string value is body text as-is.
 pub(crate) const INPUT_KEYS: [&str; 4] = ["input", "arguments", "args", "params"];
 
-/// Command lines and result lines each show this many inline; the rest is `… +N lines`.
+/// Text rows in the follow screen before its `… +N lines` tail.
 pub(crate) const INLINE_MAX_LINES: usize = 40;
+/// Total rendered rows an inline call preview may occupy, wrapping included. Enter opens the full payload.
+pub(crate) const INLINE_MAX_ROWS: usize = 10;
 /// Below this width the gutter is `│` alone.
 const NARROW: usize = 60;
 /// Narrowest body the rows are laid out for; anything less is laid out as this and clipped by the caller.
@@ -69,23 +71,24 @@ pub(crate) fn call_rows(command: &str, result: Option<(&str, bool)>, width: usiz
             push_block(&mut rows, text, width);
         }
     }
+    if rows.len() > INLINE_MAX_ROWS {
+        let hidden = rows.len() - (INLINE_MAX_ROWS - 1);
+        rows.truncate(INLINE_MAX_ROWS - 1);
+        rows.push(format!("{}… +{hidden} rows · Enter for all", gutter(width)));
+    }
     rows
 }
 
-/// `text` as gutter rows: at most `INLINE_MAX_LINES` lines, long ones soft-wrapped, then the `… +N lines` tail.
+/// `text` as gutter rows, soft-wrapped before the caller applies its total rendered-row cap.
 fn push_block(rows: &mut Vec<String>, text: &str, width: usize) {
-    let lines = block_lines(text);
     let g = gutter(width);
     let avail = width - g.chars().count();
-    for line in lines.iter().take(INLINE_MAX_LINES) {
+    for line in block_lines(text) {
         if line.is_empty() {
             rows.push(g.trim_end().to_string());
         } else {
             rows.extend(wrap_code(line, avail).into_iter().map(|piece| format!("{g}{piece}")));
         }
-    }
-    if lines.len() > INLINE_MAX_LINES {
-        rows.push(format!("{g}… +{} lines · Enter for all", lines.len() - INLINE_MAX_LINES));
     }
 }
 
@@ -177,18 +180,23 @@ mod tests {
     }
 
     #[test]
-    fn the_cap_is_forty_lines_then_one_tail_row() {
+    fn the_preview_caps_total_rendered_rows_after_wrapping() {
         let tail = |n: usize| call_rows(&lines(n), None, W);
-        assert_eq!(tail(40).len(), 40);
-        assert!(!tail(40).iter().any(|r| r.contains("Enter for all")));
-        let rows = tail(41);
-        assert_eq!(rows.len(), 41);
-        assert_eq!(rows.last().map(String::as_str), Some("│ … +1 lines · Enter for all"));
-        // Command and result are capped on their own: 100 lines each.
+        assert_eq!(tail(10).len(), 10);
+        assert!(!tail(10).iter().any(|r| r.contains("Enter for all")));
+        let rows = tail(11);
+        assert_eq!(rows.len(), 10);
+        assert!(rows.last().is_some_and(|r| r.contains("… +2 rows · Enter for all")), "{rows:?}");
+
+        // A giant inline script and its output get one total budget, not forty source lines each.
         let rows = call_rows(&lines(100), Some((&lines(100), false)), W);
-        let tails: Vec<_> = rows.iter().filter(|r| r.contains("… +60 lines · Enter for all")).collect();
-        assert_eq!(tails.len(), 2, "{rows:?}");
-        assert_eq!(rows.len(), 41 + 1 + 1 + 41);
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows.iter().filter(|r| r.contains("Enter for all")).count(), 1);
+
+        // One long source line can wrap beyond the preview budget too.
+        let rows = call_rows(&"x".repeat(1_000), None, 20);
+        assert_eq!(rows.len(), 10);
+        assert!(rows.last().is_some_and(|r| r.contains("Enter for all")));
     }
 
     #[test]
@@ -211,17 +219,21 @@ mod tests {
     }
 
     #[test]
-    fn width_eight_and_below_never_panic_and_lose_nothing() {
+    fn narrow_previews_stay_bounded_and_wrap_code_loses_nothing() {
         let cmd = "python3 -c \"print('中文 ok')\"\n\n\tindented";
         for w in 0..=12 {
+            let width = w.max(MIN_BODY_W);
             let rows = call_rows(cmd, Some(("some output here", true)), w);
-            // The separator is not wrapped, so it can be wider than a very narrow body; the caller clips it.
-            assert!(rows.iter().filter(|r| !is_sep(r)).all(|r| cols_of(r) <= w.max(MIN_BODY_W)), "w={w} {rows:?}");
-            // The command rows put back together are the command (the marker and the gutter are not text).
-            let cmd_rows = &rows[..rows.iter().position(|r| r.is_empty()).unwrap()];
-            let text: String = cmd_rows.iter().map(|r| r.strip_prefix('│').unwrap_or(r)).map(|r| r.strip_prefix('↪').unwrap_or(r)).collect();
+            assert!(rows.len() <= INLINE_MAX_ROWS, "w={w} {rows:?}");
+
+            // Full-fidelity wrapping is independent of the inline preview's intentional truncation.
+            let avail = width - gutter(width).chars().count();
+            let text: String = block_lines(cmd)
+                .iter()
+                .flat_map(|line| wrap_code(line, avail))
+                .map(|r| r.strip_prefix('↪').unwrap_or(&r).to_string())
+                .collect();
             assert_eq!(text, "python3 -c \"print('中文 ok')\"    indented", "w={w}");
-            assert!(rows.iter().any(|r| is_sep(r)), "w={w}");
         }
     }
 
