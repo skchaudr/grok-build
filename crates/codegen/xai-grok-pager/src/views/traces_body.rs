@@ -21,7 +21,7 @@ pub(crate) const TEXT_KEYS: [&str; 9] = [
 pub(crate) const INPUT_KEYS: [&str; 4] = ["input", "arguments", "args", "params"];
 
 /// Command lines and result lines each show this many inline; the rest is `… +N lines`.
-pub(crate) const INLINE_MAX_LINES: usize = 40;
+pub(crate) const INLINE_MAX_LINES: usize = 10;
 /// Below this width the gutter is `│` alone.
 const NARROW: usize = 60;
 /// Narrowest body the rows are laid out for; anything less is laid out as this and clipped by the caller.
@@ -177,18 +177,18 @@ mod tests {
     }
 
     #[test]
-    fn the_cap_is_forty_lines_then_one_tail_row() {
+    fn the_cap_is_ten_lines_then_one_tail_row() {
         let tail = |n: usize| call_rows(&lines(n), None, W);
-        assert_eq!(tail(40).len(), 40);
-        assert!(!tail(40).iter().any(|r| r.contains("Enter for all")));
-        let rows = tail(41);
-        assert_eq!(rows.len(), 41);
+        assert_eq!(tail(10).len(), 10);
+        assert!(!tail(10).iter().any(|r| r.contains("Enter for all")));
+        let rows = tail(11);
+        assert_eq!(rows.len(), 11);
         assert_eq!(rows.last().map(String::as_str), Some("│ … +1 lines · Enter for all"));
         // Command and result are capped on their own: 100 lines each.
         let rows = call_rows(&lines(100), Some((&lines(100), false)), W);
-        let tails: Vec<_> = rows.iter().filter(|r| r.contains("… +60 lines · Enter for all")).collect();
+        let tails: Vec<_> = rows.iter().filter(|r| r.contains("… +90 lines · Enter for all")).collect();
         assert_eq!(tails.len(), 2, "{rows:?}");
-        assert_eq!(rows.len(), 41 + 1 + 1 + 41);
+        assert_eq!(rows.len(), 11 + 1 + 1 + 11);
     }
 
     #[test]

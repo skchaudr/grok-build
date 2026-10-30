@@ -125,6 +125,23 @@ fn follow_json_streams_items_and_subagent_lifecycle() {
 }
 
 #[test]
+fn follow_finds_workflow_agents_under_subagents_workflows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut f, parent, kid) = setup(&tmp, true, 10);
+    assert_eq!(kinds(&f.tick(0).unwrap()), ["model", "user", "text", "call"]);
+
+    // Claude Code's Workflow tool writes its agents two levels below `subagents/`.
+    let wf = kid.parent().unwrap().join("workflows/wf_1/agent-w1.jsonl");
+    append(&parent, T2);
+    append(&wf, CHILD);
+    append(&wf.with_extension("meta.json"), r#"{"agentType":"workflow","description":"Check the lexer","finished":false}"#);
+    let two = f.tick(chrono::Utc::now().timestamp_millis()).unwrap();
+    assert_eq!(kinds(&two), ["result", "call", "agent_start", "user", "call"]);
+    let start: serde_json::Value = serde_json::from_str(&two[2]).unwrap();
+    assert_eq!((start["depth"].as_i64(), start["model"].as_str()), (Some(1), Some("claude-haiku-4-5")));
+}
+
+#[test]
 fn tick_items_returns_the_json_items_as_values() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut f, _, _) = setup(&tmp, true, 10);

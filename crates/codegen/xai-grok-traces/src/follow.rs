@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_json::{Value, json};
@@ -373,10 +373,13 @@ impl Follower {
     }
 
     /// Subagent transcripts are indexed by scans only; index the live ones beside this session's file so
-    /// they show up (Claude: `<stem>/subagents/`, Cursor: `subagents/` next to the transcript).
+    /// they show up (Claude: `<stem>/subagents/`, Workflow agents under `<stem>/subagents/workflows/<run>/`,
+    /// Cursor: `subagents/` next to the transcript).
     fn probe_subagents(&mut self, path: &Path, now_ms: i64) -> Result<()> {
-        let dirs = [Some(path.with_extension("").join("subagents")), path.parent().map(|p| p.join("subagents"))];
-        for dir in dirs.into_iter().flatten() {
+        let mut dirs: Vec<PathBuf> = [Some(path.with_extension("").join("subagents")), path.parent().map(|p| p.join("subagents"))].into_iter().flatten().collect();
+        let runs: Vec<PathBuf> = dirs.iter().filter_map(|d| fs::read_dir(d.join("workflows")).ok()).flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        dirs.extend(runs);
+        for dir in dirs {
             let Ok(entries) = fs::read_dir(&dir) else { continue };
             for p in entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "jsonl")) {
                 let fresh = fs::metadata(&p)
