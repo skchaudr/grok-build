@@ -6,7 +6,7 @@ use super::traces_modal_follow::{END, TITLE, USER, WAIT, run_hook, traces_binary
 /// Follow shows structure from hook receipts before the transcript has it: `SubagentStart` makes the child row
 /// appear with no child file on disk, `PreToolUse` makes the call row appear with its command while the
 /// transcript has no such call, and the matching `PostToolUse` closes it with a duration. The transcript then
-/// catches up with the call and result and nothing is shown twice.
+/// catches up with the call and result: nothing is shown twice, and the highlighted call shows its output inline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn traces_modal_follow_receipts() {
@@ -48,15 +48,26 @@ async fn traces_modal_follow_receipts() {
     // PostToolUse a moment later: closed, with the duration between the two receipts.
     std::thread::sleep(Duration::from_millis(1200));
     hook("PostToolUse", serde_json::json!({ "tool_name": "Bash", "tool_use_id": "ptyrcpt1", "tool_input": { "command": "echo ptyreceiptcmd" } }));
-    h.wait_for_text("✓ 1.", WAIT).expect("the call closes with a duration");
+    // The gap between the two hook processes is not exact: any duration will do.
+    h.wait_until("a ✓ followed by a duration", WAIT, |h| h.screen_contents().split("✓ ").skip(1).any(|rest| rest.starts_with(|c: char| c.is_ascii_digit())))
+        .expect("the call closes with a duration");
 
     // The transcript catches up: the call stays one row.
     append(&transcript, r#"{"type":"assistant","timestamp":"2026-10-01T00:00:05Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"ptyrcpt1","name":"Bash","input":{"command":"echo ptyreceiptcmd"}}]}}"#);
-    append(&transcript, r#"{"type":"user","timestamp":"2026-10-01T00:00:06Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"ptyrcpt1","content":"ptyreceiptcmd"}]}}"#);
+    append(&transcript, r#"{"type":"user","timestamp":"2026-10-01T00:00:06Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"ptyrcpt1","content":"ptyreceiptout"}]}}"#);
+    append(&transcript, r#"{"type":"assistant","timestamp":"2026-10-01T00:00:07Z","message":{"role":"assistant","content":[{"type":"text","text":"ptyreceiptdone"}]}}"#);
     hook("Stop", serde_json::json!({}));
-    std::thread::sleep(Duration::from_millis(2500));
+    h.wait_for_text("ptyreceiptdone", WAIT).expect("the reply arrives");
     let screen = h.screen_contents();
     assert_eq!(screen.matches("→ Bash").count(), 1, "one call row\n{screen}");
+
+    // k pauses on the call: its output comes from the transcript line the call row was linked to.
+    h.inject_keys(b"k").expect("pause on the call");
+    h.wait_for_text("paused", WAIT).expect("paused footer");
+    h.wait_for_text("ptyreceiptout", WAIT).expect("the highlighted call shows its output inline");
+    assert!(!h.contains_text("could not read"), "{}", h.screen_contents());
+    h.inject_keys(b"G").expect("resume the tail");
+    h.wait_for_text("live tail", WAIT).expect("tail pinned again");
 
     append(&transcript, END);
     hook("SessionEnd", serde_json::json!({}));

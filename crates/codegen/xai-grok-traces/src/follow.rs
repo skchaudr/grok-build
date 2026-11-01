@@ -3,7 +3,7 @@
 //! The formatters are pure; [`Follower::tick`] indexes just the followed files (the same single-file path
 //! hooks use), reads the new rows and returns the blocks to print.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use crate::index::session_id;
 use crate::live::{Ev, LiveReceipt, norm};
 use crate::normalize::{clean_text, normalize};
+use crate::receipts::native_keys;
 use crate::roots::resolve;
 use crate::{ACTIVE_WINDOW_MS, EventFilter, EventRow, MAX_EVENTS_PER_FILE, Result, Root, SessionRow, Status, TraceIndex};
 
@@ -290,6 +291,12 @@ struct Followed {
     depth: usize,
     last_line: i64,
     ended: bool,
+    /// A stop receipt ended this child: the file's freshness no longer says it is alive.
+    stopped: bool,
+    /// Highest receipt id read for this child's own session (grok and Pi write a child's receipts there).
+    rcpt_after: i64,
+    /// The child's model and label were sent after its row became known (receipt-born children start without).
+    meta_sent: bool,
     /// Last model announced for this session (`--json` `model` items).
     model: Option<String>,
     label: Option<String>,
@@ -305,24 +312,50 @@ struct RcptCall {
     depth: usize,
     at_ms: i64,
     done: bool,
-    /// When a failed `Post` arrived: the file's result prints the error and takes its duration from this.
+    /// When a `Post` that does not say success arrived: the file's result prints it and takes its duration from this.
     post_ms: Option<i64>,
 }
 
-/// `agent-<id>.jsonl` under `dir`, at most `levels` directories down (Claude: `subagents/` and `subagents/workflows/<wf>/`).
-fn find_agent_file(dir: &Path, name: &str, levels: usize) -> Option<PathBuf> {
+/// A file named one of `names` under `dir`, at most `levels` directories down (Claude: `subagents/` and `subagents/workflows/<wf>/`).
+fn find_agent_file(dir: &Path, names: &[String], levels: usize) -> Option<PathBuf> {
     for e in fs::read_dir(dir).ok()?.flatten() {
         let p = e.path();
-        if p.file_name().is_some_and(|n| n == name) {
+        if p.file_name().is_some_and(|n| names.iter().any(|m| n == m.as_str())) {
             return Some(p);
         }
         if levels > 0 && p.is_dir() {
-            if let Some(found) = find_agent_file(&p, name, levels - 1) {
+            if let Some(found) = find_agent_file(&p, names, levels - 1) {
                 return Some(found);
             }
         }
     }
     None
+}
+
+/// The receipt `agent_id` a child session is known by: Claude `agent-<id>.jsonl`, else its native id
+/// (Cursor's file stem, grok's session dir, Pi's session id).
+fn child_key(s: &SessionRow) -> Option<String> {
+    if let Some(a) = s.file_path.file_stem().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("agent-")) {
+        return Some(a.to_string());
+    }
+    let native = s.native_id.as_deref()?;
+    Some(native_keys(&s.source, Some(native)).pop().unwrap_or_else(|| native.to_string()))
+}
+
+/// Sources that write a child's tool receipts under the child's own session (`native_session` = the `agent_id`
+/// of the parent's `ChildStart`), not on the parent's. Claude's land on the parent's with an `agent_id`.
+fn child_receipts_own_session(source: &str) -> bool {
+    matches!(source, "grok" | "pi")
+}
+
+/// How a `Post` receipt closes its call: `Some(true)` success, `Some(false)` a failure or denial (closed now,
+/// the file's result adds the output), `None` unknown (Pi, Cursor's `after*`: the file's result says).
+fn post_outcome(event: &str) -> Option<bool> {
+    match event {
+        "PostToolUse" | "postToolUse" => Some(true),
+        e if e.ends_with("Failure") || e == "PermissionDenied" => Some(false),
+        _ => None,
+    }
 }
 
 /// The session to attach to: `id` if given, else the newest active root; only if it is live now.
@@ -349,11 +382,13 @@ pub struct Follower {
     rcpt_after: i64,
     /// Calls opened from receipts, by tool-use id.
     rcalls: HashMap<String, RcptCall>,
+    /// Tool-use ids of calls the files printed: a late `Pre` for one is not a new row.
+    file_calls: HashSet<String>,
 }
 
 impl Follower {
     pub fn new(idx: TraceIndex, roots: Vec<Root>, root: SessionRow, children: bool, home: Option<String>) -> Self {
-        Self { idx, roots, children, home, sessions: Vec::new(), root, started: false, last_activity_ms: 0, next_idle_s: IDLE_FIRST_S, json: false, backlog: BACKLOG, rcpt_after: 0, rcalls: HashMap::new() }
+        Self { idx, roots, children, home, sessions: Vec::new(), root, started: false, last_activity_ms: 0, next_idle_s: IDLE_FIRST_S, json: false, backlog: BACKLOG, rcpt_after: 0, rcalls: HashMap::new(), file_calls: HashSet::new() }
     }
 
     /// Emit one JSON item per line (see [`json_event`]) instead of formatted text.
@@ -404,7 +439,23 @@ impl Follower {
 
     fn adopt(&mut self, s: &SessionRow, depth: usize, tail: Option<usize>, announce: Option<String>) -> Result<()> {
         let last_line = self.resume_after(&s.id, tail)?;
-        self.sessions.push(Followed { id: s.id.clone(), row: Some(s.id.clone()), agent_id: None, depth, last_line, ended: false, model: s.model.clone(), label: s.label.clone(), announce, calls: HashMap::new() });
+        // A child found by its file is still known by the id its receipts carry, or they would adopt it twice.
+        let agent_id = child_key(s).filter(|_| depth > 0);
+        self.sessions.push(Followed {
+            id: s.id.clone(),
+            row: Some(s.id.clone()),
+            agent_id,
+            depth,
+            last_line,
+            ended: false,
+            stopped: false,
+            rcpt_after: self.rcpt_after,
+            meta_sent: true,
+            model: s.model.clone(),
+            label: s.label.clone(),
+            announce,
+            calls: HashMap::new(),
+        });
         Ok(())
     }
 
@@ -419,51 +470,119 @@ impl Follower {
             return None;
         }
         out.push(if self.json { agent_item("agent_start", a, 1, Some(at_ms), None, None).to_string() } else { started_line(None, 1) });
-        self.sessions.push(Followed { id: a.to_string(), row: None, agent_id: Some(a.to_string()), depth: 1, last_line: -1, ended: false, model: None, label: None, announce: None, calls: HashMap::new() });
+        self.sessions.push(Followed {
+            id: a.to_string(),
+            row: None,
+            agent_id: Some(a.to_string()),
+            depth: 1,
+            last_line: -1,
+            ended: false,
+            stopped: false,
+            rcpt_after: 0,
+            meta_sent: false,
+            model: None,
+            label: None,
+            announce: None,
+            calls: HashMap::new(),
+        });
         Some(self.sessions.len() - 1)
     }
 
-    /// Binds a receipt-born child to its transcript: `hint` (the path a stop receipt carries), else
-    /// `agent-<agent_id>.jsonl` under the root's `subagents/`. Does nothing while the file does not exist.
+    /// The child's own grok session: `<sessions>/<bucket>/<id>/chat_history.jsonl`, the parent's bucket first.
+    /// (A grok child is its own session, indexed with `native_id` = its dir name; see `stamp_grok_children`.)
+    fn grok_child_file(&self, id: &str) -> Option<PathBuf> {
+        let name = "chat_history.jsonl";
+        let root = self.roots.iter().find(|r| r.source == "grok")?;
+        let mut paths: Vec<PathBuf> = self.root.file_path.parent().and_then(Path::parent).map(|b| b.join(id).join(name)).into_iter().collect();
+        paths.push(root.path.join(id).join(name));
+        paths.extend(fs::read_dir(&root.path).ok()?.flatten().map(|e| e.path().join(id).join(name)));
+        paths.into_iter().find(|p| p.is_file())
+    }
+
+    /// Binds a receipt-born child to its transcript: `hint` (the path a stop receipt carries), else the harness's
+    /// layout for a child file (Claude `<stem>/subagents/**/agent-<id>.jsonl`, Cursor `subagents/<id>.jsonl` next to
+    /// the parent, grok its own session dir), else a session already indexed under that id (Pi). Does nothing while
+    /// there is no such file.
     fn attach(&mut self, at: usize, hint: Option<&str>) -> Result<()> {
         let Some(agent) = self.sessions[at].agent_id.clone() else { return Ok(()) };
-        let path = hint.map(PathBuf::from).or_else(|| find_agent_file(&self.root.file_path.with_extension("").join("subagents"), &format!("agent-{agent}.jsonl"), 2));
-        let Some((root, spelled)) = path.filter(|p| p.is_file()).and_then(|p| resolve(&p, &self.roots).map(|(r, s)| (r, s.to_path_buf()))) else { return Ok(()) };
-        self.idx.index_file(root, &spelled)?;
-        let sid = session_id(&root.source, &spelled.to_string_lossy());
-        if let Some(kid) = self.idx.session(&sid)? {
-            self.sessions[at].row = Some(kid.id);
+        if agent.contains(['/', '\\']) || agent.contains("..") {
+            return Ok(());
+        }
+        let names = [format!("agent-{agent}.jsonl"), format!("{agent}.jsonl")];
+        let parent = &self.root.file_path;
+        let mut paths: Vec<PathBuf> = hint.map(PathBuf::from).into_iter().collect();
+        match self.root.source.as_str() {
+            "claude" => paths.extend(find_agent_file(&parent.with_extension("").join("subagents"), &names[..1], 2)),
+            "cursor" => paths.extend(parent.parent().and_then(|d| find_agent_file(&d.join("subagents"), &names, 0))),
+            "grok" => paths.extend(self.grok_child_file(&agent)),
+            _ => {}
+        }
+        for p in paths.into_iter().filter(|p| p.is_file()) {
+            let Some((root, spelled)) = resolve(&p, &self.roots).map(|(r, s)| (r, s.to_path_buf())) else { continue };
+            self.idx.index_file(root, &spelled)?;
+            if let Some(kid) = self.idx.session(&session_id(&root.source, &spelled.to_string_lossy()))? {
+                self.sessions[at].row = Some(kid.id);
+                return Ok(());
+            }
+        }
+        if child_receipts_own_session(&self.root.source) {
+            self.sessions[at].row = self.idx.session_by_native(&self.root.source, &agent)?;
         }
         Ok(())
     }
 
+    /// What was still in flight when the follow began: calls and children with no close yet, and recent.
+    fn open_receipts(&self, recs: &[LiveReceipt], now_ms: i64) -> Vec<LiveReceipt> {
+        let source = &self.root.source;
+        let key = |r: &LiveReceipt| r.tool_use_id.clone().or_else(|| r.agent_id.clone());
+        let closed: Vec<String> = recs
+            .iter()
+            .filter(|r| matches!(norm(source, &r.event, r.detail.as_deref()), Some(Ev::Post | Ev::ChildStop)))
+            .filter_map(key)
+            .collect();
+        recs.iter()
+            .filter(|r| matches!(norm(source, &r.event, r.detail.as_deref()), Some(Ev::Pre | Ev::ChildStart)))
+            .filter(|r| now_ms - r.at_ms < ACTIVE_WINDOW_MS && !key(r).is_some_and(|k| closed.contains(&k)))
+            .cloned()
+            .collect()
+    }
+
     /// The structure of the run, from receipts: children start and stop, calls open and close.
     /// Content (text, results, output) stays with the files. A `Pre` is printed now; its file row is skipped.
-    fn receipts(&mut self, recs: &[LiveReceipt], out: &mut Vec<String>) -> Result<()> {
+    /// `as_agent`: the receipts were written under that child's own session, so they are the child's whatever
+    /// their `agent_id` says.
+    fn receipts(&mut self, recs: &[LiveReceipt], as_agent: Option<&str>, out: &mut Vec<String>) -> Result<()> {
         for r in recs {
-            self.rcpt_after = self.rcpt_after.max(r.id);
             let Some(ev) = norm(&self.root.source, &r.event, r.detail.as_deref()) else { continue };
             let call_id = r.tool_use_id.as_deref();
+            let agent_id = as_agent.or(r.agent_id.as_deref());
             match ev {
                 Ev::ChildStart => {
-                    if r.agent_id.is_some() {
-                        self.agent_at(r.agent_id.as_deref(), r.at_ms, out);
+                    if as_agent.is_none() && agent_id.is_some() {
+                        self.agent_at(agent_id, r.at_ms, out);
                     }
                 }
                 Ev::ChildStop => {
-                    let Some(at) = self.sessions.iter().position(|f| f.agent_id.is_some() && f.agent_id == r.agent_id) else { continue };
+                    let Some(at) = self.sessions.iter().position(|f| f.agent_id.is_some() && f.agent_id.as_deref() == agent_id) else { continue };
                     if self.sessions[at].row.is_none() {
                         self.attach(at, r.detail.as_deref())?;
                     }
+                    // The stop receipt says the child is done, whatever its file's freshness says.
                     let f = &mut self.sessions[at];
-                    if f.row.is_none() && !f.ended {
+                    f.stopped = true;
+                    if !f.ended {
                         f.ended = true;
                         out.push(if self.json { agent_item("agent_end", &f.id, f.depth, Some(r.at_ms), None, None).to_string() } else { ended_line(f.depth) });
                     }
                 }
                 Ev::Pre => {
-                    let Some(id) = call_id.filter(|id| !self.rcalls.contains_key(*id)) else { continue };
-                    let Some(at) = self.agent_at(r.agent_id.as_deref(), r.at_ms, out) else { continue };
+                    let Some(id) = call_id.filter(|id| !self.rcalls.contains_key(*id) && !self.file_calls.contains(*id)) else { continue };
+                    let Some(at) = self.agent_at(agent_id, r.at_ms, out) else { continue };
+                    // A stopped child that calls again is running again.
+                    let f = &mut self.sessions[at];
+                    if std::mem::take(&mut f.stopped) && std::mem::take(&mut f.ended) && self.json {
+                        out.push(agent_item("agent_resume", &f.id, f.depth, Some(r.at_ms), None, None).to_string());
+                    }
                     let (agent, depth) = (self.sessions[at].id.clone(), self.sessions[at].depth);
                     let (tool, what) = (r.tool.as_deref().unwrap_or_default(), r.detail.as_deref().map(first_line).unwrap_or_default());
                     out.push(if self.json {
@@ -479,21 +598,55 @@ impl Follower {
                     let Some(c) = call_id.and_then(|id| self.rcalls.get_mut(id)).filter(|c| !c.done) else { continue };
                     let ms = (r.at_ms - c.at_ms).max(0);
                     c.post_ms = Some(r.at_ms);
-                    // A failure waits for the file's result: only it has the error text.
-                    if r.event.ends_with("Failure") || r.event == "PermissionDenied" {
-                        continue;
-                    }
+                    // Only a success is closed here. A failure closes with a placeholder (the file's result links
+                    // in the real error); anything else waits for the file's result.
+                    let Some(ok) = post_outcome(&r.event) else { continue };
                     c.done = true;
+                    let why = if r.event == "PermissionDenied" { "denied" } else { "failed" };
                     out.push(if self.json {
                         let mut v = item("result", &c.agent, c.depth, None, Some(r.at_ms));
-                        (v["call_id"], v["ok"], v["ms"]) = (json!(call_id), json!(true), json!(ms));
+                        (v["call_id"], v["ok"], v["ms"]) = (json!(call_id), json!(ok), json!(ms));
+                        if !ok {
+                            v["error"] = json!(why);
+                        }
                         v.to_string()
-                    } else {
+                    } else if ok {
                         format!("{}   ✓ {}", indent(c.depth), took(ms))
+                    } else {
+                        format!("{}   ✗ {why}", indent(c.depth))
                     });
                 }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    /// Receipts that grok and Pi write under a child's own session, read with the child's cursor and attributed to
+    /// the child. `first`: the follow's first tick, so only what is still in flight is replayed.
+    fn own_session_receipts(&mut self, first: Option<i64>, out: &mut Vec<String>) -> Result<()> {
+        if !self.children || !child_receipts_own_session(&self.root.source) {
+            return Ok(());
+        }
+        let mut at = 0;
+        while at < self.sessions.len() {
+            let Some(agent) = self.sessions[at].agent_id.clone() else {
+                at += 1;
+                continue;
+            };
+            if self.sessions[at].row.is_none() {
+                self.attach(at, None)?;
+            }
+            let (row, after) = (self.sessions[at].row.clone(), self.sessions[at].rcpt_after);
+            let recs = self.idx.child_receipts_after(&self.root.source, row.as_deref(), &agent, after)?;
+            let seen = recs.iter().map(|r| r.id).max().unwrap_or(after);
+            self.sessions[at].rcpt_after = if first.is_some() { seen.max(self.rcpt_after) } else { seen };
+            let recs = match first {
+                Some(now) => self.open_receipts(&recs, now),
+                None => recs,
+            };
+            self.receipts(&recs, Some(&agent), out)?;
+            at += 1;
         }
         Ok(())
     }
@@ -517,6 +670,7 @@ impl Follower {
     pub fn tick(&mut self, now_ms: i64) -> Result<Vec<String>> {
         let mut out = Vec::new();
         let first = !self.started;
+        let (mut replay, mut head_len) = (Vec::new(), 0);
         if first {
             self.started = true;
             self.last_activity_ms = now_ms;
@@ -528,28 +682,23 @@ impl Follower {
             } else {
                 out.push(header(&root, self.home.as_deref()));
             }
+            head_len = out.len();
             self.index(&root.file_path)?;
             self.adopt(&root, 0, Some(self.backlog), None)?;
             // Receipts from before the follow: only what is still in flight (a call or child with no close yet).
+            // Children first (their rows come with their files); the calls after the rows, where they belong.
             self.rcpt_after = self.idx.receipts_watermark()?;
             let recs = self.idx.turn_receipts(&root.id)?;
-            let closed: Vec<&str> = recs
-                .iter()
-                .filter(|r| matches!(norm(&root.source, &r.event, r.detail.as_deref()), Some(Ev::Post | Ev::ChildStop)))
-                .filter_map(|r| r.tool_use_id.as_deref().or(r.agent_id.as_deref()))
-                .collect();
-            let open: Vec<LiveReceipt> = recs
-                .iter()
-                .filter(|r| matches!(norm(&root.source, &r.event, r.detail.as_deref()), Some(Ev::Pre | Ev::ChildStart)))
-                .filter(|r| now_ms - r.at_ms < ACTIVE_WINDOW_MS && !r.tool_use_id.as_deref().or(r.agent_id.as_deref()).is_some_and(|k| closed.contains(&k)))
-                .cloned()
-                .collect();
-            self.receipts(&open, &mut out)?;
+            let (kids, calls): (Vec<_>, Vec<_>) = self.open_receipts(&recs, now_ms).into_iter().partition(|r| matches!(norm(&root.source, &r.event, r.detail.as_deref()), Some(Ev::ChildStart)));
+            self.receipts(&kids, None, &mut out)?;
+            replay = calls;
         } else {
             let recs = self.idx.receipts_after(&self.root.id, self.rcpt_after)?;
-            self.receipts(&recs, &mut out)?;
+            self.rcpt_after = recs.iter().map(|r| r.id).fold(self.rcpt_after, i64::max);
+            self.receipts(&recs, None, &mut out)?;
+            self.own_session_receipts(None, &mut out)?;
         }
-        let mut printed = false;
+        let mut printed = out.len() > head_len;
         let mut at = 0;
         while at < self.sessions.len() {
             let (id, depth) = (self.sessions[at].id.clone(), self.sessions[at].depth);
@@ -558,7 +707,24 @@ impl Follower {
             }
             let Some(rid) = self.sessions[at].row.clone() else { at += 1; continue };
             let Some(row) = self.idx.session(&rid)? else { at += 1; continue };
+            // A subagent's file is indexed here, so its status is read after, not before (the root's is a tick behind).
+            let row = if depth > 0 {
+                self.index(&row.file_path)?;
+                self.idx.session(&rid)?.unwrap_or(row)
+            } else {
+                row
+            };
             out.extend(self.sessions[at].announce.take());
+            // A child born from a receipt had no model or label; send them now that its row is known.
+            if !self.sessions[at].meta_sent && let Some(m) = row.model.clone() {
+                let f = &mut self.sessions[at];
+                (f.meta_sent, f.model, f.label) = (true, Some(m.clone()), row.label.clone());
+                out.push(if self.json {
+                    model_item(&id, depth, None, row.started_at, &m, row.label.as_deref()).to_string()
+                } else {
+                    format!("{}↳ {}{}", indent(depth), short_model(&m), row.label.as_deref().map(|l| format!("  {l}")).unwrap_or_default())
+                });
+            }
             self.index(&row.file_path)?;
             if self.children {
                 for kid in self.idx.children(&rid)? {
@@ -566,8 +732,8 @@ impl Follower {
                         continue;
                     }
                     // A child already adopted from its start receipt: bind it to this file instead of adopting twice.
-                    let stem = kid.file_path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.strip_prefix("agent-")).map(str::to_string);
-                    if let Some(f) = self.sessions.iter_mut().find(|f| f.row.is_none() && f.agent_id.is_some() && f.agent_id == stem) {
+                    let key = child_key(&kid);
+                    if let Some(f) = self.sessions.iter_mut().find(|f| f.row.is_none() && f.agent_id.is_some() && f.agent_id == key) {
                         f.row = Some(kid.id.clone());
                         continue;
                     }
@@ -576,7 +742,7 @@ impl Follower {
                 }
             }
             // An ended session that is active again resumes before its new rows (a subagent's is silent in text).
-            if self.sessions[at].ended && row.status == Status::Active {
+            if self.sessions[at].ended && !self.sessions[at].stopped && row.status == Status::Active {
                 if self.json {
                     out.push(agent_item("agent_resume", &id, depth, Some(now_ms), None, None).to_string());
                 } else if depth == 0 {
@@ -594,6 +760,7 @@ impl Follower {
                 match ev.role.as_deref() {
                     Some("tool") => {
                         if let Some(call_id) = call_id.clone() {
+                            self.file_calls.insert(call_id.clone());
                             self.sessions[at].calls.insert(call_id, ev.line);
                         }
                     }
@@ -602,22 +769,38 @@ impl Follower {
                     }
                     _ => {}
                 }
+                if self.json && let Some(m) = ev.model.clone().filter(|m| self.sessions[at].model.as_ref() != Some(m)) {
+                    out.push(model_item(&id, depth, Some(ev.line), ev.timestamp, &m, self.sessions[at].label.as_deref()).to_string());
+                    self.sessions[at].model = Some(m);
+                }
                 // A call a `Pre` receipt already printed is not printed again; nor its result once a `Post` closed it.
-                let skip = match (ev.role.as_deref(), call_id.as_deref().or(result_id.as_deref()).and_then(|i| self.rcalls.get_mut(i))) {
-                    (Some("tool"), Some(_)) => true,
+                // What the file adds (where the call and its output are) goes out as a `link` item for the pane.
+                let cid = call_id.clone().or_else(|| result_id.clone());
+                let (skip, link) = match (ev.role.as_deref(), cid.as_deref().and_then(|i| self.rcalls.get_mut(i))) {
+                    (Some("tool"), Some(_)) => (true, Some(("line", None))),
                     (Some("tool_result"), Some(c)) => {
                         ev.duration_ms = ev.duration_ms.or(c.post_ms.map(|p| p - c.at_ms));
-                        std::mem::replace(&mut c.done, true)
+                        let was_done = std::mem::replace(&mut c.done, true);
+                        let error = ev.is_error.then(|| {
+                            let (exit, msg) = error_parts(&ev);
+                            [exit, msg].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("  ")
+                        });
+                        (was_done, Some(("result_line", error)))
                     }
-                    _ => false,
+                    _ => (false, None),
                 };
                 let block = if skip {
-                    None
-                } else if self.json {
-                    if let Some(m) = ev.model.as_ref().filter(|m| self.sessions[at].model.as_ref() != Some(*m)) {
-                        out.push(model_item(&id, depth, Some(ev.line), ev.timestamp, m, self.sessions[at].label.as_deref()).to_string());
-                        self.sessions[at].model = Some(m.clone());
+                    if let (true, Some((key, error))) = (self.json, link) {
+                        let mut v = item("link", &id, depth, None, ev.timestamp);
+                        (v["call_id"], v["session"], v[key]) = (json!(cid), json!(rid), json!(ev.line));
+                        if let Some(e) = error {
+                            v["error"] = json!(e);
+                        }
+                        Some(v.to_string())
+                    } else {
+                        None
                     }
+                } else if self.json {
                     json_event(&ev, raw.as_deref(), call_id.or(result_id).as_deref(), &id, depth).map(|v| v.to_string())
                 } else {
                     format_event(&ev, raw.as_deref(), depth)
@@ -627,7 +810,7 @@ impl Follower {
                     printed = true;
                 }
             }
-            let live = row.status == Status::Active;
+            let live = row.status == Status::Active && !self.sessions[at].stopped;
             let f = &mut self.sessions[at];
             if live {
                 f.ended = false;
@@ -640,6 +823,13 @@ impl Follower {
                 }
             }
             at += 1;
+        }
+        if first {
+            // Calls still open at the follow's start, after the backlog rows.
+            let before = out.len();
+            self.receipts(&replay, None, &mut out)?;
+            self.own_session_receipts(Some(now_ms), &mut out)?;
+            printed |= out.len() > before;
         }
         if printed {
             self.last_activity_ms = now_ms;
@@ -681,6 +871,25 @@ mod tests {
 
     fn user(text: &str) -> EventRow {
         ev("message", Some("user"), "User", text)
+    }
+
+    #[test]
+    fn post_outcome_closes_only_what_says_success_or_failure() {
+        assert_eq!(post_outcome("PostToolUse"), Some(true));
+        assert_eq!(post_outcome("postToolUse"), Some(true));
+        assert_eq!((post_outcome("PostToolUseFailure"), post_outcome("postToolUseFailure"), post_outcome("PermissionDenied")), (Some(false), Some(false), Some(false)));
+        // Pi's end event and Cursor's `after*` do not say whether the call worked: the file's result does.
+        assert_eq!((post_outcome("tool_execution_end"), post_outcome("afterShellExecution"), post_outcome("afterMCPExecution")), (None, None, None));
+    }
+
+    #[test]
+    fn a_child_is_known_by_the_id_its_receipts_carry() {
+        let row = |source: &str, path: &str, native: Option<&str>| SessionRow { source: source.into(), file_path: path.into(), native_id: native.map(String::from), ..Default::default() };
+        assert_eq!(child_key(&row("claude", "/p/-w/s/subagents/agent-a1.jsonl", Some("-w/s/subagents/agent-a1"))).as_deref(), Some("a1"));
+        assert_eq!(child_key(&row("grok", "/g/sessions/%2Fw/k1/chat_history.jsonl", Some("k1"))).as_deref(), Some("k1"));
+        assert_eq!(child_key(&row("pi", "/pi/-w/s/Name.jsonl", Some("-w/2026-10-01T00-00-00_abc123"))).as_deref(), Some("abc123"));
+        assert_eq!(child_key(&row("cursor", "/c/t/x/subagents/kid.jsonl", Some("kid"))).as_deref(), Some("kid"));
+        assert!(child_key(&row("grok", "/g/x/chat_history.jsonl", None)).is_none());
     }
 
     #[test]

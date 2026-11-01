@@ -367,12 +367,12 @@ pub fn boundary(source: &str, event: &str, detail: Option<&str>) -> Option<Bound
     }
 }
 
-/// Subagent start/stop events: Claude `SubagentStart/Stop`, Cursor `subagentStart/Stop`, Pi `child_start`
+/// Subagent start/stop events: Claude and grok `SubagentStart/Stop`, Cursor `subagentStart/Stop`, Pi `child_start`
 /// (sent by the Pi extension from the child's session, naming the parent's file).
 pub fn child_kind(source: &str, event: &str) -> Option<Child> {
     match (source, event) {
-        ("claude", "SubagentStart") | ("cursor", "subagentStart") | ("pi", "child_start") => Some(Child::Start),
-        ("claude", "SubagentStop") | ("cursor", "subagentStop") => Some(Child::Stop),
+        ("claude" | "grok", "SubagentStart") | ("cursor", "subagentStart") | ("pi", "child_start") => Some(Child::Start),
+        ("claude" | "grok", "SubagentStop") | ("cursor", "subagentStop") => Some(Child::Stop),
         _ => None,
     }
 }
@@ -1071,9 +1071,11 @@ mod tests {
         assert_eq!(child_kind("cursor", "subagentStart"), Some(Child::Start));
         assert_eq!(child_kind("cursor", "subagentStop"), Some(Child::Stop));
         assert_eq!(child_kind("pi", "child_start"), Some(Child::Start));
+        assert_eq!((child_kind("grok", "SubagentStart"), child_kind("grok", "SubagentStop")), (Some(Child::Start), Some(Child::Stop)));
+        assert_eq!((child_kind("grok", "subagentStart"), child_kind("pi", "SubagentStop")), (None, None));
         assert_eq!((child_kind("claude", "subagentStart"), child_kind("cursor", "SubagentStop"), child_kind("pi", "SubagentStart")), (None, None, None));
         for e in CHILD_EVENTS {
-            assert!(["claude", "cursor", "pi"].iter().any(|s| child_kind(s, e).is_some()), "{e}");
+            assert!(["claude", "cursor", "pi", "grok"].iter().any(|s| child_kind(s, e).is_some()), "{e}");
         }
     }
 

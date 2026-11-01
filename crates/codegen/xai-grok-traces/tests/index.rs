@@ -743,6 +743,12 @@ fn hook_extract_live_fields() {
     assert_eq!((pre.tool.as_deref(), pre.detail.as_deref()), (Some("Read"), Some("b/c.rs")));
     let post = extract("cursor", br#"{"hook_event_name":"postToolUseFailure","tool_name":"Shell","tool_input":{"command":"x"}}"#);
     assert_eq!(post.tool.as_deref(), Some("Shell"));
+
+    // grok names a subagent `subagentId`; Claude's `SubagentStop` keeps the child's transcript path.
+    let g = extract("grok", br#"{"hook_event_name":"SubagentStart","session_id":"p1","subagentId":"k1","subagentType":"explore"}"#);
+    assert_eq!((g.native_session.as_deref(), g.agent_id.as_deref()), (Some("p1"), Some("k1")));
+    let stop = extract("claude", br#"{"hook_event_name":"SubagentStop","agent_id":"a1","agent_transcript_path":"/p/s/subagents/agent-a1.jsonl"}"#);
+    assert_eq!(stop.detail.as_deref(), Some("/p/s/subagents/agent-a1.jsonl"));
 }
 
 /// `proc_pidinfo` is macOS-only; on other hosts a payload pid has no start time and is not stored.

@@ -49,6 +49,8 @@ pub(super) struct Call {
     pub result: Option<Res>,
     /// Its agent ended with the call still open.
     pub no_result: bool,
+    /// The session whose file holds `line`, when it is not the agent's own name (a child born from a receipt).
+    pub session: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -244,7 +246,26 @@ impl Follow {
                     started_ms: last_ts,
                     result: None,
                     no_result: false,
+                    session: v["session"].as_str().map(str::to_string),
                 }),
+                // The transcript caught up with a call a receipt opened: where its command and output are.
+                "link" => {
+                    let id = v["call_id"].as_str();
+                    let at = self.rows.iter().rposition(|r| r.agent == agent && matches!(&r.body, Body::Call(c) if c.call_id.as_deref() == id));
+                    if let Some(Body::Call(c)) = at.map(|i| &mut self.rows[i].body) {
+                        if let Some(l) = v["line"].as_i64() {
+                            c.line = l;
+                        }
+                        c.session = v["session"].as_str().map(str::to_string).or(c.session.take());
+                        if let (Some(l), Some(r)) = (v["result_line"].as_i64(), c.result.as_mut()) {
+                            r.line = l;
+                            if !r.ok && let Some(e) = v["error"].as_str() {
+                                r.error = e.to_string();
+                            }
+                        }
+                    }
+                    continue;
+                }
                 "result" => {
                     let id = v["call_id"].as_str();
                     // A result with no id (some harnesses omit it) answers the agent's oldest open call without one.
@@ -285,7 +306,11 @@ impl Follow {
                 }
                 "model" => {
                     let model = text(v, "model");
-                    let had = self.agent_mut(&agent).model.replace(model.clone());
+                    let a = self.agent_mut(&agent);
+                    if let Some(l) = v["label"].as_str().filter(|l| !l.is_empty()) {
+                        a.label = Some(l.to_string());
+                    }
+                    let had = a.model.replace(model.clone());
                     if had.is_none_or(|m| m == model) {
                         continue;
                     }
@@ -311,11 +336,11 @@ impl Follow {
         self.cursor.is_some()
     }
 
-    /// The highlighted row's call (with its agent's session id), when it is one.
+    /// The highlighted row's call (with the session id its lines are read from), when it is one.
     pub fn selected_call(&self) -> Option<(&str, &Call)> {
         let row = self.rows.get(self.cursor?)?;
         match &row.body {
-            Body::Call(c) => Some((row.agent.as_str(), c)),
+            Body::Call(c) => Some((c.session.as_deref().unwrap_or(row.agent.as_str()), c)),
             _ => None,
         }
     }
@@ -406,13 +431,17 @@ impl Follow {
     fn body_rows(&mut self, index: Option<&TraceIndex>, width: usize) -> Option<Vec<String>> {
         let (agent, c) = self.selected_call()?;
         let (agent, c) = (agent.to_string(), c.clone());
+        if c.line < 0 {
+            // Opened by a receipt; the transcript has not reached it yet. The row above is its command.
+            return Some(traces_body::note("(waiting for the transcript)", width));
+        }
         let key = (agent.clone(), c.line, c.result.as_ref().map(|r| r.line));
         let text = match self.bodies.get(&key) {
             Some(t) => t.clone(),
             None => {
                 let index = index?;
                 let fetch = |l: i64| index.raw_line(&agent, l).map_err(|e| e.to_string());
-                match compose_body(fetch(c.line), c.result.as_ref().map(|r| (fetch(r.line), !r.ok))) {
+                match compose_body(fetch(c.line), c.result.as_ref().filter(|r| r.line >= 0).map(|r| (fetch(r.line), !r.ok))) {
                     Ok(t) => {
                         self.bodies.insert(key, t.clone());
                         t
@@ -709,6 +738,44 @@ mod tests {
             assert!(screen.contains(want), "missing {want:?}\n{screen}");
         }
         assert!(screen.lines().any(|l| l.starts_with("  → Read")), "the subagent's rows sit two columns in\n{screen}");
+    }
+
+    #[test]
+    fn a_link_gives_a_receipt_opened_call_the_transcript_lines_to_read() {
+        let mut f = Follow::bare(session());
+        f.apply(
+            &[
+                item("agent_start", "kid", 1, json!({})),
+                item("call", "kid", 1, json!({"line": null, "call_id": "k1", "tool": "Bash", "what": "ls"})),
+                item("result", "kid", 1, json!({"line": null, "call_id": "k1", "ok": false, "error": "failed", "ms": 100})),
+            ],
+            2_000,
+        );
+        f.cursor = Some(1);
+        let (read_from, c) = f.selected_call().unwrap();
+        assert_eq!((read_from, c.line), ("kid", -1), "no transcript line yet: nothing to read");
+        assert!(f.body_rows(None, 60).unwrap()[0].contains("waiting for the transcript"));
+
+        f.apply(
+            &[
+                item("link", "kid", 1, json!({"call_id": "k1", "session": "kidrow", "line": 7})),
+                item("link", "kid", 1, json!({"call_id": "k1", "session": "kidrow", "line": null, "result_line": 8, "error": "exit 1  boom"})),
+            ],
+            2_100,
+        );
+        assert_eq!(f.rows.len(), 2, "a link is not a row");
+        let (read_from, c) = f.selected_call().unwrap();
+        assert_eq!((read_from, c.line), ("kidrow", 7), "lines are read from the child's own session");
+        assert_eq!(c.result, Some(Res { ok: false, error: "exit 1  boom".into(), ms: Some(100), line: 8 }));
+    }
+
+    #[test]
+    fn a_model_item_fills_in_a_label_the_start_did_not_have() {
+        let mut f = Follow::bare(session());
+        f.apply(&[item("agent_start", "kid", 1, json!({})), item("model", "kid", 1, json!({"model": "claude-haiku-4-5", "label": "Check the lexer"}))], 2_000);
+        assert_eq!(f.rows.len(), 1, "the first model of an agent is not a row");
+        let kid = f.agents.iter().find(|a| a.id == "kid").unwrap();
+        assert_eq!((kid.model.as_deref(), kid.label.as_deref()), (Some("claude-haiku-4-5"), Some("Check the lexer")));
     }
 
     #[test]

@@ -73,11 +73,173 @@ fn follow_prints_calls_from_receipts_and_not_again_from_the_file() {
     let result: serde_json::Value = serde_json::from_str(&post[0]).unwrap();
     assert_eq!((result["call_id"].as_str(), result["ms"].as_i64(), result["ok"].as_bool()), (Some("p9"), Some(2500), Some(true)));
 
-    // The transcript catches up: neither its call nor its result is printed a second time.
+    // The transcript catches up: neither its call nor its result is printed a second time; each is a `link`
+    // saying which line holds it, so the pane can show the command and the output.
     append(&parent, r#"{"type":"assistant","timestamp":"2026-10-01T00:00:20Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"p9","name":"Bash","input":{"command":"echo hi"}}]}}
 {"type":"user","timestamp":"2026-10-01T00:00:21Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"p9","content":"hi"}]}}
 "#);
-    assert!(f.tick(4_000).unwrap().is_empty());
+    let linked = f.tick(4_000).unwrap();
+    assert_eq!(kinds(&linked), ["link", "link"]);
+    let (c, r): (serde_json::Value, serde_json::Value) = (serde_json::from_str(&linked[0]).unwrap(), serde_json::from_str(&linked[1]).unwrap());
+    assert_eq!((c["call_id"].as_str(), c["line"].as_i64().is_some(), c["session"].is_string()), (Some("p9"), true, true));
+    assert_eq!((r["call_id"].as_str(), r["result_line"].as_i64().is_some(), r["line"].is_null()), (Some("p9"), true, true));
+    assert!(f.tick(5_000).unwrap().is_empty());
+}
+
+/// Indexes the child file the way a scan would (the Follower no longer probes for them).
+fn scan(tmp: &tempfile::TempDir) {
+    let projects = tmp.path().join("home/.claude/projects");
+    let root = Root { id: "claude-projects".into(), source: "claude".into(), path: projects, format: Format::Jsonl, file_name: None };
+    TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap().scan(std::slice::from_ref(&root)).unwrap();
+}
+
+#[test]
+fn a_child_found_by_its_file_is_not_adopted_again_when_its_receipts_arrive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut f, parent, kid) = setup(&tmp, true, 10);
+    f.tick(0).unwrap();
+    append(&parent, T2);
+    append(&kid, CHILD);
+    append(&kid.with_extension("meta.json"), r#"{"agentType":"Explore","description":"Check the lexer","finished":false}"#);
+    scan(&tmp);
+    let now = chrono::Utc::now().timestamp_millis();
+    let found = f.tick(now).unwrap();
+    let start = found.iter().map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()).find(|v| v["kind"] == "agent_start").expect("file-born start");
+    let agent = start["agent"].as_str().unwrap().to_string();
+
+    // Its first receipt (no SubagentStart in the window): the call lands on the same agent, with no second start.
+    record(&tmp, "PreToolUse", now, Some("k1"), Some("a1"), Some("Bash"), Some("ls"));
+    let items = f.tick(now + 500).unwrap();
+    assert_eq!(kinds(&items), ["call"], "{items:?}");
+    let call: serde_json::Value = serde_json::from_str(&items[0]).unwrap();
+    assert_eq!((call["agent"].as_str(), call["depth"].as_i64()), (Some(agent.as_str()), Some(1)));
+}
+
+#[test]
+fn a_pre_for_a_call_the_file_already_printed_is_not_a_second_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut f, _, _) = setup(&tmp, true, 10);
+    assert_eq!(kinds(&f.tick(0).unwrap()), ["model", "user", "text", "call"]);
+    // `t1` is in the backlog; its Pre and Post receipts arrive afterwards.
+    record(&tmp, "PreToolUse", 1_000, Some("t1"), None, Some("Bash"), Some("cargo test -p parser"));
+    assert!(f.tick(1_000).unwrap().is_empty());
+    record(&tmp, "PostToolUse", 2_000, Some("t1"), None, Some("Bash"), None);
+    assert!(f.tick(2_000).unwrap().is_empty());
+}
+
+#[test]
+fn a_failed_call_closes_from_its_receipt_and_links_the_real_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut f, parent, _) = setup(&tmp, true, 10);
+    f.tick(0).unwrap();
+    record(&tmp, "PreToolUse", 1_000, Some("p8"), None, Some("Bash"), Some("false"));
+    f.tick(1_000).unwrap();
+    record(&tmp, "PostToolUseFailure", 1_400, Some("p8"), None, Some("Bash"), None);
+    let items = f.tick(1_400).unwrap();
+    assert_eq!(kinds(&items), ["result"]);
+    let r: serde_json::Value = serde_json::from_str(&items[0]).unwrap();
+    assert_eq!((r["ok"].as_bool(), r["error"].as_str(), r["ms"].as_i64()), (Some(false), Some("failed"), Some(400)));
+    // A denied call closes the same way.
+    record(&tmp, "PreToolUse", 2_000, Some("p7"), None, Some("Bash"), Some("rm x"));
+    record(&tmp, "PermissionDenied", 2_100, Some("p7"), None, Some("Bash"), None);
+    let denied = f.tick(2_100).unwrap();
+    assert_eq!(kinds(&denied), ["call", "result"]);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&denied[1]).unwrap()["error"].as_str(), Some("denied"));
+
+    append(&parent, r#"{"type":"assistant","timestamp":"2026-10-01T00:00:20Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"p8","name":"Bash","input":{"command":"false"}}]}}
+{"type":"user","timestamp":"2026-10-01T00:00:21Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"p8","is_error":true,"content":"exit 1: boom"}]}}
+"#);
+    let linked = f.tick(3_000).unwrap();
+    assert_eq!(kinds(&linked), ["link", "link"]);
+    let r: serde_json::Value = serde_json::from_str(&linked[1]).unwrap();
+    assert!(r["error"].as_str().unwrap().contains("boom"), "{r}");
+}
+
+#[test]
+fn a_stop_receipt_ends_a_child_that_still_has_a_fresh_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut f, parent, kid) = setup(&tmp, true, 10);
+    f.tick(0).unwrap();
+    append(&parent, T2);
+    append(&kid, CHILD);
+    append(&kid.with_extension("meta.json"), r#"{"agentType":"Explore","description":"Check the lexer","finished":false}"#);
+    subagent_start(&tmp);
+    let now = chrono::Utc::now().timestamp_millis();
+    f.tick(now).unwrap();
+    record(&tmp, "SubagentStop", now + 100, None, Some("a1"), None, None);
+    assert_eq!(kinds(&f.tick(now + 500).unwrap()), ["agent_end"]);
+    assert!(f.tick(now + 1_000).unwrap().is_empty(), "the fresh file does not resurrect it");
+    // Its next call (a resumed child) brings it back.
+    record(&tmp, "PreToolUse", now + 2_000, Some("k2"), Some("a1"), Some("Read"), Some("x.rs"));
+    assert_eq!(kinds(&f.tick(now + 2_000).unwrap()), ["agent_resume", "call"]);
+}
+
+#[test]
+fn follow_replays_only_what_is_in_flight_at_attach_and_after_the_backlog() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut f, _, _) = setup(&tmp, true, 10);
+    let now = chrono::Utc::now().timestamp_millis();
+    // History: a closed call, then one still open; both before the follow starts.
+    record(&tmp, "PreToolUse", now - 4_000, Some("h1"), None, Some("Bash"), Some("closed"));
+    record(&tmp, "PostToolUse", now - 3_500, Some("h1"), None, Some("Bash"), None);
+    record(&tmp, "PreToolUse", now - 1_000, Some("h2"), None, Some("Bash"), Some("still running"));
+    let first = f.tick(now).unwrap();
+    assert_eq!(kinds(&first), ["model", "user", "text", "call", "call"], "backlog first, then the open call");
+    let open: serde_json::Value = serde_json::from_str(first.last().unwrap()).unwrap();
+    assert_eq!((open["call_id"].as_str(), open["what"].as_str()), (Some("h2"), Some("still running")));
+    // The cursor moved past the history: nothing is read twice.
+    assert!(f.tick(now + 500).unwrap().is_empty());
+}
+
+#[test]
+fn a_grok_child_is_followed_through_its_own_session_receipts_and_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sessions = tmp.path().join("home/.grok/sessions");
+    let root = Root { id: "grok-sessions".into(), source: "grok".into(), path: sessions.clone(), format: Format::Jsonl, file_name: Some("chat_history.jsonl") };
+    let user = |t: &str| format!("{{\"type\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"{t}\"}}]}}\n");
+    append(&sessions.join("%2Fw/p1/chat_history.jsonl"), &user("parent task"));
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
+    idx.scan(std::slice::from_ref(&root)).unwrap();
+    let parent = idx.list_sessions(&SessionFilter::default()).unwrap().remove(0);
+    let mut f = Follower::new(idx, vec![root], parent.clone(), true, None).with_json(true);
+    f.tick(0).unwrap();
+
+    let rec = |event: &str, at_ms: i64, session: Option<&str>, native: &str, id: Option<&str>, agent: Option<&str>, detail: Option<&str>| {
+        let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
+        let r = Receipt {
+            at_ms,
+            source: "grok".into(),
+            event: event.into(),
+            session_id: session.map(String::from),
+            native_session: Some(native.into()),
+            tool_use_id: id.map(String::from),
+            agent_id: agent.map(String::from),
+            tool: id.map(|_| "Bash".to_string()),
+            detail: detail.map(String::from),
+            ..Default::default()
+        };
+        idx.record_receipt(&r).unwrap();
+    };
+    // `SubagentStart` lands on the parent (`subagentId` is the agent id); the child's calls on the child's session.
+    rec("SubagentStart", 1_000, Some(&parent.id), "p1", None, Some("k1"), None);
+    rec("PreToolUse", 1_100, None, "k1", Some("g1"), None, Some("ls -la"));
+    let items = f.tick_items(1_200).unwrap();
+    let kinds: Vec<_> = items.iter().map(|v| v["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["agent_start", "call"], "{items:?}");
+    assert_eq!((items[1]["agent"].as_str(), items[1]["depth"].as_i64(), items[1]["what"].as_str()), (Some("k1"), Some(1), Some("ls -la")));
+
+    // Its transcript is its own session dir: once there, the child's rows come from it.
+    append(&sessions.join("%2Fw/k1/chat_history.jsonl"), &user("child task"));
+    let items = f.tick_items(1_300).unwrap();
+    let kinds: Vec<_> = items.iter().map(|v| v["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["user"], "{items:?}");
+    assert_eq!((items[0]["agent"].as_str(), items[0]["text"].as_str()), (Some("k1"), Some("child task")));
+
+    // The child's own `SubagentStop` (its turn-end gate) ends it under the parent.
+    rec("SubagentStop", 1_900, None, "k1", None, Some("k1"), None);
+    let items = f.tick_items(2_000).unwrap();
+    let kinds: Vec<_> = items.iter().map(|v| v["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["agent_end"], "{items:?}");
 }
 
 #[test]
@@ -108,12 +270,14 @@ fn follow_prints_new_rows_per_tick_and_children_under_their_parent() {
     subagent_start(&tmp);
     let now = chrono::Utc::now().timestamp_millis();
     let two = f.tick(now).unwrap().join("\n");
-    // The start comes from the receipt (before the parent's rows, no model yet); the child's rows from its file.
+    // The start comes from the receipt (before the parent's rows, no model yet); once its file is found the child's
+    // model and label follow, then its rows.
     assert_eq!(
         two,
         "  ↳ started\n\
          \x20  ✓ 2.0s\n\
          → Agent  Check the lexer\n\
+         \x20 ↳ haiku-4-5  Check the lexer\n\
          \n  ▶ you  look at the lexer\n\
          \x20 → Read  src/lexer.rs"
     );
@@ -148,12 +312,12 @@ fn follow_json_streams_items_and_subagent_lifecycle() {
     subagent_start(&tmp);
     let now = chrono::Utc::now().timestamp_millis();
     let two = f.tick(now).unwrap();
-    // The start comes from the receipt, so it leads and carries no model; the model follows as its own item.
-    assert_eq!(kinds(&two), ["agent_start", "result", "call", "user", "model", "call"]);
+    // The start comes from the receipt, so it leads and carries no model; the model and label follow as their own item.
+    assert_eq!(kinds(&two), ["agent_start", "result", "call", "model", "user", "call"]);
     let start: serde_json::Value = serde_json::from_str(&two[0]).unwrap();
     assert_eq!((start["agent"].as_str(), start["depth"].as_i64(), start["model"].as_str()), (Some("a1"), Some(1), None));
-    let model: serde_json::Value = serde_json::from_str(&two[4]).unwrap();
-    assert_eq!((model["agent"].as_str(), model["model"].as_str()), (Some("a1"), Some("claude-haiku-4-5")));
+    let model: serde_json::Value = serde_json::from_str(&two[3]).unwrap();
+    assert_eq!((model["agent"].as_str(), model["model"].as_str(), model["label"].as_str()), (Some("a1"), Some("claude-haiku-4-5"), Some("Check the lexer")));
     let first: serde_json::Value = serde_json::from_str(&two[1]).unwrap();
     assert_eq!(first["call_id"].as_str(), Some("t1"));
     assert_eq!(first["ms"].as_i64(), Some(2000), "result items carry the call's duration");

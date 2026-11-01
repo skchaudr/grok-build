@@ -24,7 +24,7 @@ const PATH: [&str; 4] = ["transcript_path", "transcriptPath", "session_file", "s
 const TOOL: [&str; 3] = ["tool_name", "toolName", "tool"];
 const TOOL_INPUT: [&str; 3] = ["tool_input", "toolInput", "input"];
 const TOOL_USE_ID: [&str; 3] = ["tool_use_id", "toolUseId", "toolCallId"];
-const AGENT_ID: [&str; 2] = ["agent_id", "agentId"];
+const AGENT_ID: [&str; 3] = ["agent_id", "agentId", "subagentId"];
 const NOTIFICATION_TYPE: [&str; 2] = ["notification_type", "notificationType"];
 const HARNESS_PID: [&str; 1] = ["harness_pid"];
 

@@ -300,6 +300,12 @@ impl TraceIndex {
         self.branch_receipts(id.as_deref(), &source, native.as_deref(), &format!("AND r.id > {after}"))
     }
 
+    /// Receipts with id greater than `after` written under a child's own session (grok, Pi): keyed by its row when it
+    /// has one, else unkeyed with `native_session` = the child's id (the `agent_id` of the parent's `ChildStart`).
+    pub(crate) fn child_receipts_after(&self, source: &str, row: Option<&str>, native: &str, after: i64) -> Result<Vec<LiveReceipt>> {
+        self.branch_receipts(row, source, Some(native), &format!("AND r.id > {after}"))
+    }
+
     /// Every receipt of a session by `(at_ms, id)`; the replay helper folds prefixes of this.
     pub fn session_receipts(&self, session_id: &str) -> Result<Vec<LiveReceipt>> {
         let Some((source, id, native)) = self.receipt_keys(session_id)? else { return Ok(Vec::new()) };

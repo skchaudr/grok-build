@@ -991,10 +991,14 @@ impl TracesModalState {
         let (Some(index), Some(f)) = (&self.index, &self.follow_view) else { return false };
         let Some((agent, call)) = f.selected_call() else { return false };
         let (agent, call) = (agent.to_string(), call.clone());
+        if call.line < 0 {
+            self.set_status("waiting for the transcript to reach this call");
+            return true;
+        }
         let fetch = |l: i64| index.raw_line(&agent, l).map_err(|e| e.to_string());
         self.raw = Some(pretty(fetch(call.line)));
         self.raw_source = fetch(call.line).ok().flatten();
-        let body = compose_body(fetch(call.line), call.result.as_ref().map(|r| (fetch(r.line), !r.ok)));
+        let body = compose_body(fetch(call.line), call.result.as_ref().filter(|r| r.line >= 0).map(|r| (fetch(r.line), !r.ok)));
         self.payload.open(Some(body), Shape::Call);
         self.raw_scroll = 0;
         self.follow_return = true;
