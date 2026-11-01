@@ -25,7 +25,7 @@ Every harness's events reach `trace_receipts` with the names `norm` maps and the
 | Harness | Change | File | Done when (do the action, then run the query below) |
 |---|---|---|---|
 | Claude | register `grok-traces hook claude` on the 7 capture-only events | `~/.claude/settings.json` | dispatch an Agent: a `SubagentStart` row with `agent_id`; the child's tool rows carry the same `agent_id`; a PermissionRequest yields a row |
-| Pi | subscribe `tool_execution_start`, `tool_execution_end`, `agent_start`; emit `toolCallId` as the tool-use id and `toolName`; when `parentSessionId` is readable, emit one child-start event naming it | `~/.pi/agent/extensions/traces.ts` | run a tool: `tool_execution_start` then `_end` with the same `tool_use_id`; run a pi-subagents child: a child-start row naming the parent |
+| Pi | subscribe `tool_execution_start`, `tool_execution_end`, `agent_start`; emit `toolCallId` as the tool-use id and `toolName`. Child linkage: the builder decides where the parent is knowable. pi-subagents is not always active, so the receipt must be emittable from whatever does know (`traces.ts` if the extension context exposes the parent, pi-subagents at spawn if only it does); the receipt shape is one child-start row naming the parent either way | `~/.pi/agent/extensions/traces.ts`, possibly pi-subagents | run a tool: `tool_execution_start` then `_end` with the same `tool_use_id`; run a pi-subagents child: a child-start row naming the parent |
 | grok | register PreToolUse; confirm the payload carries a tool-use id (name the field); check whether `agent/subagent/mod.rs` fires any start or stop hook; fix HARNESS-FACTS row 47 | `~/.grok/hooks/traces.json`, `docs/HARNESS-FACTS.md` | run a tool in grok-fork: `PreToolUse` with an id, before its `PostToolUse` |
 
 ```
@@ -61,19 +61,21 @@ The Follower takes structure from receipts and content from files.
 
 Each line below is a requirement and its test. The renderer stays. `traces_follow.rs` and the follow parts of `traces_modal.rs` are rebuilt to this list. This section is reviewed on its own before any frontend work is dispatched.
 
+**Rule (Sab, 2026-11-01): use grok-build's existing key bindings faithfully before inventing new ones.** A new binding is allowed only for an action grok-build has no key for, and it must follow the conventions already in `xai-grok-pager` (vim keys and arrows equivalent, Esc back, Enter open). Anyone touching the frontend reads the pager's key handling and TOOL-traces-modal.md first.
+
 **One agent per screen.** The followed agent's rows fill the pane. Other agents appear as one line each where they start and end. Test: follow a parent that dispatches two children; the parent screen shows two start lines and two end lines, no child rows.
 
-**Agent to agent in one key.** On a child's start line, one key enters it; one key returns to the parent; one key cycles to the next or previous live agent at the same depth. The header is a breadcrumb: root › child › grandchild, with each agent's model (it is in the transcript, not the panel; see `subagent-model-is-hidden`). Test: pty script enters a child, returns, cycles; header text asserted at each step.
+**Agent to agent (Sab, 2026-11-01).** Following an agent that has subagents, Left (or `h`) opens the subagent dashboard: one row per subagent with its state line, model, current call and age, built for the case where there are many. From the dashboard, `j`/`k` select and Enter (or `l`) opens that subagent's full-screen follow; Esc (or `h`) returns to the parent's follow. Left on an agent with no subagents does nothing. `Tab`/`Shift-Tab` keep cycling agents as today. `h`/`j`/`k`/`l` and the arrow keys are equivalent everywhere. The header is a breadcrumb: root › child › grandchild, with each agent's model (it is in the transcript, not the panel; see `subagent-model-is-hidden`). Test: pty script opens the dashboard on a parent with two children, enters one, returns; Left on a childless agent changes nothing; header text asserted at each step.
 
 **One loud signal.** Exactly one state line, from the `Ev` stream: `running <tool> <detail> Ns`, `thinking Ns`, `waiting on you`, `idle Ns`, `compacting`, `ended`. It is the only line in the accent colour. Errors are the only other colour. Everything else is one dim weight. Test: snapshot per state from receipts alone.
 
-**Rows carry the real thing.** A tool call is one line, tool plus detail, expanding in place to the full input and output. Assistant text folds to its first line, expanding in place. Noise rows (`classify.rs` already names them) are hidden by default and one key shows them. Test: expand a Bash row; the command and the output are byte-equal to the transcript.
+**Rows carry the real thing.** A tool call is one line, tool plus detail. The highlighted call shows its command and result inline under the row (as `traces_body` does today, 40-line cap) and Enter opens the full payload view (#29), unchanged. Assistant text folds to its first line and opens the same way. Noise rows (`classify.rs` already names them) are hidden by default and one key shows them. Test: highlight a Bash row; the inline command and output and the payload view are byte-equal to the transcript.
 
 **No dead chrome.** Every key in the footer is exercised by a pty test or removed. Every pane, column and badge that does not serve following is absent from follow mode. The current inventory to cut from is ISSUES-ux-audit.md P1. Test: the footer's key list equals the set of keys with a passing test.
 
-**Half a screen works.** Layout is header, state line, rows. No fixed-width side panel in follow mode. At 80 columns the detail truncates with an ellipsis and expansion still works. At 20 rows the header and state line stay and rows scroll. Test: the same pty script at 200×50 and 80×20 passes both.
+**Half a screen works.** The tool-call stream is the primary region and always survives. Side regions (Sab's example sketch, 2026-11-01, not binding: git state, tool-call preview, session info) exist only if they serve following, and they collapse first when width is cut. At 80 columns the detail truncates with an ellipsis and the inline body still shows. At 20 rows the header and state line stay and rows scroll. Test: the same pty script at 200×50 and 80×20 passes both.
 
-**Keyboard first.** j/k and arrows move, g/G ends, Enter expands, Tab and Shift-Tab cycle agents, Backspace returns to the parent, `/` filters the loaded rows, `f` toggles tailing (auto-scroll to newest), `q` leaves. No mouse-only action exists. Test: each key in a pty test.
+**Keyboard first.** Today's bindings stay: `j`/`k` and arrows scroll and pause the tail, `g` first row, `G` resume tailing, `Tab`/`Shift-Tab` cycle agents, `e` next failed call, Enter opens the payload view, `o` the trajectory, `Esc`/`q` back. Added: Left/`h` subagent dashboard, Enter/`l` enter the selected subagent, Esc/`h` back to the parent. `h`/`j`/`k`/`l` and arrows are equivalent everywhere. No mouse-only action exists. Test: each key in a pty test; the hint line lists exactly the keys that have one.
 
 **Event-driven redraw.** The hook wake socket (#38) exists; the modal still polls at 1 s. Follow mode redraws on wake, polling only as a fallback. Test: a receipt arriving redraws within one tick without waiting for the poll.
 
@@ -86,8 +88,3 @@ Each line below is a requirement and its test. The renderer stays. `traces_follo
 Stages 1 and 2 are one spike, run at once: a Sonnet worker on `live.rs` and `follow.rs` (the only one touching those files), a Haiku worker on `traces.ts`, a Haiku worker on grok's hook registration, payload check and HARNESS-FACTS row 47, and the lead editing `~/.claude/settings.json`. Each worker returns a diff and one test on a branch. The lead builds grok-fork and grok-traces, installs via `.new` then `mv`, rsyncs to sab-air. Sab runs the three actions per harness and looks at the pane.
 
 Stage 3 is dispatched only after this section is reviewed, one lane per bold requirement, each lane a pty test first.
-
-## Open to Sab
-
-1. Pi child linkage: emit it from `traces.ts` when `parentSessionId` is readable from the extension context, or from pi-subagents itself. The Pi worker reports which is possible before changing either.
-2. The Stage 3 key bindings above are proposed, not decided.
