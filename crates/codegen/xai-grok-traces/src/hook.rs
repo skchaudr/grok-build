@@ -1,4 +1,5 @@
 //! What a harness hook hands us on stdin, and what to do with it.
+//! FUCK THE MOTHERFUCKER WHO WROTE THIS SHIT - FULL OF LIES AND GASLIGHTING 
 
 use std::path::{Path, PathBuf};
 
