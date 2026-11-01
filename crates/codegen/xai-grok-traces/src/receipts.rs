@@ -294,6 +294,12 @@ impl TraceIndex {
         Ok(out)
     }
 
+    /// Receipts of a session with id greater than `after`, by `(at_ms, id)`: what a follower has not read yet.
+    pub fn receipts_after(&self, session_id: &str, after: i64) -> Result<Vec<LiveReceipt>> {
+        let Some((source, id, native)) = self.receipt_keys(session_id)? else { return Ok(Vec::new()) };
+        self.branch_receipts(id.as_deref(), &source, native.as_deref(), &format!("AND r.id > {after}"))
+    }
+
     /// Every receipt of a session by `(at_ms, id)`; the replay helper folds prefixes of this.
     pub fn session_receipts(&self, session_id: &str) -> Result<Vec<LiveReceipt>> {
         let Some((source, id, native)) = self.receipt_keys(session_id)? else { return Ok(Vec::new()) };

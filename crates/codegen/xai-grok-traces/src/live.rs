@@ -341,7 +341,7 @@ pub const BOUNDARY_EVENTS: &[&str] = &[
 ];
 
 /// Every event name `child_kind` can map.
-pub const CHILD_EVENTS: &[&str] = &["SubagentStart", "SubagentStop", "subagentStart", "subagentStop"];
+pub const CHILD_EVENTS: &[&str] = &["SubagentStart", "SubagentStop", "subagentStart", "subagentStop", "child_start"];
 
 /// The turn boundary an event is, per source. Event names are case-sensitive per source.
 /// A Claude `SessionStart` with detail `compact` fires mid-turn and is no boundary;
@@ -357,6 +357,9 @@ pub fn boundary(source: &str, event: &str, detail: Option<&str>) -> Option<Bound
         ("pi", "session_start" | "agent_end") => Some(Idle),
         ("pi", "agent_start") => Some(Prompt),
         ("pi", "session_shutdown") => Some(End),
+        ("grok", "SessionStart" | "Stop") => Some(Idle),
+        ("grok", "UserPromptSubmit") => Some(Prompt),
+        ("grok", "SessionEnd") => Some(End),
         ("cursor", "sessionStart" | "stop") => Some(Idle),
         ("cursor", "beforeSubmitPrompt") => Some(Prompt),
         ("cursor", "sessionEnd") => Some(End),
@@ -364,10 +367,11 @@ pub fn boundary(source: &str, event: &str, detail: Option<&str>) -> Option<Bound
     }
 }
 
-/// Subagent start/stop events: Claude `SubagentStart/Stop`, Cursor `subagentStart/Stop`.
+/// Subagent start/stop events: Claude `SubagentStart/Stop`, Cursor `subagentStart/Stop`, Pi `child_start`
+/// (sent by the Pi extension from the child's session, naming the parent's file).
 pub fn child_kind(source: &str, event: &str) -> Option<Child> {
     match (source, event) {
-        ("claude", "SubagentStart") | ("cursor", "subagentStart") => Some(Child::Start),
+        ("claude", "SubagentStart") | ("cursor", "subagentStart") | ("pi", "child_start") => Some(Child::Start),
         ("claude", "SubagentStop") | ("cursor", "subagentStop") => Some(Child::Stop),
         _ => None,
     }
@@ -410,9 +414,9 @@ pub fn norm(source: &str, event: &str, detail: Option<&str>) -> Option<Ev> {
         return Some(if c == Child::Start { Ev::ChildStart } else { Ev::ChildStop });
     }
     match (source, event) {
-        ("claude", "PreToolUse") | ("pi", "tool_execution_start") => Some(Ev::Pre),
+        ("claude" | "grok", "PreToolUse") | ("pi", "tool_execution_start") => Some(Ev::Pre),
         ("cursor", "preToolUse" | "beforeShellExecution" | "beforeMCPExecution" | "beforeReadFile") => Some(Ev::Pre),
-        ("claude", "PostToolUse" | "PostToolUseFailure" | "PermissionDenied") | ("pi", "tool_execution_end") => Some(Ev::Post),
+        ("claude", "PostToolUse" | "PostToolUseFailure" | "PermissionDenied") | ("grok", "PostToolUse") | ("pi", "tool_execution_end") => Some(Ev::Post),
         ("cursor", "postToolUse" | "postToolUseFailure" | "afterShellExecution" | "afterMCPExecution") => Some(Ev::Post),
         ("cursor", "afterFileEdit" | "afterAgentThought" | "afterAgentResponse") => Some(Ev::Tick),
         ("claude", "PermissionRequest") => Some(Ev::Ask),
@@ -1066,9 +1070,10 @@ mod tests {
         assert_eq!(child_kind("claude", "SubagentStop"), Some(Child::Stop));
         assert_eq!(child_kind("cursor", "subagentStart"), Some(Child::Start));
         assert_eq!(child_kind("cursor", "subagentStop"), Some(Child::Stop));
+        assert_eq!(child_kind("pi", "child_start"), Some(Child::Start));
         assert_eq!((child_kind("claude", "subagentStart"), child_kind("cursor", "SubagentStop"), child_kind("pi", "SubagentStart")), (None, None, None));
         for e in CHILD_EVENTS {
-            assert!(["claude", "cursor"].iter().any(|s| child_kind(s, e).is_some()), "{e}");
+            assert!(["claude", "cursor", "pi"].iter().any(|s| child_kind(s, e).is_some()), "{e}");
         }
     }
 
@@ -1734,6 +1739,11 @@ mod seq {
         assert_eq!(n("claude", "PostCompact", None), Some(CompactEnd));
         assert_eq!((n("pi", "tool_execution_start", None), n("pi", "agent_end", None)), (Some(Pre), Some(Idle { failed: false })));
         assert_eq!(n("pi", "PreToolUse", None), None);
+        assert_eq!((n("pi", "child_start", None), n("grok", "PreToolUse", None), n("grok", "PostToolUse", None)), (Some(ChildStart), Some(Pre), Some(Post)));
+        assert_eq!(
+            [n("grok", "UserPromptSubmit", None), n("grok", "Stop", None), n("grok", "SessionStart", None), n("grok", "SessionEnd", None)],
+            [Some(Prompt), Some(Idle { failed: false }), Some(Idle { failed: false }), Some(End { failed: false })]
+        );
         for e in ["preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile"] {
             assert_eq!(n("cursor", e, None), Some(Pre), "{e}");
         }

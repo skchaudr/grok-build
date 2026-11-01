@@ -88,11 +88,13 @@ fn cursor_tool(v: &Value, r: &mut Receipt) {
     }
 }
 
-/// `detail` for events not handled above: a call's arguments, a notification type, a SessionStart source.
+/// `detail` for events not handled above: a call's arguments, a notification type, a SessionStart source,
+/// a subagent's transcript path (`SubagentStop`).
 fn detail(source: &str, v: &Value, r: &Receipt) -> Option<String> {
     match (source, r.event.as_str()) {
         ("claude", "Notification") => first_str(v, &NOTIFICATION_TYPE),
         ("claude", "SessionStart") => first_str(v, &["source"]),
+        ("claude", "SubagentStop") => first_str(v, &["agent_transcript_path"]),
         _ => {
             let input = TOOL_INPUT.iter().find_map(|k| v.get(*k))?;
             call_detail(r.tool.as_deref()?, input)

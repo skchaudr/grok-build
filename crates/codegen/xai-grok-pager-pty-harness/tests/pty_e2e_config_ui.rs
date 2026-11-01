@@ -55,6 +55,8 @@ mod subscription_watch_and_gate_verify_pty;
 mod traces_live;
 #[path = "pty_e2e/traces_modal_follow.rs"]
 mod traces_modal_follow;
+#[path = "pty_e2e/traces_modal_follow_receipts.rs"]
+mod traces_modal_follow_receipts;
 #[path = "pty_e2e/traces_modal_ledger_trajectory_inspector.rs"]
 mod traces_modal_ledger_trajectory_inspector;
 #[path = "pty_e2e/traces_standalone_entry.rs"]

@@ -3,25 +3,25 @@
 use super::common::*;
 
 // Synthetic fixture only.
-const SESSION: &str = "0b7e1c2a-0000-4000-8000-0000000000f1";
-const TITLE: &str = "ptyfollowtask";
-const WAIT: Duration = Duration::from_secs(10);
+pub(super) const SESSION: &str = "0b7e1c2a-0000-4000-8000-0000000000f1";
+pub(super) const TITLE: &str = "ptyfollowtask";
+pub(super) const WAIT: Duration = Duration::from_secs(10);
 
-const USER: &str = r#"{"type":"user","timestamp":"2026-10-01T00:00:00Z","cwd":"/w/claude","message":{"role":"user","content":"ptyfollowtask"}}"#;
+pub(super) const USER: &str = r#"{"type":"user","timestamp":"2026-10-01T00:00:00Z","cwd":"/w/claude","message":{"role":"user","content":"ptyfollowtask"}}"#;
 const CALL: &str = r#"{"type":"assistant","timestamp":"2026-10-01T00:00:05Z","message":{"role":"assistant","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"f1","name":"Bash","input":{"command":"echo ptyfollowcmd","description":"say ptyfollowcmd"}}]}}"#;
 const RESULT: &str = r#"{"type":"user","timestamp":"2026-10-01T00:00:06Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"f1","content":"ptyfollowout"}]}}"#;
 // A terminal last line is what completes a transcript; the index keeps a fresh file active until then.
-const END: &str = r#"{"type":"session_end","timestamp":"2026-10-01T00:00:08Z"}"#;
+pub(super) const END: &str = r#"{"type":"session_end","timestamp":"2026-10-01T00:00:08Z"}"#;
 const REPLY: &str = r#"{"type":"assistant","timestamp":"2026-10-01T00:00:07Z","message":{"role":"assistant","content":[{"type":"text","text":"ptyfollowdone"}]}}"#;
 
 /// `grok-traces`: `GROK_TRACES_BIN`, else next to the pager binary.
-fn traces_binary(pager: &Path) -> PathBuf {
+pub(super) fn traces_binary(pager: &Path) -> PathBuf {
     std::env::var_os("GROK_TRACES_BIN").map(PathBuf::from).unwrap_or_else(|| pager.with_file_name("grok-traces"))
 }
 
 /// What a harness hook does: `grok-traces hook claude` with the event JSON on stdin, same HOME as the pager.
 /// The hook is a direct child of this test binary, so the row stays live until `SessionEnd`.
-fn run_hook(bin: &Path, home: &Path, transcript: &Path, event: &str, extra: serde_json::Value) {
+pub(super) fn run_hook(bin: &Path, home: &Path, transcript: &Path, event: &str, extra: serde_json::Value) {
     use std::io::Write;
     let mut payload = serde_json::json!({
         "hook_event_name": event,
@@ -45,7 +45,7 @@ fn run_hook(bin: &Path, home: &Path, transcript: &Path, event: &str, extra: serd
     assert!(out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(), "{event} hook: {out:?}");
 }
 
-fn append(path: &Path, line: &str) {
+pub(super) fn append(path: &Path, line: &str) {
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
     writeln!(f, "{line}").unwrap();

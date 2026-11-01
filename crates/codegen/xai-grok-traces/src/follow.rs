@@ -5,11 +5,12 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
-use std::time::SystemTime;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use crate::index::session_id;
+use crate::live::{Ev, LiveReceipt, norm};
 use crate::normalize::{clean_text, normalize};
 use crate::roots::resolve;
 use crate::{ACTIVE_WINDOW_MS, EventFilter, EventRow, MAX_EVENTS_PER_FILE, Result, Root, SessionRow, Status, TraceIndex};
@@ -280,7 +281,12 @@ pub fn json_event(ev: &EventRow, raw: Option<&str>, call_id: Option<&str>, agent
 }
 
 struct Followed {
+    /// The agent's name in the output: its session row id, or for a child adopted from a receipt its `agent_id`.
     id: String,
+    /// The session row to read files from; `None` while a receipt-born child has no transcript yet.
+    row: Option<String>,
+    /// The receipt `agent_id` of a child adopted from a receipt.
+    agent_id: Option<String>,
     depth: usize,
     last_line: i64,
     ended: bool,
@@ -291,6 +297,32 @@ struct Followed {
     announce: Option<String>,
     /// Tool call id -> line of calls with no result yet; the index puts a call's duration on the call row.
     calls: HashMap<String, i64>,
+}
+
+/// A call opened by a `Pre` receipt. Its file row is not printed again; `done` once its result was printed.
+struct RcptCall {
+    agent: String,
+    depth: usize,
+    at_ms: i64,
+    done: bool,
+    /// When a failed `Post` arrived: the file's result prints the error and takes its duration from this.
+    post_ms: Option<i64>,
+}
+
+/// `agent-<id>.jsonl` under `dir`, at most `levels` directories down (Claude: `subagents/` and `subagents/workflows/<wf>/`).
+fn find_agent_file(dir: &Path, name: &str, levels: usize) -> Option<PathBuf> {
+    for e in fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.file_name().is_some_and(|n| n == name) {
+            return Some(p);
+        }
+        if levels > 0 && p.is_dir() {
+            if let Some(found) = find_agent_file(&p, name, levels - 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 /// The session to attach to: `id` if given, else the newest active root; only if it is live now.
@@ -313,11 +345,15 @@ pub struct Follower {
     next_idle_s: u64,
     json: bool,
     backlog: usize,
+    /// Highest receipt id read for the root.
+    rcpt_after: i64,
+    /// Calls opened from receipts, by tool-use id.
+    rcalls: HashMap<String, RcptCall>,
 }
 
 impl Follower {
     pub fn new(idx: TraceIndex, roots: Vec<Root>, root: SessionRow, children: bool, home: Option<String>) -> Self {
-        Self { idx, roots, children, home, sessions: Vec::new(), root, started: false, last_activity_ms: 0, next_idle_s: IDLE_FIRST_S, json: false, backlog: BACKLOG }
+        Self { idx, roots, children, home, sessions: Vec::new(), root, started: false, last_activity_ms: 0, next_idle_s: IDLE_FIRST_S, json: false, backlog: BACKLOG, rcpt_after: 0, rcalls: HashMap::new() }
     }
 
     /// Emit one JSON item per line (see [`json_event`]) instead of formatted text.
@@ -368,25 +404,95 @@ impl Follower {
 
     fn adopt(&mut self, s: &SessionRow, depth: usize, tail: Option<usize>, announce: Option<String>) -> Result<()> {
         let last_line = self.resume_after(&s.id, tail)?;
-        self.sessions.push(Followed { id: s.id.clone(), depth, last_line, ended: false, model: s.model.clone(), label: s.label.clone(), announce, calls: HashMap::new() });
+        self.sessions.push(Followed { id: s.id.clone(), row: Some(s.id.clone()), agent_id: None, depth, last_line, ended: false, model: s.model.clone(), label: s.label.clone(), announce, calls: HashMap::new() });
         Ok(())
     }
 
-    /// Subagent transcripts are indexed by scans only; index the live ones beside this session's file so
-    /// they show up (Claude: `<stem>/subagents/`, Cursor: `subagents/` next to the transcript).
-    fn probe_subagents(&mut self, path: &Path, now_ms: i64) -> Result<()> {
-        let dirs = [Some(path.with_extension("").join("subagents")), path.parent().map(|p| p.join("subagents"))];
-        for dir in dirs.into_iter().flatten() {
-            let Ok(entries) = fs::read_dir(&dir) else { continue };
-            for p in entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "jsonl")) {
-                let fresh = fs::metadata(&p)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                    .is_some_and(|t| now_ms - (t.as_millis() as i64) < ACTIVE_WINDOW_MS);
-                if fresh {
-                    self.index(&p)?;
+    /// The followed agent for a receipt's `agent_id` (`None`: the root). A child not seen before is adopted
+    /// now, without a file, and its start is printed. `None` when children are off.
+    fn agent_at(&mut self, agent_id: Option<&str>, at_ms: i64, out: &mut Vec<String>) -> Option<usize> {
+        let Some(a) = agent_id else { return Some(0) };
+        if let Some(at) = self.sessions.iter().position(|f| f.agent_id.as_deref() == Some(a)) {
+            return Some(at);
+        }
+        if !self.children {
+            return None;
+        }
+        out.push(if self.json { agent_item("agent_start", a, 1, Some(at_ms), None, None).to_string() } else { started_line(None, 1) });
+        self.sessions.push(Followed { id: a.to_string(), row: None, agent_id: Some(a.to_string()), depth: 1, last_line: -1, ended: false, model: None, label: None, announce: None, calls: HashMap::new() });
+        Some(self.sessions.len() - 1)
+    }
+
+    /// Binds a receipt-born child to its transcript: `hint` (the path a stop receipt carries), else
+    /// `agent-<agent_id>.jsonl` under the root's `subagents/`. Does nothing while the file does not exist.
+    fn attach(&mut self, at: usize, hint: Option<&str>) -> Result<()> {
+        let Some(agent) = self.sessions[at].agent_id.clone() else { return Ok(()) };
+        let path = hint.map(PathBuf::from).or_else(|| find_agent_file(&self.root.file_path.with_extension("").join("subagents"), &format!("agent-{agent}.jsonl"), 2));
+        let Some((root, spelled)) = path.filter(|p| p.is_file()).and_then(|p| resolve(&p, &self.roots).map(|(r, s)| (r, s.to_path_buf()))) else { return Ok(()) };
+        self.idx.index_file(root, &spelled)?;
+        let sid = session_id(&root.source, &spelled.to_string_lossy());
+        if let Some(kid) = self.idx.session(&sid)? {
+            self.sessions[at].row = Some(kid.id);
+        }
+        Ok(())
+    }
+
+    /// The structure of the run, from receipts: children start and stop, calls open and close.
+    /// Content (text, results, output) stays with the files. A `Pre` is printed now; its file row is skipped.
+    fn receipts(&mut self, recs: &[LiveReceipt], out: &mut Vec<String>) -> Result<()> {
+        for r in recs {
+            self.rcpt_after = self.rcpt_after.max(r.id);
+            let Some(ev) = norm(&self.root.source, &r.event, r.detail.as_deref()) else { continue };
+            let call_id = r.tool_use_id.as_deref();
+            match ev {
+                Ev::ChildStart => {
+                    if r.agent_id.is_some() {
+                        self.agent_at(r.agent_id.as_deref(), r.at_ms, out);
+                    }
                 }
+                Ev::ChildStop => {
+                    let Some(at) = self.sessions.iter().position(|f| f.agent_id.is_some() && f.agent_id == r.agent_id) else { continue };
+                    if self.sessions[at].row.is_none() {
+                        self.attach(at, r.detail.as_deref())?;
+                    }
+                    let f = &mut self.sessions[at];
+                    if f.row.is_none() && !f.ended {
+                        f.ended = true;
+                        out.push(if self.json { agent_item("agent_end", &f.id, f.depth, Some(r.at_ms), None, None).to_string() } else { ended_line(f.depth) });
+                    }
+                }
+                Ev::Pre => {
+                    let Some(id) = call_id.filter(|id| !self.rcalls.contains_key(*id)) else { continue };
+                    let Some(at) = self.agent_at(r.agent_id.as_deref(), r.at_ms, out) else { continue };
+                    let (agent, depth) = (self.sessions[at].id.clone(), self.sessions[at].depth);
+                    let (tool, what) = (r.tool.as_deref().unwrap_or_default(), r.detail.as_deref().map(first_line).unwrap_or_default());
+                    out.push(if self.json {
+                        let mut v = item("call", &agent, depth, None, Some(r.at_ms));
+                        (v["call_id"], v["tool"], v["what"]) = (json!(id), json!(tool), json!(what));
+                        v.to_string()
+                    } else {
+                        format!("{}→ {tool}  {}", indent(depth), clip(what, CLIP)).trim_end().to_string()
+                    });
+                    self.rcalls.insert(id.to_string(), RcptCall { agent, depth, at_ms: r.at_ms, done: false, post_ms: None });
+                }
+                Ev::Post => {
+                    let Some(c) = call_id.and_then(|id| self.rcalls.get_mut(id)).filter(|c| !c.done) else { continue };
+                    let ms = (r.at_ms - c.at_ms).max(0);
+                    c.post_ms = Some(r.at_ms);
+                    // A failure waits for the file's result: only it has the error text.
+                    if r.event.ends_with("Failure") || r.event == "PermissionDenied" {
+                        continue;
+                    }
+                    c.done = true;
+                    out.push(if self.json {
+                        let mut v = item("result", &c.agent, c.depth, None, Some(r.at_ms));
+                        (v["call_id"], v["ok"], v["ms"]) = (json!(call_id), json!(true), json!(ms));
+                        v.to_string()
+                    } else {
+                        format!("{}   ✓ {}", indent(c.depth), took(ms))
+                    });
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -396,7 +502,8 @@ impl Follower {
     fn call_duration(&mut self, at: usize, result_id: Option<&str>) -> Result<Option<i64>> {
         let Some(line) = result_id.and_then(|id| self.sessions[at].calls.remove(id)) else { return Ok(None) };
         let filter = EventFilter { since_line: Some(line - 1), limit: 1, include_noise: true, ..Default::default() };
-        Ok(self.idx.list_events(&self.sessions[at].id, &filter)?.into_iter().find(|e| e.line == line).and_then(|e| e.duration_ms))
+        let Some(row) = self.sessions[at].row.clone() else { return Ok(None) };
+        Ok(self.idx.list_events(&row, &filter)?.into_iter().find(|e| e.line == line).and_then(|e| e.duration_ms))
     }
 
     /// [`Self::tick`] as the structured items `--json` prints (see [`json_event`], [`agent_item`], [`model_item`]); needs [`Self::with_json`].
@@ -423,21 +530,49 @@ impl Follower {
             }
             self.index(&root.file_path)?;
             self.adopt(&root, 0, Some(self.backlog), None)?;
+            // Receipts from before the follow: only what is still in flight (a call or child with no close yet).
+            self.rcpt_after = self.idx.receipts_watermark()?;
+            let recs = self.idx.turn_receipts(&root.id)?;
+            let closed: Vec<&str> = recs
+                .iter()
+                .filter(|r| matches!(norm(&root.source, &r.event, r.detail.as_deref()), Some(Ev::Post | Ev::ChildStop)))
+                .filter_map(|r| r.tool_use_id.as_deref().or(r.agent_id.as_deref()))
+                .collect();
+            let open: Vec<LiveReceipt> = recs
+                .iter()
+                .filter(|r| matches!(norm(&root.source, &r.event, r.detail.as_deref()), Some(Ev::Pre | Ev::ChildStart)))
+                .filter(|r| now_ms - r.at_ms < ACTIVE_WINDOW_MS && !r.tool_use_id.as_deref().or(r.agent_id.as_deref()).is_some_and(|k| closed.contains(&k)))
+                .cloned()
+                .collect();
+            self.receipts(&open, &mut out)?;
+        } else {
+            let recs = self.idx.receipts_after(&self.root.id, self.rcpt_after)?;
+            self.receipts(&recs, &mut out)?;
         }
         let mut printed = false;
         let mut at = 0;
         while at < self.sessions.len() {
             let (id, depth) = (self.sessions[at].id.clone(), self.sessions[at].depth);
-            let Some(row) = self.idx.session(&id)? else { at += 1; continue };
+            if self.sessions[at].row.is_none() {
+                self.attach(at, None)?;
+            }
+            let Some(rid) = self.sessions[at].row.clone() else { at += 1; continue };
+            let Some(row) = self.idx.session(&rid)? else { at += 1; continue };
             out.extend(self.sessions[at].announce.take());
             self.index(&row.file_path)?;
             if self.children {
-                self.probe_subagents(&row.file_path, now_ms)?;
-                for kid in self.idx.children(&id)? {
-                    if kid.status == Status::Active && !self.sessions.iter().any(|f| f.id == kid.id) {
-                        let start = self.start_block(&kid, depth + 1);
-                        self.adopt(&kid, depth + 1, first.then_some(self.backlog), Some(start))?;
+                for kid in self.idx.children(&rid)? {
+                    if kid.status != Status::Active || self.sessions.iter().any(|f| f.row.as_deref() == Some(kid.id.as_str())) {
+                        continue;
                     }
+                    // A child already adopted from its start receipt: bind it to this file instead of adopting twice.
+                    let stem = kid.file_path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.strip_prefix("agent-")).map(str::to_string);
+                    if let Some(f) = self.sessions.iter_mut().find(|f| f.row.is_none() && f.agent_id.is_some() && f.agent_id == stem) {
+                        f.row = Some(kid.id.clone());
+                        continue;
+                    }
+                    let start = self.start_block(&kid, depth + 1);
+                    self.adopt(&kid, depth + 1, first.then_some(self.backlog), Some(start))?;
                 }
             }
             // An ended session that is active again resumes before its new rows (a subagent's is silent in text).
@@ -449,9 +584,9 @@ impl Follower {
                 }
             }
             let filter = EventFilter { since_line: Some(self.sessions[at].last_line), limit: MAX_EVENTS_PER_FILE, ..Default::default() };
-            for mut ev in self.idx.list_events(&id, &filter)? {
+            for mut ev in self.idx.list_events(&rid, &filter)? {
                 self.sessions[at].last_line = ev.line;
-                let raw = self.idx.raw_line(&id, ev.line).ok().flatten();
+                let raw = self.idx.raw_line(&rid, ev.line).ok().flatten();
                 let ids = matches!(ev.role.as_deref(), Some("tool" | "tool_result"))
                     .then(|| raw.as_deref().and_then(|r| serde_json::from_str::<Value>(r).ok()).map(|v| normalize(&v)))
                     .flatten();
@@ -467,7 +602,18 @@ impl Follower {
                     }
                     _ => {}
                 }
-                let block = if self.json {
+                // A call a `Pre` receipt already printed is not printed again; nor its result once a `Post` closed it.
+                let skip = match (ev.role.as_deref(), call_id.as_deref().or(result_id.as_deref()).and_then(|i| self.rcalls.get_mut(i))) {
+                    (Some("tool"), Some(_)) => true,
+                    (Some("tool_result"), Some(c)) => {
+                        ev.duration_ms = ev.duration_ms.or(c.post_ms.map(|p| p - c.at_ms));
+                        std::mem::replace(&mut c.done, true)
+                    }
+                    _ => false,
+                };
+                let block = if skip {
+                    None
+                } else if self.json {
                     if let Some(m) = ev.model.as_ref().filter(|m| self.sessions[at].model.as_ref() != Some(*m)) {
                         out.push(model_item(&id, depth, Some(ev.line), ev.timestamp, m, self.sessions[at].label.as_deref()).to_string());
                         self.sessions[at].model = Some(m.clone());

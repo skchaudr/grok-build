@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 
 use xai_grok_traces::follow::Follower;
-use xai_grok_traces::{Format, Root, SessionFilter, TraceIndex};
+use xai_grok_traces::{Format, Receipt, Root, SessionFilter, TraceIndex};
 
 fn append(path: &Path, text: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -41,6 +41,45 @@ fn setup(tmp: &tempfile::TempDir, json: bool, backlog: usize) -> (Follower, std:
     (Follower::new(idx, vec![root], session, true, home).with_json(json).with_backlog(backlog), parent, kid)
 }
 
+/// A receipt for the only indexed session, as its hook would record it.
+fn record(tmp: &tempfile::TempDir, event: &str, at_ms: i64, tool_use_id: Option<&str>, agent_id: Option<&str>, tool: Option<&str>, detail: Option<&str>) {
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
+    let session_id = idx.list_sessions(&SessionFilter::default()).unwrap().remove(0).id;
+    let s = |v: Option<&str>| v.map(String::from);
+    let r = Receipt { at_ms, source: "claude".into(), event: event.into(), session_id: Some(session_id), tool_use_id: s(tool_use_id), agent_id: s(agent_id), tool: s(tool), detail: s(detail), ..Default::default() };
+    idx.record_receipt(&r).unwrap();
+}
+
+/// What the `SubagentStart` hook records: a child `a1`. Children are found from receipts.
+fn subagent_start(tmp: &tempfile::TempDir) {
+    record(tmp, "SubagentStart", 0, None, Some("a1"), None, None);
+}
+
+#[test]
+fn follow_prints_calls_from_receipts_and_not_again_from_the_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut f, parent, _) = setup(&tmp, true, 10);
+    assert_eq!(kinds(&f.tick(0).unwrap()), ["model", "user", "text", "call"]);
+
+    // Pre: the call row, with its command, before the transcript has it. Post: closed, duration from the receipts.
+    record(&tmp, "PreToolUse", 1_000, Some("p9"), None, Some("Bash"), Some("echo hi"));
+    let pre = f.tick(1_000).unwrap();
+    assert_eq!(kinds(&pre), ["call"]);
+    let call: serde_json::Value = serde_json::from_str(&pre[0]).unwrap();
+    assert_eq!((call["call_id"].as_str(), call["tool"].as_str(), call["what"].as_str()), (Some("p9"), Some("Bash"), Some("echo hi")));
+    record(&tmp, "PostToolUse", 3_500, Some("p9"), None, Some("Bash"), None);
+    let post = f.tick(3_500).unwrap();
+    assert_eq!(kinds(&post), ["result"]);
+    let result: serde_json::Value = serde_json::from_str(&post[0]).unwrap();
+    assert_eq!((result["call_id"].as_str(), result["ms"].as_i64(), result["ok"].as_bool()), (Some("p9"), Some(2500), Some(true)));
+
+    // The transcript catches up: neither its call nor its result is printed a second time.
+    append(&parent, r#"{"type":"assistant","timestamp":"2026-10-01T00:00:20Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"p9","name":"Bash","input":{"command":"echo hi"}}]}}
+{"type":"user","timestamp":"2026-10-01T00:00:21Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"p9","content":"hi"}]}}
+"#);
+    assert!(f.tick(4_000).unwrap().is_empty());
+}
+
 #[test]
 fn follow_prints_new_rows_per_tick_and_children_under_their_parent() {
     let tmp = tempfile::tempdir().unwrap();
@@ -66,13 +105,15 @@ fn follow_prints_new_rows_per_tick_and_children_under_their_parent() {
     append(&parent, T2);
     append(&kid, CHILD);
     append(&kid.with_extension("meta.json"), r#"{"agentType":"Explore","description":"Check the lexer","finished":false}"#);
+    subagent_start(&tmp);
     let now = chrono::Utc::now().timestamp_millis();
     let two = f.tick(now).unwrap().join("\n");
+    // The start comes from the receipt (before the parent's rows, no model yet); the child's rows from its file.
     assert_eq!(
         two,
-        "   ✓ 2.0s\n\
+        "  ↳ started\n\
+         \x20  ✓ 2.0s\n\
          → Agent  Check the lexer\n\
-         \x20 ↳ haiku-4-5 started\n\
          \n  ▶ you  look at the lexer\n\
          \x20 → Read  src/lexer.rs"
     );
@@ -104,12 +145,16 @@ fn follow_json_streams_items_and_subagent_lifecycle() {
     append(&kid, CHILD);
     let meta = kid.with_extension("meta.json");
     append(&meta, r#"{"agentType":"Explore","description":"Check the lexer","finished":false}"#);
+    subagent_start(&tmp);
     let now = chrono::Utc::now().timestamp_millis();
     let two = f.tick(now).unwrap();
-    assert_eq!(kinds(&two), ["result", "call", "agent_start", "user", "call"]);
-    let start: serde_json::Value = serde_json::from_str(&two[2]).unwrap();
-    assert_eq!((start["depth"].as_i64(), start["model"].as_str(), start["label"].as_str()), (Some(1), Some("claude-haiku-4-5"), Some("Check the lexer")));
-    let first: serde_json::Value = serde_json::from_str(&two[0]).unwrap();
+    // The start comes from the receipt, so it leads and carries no model; the model follows as its own item.
+    assert_eq!(kinds(&two), ["agent_start", "result", "call", "user", "model", "call"]);
+    let start: serde_json::Value = serde_json::from_str(&two[0]).unwrap();
+    assert_eq!((start["agent"].as_str(), start["depth"].as_i64(), start["model"].as_str()), (Some("a1"), Some(1), None));
+    let model: serde_json::Value = serde_json::from_str(&two[4]).unwrap();
+    assert_eq!((model["agent"].as_str(), model["model"].as_str()), (Some("a1"), Some("claude-haiku-4-5")));
+    let first: serde_json::Value = serde_json::from_str(&two[1]).unwrap();
     assert_eq!(first["call_id"].as_str(), Some("t1"));
     assert_eq!(first["ms"].as_i64(), Some(2000), "result items carry the call's duration");
 
