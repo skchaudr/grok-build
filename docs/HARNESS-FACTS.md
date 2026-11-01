@@ -2,7 +2,7 @@
 
 One place for per-harness facts that agents keep rediscovering. Check here before researching; update here when you learn something. Every row names its source and whether it was **live**-tested, read from **code/schema**, or only **documented**.
 
-Last updated 2026-10-26.
+Last updated 2026-11-01.
 
 ## Session logs
 
@@ -44,9 +44,18 @@ Pi paths are under `~/.pi/agent/install/releases/<ver>/node_modules/@earendil-wo
 | Codex | `PreToolUse` (shell only) in `~/.codex/hooks.json` | stdout `{"decision":"deny","reason":"…"}`, exit 2 | not proven | `skchaudr/agent-harness-hooks` `adapters/grok_codex/entry.py:46-48`, `docs/02-adapter-grok-codex.md:45-52` | documented; offline test only (`scripts/test-hook.sh:51`) |
 | Pi | extension `pi.on("tool_call")` | return `{ block: true, reason }` (undefined = allow) | not proven | `agent-harness-hooks` `adapters/pi/extension.template.ts:11-16`, `docs/04-adapter-pi.md:19-24`; Pi `docs/extensions.md` | documented |
 | Cursor | `preToolUse` / `beforeShellExecution` in `~/.cursor/hooks.json` | **no deny path exists anywhere**; all local hooks reply `{"permission":"allow"}` (`xai-grok-traces/src/bin/grok-traces.rs:59-65`; Orca `cursor-hook.sh` cannot deny via stdout) | n/a | allow path: `MAP.md` (CLI works, app unverified) | allow **live** (CLI); deny unknown |
-| Grok | none | grok-build has no PreToolUse | n/a | `~/.grok/hooks/*.json` uses UserPromptSubmit, PostToolUse, SessionStart, Stop, SessionEnd only | code |
+| Grok | `PreToolUse`, `SubagentStart`, `SubagentStop` in `~/.grok/hooks/traces.json` (all `grok-traces hook grok`, registered 2026-11-01) | not checked; capture-only | not checked | `async: true` is ignored by grok (`xai-grok-hooks/src/config.rs:101-111` has no such field); hooks run synchronously, so PreToolUse adds a process spawn before each tool (`xai-grok-hooks/src/dispatcher.rs:320-340`, `xai-grok-shell/src/session/acp_session_impl/tool_calls.rs:1310-1320`). PreToolUse payload `toolUseId`, `toolName`, `toolInput` (`xai-grok-hooks/src/event.rs:474-480`, camelCase), fired at `tool_calls.rs:2798`; `xai-grok-traces/src/hook.rs:26` `TOOL_USE_ID` aliases cover `toolUseId` | code; not run live |
 
 Open: for every harness, one live session proving the deny **reason** reaches the model and the model retries.
+
+## Grok subagent hooks
+
+Read from code 2026-11-01; not run live.
+
+- `SubagentStart` fires in the parent session when a subagent is spawned: `xai-grok-shell/src/session/acp_session_impl/updates.rs:726` (`SubagentSpawned` arm, line 655). Payload `subagentId`, `subagentType`, `description` (`xai-grok-hooks/src/event.rs:551-558`).
+- `agent/subagent/mod.rs` fires no command hook. Line 190 is a doc comment on `client_hooks` (the ACP client path, which `has_enabled_hooks_for` at `session/acp_session/hooks.rs:168-176` also checks); lines 1812-1834 only build cancel messages.
+- `SubagentStop` has no observe fire site. The `SubagentFinished` arm (`updates.rs:747-823`) fires nothing. The only fire is the child's turn-end gate, `session/acp_session_impl/stop_gate.rs:242` (phase `Gate`, `stop_gate.rs:209`), which runs only when a `SubagentStop` hook is registered. The child gets the parent's registry (`handle_request.rs:1663`), so the `traces.json` `SubagentStop` entry runs there as a gate. Empty stdout falls back to the exit code (`xai-grok-hooks/src/runner/command.rs:810-825`), so the capture hook does not block the stop.
+- `subagentId` = child `session_id`: the child's `SessionId` is `request.id` (`agent/subagent/handle_request.rs:948`), its `SessionInfo.id` (`:954`), and the envelope's `session_id` is `session_info.id` (`session/acp_session/hooks.rs:151`, `acp_session.rs:1213-1215`). So child tool rows keyed on `session_id` match `subagentId`.
 
 ## Pi workflow packages
 
