@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::PiSessionInfo;
 
 impl PiAgent {
     /// Publish Pi's local session catalog for Grok's existing native picker.
@@ -10,6 +11,21 @@ impl PiAgent {
             let state = self.state.borrow();
             catalog_session_dir(&state.bootstrap.state, &state.session_dir)
         };
+        if std::env::var_os("GROK_PI_DPI").is_some_and(|value| value == "1") {
+            // dpi-rpc shim: sessions live on a dpi-backend, not in local JSONL.
+            let sessions = match self
+                .rpc
+                .request(json!({ "type": "dpi_list_sessions" }))
+                .await
+            {
+                Ok(data) => parse_dpi_sessions(&data),
+                Err(error) => {
+                    tracing::warn!(%error, "dpi session list failed");
+                    Vec::new()
+                }
+            };
+            return self.send_session_catalog(sessions, all).await;
+        }
         let psm_cwd = cwd.clone();
         let sessions = tokio::task::spawn_blocking(move || {
             if use_psm_index {
@@ -25,6 +41,10 @@ impl PiAgent {
         })
         .await
         .unwrap_or_default();
+        self.send_session_catalog(sessions, all).await;
+    }
+
+    async fn send_session_catalog(&self, sessions: Vec<PiSessionInfo>, all: bool) {
         let paths: HashMap<_, _> = sessions
             .iter()
             .map(|session| (session.id.clone(), session.path.clone()))
@@ -1006,4 +1026,34 @@ impl PiAgent {
         let body = serde_json::to_vec(&snapshot)?;
         atomic_write(&path, &body)
     }
+}
+
+/// Rows from the dpi-rpc shim's `dpi_list_sessions`: one per durable agent,
+/// `path` = `dpi://<session>/<agent>` (handed back to `switch_session`).
+fn parse_dpi_sessions(data: &Value) -> Vec<PiSessionInfo> {
+    let rows = data
+        .get("sessions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    rows.iter()
+        .filter_map(|row| {
+            let text = |key: &str| row.get(key).and_then(Value::as_str).map(ToOwned::to_owned);
+            Some(PiSessionInfo {
+                path: PathBuf::from(text("path")?),
+                id: text("id")?,
+                cwd: text("cwd").unwrap_or_default(),
+                name: text("name"),
+                created_at: text("createdAt").unwrap_or_default(),
+                modified_at: text("modifiedAt").unwrap_or_default(),
+                message_count: row.get("messageCount").and_then(Value::as_u64).unwrap_or(0)
+                    as usize,
+                first_message: text("firstMessage").unwrap_or_default(),
+                model_id: text("modelId"),
+                total_tokens: None,
+                total_cost: None,
+                parent_session_path: text("parentSessionPath"),
+            })
+        })
+        .collect()
 }
