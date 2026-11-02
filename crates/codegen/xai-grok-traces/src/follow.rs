@@ -599,8 +599,12 @@ impl Follower {
                     let ms = (r.at_ms - c.at_ms).max(0);
                     c.post_ms = Some(r.at_ms);
                     // Only a success is closed here. A failure closes with a placeholder (the file's result links
-                    // in the real error); anything else waits for the file's result.
+                    // in the real error); anything else waits for the file's result. Text has no link: its failures
+                    // wait for the file's result, which prints the real error.
                     let Some(ok) = post_outcome(&r.event) else { continue };
+                    if !ok && !self.json {
+                        continue;
+                    }
                     c.done = true;
                     let why = if r.event == "PermissionDenied" { "denied" } else { "failed" };
                     out.push(if self.json {
@@ -634,9 +638,7 @@ impl Follower {
                 at += 1;
                 continue;
             };
-            if self.sessions[at].row.is_none() {
-                self.attach(at, None)?;
-            }
+            // Not attached here: the tick's session loop already tried this tick.
             let (row, after) = (self.sessions[at].row.clone(), self.sessions[at].rcpt_after);
             let recs = self.idx.child_receipts_after(&self.root.source, row.as_deref(), &agent, after)?;
             let seen = recs.iter().map(|r| r.id).max().unwrap_or(after);
@@ -692,11 +694,6 @@ impl Follower {
             let (kids, calls): (Vec<_>, Vec<_>) = self.open_receipts(&recs, now_ms).into_iter().partition(|r| matches!(norm(&root.source, &r.event, r.detail.as_deref()), Some(Ev::ChildStart)));
             self.receipts(&kids, None, &mut out)?;
             replay = calls;
-        } else {
-            let recs = self.idx.receipts_after(&self.root.id, self.rcpt_after)?;
-            self.rcpt_after = recs.iter().map(|r| r.id).fold(self.rcpt_after, i64::max);
-            self.receipts(&recs, None, &mut out)?;
-            self.own_session_receipts(None, &mut out)?;
         }
         let mut printed = out.len() > head_len;
         let mut at = 0;
@@ -704,6 +701,10 @@ impl Follower {
             let (id, depth) = (self.sessions[at].id.clone(), self.sessions[at].depth);
             if self.sessions[at].row.is_none() {
                 self.attach(at, None)?;
+                // A child already running when the follow began shows its backlog, not its whole file.
+                if first && let Some(rid) = self.sessions[at].row.clone() {
+                    self.sessions[at].last_line = self.resume_after(&rid, Some(self.backlog))?;
+                }
             }
             let Some(rid) = self.sessions[at].row.clone() else { at += 1; continue };
             let Some(row) = self.idx.session(&rid)? else { at += 1; continue };
@@ -733,8 +734,9 @@ impl Follower {
                     }
                     // A child already adopted from its start receipt: bind it to this file instead of adopting twice.
                     let key = child_key(&kid);
-                    if let Some(f) = self.sessions.iter_mut().find(|f| f.row.is_none() && f.agent_id.is_some() && f.agent_id == key) {
-                        f.row = Some(kid.id.clone());
+                    if let Some(i) = self.sessions.iter().position(|f| f.row.is_none() && f.agent_id.is_some() && f.agent_id == key) {
+                        let last_line = self.resume_after(&kid.id, first.then_some(self.backlog))?;
+                        (self.sessions[i].row, self.sessions[i].last_line) = (Some(kid.id.clone()), last_line);
                         continue;
                     }
                     let start = self.start_block(&kid, depth + 1);
@@ -801,7 +803,13 @@ impl Follower {
                         None
                     }
                 } else if self.json {
-                    json_event(&ev, raw.as_deref(), call_id.or(result_id).as_deref(), &id, depth).map(|v| v.to_string())
+                    json_event(&ev, raw.as_deref(), call_id.or(result_id).as_deref(), &id, depth).map(|mut v| {
+                        // A child adopted from its receipt is named by its agent id; its lines are read from its row.
+                        if rid != id {
+                            v["session"] = json!(rid);
+                        }
+                        v.to_string()
+                    })
                 } else {
                     format_event(&ev, raw.as_deref(), depth)
                 };
@@ -824,13 +832,20 @@ impl Follower {
             }
             at += 1;
         }
+        // Receipts after the files' rows, so a call never prints above the text before it and a stop never above
+        // the child's last rows. A call whose file row came first in this tick is skipped (`file_calls`).
+        let before = out.len();
         if first {
             // Calls still open at the follow's start, after the backlog rows.
-            let before = out.len();
             self.receipts(&replay, None, &mut out)?;
             self.own_session_receipts(Some(now_ms), &mut out)?;
-            printed |= out.len() > before;
+        } else {
+            let recs = self.idx.receipts_after(&self.root.id, self.rcpt_after)?;
+            self.rcpt_after = recs.iter().map(|r| r.id).fold(self.rcpt_after, i64::max);
+            self.receipts(&recs, None, &mut out)?;
+            self.own_session_receipts(None, &mut out)?;
         }
+        printed |= out.len() > before;
         if printed {
             self.last_activity_ms = now_ms;
             self.next_idle_s = IDLE_FIRST_S;

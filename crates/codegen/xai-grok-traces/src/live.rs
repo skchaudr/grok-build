@@ -628,12 +628,15 @@ fn sort_key(ev: Ev, r: &LiveReceipt) -> (i64, u8, i64) {
 
 /// The receipts the fold reads. Parent (`agent == None`): own-thread rows plus every child start/stop.
 /// Child: its `agent_id` rows minus child start/stop and boundaries (a subagent has no turns).
+/// grok and Pi children are sessions of their own whose stop never lands on the parent: their start/stop is skipped.
 fn prepare<'a>(source: &str, receipts: &'a [LiveReceipt], agent: Option<&str>) -> Vec<(Ev, &'a LiveReceipt)> {
+    let own_session_children = matches!(source, "grok" | "pi");
     let mut out: Vec<(Ev, &LiveReceipt)> = receipts
         .iter()
         .filter_map(|r| Some((norm(source, &r.event, r.detail.as_deref())?, r)))
         .filter(|(ev, r)| match agent {
-            None => r.agent_id.is_none() || matches!(ev, Ev::ChildStart | Ev::ChildStop),
+            None if matches!(ev, Ev::ChildStart | Ev::ChildStop) => !own_session_children,
+            None => r.agent_id.is_none(),
             Some(a) => r.agent_id.as_deref() == Some(a) && !matches!(ev, Ev::ChildStart | Ev::ChildStop | Ev::Idle { .. } | Ev::Prompt | Ev::End { .. }),
         })
         .collect();

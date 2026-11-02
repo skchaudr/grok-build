@@ -306,9 +306,20 @@ impl Follow {
                 }
                 "model" => {
                     let model = text(v, "model");
+                    let label = v["label"].as_str().filter(|l| !l.is_empty()).map(str::to_string);
+                    // A child started from a receipt has a start row with no model yet: name it now.
+                    let start = self.rows.iter_mut().rev().find(|r| r.agent == agent && matches!(r.body, Body::Start { .. }));
+                    if let Some(Body::Start { model: m, label: l }) = start.map(|r| &mut r.body)
+                        && m.is_none()
+                    {
+                        *m = Some(model.clone());
+                        if label.is_some() {
+                            l.clone_from(&label);
+                        }
+                    }
                     let a = self.agent_mut(&agent);
-                    if let Some(l) = v["label"].as_str().filter(|l| !l.is_empty()) {
-                        a.label = Some(l.to_string());
+                    if let Some(l) = label {
+                        a.label = Some(l);
                     }
                     let had = a.model.replace(model.clone());
                     if had.is_none_or(|m| m == model) {
@@ -776,6 +787,7 @@ mod tests {
         assert_eq!(f.rows.len(), 1, "the first model of an agent is not a row");
         let kid = f.agents.iter().find(|a| a.id == "kid").unwrap();
         assert_eq!((kid.model.as_deref(), kid.label.as_deref()), (Some("claude-haiku-4-5"), Some("Check the lexer")));
+        assert_eq!(f.rows[0].body, Body::Start { model: Some("claude-haiku-4-5".into()), label: Some("Check the lexer".into()) }, "the start row is named");
     }
 
     #[test]

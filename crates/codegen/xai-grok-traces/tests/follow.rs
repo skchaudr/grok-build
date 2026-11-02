@@ -41,10 +41,10 @@ fn setup(tmp: &tempfile::TempDir, json: bool, backlog: usize) -> (Follower, std:
     (Follower::new(idx, vec![root], session, true, home).with_json(json).with_backlog(backlog), parent, kid)
 }
 
-/// A receipt for the only indexed session, as its hook would record it.
+/// A receipt for the parent session, as its hook would record it (a Claude child's receipts land there too).
 fn record(tmp: &tempfile::TempDir, event: &str, at_ms: i64, tool_use_id: Option<&str>, agent_id: Option<&str>, tool: Option<&str>, detail: Option<&str>) {
     let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
-    let session_id = idx.list_sessions(&SessionFilter::default()).unwrap().remove(0).id;
+    let session_id = idx.list_sessions(&SessionFilter { roots_only: true, ..Default::default() }).unwrap().remove(0).id;
     let s = |v: Option<&str>| v.map(String::from);
     let r = Receipt { at_ms, source: "claude".into(), event: event.into(), session_id: Some(session_id), tool_use_id: s(tool_use_id), agent_id: s(agent_id), tool: s(tool), detail: s(detail), ..Default::default() };
     idx.record_receipt(&r).unwrap();
@@ -166,6 +166,8 @@ fn a_stop_receipt_ends_a_child_that_still_has_a_fresh_file() {
     subagent_start(&tmp);
     let now = chrono::Utc::now().timestamp_millis();
     f.tick(now).unwrap();
+    // The next tick binds the child to its file and prints its rows.
+    assert_eq!(kinds(&f.tick(now + 50).unwrap()), ["model", "user", "call"]);
     record(&tmp, "SubagentStop", now + 100, None, Some("a1"), None, None);
     assert_eq!(kinds(&f.tick(now + 500).unwrap()), ["agent_end"]);
     assert!(f.tick(now + 1_000).unwrap().is_empty(), "the fresh file does not resurrect it");
@@ -191,55 +193,97 @@ fn follow_replays_only_what_is_in_flight_at_attach_and_after_the_backlog() {
     assert!(f.tick(now + 500).unwrap().is_empty());
 }
 
+/// What a hook does with a harness payload: `extract` then `ingest` (paths resolve to the session they key).
+fn hook(tmp: &tempfile::TempDir, roots: &[Root], source: &str, payload: serde_json::Value) {
+    use xai_grok_traces::hook::{extract, ingest};
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
+    ingest(&mut idx, roots, extract(source, payload.to_string().as_bytes())).unwrap();
+}
+
+/// Ticks twice (a child adopted from its receipt binds to its file on the next tick) and returns both ticks' items.
+fn two_ticks(f: &mut Follower) -> Vec<serde_json::Value> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut items = f.tick_items(now).unwrap();
+    items.extend(f.tick_items(now + 100).unwrap());
+    items
+}
+
+fn kind_list(items: &[serde_json::Value]) -> Vec<&str> {
+    items.iter().map(|v| v["kind"].as_str().unwrap()).collect()
+}
+
 #[test]
 fn a_grok_child_is_followed_through_its_own_session_receipts_and_file() {
     let tmp = tempfile::tempdir().unwrap();
     let sessions = tmp.path().join("home/.grok/sessions");
-    let root = Root { id: "grok-sessions".into(), source: "grok".into(), path: sessions.clone(), format: Format::Jsonl, file_name: Some("chat_history.jsonl") };
+    let roots = vec![Root { id: "grok-sessions".into(), source: "grok".into(), path: sessions.clone(), format: Format::Jsonl, file_name: Some("chat_history.jsonl") }];
     let user = |t: &str| format!("{{\"type\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"{t}\"}}]}}\n");
-    append(&sessions.join("%2Fw/p1/chat_history.jsonl"), &user("parent task"));
+    let (p1, k1) = (sessions.join("%2Fw/p1"), sessions.join("%2Fw/k1"));
+    append(&p1.join("chat_history.jsonl"), &user("parent task"));
     let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
-    idx.scan(std::slice::from_ref(&root)).unwrap();
+    idx.scan(&roots).unwrap();
     let parent = idx.list_sessions(&SessionFilter::default()).unwrap().remove(0);
-    let mut f = Follower::new(idx, vec![root], parent.clone(), true, None).with_json(true);
+    let mut f = Follower::new(idx, roots.clone(), parent, true, None).with_json(true);
     f.tick(0).unwrap();
 
-    let rec = |event: &str, at_ms: i64, session: Option<&str>, native: &str, id: Option<&str>, agent: Option<&str>, detail: Option<&str>| {
-        let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
-        let r = Receipt {
-            at_ms,
-            source: "grok".into(),
-            event: event.into(),
-            session_id: session.map(String::from),
-            native_session: Some(native.into()),
-            tool_use_id: id.map(String::from),
-            agent_id: agent.map(String::from),
-            tool: id.map(|_| "Bash".to_string()),
-            detail: detail.map(String::from),
-            ..Default::default()
-        };
-        idx.record_receipt(&r).unwrap();
+    // grok's payloads: `SubagentStart` in the parent (`subagentId` = the child's session id); the child's calls and
+    // its `SubagentStop` (its turn-end gate) under the child's own session, keyed by its own transcript.
+    let updates = |dir: &Path| dir.join("updates.jsonl").to_string_lossy().into_owned();
+    hook(&tmp, &roots, "grok", serde_json::json!({"hookEventName": "SubagentStart", "sessionId": "p1", "transcriptPath": updates(&p1), "subagentId": "k1", "subagentType": "explore"}));
+    append(&k1.join("chat_history.jsonl"), &user("child task"));
+    hook(&tmp, &roots, "grok", serde_json::json!({"hookEventName": "PreToolUse", "sessionId": "k1", "transcriptPath": updates(&k1), "toolName": "Bash", "toolUseId": "g1", "toolInput": {"command": "ls -la"}}));
+    let items = two_ticks(&mut f);
+    assert_eq!(kind_list(&items), ["agent_start", "user", "call"], "{items:?}");
+    let agent = items[0]["agent"].as_str().unwrap();
+    assert_eq!((items[1]["agent"].as_str(), items[1]["text"].as_str()), (Some(agent), Some("child task")));
+    assert_eq!((items[2]["agent"].as_str(), items[2]["depth"].as_i64(), items[2]["what"].as_str()), (Some(agent), Some(1), Some("ls -la")));
+
+    hook(&tmp, &roots, "grok", serde_json::json!({"hookEventName": "SubagentStop", "sessionId": "k1", "transcriptPath": updates(&k1), "subagentId": "k1", "subagentType": "explore", "phase": "gate"}));
+    let items = f.tick_items(chrono::Utc::now().timestamp_millis()).unwrap();
+    assert_eq!(kind_list(&items), ["agent_end"], "{items:?}");
+}
+
+#[test]
+fn a_pi_child_is_linked_by_its_start_row_and_followed_through_its_own_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sessions = tmp.path().join("home/.pi/agent/sessions");
+    let roots = vec![Root { id: "pi-sessions".into(), source: "pi".into(), path: sessions.clone(), format: Format::Jsonl, file_name: None }];
+    let file = |id: &str, text: &str| {
+        format!(
+            "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"cwd\":\"/w\"}}\n\
+             {{\"type\":\"message\",\"timestamp\":\"2026-10-01T00:00:01Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n"
+        )
     };
-    // `SubagentStart` lands on the parent (`subagentId` is the agent id); the child's calls on the child's session.
-    rec("SubagentStart", 1_000, Some(&parent.id), "p1", None, Some("k1"), None);
-    rec("PreToolUse", 1_100, None, "k1", Some("g1"), None, Some("ls -la"));
-    let items = f.tick_items(1_200).unwrap();
-    let kinds: Vec<_> = items.iter().map(|v| v["kind"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["agent_start", "call"], "{items:?}");
-    assert_eq!((items[1]["agent"].as_str(), items[1]["depth"].as_i64(), items[1]["what"].as_str()), (Some("k1"), Some(1), Some("ls -la")));
+    // pi-subagents puts an async child's session under `<parent stem>/async-<run>/`.
+    let parent_file = sessions.join("--w--/2026-10-01T00-00-00_p1.jsonl");
+    let kid_file = sessions.join("--w--/2026-10-01T00-00-00_p1/async-r1/2026-10-01T00-00-05_k1.jsonl");
+    append(&parent_file, &file("p1", "parent task"));
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
+    idx.scan(&roots).unwrap();
+    let parent = idx.list_sessions(&SessionFilter::default()).unwrap().remove(0);
+    let mut f = Follower::new(idx, roots.clone(), parent, true, None).with_json(true);
+    f.tick(0).unwrap();
 
-    // Its transcript is its own session dir: once there, the child's rows come from it.
-    append(&sessions.join("%2Fw/k1/chat_history.jsonl"), &user("child task"));
-    let items = f.tick_items(1_300).unwrap();
-    let kinds: Vec<_> = items.iter().map(|v| v["kind"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["user"], "{items:?}");
-    assert_eq!((items[0]["agent"].as_str(), items[0]["text"].as_str()), (Some("k1"), Some("child task")));
+    // What traces.ts sends: `child_start` naming the parent's file with the child's session id as `agent_id`; the
+    // child's own rows under its own session file, without an `agent_id`.
+    append(&kid_file, &file("k1", "child task"));
+    let path = |p: &Path| p.to_string_lossy().into_owned();
+    hook(&tmp, &roots, "pi", serde_json::json!({"event": "child_start", "tool": "", "cwd": "/w", "session_id": "", "session_file": path(&parent_file), "agent_id": "k1"}));
+    let call = serde_json::json!({"event": "tool_execution_start", "tool": "bash", "cwd": "/w", "session_id": "k1", "session_file": path(&kid_file), "tool_use_id": "kc1", "tool_input": {"command": "ls -la"}});
+    hook(&tmp, &roots, "pi", call.clone());
+    let items = two_ticks(&mut f);
+    let seen: Vec<_> = items.iter().filter(|v| matches!(v["kind"].as_str(), Some("agent_start" | "user" | "call"))).collect();
+    assert_eq!(seen.iter().map(|v| v["kind"].as_str().unwrap()).collect::<Vec<_>>(), ["agent_start", "user", "call"], "{items:?}");
+    let agent = seen[0]["agent"].as_str().unwrap();
+    assert_eq!((seen[1]["agent"].as_str(), seen[1]["text"].as_str()), (Some(agent), Some("child task")));
+    assert_eq!((seen[2]["agent"].as_str(), seen[2]["depth"].as_i64(), seen[2]["what"].as_str()), (Some(agent), Some(1), Some("ls -la")));
 
-    // The child's own `SubagentStop` (its turn-end gate) ends it under the parent.
-    rec("SubagentStop", 1_900, None, "k1", None, Some("k1"), None);
-    let items = f.tick_items(2_000).unwrap();
-    let kinds: Vec<_> = items.iter().map(|v| v["kind"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["agent_end"], "{items:?}");
+    // Pi's end event does not say whether the call worked: the file's result closes it, not the receipt.
+    let mut end = call;
+    end["event"] = "tool_execution_end".into();
+    hook(&tmp, &roots, "pi", end);
+    let items = f.tick_items(chrono::Utc::now().timestamp_millis()).unwrap();
+    assert!(!kind_list(&items).contains(&"result"), "{items:?}");
 }
 
 #[test]
@@ -270,14 +314,13 @@ fn follow_prints_new_rows_per_tick_and_children_under_their_parent() {
     subagent_start(&tmp);
     let now = chrono::Utc::now().timestamp_millis();
     let two = f.tick(now).unwrap().join("\n");
-    // The start comes from the receipt (before the parent's rows, no model yet); once its file is found the child's
-    // model and label follow, then its rows.
+    // The start comes from the receipt, after the parent's rows that led to it and with no model yet.
+    assert_eq!(two, "   ✓ 2.0s\n→ Agent  Check the lexer\n  ↳ started");
+    // The next tick finds its file: the child's model and label, then its rows.
+    let found = f.tick(now + 250).unwrap().join("\n");
     assert_eq!(
-        two,
-        "  ↳ started\n\
-         \x20  ✓ 2.0s\n\
-         → Agent  Check the lexer\n\
-         \x20 ↳ haiku-4-5  Check the lexer\n\
+        found,
+        "  ↳ haiku-4-5  Check the lexer\n\
          \n  ▶ you  look at the lexer\n\
          \x20 → Read  src/lexer.rs"
     );
@@ -312,13 +355,18 @@ fn follow_json_streams_items_and_subagent_lifecycle() {
     subagent_start(&tmp);
     let now = chrono::Utc::now().timestamp_millis();
     let two = f.tick(now).unwrap();
-    // The start comes from the receipt, so it leads and carries no model; the model and label follow as their own item.
-    assert_eq!(kinds(&two), ["agent_start", "result", "call", "model", "user", "call"]);
-    let start: serde_json::Value = serde_json::from_str(&two[0]).unwrap();
+    // The start comes from the receipt, after the parent's rows, and carries no model.
+    assert_eq!(kinds(&two), ["result", "call", "agent_start"]);
+    let start: serde_json::Value = serde_json::from_str(&two[2]).unwrap();
     assert_eq!((start["agent"].as_str(), start["depth"].as_i64(), start["model"].as_str()), (Some("a1"), Some(1), None));
-    let model: serde_json::Value = serde_json::from_str(&two[3]).unwrap();
+    // The next tick finds its file: the model and label as their own item, then its rows, read from the child's row.
+    let found = f.tick(now + 250).unwrap();
+    assert_eq!(kinds(&found), ["model", "user", "call"]);
+    let model: serde_json::Value = serde_json::from_str(&found[0]).unwrap();
     assert_eq!((model["agent"].as_str(), model["model"].as_str(), model["label"].as_str()), (Some("a1"), Some("claude-haiku-4-5"), Some("Check the lexer")));
-    let first: serde_json::Value = serde_json::from_str(&two[1]).unwrap();
+    let call: serde_json::Value = serde_json::from_str(&found[2]).unwrap();
+    assert!(call["session"].as_str().is_some_and(|s| s != "a1"), "a file row of a receipt-born child names the row to read: {call}");
+    let first: serde_json::Value = serde_json::from_str(&two[0]).unwrap();
     assert_eq!(first["call_id"].as_str(), Some("t1"));
     assert_eq!(first["ms"].as_i64(), Some(2000), "result items carry the call's duration");
 
