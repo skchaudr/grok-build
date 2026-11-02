@@ -9,7 +9,7 @@
 // DPI_TOKEN come from ~/.dpi/backend.env (local backend), else ~/.dpi/client.env.
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -148,7 +148,39 @@ async function runStream(signal) {
   }
 }
 
+// `--continue` means the durable agent this machine last attached to.
+const LAST = join(homedir(), ".dpi", "grok-pi-last.json");
+
+function argValue(flag) {
+  const i = process.argv.indexOf(flag);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
+
+// dpi://<session>/<agent> | <session>:<agent> | <session name or id>
+function parseTarget(value) {
+  const url = value.match(/^dpi:\/\/([^/]+)(?:\/([^/]+))?/);
+  if (url) return [decodeURIComponent(url[1]), url[2] ? decodeURIComponent(url[2]) : "main"];
+  const pair = value.match(/^([0-9a-f-]{36}):(.+)$/);
+  if (pair) return [pair[1], pair[2]];
+  return [value, "main"];
+}
+
+async function pickTarget() {
+  const explicit = argValue("--session");
+  if (explicit) return parseTarget(explicit);
+  if (session) return [session, agent];
+  const sessions = await api("GET", "/sessions");
+  if (!sessions.length) throw new Error("no dpi sessions; create one or set DPI_SESSION");
+  try {
+    const last = JSON.parse(readFileSync(LAST, "utf8"));
+    if (sessions.some((s) => s.id === last.session)) return [last.session, last.agent];
+  } catch {}
+  const newest = sessions.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
+  return [newest.id, "main"];
+}
+
 function attach() {
+  try { writeFileSync(LAST, JSON.stringify({ session, agent })); } catch {}
   stream?.abort();
   stream = new AbortController();
   running = false;
@@ -248,10 +280,8 @@ const handlers = {
   },
   // sessionPath: dpi://<session>[/<agent>]
   switch_session: async (c) => {
-    const m = String(c.sessionPath ?? "").match(/^dpi:\/\/([^/]+)(?:\/([^/]+))?/);
-    if (!m) throw new Error(`not a dpi session path: ${c.sessionPath}`);
-    session = decodeURIComponent(m[1]);
-    agent = m[2] ? decodeURIComponent(m[2]) : "main";
+    if (!String(c.sessionPath ?? "").startsWith("dpi://")) throw new Error(`not a dpi session path: ${c.sessionPath}`);
+    [session, agent] = parseTarget(String(c.sessionPath));
     attach();
     return { cancelled: false };
   },
@@ -274,11 +304,11 @@ async function main() {
   if (process.argv.includes("--version")) return console.log("dpi-rpc 0.99.0");
   if (!TOKEN) throw new Error("DPI_TOKEN not set (env, ~/.dpi/client.env or ~/.dpi/backend.env)");
   device = await api("GET", "/device");
-  if (!session) {
-    const sessions = await api("GET", "/sessions");
-    if (!sessions.length) throw new Error("no dpi sessions; create one or set DPI_SESSION");
-    session = sessions[0].id;
-  }
+  [session, agent] = await pickTarget();
+  // Resolve names to ids so the remembered target survives renames.
+  const a = await api("GET", agentPath());
+  session = a.sessionId;
+  agent = String(a.id);
   attach();
   const rl = createInterface({ input: process.stdin });
   rl.on("line", (line) => {
