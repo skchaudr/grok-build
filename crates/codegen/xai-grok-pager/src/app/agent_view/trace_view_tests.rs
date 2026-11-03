@@ -1,7 +1,7 @@
 //! The read-only past-session view: a made-up Claude transcript goes through the session-event handler, then is drawn at full and half width with vim mode on.
 
 use super::{
-    AgentView, AppRenderParams, BannerSlotParams, ComposerRoute, InputMode, OverlayHeader,
+    AgentPane, AgentView, AppRenderParams, BannerSlotParams, ComposerRoute, InputMode, OverlayHeader,
     test_fixtures,
 };
 use crate::acp::model_state::ModelState;
@@ -138,6 +138,10 @@ fn transcript() -> Vec<Value> {
 }
 
 fn app() -> AppView {
+    app_with(true)
+}
+
+fn app_with(vim: bool) -> AppView {
     // Thinking blocks follow the machine's `[ui]` setting; the view is checked with them on.
     crate::appearance::cache::set_show_thinking_blocks(true);
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -149,8 +153,13 @@ fn app() -> AppView {
     );
     let id = AgentId(0);
     let mut agent = test_fixtures::make_agent();
-    agent.vim_mode = true;
-    agent.set_input_mode(InputMode::Vim);
+    agent.vim_mode = vim;
+    if vim {
+        agent.set_input_mode(InputMode::Vim);
+    } else {
+        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.set_input_mode(InputMode::Simple);
+    }
     agent.active_modal = Some(ActiveModal::Traces {
         state: Box::new(TracesModalState::open(None)),
     });
@@ -331,6 +340,35 @@ fn inside_a_grok_session_the_view_opens_beside_it_and_esc_leaves_the_session_as_
     assert_eq!(o.scrollback.len(), 1);
     assert!(matches!(o.scrollback.get(0).map(|e| &e.block), Some(RenderBlock::System(_))));
     assert_eq!(o.composer_route(), ComposerRoute::RootSession);
+}
+
+#[test]
+fn esc_goes_back_with_vim_mode_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with(false);
+    standalone_traces::open_claude(&mut app, row(&tmp));
+    assert_eq!(agent(&app).active_pane, AgentPane::Scrollback);
+    let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(
+        app.handle_input(&esc),
+        InputOutcome::Action(Action::TracesLeaveView)
+    ));
+}
+
+#[test]
+fn cancel_and_rewind_do_nothing_in_a_subagent_opened_from_the_view() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = opened(&tmp);
+    let ActiveView::Agent(id) = app.active_view else {
+        panic!()
+    };
+    let parent = app.agents.get_mut(&id).unwrap();
+    parent.insert_test_child("child".into(), Box::new(test_fixtures::make_agent()));
+    parent.active_subagent = Some("child".into());
+    for action in [Action::Rewind, Action::RewindShowPicker, Action::CancelTurn] {
+        assert!(crate::app::dispatch::dispatch(action, &mut app).is_empty());
+        assert!(agent(&app).subagent_views["child"].rewind_state.is_none());
+    }
 }
 
 #[test]
