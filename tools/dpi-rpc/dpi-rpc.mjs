@@ -232,7 +232,8 @@ async function send(content, whenBusy) {
 
 const handlers = {
   get_state: getState,
-  get_available_models: async () => ({ models: device.models }),
+  // Re-read so model list edits on the backend show without restarting grok-pi.
+  get_available_models: async () => ((device = await api("GET", "/device")), { models: device.models }),
   get_commands: async () => ({ commands: [] }),
   get_messages: async () => ({ messages: await activeMessages() }),
   get_entries: async () => {
