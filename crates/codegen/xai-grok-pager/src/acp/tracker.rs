@@ -41,6 +41,15 @@ fn utc_ms_to_local(ms: i64) -> DateTime<Local> {
         .map(|utc| utc.with_timezone(&Local))
         .unwrap_or_else(Local::now)
 }
+/// A replayed tool or thinking row starts at its transcript time, as messages do; live rows keep `Local::now()`.
+fn stamp_replayed_row(scrollback: &mut ScrollbackState, id: EntryId, meta: &NotificationMeta) {
+    if meta.is_replay
+        && let Some(ms) = meta.agent_timestamp_ms
+        && let Some(entry) = scrollback.get_by_id_mut(id)
+    {
+        entry.created_at = Some(utc_ms_to_local(ms));
+    }
+}
 /// What the agent is currently doing within a turn. Note: `Idle` here means "the tracker has no in-flight work".
 /// The turn-status line uses this to name what the agent is blocked on instead of one generic "Waiting…". The view
 /// resolves the rest (`Model`/`Subagent`, which need turn-state and the subagent registry the tracker doesn't own).
@@ -1058,9 +1067,7 @@ impl AcpUpdateTracker {
                 self.drop_stale_blocking_waits(meta.stream_start_ms);
                 self.handle_thought_chunk(thought, meta, scrollback)
             }
-            acp::SessionUpdate::ToolCall(tc) => {
-                self.handle_tool_call(tc, scrollback, meta.is_replay)
-            }
+            acp::SessionUpdate::ToolCall(tc) => self.handle_tool_call(tc, scrollback, meta),
             acp::SessionUpdate::ToolCallUpdate(tcu) => {
                 self.handle_tool_call_update(tcu, scrollback, meta.is_replay)
             }
@@ -1246,6 +1253,7 @@ impl AcpUpdateTracker {
             return false;
         }
         let is_replay = meta.is_replay;
+        let is_new = self.current_thinking.is_none();
         let id = *self.current_thinking.get_or_insert_with(|| {
             let block = if is_replay {
                 RenderBlock::thinking_streaming_replay()
@@ -1256,6 +1264,9 @@ impl AcpUpdateTracker {
             scrollback.set_last_running(true);
             entry_id
         });
+        if is_new {
+            stamp_replayed_row(scrollback, id, meta);
+        }
         if let (Some(agent_ts), Some(stream_start)) =
             (meta.agent_timestamp_ms, meta.stream_start_ms)
         {
@@ -1272,8 +1283,9 @@ impl AcpUpdateTracker {
         &mut self,
         mut tc: acp::ToolCall,
         scrollback: &mut ScrollbackState,
-        is_replay: bool,
+        meta: &NotificationMeta,
     ) -> bool {
+        let is_replay = meta.is_replay;
         self.finish_thinking(scrollback);
         self.current_agent_msg = None;
         if is_todo_tool(&tc)
@@ -1345,7 +1357,8 @@ impl AcpUpdateTracker {
                 self.session_cwd.as_deref(),
                 &self.subagent_labels.borrow(),
             );
-            self.finish_completed_tool(block, scrollback, is_replay);
+            let id = self.finish_completed_tool(block, scrollback, is_replay);
+            stamp_replayed_row(scrollback, id, meta);
             return true;
         }
         let is_completed = matches!(
@@ -1358,16 +1371,24 @@ impl AcpUpdateTracker {
                 self.session_cwd.as_deref(),
                 &self.subagent_labels.borrow(),
             );
-            self.finish_completed_tool(block, scrollback, is_replay);
+            let id = self.finish_completed_tool(block, scrollback, is_replay);
+            stamp_replayed_row(scrollback, id, meta);
         } else {
             let block = tool_call_to_block(
                 &tc,
                 self.session_cwd.as_deref(),
                 &self.subagent_labels.borrow(),
             );
-            let id = scrollback.push_block(block);
-            scrollback.set_last_running(true);
-            let started_at = Some(std::time::Instant::now());
+            // A replayed call with no result has no local clock to trust: it runs untimed and finishes with no duration.
+            let (id, started_at) = if is_replay {
+                let id = scrollback.push(ScrollbackEntry::running(block));
+                stamp_replayed_row(scrollback, id, meta);
+                (id, None)
+            } else {
+                let id = scrollback.push_block(block);
+                scrollback.set_last_running(true);
+                (id, Some(std::time::Instant::now()))
+            };
             self.pending_tools.insert(
                 tc_id,
                 PendingTool {

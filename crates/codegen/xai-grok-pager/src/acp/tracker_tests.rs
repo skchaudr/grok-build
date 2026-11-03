@@ -753,6 +753,71 @@ fn entry_falls_back_to_now_without_server_timestamp() {
         "Without server timestamp, should fall back to Local::now()"
     );
 }
+#[test]
+fn replayed_tool_and_thinking_rows_use_transcript_time() {
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let at = |ms: i64| NotificationMeta {
+        agent_timestamp_ms: Some(ms),
+        is_replay: true,
+        ..Default::default()
+    };
+    let (think_ms, run_ms, done_ms) = (1_700_000_000_000i64, 1_700_000_005_000, 1_700_000_009_000);
+    tracker.handle_update(thought_chunk("hmm"), &at(think_ms), &mut sb);
+    tracker.handle_update(
+        tool_call("t1", acp::ToolKind::Execute, "ls"),
+        &at(run_ms),
+        &mut sb,
+    );
+    tracker.handle_update(
+        tool_call_completed("t2", acp::ToolKind::Execute, "pwd"),
+        &at(done_ms),
+        &mut sb,
+    );
+    let times: Vec<i64> = (0..3)
+        .map(|i| sb.get(i).unwrap().created_at.unwrap().timestamp_millis())
+        .collect();
+    assert_eq!(times, vec![think_ms, run_ms, done_ms]);
+}
+#[test]
+fn replayed_call_without_result_finishes_with_no_duration() {
+    let elapsed = |sb: &ScrollbackState| match &sb.get(0).unwrap().block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(b)) => b.elapsed_ms(),
+        other => panic!("expected an Execute row, got {other:?}"),
+    };
+    let replay = NotificationMeta {
+        is_replay: true,
+        ..Default::default()
+    };
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        tool_call("t1", acp::ToolKind::Execute, "ls"),
+        &replay,
+        &mut sb,
+    );
+    sb.finish_all_running();
+    assert!(!sb.get(0).unwrap().is_running);
+    assert_eq!(
+        elapsed(&sb),
+        None,
+        "a replayed call with no result has no duration"
+    );
+    // Live keeps its local clock.
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        tool_call("t1", acp::ToolKind::Execute, "ls"),
+        &meta(),
+        &mut sb,
+    );
+    sb.finish_all_running();
+    assert!(
+        elapsed(&sb).is_some(),
+        "a live call keeps its Instant::now() timer"
+    );
+}
 /// Helper: create a ToolCallUpdate with InProgress status and BashOutput raw_output.
 fn tool_update_in_progress(id: &str, output_bytes: &[u8]) -> acp::SessionUpdate {
     use xai_grok_tools::types::output::{BashOutput, ToolOutput};
