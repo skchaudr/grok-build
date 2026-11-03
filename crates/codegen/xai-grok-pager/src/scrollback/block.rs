@@ -910,7 +910,14 @@ impl RenderBlock {
             | RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(_))
             | RenderBlock::ToolCall(ToolCallBlock::UseTool(_))
             | RenderBlock::BgTask(_) => true,
-            RenderBlock::ToolCall(ToolCallBlock::Read(b)) => b.has_content(),
+            // A read with neither text nor media still opens, to show its path and why it is empty.
+            RenderBlock::ToolCall(ToolCallBlock::Read(b)) => {
+                b.has_content() || b.image_ref.is_none()
+            }
+            // Media-bearing rows keep the image/video path; every other row opens its tool name, input and output.
+            RenderBlock::ToolCall(ToolCallBlock::Other(b) | ToolCallBlock::Skill(b)) => {
+                b.media_ref_path().is_none()
+            }
             RenderBlock::ToolCall(ToolCallBlock::Search(b)) => b.error.is_none(),
             RenderBlock::ToolCall(ToolCallBlock::ListDir(b)) => {
                 b.error.is_none() && !b.output.is_empty()

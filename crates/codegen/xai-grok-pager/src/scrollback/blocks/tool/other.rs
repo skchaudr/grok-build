@@ -15,6 +15,8 @@ pub struct OtherToolCallBlock {
     /// Error message if the tool call failed; `None` means success.
     pub error: Option<String>,
     pub output: Option<String>,
+    /// Full tool input as pretty JSON, shown in the block viewer.
+    pub input: Option<String>,
     /// When the tool started running.
     pub started_at: Option<std::time::Instant>,
     /// Elapsed time in ms after completion.
@@ -34,6 +36,7 @@ impl OtherToolCallBlock {
             summary: summary.into(),
             error: None,
             output: None,
+            input: None,
             started_at: None,
             elapsed_ms: None,
             image_refs: Vec::new(),

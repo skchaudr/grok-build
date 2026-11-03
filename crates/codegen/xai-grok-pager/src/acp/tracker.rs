@@ -2556,6 +2556,11 @@ fn tool_call_to_block_inner(
                 (name.into_owned(), ToolCallBlock::Other)
             };
             let mut block = OtherToolCallBlock::new(label, summary);
+            block.input = tc
+                .raw_input
+                .as_ref()
+                .filter(|v| !v.is_null())
+                .and_then(|v| serde_json::to_string_pretty(v).ok());
             let mut ct = content_text(tc);
             if ct.is_empty()
                 && let Some(extracted) = extract_use_tool_output(&tc.raw_output)
