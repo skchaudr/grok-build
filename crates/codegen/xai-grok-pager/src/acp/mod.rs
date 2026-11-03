@@ -5,6 +5,9 @@
 pub(crate) const MAX_PLAN_FILE_BYTES: usize = 256 * 1024;
 pub(crate) mod claude_feed;
 pub(crate) mod claude_subagents;
+// Not opened from the list yet.
+#[allow(dead_code)]
+pub(crate) mod codex_feed;
 pub mod leader_bridge;
 pub mod meta;
 pub mod model_state;

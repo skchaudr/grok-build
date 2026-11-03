@@ -108,7 +108,7 @@ fn prompt_text(text: &str) -> Option<String> {
     (!HARNESS.iter().any(|h| t.starts_with(h))).then(|| text.to_string())
 }
 
-fn str_of(v: &Value, key: &str) -> Option<String> {
+pub(super) fn str_of(v: &Value, key: &str) -> Option<String> {
     v.get(key)
         .and_then(Value::as_str)
         .map(str::trim)
@@ -116,7 +116,7 @@ fn str_of(v: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn num_of(v: &Value, key: &str) -> Option<i64> {
+pub(super) fn num_of(v: &Value, key: &str) -> Option<i64> {
     let x = v.get(key)?;
     x.as_i64()
         .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
@@ -150,13 +150,13 @@ fn text_of(content: &Value) -> String {
     }
 }
 
-fn chunk(text: &str) -> acp::ContentChunk {
+pub(super) fn chunk(text: &str) -> acp::ContentChunk {
     acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
         text.to_string(),
     )))
 }
 
-fn text_content(text: &str) -> acp::ToolCallContent {
+pub(super) fn text_content(text: &str) -> acp::ToolCallContent {
     acp::ToolCallContent::Content(acp::Content::new(acp::ContentBlock::Text(
         acp::TextContent::new(text.to_string()),
     )))
@@ -638,7 +638,7 @@ impl Converter {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tool_call(
+pub(super) fn tool_call(
     id: &str,
     kind: acp::ToolKind,
     title: String,
@@ -663,7 +663,7 @@ fn tool_call(
         .meta(meta)
 }
 
-fn bash_raw(command: &str, output: &str, exit_code: i32) -> Value {
+pub(super) fn bash_raw(command: &str, output: &str, exit_code: i32) -> Value {
     json!({ "type": "Bash", "output": output.as_bytes(), "exit_code": exit_code, "command": command, "truncated": false, "signal": null, "timed_out": false, "description": null, "current_dir": "", "output_file": "", "total_bytes": output.len() })
 }
 
