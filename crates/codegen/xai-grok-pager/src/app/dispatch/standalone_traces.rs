@@ -10,6 +10,7 @@ use xai_grok_shell::extensions::notification::SessionNotification;
 
 use crate::acp::claude_feed::{self, Event, Fed};
 use crate::acp::pi_feed;
+use crate::acp::codex_feed;
 use crate::acp::tracker::AcpUpdateTracker;
 use crate::app::actions::{Action, Effect};
 use crate::app::agent::{AgentId, AgentSession, AgentState};
@@ -67,7 +68,7 @@ pub(crate) fn open_pending(app: &mut AppView, scan_done: bool) {
     }
 }
 
-/// Enter on a Claude or Pi session in the sessions list: the transcript, converted, goes through the session-event handler into a
+/// Enter on a Claude, Pi or Codex session in the sessions list: the transcript, converted, goes through the session-event handler into a
 /// read-only view (no composer) as a replay; the sessions list waits in `trace_return` for Esc.
 pub(crate) fn open_claude(app: &mut AppView, row: xai_grok_traces::SessionRow) {
     open_claude_in(app, row, is_standalone());
@@ -80,6 +81,8 @@ pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow
         pi_feed::convert(&row.file_path, &row.id)
     } else if row.source == "dpi" {
         pi_feed::convert_dpi(&row.file_path.to_string_lossy(), &row.id)
+    } else if row.source == "codex" {
+        codex_feed::convert(&row.file_path, &row.id)
     } else {
         claude_feed::convert(&row.file_path, &row.id)
     };

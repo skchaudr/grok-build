@@ -663,7 +663,7 @@ pub(super) fn tool_call(
         .meta(meta)
 }
 
-fn bash_raw(command: &str, output: &str, exit_code: i32) -> Value {
+pub(super) fn bash_raw(command: &str, output: &str, exit_code: i32) -> Value {
     json!({ "type": "Bash", "output": output.as_bytes(), "exit_code": exit_code, "command": command, "truncated": false, "signal": null, "timed_out": false, "description": null, "current_dir": "", "output_file": "", "total_bytes": output.len() })
 }
 

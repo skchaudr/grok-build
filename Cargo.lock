@@ -14338,6 +14338,7 @@ dependencies = [
  "xai-token-estimation",
  "xai-tool-types",
  "xai-tty-utils",
+ "zstd",
 ]
 
 [[package]]
