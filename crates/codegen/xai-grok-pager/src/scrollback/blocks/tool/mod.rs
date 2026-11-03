@@ -378,6 +378,25 @@ impl ToolCallBlock {
         }
     }
 
+    /// Set the finished duration. `finish()` keeps a value that is already set.
+    pub fn set_elapsed_ms(&mut self, ms: i64) {
+        let slot = match self {
+            ToolCallBlock::Execute(b) => &mut b.elapsed_ms,
+            ToolCallBlock::Read(b) => &mut b.elapsed_ms,
+            ToolCallBlock::Edit(b) => &mut b.elapsed_ms,
+            ToolCallBlock::Search(b) => &mut b.elapsed_ms,
+            ToolCallBlock::ListDir(b) => &mut b.elapsed_ms,
+            ToolCallBlock::WebFetch(b) => &mut b.elapsed_ms,
+            ToolCallBlock::WebSearch(b) => &mut b.elapsed_ms,
+            ToolCallBlock::IntegrationSearch(b) => &mut b.elapsed_ms,
+            ToolCallBlock::UseTool(b) => &mut b.elapsed_ms,
+            ToolCallBlock::MemorySearch(b) => &mut b.elapsed_ms,
+            ToolCallBlock::SentMessage(b) => &mut b.elapsed_ms,
+            ToolCallBlock::Skill(b) | ToolCallBlock::Other(b) => &mut b.elapsed_ms,
+        };
+        *slot = Some(ms);
+    }
+
     /// Start timing for this block (sets `started_at = now`). Only blocks that actually run in the UI get meaningful
     /// timing.
     pub fn start_timing(&mut self) {

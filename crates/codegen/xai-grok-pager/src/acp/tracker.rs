@@ -2084,7 +2084,21 @@ fn tool_call_to_block(
     session_cwd: Option<&Path>,
     labels: &SubagentLabelRegistry,
 ) -> RenderBlock {
-    apply_parent_nest(tool_call_to_block_inner(tc, session_cwd, labels), tc)
+    let mut block = apply_parent_nest(tool_call_to_block_inner(tc, session_cwd, labels), tc);
+    // A finished call replayed from a transcript carries its real duration in `_meta.durationMs`; a live clock cannot know it.
+    if matches!(
+        tc.status,
+        acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
+    ) && let Some(ms) = tc
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("durationMs"))
+        .and_then(serde_json::Value::as_i64)
+        && let RenderBlock::ToolCall(call) = &mut block
+    {
+        call.set_elapsed_ms(ms);
+    }
+    block
 }
 
 fn tool_call_to_block_inner(
