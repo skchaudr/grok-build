@@ -177,6 +177,10 @@ fn ingest_bb(idx: &mut TraceIndex, roots: &[Root], mut r: Receipt) -> Result<i64
 /// receipt and index just that conversation. The db is located from the root and the uuid (never from the payload's
 /// path), so the session keys the same as a scan would.
 fn ingest_dpi(idx: &mut TraceIndex, roots: &[Root], mut r: Receipt) -> Result<i64> {
+    // The backend sends its own pid: one process hosts every agent, so `live` keys their liveness on it.
+    if r.harness_pid.is_some() {
+        fill_harness(&mut r);
+    }
     let root = roots.iter().find(|x| x.source == "dpi" && x.format == Format::Sqlite);
     let target = r.native_session.as_deref().and_then(split_native).filter(|(s, _)| valid_session_id(s));
     let target = target.map(|(s, c)| (s.to_string(), c));

@@ -354,9 +354,9 @@ pub fn boundary(source: &str, event: &str, detail: Option<&str>) -> Option<Bound
         ("claude", "Notification") => (detail == Some("idle_prompt")).then_some(Idle),
         ("claude", "UserPromptSubmit") => Some(Prompt),
         ("claude", "SessionEnd") => Some(End),
-        ("pi", "session_start" | "agent_end") => Some(Idle),
-        ("pi", "agent_start") => Some(Prompt),
-        ("pi", "session_shutdown") => Some(End),
+        ("pi" | "dpi", "session_start" | "agent_end") => Some(Idle),
+        ("pi" | "dpi", "agent_start") => Some(Prompt),
+        ("pi" | "dpi", "session_shutdown") => Some(End),
         ("grok", "SessionStart" | "Stop") => Some(Idle),
         ("grok", "UserPromptSubmit") => Some(Prompt),
         ("grok", "SessionEnd") => Some(End),
@@ -414,9 +414,9 @@ pub fn norm(source: &str, event: &str, detail: Option<&str>) -> Option<Ev> {
         return Some(if c == Child::Start { Ev::ChildStart } else { Ev::ChildStop });
     }
     match (source, event) {
-        ("claude" | "grok", "PreToolUse") | ("pi", "tool_execution_start") => Some(Ev::Pre),
+        ("claude" | "grok", "PreToolUse") | ("pi" | "dpi", "tool_execution_start") => Some(Ev::Pre),
         ("cursor", "preToolUse" | "beforeShellExecution" | "beforeMCPExecution" | "beforeReadFile") => Some(Ev::Pre),
-        ("claude", "PostToolUse" | "PostToolUseFailure" | "PermissionDenied") | ("grok", "PostToolUse") | ("pi", "tool_execution_end") => Some(Ev::Post),
+        ("claude", "PostToolUse" | "PostToolUseFailure" | "PermissionDenied") | ("grok", "PostToolUse") | ("pi" | "dpi", "tool_execution_end") => Some(Ev::Post),
         ("cursor", "postToolUse" | "postToolUseFailure" | "afterShellExecution" | "afterMCPExecution") => Some(Ev::Post),
         ("cursor", "afterFileEdit" | "afterAgentThought" | "afterAgentResponse") => Some(Ev::Tick),
         ("claude", "PermissionRequest") => Some(Ev::Ask),
@@ -429,13 +429,13 @@ pub fn norm(source: &str, event: &str, detail: Option<&str>) -> Option<Ev> {
 
 /// Whether a `Post` closes only the `Pre` with its id (strict) or also every older open `Pre` (close-older).
 ///
-/// Pi: true (`toolCallId` on both events, no hook denial; MAP "Live captures" row 9).
+/// Pi and dpi (which the dpi backend feeds Pi's event names): true (`toolCallId` on both events, no hook denial; MAP "Live captures" row 9).
 /// Claude: false. Row 1 says ids are present, but row 5 says a hook-denied `Pre` gets no `PostToolUseFailure`
 /// or `PermissionDenied`, so orphans exist.
 /// Cursor: false. Rows 12 (ids on every pair) is yes, but row 5 covered Claude only and there is no Cursor
 /// denial capture, so orphans are not ruled out. Rows not on the mini are the fallback.
 pub fn strict_ids(source: &str) -> bool {
-    source == "pi"
+    matches!(source, "pi" | "dpi")
 }
 
 // ---- durations ----
