@@ -3,6 +3,7 @@
 //! This module spawns the agent process, initializes the protocol, authenticates, and provides the channel for communication.
 /// Shared plan-file size cap for the pager keep.
 pub(crate) const MAX_PLAN_FILE_BYTES: usize = 256 * 1024;
+pub(crate) mod claude_feed;
 pub(crate) mod claude_subagents;
 pub mod leader_bridge;
 pub mod meta;

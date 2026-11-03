@@ -313,7 +313,14 @@ impl AgentView {
                 HintItem::new(key!(Tab), "next field"),
                 self.card_esc_hint(),
             ]),
-            KeyOwner::Pane => ShortcutsBarContent::Pane(self.normal_pane_hints(registry)),
+            KeyOwner::Pane => {
+                let mut hints = self.normal_pane_hints(registry);
+                // With no composer, the key that leaves for it reaches nothing.
+                if self.composer_route() == ComposerRoute::Hidden {
+                    hints.retain(|hint| hint.label != "prompt");
+                }
+                ShortcutsBarContent::Pane(hints)
+            }
         }
     }
     /// An open line viewer paints its own hints over this row further down `draw`, so the bar is silent.

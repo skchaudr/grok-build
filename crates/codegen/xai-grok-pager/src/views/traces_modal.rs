@@ -961,6 +961,14 @@ impl TracesModalState {
         }
     }
 
+    /// Enter on a past local Claude row opens the read-only session view instead of the trajectory; a live one is followed.
+    fn claude_to_open(&self) -> Option<SessionRow> {
+        if self.selected_live() {
+            return None;
+        }
+        self.selected_session().filter(|s| s.host.is_none() && s.source == "claude").cloned()
+    }
+
     /// Enter on a live local row follows it instead of opening its trajectory.
     fn selected_live(&self) -> bool {
         self.index.is_some() && self.selected_session().is_some_and(|s| s.host.is_none() && s.status == Status::Active)
@@ -3862,6 +3870,9 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                 KeyCode::Char('r') => return state.resume(state.selected_session().cloned()),
                 KeyCode::Enter => {
                     if !state.expand_selected_more() {
+                        if let Some(row) = state.claude_to_open() {
+                            return InputOutcome::Action(Action::TracesOpenClaude(Box::new(row)));
+                        }
                         if state.selected_live() {
                             state.open_follow();
                         } else {
@@ -7472,7 +7483,7 @@ mod tests {
         let mut state = TracesModalState::open_with_hosts(None, vec![]);
         state.clear_status();
         state.sessions = (0..n)
-            .map(|i| SessionRow { id: format!("s{i}"), title: format!("task {i}"), ..row("claude", "/h/x.jsonl") })
+            .map(|i| SessionRow { id: format!("s{i}"), title: format!("task {i}"), ..row("grok", "/h/x.jsonl") })
             .collect();
         state.rebuild_ledger();
         state
@@ -7722,7 +7733,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_follows_a_live_row_and_opens_the_trajectory_of_an_ended_one() {
+    fn enter_follows_a_live_claude_row_and_opens_an_ended_one_read_only() {
         let (_tmp, mut state) = claude_fixture();
         // The fixture's files are fresh, so its row is live.
         assert!(state.selected_live());
@@ -7732,8 +7743,9 @@ mod tests {
         state.sessions[0].status = Status::Completed;
         state.rebuild_ledger();
         assert!(!state.selected_live());
-        press(&mut state, KeyCode::Enter);
-        assert_eq!(state.mode, Mode::Trajectory, "an ended row still opens its trajectory");
+        let enter = handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(enter, InputOutcome::Action(Action::TracesOpenClaude(_))), "an ended Claude row opens the read-only view");
+        assert_eq!(state.mode, Mode::List);
     }
 
     #[test]

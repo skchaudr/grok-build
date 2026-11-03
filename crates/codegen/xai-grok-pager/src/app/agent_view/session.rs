@@ -409,6 +409,8 @@ impl AgentView {
             subagent_views: HashMap::new(),
             active_subagent: None,
             role: AgentRole::Root,
+            trace_return: None,
+            trace_origin: None,
             hit_subagent_frame_close: Default::default(),
             sharing_enabled: false,
             memory_mode: None,
@@ -625,6 +627,15 @@ impl AgentView {
         self.workflow_run_revisions.clear();
         self.cleared_workflow_runs.clear();
         self.workflow_runs.clear();
+    }
+    /// Empty a read-only past-session view: scrollback, tracker, plan, subagents and the session binding.
+    pub(crate) fn clear_trace_content(&mut self) {
+        drop(self.take_replay_rebuilt_state());
+        self.subagent_sessions.clear();
+        self.subagent_views.clear();
+        self.active_subagent = None;
+        self.session.loading_replay = false;
+        self.unbind_session_id();
     }
     /// Swap every replay-rebuilt field for a fresh value and return the old state.
     /// The fields reset together so stale revision gates cannot suppress the replayed updates.

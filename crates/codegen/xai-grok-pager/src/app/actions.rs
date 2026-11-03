@@ -945,6 +945,10 @@ pub enum Action {
     OpenTraces,
     /// Re-scan trace roots while `/traces` is open.
     TracesRescan,
+    /// Enter on a Claude session in `/traces`: open it read-only in the session view.
+    TracesOpenClaude(Box<xai_grok_traces::SessionRow>),
+    /// Esc in that read-only view: back to the sessions list.
+    TracesLeaveView,
     /// Copy text from the `/traces` inspector; the outcome shows in its status line.
     TracesCopy {
         text: String,

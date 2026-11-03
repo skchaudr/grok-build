@@ -30,5 +30,6 @@ pub use query::{
     ACTIVE_WINDOW_MS, EventFilter, EventRow, Facets, RECEIPT_WINDOW_MS, SessionFilter, SessionRow, Sort, Stats, Status,
     TERMINAL_EVENTS,
 };
+pub use links::{ClaudeChild, claude_children};
 pub use receipts::Receipt;
 pub use roots::{Format, Root, SOURCES, default_roots, root_for, source_label, user_roots};

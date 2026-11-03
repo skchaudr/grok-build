@@ -71,6 +71,9 @@ impl AgentView {
     }
 
     pub(crate) fn composer_route(&self) -> ComposerRoute {
+        if self.trace_return.is_some() {
+            return ComposerRoute::Hidden;
+        }
         match &self.role {
             AgentRole::Root => ComposerRoute::RootSession,
             AgentRole::Child(ChildLink {

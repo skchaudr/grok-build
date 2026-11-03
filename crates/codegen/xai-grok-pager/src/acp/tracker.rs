@@ -41,6 +41,15 @@ fn utc_ms_to_local(ms: i64) -> DateTime<Local> {
         .map(|utc| utc.with_timezone(&Local))
         .unwrap_or_else(Local::now)
 }
+/// A replayed tool or thinking row starts at its transcript time, as messages do; live rows keep `Local::now()`.
+fn stamp_replayed_row(scrollback: &mut ScrollbackState, id: EntryId, meta: &NotificationMeta) {
+    if meta.is_replay
+        && let Some(ms) = meta.agent_timestamp_ms
+        && let Some(entry) = scrollback.get_by_id_mut(id)
+    {
+        entry.created_at = Some(utc_ms_to_local(ms));
+    }
+}
 /// What the agent is currently doing within a turn. Note: `Idle` here means "the tracker has no in-flight work".
 /// The turn-status line uses this to name what the agent is blocked on instead of one generic "Waiting…". The view
 /// resolves the rest (`Model`/`Subagent`, which need turn-state and the subagent registry the tracker doesn't own).
@@ -1058,9 +1067,7 @@ impl AcpUpdateTracker {
                 self.drop_stale_blocking_waits(meta.stream_start_ms);
                 self.handle_thought_chunk(thought, meta, scrollback)
             }
-            acp::SessionUpdate::ToolCall(tc) => {
-                self.handle_tool_call(tc, scrollback, meta.is_replay)
-            }
+            acp::SessionUpdate::ToolCall(tc) => self.handle_tool_call(tc, scrollback, meta),
             acp::SessionUpdate::ToolCallUpdate(tcu) => {
                 self.handle_tool_call_update(tcu, scrollback, meta.is_replay)
             }
@@ -1246,6 +1253,7 @@ impl AcpUpdateTracker {
             return false;
         }
         let is_replay = meta.is_replay;
+        let is_new = self.current_thinking.is_none();
         let id = *self.current_thinking.get_or_insert_with(|| {
             let block = if is_replay {
                 RenderBlock::thinking_streaming_replay()
@@ -1256,6 +1264,9 @@ impl AcpUpdateTracker {
             scrollback.set_last_running(true);
             entry_id
         });
+        if is_new {
+            stamp_replayed_row(scrollback, id, meta);
+        }
         if let (Some(agent_ts), Some(stream_start)) =
             (meta.agent_timestamp_ms, meta.stream_start_ms)
         {
@@ -1272,8 +1283,9 @@ impl AcpUpdateTracker {
         &mut self,
         mut tc: acp::ToolCall,
         scrollback: &mut ScrollbackState,
-        is_replay: bool,
+        meta: &NotificationMeta,
     ) -> bool {
+        let is_replay = meta.is_replay;
         self.finish_thinking(scrollback);
         self.current_agent_msg = None;
         if is_todo_tool(&tc)
@@ -1345,7 +1357,8 @@ impl AcpUpdateTracker {
                 self.session_cwd.as_deref(),
                 &self.subagent_labels.borrow(),
             );
-            self.finish_completed_tool(block, scrollback, is_replay);
+            let id = self.finish_completed_tool(block, scrollback, is_replay);
+            stamp_replayed_row(scrollback, id, meta);
             return true;
         }
         let is_completed = matches!(
@@ -1358,15 +1371,19 @@ impl AcpUpdateTracker {
                 self.session_cwd.as_deref(),
                 &self.subagent_labels.borrow(),
             );
-            self.finish_completed_tool(block, scrollback, is_replay);
+            let id = self.finish_completed_tool(block, scrollback, is_replay);
+            stamp_replayed_row(scrollback, id, meta);
         } else {
             let block = tool_call_to_block(
                 &tc,
                 self.session_cwd.as_deref(),
                 &self.subagent_labels.borrow(),
             );
+            // A replayed call keeps a live clock too: joining a live grok session, its completion arrives live with no
+            // duration of its own. A past transcript drops these clocks before finishing (`clear_running_clocks`).
             let id = scrollback.push_block(block);
             scrollback.set_last_running(true);
+            stamp_replayed_row(scrollback, id, meta);
             let started_at = Some(std::time::Instant::now());
             self.pending_tools.insert(
                 tc_id,
@@ -1494,7 +1511,7 @@ impl AcpUpdateTracker {
                                 if let RenderBlock::ToolCall(new_tc) = &mut block
                                     && let Some(t) = pending.started_at
                                 {
-                                    new_tc.set_started_at(t);
+                                    new_tc.set_started_at(Some(t));
                                 }
                                 kind_changed = verb_group_kind_changed(&entry.block, &block);
                                 entry.block = block;
@@ -2084,7 +2101,21 @@ fn tool_call_to_block(
     session_cwd: Option<&Path>,
     labels: &SubagentLabelRegistry,
 ) -> RenderBlock {
-    apply_parent_nest(tool_call_to_block_inner(tc, session_cwd, labels), tc)
+    let mut block = apply_parent_nest(tool_call_to_block_inner(tc, session_cwd, labels), tc);
+    // A finished call replayed from a transcript carries its real duration in `_meta.durationMs`; a live clock cannot know it.
+    if matches!(
+        tc.status,
+        acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
+    ) && let Some(ms) = tc
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("durationMs"))
+        .and_then(serde_json::Value::as_i64)
+        && let RenderBlock::ToolCall(call) = &mut block
+    {
+        call.set_elapsed_ms(ms);
+    }
+    block
 }
 
 fn tool_call_to_block_inner(
@@ -2542,6 +2573,11 @@ fn tool_call_to_block_inner(
                 (name.into_owned(), ToolCallBlock::Other)
             };
             let mut block = OtherToolCallBlock::new(label, summary);
+            block.input = tc
+                .raw_input
+                .as_ref()
+                .filter(|v| !v.is_null())
+                .and_then(|v| serde_json::to_string_pretty(v).ok());
             let mut ct = content_text(tc);
             if ct.is_empty()
                 && let Some(extracted) = extract_use_tool_output(&tc.raw_output)

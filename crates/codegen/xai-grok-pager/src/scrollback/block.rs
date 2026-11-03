@@ -910,7 +910,16 @@ impl RenderBlock {
             | RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(_))
             | RenderBlock::ToolCall(ToolCallBlock::UseTool(_))
             | RenderBlock::BgTask(_) => true,
-            RenderBlock::ToolCall(ToolCallBlock::Read(b)) => b.has_content(),
+            // A finished read with neither text nor media still opens, to show its path and why it is empty. A running
+            // one (clock going, no duration yet) waits for its content.
+            RenderBlock::ToolCall(ToolCallBlock::Read(b)) => {
+                let running = b.started_at.is_some() && b.elapsed_ms.is_none();
+                b.has_content() || (b.image_ref.is_none() && !running)
+            }
+            // Media-bearing rows keep the image/video path; every other row opens its tool name, input and output.
+            RenderBlock::ToolCall(ToolCallBlock::Other(b) | ToolCallBlock::Skill(b)) => {
+                b.media_ref_path().is_none()
+            }
             RenderBlock::ToolCall(ToolCallBlock::Search(b)) => b.error.is_none(),
             RenderBlock::ToolCall(ToolCallBlock::ListDir(b)) => {
                 b.error.is_none() && !b.output.is_empty()
@@ -1271,6 +1280,18 @@ mod tests {
     #[test]
     fn test_list_dir_block_with_output_has_fullscreen_viewer() {
         let block = RenderBlock::list_dir_with_output("/tmp", "a.txt\nb.txt");
+        assert!(block.has_normal_fullscreen_viewer());
+    }
+
+    #[test]
+    fn test_running_read_opens_its_viewer_only_once_finished() {
+        let mut read = crate::scrollback::blocks::ReadToolCallBlock::new("/tmp/demo.rs");
+        read.started_at = Some(std::time::Instant::now());
+        let mut block = RenderBlock::ToolCall(ToolCallBlock::Read(read));
+        assert!(!block.has_normal_fullscreen_viewer());
+        if let RenderBlock::ToolCall(ToolCallBlock::Read(b)) = &mut block {
+            b.finish();
+        }
         assert!(block.has_normal_fullscreen_viewer());
     }
 

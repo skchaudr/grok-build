@@ -393,14 +393,24 @@ impl BlockViewerPane {
 
         let theme = Theme::current();
 
-        // Error-only blocks: show the error text
+        // No text: show the path, then the error or a line saying there is no text content
         if !read.has_content() {
-            let error = read.error.as_deref()?;
-            let error_style = Style::default().fg(theme.accent_error);
-            let lines: Vec<Line<'static>> = error
-                .lines()
-                .map(|l| Line::from(Span::styled(l.to_string(), error_style)))
-                .collect();
+            let mut lines = vec![Line::from(Span::styled(
+                read.path.clone(),
+                Style::default().fg(theme.text_primary),
+            ))];
+            match read.error.as_deref() {
+                Some(error) => lines.extend(error.lines().map(|l| {
+                    Line::from(Span::styled(
+                        l.to_string(),
+                        Style::default().fg(theme.accent_error),
+                    ))
+                })),
+                None => lines.push(Line::from(Span::styled(
+                    "No text content.",
+                    Style::default().fg(theme.text_secondary),
+                ))),
+            }
             return Some(Self::for_static_content(entry_id, ViewerKind::Read, lines));
         }
 
@@ -472,6 +482,42 @@ impl BlockViewerPane {
         };
 
         let lines = Self::static_lines_from_block(entry, list_dir);
+        Some(Self::for_static_content(
+            entry_id,
+            ViewerKind::PlainText,
+            lines,
+        ))
+    }
+
+    /// Tool name, full input and full output (or error) of an `Other` or `Skill` row.
+    pub fn for_other(entry_id: EntryId, entry: &ScrollbackEntry) -> Option<Self> {
+        let (RenderBlock::ToolCall(ToolCallBlock::Other(b) | ToolCallBlock::Skill(b))) =
+            &entry.block
+        else {
+            return None;
+        };
+        let theme = Theme::current();
+        let label = Style::default().fg(theme.text_secondary);
+        let value = Style::default().fg(theme.text_primary);
+        let text = |s: &str, style: Style| -> Vec<Line<'static>> {
+            s.lines()
+                .map(|l| Line::from(Span::styled(l.to_string(), style)))
+                .collect()
+        };
+
+        let mut lines = vec![Line::from(Span::styled(b.name.clone(), value))];
+        if let Some(input) = &b.input {
+            lines.push(Line::from(Span::styled("Input", label)));
+            lines.extend(text(input, value));
+        }
+        if let Some(out) = b.output.as_deref() {
+            lines.push(Line::from(Span::styled("Output", label)));
+            lines.extend(text(out, value));
+        }
+        if let Some(err) = b.error.as_deref() {
+            lines.push(Line::from(Span::styled("Error", label)));
+            lines.extend(text(err, Style::default().fg(theme.accent_error)));
+        }
         Some(Self::for_static_content(
             entry_id,
             ViewerKind::PlainText,

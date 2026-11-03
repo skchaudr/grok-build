@@ -1093,6 +1093,12 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             }
             vec![]
         }
+        // A read-only past-session view has no agent to cancel or rewind.
+        Action::CancelTurn | Action::Rewind | Action::RewindShowPicker
+            if super::standalone_traces::in_trace_view(app) =>
+        {
+            vec![]
+        }
         Action::CancelTurn => dispatch_cancel_turn(app),
         Action::CancelTurnChoice(choice) => dispatch_cancel_turn_choice(app, choice),
         Action::KillBgTask(task_id) => dispatch_kill_bg_task(app, task_id),
@@ -1448,6 +1454,14 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                 state: Box::new(crate::views::traces_modal::TracesModalState::open(index)),
             });
             vec![Effect::ScanTraces { agent_id: id }]
+        }
+        Action::TracesOpenClaude(row) => {
+            super::standalone_traces::open_claude(app, *row);
+            vec![]
+        }
+        Action::TracesLeaveView => {
+            super::standalone_traces::leave_view(app);
+            vec![]
         }
         Action::TracesRescan => match app.active_view {
             ActiveView::Agent(id) => vec![Effect::ScanTraces { agent_id: id }],
