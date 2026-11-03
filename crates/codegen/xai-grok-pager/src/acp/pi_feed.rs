@@ -1,8 +1,8 @@
 //! A Pi session file turned into the events grok's session-event handler receives, as `claude_feed` does for Claude.
 //! Content only; a call's start and end come from the entries' own timestamps and `durationMs`.
-//! Entries are read in file order: the active branch is a later piece.
+//! Only the active branch is read: the chain of `parentId`s from the last entry back to the root.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -29,6 +29,36 @@ fn role(e: &Value) -> Option<&str> {
     e.pointer("/message/role").and_then(Value::as_str)
 }
 
+fn type_of(e: &Value) -> Option<&str> {
+    e.get("type").and_then(Value::as_str)
+}
+
+/// The entries on the chain from the last entry back to the root, oldest first.
+/// A file whose entries carry no ids (older Pi) is one straight line: all of it.
+fn active_branch(all: Vec<Value>) -> Vec<Value> {
+    let id = |e: &Value| e.get("id").and_then(Value::as_str).map(str::to_string);
+    let Some(last) = all.iter().rposition(|e| id(e).is_some()) else {
+        return all;
+    };
+    let index: HashMap<String, usize> = all
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| id(e).map(|id| (id, i)))
+        .collect();
+    let (mut chain, mut seen, mut cur) = (vec![last], HashSet::from([last]), last);
+    // `seen` stops a parent loop in a damaged file.
+    while let Some(p) = all[cur]
+        .get("parentId")
+        .and_then(Value::as_str)
+        .and_then(|p| index.get(p).copied())
+        .filter(|p| seen.insert(*p))
+    {
+        chain.push(p);
+        cur = p;
+    }
+    chain.into_iter().rev().map(|i| all[i].clone()).collect()
+}
+
 /// The session's events, in file order. `session_id` is the id the view is bound to.
 pub(crate) fn convert(session: &Path, session_id: &str) -> io::Result<Vec<Fed>> {
     let raw = fs::read(session)?;
@@ -53,10 +83,13 @@ struct Converter {
 
 impl Converter {
     fn run(&mut self, text: &str) {
-        let entries: Vec<Value> = text
+        let all: Vec<Value> = text
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .filter(|e| e.get("type").and_then(Value::as_str) == Some("message"))
+            .collect();
+        let entries: Vec<Value> = active_branch(all)
+            .into_iter()
+            .filter(|e| matches!(type_of(e), Some("message" | "compaction")))
             .collect();
         let mut results: HashMap<String, Res> = HashMap::new();
         for e in entries.iter().filter(|e| role(e) == Some("toolResult")) {
@@ -77,6 +110,10 @@ impl Converter {
         }
         for e in &entries {
             let ts = ts_of(e);
+            if type_of(e) == Some("compaction") {
+                self.compaction(e, ts);
+                continue;
+            }
             let m = &e["message"];
             let content = m.get("content").unwrap_or(&Value::Null);
             match role(e) {
@@ -109,6 +146,20 @@ impl Converter {
                 _ => {}
             }
         }
+    }
+
+    /// A compaction entry is grok's compaction row. Pi records only `tokensBefore`, so the
+    /// "after" count is the summary's size at Pi's own four-characters-a-token estimate.
+    fn compaction(&mut self, e: &Value, ts: Option<i64>) {
+        let summary = str_of(e, "summary").unwrap_or_default();
+        let done = XaiSessionUpdate::AutoCompactCompleted {
+            tokens_before: e.get("tokensBefore").and_then(Value::as_u64),
+            tokens_after: summary.chars().count() as u64 / 4,
+            elapsed_ms: None,
+            summary_preview: Some(summary.chars().take(100).collect()),
+        };
+        let m = self.meta(ts, None);
+        self.push(Event::Xai(done), m);
     }
 
     fn block(

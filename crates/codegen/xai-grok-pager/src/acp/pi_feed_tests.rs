@@ -6,8 +6,18 @@ fn at(sec: u64) -> String {
     format!("2026-01-01T00:00:{sec:02}.000Z")
 }
 
+static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A root-less entry with a fresh id; `run` links it to the line before it.
 fn msg(sec: u64, message: Value) -> Value {
-    json!({ "type": "message", "id": format!("e{sec}"), "parentId": null, "timestamp": at(sec), "message": message })
+    let n = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    json!({ "type": "message", "id": format!("e{n}"), "parentId": null, "timestamp": at(sec), "message": message })
+}
+
+/// The entry, hung under `parent` instead of the line before it.
+fn under(parent: &Value, mut e: Value) -> Value {
+    e["parentId"] = parent["id"].clone();
+    e
 }
 
 fn user(sec: u64, text: &str) -> Value {
@@ -38,6 +48,13 @@ fn result(sec: u64, id: &str, text: &str, is_error: bool, dur: u64, details: Val
 fn run(lines: &[Value]) -> Vec<Fed> {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("s.jsonl");
+    // A null parent means "the line before", as in a plain Pi session.
+    let mut lines = lines.to_vec();
+    for i in 1..lines.len() {
+        if lines[i]["parentId"].is_null() {
+            lines[i]["parentId"] = lines[i - 1]["id"].clone();
+        }
+    }
     let body: Vec<String> = lines.iter().map(Value::to_string).collect();
     fs::write(&path, body.join("\n")).unwrap();
     convert(&path, "pi:s").unwrap()
@@ -210,4 +227,68 @@ fn a_subagent_launch_is_a_spawn_and_a_finished_one_closes() {
         (status.as_str(), *duration_ms, output.as_deref()),
         ("completed", 6000, Some("found it"))
     );
+}
+
+#[test]
+fn only_the_active_branch_is_shown_and_a_compaction_is_grok_s_row() {
+    let root = user(1, "root question");
+    let old_a = under(
+        &root,
+        assistant(
+            2,
+            100,
+            json!([{ "type": "text", "text": "abandoned answer" }]),
+        ),
+    );
+    let new_a = under(
+        &root,
+        assistant(3, 100, json!([{ "type": "text", "text": "kept answer" }])),
+    );
+    let mut compaction = json!({ "type": "compaction", "id": "k1", "parentId": new_a["id"], "timestamp": at(4),
+        "summary": "x".repeat(400), "firstKeptEntryId": new_a["id"], "tokensBefore": 12000 });
+    let tail = under(
+        &compaction,
+        assistant(
+            5,
+            100,
+            json!([{ "type": "text", "text": "after compaction" }]),
+        ),
+    );
+    compaction["parentId"] = new_a["id"].clone();
+    // File order interleaves the branches: the abandoned one is written before the kept one.
+    let feed = run(&[root, old_a, new_a, compaction, tail]);
+    let texts: Vec<String> = feed
+        .iter()
+        .filter_map(|f| match &f.event {
+            Event::Acp(acp::SessionUpdate::AgentMessageChunk(c)) => match &c.content {
+                acp::ContentBlock::Text(t) => Some(t.text.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["kept answer", "after compaction"]);
+    let rows: Vec<_> = feed
+        .iter()
+        .filter_map(|f| match &f.event {
+            Event::Xai(XaiSessionUpdate::AutoCompactCompleted {
+                tokens_before,
+                tokens_after,
+                ..
+            }) => Some((*tokens_before, *tokens_after)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows, [(Some(12000), 100)]);
+    // The row sits between the answer it follows and the one after it.
+    let pos = feed
+        .iter()
+        .position(|f| {
+            matches!(
+                f.event,
+                Event::Xai(XaiSessionUpdate::AutoCompactCompleted { .. })
+            )
+        })
+        .unwrap();
+    assert_eq!(pos, 2);
 }
