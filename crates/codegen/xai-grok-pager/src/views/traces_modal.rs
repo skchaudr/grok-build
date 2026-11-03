@@ -4217,6 +4217,7 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
             plain("G live"),
             plain("Tab agent"),
             plain("e next error"),
+            plain("h/l fold"),
             plain("Enter open call"),
             plain("o trajectory"),
             plain("Esc back"),
@@ -7745,8 +7746,16 @@ mod tests {
         // The live subagent's rows follow the parent's; up from the tail (its reply) is its Bash call.
         press(&mut state, KeyCode::Char('k'));
         assert!(state.follow_view.as_ref().and_then(|f| f.selected_call()).is_some());
+        let closed = modal_screen(&mut state, 100, 40);
+        assert!(!closed.contains("── result ──"), "highlighting a call does not open it\n{closed}");
+        press(&mut state, KeyCode::Char('l'));
         let inline = modal_screen(&mut state, 100, 40);
-        assert!(inline.contains("│ ── result ──") && inline.contains("│ ok"), "the highlighted call shows its result inline\n{inline}");
+        assert!(inline.contains("│ ── result ──") && inline.contains("│ ok"), "l shows the call's result inline\n{inline}");
+        press(&mut state, KeyCode::Char('k'));
+        assert!(modal_screen(&mut state, 100, 40).contains("│ ── result ──"), "an opened call stays open when the cursor moves off");
+        press(&mut state, KeyCode::Char('j'));
+        press(&mut state, KeyCode::Left);
+        assert!(!modal_screen(&mut state, 100, 40).contains("── result ──"), "← closes it");
         press(&mut state, KeyCode::Enter);
         assert_eq!((state.mode, state.follow_return), (Mode::Inspector, true));
         let screen = modal_screen(&mut state, 100, 14);

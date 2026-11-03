@@ -4,7 +4,7 @@
 //! modal's 1 s poll; its `--json` items become the [`Row`]s here. Nothing here touches the index except the
 //! raw-line reads that fill the selected call's body.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -113,6 +113,8 @@ pub(super) struct Follow {
     inflight: bool,
     /// Composed bodies by (agent, call line, result line); only complete reads are kept.
     bodies: HashMap<(String, i64, Option<i64>), String>,
+    /// Call rows (indices into `rows`) shown with their body inline: `l` opens, `h` closes.
+    open: HashSet<usize>,
 }
 
 /// `0.4s`, `12s`, `2m05s`.
@@ -182,6 +184,7 @@ impl Follow {
             rx,
             inflight: false,
             bodies: HashMap::new(),
+            open: HashSet::new(),
         }
     }
 
@@ -349,7 +352,11 @@ impl Follow {
 
     /// The highlighted row's call (with the session id its lines are read from), when it is one.
     pub fn selected_call(&self) -> Option<(&str, &Call)> {
-        let row = self.rows.get(self.cursor?)?;
+        self.call_at(self.cursor?)
+    }
+
+    fn call_at(&self, i: usize) -> Option<(&str, &Call)> {
+        let row = self.rows.get(i)?;
         match &row.body {
             Body::Call(c) => Some((c.session.as_deref().unwrap_or(row.agent.as_str()), c)),
             _ => None,
@@ -432,15 +439,23 @@ impl Follow {
             KeyCode::Tab => self.cycle_agent(false),
             KeyCode::BackTab => self.cycle_agent(true),
             KeyCode::Char('e') => self.next_error(),
+            KeyCode::Char('l') | KeyCode::Right => self.fold(true),
+            KeyCode::Char('h') | KeyCode::Left => self.fold(false),
             _ => false,
         }
     }
 
+    /// `l` / `h`: open or close the highlighted call's body inline. False when nothing changed.
+    pub fn fold(&mut self, open: bool) -> bool {
+        let Some(i) = self.cursor.filter(|&i| self.call_at(i).is_some()) else { return false };
+        if open { self.open.insert(i) } else { self.open.remove(&i) }
+    }
+
     // ------------------------------------------------------------------ render
 
-    /// The selected call's inline body: command, separator, result. Cached once complete.
-    fn body_rows(&mut self, index: Option<&TraceIndex>, width: usize) -> Option<Vec<String>> {
-        let (agent, c) = self.selected_call()?;
+    /// Row `i`'s inline call body: command, separator, result. Cached once complete.
+    fn body_rows(&mut self, i: usize, index: Option<&TraceIndex>, width: usize) -> Option<Vec<String>> {
+        let (agent, c) = self.call_at(i)?;
         let (agent, c) = (agent.to_string(), c.clone());
         if c.line < 0 {
             // Opened by a receipt; the transcript has not reached it yet. The row above is its command.
@@ -563,12 +578,17 @@ impl Follow {
             buf.set_span(body.x, body.y, &Span::styled(msg, Style::default().fg(theme.gray)), body.width);
             return;
         }
-        let cursor_depth = self.cursor.and_then(|c| self.rows.get(c)).map_or(0, |r| r.depth.min(MAX_INDENT));
-        let cursor_body = self.body_rows(index, width.saturating_sub(2 * cursor_depth));
+        let open: Vec<usize> = vis.iter().copied().filter(|i| self.open.contains(i)).collect();
+        let bodies: HashMap<usize, Vec<String>> = open
+            .into_iter()
+            .filter_map(|i| {
+                let depth = self.rows[i].depth.min(MAX_INDENT);
+                Some((i, self.body_rows(i, index, width.saturating_sub(2 * depth))?))
+            })
+            .collect();
         let lines_at = |me: &Self, pos: usize| {
             let i = vis[pos];
-            let b = if me.cursor == Some(i) { cursor_body.as_deref() } else { None };
-            me.row_lines(i, width, now_ms, theme, b)
+            me.row_lines(i, width, now_ms, theme, bodies.get(&i).map(Vec::as_slice))
         };
         let last = vis.len() - 1;
         match self.cursor.and_then(|c| vis.iter().position(|&i| i == c)) {
@@ -765,7 +785,7 @@ mod tests {
         f.cursor = Some(1);
         let (read_from, c) = f.selected_call().unwrap();
         assert_eq!((read_from, c.line), ("kid", -1), "no transcript line yet: nothing to read");
-        assert!(f.body_rows(None, 60).unwrap()[0].contains("waiting for the transcript"));
+        assert!(f.body_rows(1, None, 60).unwrap()[0].contains("waiting for the transcript"));
 
         f.apply(
             &[

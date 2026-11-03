@@ -53,7 +53,7 @@ pub(super) fn append(path: &Path, line: &str) {
 
 /// `f` on a live row opens the follow screen in `/traces`: the backlog shows the `→ Bash` call and the live
 /// header, a result and a reply appended mid-follow arrive without a key press (`✓`, the text), `k` pauses the
-/// tail and shows the call's command inline, and `SessionEnd` paints `■ ended`. Esc returns to the ledger.
+/// tail, `l` shows the call's command inline, and `SessionEnd` paints `■ ended`. Esc returns to the ledger.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn traces_modal_follow() {
@@ -93,10 +93,11 @@ async fn traces_modal_follow() {
     h.wait_for_text("✓", WAIT).expect("the result arrives without a key press");
     h.wait_for_text("ptyfollowdone", WAIT).expect("the reply arrives");
 
-    // k pauses the tail; the highlighted call shows its command under the row.
+    // k pauses the tail on the call; l shows its command and result under the row.
     h.inject_keys(b"k").expect("pause on the call");
     h.wait_for_text("paused", WAIT).expect("paused footer");
-    h.wait_for_text("ptyfollowout", WAIT).expect("the highlighted call shows its result inline");
+    h.inject_keys(b"l").expect("open the call");
+    h.wait_for_text("ptyfollowout", WAIT).expect("l shows the call's result inline");
     h.inject_keys(b"G").expect("resume the tail");
     h.wait_for_text("live tail", WAIT).expect("tail pinned again");
 
