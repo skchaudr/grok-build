@@ -8,6 +8,7 @@ use std::path::Path;
 
 use agent_client_protocol as acp;
 use serde_json::{Map, Value, json};
+use xai_grok_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
 
 use super::claude_feed::{Event, Fed, bash_raw, chunk, num_of, str_of, text_content, tool_call};
 
@@ -199,6 +200,7 @@ impl Converter {
             }
             Some("CommandExecution") => self.command(item, end, began),
             Some("FileChange") => self.file_change(item, end, began),
+            Some("CollabAgentToolCall") => self.spawn(item, end),
             _ => {}
         }
     }
@@ -307,6 +309,43 @@ impl Converter {
                 let m = self.meta(start, start);
                 self.push(Event::Acp(acp::SessionUpdate::ToolCall(tc)), m);
             }
+        }
+    }
+
+    /// A spawn call is a subagent row; the child thread's own rollout is its transcript. Other collab tools (wait, send) are skipped.
+    fn spawn(&mut self, item: &Value, ts: Option<i64>) {
+        let tool = item.get("tool").and_then(Value::as_str).unwrap_or("");
+        if !tool.eq_ignore_ascii_case("spawnAgent") && tool != "spawn_agent" {
+            return;
+        }
+        let prompt = str_of(item, "prompt").unwrap_or_default();
+        let description = prompt.lines().next().filter(|l| !l.is_empty()).unwrap_or("subagent").to_string();
+        let children: Vec<String> = item
+            .get("receiver_thread_ids")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        for child in children {
+            let spawned = XaiSessionUpdate::SubagentSpawned {
+                subagent_id: child.clone(),
+                attempt_id: None,
+                parent_session_id: self.sid.clone(),
+                parent_prompt_id: None,
+                child_session_id: child,
+                subagent_type: "subagent".into(),
+                description: description.clone(),
+                effective_context_source: None,
+                context_normalized: false,
+                capability_mode: None,
+                persona: None,
+                role: None,
+                model: None,
+                resumed_from: None,
+                workflow_run_id: None,
+                agent_address: None,
+            };
+            let m = self.meta(ts, None);
+            self.push(Event::Xai(spawned), m);
         }
     }
 

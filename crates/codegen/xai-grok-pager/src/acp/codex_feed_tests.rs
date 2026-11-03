@@ -196,3 +196,30 @@ fn file_changes_become_edits_with_a_diff_per_hunk() {
         "Failed to find expected lines"
     );
 }
+
+#[test]
+fn a_spawn_call_becomes_a_subagent_row_per_child_thread() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write(
+        tmp.path(),
+        "rollout-s.jsonl",
+        &[
+            done(T, json!({ "type": "CollabAgentToolCall", "id": "c1", "tool": "spawnAgent", "status": "completed",
+                "sender_thread_id": "parent", "receiver_thread_ids": ["child-1"], "prompt": "review the diff\nand report" }), None, 5),
+            done(T, json!({ "type": "CollabAgentToolCall", "id": "c2", "tool": "wait", "status": "completed",
+                "sender_thread_id": "parent", "receiver_thread_ids": ["child-1"] }), None, 6),
+        ],
+        false,
+    );
+    let feed = convert(&path, "parent").unwrap();
+    let spawns: Vec<_> = feed
+        .iter()
+        .filter_map(|f| match &f.event {
+            Event::Xai(XaiSessionUpdate::SubagentSpawned { child_session_id, parent_session_id, description, .. }) => {
+                Some((child_session_id.as_str(), parent_session_id.as_str(), description.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(spawns, vec![("child-1", "parent", "review the diff")], "wait is not a spawn");
+}

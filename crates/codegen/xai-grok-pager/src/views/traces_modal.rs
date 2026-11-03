@@ -961,12 +961,12 @@ impl TracesModalState {
         }
     }
 
-    /// Enter on a past local Claude row opens the read-only session view instead of the trajectory; a live one is followed.
+    /// Enter on a past local Claude or Codex row opens the read-only session view instead of the trajectory; a live one is followed.
     fn claude_to_open(&self) -> Option<SessionRow> {
         if self.selected_live() {
             return None;
         }
-        self.selected_session().filter(|s| s.host.is_none() && s.source == "claude").cloned()
+        self.selected_session().filter(|s| s.host.is_none() && matches!(s.source.as_str(), "claude" | "codex")).cloned()
     }
 
     /// Enter on a live local row follows it instead of opening its trajectory.
@@ -7746,6 +7746,18 @@ mod tests {
         let enter = handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(enter, InputOutcome::Action(Action::TracesOpenClaude(_))), "an ended Claude row opens the read-only view");
         assert_eq!(state.mode, Mode::List);
+    }
+
+    #[test]
+    fn enter_opens_an_ended_codex_row_read_only_and_follows_a_live_one() {
+        let (_tmp, mut state) = claude_fixture();
+        state.sessions[0].source = "codex".into();
+        state.rebuild_ledger();
+        assert!(state.selected_live() && state.claude_to_open().is_none());
+        state.sessions[0].status = Status::Completed;
+        state.rebuild_ledger();
+        let enter = handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(enter, InputOutcome::Action(Action::TracesOpenClaude(r)) if r.source == "codex"));
     }
 
     #[test]
