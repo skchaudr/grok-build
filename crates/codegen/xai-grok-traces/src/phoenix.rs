@@ -85,6 +85,12 @@ pub fn parse_page(v: &Value) -> (Vec<PhoenixSpan>, Option<String>) {
 /// Fetch every span of `session_id` in `project`, oldest first. The whole fetch,
 /// every page included, ends within `timeout`; a timeout, an unreachable Phoenix or
 /// a session past the page cap is an `Err`, never a partial `Ok`. Nothing is retried.
+///
+/// `session_id` must be the `session.id` string the emitter put on its spans, matched
+/// exactly. That is not always the harness's own id: live Pi spans carry `pi-<epoch ms>`
+/// (not the Pi jsonl header id) and dpi spans carry `<uuid>:1` (not the bare uuid).
+/// A harness id that differs matches nothing, and `Ok(vec![])` then looks the same as a
+/// session with no spans, so callers must resolve the emitted id first.
 pub fn fetch_session_spans(base: &str, project: &str, session_id: &str, timeout: Duration) -> Result<Vec<PhoenixSpan>, String> {
     let deadline = Instant::now() + timeout;
     let client = reqwest::blocking::Client::builder()
