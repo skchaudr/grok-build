@@ -961,12 +961,12 @@ impl TracesModalState {
         }
     }
 
-    /// Enter on a past local Claude or Pi row opens the read-only session view instead of the trajectory; a live one is followed.
+    /// Enter on a past local Claude, Pi or dpi row opens the read-only session view instead of the trajectory; a live one is followed.
     fn claude_to_open(&self) -> Option<SessionRow> {
         if self.selected_live() {
             return None;
         }
-        self.selected_session().filter(|s| s.host.is_none() && matches!(s.source.as_str(), "claude" | "pi")).cloned()
+        self.selected_session().filter(|s| s.host.is_none() && matches!(s.source.as_str(), "claude" | "pi" | "dpi")).cloned()
     }
 
     /// Enter on a live local row follows it instead of opening its trajectory.

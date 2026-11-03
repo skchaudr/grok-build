@@ -355,3 +355,20 @@ fn codemode_nested_calls_nest_under_it_and_a_lane_prompt_is_a_user_message() {
     assert_eq!(tcs[1].title, "ls");
     assert_eq!(tcs[4].title, "Read /b");
 }
+
+#[test]
+fn dpi_records_go_through_the_pi_converter() {
+    let t = 1_790_000_000_000i64;
+    let records = [
+        json!({ "kind": "pi.user", "model": [{ "role": "user", "content": "go", "timestamp": t }] }),
+        json!({ "kind": "pi.assistant", "model": [{ "role": "assistant", "timestamp": t + 2000, "content": [call("c1", "bash", json!({ "command": "ls" }))] }] }),
+        json!({ "kind": "pi.tool-result", "model": [{ "role": "toolResult", "toolCallId": "c1", "toolName": "bash", "isError": false, "timestamp": t + 3000, "content": [{ "type": "text", "text": "out" }] }] }),
+        json!({ "kind": "pi.reset" }),
+    ];
+    let feed = convert_records(&records, "dpi:s:7");
+    assert!(matches!(feed[0].event, Event::Acp(acp::SessionUpdate::UserMessageChunk(_))));
+    let tcs = calls(&feed);
+    assert_eq!((tcs.len(), tcs[0].title.as_str()), (1, "ls"));
+    assert_eq!(feed[0].meta.get("turnStartMs"), Some(&json!(t)));
+    assert!(convert_dpi("no-hash", "x").is_err());
+}

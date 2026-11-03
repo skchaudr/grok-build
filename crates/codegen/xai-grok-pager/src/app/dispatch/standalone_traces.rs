@@ -78,6 +78,8 @@ pub(crate) fn open_claude(app: &mut AppView, row: xai_grok_traces::SessionRow) {
 pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
     let feed = if row.source == "pi" {
         pi_feed::convert(&row.file_path, &row.id)
+    } else if row.source == "dpi" {
+        pi_feed::convert_dpi(&row.file_path.to_string_lossy(), &row.id)
     } else {
         claude_feed::convert(&row.file_path, &row.id)
     };

@@ -64,6 +64,37 @@ fn active_branch(all: Vec<Value>) -> Vec<Value> {
 /// The session's events, in file order. `session_id` is the id the view is bound to.
 pub(crate) fn convert(session: &Path, session_id: &str) -> io::Result<Vec<Fed>> {
     let raw = fs::read(session)?;
+    Ok(convert_text(&String::from_utf8_lossy(&raw), session_id))
+}
+
+/// A dpi conversation (`<agent.sqlite>#<conversation id>`): each entry's `model[0]` is a Pi message, so the rows
+/// become Pi `message` lines and go through the same converter.
+pub(crate) fn convert_dpi(key: &str, session_id: &str) -> io::Result<Vec<Fed>> {
+    let bad = |e: String| io::Error::new(io::ErrorKind::InvalidData, e);
+    let (db, conv) = xai_grok_traces::dpi::split_key(key).ok_or_else(|| bad(format!("not a dpi key: {key}")))?;
+    let records = xai_grok_traces::dpi::DpiDb::open(Path::new(db))
+        .and_then(|d| d.records(conv))
+        .map_err(|e| bad(e.to_string()))?;
+    Ok(convert_records(&records, session_id))
+}
+
+fn convert_records(records: &[Value], session_id: &str) -> Vec<Fed> {
+    let lines: Vec<String> = records
+        .iter()
+        .filter_map(|r| r.pointer("/model/0").filter(|m| m.is_object()))
+        .map(|m| {
+            let ts = m
+                .get("timestamp")
+                .and_then(Value::as_i64)
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            json!({ "type": "message", "timestamp": ts, "message": m }).to_string()
+        })
+        .collect();
+    convert_text(&lines.join("\n"), session_id)
+}
+
+fn convert_text(text: &str, session_id: &str) -> Vec<Fed> {
     let mut c = Converter {
         sid: session_id.to_string(),
         out: Vec::new(),
@@ -72,8 +103,8 @@ pub(crate) fn convert(session: &Path, session_id: &str) -> io::Result<Vec<Fed>> 
         prompts: 0,
         parent: None,
     };
-    c.run(&String::from_utf8_lossy(&raw));
-    Ok(c.out)
+    c.run(text);
+    c.out
 }
 
 struct Converter {
