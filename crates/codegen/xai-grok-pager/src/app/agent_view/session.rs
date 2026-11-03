@@ -410,6 +410,7 @@ impl AgentView {
             active_subagent: None,
             role: AgentRole::Root,
             trace_return: None,
+            trace_origin: None,
             hit_subagent_frame_close: Default::default(),
             sharing_enabled: false,
             memory_mode: None,

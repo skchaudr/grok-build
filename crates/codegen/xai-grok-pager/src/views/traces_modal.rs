@@ -961,9 +961,9 @@ impl TracesModalState {
         }
     }
 
-    /// Enter on a local Claude row in `grok traces` opens the read-only session view instead of the trajectory.
+    /// Enter on a past local Claude row opens the read-only session view instead of the trajectory; a live one is followed.
     fn claude_to_open(&self) -> Option<SessionRow> {
-        if !crate::app::standalone_traces::is_standalone() {
+        if self.selected_live() {
             return None;
         }
         self.selected_session().filter(|s| s.host.is_none() && s.source == "claude").cloned()
@@ -7733,7 +7733,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_follows_a_live_row_and_opens_the_trajectory_of_an_ended_one() {
+    fn enter_follows_a_live_claude_row_and_opens_an_ended_one_read_only() {
         let (_tmp, mut state) = claude_fixture();
         // The fixture's files are fresh, so its row is live.
         assert!(state.selected_live());
@@ -7743,8 +7743,9 @@ mod tests {
         state.sessions[0].status = Status::Completed;
         state.rebuild_ledger();
         assert!(!state.selected_live());
-        press(&mut state, KeyCode::Enter);
-        assert_eq!(state.mode, Mode::Trajectory, "an ended row still opens its trajectory");
+        let enter = handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(enter, InputOutcome::Action(Action::TracesOpenClaude(_))), "an ended Claude row opens the read-only view");
+        assert_eq!(state.mode, Mode::List);
     }
 
     #[test]
