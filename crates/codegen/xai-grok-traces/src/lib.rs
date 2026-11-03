@@ -15,6 +15,7 @@ mod lines;
 mod links;
 pub mod live;
 pub mod normalize;
+pub mod phoenix;
 mod query;
 pub mod remote;
 mod receipts;

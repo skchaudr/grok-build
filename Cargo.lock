@@ -15169,6 +15169,7 @@ dependencies = [
  "chrono",
  "dunce",
  "libc",
+ "reqwest 0.12.24",
  "rusqlite",
  "serde",
  "serde_json",
