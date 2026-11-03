@@ -5,7 +5,7 @@
 //!
 //! | Source | Parent comes from |
 //! |---|---|
-//! | claude | path `<session>/subagents/agent-*.jsonl` -> `<session>.jsonl`; label, type and finished from the sibling `agent-*.meta.json` |
+//! | claude | path `<session>/subagents/agent-*.jsonl` -> `<session>.jsonl`, or the sibling `agent-<parentAgentId>.jsonl` when the sidecar names one (a subagent's own subagent, any depth); label, type and finished from the sibling `agent-*.meta.json` |
 //! | codex | `session_meta` `payload.parent_thread_id`, or `source.subagent.thread_spawn.parent_thread_id` |
 //! | omp | path `<cwd>/<parent stem>/<Name>.jsonl` (task subagents), or the header's `parentSession` path |
 //! | dsh | header `parentSession` (a session id; `seedLength` or `isSeeded: true` marks a fork). A spawn the child header does not name is the parent's `subagent/catalog` event (`data.childId`, `label`, `mode`) |
@@ -45,6 +45,8 @@ pub(crate) struct Links {
     pub done: Option<i64>,
     /// Claude: the Task call that started this subagent (`toolUseId` in its `.meta.json`).
     pub tool_use_id: Option<String>,
+    /// Claude: id of the subagent that spawned this one (`parentAgentId`); absent when the session itself did.
+    pub parent_agent: Option<String>,
     pub model: Option<String>,
 }
 
@@ -89,6 +91,10 @@ pub(crate) fn path_links(root: &Root, path: &Path) -> (Links, Option<PathBuf>) {
                 l.agent_type = Some("subagent".into());
                 let meta = path.with_extension("meta.json");
                 apply_claude_meta(&meta, &mut l);
+                // Subagent transcripts are flat in one `subagents/` dir at any depth; `parentAgentId` names the sibling that spawned this one.
+                if let (Some(pa), Some(dir)) = (l.parent_agent.take(), path.parent()) {
+                    l.parent_native = rel_stem(&root.path, dir).map(|d| format!("{d}/agent-{pa}")).or(l.parent_native.take());
+                }
                 return (l, Some(meta));
             }
         }
@@ -136,6 +142,7 @@ fn apply_claude_meta(meta: &Path, l: &mut Links) {
         l.agent_type = Some(t);
     }
     l.tool_use_id = s(v.get("toolUseId"));
+    l.parent_agent = s(v.get("parentAgentId"));
     l.model = s(v.get("model")).filter(|m| m != "inherit");
     if v.get("finished") == Some(&Value::Bool(true)) {
         let errored = v.get("error").is_some_and(|e| !e.is_null() && e != &Value::Bool(false))
@@ -582,6 +589,21 @@ mod tests {
         assert!(aux.is_some_and(|p| p.ends_with("agent-a1.meta.json")));
         let (top, aux) = path_links(&r, &tmp.path().join("-w/sess1.jsonl"));
         assert_eq!((top.native_id.as_deref(), top.parent_native, aux), (Some("-w/sess1"), None, None));
+    }
+
+    #[test]
+    fn claude_nested_subagents_link_to_the_spawning_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("-w/sess1/subagents");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("agent-a1.meta.json"), r#"{"toolUseId":"toolu_1","spawnDepth":1}"#).unwrap();
+        fs::write(sub.join("agent-a2.meta.json"), r#"{"toolUseId":"toolu_2","parentAgentId":"a1","spawnDepth":2}"#).unwrap();
+        fs::write(sub.join("agent-a3.meta.json"), r#"{"toolUseId":"toolu_3","parentAgentId":"a2","spawnDepth":3}"#).unwrap();
+        let r = root("claude", tmp.path());
+        let parent = |n: &str| path_links(&r, &sub.join(format!("agent-{n}.jsonl"))).0.parent_native;
+        assert_eq!(parent("a1").as_deref(), Some("-w/sess1"));
+        assert_eq!(parent("a2").as_deref(), Some("-w/sess1/subagents/agent-a1"));
+        assert_eq!(parent("a3").as_deref(), Some("-w/sess1/subagents/agent-a2"));
     }
 
     #[test]
