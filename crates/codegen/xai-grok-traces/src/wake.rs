@@ -120,6 +120,17 @@ mod tests {
 
     const T: Duration = Duration::from_millis(500);
 
+    /// Drops a bound socket and waits until it is really dead. On macOS std sets CLOEXEC after `socket()`, so a
+    /// `Command::spawn` on another test thread can inherit the fd and keep the dropped socket alive until the child exits.
+    fn leak_dead(path: PathBuf) {
+        drop(UnixDatagram::bind(&path).unwrap());
+        let probe = UnixDatagram::unbound().unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        while probe.send_to(&[], &path).is_ok() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn round_trip_and_burst() {
         let d = tempfile::tempdir().unwrap();
@@ -153,11 +164,11 @@ mod tests {
     fn stale_socket_is_replaced_and_swept() {
         let d = tempfile::tempdir().unwrap();
         // A bound-then-leaked socket file with no process behind it.
-        drop(UnixDatagram::bind(d.path().join("wake.sock")).unwrap());
-        drop(UnixDatagram::bind(d.path().join("wake.99999.sock")).unwrap());
+        leak_dead(d.path().join("wake.sock"));
+        leak_dead(d.path().join("wake.99999.sock"));
         assert_eq!(send_all(d.path()), 0);
         assert!(!d.path().join("wake.99999.sock").exists(), "stale sibling swept");
-        drop(UnixDatagram::bind(d.path().join("wake.sock")).unwrap());
+        leak_dead(d.path().join("wake.sock"));
         let w = Waker::bind(d.path());
         assert_eq!(w.path, d.path().join("wake.sock"), "stale primary taken over");
         send_all(d.path());
