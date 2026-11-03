@@ -79,6 +79,8 @@ pub(crate) fn open_claude(app: &mut AppView, row: xai_grok_traces::SessionRow) {
     let Some(ActiveModal::Traces { state }) = agent.active_modal.take() else { return };
     agent.clear_trace_content();
     agent.trace_return = Some(state);
+    // Esc back to the list needs the scrollback focused; in simple mode nothing else moves it there.
+    agent.set_active_pane(crate::app::agent_view::AgentPane::Scrollback, true);
     agent.bind_session_id(acp::SessionId::new(row.id.clone()));
     if let Some(cwd) = row.cwd.as_deref() {
         agent.session.cwd = cwd.into();
@@ -128,7 +130,8 @@ fn message(session_id: &str, fed: Fed) -> AcpClientMessage {
     }
 }
 
-/// Whether the active view is a read-only past session.
+/// Whether the active view is a read-only past session, or a subagent opened from one (the parent holds `trace_return`).
 pub(crate) fn in_trace_view(app: &mut AppView) -> bool {
-    super::ctx::get_active_agent_mut(app).is_some_and(|a| a.trace_return.is_some())
+    let crate::app::app_view::ActiveView::Agent(id) = app.active_view else { return false };
+    app.agents.get(&id).is_some_and(|a| a.trace_return.is_some())
 }
