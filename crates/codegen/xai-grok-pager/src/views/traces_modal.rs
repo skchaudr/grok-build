@@ -7483,7 +7483,7 @@ mod tests {
         let mut state = TracesModalState::open_with_hosts(None, vec![]);
         state.clear_status();
         state.sessions = (0..n)
-            .map(|i| SessionRow { id: format!("s{i}"), title: format!("task {i}"), ..row("claude", "/h/x.jsonl") })
+            .map(|i| SessionRow { id: format!("s{i}"), title: format!("task {i}"), ..row("grok", "/h/x.jsonl") })
             .collect();
         state.rebuild_ledger();
         state
