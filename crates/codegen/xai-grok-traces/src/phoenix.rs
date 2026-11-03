@@ -3,12 +3,12 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Phoenix 21 on old-air.
 pub const DEFAULT_BASE: &str = "http://100.109.233.105:6006";
 const PAGE_LIMIT: u32 = 1000;
-// shortcut: page cap bounds a runaway cursor loop, raise if a session exceeds 20k spans.
+// shortcut: page cap bounds a runaway cursor loop and errors past 20k spans, raise if a real session hits it.
 const MAX_PAGES: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,12 +82,13 @@ pub fn parse_page(v: &Value) -> (Vec<PhoenixSpan>, Option<String>) {
     (spans, str_at(v, "next_cursor").map(str::to_owned))
 }
 
-/// Fetch every span of `session_id` in `project`, oldest first. Errors (including
-/// Phoenix being unreachable) come back within `timeout`; nothing is retried.
+/// Fetch every span of `session_id` in `project`, oldest first. The whole fetch,
+/// every page included, ends within `timeout`; a timeout, an unreachable Phoenix or
+/// a session past the page cap is an `Err`, never a partial `Ok`. Nothing is retried.
 pub fn fetch_session_spans(base: &str, project: &str, session_id: &str, timeout: Duration) -> Result<Vec<PhoenixSpan>, String> {
+    let deadline = Instant::now() + timeout;
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(timeout)
-        .timeout(timeout)
         .build()
         .map_err(|e| format!("phoenix client: {e}"))?;
     let url = format!("{}/v1/projects/{project}/spans", base.trim_end_matches('/'));
@@ -96,8 +97,13 @@ pub fn fetch_session_spans(base: &str, project: &str, session_id: &str, timeout:
     let mut out = Vec::new();
     let mut cursor: Option<String> = None;
     for _ in 0..MAX_PAGES {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err("phoenix timed out".into());
+        }
         let mut req = client
             .get(&url)
+            .timeout(left)
             .query(&[("limit", PAGE_LIMIT.to_string()), ("sort", "start_time".into()), ("order", "asc".into()), ("attribute", filter.clone())]);
         if let Some(c) = &cursor {
             req = req.query(&[("cursor", c)]);
@@ -111,10 +117,10 @@ pub fn fetch_session_spans(base: &str, project: &str, session_id: &str, timeout:
         out.extend(spans);
         match next {
             Some(n) => cursor = Some(n),
-            None => break,
+            None => return Ok(out),
         }
     }
-    Ok(out)
+    Err(format!("phoenix: session has more than {} spans", MAX_PAGES as u32 * PAGE_LIMIT))
 }
 
 #[cfg(test)]
