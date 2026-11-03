@@ -1,0 +1,42 @@
+---
+source: crates/codegen/xai-grok-pager/src/app/agent_view/trace_view_tests.rs
+expression: "draw(app.agents.get_mut(&id).unwrap(), 50)"
+---
+  /work/demo                         [Dashboard]
+
+
+     ❯ Find where the parser reads     <time>
+       config and fix the typo.
+
+
+     ◆ Thought for 3.0s
+
+     I'll look at the build first.     <time>
+
+     ◆ Run Build the crate
+     ◈ Read 2 files, Searched 1 pattern
+     ◆ Edit config.rs +1/-1
+     ◈ Ran 1 subagent
+ ┌                                              ┐
+ │   Fixed the typo in config.rs.      <time>  │
+ └                                              ┘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  y:copy  │  Enter:open  │  j/k:nav  │

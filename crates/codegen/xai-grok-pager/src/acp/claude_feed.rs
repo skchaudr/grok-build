@@ -73,13 +73,26 @@ struct Converter {
 
 fn read_children(dir: &Path) -> HashMap<String, Child> {
     let mut out = HashMap::new();
-    let Ok(rd) = fs::read_dir(dir.join("subagents")) else { return out };
+    let Ok(rd) = fs::read_dir(dir.join("subagents")) else {
+        return out;
+    };
     for e in rd.flatten() {
         let path = e.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-        let Some(stem) = name.strip_suffix(".meta.json") else { continue };
-        let Some(v) = fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()) else { continue };
-        let Some(tool_use_id) = str_of(&v, "toolUseId") else { continue };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".meta.json") else {
+            continue;
+        };
+        let Some(v) = fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        else {
+            continue;
+        };
+        let Some(tool_use_id) = str_of(&v, "toolUseId") else {
+            continue;
+        };
         out.insert(
             tool_use_id,
             Child {
@@ -95,17 +108,24 @@ fn read_children(dir: &Path) -> HashMap<String, Child> {
 }
 
 fn str_of(v: &Value, key: &str) -> Option<String> {
-    v.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    v.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn num_of(v: &Value, key: &str) -> Option<i64> {
     let x = v.get(key)?;
-    x.as_i64().or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+    x.as_i64()
+        .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
 }
 
 fn ts_of(line: &Value) -> Option<i64> {
     let s = line.get("timestamp")?.as_str()?;
-    chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.timestamp_millis())
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.timestamp_millis())
 }
 
 fn flag(line: &Value, key: &str) -> bool {
@@ -130,11 +150,15 @@ fn text_of(content: &Value) -> String {
 }
 
 fn chunk(text: &str) -> acp::ContentChunk {
-    acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(text.to_string())))
+    acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+        text.to_string(),
+    )))
 }
 
 fn text_content(text: &str) -> acp::ToolCallContent {
-    acp::ToolCallContent::Content(acp::Content::new(acp::ContentBlock::Text(acp::TextContent::new(text.to_string()))))
+    acp::ToolCallContent::Content(acp::Content::new(acp::ContentBlock::Text(
+        acp::TextContent::new(text.to_string()),
+    )))
 }
 
 /// `Name: input` on one line, so a tool with no block of its own still shows what it was given.
@@ -162,8 +186,10 @@ impl Converter {
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .filter(|l| {
-                matches!(l.get("type").and_then(Value::as_str), Some("user" | "assistant"))
-                    && !flag(l, "isMeta")
+                matches!(
+                    l.get("type").and_then(Value::as_str),
+                    Some("user" | "assistant")
+                ) && !flag(l, "isMeta")
                     && !flag(l, "isCompactSummary")
             })
             .collect();
@@ -171,7 +197,9 @@ impl Converter {
         // An API message is written as one line per content block; the first line's time is when it began.
         let mut began: HashMap<String, i64> = HashMap::new();
         for l in &lines {
-            if let (Some(id), Some(ts)) = (l.pointer("/message/id").and_then(Value::as_str), ts_of(l)) {
+            if let (Some(id), Some(ts)) =
+                (l.pointer("/message/id").and_then(Value::as_str), ts_of(l))
+            {
                 began.entry(id.to_string()).or_insert(ts);
             }
         }
@@ -184,25 +212,43 @@ impl Converter {
                     continue; // a tool_result line, or an image only
                 }
                 self.prompts += 1;
-                self.prompt_id = str_of(l, "promptId").unwrap_or_else(|| format!("{}-p{}", self.sid, self.prompts));
+                self.prompt_id = str_of(l, "promptId")
+                    .unwrap_or_else(|| format!("{}-p{}", self.sid, self.prompts));
                 let mut m = self.meta(ts, None);
                 if let Some(ts) = ts {
                     m.insert("turnStartMs".into(), json!(ts));
                 }
-                self.push(Event::Acp(acp::SessionUpdate::UserMessageChunk(chunk(&text))), m);
+                self.push(
+                    Event::Acp(acp::SessionUpdate::UserMessageChunk(chunk(&text))),
+                    m,
+                );
                 continue;
             }
-            let start = l.pointer("/message/id").and_then(Value::as_str).and_then(|id| began.get(id)).copied().or(ts);
-            let Some(blocks) = content.as_array() else { continue };
+            let start = l
+                .pointer("/message/id")
+                .and_then(Value::as_str)
+                .and_then(|id| began.get(id))
+                .copied()
+                .or(ts);
+            let Some(blocks) = content.as_array() else {
+                continue;
+            };
             for b in blocks {
                 match b.get("type").and_then(Value::as_str) {
                     Some("thinking") => {
                         let body = b.get("thinking").and_then(Value::as_str).unwrap_or("");
                         let dur = num_of(l, "thinkingDurationMs");
                         let m = self.meta(ts, ts.zip(dur).map(|(t, d)| t - d).or(start));
-                        // shortcut: signature-only thinking is sent as one space so grok keeps the block and shows "Thought for Ns"; revisit if grok gains an empty-thought row
-                        let body = if body.trim().is_empty() { " " } else { body };
-                        self.push(Event::Acp(acp::SessionUpdate::AgentThoughtChunk(chunk(body))), m);
+                        // shortcut: signature-only thinking is sent as one zero-width space (grok drops empty and whitespace-only thoughts) so the block stays and shows "Thought for Ns"; revisit if grok gains an empty-thought row
+                        let body = if body.trim().is_empty() {
+                            "\u{200b}"
+                        } else {
+                            body
+                        };
+                        self.push(
+                            Event::Acp(acp::SessionUpdate::AgentThoughtChunk(chunk(body))),
+                            m,
+                        );
                     }
                     Some("text") => {
                         let body = b.get("text").and_then(Value::as_str).unwrap_or("");
@@ -210,7 +256,10 @@ impl Converter {
                             continue;
                         }
                         let m = self.meta(ts, start);
-                        self.push(Event::Acp(acp::SessionUpdate::AgentMessageChunk(chunk(body))), m);
+                        self.push(
+                            Event::Acp(acp::SessionUpdate::AgentMessageChunk(chunk(body))),
+                            m,
+                        );
                     }
                     Some("tool_use") => {
                         let id = b.get("id").and_then(Value::as_str).unwrap_or("");
@@ -228,7 +277,10 @@ impl Converter {
         self.seq += 1;
         let mut m = Map::new();
         m.insert("isReplay".into(), json!(true));
-        m.insert("eventId".into(), json!(format!("{}-{}", self.sid, self.seq)));
+        m.insert(
+            "eventId".into(),
+            json!(format!("{}-{}", self.sid, self.seq)),
+        );
         if !self.prompt_id.is_empty() {
             m.insert("promptId".into(), json!(self.prompt_id));
         }
@@ -245,13 +297,24 @@ impl Converter {
         self.out.push(Fed { event, meta });
     }
 
-    fn tool(&mut self, id: &str, name: &str, input: &Value, res: Option<&Res>, ts: Option<i64>, start: Option<i64>) {
+    fn tool(
+        &mut self,
+        id: &str,
+        name: &str,
+        input: &Value,
+        res: Option<&Res>,
+        ts: Option<i64>,
+        start: Option<i64>,
+    ) {
         match name {
             "TodoWrite" => return self.plan(input, ts),
             "Task" | "Agent" => return self.subagent(id, input, res, ts),
             _ => {}
         }
-        let dur = res.and_then(|r| r.ts).zip(ts).map(|(end, begin)| (end - begin).max(0));
+        let dur = res
+            .and_then(|r| r.ts)
+            .zip(ts)
+            .map(|(end, begin)| (end - begin).max(0));
         let status = match res {
             None => acp::ToolCallStatus::InProgress,
             Some(r) if r.is_error => acp::ToolCallStatus::Failed,
@@ -260,20 +323,55 @@ impl Converter {
         let failed = status == acp::ToolCallStatus::Failed;
         let text = res.map(|r| r.text.as_str()).unwrap_or("");
         let s = |k: &str| str_of(input, k).unwrap_or_default();
-        let text_blocks = |t: &str| if t.is_empty() { Vec::new() } else { vec![text_content(t)] };
+        // File text is exact: no trimming.
+        let raw_s = |k: &str| {
+            input
+                .get(k)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        let text_blocks = |t: &str| {
+            if t.is_empty() {
+                Vec::new()
+            } else {
+                vec![text_content(t)]
+            }
+        };
         // (kind, title, raw_input, content, raw_output)
-        let (kind, title, raw_input, content, raw_output): (acp::ToolKind, String, Value, Vec<acp::ToolCallContent>, Option<Value>) = match name {
+        let (kind, title, raw_input, content, raw_output): (
+            acp::ToolKind,
+            String,
+            Value,
+            Vec<acp::ToolCallContent>,
+            Option<Value>,
+        ) = match name {
             "Bash" => {
-                let title = str_of(input, "description").unwrap_or_else(|| s("command").lines().next().unwrap_or("").to_string());
-                (acp::ToolKind::Execute, title, input.clone(), text_blocks(text), None)
+                let title = str_of(input, "description")
+                    .unwrap_or_else(|| s("command").lines().next().unwrap_or("").to_string());
+                (
+                    acp::ToolKind::Execute,
+                    title,
+                    input.clone(),
+                    text_blocks(text),
+                    None,
+                )
             }
             "Read" => {
                 let file = res.map(|r| &r.tur).and_then(|t| t.get("file"));
-                let body = file.and_then(|f| f.get("content")).and_then(Value::as_str).unwrap_or(text);
+                let body = file
+                    .and_then(|f| f.get("content"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(text);
                 let total = file.and_then(|f| num_of(f, "totalLines"));
-                let first = file.and_then(|f| num_of(f, "startLine")).unwrap_or(1).max(1);
+                let first = file
+                    .and_then(|f| num_of(f, "startLine"))
+                    .unwrap_or(1)
+                    .max(1);
                 let shown = file.and_then(|f| num_of(f, "numLines"));
-                let range = shown.filter(|n| *n > 0 && (first > 1 || total.is_some_and(|t| t > *n))).map(|n| json!({ "start": first, "end": first + n - 1 }));
+                let range = shown
+                    .filter(|n| *n > 0 && (first > 1 || total.is_some_and(|t| t > *n)))
+                    .map(|n| json!({ "start": first, "end": first + n - 1 }));
                 let raw = (total.is_some() || range.is_some()).then(|| {
                     let mut o = Map::new();
                     if let Some(t) = total {
@@ -286,46 +384,117 @@ impl Converter {
                 });
                 // A failed read keeps its message; a good one keeps the file text without Claude's line-number gutter.
                 let body = if failed { text } else { body };
-                (acp::ToolKind::Read, format!("Read {}", s("file_path")), input.clone(), text_blocks(body), raw)
+                (
+                    acp::ToolKind::Read,
+                    format!("Read {}", s("file_path")),
+                    input.clone(),
+                    text_blocks(body),
+                    raw,
+                )
             }
             "Grep" | "Glob" => {
                 let names: Vec<String> = res
                     .and_then(|r| r.tur.get("filenames"))
                     .and_then(Value::as_array)
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let raw = (!failed && !names.is_empty()).then(|| {
                     json!({ "type": "GrepSearch", "stdout": names.join("\n").into_bytes(), "stderr": Vec::<u8>::new(), "exit_code": 0, "match_count": names.len(), "file_matches": [] })
                 });
-                (acp::ToolKind::Search, format!("{name} {}", s("pattern")), input.clone(), text_blocks(text), raw)
+                (
+                    acp::ToolKind::Search,
+                    format!("{name} {}", s("pattern")),
+                    input.clone(),
+                    text_blocks(text),
+                    raw,
+                )
             }
             "Edit" | "Write" => {
                 let path = s("file_path");
-                let (old, new) = if name == "Write" { (None, s("content")) } else { (Some(s("old_string")), s("new_string")) };
+                let (old, new) = if name == "Write" {
+                    (None, raw_s("content"))
+                } else {
+                    (Some(raw_s("old_string")), raw_s("new_string"))
+                };
                 let mut raw = input.clone();
                 if name == "Write" {
                     raw["variant"] = json!("Write");
                 }
-                (acp::ToolKind::Edit, path.clone(), raw, edit_content(failed, text, &path, old, new), None)
+                (
+                    acp::ToolKind::Edit,
+                    path.clone(),
+                    raw,
+                    edit_content(failed, text, &path, old, new),
+                    None,
+                )
             }
             "MultiEdit" => {
                 // One Edit per replacement: grok merges adjacent edits to the same file into one row.
                 let path = s("file_path");
-                let edits = input.get("edits").and_then(Value::as_array).cloned().unwrap_or_default();
+                let edits = input
+                    .get("edits")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
                 for (i, e) in edits.iter().enumerate() {
-                    let old = e.get("old_string").and_then(Value::as_str).unwrap_or("").to_string();
-                    let new = e.get("new_string").and_then(Value::as_str).unwrap_or("").to_string();
+                    let old = e
+                        .get("old_string")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let new = e
+                        .get("new_string")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
                     let raw = json!({ "file_path": path, "old_string": old, "new_string": new });
-                    let tc = tool_call(&format!("{id}#{i}"), acp::ToolKind::Edit, path.clone(), raw, status, edit_content(failed, text, &path, Some(old), new), None, dur);
+                    let tc = tool_call(
+                        &format!("{id}#{i}"),
+                        acp::ToolKind::Edit,
+                        path.clone(),
+                        raw,
+                        status,
+                        edit_content(failed, text, &path, Some(old), new),
+                        None,
+                        dur,
+                    );
                     let m = self.meta(ts, start);
                     self.push(Event::Acp(acp::SessionUpdate::ToolCall(tc)), m);
                 }
                 return;
             }
-            "WebFetch" => (acp::ToolKind::Fetch, format!("Fetch: {}", s("url")), input.clone(), text_blocks(text), None),
-            "WebSearch" => (acp::ToolKind::Search, format!("Web search: {}", s("query")), input.clone(), text_blocks(text), None),
-            "Skill" => (acp::ToolKind::Other, format!("Skill: {}", s("skill")), input.clone(), text_blocks(text), None),
-            other => (acp::ToolKind::Other, one_line(other, input), input.clone(), text_blocks(text), None),
+            "WebFetch" => (
+                acp::ToolKind::Fetch,
+                format!("Fetch: {}", s("url")),
+                input.clone(),
+                text_blocks(text),
+                None,
+            ),
+            "WebSearch" => (
+                acp::ToolKind::Search,
+                format!("Web search: {}", s("query")),
+                input.clone(),
+                text_blocks(text),
+                None,
+            ),
+            "Skill" => (
+                acp::ToolKind::Other,
+                format!("Skill: {}", s("skill")),
+                input.clone(),
+                text_blocks(text),
+                None,
+            ),
+            other => (
+                acp::ToolKind::Other,
+                one_line(other, input),
+                input.clone(),
+                text_blocks(text),
+                None,
+            ),
         };
         let tc = tool_call(id, kind, title, raw_input, status, content, raw_output, dur);
         let m = self.meta(ts, start);
@@ -344,13 +513,20 @@ impl Converter {
                             Some("in_progress") => acp::PlanEntryStatus::InProgress,
                             _ => acp::PlanEntryStatus::Pending,
                         };
-                        Some(acp::PlanEntry::new(str_of(t, "content")?, acp::PlanEntryPriority::Medium, status))
+                        Some(acp::PlanEntry::new(
+                            str_of(t, "content")?,
+                            acp::PlanEntryPriority::Medium,
+                            status,
+                        ))
                     })
                     .collect()
             })
             .unwrap_or_default();
         let m = self.meta(ts, None);
-        self.push(Event::Acp(acp::SessionUpdate::Plan(acp::Plan::new(entries))), m);
+        self.push(
+            Event::Acp(acp::SessionUpdate::Plan(acp::Plan::new(entries))),
+            m,
+        );
     }
 
     /// A Task/Agent call is a subagent row, not a tool row.
@@ -362,15 +538,21 @@ impl Converter {
             .map(|c| c.sid.clone())
             .or_else(|| str_of(tur, "agentId").map(|a| format!("agent-{a}")))
             .unwrap_or_else(|| format!("agent-{tool_use_id}"));
-        let model = linked.and_then(|c| c.model.clone()).or_else(|| str_of(tur, "resolvedModel"));
+        let model = linked
+            .and_then(|c| c.model.clone())
+            .or_else(|| str_of(tur, "resolvedModel"));
         let spawned = XaiSessionUpdate::SubagentSpawned {
             subagent_id: child_sid.clone(),
             attempt_id: None,
             parent_session_id: self.sid.clone(),
             parent_prompt_id: None,
             child_session_id: child_sid.clone(),
-            subagent_type: str_of(input, "subagent_type").or_else(|| linked.and_then(|c| c.agent_type.clone())).unwrap_or_else(|| "general-purpose".into()),
-            description: str_of(input, "description").or_else(|| linked.and_then(|c| c.description.clone())).unwrap_or_else(|| "subagent".into()),
+            subagent_type: str_of(input, "subagent_type")
+                .or_else(|| linked.and_then(|c| c.agent_type.clone()))
+                .unwrap_or_else(|| "general-purpose".into()),
+            description: str_of(input, "description")
+                .or_else(|| linked.and_then(|c| c.description.clone()))
+                .unwrap_or_else(|| "subagent".into()),
             effective_context_source: None,
             context_normalized: false,
             capability_mode: None,
@@ -384,8 +566,11 @@ impl Converter {
         let m = self.meta(ts, None);
         self.push(Event::Xai(spawned), m);
         // An async launch's result is only the launch note; the sidecar's `finished` says it ended.
-        let done = tur.get("status").and_then(Value::as_str) == Some("completed") || linked.is_some_and(|c| c.finished);
-        let Some(r) = res.filter(|_| done) else { return };
+        let done = tur.get("status").and_then(Value::as_str) == Some("completed")
+            || linked.is_some_and(|c| c.finished);
+        let Some(r) = res.filter(|_| done) else {
+            return;
+        };
         let launched = tur.get("status").and_then(Value::as_str) == Some("async_launched");
         let finished = XaiSessionUpdate::SubagentFinished {
             subagent_id: child_sid.clone(),
@@ -395,7 +580,10 @@ impl Converter {
             error: r.is_error.then(|| r.text.clone()),
             tool_calls: num_of(tur, "totalToolUseCount").unwrap_or(0).max(0) as u32,
             turns: 0,
-            duration_ms: num_of(tur, "totalDurationMs").or_else(|| r.ts.zip(ts).map(|(e, b)| e - b)).unwrap_or(0).max(0) as u64,
+            duration_ms: num_of(tur, "totalDurationMs")
+                .or_else(|| r.ts.zip(ts).map(|(e, b)| e - b))
+                .unwrap_or(0)
+                .max(0) as u64,
             tokens_used: num_of(tur, "totalTokens").unwrap_or(0).max(0) as u64,
             output: (!launched && !r.is_error).then(|| r.text.clone()),
             will_wake: false,
@@ -432,11 +620,23 @@ fn tool_call(
 }
 
 /// A good edit carries its diff; a failed one carries Claude's message.
-fn edit_content(failed: bool, text: &str, path: &str, old: Option<String>, new: String) -> Vec<acp::ToolCallContent> {
+fn edit_content(
+    failed: bool,
+    text: &str,
+    path: &str,
+    old: Option<String>,
+    new: String,
+) -> Vec<acp::ToolCallContent> {
     if failed {
-        return if text.is_empty() { Vec::new() } else { vec![text_content(text)] };
+        return if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![text_content(text)]
+        };
     }
-    vec![acp::ToolCallContent::Diff(acp::Diff::new(path, new).old_text(old))]
+    vec![acp::ToolCallContent::Diff(
+        acp::Diff::new(path, new).old_text(old),
+    )]
 }
 
 /// Every tool result by `tool_use_id`.
@@ -446,9 +646,16 @@ fn index_results(lines: &[Value], dir: &Path) -> HashMap<String, Res> {
         if l.get("type").and_then(Value::as_str) != Some("user") {
             continue;
         }
-        let Some(blocks) = l.pointer("/message/content").and_then(Value::as_array) else { continue };
-        for b in blocks.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")) {
-            let Some(id) = b.get("tool_use_id").and_then(Value::as_str) else { continue };
+        let Some(blocks) = l.pointer("/message/content").and_then(Value::as_array) else {
+            continue;
+        };
+        for b in blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+        {
+            let Some(id) = b.get("tool_use_id").and_then(Value::as_str) else {
+                continue;
+            };
             out.insert(
                 id.to_string(),
                 Res {
@@ -469,9 +676,13 @@ fn unstub(text: &str, dir: &Path) -> String {
     if !text.starts_with("<persisted-output>") {
         return text.to_string();
     }
-    let Some(at) = text.find(MARK) else { return text.to_string() };
+    let Some(at) = text.find(MARK) else {
+        return text.to_string();
+    };
     let path = text[at + MARK.len()..].lines().next().unwrap_or("").trim();
-    let Some(name) = Path::new(path).file_name() else { return text.to_string() };
+    let Some(name) = Path::new(path).file_name() else {
+        return text.to_string();
+    };
     fs::read_to_string(dir.join("tool-results").join(name)).unwrap_or_else(|_| text.to_string())
 }
 
