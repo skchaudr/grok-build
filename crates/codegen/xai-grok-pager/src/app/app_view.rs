@@ -2635,6 +2635,21 @@ impl AppView {
                 {
                     return outcome;
                 }
+                // A read-only past-session view: Esc goes back to the sessions list unless something layered on top wants it.
+                if let Event::Key(key) = ev
+                    && key.kind != KeyEventKind::Release
+                    && key.code == KeyCode::Esc
+                    && key.modifiers.is_empty()
+                    && self.agents.get(&id).is_some_and(|a| {
+                        a.trace_return.is_some()
+                            && a.active_subagent.is_none()
+                            && a.is_bare_scrollback()
+                            && a.no_input_overlay_pending()
+                            && a.no_esc_consumer_pending()
+                    })
+                {
+                    return InputOutcome::Action(Action::TracesLeaveView);
+                }
                 let prompt_paging = !overlay_active && !self.screen_mode.is_minimal();
                 let outcome = match self.agents.get_mut(&id) {
                     Some(agent) => {

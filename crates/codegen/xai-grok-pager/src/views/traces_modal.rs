@@ -961,6 +961,14 @@ impl TracesModalState {
         }
     }
 
+    /// Enter on a local Claude row in `grok traces` opens the read-only session view instead of the trajectory.
+    fn claude_to_open(&self) -> Option<SessionRow> {
+        if !crate::app::standalone_traces::is_standalone() {
+            return None;
+        }
+        self.selected_session().filter(|s| s.host.is_none() && s.source == "claude").cloned()
+    }
+
     /// Enter on a live local row follows it instead of opening its trajectory.
     fn selected_live(&self) -> bool {
         self.index.is_some() && self.selected_session().is_some_and(|s| s.host.is_none() && s.status == Status::Active)
@@ -3862,6 +3870,9 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                 KeyCode::Char('r') => return state.resume(state.selected_session().cloned()),
                 KeyCode::Enter => {
                     if !state.expand_selected_more() {
+                        if let Some(row) = state.claude_to_open() {
+                            return InputOutcome::Action(Action::TracesOpenClaude(Box::new(row)));
+                        }
                         if state.selected_live() {
                             state.open_follow();
                         } else {
