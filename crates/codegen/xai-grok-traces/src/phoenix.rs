@@ -24,7 +24,13 @@ pub struct PhoenixSpan {
     pub trace_id: String,
     /// `tool_use_id` attribute when the emitter sets it.
     pub call_id: Option<String>,
+    /// Span name as emitted, harness prefix included (`grok tool:read_file`).
     pub name: String,
+    /// `hook.event` (PreToolUse, PostToolUse, Stop, ...): tells a call's start span from
+    /// its end span when the emitter sends both (grok), and calls from non-call spans.
+    pub hook_event: Option<String>,
+    /// `tool.name`; `None` on non-call spans.
+    pub tool_name: Option<String>,
     pub start: DateTime<Utc>,
     /// Always set: OTLP exports a span when it ends, so Phoenix never holds a running
     /// span. Running rows and liveness must come from receipts, not from Phoenix.
@@ -54,6 +60,8 @@ pub fn parse_span(v: &Value) -> Option<PhoenixSpan> {
         trace_id: str_at(ctx, "trace_id").unwrap_or_default().to_owned(),
         call_id: attr("tool_use_id"),
         name: str_at(v, "name").unwrap_or_default().to_owned(),
+        hook_event: attr("hook.event"),
+        tool_name: attr("tool.name"),
         start: time(v, "start_time")?,
         end: time(v, "end_time")?,
         status: match str_at(v, "status_code") {
@@ -122,7 +130,7 @@ mod tests {
             "start_time": "2026-01-02T03:04:05.250+00:00",
             "end_time": "2026-01-02T03:04:07.000+00:00",
             "status_code": "OK",
-            "attributes": {"session.id": "sess", "tool_use_id": "toolu_x", "agent_id": "a1", "transcript_path": "/tmp/t.jsonl"}
+            "attributes": {"session.id": "sess", "tool_use_id": "toolu_x", "hook.event": "PostToolUse", "tool.name": "Bash", "agent_id": "a1", "transcript_path": "/tmp/t.jsonl"}
         });
         v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         v
@@ -135,6 +143,8 @@ mod tests {
         assert_eq!(s.trace_id, "t1");
         assert_eq!(s.call_id.as_deref(), Some("toolu_x"));
         assert_eq!(s.name, "claude tool:Bash");
+        assert_eq!(s.hook_event.as_deref(), Some("PostToolUse"));
+        assert_eq!(s.tool_name.as_deref(), Some("Bash"));
         assert_eq!(s.end - s.start, chrono::Duration::milliseconds(1750));
         assert_eq!(s.status, SpanStatus::Ok);
         assert_eq!(s.parent_id.as_deref(), Some("p1"));
@@ -145,7 +155,8 @@ mod tests {
 
     #[test]
     fn missing_attrs() {
-        let s = parse_span(&span(json!({"status_code": "UNSET", "parent_id": null, "attributes": {}}))).unwrap();
+        let s = parse_span(&span(json!({"status_code": "UNSET", "parent_id": null, "attributes": {"tool.name": ""}}))).unwrap();
+        assert_eq!((s.hook_event, s.tool_name), (None, None));
         assert_eq!(s.status, SpanStatus::Unset);
         assert_eq!(s.parent_id, None);
         assert_eq!((s.call_id, s.session_id, s.agent_id, s.transcript_path), (None, None, None, None));
