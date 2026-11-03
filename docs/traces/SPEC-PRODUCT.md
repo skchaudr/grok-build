@@ -14,6 +14,11 @@ Newest last. "Departs" means it goes beyond or against his words.
 6. Running rows and liveness come from receipts, because Phoenix only holds finished spans (checked live).
 7. Pi spans carry Pi's own session id; dpi matches by the uuid in `<uuid>:N`; grok's emitter goes to one span per call in C1; traces queries the Phoenix project named after the harness.
 8. The other machine's running calls come from its receipts over ssh (`remote.rs`), since Phoenix has a call only once it ends.
+9. grok live uses grok's own viewer attach; if attach can't reach a session started in another terminal, it uses receipts plus that session's `updates.jsonl` (already grok's events, no converter).
+10. `/traces` inside a grok session opens a past session in its own agent view, leaving the user's session untouched; Esc returns.
+11. `Enter` opens the block viewer on Other and Skill rows (tool name, full input, full output). This also changes grok's own sessions. Departs: grok-build behavior changed.
+12. Harness messages in a Claude transcript (`<task-notification>`, `<local-command-stdout>`, `<system-reminder>`, interrupts) are not shown as user prompts; slash commands show as grok shows one.
+13. Work is split into pieces of one job each (about one file or function); anything touching grok's handler, view or tracker is built by Opus.
 
 ## What traces is
 
