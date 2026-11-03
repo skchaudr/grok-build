@@ -13,6 +13,7 @@ Newest last. "Departs" means it goes beyond or against his words.
 5. Every slice merges when review and tests pass; grok is rebuilt and installed only at the three checkpoints (after A2, after A4, at the end). B1's hook files install when it merges.
 6. Running rows and liveness come from receipts, because Phoenix only holds finished spans (checked live).
 7. Pi spans carry Pi's own session id; dpi matches by the uuid in `<uuid>:N`; grok's emitter goes to one span per call in C1; traces queries the Phoenix project named after the harness.
+8. The other machine's running calls come from its receipts over ssh (`remote.rs`), since Phoenix has a call only once it ends.
 
 ## What traces is
 
@@ -144,7 +145,7 @@ Phoenix gives the structure, and the transcript gives the content. Traces never 
   - Traces queries the Phoenix project named after the session's harness.
   - Pi on the Mini ships again (`~/phoenix-lab/.venv` is missing).
   - Traces reads spans from Phoenix 21 on old-air (`100.109.233.105:6006`). There's no Rust client today; Phase 1 adds one.
-- **Hook receipts are the same structure, locally and instantly.** `grok-traces hook` already records `tool_use_id` and `agent_id`. Receipts cover the moment before Phoenix has the span, and keep traces working when Phoenix is unreachable. Pi's receipts don't carry call ids today: traces.sqlite has zero `tool_execution_*` receipts despite `traces.ts:66-68`. Fixed on both machines.
+- **Hook receipts are the same structure, locally and instantly.** `grok-traces hook` already records `tool_use_id` and `agent_id`. Receipts cover the moment before Phoenix has the span, and keep traces working when Phoenix is unreachable. Pi's `tool_execution_*` receipts already carry the call id (only Pi sessions started before `traces.ts` was installed lack them; Pi loads extensions at startup). The end receipt also carries `is_error`, `duration_ms` and `parent_tool_use_id`.
 - **The transcript is the content.** Full command, output, text and thinking, matched to its span or receipt by `tool_use_id`.
 - **One writer, one row per call.** Traces merges spans, receipts and transcript into one stream per session before grok's handler sees it.
   - When a span or receipt reports a call starting, traces first reads the transcript tail (a local read) and emits any text and thinking that came before the call. Then it opens the call's row right away, as running, with the span's real start time.
@@ -155,7 +156,7 @@ Phoenix gives the structure, and the transcript gives the content. Traces never 
 - **Phoenix only ever holds finished spans** (checked live 2026-11-03: 0 of 3,000+ spans had no end; OTLP exports a span when it ends). So a running row and a session's liveness come from receipts; Phoenix gives the call's real end, status and parent once it finishes.
 - **Liveness:** alive, ended or failed comes from the session's receipts (last receipt, its pid), never from guessing at transcript silence.
 - **Wake:** new spans, receipts and transcript lines wake the view through traces' existing wake notifications (`wake.rs`), not polling. New content reaches the tail within about a second. Scrolling up stops following; `G` goes back to the tail.
-- **The other machine's sessions:** their structure comes from Phoenix directly, and their content through the existing ssh remote path (`remote.rs`), in the same view.
+- **The other machine's sessions:** finished calls come from Phoenix; running calls from that machine's receipts and content from its transcript, both through the existing ssh remote path (`remote.rs`), in the same view.
 - **Phoenix unreachable:** receipts and transcripts keep everything working, and the status line says Phoenix is offline.
 
 ### Subagents
