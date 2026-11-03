@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use agent_client_protocol as acp;
 use xai_acp_lib::AcpClientMessage;
 use xai_grok_shell::extensions::notification::SessionNotification;
-use xai_grok_shell::session::storage::{ReplayPathHint, ReplayedUpdate, stream_replay_updates_at_hinted};
+use xai_grok_shell::session::storage::{ReplayEmission, ReplayPathHint, ReplayedUpdate, stream_replay_updates_at_hinted};
 
 use crate::acp::claude_feed::{self, Event, Fed};
 use crate::acp::tracker::AcpUpdateTracker;
@@ -106,7 +106,7 @@ pub(crate) fn open_grok_in(app: &mut AppView, row: xai_grok_traces::SessionRow, 
 fn grok_feed(sid: &str, home: &Path, cwd: Option<&str>) -> io::Result<Vec<Fed>> {
     let hint = ReplayPathHint { child_cwd: cwd.map(Path::new), ..Default::default() };
     let mut out = Vec::new();
-    stream_replay_updates_at_hinted(sid, home, hint, |update| {
+    let emission = stream_replay_updates_at_hinted(sid, home, hint, |update| {
         let (event, meta) = match update {
             ReplayedUpdate::Acp(update, meta) => (Event::Acp(update), meta.unwrap_or_default()),
             ReplayedUpdate::Xai(update) => (Event::Xai(update), Default::default()),
@@ -115,7 +115,7 @@ fn grok_feed(sid: &str, home: &Path, cwd: Option<&str>) -> io::Result<Vec<Fed>> 
         meta.insert("isReplay".into(), true.into());
         out.push(Fed { event, meta });
     })?;
-    if out.is_empty() {
+    if emission == ReplayEmission::Empty {
         return Err(io::Error::new(io::ErrorKind::NotFound, "no updates.jsonl to replay"));
     }
     Ok(out)
