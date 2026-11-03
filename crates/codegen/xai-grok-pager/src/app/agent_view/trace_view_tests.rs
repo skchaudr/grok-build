@@ -174,7 +174,7 @@ fn row(tmp: &tempfile::TempDir) -> xai_grok_traces::SessionRow {
 
 fn opened(tmp: &tempfile::TempDir) -> AppView {
     let mut app = app();
-    standalone_traces::open_claude(&mut app, row(tmp));
+    standalone_traces::open_claude_in(&mut app, row(tmp), true);
     app
 }
 
@@ -302,6 +302,38 @@ fn esc_goes_back_to_the_sessions_list_and_the_view_empties() {
 }
 
 #[test]
+fn inside_a_grok_session_the_view_opens_beside_it_and_esc_leaves_the_session_as_it_was() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app();
+    let origin = AgentId(0);
+    // The fixture inserts its agent by hand; real creation paths advance the counter.
+    app.next_agent_id = 1;
+    {
+        let a = app.agents.get_mut(&origin).unwrap();
+        a.bind_session_id(agent_client_protocol::SessionId::new("grok-live"));
+        a.scrollback
+            .push_block(RenderBlock::system("the user's own entry".to_string()));
+    }
+    standalone_traces::open_claude_in(&mut app, row(&tmp), false);
+    assert_ne!(app.active_view, ActiveView::Agent(origin), "a view of its own");
+    assert!(agent(&app).trace_return.is_some());
+    assert!(blocks(agent(&app)).iter().any(|x| matches!(x, RenderBlock::ToolCall(_))));
+    let o = &app.agents[&origin];
+    assert_eq!(o.session.session_id.as_ref().map(|s| &*s.0), Some("grok-live"));
+    assert_eq!(o.scrollback.len(), 1);
+
+    standalone_traces::leave_view(&mut app);
+    assert_eq!(app.active_view, ActiveView::Agent(origin));
+    assert_eq!(app.agents.len(), 1, "the read-only view is closed");
+    let o = &app.agents[&origin];
+    assert!(matches!(o.active_modal, Some(ActiveModal::Traces { .. })), "the sessions list is back");
+    assert_eq!(o.session.session_id.as_ref().map(|s| &*s.0), Some("grok-live"));
+    assert_eq!(o.scrollback.len(), 1);
+    assert!(matches!(o.scrollback.get(0).map(|e| &e.block), Some(RenderBlock::System(_))));
+    assert_eq!(o.composer_route(), ComposerRoute::RootSession);
+}
+
+#[test]
 fn cancel_and_rewind_do_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = opened(&tmp);
@@ -317,7 +349,7 @@ fn opening_twice_does_not_stack_sessions() {
     let mut app = opened(&tmp);
     let first = agent(&app).scrollback.len();
     standalone_traces::leave_view(&mut app);
-    standalone_traces::open_claude(&mut app, row(&tmp));
+    standalone_traces::open_claude_in(&mut app, row(&tmp), true);
     assert_eq!(agent(&app).scrollback.len(), first);
 }
 
@@ -330,7 +362,7 @@ fn an_unreadable_transcript_stays_on_the_list_with_a_status() {
         file_path: "/nope/x.jsonl".into(),
         ..Default::default()
     };
-    standalone_traces::open_claude(&mut app, missing);
+    standalone_traces::open_claude_in(&mut app, missing, true);
     let a = agent(&app);
     assert!(a.trace_return.is_none());
     let Some(ActiveModal::Traces { state }) = &a.active_modal else {

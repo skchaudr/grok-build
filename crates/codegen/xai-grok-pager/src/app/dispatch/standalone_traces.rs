@@ -9,8 +9,12 @@ use xai_acp_lib::AcpClientMessage;
 use xai_grok_shell::extensions::notification::SessionNotification;
 
 use crate::acp::claude_feed::{self, Event, Fed};
+use crate::acp::tracker::AcpUpdateTracker;
 use crate::app::actions::{Action, Effect};
-use crate::app::app_view::{AppView, AuthState, TrustState};
+use crate::app::agent::{AgentId, AgentSession, AgentState};
+use crate::app::agent_view::AgentView;
+use crate::app::app_view::{ActiveView, AppView, AuthState, TrustState};
+use crate::scrollback::state::ScrollbackState;
 use crate::app::consent::ConsentState;
 use crate::views::modal::ActiveModal;
 
@@ -62,11 +66,18 @@ pub(crate) fn open_pending(app: &mut AppView, scan_done: bool) {
     }
 }
 
-/// Enter on a Claude session in the sessions list: the transcript, converted, goes through the session-event handler into this
-/// view as a replay. The view is read-only (no composer); the sessions list waits in `trace_return` for Esc.
+/// Enter on a Claude session in the sessions list: the transcript, converted, goes through the session-event handler into a
+/// read-only view (no composer) as a replay; the sessions list waits in `trace_return` for Esc.
 pub(crate) fn open_claude(app: &mut AppView, row: xai_grok_traces::SessionRow) {
+    open_claude_in(app, row, is_standalone());
+}
+
+/// `grok traces` replays into its own view. Inside a grok session the replay gets a new agent view, so the user's session
+/// is left as it was.
+pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
     let feed = claude_feed::convert(&row.file_path, &row.id);
-    let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
+    let ActiveView::Agent(origin) = app.active_view else { return };
+    let Some(agent) = app.agents.get_mut(&origin) else { return };
     let events = match feed {
         Ok(events) => events,
         Err(e) => {
@@ -77,7 +88,19 @@ pub(crate) fn open_claude(app: &mut AppView, row: xai_grok_traces::SessionRow) {
         }
     };
     let Some(ActiveModal::Traces { state }) = agent.active_modal.take() else { return };
-    agent.clear_trace_content();
+    let agent = if standalone {
+        agent.clear_trace_content();
+        agent
+    } else {
+        let id = AgentId(app.next_agent_id);
+        app.next_agent_id += 1;
+        let view = read_only_view(app, id);
+        app.agents.insert(id, view);
+        super::ctx::switch_to_agent(app, id, super::ctx::SwitchCause::Load);
+        let agent = app.agents.get_mut(&id).expect("just inserted");
+        agent.trace_origin = Some(origin);
+        agent
+    };
     agent.trace_return = Some(state);
     agent.bind_session_id(acp::SessionId::new(row.id.clone()));
     if let Some(cwd) = row.cwd.as_deref() {
@@ -97,12 +120,72 @@ pub(crate) fn open_claude(app: &mut AppView, row: xai_grok_traces::SessionRow) {
     agent.mark_turn_finished(crate::app::cancel_latency::TurnEnd::Aborted);
 }
 
-/// Esc in the read-only view: empty it and put the sessions list back.
+/// Esc in the read-only view: put the sessions list back, on the session it was opened from when there is one.
 pub(crate) fn leave_view(app: &mut AppView) {
     let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     let Some(state) = agent.trace_return.take() else { return };
+    if let Some(origin) = agent.trace_origin
+        && let ActiveView::Agent(id) = app.active_view
+        && let Some(back) = app.agents.get_mut(&origin)
+    {
+        back.active_modal = Some(ActiveModal::Traces { state });
+        super::ctx::switch_to_agent(app, origin, super::ctx::SwitchCause::Picker);
+        super::session::modal::remove_agent_and_cleanup(app, id);
+        return;
+    }
+    let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     agent.clear_trace_content();
     agent.active_modal = Some(ActiveModal::Traces { state });
+}
+
+/// A blank top-level view for a past session; nothing is sent for it, and it has no session until the replay binds one.
+fn read_only_view(app: &AppView, id: AgentId) -> AgentView {
+    let mut scrollback = ScrollbackState::new();
+    scrollback.set_appearance(app.appearance.clone());
+    AgentView::from_app(
+        app,
+        AgentSession {
+            id,
+            acp_tx: app.acp_tx.clone(),
+            session_id: None,
+            models: app.models.clone(),
+            state: AgentState::Idle,
+            tracker: AcpUpdateTracker::new(),
+            cwd: app.cwd.clone(),
+            is_worktree: false,
+            forked_from: None,
+            pending_prompts: std::collections::VecDeque::new(),
+            next_queue_id: 0,
+            yolo_mode: false,
+            auto_mode: false,
+            prompt_history: Vec::new(),
+            prompt_history_loading: false,
+            loading_replay: false,
+            restore_degree: None,
+            rate_limited: false,
+            model_incompatible: false,
+            credit_limit_blocked: false,
+            free_usage_blocked: false,
+            available_commands: Vec::new(),
+            available_commands_generation: 0,
+            available_tools: None,
+            model_switch_pending: false,
+            hook_block_hold: false,
+            blocked_prompt: None,
+            user_model_preference: None,
+            deferred_model_switch: None,
+            bg_tasks: std::collections::BTreeMap::new(),
+            bg_tool_call_to_task: std::collections::HashMap::new(),
+            scheduled_tasks: std::collections::HashMap::new(),
+            in_flight_prompt: None,
+            forwarded_slash: None,
+            turn_saw_agent_text: false,
+            compact_held_prompt: None,
+            current_prompt_id: None,
+            created_via_new: false,
+        },
+        scrollback,
+    )
 }
 
 /// One converted event as the message the handler takes off the wire.
