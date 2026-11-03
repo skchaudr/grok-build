@@ -464,3 +464,22 @@ fn snapshot_half_width_vim() {
         draw(app.agents.get_mut(&id).unwrap(), 50)
     );
 }
+
+#[test]
+fn a_pi_row_opens_read_only_through_the_pi_converter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("pi.jsonl");
+    let entries = [
+        json!({"type":"message","id":"a","parentId":null,"timestamp":at(0),"message":{"role":"user","content":[{"type":"text","text":"look around"}]}}),
+        json!({"type":"message","id":"b","parentId":"a","timestamp":at(2),"message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"ls"}}]}}),
+        json!({"type":"message","id":"c","parentId":"b","timestamp":at(3),"message":{"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"a.txt"}]}}),
+    ];
+    let body: Vec<String> = entries.iter().map(Value::to_string).collect();
+    std::fs::write(&path, body.join("\n")).unwrap();
+    let row = xai_grok_traces::SessionRow { id: "pi:s1".into(), source: "pi".into(), file_path: path, ..Default::default() };
+    let mut app = app();
+    standalone_traces::open_claude_in(&mut app, row, true);
+    let a = agent(&app);
+    assert!(a.trace_return.is_some());
+    assert!(blocks(a).iter().any(|x| matches!(x, RenderBlock::ToolCall(_))), "the bash call is drawn");
+}

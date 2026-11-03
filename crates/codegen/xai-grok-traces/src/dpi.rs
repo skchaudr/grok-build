@@ -274,6 +274,13 @@ impl DpiDb {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Every entry record of a conversation, in order: what a past-session view replays.
+    pub fn records(&self, conversation: i64) -> Result<Vec<Value>> {
+        let mut stmt = self.conn.prepare("SELECT record FROM entries WHERE conversation_id = ?1 ORDER BY id")?;
+        let rows = stmt.query_map([conversation], |r| r.get::<_, String>(0))?;
+        Ok(rows.flatten().filter_map(|r| serde_json::from_str(&r).ok()).collect())
+    }
+
     /// The full entry row as one JSON line (the analogue of a transcript's raw line).
     pub fn raw_entry(&self, conversation: i64, entry_id: i64) -> Result<Option<String>> {
         Ok(self
@@ -447,6 +454,7 @@ mod tests {
         assert_eq!(raw["record"]["model"][0]["content"][0]["text"], "Done.");
         assert!(db.raw_entry(1, 99).unwrap().is_none());
         assert!(db.raw_entry(3, 20).unwrap().is_none(), "entry belongs to another conversation");
+        assert_eq!(db.records(3).unwrap().len(), 2);
         assert!(db.conn.execute("DELETE FROM entries", []).is_err());
         assert!(DpiDb::open(&tmp.path().join("missing.sqlite")).is_err());
     }

@@ -8,6 +8,7 @@ pub(crate) mod claude_subagents;
 pub mod leader_bridge;
 pub mod meta;
 pub mod model_state;
+pub(crate) mod pi_feed;
 pub(crate) mod skills_listing;
 pub mod spawn;
 pub(crate) mod subagent_label_registry;
