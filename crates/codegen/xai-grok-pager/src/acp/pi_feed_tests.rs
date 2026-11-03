@@ -292,3 +292,66 @@ fn only_the_active_branch_is_shown_and_a_compaction_is_grok_s_row() {
         .unwrap();
     assert_eq!(pos, 2);
 }
+
+#[test]
+fn codemode_nested_calls_nest_under_it_and_a_lane_prompt_is_a_user_message() {
+    let mut lane = msg(0, Value::Null);
+    lane.as_object_mut().unwrap().remove("message");
+    lane["type"] = json!("custom_message");
+    lane["customType"] = json!("lane-step");
+    lane["content"] = json!("Lane stage: made-up");
+    let nested = json!({ "complete": true, "calls": [
+        { "id": "cm1/1", "name": "bash", "status": "ok", "arguments": { "command": "ls" }, "durationMs": 7 },
+        { "id": "cm1/2", "name": "read", "status": "error", "arguments": { "path": "/a" }, "durationMs": 3 },
+    ] });
+    let old = json!({ "calls": [
+        { "id": "cm2/1", "name": "read", "status": "ok", "args": "{\"path\":\"/b\"}", "durationMs": 1.6 },
+    ] });
+    let feed = run(&[
+        lane,
+        user(1, "go"),
+        assistant(
+            5,
+            1000,
+            json!([
+                call("cm1", "codemode", json!({ "code": "x" })),
+                call("cm2", "codemode", json!({ "code": "y" })),
+            ]),
+        ),
+        {
+            let mut r = result(6, "cm1", "done", false, 9, Value::Null);
+            r["message"]["nestedCalls"] = nested;
+            r
+        },
+        result(7, "cm2", "done", false, 2, old),
+    ]);
+    let Event::Acp(acp::SessionUpdate::UserMessageChunk(_)) = &feed[0].event else {
+        panic!("lane prompt is not a user message");
+    };
+    let tcs = calls(&feed);
+    let parent = |t: &acp::ToolCall| {
+        t.meta
+            .as_ref()
+            .and_then(|m| m.get("pi")?.get("parentToolCallId"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    use acp::ToolKind::*;
+    let got: Vec<_> = tcs
+        .iter()
+        .map(|t| (&*t.tool_call_id.0, t.kind, parent(t), t.status))
+        .collect();
+    use acp::ToolCallStatus::{Completed, Failed};
+    assert_eq!(
+        got,
+        [
+            ("cm1", Other, None, Completed),
+            ("cm1/1", Execute, Some("cm1".into()), Completed),
+            ("cm1/2", Read, Some("cm1".into()), Failed),
+            ("cm2", Other, None, Completed),
+            ("cm2/1", Read, Some("cm2".into()), Completed),
+        ]
+    );
+    assert_eq!(tcs[1].title, "ls");
+    assert_eq!(tcs[4].title, "Read /b");
+}

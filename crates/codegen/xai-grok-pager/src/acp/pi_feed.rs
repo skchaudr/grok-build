@@ -23,6 +23,8 @@ struct Res {
     ts: Option<i64>,
     dur: Option<i64>,
     details: Value,
+    /// A codemode result's `nestedCalls`, a sibling of `details`.
+    nested: Value,
 }
 
 fn role(e: &Value) -> Option<&str> {
@@ -68,6 +70,7 @@ pub(crate) fn convert(session: &Path, session_id: &str) -> io::Result<Vec<Fed>> 
         seq: 0,
         prompt_id: String::new(),
         prompts: 0,
+        parent: None,
     };
     c.run(&String::from_utf8_lossy(&raw));
     Ok(c.out)
@@ -79,6 +82,8 @@ struct Converter {
     seq: u64,
     prompt_id: String,
     prompts: u64,
+    /// The codemode call whose nested calls are being emitted.
+    parent: Option<String>,
 }
 
 impl Converter {
@@ -89,7 +94,12 @@ impl Converter {
             .collect();
         let entries: Vec<Value> = active_branch(all)
             .into_iter()
-            .filter(|e| matches!(type_of(e), Some("message" | "compaction")))
+            .filter(|e| {
+                matches!(
+                    type_of(e),
+                    Some("message" | "compaction" | "custom_message")
+                )
+            })
             .collect();
         let mut results: HashMap<String, Res> = HashMap::new();
         for e in entries.iter().filter(|e| role(e) == Some("toolResult")) {
@@ -105,6 +115,7 @@ impl Converter {
                     ts: ts_of(e),
                     dur: num_of(m, "durationMs"),
                     details: m.get("details").cloned().unwrap_or(Value::Null),
+                    nested: m.get("nestedCalls").cloned().unwrap_or(Value::Null),
                 },
             );
         }
@@ -114,25 +125,15 @@ impl Converter {
                 self.compaction(e, ts);
                 continue;
             }
+            // A lane prompt is a `custom_message` entry: its content goes to the model as a user turn.
+            if type_of(e) == Some("custom_message") {
+                self.user(&text_of(e.get("content").unwrap_or(&Value::Null)), ts);
+                continue;
+            }
             let m = &e["message"];
             let content = m.get("content").unwrap_or(&Value::Null);
             match role(e) {
-                Some("user") => {
-                    let text = text_of(content);
-                    if text.trim().is_empty() {
-                        continue;
-                    }
-                    self.prompts += 1;
-                    self.prompt_id = format!("{}-p{}", self.sid, self.prompts);
-                    let mut meta = self.meta(ts, None);
-                    if let Some(ts) = ts {
-                        meta.insert("turnStartMs".into(), json!(ts));
-                    }
-                    self.push(
-                        Event::Acp(acp::SessionUpdate::UserMessageChunk(chunk(&text))),
-                        meta,
-                    );
-                }
+                Some("user") => self.user(&text_of(content), ts),
                 Some("assistant") => {
                     // The entry is stamped when the message ended.
                     let start = ts.zip(num_of(m, "durationMs")).map(|(t, d)| t - d).or(ts);
@@ -146,6 +147,32 @@ impl Converter {
                 _ => {}
             }
         }
+    }
+
+    fn user(&mut self, text: &str, ts: Option<i64>) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.prompts += 1;
+        self.prompt_id = format!("{}-p{}", self.sid, self.prompts);
+        let mut meta = self.meta(ts, None);
+        if let Some(ts) = ts {
+            meta.insert("turnStartMs".into(), json!(ts));
+        }
+        self.push(
+            Event::Acp(acp::SessionUpdate::UserMessageChunk(chunk(text))),
+            meta,
+        );
+    }
+
+    /// grok nests a call under its parent by `_meta.pi.parentToolCallId`.
+    fn nest(&self, mut tc: acp::ToolCall) -> acp::ToolCall {
+        if let Some(p) = &self.parent {
+            let mut m = tc.meta.take().unwrap_or_default();
+            m.insert("pi".into(), json!({ "parentToolCallId": p }));
+            tc.meta = Some(m);
+        }
+        tc
     }
 
     /// A compaction entry is grok's compaction row. Pi records only `tokensBefore`, so the
@@ -312,6 +339,7 @@ impl Converter {
                         dur,
                     );
                     let m = self.meta(ts, start);
+                    let tc = self.nest(tc);
                     self.push(Event::Acp(acp::SessionUpdate::ToolCall(tc)), m);
                 }
                 return;
@@ -324,8 +352,46 @@ impl Converter {
             ),
         };
         let tc = tool_call(id, kind, title, raw_input, status, content, None, dur);
+        let tc = self.nest(tc);
         let m = self.meta(ts, start);
         self.push(Event::Acp(acp::SessionUpdate::ToolCall(tc)), m);
+        if name == "codemode" && self.parent.is_none() {
+            self.nested(id, res, ts, start);
+        }
+    }
+
+    /// A codemode result lists its inner calls (`nestedCalls` with `arguments`, else `details.calls` with `args` as JSON text).
+    fn nested(&mut self, parent: &str, res: Option<&Res>, ts: Option<i64>, start: Option<i64>) {
+        let Some(r) = res else { return };
+        fn list(v: &Value) -> Option<&Vec<Value>> {
+            v.get("calls").and_then(Value::as_array)
+        }
+        let calls = list(&r.nested).or_else(|| list(&r.details));
+        self.parent = Some(parent.to_string());
+        for c in calls.into_iter().flatten() {
+            let (Some(id), Some(name)) = (str_of(c, "id"), str_of(c, "name")) else {
+                continue;
+            };
+            let args = c.get("arguments").cloned().unwrap_or_else(|| {
+                c.get("args")
+                    .and_then(Value::as_str)
+                    .and_then(|a| serde_json::from_str(a).ok())
+                    .unwrap_or(Value::Null)
+            });
+            let inner = Res {
+                text: String::new(),
+                is_error: str_of(c, "status").is_some_and(|s| s != "ok"),
+                ts: None,
+                dur: c
+                    .get("durationMs")
+                    .and_then(Value::as_f64)
+                    .map(|d| d.round() as i64),
+                details: Value::Null,
+                nested: Value::Null,
+            };
+            self.tool(&id, &name, &args, Some(&inner), ts, start);
+        }
+        self.parent = None;
     }
 
     /// A subagent launch is a subagent row, not a tool row. The child's session is `runId` from the result.
