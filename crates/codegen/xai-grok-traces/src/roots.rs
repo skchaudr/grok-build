@@ -13,7 +13,7 @@ const IGNORED_DIRS: [&str; 15] = [
 pub enum Format {
     Jsonl,
     Zstd,
-    /// A SQLite db read in place (bb); the root path is the db file.
+    /// SQLite read in place: bb's db (the root path is the db file) or a dpi data dir (the root path is the directory).
     Sqlite,
 }
 
@@ -28,7 +28,7 @@ impl Format {
 }
 
 /// Ledger tab order: All, then these.
-pub const SOURCES: [&str; 8] = ["dsh", "claude", "pi", "omp", "codex", "cursor", "grok", "bb"];
+pub const SOURCES: [&str; 9] = ["dsh", "claude", "pi", "omp", "codex", "cursor", "grok", "bb", "dpi"];
 
 pub fn source_label(source: &str) -> &str {
     match source {
@@ -40,6 +40,7 @@ pub fn source_label(source: &str) -> &str {
         "cursor" => "Cursor",
         "grok" => "Grok",
         "bb" => "bb",
+        "dpi" => "dpi",
         other => other,
     }
 }
@@ -82,6 +83,8 @@ pub fn default_roots(home: &Path, grok_home: &Path) -> Vec<Root> {
         },
         // bb threads live in one SQLite db, read in place (see `bb`); absent where bb is not installed.
         Root::new("bb-threads", "bb", crate::bb::default_db_path(home), Format::Sqlite),
+        // dpi agents live in one agent.sqlite per session under the backend's data dir, read in place (see `dpi`).
+        Root::new("dpi-sessions", "dpi", crate::dpi::data_dir(home), Format::Sqlite),
     ]
 }
 

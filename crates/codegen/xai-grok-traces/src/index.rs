@@ -22,6 +22,7 @@ use crate::normalize::{Kind, NormalizedEvent, Role, clip, normalize};
 use crate::roots::{Format, MAX_FILES, Root, discover, resolve};
 
 mod bb_index;
+mod dpi_index;
 
 use crate::bb::{Bb, BbThread, thread_key};
 
@@ -282,6 +283,7 @@ pub struct ScanReport {
 enum Work {
     File(PathBuf),
     Bb(BbThread),
+    Dpi(crate::dpi::DpiConversation),
 }
 
 /// What discovery learned about a root, applied after its files are indexed.
@@ -1004,7 +1006,9 @@ impl TraceIndex {
         let mut plans: Vec<RootPlan> = Vec::with_capacity(roots.len());
         let mut work: Vec<(i64, usize, Work)> = Vec::new();
         for (i, root) in roots.iter().enumerate() {
-            let plan = if root.format == Format::Sqlite {
+            let plan = if root.format == Format::Sqlite && root.source == "dpi" {
+                self.plan_dpi_root(root, i, &mut work)
+            } else if root.format == Format::Sqlite {
                 self.plan_bb_root(root, i, &mut work)
             } else {
                 let d = discover(root, max_files);
@@ -1038,6 +1042,7 @@ impl TraceIndex {
                     };
                     (PathBuf::from(thread_key(&root.path, &t.id)), done)
                 }
+                Work::Dpi(c) => (PathBuf::from(c.key()), self.index_dpi_conversation(root, c)),
             };
             match done {
                 Ok(true) => report.indexed += 1,

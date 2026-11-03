@@ -495,17 +495,22 @@ impl TraceIndex {
 
     /// The source line behind an event, re-read from disk.
     pub fn raw_line(&self, session_id: &str, line: i64) -> Result<Option<String>> {
-        let loc: Option<(String, String, i64)> = self
+        let loc: Option<(String, String, i64, String)> = self
             .conn()
             .query_row(
-                "SELECT f.path, f.format, s.sk FROM trace_sessions s JOIN trace_events e ON e.sk = s.sk
+                "SELECT f.path, f.format, s.sk, f.source_id FROM trace_sessions s JOIN trace_events e ON e.sk = s.sk
                  JOIN trace_files f ON f.path = s.file_path WHERE s.id = ?1 AND e.line_number = ?2",
                 params![session_id, line],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((path, format, sk)) = loc else { return Ok(None) };
+        let Some((path, format, sk, source)) = loc else { return Ok(None) };
         if format == "sqlite" {
+            if source == "dpi" {
+                // dpi: `<agent.sqlite>#<conversation id>` plus the entry id (the line number).
+                let Some((db, conversation)) = crate::dpi::split_key(&path) else { return Ok(None) };
+                return crate::dpi::DpiDb::open(Path::new(db))?.raw_entry(conversation, line);
+            }
             // bb: the pointer is `<db>#<thread id>` plus the event sequence (the line number).
             let Some((db, thread)) = crate::bb::split_key(&path) else { return Ok(None) };
             return crate::bb::Bb::open(Path::new(db))?.raw_event(thread, line);

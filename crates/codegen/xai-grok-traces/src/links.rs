@@ -11,6 +11,7 @@
 //! | dsh | header `parentSession` (a session id; `seedLength` or `isSeeded: true` marks a fork). A spawn the child header does not name is the parent's `subagent/catalog` event (`data.childId`, `label`, `mode`) |
 //! | grok | `summary.json` `parent_session_id` when `session_kind` starts with `subagent`; a fresh subagent leaves that unset and the parent is `subagents/<child>/meta.json` (`parent_session_id`, `description`, `subagent_type`) |
 //! | bb | `threads.parent_thread_id` |
+//! | dpi | `conversations.owner_conversation_id` -> `<session uuid>:<owner id>` (a conversation's `native_id` is `<session uuid>:<conversation id>`) |
 //! | pi | no parent field in the files |
 //! | cursor | path `agent-transcripts/<id>/subagents/<child>.jsonl` -> `<id>` (that transcript's file stem); the lines carry no parent id |
 

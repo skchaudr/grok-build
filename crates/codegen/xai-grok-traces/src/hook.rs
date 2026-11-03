@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::bb::thread_key;
 use crate::classify::call_detail;
+use crate::dpi::{conv_key, db_path, split_native, valid_session_id};
 use crate::live::{chain_from, find_harness_chain, proc_start};
 use crate::index::{Result, TraceIndex, now_ms, session_id};
 use crate::receipts::Receipt;
@@ -27,6 +28,10 @@ const TOOL_USE_ID: [&str; 3] = ["tool_use_id", "toolUseId", "toolCallId"];
 const AGENT_ID: [&str; 3] = ["agent_id", "agentId", "subagentId"];
 const NOTIFICATION_TYPE: [&str; 2] = ["notification_type", "notificationType"];
 const HARNESS_PID: [&str; 1] = ["harness_pid"];
+
+fn dpi_key(root: &Root, session: &str, conversation: i64) -> String {
+    conv_key(&db_path(&root.path, session), conversation)
+}
 
 fn first_str(v: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
@@ -121,6 +126,9 @@ fn ingest_inner(idx: &mut TraceIndex, roots: &[Root], mut r: Receipt) -> Result<
     if r.source == "bb" {
         return ingest_bb(idx, roots, r);
     }
+    if r.source == "dpi" {
+        return ingest_dpi(idx, roots, r);
+    }
     fill_harness(&mut r);
     let target = r.path.as_deref().and_then(|p| resolve(&transcript_for(&r.source, Path::new(p)), roots));
     if let Some((root, path)) = &target {
@@ -161,6 +169,23 @@ fn ingest_bb(idx: &mut TraceIndex, roots: &[Root], mut r: Receipt) -> Result<i64
     let id = idx.record_receipt(&r)?;
     if let (Some(root), Some(thread)) = (root, &thread) {
         idx.index_bb_thread_id(root, thread)?;
+    }
+    Ok(id)
+}
+
+/// dpi hooks carry `<session uuid>:<conversation id>` and the session's agent.sqlite, not a transcript: record the
+/// receipt and index just that conversation. The db is located from the root and the uuid (never from the payload's
+/// path), so the session keys the same as a scan would.
+fn ingest_dpi(idx: &mut TraceIndex, roots: &[Root], mut r: Receipt) -> Result<i64> {
+    let root = roots.iter().find(|x| x.source == "dpi" && x.format == Format::Sqlite);
+    let target = r.native_session.as_deref().and_then(split_native).filter(|(s, _)| valid_session_id(s));
+    let target = target.map(|(s, c)| (s.to_string(), c));
+    if let (Some(root), Some((session, conv))) = (root, &target) {
+        r.session_id = Some(session_id(&root.source, &dpi_key(root, session, *conv)));
+    }
+    let id = idx.record_receipt(&r)?;
+    if let (Some(root), Some((session, conv))) = (root, &target) {
+        idx.index_dpi_conversation_id(root, session, *conv)?;
     }
     Ok(id)
 }
