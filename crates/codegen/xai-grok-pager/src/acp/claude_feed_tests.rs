@@ -586,3 +586,91 @@ fn a_write_over_a_file_diffs_and_a_failed_bash_keeps_its_exit_code() {
         "boom"
     );
 }
+
+#[test]
+fn harness_lines_are_not_prompts_and_a_slash_command_is() {
+    let feed = run(&[
+        user(0, "do the thing"),
+        tool_use(1, "t1", "Bash", json!({ "command": "ls" })),
+        user(
+            2,
+            "<task-notification>\n<task-id>x</task-id>\n</task-notification>",
+        ),
+        user(3, "<local-command-stdout>ok</local-command-stdout>"),
+        user(
+            4,
+            "<local-command-caveat>Caveat: generated</local-command-caveat>",
+        ),
+        user(5, "<system-reminder>be brief</system-reminder>"),
+        user(6, "[Request interrupted by user]"),
+        result(7, "t1", "out", false, Value::Null),
+        tool_use(8, "t2", "Bash", json!({ "command": "pwd" })),
+        user(
+            9,
+            "<command-message>loop</command-message>\n<command-name>/loop</command-name>\n<command-args>5m check</command-args>",
+        ),
+    ]);
+    assert_eq!(shape(&feed), ["user", "call", "call", "user"]);
+    let texts: Vec<String> = feed
+        .iter()
+        .filter_map(|f| match &f.event {
+            Event::Acp(acp::SessionUpdate::UserMessageChunk(c)) => match &c.content {
+                acp::ContentBlock::Text(t) => Some(t.text.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["do the thing", "/loop 5m check"]);
+    assert_eq!(
+        feed[1].meta.get("promptId"),
+        feed[2].meta.get("promptId"),
+        "calls after a harness line stay in the same turn"
+    );
+}
+
+#[test]
+fn an_async_subagent_ends_when_its_own_transcript_does() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write(
+        tmp.path(),
+        "s1",
+        &[
+            tool_use(
+                0,
+                "toolu_a",
+                "Agent",
+                json!({ "description": "d", "prompt": "go" }),
+            ),
+            result(
+                1,
+                "toolu_a",
+                "Async agent launched",
+                false,
+                json!({ "status": "async_launched", "agentId": "aa1" }),
+            ),
+        ],
+    );
+    let subs = tmp.path().join("proj/s1/subagents");
+    fs::create_dir_all(&subs).unwrap();
+    fs::write(
+        subs.join("agent-aa1.meta.json"),
+        json!({ "toolUseId": "toolu_a", "finished": true }).to_string(),
+    )
+    .unwrap();
+    let child = [
+        assistant(2, "c1", json!({ "type": "text", "text": "a" })),
+        assistant(30, "c2", json!({ "type": "text", "text": "b" })),
+    ];
+    let body: Vec<String> = child.iter().map(Value::to_string).collect();
+    fs::write(subs.join("agent-aa1.jsonl"), body.join("\n")).unwrap();
+    let feed = convert(&path, "claude:s1").unwrap();
+    let Event::Xai(XaiSessionUpdate::SubagentFinished { duration_ms, .. }) = &feed[1].event else {
+        panic!("finish")
+    };
+    assert_eq!(*duration_ms, 30_000);
+    assert_eq!(
+        feed[1].meta.get("agentTimestampMs"),
+        Some(&json!(ts_of(&assistant(30, "x", json!({}))).unwrap()))
+    );
+}
