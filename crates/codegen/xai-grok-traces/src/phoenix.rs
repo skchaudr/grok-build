@@ -186,12 +186,84 @@ mod tests {
         assert!(spans.is_empty() && next.is_none());
     }
 
+    /// One-thread HTTP stub on loopback: `handler(request_index, request_line)` returns
+    /// (status, body, delay before replying). Returns the base URL and the request lines seen.
+    fn stub(handler: impl Fn(usize, &str) -> (u16, String, Duration) + Send + 'static) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for (i, conn) in listener.incoming().enumerate() {
+                let Ok(mut conn) = conn else { return };
+                let mut rd = BufReader::new(conn.try_clone().unwrap());
+                let mut line = String::new();
+                rd.read_line(&mut line).unwrap();
+                loop {
+                    let mut h = String::new();
+                    if rd.read_line(&mut h).unwrap_or(0) <= 2 {
+                        break;
+                    }
+                }
+                log.lock().unwrap().push(line.clone());
+                let (code, body, delay) = handler(i, &line);
+                std::thread::sleep(delay);
+                let _ = write!(conn, "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        (base, seen)
+    }
+
+    const FAST: Duration = Duration::ZERO;
+
     #[test]
-    fn unreachable_phoenix_errors_fast() {
-        let t = std::time::Instant::now();
-        // TEST-NET-1 address: never answers.
-        let r = fetch_session_spans("http://192.0.2.1:6006", "claude", "s", Duration::from_millis(300));
-        assert!(r.is_err());
-        assert!(t.elapsed() < Duration::from_secs(3));
+    fn follows_cursor_across_pages() {
+        let (base, seen) = stub(|i, _| {
+            let body = if i == 0 { json!({"data": [span(json!({}))], "next_cursor": "c2"}) } else { json!({"data": [span(json!({"context": {"trace_id": "t1", "span_id": "s2"}}))], "next_cursor": null}) };
+            (200, body.to_string(), FAST)
+        });
+        let spans = fetch_session_spans(&base, "claude", "sess", Duration::from_secs(5)).unwrap();
+        assert_eq!(spans.iter().map(|s| s.span_id.as_str()).collect::<Vec<_>>(), ["s1", "s2"]);
+        let seen = seen.lock().unwrap();
+        assert!(!seen[0].contains("cursor=") && seen[1].contains("cursor=c2"), "{seen:?}");
+        assert!(seen[0].contains("/v1/projects/claude/spans") && seen[0].contains("session.id"));
+    }
+
+    #[test]
+    fn page_cap_is_an_error_not_a_partial_ok() {
+        let (base, seen) = stub(|_, _| (200, json!({"data": [span(json!({}))], "next_cursor": "more"}).to_string(), FAST));
+        let r = fetch_session_spans(&base, "claude", "s", Duration::from_secs(10));
+        assert!(r.unwrap_err().contains("more than"));
+        assert_eq!(seen.lock().unwrap().len(), MAX_PAGES);
+    }
+
+    #[test]
+    fn non_2xx_is_an_error() {
+        let (base, _) = stub(|_, _| (500, "{}".into(), FAST));
+        assert!(fetch_session_spans(&base, "claude", "s", Duration::from_secs(5)).unwrap_err().contains("http 500"));
+    }
+
+    #[test]
+    fn deadline_covers_the_whole_multi_page_fetch() {
+        // Each page is well inside the timeout; 20 of them are not. Without a shared deadline this takes ~3s.
+        let (base, _) = stub(|_, _| (200, json!({"data": [], "next_cursor": "more"}).to_string(), Duration::from_millis(150)));
+        let t = Instant::now();
+        assert!(fetch_session_spans(&base, "claude", "s", Duration::from_millis(500)).is_err());
+        assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn silent_phoenix_is_bounded() {
+        let (base, _) = stub(|_, _| (200, "{}".into(), Duration::from_secs(5)));
+        let t = Instant::now();
+        assert!(fetch_session_spans(&base, "claude", "s", Duration::from_millis(300)).is_err());
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn refused_connection_is_an_error() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        assert!(fetch_session_spans(&format!("http://127.0.0.1:{port}"), "claude", "s", Duration::from_millis(300)).is_err());
     }
 }
