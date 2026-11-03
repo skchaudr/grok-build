@@ -1459,6 +1459,10 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             super::standalone_traces::open_claude(app, *row);
             vec![]
         }
+        Action::TracesOpenGrok(row) => {
+            super::standalone_traces::open_grok(app, *row);
+            vec![]
+        }
         Action::TracesLeaveView => {
             super::standalone_traces::leave_view(app);
             vec![]

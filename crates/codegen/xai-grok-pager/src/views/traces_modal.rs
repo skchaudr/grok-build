@@ -961,12 +961,12 @@ impl TracesModalState {
         }
     }
 
-    /// Enter on a past local Claude, Pi, dpi or Codex row opens the read-only session view instead of the trajectory; a live one is followed.
-    fn claude_to_open(&self) -> Option<SessionRow> {
+    /// Enter on a past local Claude, Pi, dpi, Codex or grok row opens the read-only session view instead of the trajectory; a live one is followed.
+    fn past_to_open(&self) -> Option<SessionRow> {
         if self.selected_live() {
             return None;
         }
-        self.selected_session().filter(|s| s.host.is_none() && matches!(s.source.as_str(), "claude" | "pi" | "dpi" | "codex")).cloned()
+        self.selected_session().filter(|s| s.host.is_none() && matches!(s.source.as_str(), "claude" | "pi" | "dpi" | "codex" | "grok")).cloned()
     }
 
     /// Enter on a live local row follows it instead of opening its trajectory.
@@ -3870,8 +3870,10 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                 KeyCode::Char('r') => return state.resume(state.selected_session().cloned()),
                 KeyCode::Enter => {
                     if !state.expand_selected_more() {
-                        if let Some(row) = state.claude_to_open() {
-                            return InputOutcome::Action(Action::TracesOpenClaude(Box::new(row)));
+                        if let Some(row) = state.past_to_open() {
+                            let row = Box::new(row);
+                            let open = if row.source == "grok" { Action::TracesOpenGrok(row) } else { Action::TracesOpenClaude(row) };
+                            return InputOutcome::Action(open);
                         }
                         if state.selected_live() {
                             state.open_follow();
@@ -7768,7 +7770,7 @@ mod tests {
         let (_tmp, mut state) = claude_fixture();
         state.sessions[0].source = "codex".into();
         state.rebuild_ledger();
-        assert!(state.selected_live() && state.claude_to_open().is_none());
+        assert!(state.selected_live() && state.past_to_open().is_none());
         state.sessions[0].status = Status::Completed;
         state.rebuild_ledger();
         let enter = handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

@@ -1,12 +1,15 @@
 //! `grok traces`: the pager starts straight into the traces modal with no agent session behind it.
 //! The mode is process-wide and set once by the CLI, so a static is enough.
 
+use std::io;
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol as acp;
 use xai_acp_lib::AcpClientMessage;
 use xai_grok_shell::extensions::notification::SessionNotification;
+use xai_grok_shell::session::storage::{ReplayEmission, ReplayPathHint, ReplayedUpdate, stream_replay_updates_at_hinted};
 
 use crate::acp::claude_feed::{self, Event, Fed};
 use crate::acp::pi_feed;
@@ -86,6 +89,55 @@ pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow
     } else {
         claude_feed::convert(&row.file_path, &row.id)
     };
+    open_feed_in(app, row.id.clone(), row, feed, standalone);
+}
+
+/// Enter on a past grok session: same read-only view as Claude.
+pub(crate) fn open_grok(app: &mut AppView, row: xai_grok_traces::SessionRow) {
+    open_grok_in(app, row, is_standalone());
+}
+
+/// grok's `updates.jsonl` is already grok's events: no converter, replayed with the xAI updates kept so subagents survive.
+/// The row's file is `<grok home>/sessions/<cwd>/<session id>/chat_history.jsonl`.
+pub(crate) fn open_grok_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
+    let dir = row.file_path.parent();
+    let sid = dir.and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
+    let home = dir
+        .and_then(|d| d.ancestors().find(|a| a.file_name().is_some_and(|n| n == "sessions")))
+        .and_then(Path::parent);
+    let feed = match (&sid, home) {
+        (Some(sid), Some(home)) => grok_feed(sid, home, row.cwd.as_deref()),
+        _ => Err(io::Error::other("not in a grok sessions directory")),
+    };
+    // Bound to grok's own id, so opening a subagent finds its files under this session.
+    open_feed_in(app, sid.unwrap_or_else(|| row.id.clone()), row, feed, standalone);
+}
+
+fn grok_feed(sid: &str, home: &Path, cwd: Option<&str>) -> io::Result<Vec<Fed>> {
+    let hint = ReplayPathHint { child_cwd: cwd.map(Path::new), ..Default::default() };
+    let mut out = Vec::new();
+    let emission = stream_replay_updates_at_hinted(sid, home, hint, |update| {
+        let (event, meta) = match update {
+            ReplayedUpdate::Acp(update, meta) => (Event::Acp(update), meta.unwrap_or_default()),
+            ReplayedUpdate::Xai(update) => (Event::Xai(update), Default::default()),
+        };
+        let mut meta = meta;
+        meta.insert("isReplay".into(), true.into());
+        out.push(Fed { event, meta });
+    })?;
+    if emission == ReplayEmission::Empty {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "no updates.jsonl to replay"));
+    }
+    Ok(out)
+}
+
+fn open_feed_in(
+    app: &mut AppView,
+    session_id: String,
+    row: xai_grok_traces::SessionRow,
+    feed: io::Result<Vec<Fed>>,
+    standalone: bool,
+) {
     let ActiveView::Agent(origin) = app.active_view else { return };
     let Some(agent) = app.agents.get_mut(&origin) else { return };
     let events = match feed {
@@ -114,7 +166,7 @@ pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow
     agent.trace_return = Some(state);
     // Esc back to the list needs the scrollback focused; in simple mode nothing else moves it there.
     agent.set_active_pane(crate::app::agent_view::AgentPane::Scrollback, true);
-    agent.bind_session_id(acp::SessionId::new(row.id.clone()));
+    agent.bind_session_id(acp::SessionId::new(session_id.clone()));
     if let Some(cwd) = row.cwd.as_deref() {
         agent.session.cwd = cwd.into();
         agent.session.tracker.set_session_cwd(cwd);
@@ -122,7 +174,7 @@ pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow
     agent.begin_replay_window();
     agent.scrollback.begin_batch();
     for fed in events {
-        super::super::acp_handler::handle(message(&row.id, fed), app);
+        super::super::acp_handler::handle(message(&session_id, fed), app);
     }
     let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     agent.scrollback.end_batch();
