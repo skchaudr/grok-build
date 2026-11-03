@@ -43,6 +43,9 @@ pub(crate) struct Links {
     pub agent_type: Option<String>,
     /// 1 finished, 2 finished with an error.
     pub done: Option<i64>,
+    /// Claude: the Task call that started this subagent (`toolUseId` in its `.meta.json`).
+    pub tool_use_id: Option<String>,
+    pub model: Option<String>,
 }
 
 fn s(v: Option<&Value>) -> Option<String> {
@@ -132,11 +135,48 @@ fn apply_claude_meta(meta: &Path, l: &mut Links) {
     if let Some(t) = s(v.get("agentType")) {
         l.agent_type = Some(t);
     }
+    l.tool_use_id = s(v.get("toolUseId"));
+    l.model = s(v.get("model")).filter(|m| m != "inherit");
     if v.get("finished") == Some(&Value::Bool(true)) {
         let errored = v.get("error").is_some_and(|e| !e.is_null() && e != &Value::Bool(false))
             || matches!(s(v.get("status")).as_deref(), Some("failed" | "error"));
         l.done = Some(if errored { 2 } else { 1 });
     }
+}
+
+/// A Claude subagent of one session, found through its `agent-*.meta.json`.
+#[derive(Clone, Debug)]
+pub struct ClaudeChild {
+    /// The Task call that started it.
+    pub tool_use_id: String,
+    /// File stem of its transcript, `agent-<id>`.
+    pub stem: String,
+    pub description: Option<String>,
+    pub agent_type: Option<String>,
+    pub model: Option<String>,
+    pub finished: bool,
+}
+
+/// The subagents under `<session dir>/subagents/`, from the same sidecars `path_links` reads. A sidecar without `toolUseId` is skipped.
+pub fn claude_children(session_dir: &Path) -> Vec<ClaudeChild> {
+    let Ok(rd) = fs::read_dir(session_dir.join("subagents")) else { return Vec::new() };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        let path = e.path();
+        let Some(stem) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".meta.json")) else { continue };
+        let mut l = Links::default();
+        apply_claude_meta(&path, &mut l);
+        let Some(tool_use_id) = l.tool_use_id else { continue };
+        out.push(ClaudeChild {
+            tool_use_id,
+            stem: stem.to_string(),
+            description: l.label,
+            agent_type: l.agent_type,
+            model: l.model,
+            finished: l.done.is_some(),
+        });
+    }
+    out
 }
 
 /// Links from a header line (`session_meta` for Codex, `session` for DSH, Pi and OMP).
@@ -542,6 +582,19 @@ mod tests {
         assert!(aux.is_some_and(|p| p.ends_with("agent-a1.meta.json")));
         let (top, aux) = path_links(&r, &tmp.path().join("-w/sess1.jsonl"));
         assert_eq!((top.native_id.as_deref(), top.parent_native, aux), (Some("-w/sess1"), None, None));
+    }
+
+    #[test]
+    fn claude_children_are_keyed_by_the_task_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("sess1/subagents");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("agent-a1.meta.json"), r#"{"toolUseId":"toolu_1","agentType":"Explore","description":"Find it","model":"inherit","finished":true}"#).unwrap();
+        fs::write(sub.join("agent-a2.meta.json"), r#"{"agentType":"Explore"}"#).unwrap();
+        let kids = claude_children(&tmp.path().join("sess1"));
+        assert_eq!(kids.len(), 1, "no toolUseId, no link");
+        let k = &kids[0];
+        assert_eq!((k.tool_use_id.as_str(), k.stem.as_str(), k.agent_type.as_deref(), k.model.as_deref(), k.finished), ("toolu_1", "agent-a1", Some("Explore"), None, true));
     }
 
     #[test]

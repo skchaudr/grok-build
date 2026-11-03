@@ -510,3 +510,167 @@ fn a_garbled_line_does_not_stop_the_rest() {
 fn a_missing_transcript_is_an_error() {
     assert!(convert(Path::new("/definitely/not/here.jsonl"), "x").is_err());
 }
+
+#[test]
+fn grep_content_and_count_results_reach_the_search_block() {
+    let feed = run(&[
+        tool_use(
+            0,
+            "g",
+            "Grep",
+            json!({ "pattern": "foo", "output_mode": "content" }),
+        ),
+        result(
+            1,
+            "g",
+            "a.rs:3:foo\na.rs:9:foo bar",
+            false,
+            json!({ "mode": "content", "filenames": [], "content": "a.rs:3:foo\na.rs:9:foo bar" }),
+        ),
+        tool_use(
+            2,
+            "c",
+            "Grep",
+            json!({ "pattern": "foo", "output_mode": "count" }),
+        ),
+        result(
+            3,
+            "c",
+            "a.rs:2\nb.rs:1",
+            false,
+            json!({ "mode": "count", "filenames": [], "content": "a.rs:2\nb.rs:1" }),
+        ),
+    ]);
+    let c = calls(&feed);
+    let r = c[0].raw_output.as_ref().unwrap();
+    assert_eq!(r["match_count"], 2);
+    assert_eq!(r["file_matches"][0]["path"], "a.rs");
+    assert_eq!(r["file_matches"][0]["matches"][1]["line_number"], 9);
+    let r = c[1].raw_output.as_ref().unwrap();
+    assert_eq!(r["match_count"], 3);
+    assert_eq!(r["stdout"], json!(b"a.rs\nb.rs".to_vec()));
+}
+
+#[test]
+fn a_write_over_a_file_diffs_and_a_failed_bash_keeps_its_exit_code() {
+    let feed = run(&[
+        tool_use(
+            0,
+            "w",
+            "Write",
+            json!({ "file_path": "/w/b.rs", "content": "new\n" }),
+        ),
+        result(
+            1,
+            "w",
+            "updated",
+            false,
+            json!({ "type": "update", "originalFile": "old\n" }),
+        ),
+        tool_use(2, "b", "Bash", json!({ "command": "false" })),
+        result(3, "b", "Exit code 2\nboom", true, Value::Null),
+    ]);
+    let c = calls(&feed);
+    let acp::ToolCallContent::Diff(d) = &c[0].content[0] else {
+        panic!("diff")
+    };
+    assert_eq!(
+        (d.old_text.as_deref(), d.new_text.as_str()),
+        (Some("old\n"), "new\n")
+    );
+    assert!(c[0].raw_input.as_ref().unwrap().get("variant").is_none());
+    let r = c[1].raw_output.as_ref().unwrap();
+    assert_eq!(r["exit_code"], 2);
+    assert_eq!(
+        crate::acp::tracker::content_blocks_text(&c[1].content),
+        "boom"
+    );
+}
+
+#[test]
+fn harness_lines_are_not_prompts_and_a_slash_command_is() {
+    let feed = run(&[
+        user(0, "do the thing"),
+        tool_use(1, "t1", "Bash", json!({ "command": "ls" })),
+        user(
+            2,
+            "<task-notification>\n<task-id>x</task-id>\n</task-notification>",
+        ),
+        user(3, "<local-command-stdout>ok</local-command-stdout>"),
+        user(
+            4,
+            "<local-command-caveat>Caveat: generated</local-command-caveat>",
+        ),
+        user(5, "<system-reminder>be brief</system-reminder>"),
+        user(6, "[Request interrupted by user]"),
+        result(7, "t1", "out", false, Value::Null),
+        tool_use(8, "t2", "Bash", json!({ "command": "pwd" })),
+        user(
+            9,
+            "<command-message>loop</command-message>\n<command-name>/loop</command-name>\n<command-args>5m check</command-args>",
+        ),
+    ]);
+    assert_eq!(shape(&feed), ["user", "call", "call", "user"]);
+    let texts: Vec<String> = feed
+        .iter()
+        .filter_map(|f| match &f.event {
+            Event::Acp(acp::SessionUpdate::UserMessageChunk(c)) => match &c.content {
+                acp::ContentBlock::Text(t) => Some(t.text.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["do the thing", "/loop 5m check"]);
+    assert_eq!(
+        feed[1].meta.get("promptId"),
+        feed[2].meta.get("promptId"),
+        "calls after a harness line stay in the same turn"
+    );
+}
+
+#[test]
+fn an_async_subagent_ends_when_its_own_transcript_does() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write(
+        tmp.path(),
+        "s1",
+        &[
+            tool_use(
+                0,
+                "toolu_a",
+                "Agent",
+                json!({ "description": "d", "prompt": "go" }),
+            ),
+            result(
+                1,
+                "toolu_a",
+                "Async agent launched",
+                false,
+                json!({ "status": "async_launched", "agentId": "aa1" }),
+            ),
+        ],
+    );
+    let subs = tmp.path().join("proj/s1/subagents");
+    fs::create_dir_all(&subs).unwrap();
+    fs::write(
+        subs.join("agent-aa1.meta.json"),
+        json!({ "toolUseId": "toolu_a", "finished": true }).to_string(),
+    )
+    .unwrap();
+    let child = [
+        assistant(2, "c1", json!({ "type": "text", "text": "a" })),
+        assistant(30, "c2", json!({ "type": "text", "text": "b" })),
+    ];
+    let body: Vec<String> = child.iter().map(Value::to_string).collect();
+    fs::write(subs.join("agent-aa1.jsonl"), body.join("\n")).unwrap();
+    let feed = convert(&path, "claude:s1").unwrap();
+    let Event::Xai(XaiSessionUpdate::SubagentFinished { duration_ms, .. }) = &feed[1].event else {
+        panic!("finish")
+    };
+    assert_eq!(*duration_ms, 30_000);
+    assert_eq!(
+        feed[1].meta.get("agentTimestampMs"),
+        Some(&json!(ts_of(&assistant(30, "x", json!({}))).unwrap()))
+    );
+}

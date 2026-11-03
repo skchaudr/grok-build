@@ -11,6 +11,7 @@ use std::sync::Arc;
 use agent_client_protocol as acp;
 use serde_json::{Map, Value, json};
 use xai_grok_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
+use xai_grok_traces::{ClaudeChild, claude_children};
 
 /// One update for the handler. `Acp` goes in as `session/update`, `Xai` as `x.ai/session/update`.
 pub(crate) enum Event {
@@ -31,16 +32,6 @@ struct Res {
     ts: Option<i64>,
     /// The line's `toolUseResult`: extra structure Claude keeps beside the text.
     tur: Value,
-}
-
-/// A subagent from `<session>/subagents/agent-*.meta.json`.
-#[derive(Clone)]
-struct Child {
-    sid: String,
-    description: Option<String>,
-    agent_type: Option<String>,
-    model: Option<String>,
-    finished: bool,
 }
 
 /// The session's events, in transcript order. `session_id` is the id the view is bound to.
@@ -64,47 +55,57 @@ struct Converter {
     sid: String,
     /// `<project>/<session id>/`: `tool-results/` and `subagents/` live here.
     dir: PathBuf,
-    children: HashMap<String, Child>,
+    children: HashMap<String, ClaudeChild>,
     out: Vec<Fed>,
     seq: u64,
     prompt_id: String,
     prompts: u64,
 }
 
-fn read_children(dir: &Path) -> HashMap<String, Child> {
-    let mut out = HashMap::new();
-    let Ok(rd) = fs::read_dir(dir.join("subagents")) else {
-        return out;
+fn read_children(dir: &Path) -> HashMap<String, ClaudeChild> {
+    claude_children(dir)
+        .into_iter()
+        .map(|c| (c.tool_use_id.clone(), c))
+        .collect()
+}
+
+/// The last timestamp in a subagent's own transcript: when it stopped.
+fn last_ts(path: &Path) -> Option<i64> {
+    fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .rev()
+        .find_map(|l| ts_of(&serde_json::from_str::<Value>(l).ok()?))
+}
+
+/// What a user line really is. `None` is a harness message, not the user's words.
+fn prompt_text(text: &str) -> Option<String> {
+    let tag = |name: &str| {
+        let body = text.split_once(&format!("<{name}>"))?.1;
+        let body = body.split_once(&format!("</{name}>"))?.0.trim();
+        (!body.is_empty()).then(|| body.to_string())
     };
-    for e in rd.flatten() {
-        let path = e.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
+    if let Some(cmd) = tag("command-name") {
+        let cmd = if cmd.starts_with('/') {
+            cmd
+        } else {
+            format!("/{cmd}")
         };
-        let Some(stem) = name.strip_suffix(".meta.json") else {
-            continue;
-        };
-        let Some(v) = fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        else {
-            continue;
-        };
-        let Some(tool_use_id) = str_of(&v, "toolUseId") else {
-            continue;
-        };
-        out.insert(
-            tool_use_id,
-            Child {
-                sid: stem.to_string(),
-                description: str_of(&v, "description"),
-                agent_type: str_of(&v, "agentType"),
-                model: str_of(&v, "model").filter(|m| m != "inherit"),
-                finished: v.get("finished") == Some(&Value::Bool(true)),
-            },
-        );
+        return Some(match tag("command-args") {
+            Some(args) => format!("{cmd} {args}"),
+            None => cmd,
+        });
     }
-    out
+    const HARNESS: [&str; 6] = [
+        "<task-notification>",
+        "<command-message>",
+        "<command-args>",
+        "<local-command-",
+        "<system-reminder>",
+        "[Request interrupted by user",
+    ];
+    let t = text.trim_start();
+    (!HARNESS.iter().any(|h| t.starts_with(h))).then(|| text.to_string())
 }
 
 fn str_of(v: &Value, key: &str) -> Option<String> {
@@ -211,6 +212,10 @@ impl Converter {
                 if text.trim().is_empty() {
                     continue; // a tool_result line, or an image only
                 }
+                // A slash command shows as "/name args"; other harness lines are not prompts and change nothing.
+                let Some(text) = prompt_text(&text) else {
+                    continue;
+                };
                 self.prompts += 1;
                 self.prompt_id = str_of(l, "promptId")
                     .unwrap_or_else(|| format!("{}-p{}", self.sid, self.prompts));
@@ -349,12 +354,30 @@ impl Converter {
             "Bash" => {
                 let title = str_of(input, "description")
                     .unwrap_or_else(|| s("command").lines().next().unwrap_or("").to_string());
+                // A failed run starts "Exit code N"; carry N so the block says so. The body is the rest.
+                let code = failed
+                    .then(|| {
+                        text.lines()
+                            .next()?
+                            .strip_prefix("Exit code ")?
+                            .trim()
+                            .parse::<i32>()
+                            .ok()
+                    })
+                    .flatten();
+                let (body, raw) = match code {
+                    Some(code) => {
+                        let body = text.split_once('\n').map_or("", |(_, rest)| rest);
+                        (body, Some(bash_raw(&s("command"), body, code)))
+                    }
+                    None => (text, None),
+                };
                 (
                     acp::ToolKind::Execute,
                     title,
                     input.clone(),
-                    text_blocks(text),
-                    None,
+                    text_blocks(body),
+                    raw,
                 )
             }
             "Read" => {
@@ -393,6 +416,8 @@ impl Converter {
                 )
             }
             "Grep" | "Glob" => {
+                let tur = res.map(|r| &r.tur).unwrap_or(&Value::Null);
+                let mode = tur.get("mode").and_then(Value::as_str);
                 let names: Vec<String> = res
                     .and_then(|r| r.tur.get("filenames"))
                     .and_then(Value::as_array)
@@ -402,9 +427,17 @@ impl Converter {
                             .collect()
                     })
                     .unwrap_or_default();
-                let raw = (!failed && !names.is_empty()).then(|| {
-                    json!({ "type": "GrepSearch", "stdout": names.join("\n").into_bytes(), "stderr": Vec::<u8>::new(), "exit_code": 0, "match_count": names.len(), "file_matches": [] })
-                });
+                // Content and count modes put their result in `content`, not `filenames`.
+                let raw = if failed {
+                    None
+                } else if let (Some(mode @ ("content" | "count")), Some(body)) =
+                    (mode, tur.get("content").and_then(Value::as_str))
+                {
+                    grep_raw(mode == "count", body)
+                } else {
+                    (!names.is_empty())
+                        .then(|| grep_json(&names.join("\n"), names.len(), json!([])))
+                };
                 (
                     acp::ToolKind::Search,
                     format!("{name} {}", s("pattern")),
@@ -415,13 +448,19 @@ impl Converter {
             }
             "Edit" | "Write" => {
                 let path = s("file_path");
+                // Writing over a file is a diff against what it held; only a new file is "Creating".
+                let before = res
+                    .map(|r| &r.tur)
+                    .filter(|t| t.get("type").and_then(Value::as_str) == Some("update"))
+                    .and_then(|t| t.get("originalFile")?.as_str());
+                let overwrite = name == "Write" && before.is_some();
                 let (old, new) = if name == "Write" {
-                    (None, raw_s("content"))
+                    (before.map(str::to_string), raw_s("content"))
                 } else {
                     (Some(raw_s("old_string")), raw_s("new_string"))
                 };
                 let mut raw = input.clone();
-                if name == "Write" {
+                if name == "Write" && !overwrite {
                     raw["variant"] = json!("Write");
                 }
                 (
@@ -535,7 +574,7 @@ impl Converter {
         let linked = self.children.get(tool_use_id).cloned();
         let linked = linked.as_ref();
         let child_sid = linked
-            .map(|c| c.sid.clone())
+            .map(|c| c.stem.clone())
             .or_else(|| str_of(tur, "agentId").map(|a| format!("agent-{a}")))
             .unwrap_or_else(|| format!("agent-{tool_use_id}"));
         let model = linked
@@ -572,6 +611,11 @@ impl Converter {
             return;
         };
         let launched = tur.get("status").and_then(Value::as_str) == Some("async_launched");
+        // An async launch's result time is only the launch; the subagent's own transcript says when it stopped.
+        let end = linked
+            .filter(|_| launched)
+            .and_then(|c| last_ts(&self.dir.join("subagents").join(format!("{}.jsonl", c.stem))))
+            .or(r.ts);
         let finished = XaiSessionUpdate::SubagentFinished {
             subagent_id: child_sid.clone(),
             attempt_id: None,
@@ -581,14 +625,14 @@ impl Converter {
             tool_calls: num_of(tur, "totalToolUseCount").unwrap_or(0).max(0) as u32,
             turns: 0,
             duration_ms: num_of(tur, "totalDurationMs")
-                .or_else(|| r.ts.zip(ts).map(|(e, b)| e - b))
+                .or_else(|| end.zip(ts).map(|(e, b)| e - b))
                 .unwrap_or(0)
                 .max(0) as u64,
             tokens_used: num_of(tur, "totalTokens").unwrap_or(0).max(0) as u64,
             output: (!launched && !r.is_error).then(|| r.text.clone()),
             will_wake: false,
         };
-        let m = self.meta(r.ts, None);
+        let m = self.meta(end, None);
         self.push(Event::Xai(finished), m);
     }
 }
@@ -617,6 +661,52 @@ fn tool_call(
         .raw_output(raw_output)
         .locations(vec![])
         .meta(meta)
+}
+
+fn bash_raw(command: &str, output: &str, exit_code: i32) -> Value {
+    json!({ "type": "Bash", "output": output.as_bytes(), "exit_code": exit_code, "command": command, "truncated": false, "signal": null, "timed_out": false, "description": null, "current_dir": "", "output_file": "", "total_bytes": output.len() })
+}
+
+fn grep_json(stdout: &str, match_count: usize, file_matches: Value) -> Value {
+    json!({ "type": "GrepSearch", "stdout": stdout.as_bytes(), "stderr": Vec::<u8>::new(), "exit_code": 0, "match_count": match_count, "file_matches": file_matches })
+}
+
+/// Claude's content mode lists `path:line:text`; count mode lists `path:n`. Other lines (context, separators) are skipped.
+fn grep_raw(count_mode: bool, body: &str) -> Option<Value> {
+    if count_mode {
+        let rows: Vec<(&str, usize)> = body
+            .lines()
+            .filter_map(|l| {
+                let (path, n) = l.rsplit_once(':')?;
+                Some((path, n.trim().parse().ok()?))
+            })
+            .collect();
+        let paths: Vec<&str> = rows.iter().map(|r| r.0).collect();
+        let total = rows.iter().map(|r| r.1).sum();
+        return (total > 0).then(|| grep_json(&paths.join("\n"), total, json!([])));
+    }
+    let mut files: Vec<(&str, Vec<Value>)> = Vec::new();
+    let mut total = 0;
+    for l in body.lines() {
+        let Some((path, rest)) = l.split_once(':') else {
+            continue;
+        };
+        let Some((n, text)) = rest.split_once(':') else {
+            continue;
+        };
+        let Ok(n) = n.parse::<usize>() else { continue };
+        total += 1;
+        let m = json!({ "line_number": n, "content": text });
+        match files.last_mut() {
+            Some((p, ms)) if *p == path => ms.push(m),
+            _ => files.push((path, vec![m])),
+        }
+    }
+    let fm: Vec<Value> = files
+        .into_iter()
+        .map(|(path, matches)| json!({ "path": path, "matches": matches }))
+        .collect();
+    (total > 0).then(|| grep_json("", total, Value::Array(fm)))
 }
 
 /// A good edit carries its diff; a failed one carries Claude's message.
