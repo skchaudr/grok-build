@@ -109,7 +109,15 @@ pub(crate) fn path_links(root: &Root, path: &Path) -> (Links, Option<PathBuf>) {
             // `<cwd dir>/<parent stem>/<Name>.jsonl`: a task subagent next to its parent's transcript.
             let rel = path.strip_prefix(&root.path).ok();
             if let (Some(rel), Some(dir)) = (rel, path.parent()) {
-                if rel.components().count() >= 3 {
+                let is_run = |d: &Path| d.file_name().is_some_and(|n| n.to_string_lossy().starts_with("run-"));
+                if rel.components().any(|c| c.as_os_str() == "subagent-artifacts") {
+                    // Output files, not sessions: no parent to name.
+                } else if is_run(dir) && path.file_name().is_some_and(|n| n == "session.jsonl") {
+                    // pi-subagents: `<cwd dir>/<parent stem>/<runId>/run-N/session.jsonl`; the parent is the sibling `<parent stem>.jsonl`.
+                    l.parent_native = dir.parent().and_then(Path::parent).and_then(|d| rel_stem(&root.path, d));
+                    l.label = dir.parent().and_then(Path::file_name).map(|n| label(&n.to_string_lossy()));
+                    l.agent_type = Some("subagent".into());
+                } else if rel.components().count() >= 3 {
                     l.parent_native = rel_stem(&root.path, dir);
                     l.label = path.file_stem().map(|n| label(&n.to_string_lossy()));
                     l.agent_type = Some("task".into());
@@ -641,6 +649,18 @@ mod tests {
         let parent = tmp.path().join("-w/2026_abc.jsonl");
         header_links(&r, &json!({"type":"session","parentSession": parent.to_string_lossy()}), &mut b);
         assert_eq!(b.parent_native.as_deref(), Some("-w/2026_abc"));
+    }
+
+    #[test]
+    fn pi_subagent_run_names_the_parent_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = root("pi", tmp.path());
+        let (l, _) = path_links(&r, &tmp.path().join("-w/2026_abc/run1/run-0/session.jsonl"));
+        assert_eq!((l.parent_native.as_deref(), l.label.as_deref(), l.agent_type.as_deref()), (Some("-w/2026_abc"), Some("run1"), Some("subagent")));
+        let (a, _) = path_links(&r, &tmp.path().join("-w/subagent-artifacts/x/out.jsonl"));
+        assert_eq!(a.parent_native, None, "artifacts are not children");
+        let (top, _) = path_links(&r, &tmp.path().join("-w/2026_abc.jsonl"));
+        assert_eq!(top.parent_native, None);
     }
 
     #[test]
