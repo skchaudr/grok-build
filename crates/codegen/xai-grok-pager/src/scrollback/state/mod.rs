@@ -996,7 +996,7 @@ impl ScrollbackState {
         if let RenderBlock::ToolCall(new_tc) = &mut block
             && let Some(t) = started_at
         {
-            new_tc.set_started_at(t);
+            new_tc.set_started_at(Some(t));
         }
         let kind_changed = verb_group::verb_group_kind_changed(&entry.block, &block);
         let (is_same_kind, untrusted_rising) = match (&entry.block, &block) {
@@ -1092,6 +1092,15 @@ impl ScrollbackState {
     /// If the entry has been running for less than `MIN_RUNNING_DURATION_MS`, the finish is deferred so the animated "running" state is visible.
     pub fn finish_running(&mut self, id: EntryId) {
         self.finish_running_with_time(id, None);
+    }
+
+    /// A past transcript's unfinished calls have no real duration: drop their local clocks so finishing leaves none.
+    pub(crate) fn clear_running_clocks(&mut self) {
+        for id in &self.running {
+            if let Some(RenderBlock::ToolCall(tc)) = self.entries.get_mut(id).map(|e| &mut e.block) {
+                tc.set_started_at(None);
+            }
+        }
     }
 
     /// Mark every running entry finished. `finish_turn` alone would leave them animating forever.

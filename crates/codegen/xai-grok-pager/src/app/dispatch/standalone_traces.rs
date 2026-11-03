@@ -117,6 +117,7 @@ pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow
     let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     agent.scrollback.end_batch();
     agent.session.loading_replay = false;
+    agent.scrollback.clear_running_clocks();
     agent.session.finish_turn(&mut agent.scrollback);
     agent.scrollback.finish_all_running();
     agent.mark_turn_finished(crate::app::cancel_latency::TurnEnd::Aborted);
@@ -124,14 +125,21 @@ pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow
 
 /// Esc in the read-only view: put the sessions list back, on the session it was opened from when there is one.
 pub(crate) fn leave_view(app: &mut AppView) {
+    let ActiveView::Agent(id) = app.active_view else { return };
     let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     let Some(state) = agent.trace_return.take() else { return };
-    if let Some(origin) = agent.trace_origin
-        && let ActiveView::Agent(id) = app.active_view
-        && let Some(back) = app.agents.get_mut(&origin)
-    {
-        back.active_modal = Some(ActiveModal::Traces { state });
-        super::ctx::switch_to_agent(app, origin, super::ctx::SwitchCause::Picker);
+    if let Some(origin) = agent.trace_origin {
+        // The origin may have been closed meanwhile: another session takes the list, else the welcome screen.
+        let back = Some(origin)
+            .filter(|o| app.agents.contains_key(o))
+            .or_else(|| app.agents.keys().copied().find(|k| *k != id));
+        match back {
+            Some(back) => {
+                app.agents[&back].active_modal = Some(ActiveModal::Traces { state });
+                super::ctx::switch_to_agent(app, back, super::ctx::SwitchCause::Picker);
+            }
+            None => super::ctx::show_welcome(app),
+        }
         super::session::modal::remove_agent_and_cleanup(app, id);
         return;
     }

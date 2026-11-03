@@ -343,10 +343,35 @@ fn inside_a_grok_session_the_view_opens_beside_it_and_esc_leaves_the_session_as_
 }
 
 #[test]
+fn esc_with_the_origin_closed_hands_the_list_to_another_session_or_the_welcome_screen() {
+    let tmp = tempfile::tempdir().unwrap();
+    for other in [false, true] {
+        let mut app = app();
+        let origin = AgentId(0);
+        app.next_agent_id = 1;
+        standalone_traces::open_claude_in(&mut app, row(&tmp), false);
+        let ActiveView::Agent(view) = app.active_view else { panic!() };
+        app.agents.shift_remove(&origin);
+        let spare = AgentId(9);
+        if other {
+            app.agents.insert(spare, test_fixtures::make_agent());
+        }
+        standalone_traces::leave_view(&mut app);
+        assert!(!app.agents.contains_key(&view), "the read-only view is closed");
+        if other {
+            assert_eq!(app.active_view, ActiveView::Agent(spare));
+            assert!(matches!(app.agents[&spare].active_modal, Some(ActiveModal::Traces { .. })));
+        } else {
+            assert_eq!(app.active_view, ActiveView::Welcome);
+        }
+    }
+}
+
+#[test]
 fn esc_goes_back_with_vim_mode_off() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = app_with(false);
-    standalone_traces::open_claude(&mut app, row(&tmp));
+    standalone_traces::open_claude_in(&mut app, row(&tmp), true);
     assert_eq!(agent(&app).active_pane, AgentPane::Scrollback);
     let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(matches!(

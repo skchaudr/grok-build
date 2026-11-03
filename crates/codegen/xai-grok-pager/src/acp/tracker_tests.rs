@@ -781,7 +781,7 @@ fn replayed_tool_and_thinking_rows_use_transcript_time() {
     assert_eq!(times, vec![think_ms, run_ms, done_ms]);
 }
 #[test]
-fn replayed_call_without_result_finishes_with_no_duration() {
+fn replayed_running_call_is_timed_unless_its_clock_is_cleared() {
     let elapsed = |sb: &ScrollbackState| match &sb.get(0).unwrap().block {
         RenderBlock::ToolCall(ToolCallBlock::Execute(b)) => b.elapsed_ms(),
         other => panic!("expected an Execute row, got {other:?}"),
@@ -790,6 +790,7 @@ fn replayed_call_without_result_finishes_with_no_duration() {
         is_replay: true,
         ..Default::default()
     };
+    // Joining a live grok session: the replayed call ticks and its live completion carries a duration.
     let mut sb = ScrollbackState::new();
     let mut tracker = AcpUpdateTracker::new();
     tracker.handle_update(
@@ -797,26 +798,22 @@ fn replayed_call_without_result_finishes_with_no_duration() {
         &replay,
         &mut sb,
     );
-    sb.finish_all_running();
+    assert!(elapsed(&sb).is_some(), "a replayed running call ticks");
+    tracker.handle_update(tool_update_completed("t1"), &meta(), &mut sb);
     assert!(!sb.get(0).unwrap().is_running);
-    assert_eq!(
-        elapsed(&sb),
-        None,
-        "a replayed call with no result has no duration"
-    );
-    // Live keeps its local clock.
+    assert!(elapsed(&sb).is_some(), "the live completion has a duration");
+    // A past transcript: the call never finished, so it ends with no duration.
     let mut sb = ScrollbackState::new();
     let mut tracker = AcpUpdateTracker::new();
     tracker.handle_update(
         tool_call("t1", acp::ToolKind::Execute, "ls"),
-        &meta(),
+        &replay,
         &mut sb,
     );
-    sb.finish_all_running();
-    assert!(
-        elapsed(&sb).is_some(),
-        "a live call keeps its Instant::now() timer"
-    );
+    sb.clear_running_clocks();
+    tracker.finish_turn(&mut sb);
+    assert!(!sb.get(0).unwrap().is_running);
+    assert_eq!(elapsed(&sb), None, "an unfinished past call has no duration");
 }
 /// Helper: create a ToolCallUpdate with InProgress status and BashOutput raw_output.
 fn tool_update_in_progress(id: &str, output_bytes: &[u8]) -> acp::SessionUpdate {

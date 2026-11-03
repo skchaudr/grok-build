@@ -433,7 +433,7 @@ impl Converter {
                 } else if let (Some(mode @ ("content" | "count")), Some(body)) =
                     (mode, tur.get("content").and_then(Value::as_str))
                 {
-                    grep_raw(mode == "count", body)
+                    grep_raw(mode == "count", body, &s("path"))
                 } else {
                     (!names.is_empty())
                         .then(|| grep_json(&names.join("\n"), names.len(), json!([])))
@@ -671,8 +671,9 @@ fn grep_json(stdout: &str, match_count: usize, file_matches: Value) -> Value {
     json!({ "type": "GrepSearch", "stdout": stdout.as_bytes(), "stderr": Vec::<u8>::new(), "exit_code": 0, "match_count": match_count, "file_matches": file_matches })
 }
 
-/// Claude's content mode lists `path:line:text`; count mode lists `path:n`. Other lines (context, separators) are skipped.
-fn grep_raw(count_mode: bool, body: &str) -> Option<Value> {
+/// Claude's content mode lists `path:line:text` (`line:text` when one file is searched); count mode lists `path:n`.
+/// Other lines (context, separators) are skipped.
+fn grep_raw(count_mode: bool, body: &str, file: &str) -> Option<Value> {
     if count_mode {
         let rows: Vec<(&str, usize)> = body
             .lines()
@@ -688,13 +689,19 @@ fn grep_raw(count_mode: bool, body: &str) -> Option<Value> {
     let mut files: Vec<(&str, Vec<Value>)> = Vec::new();
     let mut total = 0;
     for l in body.lines() {
-        let Some((path, rest)) = l.split_once(':') else {
+        let Some((head, rest)) = l.split_once(':') else {
             continue;
         };
-        let Some((n, text)) = rest.split_once(':') else {
-            continue;
+        let (path, n, text) = match head.parse::<usize>() {
+            Ok(n) => (file, n, rest),
+            Err(_) => {
+                let Some((n, text)) = rest.split_once(':') else {
+                    continue;
+                };
+                let Ok(n) = n.parse::<usize>() else { continue };
+                (head, n, text)
+            }
         };
-        let Ok(n) = n.parse::<usize>() else { continue };
         total += 1;
         let m = json!({ "line_number": n, "content": text });
         match files.last_mut() {

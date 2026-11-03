@@ -540,6 +540,19 @@ fn grep_content_and_count_results_reach_the_search_block() {
             false,
             json!({ "mode": "count", "filenames": [], "content": "a.rs:2\nb.rs:1" }),
         ),
+        tool_use(
+            4,
+            "one",
+            "Grep",
+            json!({ "pattern": "x", "path": "/w/a.rs", "output_mode": "content" }),
+        ),
+        result(
+            5,
+            "one",
+            "3:let x: i32",
+            false,
+            json!({ "mode": "content", "filenames": [], "content": "3:let x: i32" }),
+        ),
     ]);
     let c = calls(&feed);
     let r = c[0].raw_output.as_ref().unwrap();
@@ -549,6 +562,9 @@ fn grep_content_and_count_results_reach_the_search_block() {
     let r = c[1].raw_output.as_ref().unwrap();
     assert_eq!(r["match_count"], 3);
     assert_eq!(r["stdout"], json!(b"a.rs\nb.rs".to_vec()));
+    let r = c[2].raw_output.as_ref().unwrap();
+    assert_eq!(r["file_matches"][0]["path"], "/w/a.rs");
+    assert_eq!(r["file_matches"][0]["matches"][0]["content"], "let x: i32");
 }
 
 #[test]

@@ -1379,16 +1379,12 @@ impl AcpUpdateTracker {
                 self.session_cwd.as_deref(),
                 &self.subagent_labels.borrow(),
             );
-            // A replayed call with no result has no local clock to trust: it runs untimed and finishes with no duration.
-            let (id, started_at) = if is_replay {
-                let id = scrollback.push(ScrollbackEntry::running(block));
-                stamp_replayed_row(scrollback, id, meta);
-                (id, None)
-            } else {
-                let id = scrollback.push_block(block);
-                scrollback.set_last_running(true);
-                (id, Some(std::time::Instant::now()))
-            };
+            // A replayed call keeps a live clock too: joining a live grok session, its completion arrives live with no
+            // duration of its own. A past transcript drops these clocks before finishing (`clear_running_clocks`).
+            let id = scrollback.push_block(block);
+            scrollback.set_last_running(true);
+            stamp_replayed_row(scrollback, id, meta);
+            let started_at = Some(std::time::Instant::now());
             self.pending_tools.insert(
                 tc_id,
                 PendingTool {
@@ -1515,7 +1511,7 @@ impl AcpUpdateTracker {
                                 if let RenderBlock::ToolCall(new_tc) = &mut block
                                     && let Some(t) = pending.started_at
                                 {
-                                    new_tc.set_started_at(t);
+                                    new_tc.set_started_at(Some(t));
                                 }
                                 kind_changed = verb_group_kind_changed(&entry.block, &block);
                                 entry.block = block;

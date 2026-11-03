@@ -360,21 +360,21 @@ impl ToolCallBlock {
     /// Set `started_at` on the inner variant block.
     /// Unlike `transfer_timing_from`, this works across variant boundaries.
     /// For example, it can set `started_at` on a `Search` block from a value captured when the block was still `Other`.
-    pub fn set_started_at(&mut self, instant: std::time::Instant) {
+    pub fn set_started_at(&mut self, instant: Option<std::time::Instant>) {
         match self {
-            ToolCallBlock::Execute(b) => b.started_at = Some(instant),
-            ToolCallBlock::Read(b) => b.started_at = Some(instant),
-            ToolCallBlock::Edit(b) => b.started_at = Some(instant),
-            ToolCallBlock::Search(b) => b.started_at = Some(instant),
-            ToolCallBlock::ListDir(b) => b.started_at = Some(instant),
-            ToolCallBlock::WebFetch(b) => b.started_at = Some(instant),
-            ToolCallBlock::WebSearch(b) => b.started_at = Some(instant),
-            ToolCallBlock::IntegrationSearch(b) => b.started_at = Some(instant),
-            ToolCallBlock::UseTool(b) => b.started_at = Some(instant),
-            ToolCallBlock::MemorySearch(b) => b.started_at = Some(instant),
-            ToolCallBlock::SentMessage(b) => b.started_at = Some(instant),
-            ToolCallBlock::Skill(b) => b.started_at = Some(instant),
-            ToolCallBlock::Other(b) => b.started_at = Some(instant),
+            ToolCallBlock::Execute(b) => b.started_at = instant,
+            ToolCallBlock::Read(b) => b.started_at = instant,
+            ToolCallBlock::Edit(b) => b.started_at = instant,
+            ToolCallBlock::Search(b) => b.started_at = instant,
+            ToolCallBlock::ListDir(b) => b.started_at = instant,
+            ToolCallBlock::WebFetch(b) => b.started_at = instant,
+            ToolCallBlock::WebSearch(b) => b.started_at = instant,
+            ToolCallBlock::IntegrationSearch(b) => b.started_at = instant,
+            ToolCallBlock::UseTool(b) => b.started_at = instant,
+            ToolCallBlock::MemorySearch(b) => b.started_at = instant,
+            ToolCallBlock::SentMessage(b) => b.started_at = instant,
+            ToolCallBlock::Skill(b) => b.started_at = instant,
+            ToolCallBlock::Other(b) => b.started_at = instant,
         }
     }
 
