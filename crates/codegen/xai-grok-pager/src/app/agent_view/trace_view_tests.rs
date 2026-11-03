@@ -290,6 +290,44 @@ fn the_transcript_lands_in_grok_blocks_with_no_composer() {
     assert_eq!(a.subagent_sessions.len(), 1);
 }
 
+/// A made-up grok session: its own `updates.jsonl` replays as is, and the xAI subagent spawn becomes the subagent row.
+#[test]
+fn a_past_grok_session_replays_its_updates_with_the_subagent_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = "/work/demo";
+    let dir = tmp.path().join("sessions").join(xai_grok_config::encode_cwd_dirname(cwd)).join("g1");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("chat_history.jsonl"), "").unwrap();
+    let acp = |u: Value| json!({ "timestamp": 1, "method": "session/update", "params": { "sessionId": "g1", "update": u } });
+    let lines = [
+        acp(json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "Review the diff." } })),
+        json!({ "timestamp": 2, "method": "_x.ai/session/update", "params": { "sessionId": "g1", "update": {
+            "sessionUpdate": "subagent_spawned", "subagent_id": "sa1", "parent_session_id": "g1",
+            "child_session_id": "c1", "subagent_type": "explore", "description": "Review the diff" } } }),
+        acp(json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Looks right." } })),
+    ];
+    let body: Vec<String> = lines.iter().map(Value::to_string).collect();
+    std::fs::write(dir.join("updates.jsonl"), body.join("\n")).unwrap();
+    let row = xai_grok_traces::SessionRow {
+        id: "grok:g1".into(),
+        source: "grok".into(),
+        file_path: dir.join("chat_history.jsonl"),
+        cwd: Some(cwd.into()),
+        ..Default::default()
+    };
+
+    let mut app = app();
+    standalone_traces::open_grok_in(&mut app, row, true);
+    let a = agent(&app);
+    assert!(a.active_modal.is_none(), "the list steps aside");
+    assert_eq!(a.composer_route(), ComposerRoute::Hidden);
+    let b = blocks(a);
+    assert!(b.iter().any(|x| matches!(x, RenderBlock::UserPrompt(_))));
+    assert!(b.iter().any(|x| matches!(x, RenderBlock::AgentMessage(_))));
+    assert!(b.iter().any(|x| matches!(x, RenderBlock::Subagent(_))), "the subagent row survives");
+    assert_eq!(a.subagent_sessions.len(), 1);
+}
+
 #[test]
 fn esc_goes_back_to_the_sessions_list_and_the_view_empties() {
     let tmp = tempfile::tempdir().unwrap();

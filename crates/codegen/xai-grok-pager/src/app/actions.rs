@@ -947,6 +947,8 @@ pub enum Action {
     TracesRescan,
     /// Enter on a Claude session in `/traces`: open it read-only in the session view.
     TracesOpenClaude(Box<xai_grok_traces::SessionRow>),
+    /// Enter on a past grok session in `/traces`: replay its `updates.jsonl` read-only in the session view.
+    TracesOpenGrok(Box<xai_grok_traces::SessionRow>),
     /// Esc in that read-only view: back to the sessions list.
     TracesLeaveView,
     /// Copy text from the `/traces` inspector; the outcome shows in its status line.
