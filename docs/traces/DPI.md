@@ -52,4 +52,4 @@ Each conversation is one agent and one grok-traces session. `native_id` = `<sess
 
 Only `session_id` selects work. It must be `<uuid>:<int>` with a plain id (`[A-Za-z0-9-]`); the db is located from the dpi root and the uuid, not from `session_file`, so it keys the same as a scan. The hook records the receipt and indexes just that conversation (`index_dpi_conversation_id`), then wakes viewers. A `session_id` without `:<int>`, an unknown conversation, or a path-shaped id records the receipt only.
 
-A receipt becomes a live row only with `harness_pid` in the payload (the process to watch); without it the session shows in the ledger and as `active` for the receipt window, but not in `live`.
+The dpi backend (`apps/dpi-backend/src/observe.ts` in durable-pi) sends its own pid as `harness_pid` and Pi's event names (`agent_start`, `tool_execution_start`/`_end`, `agent_end`), one hook at a time. `live` folds dpi with Pi's rules (`boundary`, `norm`, `strict_ids` in `live.rs`). One backend pid hosts every agent, so dpi is left out of the same-process supersede that Claude and Pi get.
