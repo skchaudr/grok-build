@@ -510,3 +510,79 @@ fn a_garbled_line_does_not_stop_the_rest() {
 fn a_missing_transcript_is_an_error() {
     assert!(convert(Path::new("/definitely/not/here.jsonl"), "x").is_err());
 }
+
+#[test]
+fn grep_content_and_count_results_reach_the_search_block() {
+    let feed = run(&[
+        tool_use(
+            0,
+            "g",
+            "Grep",
+            json!({ "pattern": "foo", "output_mode": "content" }),
+        ),
+        result(
+            1,
+            "g",
+            "a.rs:3:foo\na.rs:9:foo bar",
+            false,
+            json!({ "mode": "content", "filenames": [], "content": "a.rs:3:foo\na.rs:9:foo bar" }),
+        ),
+        tool_use(
+            2,
+            "c",
+            "Grep",
+            json!({ "pattern": "foo", "output_mode": "count" }),
+        ),
+        result(
+            3,
+            "c",
+            "a.rs:2\nb.rs:1",
+            false,
+            json!({ "mode": "count", "filenames": [], "content": "a.rs:2\nb.rs:1" }),
+        ),
+    ]);
+    let c = calls(&feed);
+    let r = c[0].raw_output.as_ref().unwrap();
+    assert_eq!(r["match_count"], 2);
+    assert_eq!(r["file_matches"][0]["path"], "a.rs");
+    assert_eq!(r["file_matches"][0]["matches"][1]["line_number"], 9);
+    let r = c[1].raw_output.as_ref().unwrap();
+    assert_eq!(r["match_count"], 3);
+    assert_eq!(r["stdout"], json!(b"a.rs\nb.rs".to_vec()));
+}
+
+#[test]
+fn a_write_over_a_file_diffs_and_a_failed_bash_keeps_its_exit_code() {
+    let feed = run(&[
+        tool_use(
+            0,
+            "w",
+            "Write",
+            json!({ "file_path": "/w/b.rs", "content": "new\n" }),
+        ),
+        result(
+            1,
+            "w",
+            "updated",
+            false,
+            json!({ "type": "update", "originalFile": "old\n" }),
+        ),
+        tool_use(2, "b", "Bash", json!({ "command": "false" })),
+        result(3, "b", "Exit code 2\nboom", true, Value::Null),
+    ]);
+    let c = calls(&feed);
+    let acp::ToolCallContent::Diff(d) = &c[0].content[0] else {
+        panic!("diff")
+    };
+    assert_eq!(
+        (d.old_text.as_deref(), d.new_text.as_str()),
+        (Some("old\n"), "new\n")
+    );
+    assert!(c[0].raw_input.as_ref().unwrap().get("variant").is_none());
+    let r = c[1].raw_output.as_ref().unwrap();
+    assert_eq!(r["exit_code"], 2);
+    assert_eq!(
+        crate::acp::tracker::content_blocks_text(&c[1].content),
+        "boom"
+    );
+}

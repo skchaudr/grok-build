@@ -349,12 +349,30 @@ impl Converter {
             "Bash" => {
                 let title = str_of(input, "description")
                     .unwrap_or_else(|| s("command").lines().next().unwrap_or("").to_string());
+                // A failed run starts "Exit code N"; carry N so the block says so. The body is the rest.
+                let code = failed
+                    .then(|| {
+                        text.lines()
+                            .next()?
+                            .strip_prefix("Exit code ")?
+                            .trim()
+                            .parse::<i32>()
+                            .ok()
+                    })
+                    .flatten();
+                let (body, raw) = match code {
+                    Some(code) => {
+                        let body = text.split_once('\n').map_or("", |(_, rest)| rest);
+                        (body, Some(bash_raw(&s("command"), body, code)))
+                    }
+                    None => (text, None),
+                };
                 (
                     acp::ToolKind::Execute,
                     title,
                     input.clone(),
-                    text_blocks(text),
-                    None,
+                    text_blocks(body),
+                    raw,
                 )
             }
             "Read" => {
@@ -393,6 +411,8 @@ impl Converter {
                 )
             }
             "Grep" | "Glob" => {
+                let tur = res.map(|r| &r.tur).unwrap_or(&Value::Null);
+                let mode = tur.get("mode").and_then(Value::as_str);
                 let names: Vec<String> = res
                     .and_then(|r| r.tur.get("filenames"))
                     .and_then(Value::as_array)
@@ -402,9 +422,17 @@ impl Converter {
                             .collect()
                     })
                     .unwrap_or_default();
-                let raw = (!failed && !names.is_empty()).then(|| {
-                    json!({ "type": "GrepSearch", "stdout": names.join("\n").into_bytes(), "stderr": Vec::<u8>::new(), "exit_code": 0, "match_count": names.len(), "file_matches": [] })
-                });
+                // Content and count modes put their result in `content`, not `filenames`.
+                let raw = if failed {
+                    None
+                } else if let (Some(mode @ ("content" | "count")), Some(body)) =
+                    (mode, tur.get("content").and_then(Value::as_str))
+                {
+                    grep_raw(mode == "count", body)
+                } else {
+                    (!names.is_empty())
+                        .then(|| grep_json(&names.join("\n"), names.len(), json!([])))
+                };
                 (
                     acp::ToolKind::Search,
                     format!("{name} {}", s("pattern")),
@@ -415,13 +443,19 @@ impl Converter {
             }
             "Edit" | "Write" => {
                 let path = s("file_path");
+                // Writing over a file is a diff against what it held; only a new file is "Creating".
+                let before = res
+                    .map(|r| &r.tur)
+                    .filter(|t| t.get("type").and_then(Value::as_str) == Some("update"))
+                    .and_then(|t| t.get("originalFile")?.as_str());
+                let overwrite = name == "Write" && before.is_some();
                 let (old, new) = if name == "Write" {
-                    (None, raw_s("content"))
+                    (before.map(str::to_string), raw_s("content"))
                 } else {
                     (Some(raw_s("old_string")), raw_s("new_string"))
                 };
                 let mut raw = input.clone();
-                if name == "Write" {
+                if name == "Write" && !overwrite {
                     raw["variant"] = json!("Write");
                 }
                 (
@@ -617,6 +651,52 @@ fn tool_call(
         .raw_output(raw_output)
         .locations(vec![])
         .meta(meta)
+}
+
+fn bash_raw(command: &str, output: &str, exit_code: i32) -> Value {
+    json!({ "type": "Bash", "output": output.as_bytes(), "exit_code": exit_code, "command": command, "truncated": false, "signal": null, "timed_out": false, "description": null, "current_dir": "", "output_file": "", "total_bytes": output.len() })
+}
+
+fn grep_json(stdout: &str, match_count: usize, file_matches: Value) -> Value {
+    json!({ "type": "GrepSearch", "stdout": stdout.as_bytes(), "stderr": Vec::<u8>::new(), "exit_code": 0, "match_count": match_count, "file_matches": file_matches })
+}
+
+/// Claude's content mode lists `path:line:text`; count mode lists `path:n`. Other lines (context, separators) are skipped.
+fn grep_raw(count_mode: bool, body: &str) -> Option<Value> {
+    if count_mode {
+        let rows: Vec<(&str, usize)> = body
+            .lines()
+            .filter_map(|l| {
+                let (path, n) = l.rsplit_once(':')?;
+                Some((path, n.trim().parse().ok()?))
+            })
+            .collect();
+        let paths: Vec<&str> = rows.iter().map(|r| r.0).collect();
+        let total = rows.iter().map(|r| r.1).sum();
+        return (total > 0).then(|| grep_json(&paths.join("\n"), total, json!([])));
+    }
+    let mut files: Vec<(&str, Vec<Value>)> = Vec::new();
+    let mut total = 0;
+    for l in body.lines() {
+        let Some((path, rest)) = l.split_once(':') else {
+            continue;
+        };
+        let Some((n, text)) = rest.split_once(':') else {
+            continue;
+        };
+        let Ok(n) = n.parse::<usize>() else { continue };
+        total += 1;
+        let m = json!({ "line_number": n, "content": text });
+        match files.last_mut() {
+            Some((p, ms)) if *p == path => ms.push(m),
+            _ => files.push((path, vec![m])),
+        }
+    }
+    let fm: Vec<Value> = files
+        .into_iter()
+        .map(|(path, matches)| json!({ "path": path, "matches": matches }))
+        .collect();
+    (total > 0).then(|| grep_json("", total, Value::Array(fm)))
 }
 
 /// A good edit carries its diff; a failed one carries Claude's message.
