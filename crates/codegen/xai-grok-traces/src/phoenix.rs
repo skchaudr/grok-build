@@ -26,8 +26,9 @@ pub struct PhoenixSpan {
     pub call_id: Option<String>,
     pub name: String,
     pub start: DateTime<Utc>,
-    /// `None` is a span that has started and not ended.
-    pub end: Option<DateTime<Utc>>,
+    /// Always set: OTLP exports a span when it ends, so Phoenix never holds a running
+    /// span. Running rows and liveness must come from receipts, not from Phoenix.
+    pub end: DateTime<Utc>,
     pub status: SpanStatus,
     pub parent_id: Option<String>,
     pub session_id: Option<String>,
@@ -43,7 +44,7 @@ fn time(v: &Value, key: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(str_at(v, key)?).ok().map(|t| t.with_timezone(&Utc))
 }
 
-/// Map one Phoenix span object. `None` when it lacks a span id or a start time.
+/// Map one Phoenix span object. `None` when it lacks a span id, start or end time.
 pub fn parse_span(v: &Value) -> Option<PhoenixSpan> {
     let ctx = v.get("context")?;
     let attrs = v.get("attributes").unwrap_or(&Value::Null);
@@ -54,7 +55,7 @@ pub fn parse_span(v: &Value) -> Option<PhoenixSpan> {
         call_id: attr("tool_use_id"),
         name: str_at(v, "name").unwrap_or_default().to_owned(),
         start: time(v, "start_time")?,
-        end: time(v, "end_time"),
+        end: time(v, "end_time")?,
         status: match str_at(v, "status_code") {
             Some("OK") => SpanStatus::Ok,
             Some("ERROR") => SpanStatus::Error,
@@ -134,7 +135,7 @@ mod tests {
         assert_eq!(s.trace_id, "t1");
         assert_eq!(s.call_id.as_deref(), Some("toolu_x"));
         assert_eq!(s.name, "claude tool:Bash");
-        assert_eq!(s.end.unwrap() - s.start, chrono::Duration::milliseconds(1750));
+        assert_eq!(s.end - s.start, chrono::Duration::milliseconds(1750));
         assert_eq!(s.status, SpanStatus::Ok);
         assert_eq!(s.parent_id.as_deref(), Some("p1"));
         assert_eq!(s.session_id.as_deref(), Some("sess"));
@@ -143,9 +144,8 @@ mod tests {
     }
 
     #[test]
-    fn open_span_and_missing_attrs() {
-        let s = parse_span(&span(json!({"end_time": null, "status_code": "UNSET", "parent_id": null, "attributes": {}}))).unwrap();
-        assert_eq!(s.end, None);
+    fn missing_attrs() {
+        let s = parse_span(&span(json!({"status_code": "UNSET", "parent_id": null, "attributes": {}}))).unwrap();
         assert_eq!(s.status, SpanStatus::Unset);
         assert_eq!(s.parent_id, None);
         assert_eq!((s.call_id, s.session_id, s.agent_id, s.transcript_path), (None, None, None, None));
@@ -155,6 +155,7 @@ mod tests {
     fn error_status_and_unparseable_spans() {
         assert_eq!(parse_span(&span(json!({"status_code": "ERROR"}))).unwrap().status, SpanStatus::Error);
         assert!(parse_span(&span(json!({"start_time": "nope"}))).is_none());
+        assert!(parse_span(&span(json!({"end_time": null}))).is_none());
         assert!(parse_span(&json!({"name": "x"})).is_none());
     }
 
