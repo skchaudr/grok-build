@@ -141,6 +141,33 @@ fn open_block_viewer_opens_list_dir_block() {
 }
 
 #[test]
+fn open_block_viewer_opens_other_skill_and_empty_read() {
+    use crate::scrollback::blocks::{OtherToolCallBlock, ReadToolCallBlock};
+    let blocks = [
+        ToolCallBlock::Other(OtherToolCallBlock::new("mcp__demo__ping", "").with_output("pong")),
+        ToolCallBlock::Skill(OtherToolCallBlock::new("Skill: demo", "")),
+        ToolCallBlock::Read(ReadToolCallBlock::new("/tmp/demo.png")),
+    ];
+    for block in blocks {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.scrollback.push_block(RenderBlock::ToolCall(block));
+        agent.scrollback.set_selected(Some(0));
+        assert!(
+            agent
+                .scrollback
+                .entry(0)
+                .unwrap()
+                .block
+                .has_normal_fullscreen_viewer()
+        );
+
+        dispatch(Action::OpenBlockViewer, &mut app);
+        assert!(app.agents.get(&AgentId(0)).unwrap().block_viewer.is_some());
+    }
+}
+
+#[test]
 fn open_block_viewer_prefers_markdown_viewer_over_image_refs() {
     use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
 

@@ -336,6 +336,9 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
             RenderBlock::ToolCall(ToolCallBlock::UseTool(_)) => {
                 BlockViewerPane::for_use_tool(entry.id, entry)
             }
+            RenderBlock::ToolCall(ToolCallBlock::Other(_) | ToolCallBlock::Skill(_)) => {
+                BlockViewerPane::for_other(entry.id, entry)
+            }
             RenderBlock::BgTask(block) => {
                 let stdout = agent
                     .session
