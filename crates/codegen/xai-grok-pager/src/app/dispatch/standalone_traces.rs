@@ -31,6 +31,8 @@ static PENDING: Mutex<Option<String>> = Mutex::new(None);
 
 pub const TITLE: &str = "traces";
 
+pub(crate) use super::traces_live::local_copy;
+
 pub fn enable(session: Option<String>) {
     STANDALONE.store(true, Ordering::Release);
     *PENDING.lock().unwrap() = session.filter(|s| !s.trim().is_empty());
@@ -82,16 +84,19 @@ pub(crate) fn open_claude(app: &mut AppView, row: xai_grok_traces::SessionRow) {
 /// `grok traces` replays into its own view. Inside a grok session the replay gets a new agent view, so the user's session
 /// is left as it was.
 pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
-    let feed = if row.source == "pi" {
-        pi_feed::convert(&row.file_path, &row.id)
-    } else if row.source == "dpi" {
-        pi_feed::convert_dpi(&row.file_path.to_string_lossy(), &row.id)
-    } else if row.source == "codex" {
-        codex_feed::convert(&row.file_path, &row.id)
-    } else {
-        claude_feed::convert(&row.file_path, &row.id)
-    };
+    let feed = super::traces_live::local_copy(&row).and_then(|path| feed_for(&row, &path));
     open_feed_in(app, row.id.clone(), row, feed, standalone);
+}
+
+/// The session's events from its transcript at `path` (the row's own file, or a local copy of another machine's).
+pub(crate) fn feed_for(row: &xai_grok_traces::SessionRow, path: &Path) -> io::Result<Vec<Fed>> {
+    match row.source.as_str() {
+        "pi" => pi_feed::convert(path, &row.id),
+        "dpi" => pi_feed::convert_dpi(&path.to_string_lossy(), &row.id),
+        "codex" => codex_feed::convert(path, &row.id),
+        "grok" => grok_feed_at(path),
+        _ => claude_feed::convert(path, &row.id),
+    }
 }
 
 /// Enter on a past grok session: same read-only view as Claude.
@@ -102,19 +107,23 @@ pub(crate) fn open_grok(app: &mut AppView, row: xai_grok_traces::SessionRow) {
 /// grok's `updates.jsonl` is already grok's events: no converter, replayed with the xAI updates kept so subagents survive.
 /// The row's file is `<grok home>/sessions/<cwd>/<session id>/chat_history.jsonl`.
 pub(crate) fn open_grok_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
-    let dir = row.file_path.parent();
+    let feed = super::traces_live::local_copy(&row).and_then(|path| grok_feed_at(&path));
+    // Bound to the index's `grok:` id, not grok's own: a tab with this session open must not get the replay.
+    open_feed_in(app, row.id.clone(), row, feed, standalone);
+}
+
+fn grok_feed_at(path: &Path) -> io::Result<Vec<Fed>> {
+    let dir = path.parent();
     let sid = dir.and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
     let home = dir
         .and_then(|d| d.ancestors().find(|a| a.file_name().is_some_and(|n| n == "sessions")))
         .and_then(Path::parent);
     // The session folder's own cwd finds `updates.jsonl` without scanning every session.
     let folder_cwd = dir.and_then(Path::parent).and_then(xai_grok_config::decode_cwd_from_dirname);
-    let feed = match (&sid, home) {
+    match (&sid, home) {
         (Some(sid), Some(home)) => grok_feed(sid, home, folder_cwd.as_deref()),
         _ => Err(io::Error::other("not in a grok sessions directory")),
-    };
-    // Bound to the index's `grok:` id, not grok's own: a tab with this session open must not get the replay.
-    open_feed_in(app, row.id.clone(), row, feed, standalone);
+    }
 }
 
 fn grok_feed(sid: &str, home: &Path, cwd: Option<&str>) -> io::Result<Vec<Fed>> {
@@ -182,12 +191,20 @@ fn open_feed_in(
     }
     agent.begin_replay_window();
     agent.scrollback.begin_batch();
+    let live = row.status == xai_grok_traces::Status::Active;
+    let seen = live.then(|| super::traces_live::signatures(&events));
     for fed in events {
         super::super::acp_handler::handle(message(&session_id, fed), app);
     }
     let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     agent.scrollback.end_batch();
     agent.session.loading_replay = false;
+    if let Some(seen) = seen {
+        // Running: its pending calls stay open, and later lines of the transcript keep arriving.
+        let id = agent.session.id;
+        super::traces_live::start(id, session_id, row, seen);
+        return;
+    }
     agent.scrollback.clear_running_clocks();
     agent.session.finish_turn(&mut agent.scrollback);
     agent.scrollback.finish_all_running();
@@ -199,6 +216,7 @@ pub(crate) fn leave_view(app: &mut AppView) {
     let ActiveView::Agent(id) = app.active_view else { return };
     let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     let Some(state) = agent.trace_return.take() else { return };
+    super::traces_live::stop(id);
     if let Some(origin) = agent.trace_origin {
         // The origin may have been closed meanwhile: another session takes the list, else the welcome screen.
         let back = Some(origin)
@@ -270,7 +288,7 @@ fn read_only_view(app: &AppView, id: AgentId) -> AgentView {
 }
 
 /// One converted event as the message the handler takes off the wire.
-fn message(session_id: &str, fed: Fed) -> AcpClientMessage {
+pub(super) fn message(session_id: &str, fed: Fed) -> AcpClientMessage {
     let (response_tx, _rx) = tokio::sync::oneshot::channel();
     match fed.event {
         Event::Acp(update) => AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {

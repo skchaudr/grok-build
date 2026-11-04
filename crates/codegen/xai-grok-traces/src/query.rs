@@ -25,6 +25,20 @@ const CHILDREN: &str = "(SELECT COUNT(*) FROM trace_sessions c WHERE c.source_id
 static LAST_RECEIPT_AT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| newest_receipt_sql("at_ms"));
 static LAST_RECEIPT_EVENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| newest_receipt_sql("event"));
 
+/// A gap between two events longer than this counts as this long: the agent was waiting, not working.
+pub const ACTIVE_GAP_CAP_MS: i64 = 5 * 60 * 1000;
+
+/// Active time: the sum of the gaps between a session's consecutive event timestamps, each gap capped at
+/// [`ACTIVE_GAP_CAP_MS`]. Plain SQLite, so the same text runs on another machine's index through `sqlite3`.
+/// Output rows: `id|active_ms`.
+pub fn active_sql(since_ms: i64) -> String {
+    format!(
+        "SELECT s.id, SUM(MIN(x.d, {ACTIVE_GAP_CAP_MS})) FROM (SELECT sk, timestamp - LAG(timestamp) OVER (PARTITION BY sk ORDER BY timestamp) AS d \
+         FROM trace_events WHERE timestamp IS NOT NULL AND sk IN (SELECT sk FROM trace_sessions WHERE updated_at >= {since_ms})) x \
+         JOIN trace_sessions s ON s.sk = x.sk WHERE x.d > 0 GROUP BY s.id"
+    )
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Status {
     Active,
@@ -402,6 +416,13 @@ impl TraceIndex {
         let now = now_ms();
         let sql = format!("SELECT {} FROM trace_sessions s LEFT JOIN trace_files f ON f.path = s.file_path WHERE s.id = ?1", session_cols());
         Ok(self.conn().query_row(&sql, [id], |r| session_row(r, now)).optional()?)
+    }
+
+    /// Active time per session updated at or after `since_ms`: see [`ACTIVE_SQL`].
+    pub fn active_ms(&self, since_ms: i64) -> Result<std::collections::HashMap<String, i64>> {
+        let mut stmt = self.conn().prepare(&active_sql(since_ms))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Sessions this one dispatched, oldest first.

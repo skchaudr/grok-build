@@ -30,6 +30,7 @@ mod router;
 mod session;
 mod settings;
 pub mod standalone_traces;
+pub(crate) mod traces_live;
 mod status;
 mod task_result;
 mod transcript;

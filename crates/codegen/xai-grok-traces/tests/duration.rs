@@ -156,3 +156,24 @@ fn an_appended_result_fills_the_call_indexed_earlier() {
     assert_eq!(tool(&after, "Shell").duration_ms, Some(1500));
     assert_eq!(tool(&after, "Shell").line, 0);
 }
+
+#[test]
+fn active_time_caps_each_quiet_gap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let grok = home.join(".grok");
+    // Gaps of 1m, 1h (counts as the 5m cap) and 2m: 8 minutes active.
+    write_lines(
+        &home.join(".pi/agent/sessions/--w--/a.jsonl"),
+        &[
+            json!({"type":"message","timestamp":T,"message":{"role":"user","content":[{"type":"text","text":"go"}]}}),
+            json!({"type":"message","timestamp":T + 60_000,"message":{"role":"assistant","content":[{"type":"toolCall","id":"p1","name":"bash","arguments":{"command":"ls"}}]}}),
+            json!({"type":"message","timestamp":T + 3_660_000,"message":{"role":"toolResult","toolCallId":"p1","toolName":"bash","content":[{"type":"text","text":"ok"}]}}),
+            json!({"type":"message","timestamp":T + 3_780_000,"message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}),
+        ],
+    );
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
+    idx.scan(&default_roots(&home, &grok)).unwrap();
+    let active = idx.active_ms(0).unwrap();
+    assert_eq!(active.values().copied().collect::<Vec<_>>(), [8 * 60_000]);
+}
