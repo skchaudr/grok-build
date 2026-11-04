@@ -263,8 +263,8 @@ pub struct TracesModalState {
     live_pending: usize,
     live_at: Option<Instant>,
     local_host: String,
-    /// The sessions list as drawn in `Mode::List`.
-    board: board::Board,
+    /// The sessions list drawn in `Mode::List` in place of the ledger. `open` sets it; the ledger's own tests leave it off.
+    board: Option<board::Board>,
 }
 
 #[derive(Clone, Debug)]
@@ -436,7 +436,9 @@ fn tab_source(tab: usize) -> Option<&'static str> {
 
 impl TracesModalState {
     pub fn open(index: Option<TraceIndex>) -> Self {
-        Self::open_with_hosts(index, remote::hosts())
+        let mut s = Self::open_with_hosts(index, remote::hosts());
+        s.board = Some(board::Board::new());
+        s
     }
 
     pub fn open_with_hosts(index: Option<TraceIndex>, hosts: Vec<String>) -> Self {
@@ -550,7 +552,7 @@ impl TracesModalState {
             live_pending: 0,
             live_at: None,
             local_host: short_hostname(),
-            board: board::Board::new(),
+            board: None,
         };
         s.watermark = s.index.as_ref().and_then(|i| i.receipts_watermark().ok()).unwrap_or(0);
         s.refresh();
@@ -609,8 +611,10 @@ impl TracesModalState {
         if self.mode == Mode::Live {
             redraw |= self.poll_live_screen(now_ms);
         }
-        if self.mode == Mode::List {
-            redraw |= self.board.poll(&self.shown_roots, &self.hosts, self.index.as_ref().map(|i| i.db_path()));
+        if self.mode == Mode::List
+            && let Some(board) = self.board.as_mut()
+        {
+            redraw |= board.poll(&self.shown_roots, &self.hosts, self.index.as_ref().map(|i| i.db_path()));
         }
         if let Some(f) = &mut self.follow_view {
             redraw |= f.poll(now_ms);
@@ -3712,8 +3716,8 @@ pub fn handle_traces_mouse(state: &mut TracesModalState, mouse: &MouseEvent) -> 
             }
             _ => InputOutcome::Unchanged,
         },
-        Mode::List => board::handle_mouse(state, mouse),
-        Mode::Trajectory => match mouse.kind {
+        Mode::List if state.board.is_some() => board::handle_mouse(state, mouse),
+        Mode::List | Mode::Trajectory => match mouse.kind {
             MouseEventKind::ScrollDown => state.wheel(WHEEL),
             MouseEventKind::ScrollUp => state.wheel(-WHEEL),
             MouseEventKind::Down(MouseButton::Left) => state.click(mouse.column, mouse.row),
@@ -3734,7 +3738,7 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
     if key.kind == KeyEventKind::Release {
         return InputOutcome::Unchanged;
     }
-    if state.mode == Mode::List && state.typing == Typing::No {
+    if state.mode == Mode::List && state.typing == Typing::No && state.board.is_some() {
         return board::handle_key(state, key);
     }
     match state.typing {
@@ -4276,7 +4280,7 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
 
 pub fn render_traces_modal(buf: &mut Buffer, full_area: Rect, state: &mut TracesModalState, compact: bool) {
     state.hit_list = None;
-    if state.mode == Mode::List {
+    if state.mode == Mode::List && state.board.is_some() {
         return board::render(buf, full_area, state);
     }
     let theme = Theme::current();
