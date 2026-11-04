@@ -1,4 +1,5 @@
-//! `/traces` follow screen: one live session (and its subagents) as a tail you can pause, filter and read.
+//! `/traces` follow screen: one live session and its subagents as a tail.
+//! The list's follow is a stage: every agent stays on a rail, and moving between them leaves the tail live.
 //!
 //! A `Follower` (the library behind `grok-traces follow`) runs on a worker thread and is ticked from the
 //! modal's 1 s poll; its `--json` items become the [`Row`]s here. Nothing here touches the index except the
@@ -115,6 +116,18 @@ pub(super) struct Follow {
     bodies: HashMap<(String, i64, Option<i64>), String>,
     /// Call rows (indices into `rows`) shown with their body inline: `l` opens, `h` closes.
     open: HashSet<usize>,
+    /// The list's follow. The rail lists every agent; `j`/`k` move there and the tail stays pinned.
+    stage: bool,
+    /// Selected rail row.
+    focus: usize,
+    /// Tail shows only the focused agent. The rail stays either way.
+    solo: bool,
+    /// An agent to select once it appears (a subagent opened from the list, before its first row).
+    pending_focus: Option<String>,
+    /// First rail row drawn.
+    rail_top: usize,
+    rail: Rect,
+    tail: Rect,
 }
 
 /// `0.4s`, `12s`, `2m05s`.
@@ -185,6 +198,54 @@ impl Follow {
             inflight: false,
             bodies: HashMap::new(),
             open: HashSet::new(),
+            stage: false,
+            focus: 0,
+            solo: false,
+            pending_focus: None,
+            rail_top: 0,
+            rail: Rect::default(),
+            tail: Rect::default(),
+        }
+    }
+
+    /// Follow from the sessions list: every agent on a rail, tail pinned until you page back through it.
+    pub fn enter_stage(&mut self, focus: Option<String>) {
+        self.stage = true;
+        self.solo = false;
+        self.cursor = None;
+        self.pending_focus = focus;
+        self.apply_pending_focus();
+    }
+
+    pub fn is_stage(&self) -> bool {
+        self.stage
+    }
+
+    /// Agents already known from the list, so the rail is filled before the first tick.
+    pub fn seed_agents<I>(&mut self, extra: I)
+    where
+        I: IntoIterator<Item = (String, Option<String>, Option<String>)>,
+    {
+        for (id, model, label) in extra {
+            if let Some(a) = self.agents.iter_mut().find(|a| a.id == id) {
+                if a.model.is_none() {
+                    a.model = model;
+                }
+                if a.label.is_none() {
+                    a.label = label;
+                }
+            } else {
+                self.agents.push(Agent { id, model, label });
+            }
+        }
+        self.apply_pending_focus();
+    }
+
+    fn apply_pending_focus(&mut self) {
+        let Some(id) = self.pending_focus.clone() else { return };
+        if let Some(i) = self.agents.iter().position(|a| a.id == id) {
+            self.focus = i;
+            self.pending_focus = None;
         }
     }
 
@@ -334,11 +395,16 @@ impl Follow {
             };
             self.rows.push(Row { agent, depth, body });
         }
+        self.apply_pending_focus();
     }
 
     /// Indices of the rows the current agent filter shows.
     pub fn visible(&self) -> Vec<usize> {
-        let only = self.filter.checked_sub(1).and_then(|i| self.agents.get(i)).map(|a| a.id.as_str());
+        let only = if self.stage {
+            self.solo.then(|| self.agents.get(self.focus)).flatten().map(|a| a.id.as_str())
+        } else {
+            self.filter.checked_sub(1).and_then(|i| self.agents.get(i)).map(|a| a.id.as_str())
+        };
         (0..self.rows.len()).filter(|&i| only.is_none_or(|id| self.rows[i].agent == id)).collect()
     }
 
@@ -451,6 +517,154 @@ impl Follow {
         if open { self.open.insert(i) } else { self.open.remove(&i) }
     }
 
+    /// `j`/`k` on the stage move the rail. Paging reads the tail without treating that as leaving follow.
+    pub fn stage_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => self.move_focus(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_focus(-1),
+            KeyCode::PageDown => self.step(8),
+            KeyCode::PageUp => self.step(-8),
+            KeyCode::Char('g') | KeyCode::Home => self.move_focus(-(self.focus as isize)),
+            KeyCode::Char('G') | KeyCode::End => self.resume(),
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.solo = !self.solo;
+                self.cursor = None;
+                self.top = 0;
+                true
+            }
+            KeyCode::Char('e') => self.next_error(),
+            KeyCode::Enter => self.toggle_focused_call(),
+            KeyCode::Char('l') | KeyCode::Right => self.fold_at(self.call_target(), true),
+            KeyCode::Char('h') | KeyCode::Left => self.fold_at(self.call_target(), false),
+            _ => false,
+        }
+    }
+
+    pub fn stage_click(&mut self, col: u16, row: u16) -> bool {
+        if in_rect(self.rail, col, row) {
+            let i = self.rail_top + (row - self.rail.y) as usize;
+            if i >= self.agents.len() {
+                return false;
+            }
+            if i != self.focus {
+                self.focus = i;
+                self.cursor = None;
+                return true;
+            }
+            return self.toggle_focused_call();
+        }
+        if in_rect(self.tail, col, row) {
+            return self.toggle_focused_call();
+        }
+        false
+    }
+
+    pub fn stage_wheel(&mut self, col: u16, row: u16, down: bool) -> bool {
+        let delta = if down { 1 } else { -1 };
+        if in_rect(self.tail, col, row) { self.step(delta * 3) } else { self.move_focus(delta) }
+    }
+
+    /// The call Enter inspects: the row you paged to, or the focused agent's latest call while the tail is pinned.
+    pub fn focus_call(&self) -> Option<(&str, &Call)> {
+        if let Some(c) = self.selected_call() {
+            return Some(c);
+        }
+        if !self.stage {
+            return None;
+        }
+        self.call_at(self.latest_focused_call()?)
+    }
+
+    fn move_focus(&mut self, delta: isize) -> bool {
+        if self.agents.is_empty() {
+            return false;
+        }
+        let last = self.agents.len() as isize - 1;
+        let next = (self.focus as isize + delta).clamp(0, last) as usize;
+        if next == self.focus {
+            return false;
+        }
+        self.focus = next;
+        // Switching agents comes back to the live tail. Reading history is PageUp, and it keeps running.
+        self.cursor = None;
+        self.top = 0;
+        true
+    }
+
+    fn latest_focused_call(&self) -> Option<usize> {
+        let id = self.agents.get(self.focus)?.id.clone();
+        self.rows.iter().enumerate().rev().find_map(|(i, r)| (r.agent == id && matches!(r.body, Body::Call(_))).then_some(i))
+    }
+
+    /// Highlighted call, else the focused agent's latest one. Does not pin the tail.
+    fn call_target(&self) -> Option<usize> {
+        self.cursor.filter(|&i| self.call_at(i).is_some()).or_else(|| self.latest_focused_call())
+    }
+
+    fn toggle_focused_call(&mut self) -> bool {
+        self.fold_at(self.call_target(), self.call_target().is_some_and(|i| !self.open.contains(&i)))
+    }
+
+    fn fold_at(&mut self, i: Option<usize>, open: bool) -> bool {
+        let Some(i) = i.filter(|&i| self.call_at(i).is_some()) else { return false };
+        if open { self.open.insert(i) } else { self.open.remove(&i) };
+        true
+    }
+
+    fn agent_name(&self, id: &str) -> String {
+        match self.agents.iter().find(|a| a.id == id) {
+            Some(a) => a.name(a.id == self.root.id),
+            None => id.to_string(),
+        }
+    }
+
+    fn agent_ended(&self, id: &str) -> bool {
+        if id == self.root.id {
+            return self.ended;
+        }
+        let mut ended = false;
+        for r in self.rows.iter().filter(|r| r.agent == id) {
+            match &r.body {
+                Body::End => ended = true,
+                Body::Resume | Body::Start { .. } => ended = false,
+                _ => {}
+            }
+        }
+        ended
+    }
+
+    /// What the rail shows for an agent: its open call, else the last thing it did.
+    fn activity(&self, id: &str) -> String {
+        if let Some(c) = self.rows.iter().rev().filter(|r| r.agent == id).find_map(|r| match &r.body {
+            Body::Call(c) if c.result.is_none() && !c.no_result => Some(c),
+            _ => None,
+        }) {
+            return format!("→ {} {}", c.tool, first_line(&c.what));
+        }
+        for r in self.rows.iter().rev().filter(|r| r.agent == id) {
+            let line = match &r.body {
+                Body::Call(c) => format!("→ {} {}", c.tool, first_line(&c.what)),
+                Body::Text(t) if !first_line(t).is_empty() => first_line(t).to_string(),
+                Body::User(t) => format!("you {}", first_line(t)),
+                Body::End => "ended".into(),
+                Body::Start { .. } => "started".into(),
+                _ => continue,
+            };
+            return line;
+        }
+        "waiting".into()
+    }
+
+    /// A short name in front of each tail row when every agent is on screen.
+    fn row_tag(&self, agent: &str) -> String {
+        if !self.stage || self.solo || self.agents.len() < 2 {
+            return String::new();
+        }
+        let name = truncate_str(&self.agent_name(agent), 8);
+        let pad = 8usize.saturating_sub(name.width());
+        format!("{name}{} ", " ".repeat(pad))
+    }
+
     // ------------------------------------------------------------------ render
 
     /// Row `i`'s inline call body: command, separator, result. Cached once complete.
@@ -552,16 +766,15 @@ impl Follow {
 
     /// Header line, the tail (or the paused window) of the rows, and a status line.
     pub fn render(&mut self, buf: &mut Buffer, area: Rect, index: Option<&TraceIndex>, theme: &Theme, now_ms: i64) {
+        if self.stage {
+            self.render_stage(buf, area, index, theme, now_ms);
+            return;
+        }
         if area.height < 3 {
             return;
         }
         let width = area.width as usize;
-        let state = if self.ended { "■ ended" } else { "● live" };
-        let state_color = if self.ended { theme.gray } else { theme.accent_running };
-        buf.set_span(area.x, area.y, &Span::styled(state, Style::default().fg(state_color).add_modifier(Modifier::BOLD)), area.width);
-        let title = truncate_str(&header(&self.root, None), width.saturating_sub(state.width() + 2));
-        buf.set_span(area.x + state.width() as u16 + 2, area.y, &Span::styled(title, Style::default().fg(theme.text_primary)), area.width);
-
+        self.draw_head(buf, Rect { height: 1, ..area }, theme);
         let paused = self.paused().then(|| format!("paused · {} new · G live", self.rows.len().saturating_sub(self.paused_len)));
         let status = [Some(paused.unwrap_or_else(|| "live tail".to_string())), self.filter_name().map(|n| format!("agent: {n}")), self.err.as_ref().map(|e| format!("index: {e}"))]
             .into_iter()
@@ -569,12 +782,115 @@ impl Follow {
             .collect::<Vec<_>>()
             .join(" · ");
         buf.set_span(area.x, area.y + area.height - 1, &Span::styled(truncate_str(&status, width), Style::default().fg(theme.gray)), area.width);
+        self.draw_rows(buf, Rect { y: area.y + 1, height: area.height - 2, ..area }, index, theme, now_ms);
+    }
 
-        let body = Rect { y: area.y + 1, height: area.height - 2, ..area };
+    /// Rail of every agent beside (or above) the live tail. Moving on the rail does not pause the tail.
+    fn render_stage(&mut self, buf: &mut Buffer, area: Rect, index: Option<&TraceIndex>, theme: &Theme, now_ms: i64) {
+        buf.set_style(area, Style::default().bg(theme.bg_base));
+        if area.height < 5 || area.width < 24 {
+            return;
+        }
+        self.draw_head(buf, Rect { height: 1, ..area }, theme);
+        let foot = Rect { y: area.y + area.height - 1, height: 1, ..area };
+        let mid = Rect { y: area.y + 1, height: area.height - 2, ..area };
+        let wide = area.width >= 100 && mid.height >= 8;
+        let (rail, tail) = if wide {
+            let w = 36.min(area.width / 3);
+            let gap = Rect { x: mid.x + w, width: 1, ..mid };
+            for i in 0..gap.height {
+                buf.set_span(gap.x, gap.y + i, &Span::styled("│", Style::default().fg(theme.selection_border).bg(theme.bg_base)), 1);
+            }
+            (Rect { width: w, ..mid }, Rect { x: mid.x + w + 1, width: mid.width.saturating_sub(w + 1), ..mid })
+        } else {
+            let n = self.agents.len().clamp(1, 6).min(mid.height.saturating_sub(2) as usize).max(1) as u16;
+            (Rect { height: n, ..mid }, Rect { y: mid.y + n, height: mid.height.saturating_sub(n), ..mid })
+        };
+        self.rail = rail;
+        self.tail = tail;
+        self.draw_rail(buf, rail, theme);
+        self.draw_rows(buf, tail, index, theme, now_ms);
+        self.draw_stage_foot(buf, foot, theme);
+    }
+
+    fn draw_head(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+        let state = if self.ended { "■ ended" } else { "● live" };
+        let state_color = if self.ended { theme.gray } else { theme.accent_running };
+        buf.set_span(area.x, area.y, &Span::styled(state, Style::default().fg(state_color).add_modifier(Modifier::BOLD)), area.width);
+        let title = truncate_str(&header(&self.root, None), (area.width as usize).saturating_sub(state.width() + 2));
+        buf.set_span(area.x + state.width() as u16 + 2, area.y, &Span::styled(title, Style::default().fg(theme.text_primary)), area.width);
+    }
+
+    fn draw_stage_foot(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+        let which = if self.solo { format!("one · {}", self.agents.get(self.focus).map(|a| a.name(a.id == self.root.id)).unwrap_or_default()) } else { "all agents".into() };
+        let place = if self.paused() { format!("reading · {} new", self.rows.len().saturating_sub(self.paused_len)) } else { "live tail".into() };
+        let err = self.err.as_ref().map(|e| format!(" · index: {e}")).unwrap_or_default();
+        let keys = "j/k agent · Tab one · Enter call · PgUp back · G tail · i payload · o session · Esc list";
+        let left = format!("{place} · {which}{err}");
+        let line = if left.width() + keys.width() + 3 <= area.width as usize { format!("{left}  {keys}") } else { left };
+        buf.set_span(area.x, area.y, &Span::styled(truncate_str(&line, area.width as usize), Style::default().fg(theme.gray).bg(theme.bg_base)), area.width);
+    }
+
+    fn draw_rail(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+        let n = self.agents.len();
+        let h = area.height as usize;
+        if h == 0 || n == 0 {
+            return;
+        }
+        if self.focus >= n {
+            self.focus = n - 1;
+        }
+        if self.focus < self.rail_top {
+            self.rail_top = self.focus;
+        }
+        if self.focus >= self.rail_top + h {
+            self.rail_top = self.focus + 1 - h;
+        }
+        for slot in 0..h {
+            let i = self.rail_top + slot;
+            if i >= n {
+                break;
+            }
+            let y = area.y + slot as u16;
+            let selected = i == self.focus;
+            let bg = if selected { theme.bg_highlight } else { theme.bg_base };
+            buf.set_style(Rect { x: area.x, y, width: area.width, height: 1 }, Style::default().bg(bg));
+            let (id, name) = {
+                let a = &self.agents[i];
+                (a.id.clone(), a.name(a.id == self.root.id))
+            };
+            let ended = self.agent_ended(&id);
+            let glyph = if ended { "○" } else { "●" };
+            let gcol = if ended { theme.gray } else { theme.accent_running };
+            buf.set_span(area.x, y, &Span::styled(glyph, Style::default().fg(gcol).bg(bg)), 1);
+            let name_w = (area.width as usize).saturating_sub(4).min(16);
+            let shown = truncate_str(&name, name_w);
+            let name_style = Style::default().fg(if selected { theme.text_primary } else { theme.text_secondary }).bg(bg);
+            buf.set_span(area.x + 2, y, &Span::styled(shown.clone(), if selected { name_style.add_modifier(Modifier::BOLD) } else { name_style }), name_w as u16);
+            let act_x = area.x + 2 + shown.width() as u16 + 1;
+            let left = (area.x + area.width).saturating_sub(act_x) as usize;
+            if left > 0 {
+                let act = truncate_str(&self.activity(&id), left);
+                buf.set_span(act_x, y, &Span::styled(act, Style::default().fg(theme.gray).bg(bg)), left as u16);
+            }
+        }
+    }
+
+    fn draw_rows(&mut self, buf: &mut Buffer, body: Rect, index: Option<&TraceIndex>, theme: &Theme, now_ms: i64) {
+        if body.height == 0 {
+            return;
+        }
+        let width = body.width as usize;
         let hgt = body.height as usize;
         let vis = self.visible();
         if vis.is_empty() {
-            let msg = if self.connected { "no activity yet" } else { "connecting…" };
+            let msg = if self.stage && self.connected && self.root.host.is_some() {
+                "no transcript on this machine yet · o opens the snapshot"
+            } else if self.connected {
+                "no activity yet"
+            } else {
+                "connecting…"
+            };
             buf.set_span(body.x, body.y, &Span::styled(msg, Style::default().fg(theme.gray)), body.width);
             return;
         }
@@ -588,7 +904,16 @@ impl Follow {
             .collect();
         let lines_at = |me: &Self, pos: usize| {
             let i = vis[pos];
-            me.row_lines(i, width, now_ms, theme, bodies.get(&i).map(Vec::as_slice))
+            let tag = me.row_tag(&me.rows[i].agent);
+            let tw = tag.width();
+            let mut lines = me.row_lines(i, width.saturating_sub(tw), now_ms, theme, bodies.get(&i).map(Vec::as_slice));
+            if tw > 0 {
+                for (n, line) in lines.iter_mut().enumerate() {
+                    let prefix = if n == 0 { tag.clone() } else { " ".repeat(tw) };
+                    line.spans.insert(0, Span::styled(prefix, Style::default().fg(theme.gray)));
+                }
+            }
+            lines
         };
         let last = vis.len() - 1;
         match self.cursor.and_then(|c| vis.iter().position(|&i| i == c)) {
@@ -625,6 +950,10 @@ impl Follow {
             }
         }
     }
+}
+
+fn in_rect(r: Rect, col: u16, row: u16) -> bool {
+    r.width > 0 && r.height > 0 && col >= r.x && row >= r.y && col < r.x.saturating_add(r.width) && row < r.y.saturating_add(r.height)
 }
 
 fn now_ms() -> i64 {
@@ -864,6 +1193,34 @@ mod tests {
         f.step(30);
         let mid = screen(&mut f, 40, 6);
         assert!(mid.contains("row 30") && !mid.contains("row 0\n"), "{mid}");
+    }
+
+    #[test]
+    fn stage_moves_between_agents_without_pausing_the_tail() {
+        let mut f = Follow::bare(session());
+        f.enter_stage(Some("kid".into()));
+        f.seed_agents([("kid".into(), Some("claude-haiku-4-5".into()), Some("Check the lexer".into()))]);
+        assert_eq!(f.focus, 1, "the subagent is selected as soon as the list knows it");
+        f.apply(&stream(), 13_000);
+        assert!(!f.paused());
+        assert!(f.stage_key(KeyCode::Char('k')));
+        assert_eq!(f.agents[f.focus].id, "root");
+        assert!(!f.paused(), "moving the rail leaves the tail pinned");
+        let shown = screen(&mut f, 110, 18);
+        assert!(shown.contains("fix the parser"), "{shown}");
+        assert!(shown.contains("Check the lexer") && shown.contains("root"), "both agents stay on the rail\n{shown}");
+        assert!(shown.contains("→ Bash") && shown.contains("all agents") && shown.contains("live tail"), "{shown}");
+        assert!(!shown.contains("paused"), "{shown}");
+        assert!(f.stage_key(KeyCode::Enter));
+        assert!(!f.open.is_empty() && !f.paused(), "Enter opens the call and stays on the tail");
+        assert!(f.stage_key(KeyCode::Tab));
+        assert_eq!(f.visible().len(), 6, "Tab solos the focused agent; the rail is unchanged");
+        assert!(screen(&mut f, 110, 18).contains("one · root"));
+        assert!(f.stage_key(KeyCode::PageUp));
+        assert!(f.paused());
+        assert!(screen(&mut f, 110, 18).contains("reading"), "paging back keeps the new rows coming");
+        assert!(f.stage_key(KeyCode::Char('G')));
+        assert!(!f.paused());
     }
 
     #[test]

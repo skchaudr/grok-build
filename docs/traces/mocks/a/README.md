@@ -7,9 +7,9 @@ Run: `~/traces-checkpoints/grok-proto-a traces` (built from branch `traces/proto
 - `list`: sessions in grok's Dashboard look. Header with live/ended/failed counts, a row of views, sections under a rule, two-line rows (title · harness · folder · machine, then where the session ended up), grok's selection band.
 - `compact`: `c` toggles one line per session.
 - `subagents`: `e` lists a session's subagents in place under it, running first, then newest.
-- `longest`, `failed`, `project`, `harness`: the other views (`Tab` / `Shift+Tab`; `Ctrl+G` too, grok's group key).
+- `longest`, `failed`, `project`, `harness`, and `All agents` (every agent, subagents included, without pressing `e`): the other views (`Tab` / `Shift+Tab`; `Ctrl+G` too, grok's group key). `/` filters this list in place. A click selects a row; a second click follows or opens it.
 - `session`: Enter on an ended session opens grok's own read-only session view.
-- `follow`: Enter on a live session opens the same view and keeps feeding it as the transcript grows.
+- `follow`: Enter on a live session (or `f` on any session) opens the follow stage: every agent in that session stays on a rail, the tail stays pinned while you move between them, Enter opens a call in place, `o` opens grok's own session view. PageUp reads back without stopping the tail; `G` returns to it. Tab shows one agent in the tail. The rail is beside the tail when the screen is wide, and above it when it is narrow.
 - `subagent-open`: Enter on a subagent row opens that subagent's own session.
 - `remote`: a sab-air session, copied over ssh and opened in the same view.
 
@@ -26,8 +26,7 @@ The Dashboard lists top-level agents only; a subagent never gets a row. A parent
 
 ## Left out
 
-- `/` search: it falls back to the old table.
-- Mouse clicks (the wheel works) and a `?` sheet for the list.
-- Following a live sab-air session: it opens as a snapshot.
+- A `?` sheet for the list.
+- A live sab-air session opens on the same rail. The tail fills when this machine has the transcript; `o` opens the copied snapshot either way.
 - sab-air summaries read only the title and last event, not the event tail.
-- Opening an async Claude subagent from inside a session view shows an empty takeover. That's how main behaves today; open it from the list instead.
+- Opening an async Claude subagent from inside grok's session view (`o`) shows an empty takeover. That's how main behaves today; open it from the rail instead.

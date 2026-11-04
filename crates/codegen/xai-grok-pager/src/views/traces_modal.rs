@@ -433,6 +433,11 @@ fn tab_source(tab: usize) -> Option<&'static str> {
     tab.checked_sub(1).and_then(|i| SOURCES.get(i).copied())
 }
 
+/// grok's read-only session can read these. A remote dpi transcript is not one of them.
+fn session_readable(row: &SessionRow) -> bool {
+    matches!(row.source.as_str(), "claude" | "pi" | "dpi" | "codex" | "grok") && (row.host.is_none() || row.source != "dpi")
+}
+
 impl TracesModalState {
     pub fn open(index: Option<TraceIndex>) -> Self {
         Self::open_with_hosts(index, remote::hosts())
@@ -982,6 +987,20 @@ impl TracesModalState {
         self.index.is_some() && self.selected_session().is_some_and(|s| s.host.is_none() && s.status == Status::Active)
     }
 
+    /// The list's follow: every agent on a rail, the tail pinned. `family` is the root's subagents already on the list.
+    pub(super) fn open_stage(&mut self, root: SessionRow, focus: Option<String>, family: Vec<SessionRow>) {
+        let Some(index) = &self.index else {
+            self.set_status("no traces index on this machine");
+            return;
+        };
+        let mut follow = Follow::open(index.db_path().to_path_buf(), root);
+        follow.enter_stage(focus);
+        follow.seed_agents(family.into_iter().map(|r| (r.id, r.model, r.label)));
+        self.follow_view = Some(follow);
+        self.follow_return = false;
+        self.mode = Mode::Follow;
+    }
+
     /// `f` / Enter on a live row: tail the selected session in process.
     fn open_follow(&mut self) -> bool {
         let Some(row) = self.selected_session().cloned() else { return false };
@@ -1004,13 +1023,20 @@ impl TracesModalState {
 
     /// Enter on the highlighted call: its full payload, back to the follow screen on Esc.
     fn follow_inspect(&mut self) -> bool {
-        let (Some(index), Some(f)) = (&self.index, &self.follow_view) else { return false };
-        let Some((agent, call)) = f.selected_call() else { return false };
-        let (agent, call) = (agent.to_string(), call.clone());
+        let stage = self.follow_view.as_ref().is_some_and(|f| f.is_stage());
+        let picked = self.follow_view.as_ref().and_then(|f| if stage { f.focus_call() } else { f.selected_call() }.map(|(a, c)| (a.to_string(), c.clone())));
+        let Some((agent, call)) = picked else {
+            if stage {
+                self.set_status("no call on this agent yet");
+                return true;
+            }
+            return false;
+        };
         if call.line < 0 {
             self.set_status("waiting for the transcript to reach this call");
             return true;
         }
+        let Some(index) = &self.index else { return false };
         let fetch = |l: i64| index.raw_line(&agent, l).map_err(|e| e.to_string());
         self.raw = Some(pretty(fetch(call.line)));
         self.raw_source = fetch(call.line).ok().flatten();
@@ -3687,13 +3713,22 @@ impl TracesModalState {
 
 /// Esc in a sub-view or an editor is handled here; only the ledger's Esc closes the modal.
 pub fn wants_esc(state: &TracesModalState) -> bool {
-    state.typing != Typing::No || state.mode != Mode::List
+    state.typing != Typing::No || state.mode != Mode::List || state.dash.as_ref().is_some_and(|d| d.searching())
 }
 
 /// Mouse in the list and the trajectory. A click selects; a click on the selected row (a double-click)
 /// is Enter; the wheel moves by [`WHEEL`] rows; a click on a fold glyph toggles that fold.
 /// The inspector ignores the mouse.
 pub fn handle_traces_mouse(state: &mut TracesModalState, mouse: &MouseEvent) -> InputOutcome {
+    if state.mode == Mode::Follow && state.follow_view.as_ref().is_some_and(|f| f.is_stage()) {
+        let moved = match mouse.kind {
+            MouseEventKind::ScrollDown => state.follow_view.as_mut().is_some_and(|f| f.stage_wheel(mouse.column, mouse.row, true)),
+            MouseEventKind::ScrollUp => state.follow_view.as_mut().is_some_and(|f| f.stage_wheel(mouse.column, mouse.row, false)),
+            MouseEventKind::Down(MouseButton::Left) => state.follow_view.as_mut().is_some_and(|f| f.stage_click(mouse.column, mouse.row)),
+            _ => false,
+        };
+        return if moved { InputOutcome::Changed } else { InputOutcome::Unchanged };
+    }
     match state.mode {
         Mode::Inspector => InputOutcome::Unchanged,
         Mode::Follow => match mouse.kind {
@@ -3715,6 +3750,7 @@ pub fn handle_traces_mouse(state: &mut TracesModalState, mouse: &MouseEvent) -> 
         Mode::List if state.dash_active() => match mouse.kind {
             MouseEventKind::ScrollDown => dash::wheel(state, true),
             MouseEventKind::ScrollUp => dash::wheel(state, false),
+            MouseEventKind::Down(MouseButton::Left) => dash::click(state, mouse.column, mouse.row),
             _ => InputOutcome::Unchanged,
         },
         Mode::List | Mode::Trajectory => match mouse.kind {
@@ -3732,6 +3768,32 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
         InputOutcome::Unchanged if expired => InputOutcome::Changed,
         other => other,
     }
+}
+
+/// Keys on the list's follow. `j`/`k` move between agents; the tail stays live until PageUp.
+fn stage_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => state.leave_follow(),
+        KeyCode::Char('i') => {
+            if !state.follow_inspect() {
+                return InputOutcome::Unchanged;
+            }
+        }
+        KeyCode::Char('o') => {
+            let Some(row) = state.follow_view.as_ref().map(|f| f.root.clone()) else { return InputOutcome::Unchanged };
+            if session_readable(&row) {
+                let row = Box::new(row);
+                return InputOutcome::Action(if row.source == "grok" { Action::TracesOpenGrok(row) } else { Action::TracesOpenClaude(row) });
+            }
+            state.follow_trajectory();
+        }
+        code => {
+            if !state.follow_view.as_mut().is_some_and(|f| f.stage_key(code)) {
+                return InputOutcome::Unchanged;
+            }
+        }
+    }
+    InputOutcome::Changed
 }
 
 fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
@@ -3799,6 +3861,9 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
         return InputOutcome::Unchanged;
     }
     let page = 10;
+    if state.mode == Mode::Follow && state.follow_view.as_ref().is_some_and(|f| f.is_stage()) {
+        return stage_key(state, key);
+    }
     match state.mode {
         Mode::List => {
             let len = state.ledger.len();
@@ -4282,6 +4347,14 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
 
 pub fn render_traces_modal(buf: &mut Buffer, full_area: Rect, state: &mut TracesModalState, compact: bool) {
     state.hit_list = None;
+    if state.mode == Mode::Follow && state.follow_view.as_ref().is_some_and(|f| f.is_stage()) {
+        let now = now_ms();
+        let theme = Theme::current();
+        if let Some(follow) = state.follow_view.as_mut() {
+            follow.render(buf, full_area, state.index.as_ref(), &theme, now);
+        }
+        return;
+    }
     if state.dash_active() {
         dash::render(buf, full_area, state);
         return;

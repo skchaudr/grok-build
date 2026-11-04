@@ -29,6 +29,8 @@ ended up: what got done, what was left open, or what it was stuck on. Plain word
 pub enum View {
     /// Running sessions first, then the rest newest first.
     Live,
+    /// Every agent, subagents included, without opening the parent first.
+    Agents,
     /// By active time, longest first.
     Longest,
     /// Sessions that ended on an error, newest first; subagents included.
@@ -38,11 +40,12 @@ pub enum View {
 }
 
 impl View {
-    const ALL: [View; 5] = [View::Live, View::Longest, View::Failed, View::Project, View::Harness];
+    const ALL: [View; 6] = [View::Live, View::Agents, View::Longest, View::Failed, View::Project, View::Harness];
 
     fn label(self) -> &'static str {
         match self {
             View::Live => "Live and recent",
+            View::Agents => "All agents",
             View::Longest => "Longest",
             View::Failed => "Failed",
             View::Project => "By project",
@@ -86,6 +89,11 @@ pub(super) struct Dash {
     workers: usize,
     /// `GROK_TRACES_NO_SUMMARIES=1` turns generation off (tests, screenshots); cached ones still show.
     generate: bool,
+    /// `/` narrows this list in place.
+    query: String,
+    typing: bool,
+    /// List body from the last draw, so a click can find its row.
+    list: Rect,
 }
 
 fn cache_path() -> PathBuf {
@@ -114,7 +122,14 @@ impl Dash {
             queue: Arc::new(Mutex::new(VecDeque::new())),
             workers: 0,
             generate: std::env::var_os("GROK_TRACES_NO_SUMMARIES").is_none_or(|v| v != "1"),
+            query: String::new(),
+            typing: false,
+            list: Rect::default(),
         }
+    }
+
+    pub(super) fn searching(&self) -> bool {
+        self.typing || !self.query.is_empty()
     }
 }
 
@@ -172,6 +187,14 @@ fn sections<'a>(
             let (live, rest): (Vec<_>, Vec<_>) = recent.into_iter().partition(|r| running(r, kids));
             [("Live", live), ("Recent", rest)].into_iter().filter(|(_, v)| !v.is_empty()).map(|(l, v)| (l.to_string(), v)).collect()
         }
+        View::Agents => {
+            let mut rows: Vec<&SessionRow> = roots.iter().chain(kids.values().flatten()).collect();
+            rows.sort_by(|a, b| a.id.cmp(&b.id));
+            rows.dedup_by(|a, b| a.id == b.id);
+            rows.sort_by_key(|r| std::cmp::Reverse(last_at(r)));
+            let (live, rest): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| r.status == Status::Active);
+            [("Live", live), ("Recent", rest)].into_iter().filter(|(_, v)| !v.is_empty()).map(|(l, v)| (l.to_string(), v)).collect()
+        }
         View::Longest => {
             let mut rows = recent;
             rows.sort_by_key(|r| std::cmp::Reverse(active.get(&r.id).copied().unwrap_or(0)));
@@ -197,30 +220,70 @@ fn sections<'a>(
     }
 }
 
+fn query_hit(d: &Dash, row: &SessionRow) -> bool {
+    let q = d.query.trim();
+    if q.is_empty() {
+        return true;
+    }
+    let q = q.to_lowercase();
+    let summary = d.summaries.get(&row.id).map(|s| s.text.as_str()).unwrap_or("");
+    format!(
+        "{} {} {} {} {} {} {}",
+        row.title,
+        row.label.as_deref().unwrap_or(""),
+        row.id,
+        project_of(row),
+        row.source,
+        row.now.as_deref().unwrap_or(""),
+        summary
+    )
+    .to_lowercase()
+    .contains(&q)
+}
+
+fn keep_tree(d: &Dash, row: &SessionRow, kids: &HashMap<String, Vec<SessionRow>>) -> bool {
+    query_hit(d, row) || kids.get(&row.id).is_some_and(|cs| cs.iter().any(|c| keep_tree(d, c, kids)))
+}
+
 fn build<'a>(d: &Dash, roots: &'a [SessionRow], kids: &'a HashMap<String, Vec<SessionRow>>) -> Vec<Item<'a>> {
+    let filtering = !d.query.trim().is_empty();
     let mut out = Vec::new();
     for (label, rows) in sections(d.view, roots, kids, &d.active) {
+        let rows: Vec<&SessionRow> = rows
+            .into_iter()
+            .filter(|r| if d.view == View::Agents { query_hit(d, r) } else { !filtering || keep_tree(d, r, kids) })
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
         let folded = d.folded.contains(&label);
         out.push(Item::Section { label, count: rows.len() });
         if folded {
             continue;
         }
         for row in rows {
-            push_row(&mut out, d, row, 0, kids);
+            if d.view == View::Agents {
+                out.push(Item::Row { row, depth: 0, kids: 0 });
+            } else {
+                push_row(&mut out, d, row, 0, kids, filtering);
+            }
         }
     }
     out
 }
 
-fn push_row<'a>(out: &mut Vec<Item<'a>>, d: &Dash, row: &'a SessionRow, depth: u16, kids: &'a HashMap<String, Vec<SessionRow>>) {
+fn push_row<'a>(out: &mut Vec<Item<'a>>, d: &Dash, row: &'a SessionRow, depth: u16, kids: &'a HashMap<String, Vec<SessionRow>>, force_open: bool) {
     let children = kids.get(&row.id).map(Vec::as_slice).unwrap_or(&[]);
     out.push(Item::Row { row, depth, kids: children.len().max(row.children as usize) });
-    if d.open.contains(&row.id) && depth < 6 {
+    if (force_open || d.open.contains(&row.id)) && depth < 6 {
         // grok's Tasks order: running first, then newest.
         let mut children: Vec<&SessionRow> = children.iter().collect();
         children.sort_by_key(|c| (!running(c, kids), std::cmp::Reverse(last_at(c))));
         for c in children {
-            push_row(out, d, c, depth + 1, kids);
+            if force_open && !keep_tree(d, c, kids) {
+                continue;
+            }
+            push_row(out, d, c, depth + 1, kids, force_open);
         }
     }
 }
@@ -405,6 +468,23 @@ pub(super) fn key(state: &mut TracesModalState, key: &KeyEvent) -> Option<InputO
 }
 
 fn dash_key(state: &mut TracesModalState, d: &mut Dash, key: &KeyEvent) -> Option<InputOutcome> {
+    if d.typing {
+        match key.code {
+            KeyCode::Esc => {
+                d.typing = false;
+                d.query.clear();
+            }
+            KeyCode::Enter => d.typing = false,
+            KeyCode::Backspace => {
+                d.query.pop();
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => d.query.push(c),
+            _ => return None,
+        }
+        d.sel_key = None;
+        d.scroll = 0;
+        return Some(InputOutcome::Changed);
+    }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let items = build(d, &state.shown_roots, &state.shown_children);
     let len = items.len();
@@ -425,6 +505,19 @@ fn dash_key(state: &mut TracesModalState, d: &mut Dash, key: &KeyEvent) -> Optio
         KeyCode::Tab => set_view(d, d.view.step(1)),
         KeyCode::BackTab => set_view(d, d.view.step(-1)),
         KeyCode::Char('c') => d.compact = !d.compact,
+        KeyCode::Char('/') => {
+            d.typing = true;
+        }
+        KeyCode::Esc if d.searching() => {
+            d.typing = false;
+            d.query.clear();
+            d.sel_key = None;
+        }
+        KeyCode::Char('f') => {
+            let Some(Item::Row { row, .. }) = items.get(sel) else { return Some(InputOutcome::Unchanged) };
+            let row = (*row).clone();
+            return Some(open_stage_row(state, row));
+        }
         KeyCode::Char('e') | KeyCode::Char(' ') | KeyCode::Right | KeyCode::Char('l') | KeyCode::Left | KeyCode::Char('h') => {
             let expand = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
             let collapse = matches!(key.code, KeyCode::Left | KeyCode::Char('h'));
@@ -455,6 +548,9 @@ fn dash_key(state: &mut TracesModalState, d: &mut Dash, key: &KeyEvent) -> Optio
             Some(Item::Section { label, .. }) => toggle(&mut d.folded, label),
             Some(Item::Row { row, .. }) => {
                 let row = (*row).clone();
+                if row.status == Status::Active {
+                    return Some(open_stage_row(state, row));
+                }
                 return Some(open_row(state, row));
             }
             None => {}
@@ -476,10 +572,49 @@ fn toggle(set: &mut HashSet<String>, k: &str) {
     }
 }
 
-/// Enter: grok's read-only session view for every harness it can read (a running session follows), else the ledger's trajectory.
+fn root_of(state: &TracesModalState, row: &SessionRow) -> SessionRow {
+    let mut cur = row.clone();
+    for _ in 0..8 {
+        let Some(pid) = cur.parent_id.clone() else { break };
+        match state.shown_roots.iter().chain(state.shown_children.values().flatten()).find(|r| r.id == pid).cloned() {
+            Some(parent) => cur = parent,
+            None => break,
+        }
+    }
+    cur
+}
+
+fn family(state: &TracesModalState, root_id: &str) -> Vec<SessionRow> {
+    let mut out = Vec::new();
+    let mut stack = vec![root_id.to_string()];
+    let mut guard = 0;
+    while let Some(id) = stack.pop() {
+        guard += 1;
+        if guard > 64 {
+            break;
+        }
+        if let Some(cs) = state.shown_children.get(&id) {
+            for c in cs {
+                stack.push(c.id.clone());
+                out.push(c.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Follow this agent: its session on the rail, the tail pinned. `o` in there opens grok's session view.
+fn open_stage_row(state: &mut TracesModalState, row: SessionRow) -> InputOutcome {
+    let root = root_of(state, &row);
+    let focus = (row.id != root.id).then(|| row.id.clone());
+    let fam = family(state, &root.id);
+    state.open_stage(root, focus, fam);
+    InputOutcome::Changed
+}
+
+/// Enter on an ended session: grok's read-only session view for every harness it can read, else the ledger's trajectory.
 fn open_row(state: &mut TracesModalState, row: SessionRow) -> InputOutcome {
-    let readable = matches!(row.source.as_str(), "claude" | "pi" | "dpi" | "codex" | "grok");
-    if readable && (row.host.is_none() || row.source != "dpi") {
+    if session_readable(&row) {
         let row = Box::new(row);
         return InputOutcome::Action(if row.source == "grok" { Action::TracesOpenGrok(row) } else { Action::TracesOpenClaude(row) });
     }
@@ -498,6 +633,51 @@ pub(super) fn wheel(state: &mut TracesModalState, down: bool) -> InputOutcome {
     InputOutcome::Changed
 }
 
+pub(super) fn click(state: &mut TracesModalState, col: u16, row: u16) -> InputOutcome {
+    let Some(mut d) = state.dash.take() else { return InputOutcome::Unchanged };
+    let out = dash_click(state, &mut d, col, row);
+    if state.dash.is_none() {
+        state.dash = Some(d);
+    }
+    out
+}
+
+fn dash_click(state: &mut TracesModalState, d: &mut Dash, col: u16, row: u16) -> InputOutcome {
+    let list = d.list;
+    if list.height == 0 || col < list.x || row < list.y || col >= list.x.saturating_add(list.width) || row >= list.y.saturating_add(list.height) {
+        return InputOutcome::Unchanged;
+    }
+    let items = build(d, &state.shown_roots, &state.shown_children);
+    let heights: Vec<usize> = items.iter().map(|it| height(d, it)).collect();
+    let rel = (row - list.y) as usize + d.scroll;
+    let mut acc = 0usize;
+    let hit = heights.iter().enumerate().find_map(|(i, h)| {
+        acc += h;
+        (rel < acc).then_some(i)
+    });
+    let Some(i) = hit else { return InputOutcome::Unchanged };
+    if i != d.sel {
+        d.sel = i;
+        d.sel_key = items.get(i).map(Item::key);
+        return InputOutcome::Changed;
+    }
+    match items.get(i) {
+        Some(Item::Section { label, .. }) => {
+            toggle(&mut d.folded, label);
+            InputOutcome::Changed
+        }
+        Some(Item::Row { row, .. }) => {
+            let row = (*row).clone();
+            if row.status == Status::Active {
+                open_stage_row(state, row)
+            } else {
+                open_row(state, row)
+            }
+        }
+        None => InputOutcome::Unchanged,
+    }
+}
+
 // ---- drawing ----
 
 pub(super) fn render(buf: &mut Buffer, area: Rect, state: &mut TracesModalState) {
@@ -510,6 +690,7 @@ fn draw(buf: &mut Buffer, area: Rect, state: &TracesModalState, d: &mut Dash) {
     let theme = Theme::current();
     ratatui::widgets::Clear.render(area, buf);
     buf.set_style(area, Style::default().bg(theme.bg_base));
+    d.list = Rect::default();
     if area.height < 6 || area.width < 30 {
         return;
     }
@@ -533,11 +714,20 @@ fn draw(buf: &mut Buffer, area: Rect, state: &TracesModalState, d: &mut Dash) {
     draw_views(buf, Rect { y: area.y + 2, height: 1, ..inner }, d, &theme);
 
     let list = Rect { y: area.y + 4, height: area.height.saturating_sub(6), ..area };
+    d.list = list;
     let footer = Rect { y: area.y + area.height - 1, height: 1, ..inner };
     draw_footer(buf, footer, state, d, &items);
 
     if items.is_empty() {
-        let msg = if state.scanning { "Loading sessions…" } else if d.view == View::Failed { "No session ended on an error" } else { "No sessions yet" };
+        let msg = if state.scanning {
+            "Loading sessions…"
+        } else if !d.query.is_empty() {
+            "No match"
+        } else if d.view == View::Failed {
+            "No session ended on an error"
+        } else {
+            "No sessions yet"
+        };
         buf.set_string(inner.x, list.y, msg, theme.dim().bg(theme.bg_base));
         return;
     }
@@ -606,7 +796,7 @@ fn draw(buf: &mut Buffer, area: Rect, state: &TracesModalState, d: &mut Dash) {
                 if lines == 2
                     && let Some(ly) = at(1)
                 {
-                    let text = second_line(d, row, &state.shown_children);
+                    let text = second_line(d, row, &state.shown_roots, &state.shown_children);
                     let style = if selected { Style::default().bg(bg).fg(theme.text_secondary) } else { theme.dim().bg(bg) };
                     let tx = x + 2;
                     buf.set_string(tx, ly, truncate_str(&text, w.saturating_sub(2) as usize), style);
@@ -682,7 +872,13 @@ fn draw_views(buf: &mut Buffer, area: Rect, d: &Dash, theme: &Theme) {
         buf.set_string(x, area.y, &t, style);
         x += t.width() as u16;
     }
-    let density = if d.compact { "Compact" } else { "Comfortable" };
+    let density = if d.typing || !d.query.is_empty() {
+        format!("/{}", d.query)
+    } else if d.compact {
+        "Compact".into()
+    } else {
+        "Comfortable".into()
+    };
     let w = density.width() as u16;
     if x + w + 2 < end {
         buf.set_string(end - w, area.y, density, theme.dim().bg(theme.bg_base));
@@ -765,15 +961,27 @@ fn title_line(buf: &mut Buffer, rect: Rect, theme: &Theme, d: &Dash, row: &Sessi
     }
 }
 
+fn parent_phrase(row: &SessionRow, roots: &[SessionRow], kids: &HashMap<String, Vec<SessionRow>>) -> Option<String> {
+    let pid = row.parent_id.as_deref()?;
+    let parent = roots.iter().chain(kids.values().flatten()).find(|r| r.id == pid)?;
+    Some(format!("under {}", clean_name(parent)))
+}
+
 /// Under the title: what a running session is doing now, else where an ended one got to (generated, else its last event).
-fn second_line(d: &Dash, row: &SessionRow, kids: &HashMap<String, Vec<SessionRow>>) -> String {
-    if running(row, kids) {
-        return row.now.as_deref().map(one_line).unwrap_or_else(|| "Working".into());
+fn second_line(d: &Dash, row: &SessionRow, roots: &[SessionRow], kids: &HashMap<String, Vec<SessionRow>>) -> String {
+    let under = (d.view == View::Agents).then(|| parent_phrase(row, roots, kids)).flatten();
+    let body = if running(row, kids) {
+        row.now.as_deref().map(one_line).unwrap_or_else(|| "Working".into())
+    } else if let Some(s) = d.summaries.get(&row.id) {
+        s.text.clone()
+    } else {
+        row.now.as_deref().map(one_line).unwrap_or_default()
+    };
+    match under {
+        Some(u) if body.is_empty() => u,
+        Some(u) => format!("{u} · {body}"),
+        None => body,
     }
-    if let Some(s) = d.summaries.get(&row.id) {
-        return s.text.clone();
-    }
-    row.now.as_deref().map(one_line).unwrap_or_default()
 }
 
 fn draw_footer(buf: &mut Buffer, area: Rect, state: &TracesModalState, d: &Dash, items: &[Item]) {
@@ -784,6 +992,7 @@ fn draw_footer(buf: &mut Buffer, area: Rect, state: &TracesModalState, d: &Dash,
         }
         Some(Item::Row { row, kids, .. }) => {
             hints.push(HintItem::new(key!(Enter), if row.status == Status::Active { "follow" } else { "open" }));
+            hints.push(HintItem::new(key!('f'), "follow"));
             if *kids > 0 {
                 hints.push(HintItem::new(key!('e'), if d.open.contains(&row.id) { "hide subagents" } else { "subagents" }));
             }
@@ -791,6 +1000,7 @@ fn draw_footer(buf: &mut Buffer, area: Rect, state: &TracesModalState, d: &Dash,
         None => {}
     }
     hints.push(HintItem::new(key!(Tab), "view"));
+    hints.push(HintItem::new(key!('/'), if d.query.is_empty() { "filter" } else { "filtering" }));
     hints.push(HintItem::new(key!('c'), if d.compact { "comfortable" } else { "compact" }));
     let _ = state;
     ShortcutsBar::new(&hints).compact(5, None).render(area, buf);
@@ -829,5 +1039,32 @@ mod tests {
         let active = HashMap::from([("old".to_string(), 50), ("new".to_string(), 10)]);
         let longest: Vec<String> = sections(View::Longest, &roots, &kids, &active)[0].1.iter().map(|r| r.id.clone()).collect();
         assert_eq!(longest, vec!["old", "new", "parent"]);
+    }
+
+    #[test]
+    fn all_agents_lists_children_and_the_filter_keeps_a_match() {
+        let mut kid = row("k", 3);
+        kid.parent_id = Some("parent".into());
+        kid.status = Status::Active;
+        kid.title = "lexer".into();
+        let roots = vec![row("parent", 1), row("other", 9)];
+        let kids = HashMap::from([("parent".to_string(), vec![kid])]);
+        let mut d = Dash::new();
+        d.view = View::Agents;
+        let ids = |d: &Dash| {
+            build(d, &roots, &kids)
+                .into_iter()
+                .filter_map(|it| match it {
+                    Item::Row { row, .. } => Some(row.id.clone()),
+                    Item::Section { .. } => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&d), vec!["k".to_string(), "other".to_string(), "parent".to_string()]);
+        d.query = "lexer".into();
+        assert_eq!(ids(&d), vec!["k".to_string()]);
+        d.query.clear();
+        d.view = View::Live;
+        assert_eq!(ids(&d), vec!["parent".to_string(), "other".to_string()], "a live child keeps its parent in Live and stays folded");
     }
 }
