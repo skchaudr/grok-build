@@ -19,6 +19,9 @@ Newest last. "Departs" means it goes beyond or against his words.
 11. `Enter` opens the block viewer on Other and Skill rows (tool name, full input, full output). This also changes grok's own sessions. Departs: grok-build behavior changed.
 12. Harness messages in a Claude transcript (`<task-notification>`, `<local-command-stdout>`, `<system-reminder>`, interrupts) are not shown as user prompts; slash commands show as grok shows one.
 13. Work is split into pieces of one job each (about one file or function); anything touching grok's handler, view or tracker is built by Opus.
+14. grok's hook config (`~/.grok/hooks/traces.json`) is tracked in `~/.dotfiles` as `grok/hooks/traces.json`, beside the Claude and Pi emitters.
+15. Pi `grep` shows as Search, like Claude's Grep, so it folds with the other searches (departs: the Pi table below lists only `find`). Codex web searches show as Search and MCP calls as Other rows; Codex extension, subagent-activity and compaction items are not shown.
+16. The flaky `tests/remote.rs::events_and_raw` (timed out once in ten full-crate runs) gets its own fix piece in the next batch.
 
 ## What traces is
 
