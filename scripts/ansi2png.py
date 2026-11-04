@@ -13,14 +13,16 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import os
 import sys
 import unicodedata
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-FONT_BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
+FONT_DIR = os.environ.get("ANSI2PNG_FONT_DIR", "/usr/share/fonts/truetype/dejavu")
+FONT_PATH = f"{FONT_DIR}/DejaVuSansMono.ttf"
+FONT_BOLD_PATH = f"{FONT_DIR}/DejaVuSansMono-Bold.ttf"
 FONT_SIZE = 16
 
 # Default terminal: dark bg, light fg. Captures often leave these implicit.
@@ -52,7 +54,7 @@ class _GlyphIndex:
     """FreeType cmap lookup for missing-glyph detection."""
 
     def __init__(self, path: str) -> None:
-        libname = ctypes.util.find_library("freetype")
+        libname = ctypes.util.find_library("freetype") or next((p for p in ("/opt/homebrew/lib/libfreetype.6.dylib",) if Path(p).exists()), None)
         if not libname:
             raise RuntimeError("libfreetype not found")
         self._ft = ctypes.CDLL(libname)
