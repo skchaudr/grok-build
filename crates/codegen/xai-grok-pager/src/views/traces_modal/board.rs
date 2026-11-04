@@ -353,8 +353,8 @@ fn spawn_active(db: std::path::PathBuf, hosts: Vec<String>) -> mpsc::Receiver<Ha
 }
 
 pub fn handle_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
-    let items = state.board.items(&state.shown_roots, &state.shown_children);
-    let b = &mut state.board;
+    let items = state.board.as_mut().expect("board").items(&state.shown_roots, &state.shown_children);
+    let b = state.board.as_mut().expect("board");
     match key.code {
         KeyCode::Down | KeyCode::Char('j') => b.move_by(&items, 1),
         KeyCode::Up | KeyCode::Char('k') => b.move_by(&items, -1),
@@ -376,10 +376,9 @@ pub fn handle_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome 
         KeyCode::Char('c') => b.compact = !b.compact,
         KeyCode::Char('e') => match b.selected(&items) {
             Some(It::Row { row, kids, .. }) if *kids > 0 => {
+                // Shows every subagent; again folds them all away; again shows them all.
                 let id = row.id.clone();
-                let showing_running = !b.open.contains(&id) && !b.shut.contains(&id) && running_kids(state, &id);
-                let b = &mut state.board;
-                if b.open.remove(&id) || showing_running {
+                if b.open.remove(&id) {
                     b.shut.insert(id);
                 } else {
                     b.shut.remove(&id);
@@ -421,10 +420,6 @@ pub fn handle_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome 
     InputOutcome::Changed
 }
 
-fn running_kids(state: &TracesModalState, id: &str) -> bool {
-    state.shown_children.get(id).is_some_and(|k| k.iter().any(running))
-}
-
 /// Enter: grok's own session view for every harness it can read (live ones keep updating); the trajectory otherwise.
 fn open(state: &mut TracesModalState, row: SessionRow) -> InputOutcome {
     match row.source.as_str() {
@@ -443,8 +438,8 @@ pub fn handle_mouse(state: &mut TracesModalState, mouse: &MouseEvent) -> InputOu
         MouseEventKind::ScrollUp => -3,
         _ => return InputOutcome::Unchanged,
     };
-    let items = state.board.items(&state.shown_roots, &state.shown_children);
-    state.board.move_by(&items, delta);
+    let items = state.board.as_mut().expect("board").items(&state.shown_roots, &state.shown_children);
+    state.board.as_mut().expect("board").move_by(&items, delta);
     InputOutcome::Changed
 }
 
@@ -458,7 +453,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut TracesModalState) {
         return;
     }
     let now = now_ms();
-    let items = state.board.items(&state.shown_roots, &state.shown_children);
+    let items = state.board.as_mut().expect("board").items(&state.shown_roots, &state.shown_children);
     // Content sits two columns in, as the Dashboard's does.
     let x = area.x + 2;
     let w = area.width.saturating_sub(4);
@@ -471,7 +466,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut TracesModalState) {
     }
     render_footer(buf, Rect::new(area.x, footer_y, area.width, 1), &theme);
 
-    let b = &mut state.board;
+    let b = state.board.as_mut().expect("board");
     if items.is_empty() {
         let msg = match b.view {
             View::Failed => "No failed sessions.",
@@ -509,8 +504,10 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut TracesModalState) {
         let selected = i == sel_idx;
         match it {
             It::Head(label, n) => {
-                if y0 >= list.y as isize {
-                    head(buf, x, y0 as u16, w, label, *n, &theme);
+                // Comfortable rows end in a blank line already; compact ones get it above the header instead.
+                let y = y0 + isize::from(b.compact && i > 0);
+                if y >= list.y as isize && y < (list.y + list.height) as isize {
+                    head(buf, x, y as u16, w, label, *n, &theme);
                 }
             }
             It::Row { row, depth, last, kids, parent, .. } => {
@@ -710,7 +707,7 @@ fn split_at_width(s: &str, w: usize) -> (String, bool) {
 
 fn render_header(buf: &mut Buffer, area: Rect, state: &TracesModalState, theme: &Theme) {
     let bg = theme.bg_base;
-    let b = &state.board;
+    let b = state.board.as_ref().expect("board");
     let mut spans = vec![Span::styled("traces ", Style::default().fg(theme.text_primary).bg(bg).add_modifier(Modifier::BOLD))];
     for (v, name) in VIEWS {
         let style = if v == b.view {
