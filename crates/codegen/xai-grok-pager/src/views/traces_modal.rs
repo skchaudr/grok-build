@@ -722,7 +722,7 @@ impl TracesModalState {
             errors_only: self.errors_only,
             active_only: self.active_only,
             sort: self.sort,
-            limit: PAGE,
+            limit: if self.board_home { board::BOARD_LIMIT } else { PAGE },
             roots_only: self.roots_only(),
             hide_trivial: browse,
             ..Default::default()
@@ -1939,10 +1939,11 @@ impl TracesModalState {
                 let (tx, rx) = mpsc::channel();
                 self.remote_rx = Some(rx);
                 self.remote_pending = self.hosts.len();
+                let limit = if self.board_home { board::BOARD_LIMIT } else { 200 };
                 for target in self.hosts.clone() {
                     let tx = tx.clone();
                     std::thread::spawn(move || {
-                        let result = remote::fetch_sessions(&target, &RemoteFilter { limit: 200, ..Default::default() });
+                        let result = remote::fetch_sessions(&target, &RemoteFilter { limit, ..Default::default() });
                         let _ = tx.send(HostResult { target, result });
                     });
                 }
@@ -3312,7 +3313,7 @@ fn tail_lines(text: &str, n: usize) -> String {
 
 /// The human text of one raw trajectory line: message text, thinking, tool inputs and tool output, in
 /// order, found by key across Claude, Codex and Pi shapes. Falls back to `pretty()` when none is found.
-fn body_text(raw: &str) -> String {
+pub(crate) fn body_text(raw: &str) -> String {
     body_text_joined(raw, "\n\n")
 }
 

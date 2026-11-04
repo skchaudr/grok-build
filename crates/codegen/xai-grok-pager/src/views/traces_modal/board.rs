@@ -53,6 +53,8 @@ pub struct Board {
     open: HashSet<String>,
     /// Collapsed groups, by `view/label`.
     collapsed: HashSet<String>,
+    /// Group keys that already got their default (the old "Earlier" bucket starts closed).
+    seeded: HashSet<String>,
     pub active: ActiveTimes,
     pub summaries: Summaries,
 }
@@ -66,6 +68,7 @@ impl Board {
             scroll: 0,
             open: HashSet::new(),
             collapsed: HashSet::new(),
+            seeded: HashSet::new(),
             active: ActiveTimes::new(),
             summaries: Summaries::load(summaries),
         }
@@ -90,8 +93,10 @@ impl Line {
     }
 }
 
-/// Subagents listed under an open session before the rest become a count.
+/// Ended subagents listed under an open session. Every running one is listed; the rest are a count.
 const MAX_SHOWN_KIDS: usize = 12;
+/// Roots kept per machine. The header says so when a list is this long.
+pub(super) const BOARD_LIMIT: usize = 2000;
 
 fn last_at(r: &SessionRow) -> i64 {
     r.last_event_at.or(r.updated_at).unwrap_or(0)
@@ -116,6 +121,24 @@ pub(super) fn project(cwd: Option<&str>) -> String {
         return "~".into();
     }
     cwd.rsplit('/').next().unwrap_or(cwd).to_string()
+}
+
+/// Running subagents, then up to [`MAX_SHOWN_KIDS`] ended ones. The count is how many ended ones were left out.
+pub(super) fn pick_kids(kids: &[SessionRow]) -> (Vec<&SessionRow>, usize) {
+    let mut live = Vec::new();
+    let mut rest = Vec::new();
+    for c in kids {
+        if c.status == Status::Active {
+            live.push(c);
+        } else {
+            rest.push(c);
+        }
+    }
+    live.sort_by_key(|c| std::cmp::Reverse(last_at(c)));
+    rest.sort_by_key(|c| std::cmp::Reverse(last_at(c)));
+    let more = rest.len().saturating_sub(MAX_SHOWN_KIDS);
+    live.extend(rest.into_iter().take(MAX_SHOWN_KIDS));
+    (live, more)
 }
 
 /// "4h05m", "12m", "40s", or "–" when unknown.
@@ -235,15 +258,13 @@ impl TracesModalState {
         for d in self.details(r, kids) {
             out.push(Line::Detail(d));
         }
-        // Running subagents first, then the most recent; past the cap, a count (the session view has them all).
-        let mut kids: Vec<&SessionRow> = kids.iter().collect();
-        kids.sort_by_key(|c| (c.status != Status::Active, std::cmp::Reverse(last_at(c))));
-        let more = kids.len().saturating_sub(MAX_SHOWN_KIDS);
-        for c in kids.into_iter().take(MAX_SHOWN_KIDS) {
+        // Every running subagent, then the most recent ended ones. A running one is never hidden behind the cap.
+        let (shown, more) = pick_kids(kids);
+        for c in shown {
             self.push_row(out, c, depth + 1);
         }
         if more > 0 {
-            out.push(Line::Detail(format!("{more} older subagents: Enter opens the session, which lists them all")));
+            out.push(Line::Detail(format!("{more} ended subagents — Enter opens the session, which lists them")));
         }
     }
 
@@ -352,7 +373,15 @@ impl TracesModalState {
         true
     }
 
-    /// Enter on a session: grok's session view for the harnesses it reads, the trajectory for the rest.
+    /// The old "Earlier" bucket starts closed, once. Opening it stays open.
+    pub(super) fn prepare_board(&mut self) {
+        let key = format!("{:?}/Earlier", self.board.view);
+        if self.board.seeded.insert(key.clone()) {
+            self.board.collapsed.insert(key);
+        }
+    }
+
+    /// Enter opens the session in grok's session view. A live one keeps following.
     fn board_enter(&mut self) -> InputOutcome {
         match self.selected_line() {
             Some(Line::Header { .. }) => {
@@ -360,21 +389,9 @@ impl TracesModalState {
                 InputOutcome::Changed
             }
             Some(Line::Row { row, .. }) => {
-                let remote = row.host.is_some();
-                let viewable = match row.source.as_str() {
-                    "claude" | "pi" | "codex" => true,
-                    "grok" | "dpi" => !remote,
-                    _ => false,
-                };
-                if viewable {
-                    let row = Box::new(row);
-                    let open = if row.source == "grok" { Action::TracesOpenGrok(row) } else { Action::TracesOpenClaude(row) };
-                    return InputOutcome::Action(open);
-                }
-                self.trail.clear();
-                self.live_return = false;
-                self.open_session(row);
-                InputOutcome::Changed
+                let row = Box::new(row);
+                let open = if row.source == "grok" { Action::TracesOpenGrok(row) } else { Action::TracesOpenClaude(row) };
+                InputOutcome::Action(open)
             }
             _ => InputOutcome::Unchanged,
         }
@@ -382,6 +399,7 @@ impl TracesModalState {
 }
 
 pub(super) fn board_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
+    state.prepare_board();
     let page = 10;
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => state.board_move(1),
@@ -436,6 +454,7 @@ pub(super) fn board_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOu
 }
 
 pub(super) fn board_wheel(state: &mut TracesModalState, down: bool) -> InputOutcome {
+    state.prepare_board();
     state.board_move(if down { 3 } else { -3 });
     InputOutcome::Changed
 }
@@ -472,11 +491,18 @@ pub(super) fn render_board(buf: &mut Buffer, area: Rect, state: &mut TracesModal
     let gray = Style::default().fg(theme.gray).bg(theme.bg_base);
 
     // Top line: what is shown, and the counts on the right (the Dashboard's `◇ 4 idle`).
+    state.prepare_board();
     let kids = &state.shown_children;
     let all: Vec<&SessionRow> = state.shown_roots.iter().collect();
     let live = all.iter().filter(|r| is_live(r, kids)).count();
     let failed = all.iter().filter(|r| is_failed(r, kids)).count();
-    let left = format!("traces · {}{}", host_label(state), if state.scanning { " · indexing…" } else { "" });
+    let capped = state.sessions.len() >= BOARD_LIMIT || state.remote_rows.values().any(|v| v.len() >= BOARD_LIMIT);
+    let left = format!(
+        "all agents · {}{}{}",
+        host_label(state),
+        if capped { format!(" · newest {BOARD_LIMIT}") } else { String::new() },
+        if state.scanning { " · indexing…" } else { "" }
+    );
     buf.set_string(inner.x, inner.y + 1, truncate_str(&left, w), gray);
     let mut parts: Vec<(String, Color)> = Vec::new();
     if live > 0 {
@@ -730,6 +756,34 @@ mod tests {
         assert_eq!(fmt_span(Some(42_000)), "42s");
         assert_eq!(fmt_span(Some(12 * 60_000)), "12m");
         assert_eq!(fmt_span(Some(4 * 3_600_000 + 5 * 60_000)), "4h05m");
+    }
+
+    #[test]
+    fn running_subagents_are_all_listed() {
+        let rows = vec![
+            kid("a", true, 1),
+            kid("b", true, 2),
+            kid("c", false, 3),
+            kid("d", false, 4),
+        ];
+        let mut many: Vec<SessionRow> = (0..MAX_SHOWN_KIDS + 2).map(|i| kid(&format!("e{i}"), false, i as i64)).collect();
+        many.push(kid("live", true, 99));
+        let (shown, more) = pick_kids(&many);
+        assert!(shown.iter().any(|r| r.id == "live"));
+        assert_eq!(shown.iter().filter(|r| r.status == Status::Active).count(), 1);
+        assert_eq!(more, 2);
+        let (shown, more) = pick_kids(&rows);
+        assert_eq!(more, 0);
+        assert_eq!(shown[0].id, "b");
+    }
+
+    fn kid(id: &str, active: bool, at: i64) -> SessionRow {
+        SessionRow {
+            id: id.into(),
+            status: if active { Status::Active } else { Status::Completed },
+            last_event_at: Some(at),
+            ..Default::default()
+        }
     }
 
     #[test]

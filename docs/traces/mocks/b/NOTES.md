@@ -1,6 +1,6 @@
 # Prototype B: organization first
 
-Run: `/Volumes/Mini-SSD/offload/repos/grok-build/target-b/release/xai-grok-pager traces` (branch `traces/proto-b`).
+Run: branch `traces/grok-b`. `CARGO_TARGET_DIR=/Volumes/Mini-SSD/offload/repos/grok-build/target-b`, then `cargo run -p xai-grok-pager -- traces`.
 
 ## Keys on the board
 
@@ -15,11 +15,10 @@ Tab / Shift+Tab or 1-5: view. `c`: compact or comfortable. `e`: open a session i
 
 ## Left out
 
-- Sessions in the index's trivial filter (fewer than 3 events, no tools) and children beyond the board's roots query (500 local, 200 per remote host).
-- sab-air grok and dpi sessions don't open in the session view (their files aren't a single transcript to copy); they show a status line.
-- OMP, bb and Cursor rows open the old trajectory view.
-- The session view's top line and status line are unchanged (harness · model · folder, alive or ended).
+- Pings stay off the board (fewer than 3 events, no tools, and not live). A list that is 2000 long says `newest 2000`.
+- The first 20,000 events of an omp, bb, cursor or dsh session open in the session view. Past that, the tail is not followed.
+- Grok and Cursor active time is still `–` when the index has no event timestamps.
 
 ## Subagents in grok's Dashboard
 
-Grok's Dashboard has no subagent rows. They were removed (`views/dashboard/state.rs`: a `sub:` key is "a pinned or reordered subagent row from before those rows were removed"). A parent shows a `Subagents N` chip in its title (`row_title.rs`, `RowBadge::Subagents`), and the subagents are reached inside the session: the Subagents pane under the scrollback and Enter on a subagent row. Here the board lists them under their parent with `e`, running first, and Enter opens one directly.
+Grok's Dashboard has no subagent rows. They were removed (`views/dashboard/state.rs`: a `sub:` key is "a pinned or reordered subagent row from before those rows were removed"). A parent shows a `Subagents N` chip in its title (`row_title.rs`, `RowBadge::Subagents`), and the subagents are reached inside the session: the Subagents pane under the scrollback and Enter on a subagent row. Here the board lists them under their parent with `e`: every running one, then the latest ended ones. Enter opens that session in grok's session view, for every harness. A live one stays pinned to the tail until you scroll up.

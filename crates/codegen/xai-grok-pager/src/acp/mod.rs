@@ -4,6 +4,7 @@
 /// Shared plan-file size cap for the pager keep.
 pub(crate) const MAX_PLAN_FILE_BYTES: usize = 256 * 1024;
 pub(crate) mod claude_feed;
+pub(crate) mod plain_feed;
 pub(crate) mod claude_subagents;
 // Not opened from the list yet.
 #[allow(dead_code)]

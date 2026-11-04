@@ -63,15 +63,28 @@ pub(crate) fn start(app: &mut AppView) -> Vec<Effect> {
 pub(crate) fn open_pending(app: &mut AppView, scan_done: bool) {
     let mut pending = PENDING.lock().unwrap();
     let Some(prefix) = pending.clone() else { return };
-    let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
-    let Some(ActiveModal::Traces { state }) = agent.active_modal.as_mut() else { return };
-    match state.open_by_prefix(&prefix) {
-        Ok(()) => *pending = None,
-        Err(msg) if scan_done => {
-            state.status = Some(msg);
-            *pending = None;
+    let opened = {
+        let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
+        let Some(ActiveModal::Traces { state }) = agent.active_modal.as_mut() else { return };
+        match state.open_by_prefix(&prefix) {
+            Ok(row) => {
+                *pending = None;
+                Some(row)
+            }
+            Err(msg) if scan_done => {
+                state.status = Some(msg);
+                *pending = None;
+                None
+            }
+            Err(_) => None,
         }
-        Err(_) => {}
+    };
+    drop(pending);
+    let Some(row) = opened else { return };
+    if row.source == "grok" {
+        open_grok(app, row);
+    } else {
+        open_claude(app, row);
     }
 }
 
@@ -101,7 +114,11 @@ pub(crate) fn open_grok(app: &mut AppView, row: xai_grok_traces::SessionRow) {
 /// The row's file is `<grok home>/sessions/<cwd>/<session id>/chat_history.jsonl`.
 pub(crate) fn open_grok_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
     // Bound to the index's `grok:` id, not grok's own: a tab with this session open must not get the replay.
-    let local = row.file_path.clone();
+    // A row from another machine is copied first (session dir, so `updates.jsonl` comes with it).
+    let local = match local_copy(&row) {
+        Ok(p) => p,
+        Err(e) => return report(app, &row, e),
+    };
     let feed = feed_for(&row, &local);
     open_feed_in(app, row.id.clone(), row, local, feed, standalone);
 }
@@ -125,8 +142,70 @@ fn feed_for(row: &xai_grok_traces::SessionRow, path: &Path) -> io::Result<Vec<Fe
                 _ => Err(io::Error::other("not in a grok sessions directory")),
             }
         }
-        _ => claude_feed::convert(path, &row.id),
+        "claude" => claude_feed::convert(path, &row.id),
+        _ => plain_events(row, path),
     }
+}
+
+/// Harnesses without their own converter: the index (and the raw line behind each event) on this machine,
+/// the copied transcript when it is JSONL, otherwise one `events` read over ssh.
+fn plain_events(row: &xai_grok_traces::SessionRow, path: &Path) -> io::Result<Vec<Fed>> {
+    let live = row.status == xai_grok_traces::Status::Active;
+    if row.host.is_none() {
+        let idx = xai_grok_traces::TraceIndex::open(&xai_grok_traces::default_db_path()).map_err(|e| io::Error::other(e.to_string()))?;
+        // shortcut: the first 20_000 events; a longer session's tail is not followed, raise this if that shows up
+        let events = idx
+            .list_events(&row.id, &xai_grok_traces::EventFilter { limit: 20_000, ..Default::default() })
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let texts: Vec<String> = events.iter().map(|e| event_text(&idx, &row.id, e)).collect();
+        return Ok(crate::acp::plain_feed::from_events(&events, &texts, live));
+    }
+    if looks_like_jsonl(path) {
+        let raw = std::fs::read_to_string(path)?;
+        return Ok(crate::acp::plain_feed::from_jsonl(&raw, live));
+    }
+    let target = target_of(row).ok_or_else(|| io::Error::other("no ssh target for this host in ~/.grok/traces/hosts"))?;
+    let events = xai_grok_traces::remote::fetch_events(
+        &target,
+        &row.id,
+        &xai_grok_traces::remote::EventQuery { limit: 20_000, ..Default::default() },
+    )
+    .map_err(|e| io::Error::other(e.to_string()))?;
+    let texts: Vec<String> = events.iter().map(|e| {
+        let detail = e.detail.as_deref().unwrap_or("");
+        if e.preview.is_empty() { e.title.clone() } else if detail.is_empty() { e.preview.clone() } else { format!("{} · {detail}", e.preview) }
+    }).collect();
+    Ok(crate::acp::plain_feed::from_events(&events, &texts, live))
+}
+
+fn event_text(idx: &xai_grok_traces::TraceIndex, id: &str, e: &xai_grok_traces::EventRow) -> String {
+    idx.raw_line(id, e.line)
+        .ok()
+        .flatten()
+        .map(|raw| crate::views::traces_modal::body_text(&raw))
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| if e.preview.is_empty() { e.title.clone() } else { e.preview.clone() })
+}
+
+fn looks_like_jsonl(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else { return false };
+    let mut line = String::new();
+    if std::io::BufRead::read_line(&mut std::io::BufReader::new(file), &mut line).is_err() {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(line.trim()).is_ok()
+}
+
+/// The footer names the harness (and the other machine) when the transcript itself names no model.
+fn trace_label(row: &xai_grok_traces::SessionRow) -> String {
+    let mut parts = vec![xai_grok_traces::source_label(&row.source).to_string()];
+    if let Some(m) = row.model.as_deref().filter(|m| !m.is_empty()) {
+        parts.push(m.to_string());
+    }
+    if let Some(h) = row.host.as_deref() {
+        parts.push(h.to_string());
+    }
+    parts.join(" · ")
 }
 
 /// The ssh target (`user@host`) for a remote row's host label.
@@ -137,36 +216,88 @@ fn target_of(row: &xai_grok_traces::SessionRow) -> Option<String> {
 
 /// A local file to convert: the row's own, or for a row from another machine a copy fetched over ssh (rsync) into the temp dir.
 /// A Claude transcript brings its `<session>/` folder too, for subagents and stored tool results.
+/// grok copies the session directory (it holds `updates.jsonl`); dpi and bb copy the sqlite and keep the `#id` key.
 fn local_copy(row: &xai_grok_traces::SessionRow) -> io::Result<PathBuf> {
     if row.host.is_none() {
         return Ok(row.file_path.clone());
     }
-    if matches!(row.source.as_str(), "grok" | "dpi") {
-        return Err(io::Error::other(format!("{} sessions from another machine don't open here yet", row.source)));
-    }
     let target = target_of(row).ok_or_else(|| io::Error::other("no ssh target for this host in ~/.grok/traces/hosts"))?;
     let host = row.host.clone().unwrap_or_default();
-    let dest = std::env::temp_dir().join("grok-traces-remote").join(&host).join(
-        row.file_path.parent().map(|p| p.to_string_lossy().trim_start_matches('/').replace('/', "_")).unwrap_or_default(),
-    );
-    std::fs::create_dir_all(&dest)?;
+    let root = std::env::temp_dir().join("grok-traces-remote").join(&host);
+    if row.file_path.as_os_str().is_empty() {
+        return Ok(root.join(format!("remote-{}", row.id.replace('/', "_"))));
+    }
+    match row.source.as_str() {
+        "grok" => copy_grok_dir(&target, &host, &root, row),
+        "dpi" => copy_keyed(&target, &host, &root.join("dpi"), &row.file_path.to_string_lossy(), xai_grok_traces::dpi::split_key),
+        "bb" => copy_bb(&target, &host, &root.join("bb"), &row.file_path.to_string_lossy()),
+        _ => copy_file(&target, &host, &root, row),
+    }
+}
+
+fn rsync(srcs: &[String], dest: &Path, host: &str) -> io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    let out = std::process::Command::new("rsync")
+        .args(["-a", "--timeout=8", "-e", "ssh -o BatchMode=yes -o ConnectTimeout=3"])
+        .args(srcs)
+        .arg(format!("{}/", dest.display()))
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    if out.status.success() || out.status.code() == Some(23) {
+        return Ok(());
+    }
+    Err(io::Error::other(format!("{host} unreachable: {}", String::from_utf8_lossy(&out.stderr).trim())))
+}
+
+fn copy_file(target: &str, host: &str, root: &Path, row: &xai_grok_traces::SessionRow) -> io::Result<PathBuf> {
+    let dest = root.join(row.file_path.parent().map(|p| p.to_string_lossy().trim_start_matches('/').replace('/', "_")).unwrap_or_default());
     let remote = row.file_path.to_string_lossy().into_owned();
     let mut srcs = vec![format!("{target}:{remote}")];
     if row.source == "claude" {
         srcs.push(format!("{target}:{}", row.file_path.with_extension("").to_string_lossy()));
     }
-    let out = std::process::Command::new("rsync")
-        .args(["-a", "--timeout=8", "-e", "ssh -o BatchMode=yes -o ConnectTimeout=3"])
-        .args(&srcs)
-        .arg(format!("{}/", dest.display()))
-        .stdin(std::process::Stdio::null())
-        .output()?;
+    rsync(&srcs, &dest, host)?;
     let local = dest.join(row.file_path.file_name().unwrap_or_default());
-    // 23 = some sources missing (a Claude session with no folder): the transcript itself still arrived.
-    if !(out.status.success() || out.status.code() == Some(23) && local.exists()) {
-        return Err(io::Error::other(format!("{host} unreachable: {}", String::from_utf8_lossy(&out.stderr).trim())));
+    if !local.exists() {
+        return Err(io::Error::other(format!("{host} unreachable: transcript did not copy")));
     }
     Ok(local)
+}
+
+/// The session directory, under a `sessions/` ancestor, so grok's replay finds `updates.jsonl` and the cwd slug.
+fn copy_grok_dir(target: &str, host: &str, root: &Path, row: &xai_grok_traces::SessionRow) -> io::Result<PathBuf> {
+    let session_dir = row.file_path.parent().ok_or_else(|| io::Error::other("grok session has no directory"))?;
+    let slug = session_dir.parent().and_then(|p| p.file_name()).unwrap_or(std::ffi::OsStr::new("cwd"));
+    let sid = session_dir.file_name().unwrap_or(std::ffi::OsStr::new("session"));
+    let dest = root.join("sessions").join(slug).join(sid);
+    rsync(&[format!("{target}:{}/", session_dir.display())], &dest, host)?;
+    let local = dest.join(row.file_path.file_name().unwrap_or_default());
+    if !local.exists() {
+        return Err(io::Error::other(format!("{host} unreachable: grok session did not copy")));
+    }
+    Ok(local)
+}
+
+fn copy_keyed(target: &str, host: &str, dest: &Path, key: &str, split: fn(&str) -> Option<(&str, i64)>) -> io::Result<PathBuf> {
+    let (db, conv) = split(key).ok_or_else(|| io::Error::other(format!("not a session key: {key}")))?;
+    let name = Path::new(db).file_name().unwrap_or_default();
+    rsync(&[format!("{target}:{db}")], dest, host)?;
+    let local = dest.join(name);
+    if !local.exists() {
+        return Err(io::Error::other(format!("{host} unreachable: database did not copy")));
+    }
+    Ok(PathBuf::from(format!("{}#{conv}", local.display())))
+}
+
+fn copy_bb(target: &str, host: &str, dest: &Path, key: &str) -> io::Result<PathBuf> {
+    let (db, thread) = xai_grok_traces::bb::split_key(key).ok_or_else(|| io::Error::other(format!("not a bb key: {key}")))?;
+    let name = Path::new(db).file_name().unwrap_or_default();
+    rsync(&[format!("{target}:{db}")], dest, host)?;
+    let local = dest.join(name);
+    if !local.exists() {
+        return Err(io::Error::other(format!("{host} unreachable: database did not copy")));
+    }
+    Ok(PathBuf::from(format!("{}#{thread}", local.display())))
 }
 
 fn report(app: &mut AppView, row: &xai_grok_traces::SessionRow, e: io::Error) {
@@ -252,9 +383,13 @@ fn open_feed_in(
     let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     agent.scrollback.end_batch();
     agent.session.loading_replay = false;
+    if agent.session.models.footer_label().is_none() {
+        agent.session.models.set_served_model_name(Some(trace_label(&row)));
+    }
     *FOLLOW.lock().unwrap() = follow.map(|f| Follow { agent: view, ..f });
     if live {
-        // Still running: its last calls stay open until their results land.
+        // Still running: its last calls stay open, and grok's own follow keeps the tail in view until you scroll up.
+        agent.scrollback.enable_follow_mode();
         return;
     }
     agent.scrollback.clear_running_clocks();
@@ -273,6 +408,8 @@ struct Follow {
     fed: usize,
     running: HashSet<String>,
     size: u64,
+    /// No local transcript to watch: each finished copy re-reads the remote event list.
+    events_over_ssh: bool,
     /// A remote row: the copy refreshing in the background, and when the last one finished.
     sync: Option<mpsc::Receiver<io::Result<PathBuf>>>,
     synced_at: Instant,
@@ -291,10 +428,16 @@ impl Follow {
             fed: events.len(),
             running: events.iter().filter_map(running_call).collect(),
             size: watched_size(row, local),
+            events_over_ssh: ssh_events(row, local),
             sync: None,
             synced_at: Instant::now(),
         }
     }
+}
+
+/// Remote sessions whose transcript is not a file we can re-read (a sqlite key, or no file at all).
+fn ssh_events(row: &xai_grok_traces::SessionRow, local: &Path) -> bool {
+    row.host.is_some() && !matches!(row.source.as_str(), "claude" | "pi" | "dpi" | "codex" | "grok") && !looks_like_jsonl(local)
 }
 
 /// A tool call still waiting for its result.
@@ -318,9 +461,14 @@ fn call_id(fed: &Fed) -> Option<String> {
 
 /// Bytes of what the converter reads: the transcript, plus `updates.jsonl` beside a grok one.
 fn watched_size(row: &xai_grok_traces::SessionRow, local: &Path) -> u64 {
+    let spec = local.to_string_lossy();
+    let file: &Path = match spec.split_once('#') {
+        Some((db, _)) => Path::new(db),
+        None => local,
+    };
     let len = |p: &Path| std::fs::metadata(p).map_or(0, |m| m.len());
-    let extra = if row.source == "grok" { local.parent().map_or(0, |d| len(&d.join("updates.jsonl"))) } else { 0 };
-    len(local) + extra
+    let extra = if row.source == "grok" { file.parent().map_or(0, |d| len(&d.join("updates.jsonl"))) } else { 0 };
+    len(file) + extra
 }
 
 /// Whether a live session is open, so the app keeps polling.
@@ -351,15 +499,22 @@ pub(crate) fn poll_follow(app: &mut AppView) -> bool {
                 f.sync = Some(rx);
                 return false;
             }
-            Some(Ok(_)) | Some(Err(mpsc::TryRecvError::Disconnected)) => {
+            Some(Ok(Ok(path))) => {
+                f.local = path;
                 f.sync = None;
                 f.synced_at = Instant::now();
+            }
+            Some(Ok(Err(_))) | Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                f.sync = None;
+                f.synced_at = Instant::now();
+                return false;
             }
             _ => return false,
         }
     }
+    let pull = f.events_over_ssh;
     let size = watched_size(&f.row, &f.local);
-    if size == f.size {
+    if !pull && size == f.size {
         return false;
     }
     f.size = size;
