@@ -30,6 +30,7 @@ use crate::views::traces_payload::{self, Payload, Shape};
 
 pub(super) use super::traces_body::{pretty, INPUT_KEYS, TEXT_KEYS};
 
+mod dash;
 mod standalone;
 
 pub const TITLE: &str = "Traces";
@@ -261,6 +262,8 @@ pub struct TracesModalState {
     live_pending: usize,
     live_at: Option<Instant>,
     local_host: String,
+    /// The Dashboard-style sessions list drawn over `Mode::List`.
+    dash: Option<Box<dash::Dash>>,
 }
 
 #[derive(Clone, Debug)]
@@ -546,6 +549,7 @@ impl TracesModalState {
             live_pending: 0,
             live_at: None,
             local_host: short_hostname(),
+            dash: Some(Box::new(dash::Dash::new())),
         };
         s.watermark = s.index.as_ref().and_then(|i| i.receipts_watermark().ok()).unwrap_or(0);
         s.refresh();
@@ -598,6 +602,9 @@ impl TracesModalState {
             }
         }
         redraw |= self.poll_remote();
+        if self.mode == Mode::List {
+            redraw |= self.poll_dash();
+        }
         if self.peek.is_some() {
             redraw |= self.refresh_peek();
         }
@@ -3704,6 +3711,11 @@ pub fn handle_traces_mouse(state: &mut TracesModalState, mouse: &MouseEvent) -> 
             }
             _ => InputOutcome::Unchanged,
         },
+        Mode::List if state.dash_active() => match mouse.kind {
+            MouseEventKind::ScrollDown => dash::wheel(state, true),
+            MouseEventKind::ScrollUp => dash::wheel(state, false),
+            _ => InputOutcome::Unchanged,
+        },
         Mode::List | Mode::Trajectory => match mouse.kind {
             MouseEventKind::ScrollDown => state.wheel(WHEEL),
             MouseEventKind::ScrollUp => state.wheel(-WHEEL),
@@ -3770,6 +3782,11 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
             return InputOutcome::Changed;
         }
         Typing::No => {}
+    }
+    if state.dash_active()
+        && let Some(out) = dash::key(state, key)
+    {
+        return out;
     }
     // The payload scrolls a page on Ctrl-U/D.
     if state.mode == Mode::Inspector && key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Char('u' | 'd')) {
@@ -4264,6 +4281,10 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
 
 pub fn render_traces_modal(buf: &mut Buffer, full_area: Rect, state: &mut TracesModalState, compact: bool) {
     state.hit_list = None;
+    if state.dash_active() {
+        dash::render(buf, full_area, state);
+        return;
+    }
     let theme = Theme::current();
     let sizing = ModalSizing { width_pct: 1.0, max_width: u16::MAX, min_width: 44, v_margin: 0, h_pad: 2, v_pad: 0, footer_lines: 2 }
         .with_compact(compact);

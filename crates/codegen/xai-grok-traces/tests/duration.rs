@@ -156,3 +156,31 @@ fn an_appended_result_fills_the_call_indexed_earlier() {
     assert_eq!(tool(&after, "Shell").duration_ms, Some(1500));
     assert_eq!(tool(&after, "Shell").line, 0);
 }
+
+/// Active time counts the agent's gaps, not the wait for the next prompt, and not a gap over half an hour.
+#[test]
+fn active_time_skips_prompt_waits_and_long_gaps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let grok = home.join(".grok");
+    let user = |t: i64, text: &str| json!({"type":"message","timestamp":t,"message":{"role":"user","content":[{"type":"text","text":text}]}});
+    let call = |t: i64, id: &str| json!({"type":"message","timestamp":t,"message":{"role":"assistant","content":[{"type":"toolCall","id":id,"name":"bash","arguments":{"command":"ls"}}]}});
+    let result = |t: i64, id: &str| json!({"type":"message","timestamp":t,"message":{"role":"toolResult","toolCallId":id,"toolName":"bash","content":[{"type":"text","text":"ok"}]}});
+    write_lines(
+        &home.join(".pi/agent/sessions/--w--/a.jsonl"),
+        &[
+            user(T, "first"),
+            call(T + 1_000, "c1"),     // +1s
+            result(T + 4_000, "c1"),   // +3s
+            user(T + 600_000, "next"), // a prompt wait: not counted
+            call(T + 610_000, "c2"),   // +10s
+            result(T + 4_000_000, "c2"), // over 30 min: not counted
+        ],
+    );
+    let roots = default_roots(&home, &grok);
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
+    idx.scan(&roots).unwrap();
+    let rows = idx.list_sessions(&SessionFilter::default()).unwrap();
+    let active = idx.active_ms().unwrap();
+    assert_eq!(active.get(&rows[0].id).copied(), Some(14_000), "{active:?}");
+}

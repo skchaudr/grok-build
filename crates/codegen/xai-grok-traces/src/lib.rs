@@ -27,7 +27,7 @@ pub use index::{
     RootReport, SCHEMA_VERSION, SIZE_BUDGET, ScanReport, TraceIndex, default_db_path, session_id,
 };
 pub use query::{
-    ACTIVE_WINDOW_MS, EventFilter, EventRow, Facets, RECEIPT_WINDOW_MS, SessionFilter, SessionRow, Sort, Stats, Status,
+    ACTIVE_SQL, ACTIVE_WINDOW_MS, EventFilter, EventRow, Facets, IDLE_GAP_MS, RECEIPT_WINDOW_MS, SessionFilter, SessionRow, Sort, Stats, Status,
     TERMINAL_EVENTS,
 };
 pub use links::{ClaudeChild, claude_children};

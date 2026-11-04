@@ -82,7 +82,59 @@ pub(crate) fn open_claude(app: &mut AppView, row: xai_grok_traces::SessionRow) {
 /// `grok traces` replays into its own view. Inside a grok session the replay gets a new agent view, so the user's session
 /// is left as it was.
 pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
-    let feed = if row.source == "pi" {
+    let feed = localize(&row).and_then(|local| convert(&local));
+    open_feed_in(app, row.id.clone(), row, feed, standalone);
+}
+
+/// A row from another machine, copied here over ssh with what its feed reads beside it (Claude's `<session>/` folder of
+/// subagents and stored outputs, grok's whole session folder), under `<traces>/remote/<host>/<its path>`.
+/// A local row comes back as it is.
+fn localize(row: &xai_grok_traces::SessionRow) -> io::Result<xai_grok_traces::SessionRow> {
+    use std::process::{Command, Stdio};
+    let Some(host) = row.host.as_deref() else { return Ok(row.clone()) };
+    let target = xai_grok_traces::remote::hosts()
+        .into_iter()
+        .find(|t| xai_grok_traces::remote::label(t) == host)
+        .ok_or_else(|| io::Error::other(format!("{host} is not in the traces hosts file")))?;
+    let path = &row.file_path;
+    let (dir, name, stem) = match (path.parent(), path.file_name(), path.file_stem()) {
+        (Some(d), Some(n), Some(s)) => (d, n.to_string_lossy().into_owned(), s.to_string_lossy().into_owned()),
+        _ => return Err(io::Error::other("remote path has no folder")),
+    };
+    // grok needs the whole session folder (`updates.jsonl`, `subagents/`): copy it from its parent.
+    let (from, items) = if row.source == "grok" {
+        let sid = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        (dir.parent().unwrap_or(dir), vec![sid])
+    } else {
+        (dir, vec![name, stem])
+    };
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let list = items.iter().map(|i| quote(i)).collect::<Vec<_>>().join(" ");
+    let remote_cmd = format!("cd {} && tar -cf - $(ls -d {list} 2>/dev/null)", quote(&from.to_string_lossy()));
+    let local_dir = xai_grok_traces::default_db_path()
+        .with_file_name("remote")
+        .join(host)
+        .join(from.strip_prefix("/").unwrap_or(from));
+    std::fs::create_dir_all(&local_dir)?;
+    let mut ssh = Command::new("ssh")
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=3", &target, &remote_cmd])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let out = ssh.stdout.take().ok_or_else(|| io::Error::other("ssh gave no output"))?;
+    let status = Command::new("tar").arg("-xf").arg("-").arg("-C").arg(&local_dir).stdin(out).status()?;
+    let _ = ssh.wait();
+    if !status.success() {
+        return Err(io::Error::other(format!("copying from {host} failed")));
+    }
+    let mut local = row.clone();
+    local.file_path = local_dir.join(path.strip_prefix(from).unwrap_or(path));
+    Ok(local)
+}
+
+/// The row's transcript, converted by its harness's feed.
+fn convert(row: &xai_grok_traces::SessionRow) -> io::Result<Vec<Fed>> {
+    if row.source == "pi" {
         pi_feed::convert(&row.file_path, &row.id)
     } else if row.source == "dpi" {
         pi_feed::convert_dpi(&row.file_path.to_string_lossy(), &row.id)
@@ -90,8 +142,76 @@ pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow
         codex_feed::convert(&row.file_path, &row.id)
     } else {
         claude_feed::convert(&row.file_path, &row.id)
+    }
+}
+
+/// A running session being followed: how much of its transcript was read, how many events went in, and which of those
+/// were calls still running (they are sent again, as upserts, once their result is in).
+pub(crate) struct TraceFollow {
+    row: xai_grok_traces::SessionRow,
+    session_id: String,
+    len: u64,
+    sent: usize,
+    pending: Vec<usize>,
+}
+
+fn is_pending(fed: &Fed) -> bool {
+    matches!(&fed.event, Event::Acp(acp::SessionUpdate::ToolCall(tc)) if matches!(tc.status, acp::ToolCallStatus::Pending | acp::ToolCallStatus::InProgress))
+}
+
+fn file_len(row: &xai_grok_traces::SessionRow) -> u64 {
+    std::fs::metadata(&row.file_path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// The 1s traces tick on a followed session: when its transcript grew, feed what is new. Returns whether to redraw.
+pub(crate) fn poll_follow(app: &mut AppView) -> bool {
+    let Some(agent) = super::ctx::get_active_agent_mut(app) else { return false };
+    let Some(mut follow) = agent.trace_follow.take() else { return false };
+    let len = file_len(&follow.row);
+    if len == follow.len {
+        agent.trace_follow = Some(follow);
+        return false;
+    }
+    let Ok(events) = convert(&follow.row) else {
+        agent.trace_follow = Some(follow);
+        return false;
     };
-    open_feed_in(app, row.id.clone(), row, feed, standalone);
+    follow.len = len;
+    let mut still = Vec::new();
+    let mut out = Vec::new();
+    let mut events: Vec<Option<Fed>> = events.into_iter().map(Some).collect();
+    for &i in &follow.pending {
+        if let Some(fed) = events.get_mut(i).and_then(Option::take) {
+            if is_pending(&fed) {
+                still.push(i);
+            } else {
+                out.push(fed);
+            }
+        }
+    }
+    for (i, fed) in events.iter_mut().enumerate().skip(follow.sent) {
+        if let Some(fed) = fed.take() {
+            if is_pending(&fed) {
+                still.push(i);
+            }
+            out.push(fed);
+        }
+    }
+    follow.sent = follow.sent.max(events.len());
+    follow.pending = still;
+    let sid = follow.session_id.clone();
+    agent.trace_follow = Some(follow);
+    if out.is_empty() {
+        return false;
+    }
+    agent.scrollback.begin_batch();
+    for fed in out {
+        super::super::acp_handler::handle(message(&sid, fed), app);
+    }
+    if let Some(agent) = super::ctx::get_active_agent_mut(app) {
+        agent.scrollback.end_batch();
+    }
+    true
 }
 
 /// Enter on a past grok session: same read-only view as Claude.
@@ -102,7 +222,11 @@ pub(crate) fn open_grok(app: &mut AppView, row: xai_grok_traces::SessionRow) {
 /// grok's `updates.jsonl` is already grok's events: no converter, replayed with the xAI updates kept so subagents survive.
 /// The row's file is `<grok home>/sessions/<cwd>/<session id>/chat_history.jsonl`.
 pub(crate) fn open_grok_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
-    let dir = row.file_path.parent();
+    let local = match localize(&row) {
+        Ok(local) => local,
+        Err(e) => return open_feed_in(app, row.id.clone(), row, Err(e), standalone),
+    };
+    let dir = local.file_path.parent();
     let sid = dir.and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
     let home = dir
         .and_then(|d| d.ancestors().find(|a| a.file_name().is_some_and(|n| n == "sessions")))
@@ -180,6 +304,15 @@ fn open_feed_in(
         agent.session.cwd = cwd.into();
         agent.session.tracker.set_session_cwd(cwd);
     }
+    // A running local session is followed: calls still running stay running, and the transcript is re-read as it grows.
+    let live = row.status == xai_grok_traces::Status::Active && row.host.is_none();
+    let follow = live.then(|| TraceFollow {
+        len: file_len(&row),
+        sent: events.len(),
+        pending: events.iter().enumerate().filter(|(_, f)| is_pending(f)).map(|(i, _)| i).collect(),
+        session_id: session_id.clone(),
+        row: row.clone(),
+    });
     agent.begin_replay_window();
     agent.scrollback.begin_batch();
     for fed in events {
@@ -188,6 +321,11 @@ fn open_feed_in(
     let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     agent.scrollback.end_batch();
     agent.session.loading_replay = false;
+    if let Some(follow) = follow {
+        agent.trace_follow = Some(Box::new(follow));
+        agent.scrollback.clear_running_clocks();
+        return;
+    }
     agent.scrollback.clear_running_clocks();
     agent.session.finish_turn(&mut agent.scrollback);
     agent.scrollback.finish_all_running();
@@ -199,6 +337,7 @@ pub(crate) fn leave_view(app: &mut AppView) {
     let ActiveView::Agent(id) = app.active_view else { return };
     let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     let Some(state) = agent.trace_return.take() else { return };
+    agent.trace_follow = None;
     if let Some(origin) = agent.trace_origin {
         // The origin may have been closed meanwhile: another session takes the list, else the welcome screen.
         let back = Some(origin)

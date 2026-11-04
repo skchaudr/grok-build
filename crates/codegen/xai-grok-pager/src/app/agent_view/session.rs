@@ -411,6 +411,7 @@ impl AgentView {
             role: AgentRole::Root,
             trace_return: None,
             trace_origin: None,
+            trace_follow: None,
             hit_subagent_frame_close: Default::default(),
             sharing_enabled: false,
             memory_mode: None,
@@ -635,6 +636,7 @@ impl AgentView {
         self.subagent_views.clear();
         self.active_subagent = None;
         self.session.loading_replay = false;
+        self.trace_follow = None;
         self.unbind_session_id();
     }
     /// Swap every replay-rebuilt field for a fresh value and return the old state.

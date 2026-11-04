@@ -2035,7 +2035,7 @@ pub(crate) async fn run(
         } else if dashboard_poll_at.is_none() {
             dashboard_poll_at = Some(Instant::now());
         }
-        if traces_state_mut(&mut app).is_none() {
+        if traces_state_mut(&mut app).is_none() && !following_trace(&app) {
             traces_poll_at = None;
         } else if traces_poll_at.is_none() {
             traces_poll_at = Some(Instant::now() + TRACES_POLL_INTERVAL);
@@ -2555,6 +2555,9 @@ pub(crate) async fn run(
                 // Re-armed by the loop-top check above.
                 traces_poll_at = None;
                 if traces_state_mut(&mut app).is_some_and(|state| state.poll_live()) {
+                    presenter.request(false);
+                }
+                if following_trace(&app) && super::dispatch::standalone_traces::poll_follow(&mut app) {
                     presenter.request(false);
                 }
             }
@@ -4067,6 +4070,12 @@ fn process_effects(
     false
 }
 /// The open `/traces` modal of the active agent, if any.
+/// The active view follows a running session from the sessions list.
+fn following_trace(app: &AppView) -> bool {
+    let ActiveView::Agent(id) = app.active_view else { return false };
+    app.agents.get(&id).is_some_and(|a| a.trace_follow.is_some())
+}
+
 fn traces_state_mut(app: &mut AppView) -> Option<&mut crate::views::traces_modal::TracesModalState> {
     let ActiveView::Agent(id) = app.active_view else { return None };
     match app.agents.get_mut(&id)?.active_modal.as_mut()? {

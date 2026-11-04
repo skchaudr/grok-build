@@ -537,6 +537,23 @@ impl TraceIndex {
     }
 }
 
+/// Active time per session id, in ms: the gaps between consecutive non-noise events, minus each gap that ends at a user
+/// prompt (the agent was waiting on the human) and any gap over [`IDLE_GAP_MS`] (away, asleep). `sqlite3` runs the same text
+/// on another machine over ssh, so it prints `id|ms` rows.
+pub const ACTIVE_SQL: &str = "WITH g AS (SELECT e.sk, e.timestamp - LAG(e.timestamp) OVER (PARTITION BY e.sk ORDER BY e.line_number) AS gap,
+  (e.role = 0 AND e.kind = 0) AS prompt FROM trace_events e WHERE e.timestamp IS NOT NULL AND e.noise = 0)
+SELECT s.id, SUM(CASE WHEN g.gap > 0 AND g.gap <= 1800000 AND NOT g.prompt THEN g.gap ELSE 0 END) FROM g JOIN trace_sessions s ON s.sk = g.sk GROUP BY g.sk";
+/// A gap longer than this between two events is idle, whatever it ends at. Written into [`ACTIVE_SQL`] as 1800000.
+pub const IDLE_GAP_MS: i64 = 30 * 60 * 1000;
+
+impl TraceIndex {
+    /// [`ACTIVE_SQL`] over this index.
+    pub fn active_ms(&self) -> Result<std::collections::HashMap<String, i64>> {
+        let mut stmt = self.conn().prepare(ACTIVE_SQL)?;
+        Ok(stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0))))?.collect::<rusqlite::Result<_>>()?)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stats {
     pub sessions: i64,
