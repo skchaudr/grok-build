@@ -549,7 +549,8 @@ impl TracesModalState {
             live_pending: 0,
             live_at: None,
             local_host: short_hostname(),
-            dash: Some(Box::new(dash::Dash::new())),
+            // The ledger's own tests drive the table underneath; the list's logic has its tests in `dash`.
+            dash: (!cfg!(test)).then(|| Box::new(dash::Dash::new())),
         };
         s.watermark = s.index.as_ref().and_then(|i| i.receipts_watermark().ok()).unwrap_or(0);
         s.refresh();
