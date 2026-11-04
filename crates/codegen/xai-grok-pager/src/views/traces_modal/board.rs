@@ -70,6 +70,8 @@ pub struct Board {
     active_rx: Option<mpsc::Receiver<HashMap<String, i64>>>,
     active_at: Option<Instant>,
     sums: Summaries,
+    /// Rows of the follow deck's live strip, filled while that screen is up. `(screen y, session id)`.
+    pub(super) strip_hits: Vec<(u16, String)>,
 }
 
 #[derive(Clone)]
@@ -147,7 +149,13 @@ impl Board {
             active_rx: None,
             active_at: None,
             sums: Summaries::load(),
+            strip_hits: Vec::new(),
         }
+    }
+
+    /// The list returns to this session when follow closes.
+    pub(super) fn select_id(&mut self, id: String) {
+        self.sel = Some(id);
     }
 
     /// Collect worker results; start the next active-time query and summaries when due. True to redraw.
@@ -374,6 +382,10 @@ pub fn handle_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome 
             b.scroll = 0;
         }
         KeyCode::Char('c') => b.compact = !b.compact,
+        KeyCode::Char('f') => match b.selected(&items).cloned() {
+            Some(It::Row { row, .. }) => return follow_row(state, row),
+            _ => return InputOutcome::Unchanged,
+        },
         KeyCode::Char('e') => match b.selected(&items) {
             Some(It::Row { row, kids, .. }) if *kids > 0 => {
                 // Shows every subagent; again folds them all away; again shows them all.
@@ -420,12 +432,36 @@ pub fn handle_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome 
     InputOutcome::Changed
 }
 
-/// Enter: grok's own session view for every harness it can read (live ones keep updating); the trajectory otherwise.
-fn open(state: &mut TracesModalState, row: SessionRow) -> InputOutcome {
+/// A running session on this machine is followed. Anything else opens grok's session view when that harness has one.
+pub(super) fn enter_follows(row: &SessionRow) -> bool {
+    row.host.is_none() && row.status == Status::Active
+}
+
+fn follow_row(state: &mut TracesModalState, row: SessionRow) -> InputOutcome {
+    if state.open_follow_row(row.clone()) {
+        InputOutcome::Changed
+    } else {
+        open(state, row)
+    }
+}
+
+/// grok's own session view, for the harnesses it can read.
+pub(super) fn grok_action(row: SessionRow) -> Option<Action> {
     match row.source.as_str() {
-        "grok" => InputOutcome::Action(Action::TracesOpenGrok(Box::new(row))),
-        "claude" | "pi" | "dpi" | "codex" => InputOutcome::Action(Action::TracesOpenClaude(Box::new(row))),
-        _ => {
+        "grok" => Some(Action::TracesOpenGrok(Box::new(row))),
+        "claude" | "pi" | "dpi" | "codex" => Some(Action::TracesOpenClaude(Box::new(row))),
+        _ => None,
+    }
+}
+
+/// Enter: follow a running local session. An ended one, or one on another machine, opens in grok's view.
+fn open(state: &mut TracesModalState, row: SessionRow) -> InputOutcome {
+    if enter_follows(&row) && state.open_follow_row(row.clone()) {
+        return InputOutcome::Changed;
+    }
+    match grok_action(row.clone()) {
+        Some(action) => InputOutcome::Action(action),
+        None => {
             state.open_session(row);
             InputOutcome::Changed
         }
@@ -749,6 +785,7 @@ fn render_footer(buf: &mut Buffer, area: Rect, theme: &Theme) {
     let _ = theme;
     // Enter, Esc and the arrows are obvious and get no hint.
     let hints = vec![
+        HintItem::new(key!('f'), "follow"),
         HintItem::new(key!('e'), "subagents"),
         HintItem::new(key!(Tab), "view"),
         HintItem::new(key!('c'), "compact"),
@@ -814,5 +851,16 @@ mod tests {
         board.view = View::Failed;
         let keys: Vec<String> = board.items(&roots, &kids).iter().filter_map(It::key).collect();
         assert_eq!(keys, ["a", "b1"]);
+    }
+
+    #[test]
+    fn enter_follows_a_running_local_session() {
+        let live = row("a", "/r/x", true, false, 0);
+        let ended = row("b", "/r/x", false, false, 0);
+        let mut remote = row("c", "/r/x", true, false, 0);
+        remote.host = Some("sab-air".into());
+        assert!(enter_follows(&live));
+        assert!(!enter_follows(&ended));
+        assert!(!enter_follows(&remote));
     }
 }

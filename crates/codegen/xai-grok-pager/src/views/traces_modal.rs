@@ -31,6 +31,7 @@ use crate::views::traces_payload::{self, Payload, Shape};
 pub(super) use super::traces_body::{pretty, INPUT_KEYS, TEXT_KEYS};
 
 mod board;
+mod deck;
 mod standalone;
 mod summaries;
 
@@ -989,14 +990,23 @@ impl TracesModalState {
     /// `f` / Enter on a live row: tail the selected session in process.
     fn open_follow(&mut self) -> bool {
         let Some(row) = self.selected_session().cloned() else { return false };
+        self.open_follow_row(row)
+    }
+
+    /// Tail `row` in process. A session on another machine stays on the list: Enter there copies it into grok's view.
+    pub(super) fn open_follow_row(&mut self, row: SessionRow) -> bool {
         if row.host.is_some() {
             self.set_status("follow runs on this machine only; open the row instead");
             return true;
         }
         let Some(index) = &self.index else { return false };
+        let id = row.id.clone();
         self.follow_view = Some(Follow::open(index.db_path().to_path_buf(), row));
         self.follow_return = false;
         self.mode = Mode::Follow;
+        if let Some(b) = self.board.as_mut() {
+            b.select_id(id);
+        }
         true
     }
 
@@ -3700,6 +3710,7 @@ pub fn wants_esc(state: &TracesModalState) -> bool {
 pub fn handle_traces_mouse(state: &mut TracesModalState, mouse: &MouseEvent) -> InputOutcome {
     match state.mode {
         Mode::Inspector => InputOutcome::Unchanged,
+        Mode::Follow if state.board.is_some() => deck::handle_mouse(state, mouse),
         Mode::Follow => match mouse.kind {
             MouseEventKind::ScrollDown => state.wheel(WHEEL),
             MouseEventKind::ScrollUp => state.wheel(-WHEEL),
@@ -3901,6 +3912,7 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                 _ => return InputOutcome::Unchanged,
             }
         }
+        Mode::Follow if state.board.is_some() => return deck::handle_key(state, key),
         Mode::Follow => match key.code {
             KeyCode::Esc | KeyCode::Char('q') => state.leave_follow(),
             KeyCode::Enter => {
@@ -4282,6 +4294,9 @@ pub fn render_traces_modal(buf: &mut Buffer, full_area: Rect, state: &mut Traces
     state.hit_list = None;
     if state.mode == Mode::List && state.board.is_some() {
         return board::render(buf, full_area, state);
+    }
+    if state.mode == Mode::Follow && state.board.is_some() {
+        return deck::render(buf, full_area, state);
     }
     let theme = Theme::current();
     let sizing = ModalSizing { width_pct: 1.0, max_width: u16::MAX, min_width: 44, v_margin: 0, h_pad: 2, v_pad: 0, footer_lines: 2 }
