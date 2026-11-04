@@ -2035,7 +2035,7 @@ pub(crate) async fn run(
         } else if dashboard_poll_at.is_none() {
             dashboard_poll_at = Some(Instant::now());
         }
-        if traces_state_mut(&mut app).is_none() {
+        if traces_state_mut(&mut app).is_none() && !super::standalone_traces::following() {
             traces_poll_at = None;
         } else if traces_poll_at.is_none() {
             traces_poll_at = Some(Instant::now() + TRACES_POLL_INTERVAL);
@@ -2555,6 +2555,9 @@ pub(crate) async fn run(
                 // Re-armed by the loop-top check above.
                 traces_poll_at = None;
                 if traces_state_mut(&mut app).is_some_and(|state| state.poll_live()) {
+                    presenter.request(false);
+                }
+                if super::standalone_traces::poll_follow(&mut app) {
                     presenter.request(false);
                 }
             }

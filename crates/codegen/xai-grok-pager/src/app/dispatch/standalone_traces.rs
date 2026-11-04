@@ -1,10 +1,12 @@
 //! `grok traces`: the pager starts straight into the traces modal with no agent session behind it.
 //! The mode is process-wide and set once by the CLI, so a static is enough.
 
+use std::collections::HashSet;
 use std::io;
-use std::path::Path;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use agent_client_protocol as acp;
 use xai_acp_lib::AcpClientMessage;
@@ -80,18 +82,14 @@ pub(crate) fn open_claude(app: &mut AppView, row: xai_grok_traces::SessionRow) {
 }
 
 /// `grok traces` replays into its own view. Inside a grok session the replay gets a new agent view, so the user's session
-/// is left as it was.
+/// is left as it was. A row from another machine is copied here first; a live row keeps being followed.
 pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
-    let feed = if row.source == "pi" {
-        pi_feed::convert(&row.file_path, &row.id)
-    } else if row.source == "dpi" {
-        pi_feed::convert_dpi(&row.file_path.to_string_lossy(), &row.id)
-    } else if row.source == "codex" {
-        codex_feed::convert(&row.file_path, &row.id)
-    } else {
-        claude_feed::convert(&row.file_path, &row.id)
+    let local = match local_copy(&row) {
+        Ok(p) => p,
+        Err(e) => return report(app, &row, e),
     };
-    open_feed_in(app, row.id.clone(), row, feed, standalone);
+    let feed = feed_for(&row, &local);
+    open_feed_in(app, row.id.clone(), row, local, feed, standalone);
 }
 
 /// Enter on a past grok session: same read-only view as Claude.
@@ -102,19 +100,81 @@ pub(crate) fn open_grok(app: &mut AppView, row: xai_grok_traces::SessionRow) {
 /// grok's `updates.jsonl` is already grok's events: no converter, replayed with the xAI updates kept so subagents survive.
 /// The row's file is `<grok home>/sessions/<cwd>/<session id>/chat_history.jsonl`.
 pub(crate) fn open_grok_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
-    let dir = row.file_path.parent();
-    let sid = dir.and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
-    let home = dir
-        .and_then(|d| d.ancestors().find(|a| a.file_name().is_some_and(|n| n == "sessions")))
-        .and_then(Path::parent);
-    // The session folder's own cwd finds `updates.jsonl` without scanning every session.
-    let folder_cwd = dir.and_then(Path::parent).and_then(xai_grok_config::decode_cwd_from_dirname);
-    let feed = match (&sid, home) {
-        (Some(sid), Some(home)) => grok_feed(sid, home, folder_cwd.as_deref()),
-        _ => Err(io::Error::other("not in a grok sessions directory")),
-    };
     // Bound to the index's `grok:` id, not grok's own: a tab with this session open must not get the replay.
-    open_feed_in(app, row.id.clone(), row, feed, standalone);
+    let local = row.file_path.clone();
+    let feed = feed_for(&row, &local);
+    open_feed_in(app, row.id.clone(), row, local, feed, standalone);
+}
+
+/// The row's events, converted from its transcript at `path` (the row's own file, or the local copy of a remote one).
+fn feed_for(row: &xai_grok_traces::SessionRow, path: &Path) -> io::Result<Vec<Fed>> {
+    match row.source.as_str() {
+        "pi" => pi_feed::convert(path, &row.id),
+        "dpi" => pi_feed::convert_dpi(&path.to_string_lossy(), &row.id),
+        "codex" => codex_feed::convert(path, &row.id),
+        "grok" => {
+            let dir = path.parent();
+            let sid = dir.and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
+            let home = dir
+                .and_then(|d| d.ancestors().find(|a| a.file_name().is_some_and(|n| n == "sessions")))
+                .and_then(Path::parent);
+            // The session folder's own cwd finds `updates.jsonl` without scanning every session.
+            let folder_cwd = dir.and_then(Path::parent).and_then(xai_grok_config::decode_cwd_from_dirname);
+            match (&sid, home) {
+                (Some(sid), Some(home)) => grok_feed(sid, home, folder_cwd.as_deref()),
+                _ => Err(io::Error::other("not in a grok sessions directory")),
+            }
+        }
+        _ => claude_feed::convert(path, &row.id),
+    }
+}
+
+/// The ssh target (`user@host`) for a remote row's host label.
+fn target_of(row: &xai_grok_traces::SessionRow) -> Option<String> {
+    let host = row.host.as_deref()?;
+    xai_grok_traces::remote::hosts().into_iter().find(|t| xai_grok_traces::remote::label(t) == host)
+}
+
+/// A local file to convert: the row's own, or for a row from another machine a copy fetched over ssh (rsync) into the temp dir.
+/// A Claude transcript brings its `<session>/` folder too, for subagents and stored tool results.
+fn local_copy(row: &xai_grok_traces::SessionRow) -> io::Result<PathBuf> {
+    if row.host.is_none() {
+        return Ok(row.file_path.clone());
+    }
+    if matches!(row.source.as_str(), "grok" | "dpi") {
+        return Err(io::Error::other(format!("{} sessions from another machine don't open here yet", row.source)));
+    }
+    let target = target_of(row).ok_or_else(|| io::Error::other("no ssh target for this host in ~/.grok/traces/hosts"))?;
+    let host = row.host.clone().unwrap_or_default();
+    let dest = std::env::temp_dir().join("grok-traces-remote").join(&host).join(
+        row.file_path.parent().map(|p| p.to_string_lossy().trim_start_matches('/').replace('/', "_")).unwrap_or_default(),
+    );
+    std::fs::create_dir_all(&dest)?;
+    let remote = row.file_path.to_string_lossy().into_owned();
+    let mut srcs = vec![format!("{target}:{remote}")];
+    if row.source == "claude" {
+        srcs.push(format!("{target}:{}", row.file_path.with_extension("").to_string_lossy()));
+    }
+    let out = std::process::Command::new("rsync")
+        .args(["-a", "--timeout=8", "-e", "ssh -o BatchMode=yes -o ConnectTimeout=3"])
+        .args(&srcs)
+        .arg(format!("{}/", dest.display()))
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    let local = dest.join(row.file_path.file_name().unwrap_or_default());
+    // 23 = some sources missing (a Claude session with no folder): the transcript itself still arrived.
+    if !(out.status.success() || out.status.code() == Some(23) && local.exists()) {
+        return Err(io::Error::other(format!("{host} unreachable: {}", String::from_utf8_lossy(&out.stderr).trim())));
+    }
+    Ok(local)
+}
+
+fn report(app: &mut AppView, row: &xai_grok_traces::SessionRow, e: io::Error) {
+    if let Some(agent) = super::ctx::get_active_agent_mut(app)
+        && let Some(ActiveModal::Traces { state }) = agent.active_modal.as_mut()
+    {
+        state.status = Some(format!("can't open {}: {e}", row.title));
+    }
 }
 
 fn grok_feed(sid: &str, home: &Path, cwd: Option<&str>) -> io::Result<Vec<Fed>> {
@@ -144,6 +204,7 @@ fn open_feed_in(
     app: &mut AppView,
     session_id: String,
     row: xai_grok_traces::SessionRow,
+    local: PathBuf,
     feed: io::Result<Vec<Fed>>,
     standalone: bool,
 ) {
@@ -182,21 +243,165 @@ fn open_feed_in(
     }
     agent.begin_replay_window();
     agent.scrollback.begin_batch();
+    let live = row.status == xai_grok_traces::Status::Active;
+    let follow = live.then(|| Follow::new(&row, &local, &session_id, &events));
     for fed in events {
         super::super::acp_handler::handle(message(&session_id, fed), app);
     }
+    let ActiveView::Agent(view) = app.active_view else { return };
     let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     agent.scrollback.end_batch();
     agent.session.loading_replay = false;
+    *FOLLOW.lock().unwrap() = follow.map(|f| Follow { agent: view, ..f });
+    if live {
+        // Still running: its last calls stay open until their results land.
+        return;
+    }
     agent.scrollback.clear_running_clocks();
     agent.session.finish_turn(&mut agent.scrollback);
     agent.scrollback.finish_all_running();
     agent.mark_turn_finished(crate::app::cancel_latency::TurnEnd::Aborted);
 }
 
+/// The live session open in the read-only view. Each poll re-reads its transcript when the file grew and feeds what is new
+/// through the handler: events past `fed`, and calls fed as running that now have their result (the tracker updates those in place).
+struct Follow {
+    agent: AgentId,
+    session_id: String,
+    row: xai_grok_traces::SessionRow,
+    local: PathBuf,
+    fed: usize,
+    running: HashSet<String>,
+    size: u64,
+    /// A remote row: the copy refreshing in the background, and when the last one finished.
+    sync: Option<mpsc::Receiver<io::Result<PathBuf>>>,
+    synced_at: Instant,
+}
+
+static FOLLOW: Mutex<Option<Follow>> = Mutex::new(None);
+const REMOTE_SYNC_EVERY: Duration = Duration::from_secs(2);
+
+impl Follow {
+    fn new(row: &xai_grok_traces::SessionRow, local: &Path, session_id: &str, events: &[Fed]) -> Self {
+        Follow {
+            agent: AgentId(0),
+            session_id: session_id.to_string(),
+            row: row.clone(),
+            local: local.to_path_buf(),
+            fed: events.len(),
+            running: events.iter().filter_map(running_call).collect(),
+            size: watched_size(row, local),
+            sync: None,
+            synced_at: Instant::now(),
+        }
+    }
+}
+
+/// A tool call still waiting for its result.
+fn running_call(fed: &Fed) -> Option<String> {
+    match &fed.event {
+        Event::Acp(acp::SessionUpdate::ToolCall(tc))
+            if matches!(tc.status, acp::ToolCallStatus::Pending | acp::ToolCallStatus::InProgress) =>
+        {
+            Some(tc.tool_call_id.0.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn call_id(fed: &Fed) -> Option<String> {
+    match &fed.event {
+        Event::Acp(acp::SessionUpdate::ToolCall(tc)) => Some(tc.tool_call_id.0.to_string()),
+        _ => None,
+    }
+}
+
+/// Bytes of what the converter reads: the transcript, plus `updates.jsonl` beside a grok one.
+fn watched_size(row: &xai_grok_traces::SessionRow, local: &Path) -> u64 {
+    let len = |p: &Path| std::fs::metadata(p).map_or(0, |m| m.len());
+    let extra = if row.source == "grok" { local.parent().map_or(0, |d| len(&d.join("updates.jsonl"))) } else { 0 };
+    len(local) + extra
+}
+
+/// Whether a live session is open, so the app keeps polling.
+pub(crate) fn following() -> bool {
+    FOLLOW.lock().unwrap().is_some()
+}
+
+/// The app's traces poll while a live session is open: feed what the transcript gained. Returns whether to redraw.
+pub(crate) fn poll_follow(app: &mut AppView) -> bool {
+    let mut guard = FOLLOW.lock().unwrap();
+    let Some(f) = guard.as_mut() else { return false };
+    let bound = app.agents.get(&f.agent).and_then(|a| a.session.session_id.as_ref()).is_some_and(|s| *s.0 == *f.session_id);
+    if !bound {
+        *guard = None;
+        return false;
+    }
+    if app.active_view != ActiveView::Agent(f.agent) {
+        return false;
+    }
+    if f.row.host.is_some() {
+        match f.sync.as_ref().map(mpsc::Receiver::try_recv) {
+            None if f.synced_at.elapsed() >= REMOTE_SYNC_EVERY => {
+                let (tx, rx) = mpsc::channel();
+                let row = f.row.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(local_copy(&row));
+                });
+                f.sync = Some(rx);
+                return false;
+            }
+            Some(Ok(_)) | Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                f.sync = None;
+                f.synced_at = Instant::now();
+            }
+            _ => return false,
+        }
+    }
+    let size = watched_size(&f.row, &f.local);
+    if size == f.size {
+        return false;
+    }
+    f.size = size;
+    let Ok(events) = feed_for(&f.row, &f.local) else { return false };
+    let total = events.len();
+    let mut send = Vec::new();
+    for (i, fed) in events.into_iter().enumerate() {
+        let id = call_id(&fed);
+        let still = running_call(&fed).is_some();
+        if i >= f.fed {
+            if still && let Some(id) = &id {
+                f.running.insert(id.clone());
+            }
+            send.push(fed);
+        } else if !still && id.as_ref().is_some_and(|id| f.running.remove(id)) {
+            send.push(fed);
+        }
+    }
+    f.fed = total;
+    let session_id = f.session_id.clone();
+    drop(guard);
+    if send.is_empty() {
+        return false;
+    }
+    if let Some(agent) = super::ctx::get_active_agent_mut(app) {
+        agent.session.loading_replay = true;
+    }
+    for fed in send {
+        super::super::acp_handler::handle(message(&session_id, fed), app);
+    }
+    if let Some(agent) = super::ctx::get_active_agent_mut(app) {
+        agent.session.loading_replay = false;
+    }
+    true
+}
+
 /// Esc in the read-only view: put the sessions list back, on the session it was opened from when there is one.
 pub(crate) fn leave_view(app: &mut AppView) {
     let ActiveView::Agent(id) = app.active_view else { return };
+    if FOLLOW.lock().unwrap().as_ref().is_some_and(|f| f.agent == id) {
+        *FOLLOW.lock().unwrap() = None;
+    }
     let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     let Some(state) = agent.trace_return.take() else { return };
     if let Some(origin) = agent.trace_origin {

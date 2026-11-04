@@ -30,6 +30,8 @@ use crate::views::traces_payload::{self, Payload, Shape};
 
 pub(super) use super::traces_body::{pretty, INPUT_KEYS, TEXT_KEYS};
 
+mod board;
+mod board_data;
 mod standalone;
 
 pub const TITLE: &str = "Traces";
@@ -73,6 +75,8 @@ pub enum Mode {
     Live,
     /// `f` / Enter on a live row: one session's tail, ticked in process by a `Follower`.
     Follow,
+    /// The sessions board (`board.rs`): grok's Dashboard look, with views and density.
+    Board,
 }
 
 /// Which line editor has the keyboard, if any.
@@ -261,6 +265,9 @@ pub struct TracesModalState {
     live_pending: usize,
     live_at: Option<Instant>,
     local_host: String,
+    /// The sessions board, and whether it is the top screen.
+    board: board::Board,
+    board_home: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -546,11 +553,21 @@ impl TracesModalState {
             live_pending: 0,
             live_at: None,
             local_host: short_hostname(),
+            board: board::Board::new(false),
+            board_home: false,
         };
         s.watermark = s.index.as_ref().and_then(|i| i.receipts_watermark().ok()).unwrap_or(0);
         s.refresh();
         s.poll_live();
         s
+    }
+
+    /// The board as the top screen, with generated summaries on (`/traces` and `grok traces`).
+    pub fn with_board(mut self) -> Self {
+        self.board = board::Board::new(true);
+        self.board_home = true;
+        self.mode = Mode::Board;
+        self
     }
 
     /// Live mode, driven by the app's 1s poll while the modal is open. Returns whether to redraw.
@@ -606,6 +623,11 @@ impl TracesModalState {
         }
         if let Some(f) = &mut self.follow_view {
             redraw |= f.poll(now_ms);
+        }
+        if self.mode == Mode::Board {
+            self.poll_board(now_ms);
+            // Every poll: the live spinners and ages move.
+            redraw = true;
         }
         let Some(index) = &self.index else { return redraw };
         let mark = index.receipts_watermark().unwrap_or(self.watermark);
@@ -991,7 +1013,7 @@ impl TracesModalState {
     fn leave_follow(&mut self) {
         self.follow_view = None;
         self.follow_return = false;
-        self.mode = Mode::List;
+        self.mode = if self.board_home { Mode::Board } else { Mode::List };
     }
 
     /// Enter on the highlighted call: its full payload, back to the follow screen on Esc.
@@ -1080,6 +1102,8 @@ impl TracesModalState {
         } else {
             self.mode = if self.live_return {
                 Mode::Live
+            } else if self.board_home {
+                Mode::Board
             } else {
                 Mode::List
             };
@@ -3603,7 +3627,7 @@ impl TracesModalState {
                 let fold_x = list.x + TEXT_COL as u16 + (depth as u16) * MARK_W as u16;
                 column == fold_x && fold_x < list.x.saturating_add(list.width)
             }
-            Mode::Inspector | Mode::Live | Mode::Follow => false,
+            Mode::Inspector | Mode::Live | Mode::Follow | Mode::Board => false,
         }
     }
 
@@ -3611,7 +3635,7 @@ impl TracesModalState {
         match self.mode {
             Mode::List => self.selected = pos,
             Mode::Trajectory => self.goto(pos),
-            Mode::Inspector | Mode::Live | Mode::Follow => {}
+            Mode::Inspector | Mode::Live | Mode::Follow | Mode::Board => {}
         }
     }
 
@@ -3627,7 +3651,7 @@ impl TracesModalState {
                 let gaps = row_gaps(self, &heights, list.height as usize);
                 fit_rows(self.sel_pos(), &mut self.event_scroll, &heights, &gaps, list.height as usize);
             }
-            Mode::Inspector | Mode::Live | Mode::Follow => {}
+            Mode::Inspector | Mode::Live | Mode::Follow | Mode::Board => {}
         }
     }
 
@@ -3645,7 +3669,7 @@ impl TracesModalState {
                 self.reveal_selection();
                 if before == (self.sel_pos(), self.event_scroll) { InputOutcome::Unchanged } else { InputOutcome::Changed }
             }
-            Mode::Inspector | Mode::Live => InputOutcome::Unchanged,
+            Mode::Inspector | Mode::Live | Mode::Board => InputOutcome::Unchanged,
             Mode::Follow => {
                 let moved = self.follow_view.as_mut().is_some_and(|f| f.step(delta));
                 if moved { InputOutcome::Changed } else { InputOutcome::Unchanged }
@@ -3667,7 +3691,7 @@ impl TracesModalState {
         let already = match self.mode {
             Mode::List => hit.index == self.selected,
             Mode::Trajectory => hit.index == self.sel_pos(),
-            Mode::Inspector | Mode::Live | Mode::Follow => false,
+            Mode::Inspector | Mode::Live | Mode::Follow | Mode::Board => false,
         };
         if already {
             return handle_traces_key(self, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -3679,7 +3703,11 @@ impl TracesModalState {
 
 /// Esc in a sub-view or an editor is handled here; only the ledger's Esc closes the modal.
 pub fn wants_esc(state: &TracesModalState) -> bool {
-    state.typing != Typing::No || state.mode != Mode::List
+    match state.mode {
+        Mode::List => state.typing != Typing::No,
+        Mode::Board => state.typing != Typing::No || !state.query.is_empty(),
+        _ => true,
+    }
 }
 
 /// Mouse in the list and the trajectory. A click selects; a click on the selected row (a double-click)
@@ -3688,6 +3716,11 @@ pub fn wants_esc(state: &TracesModalState) -> bool {
 pub fn handle_traces_mouse(state: &mut TracesModalState, mouse: &MouseEvent) -> InputOutcome {
     match state.mode {
         Mode::Inspector => InputOutcome::Unchanged,
+        Mode::Board => match mouse.kind {
+            MouseEventKind::ScrollDown => board::board_wheel(state, true),
+            MouseEventKind::ScrollUp => board::board_wheel(state, false),
+            _ => InputOutcome::Unchanged,
+        },
         Mode::Follow => match mouse.kind {
             MouseEventKind::ScrollDown => state.wheel(WHEEL),
             MouseEventKind::ScrollUp => state.wheel(-WHEEL),
@@ -3780,8 +3813,12 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
     if matches!(key.code, KeyCode::Char(_)) && key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
         return InputOutcome::Unchanged;
     }
+    if state.mode == Mode::Board {
+        return board::board_key(state, key);
+    }
     let page = 10;
     match state.mode {
+        Mode::Board => unreachable!("handled above"),
         Mode::List => {
             let len = state.ledger.len();
             match key.code {
@@ -4252,6 +4289,7 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
             v.push(plain("Esc back"));
             v
         }
+        Mode::Board => Vec::new(),
     };
     for label in ["⇅ in/out", "E all", "</> more/less", "n noise", "x errors"] {
         if modal_window::shortcuts_rows_needed(&hints, width) <= 2 {
@@ -4264,6 +4302,9 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
 
 pub fn render_traces_modal(buf: &mut Buffer, full_area: Rect, state: &mut TracesModalState, compact: bool) {
     state.hit_list = None;
+    if state.mode == Mode::Board {
+        return board::render_board(buf, full_area, state);
+    }
     let theme = Theme::current();
     let sizing = ModalSizing { width_pct: 1.0, max_width: u16::MAX, min_width: 44, v_margin: 0, h_pad: 2, v_pad: 0, footer_lines: 2 }
         .with_compact(compact);
@@ -4283,6 +4324,7 @@ pub fn render_traces_modal(buf: &mut Buffer, full_area: Rect, state: &mut Traces
         return;
     }
     match state.mode {
+        Mode::Board => {}
         Mode::List => render_ledger(buf, content, state, &theme),
         Mode::Trajectory => render_trajectory(buf, content, state, &theme),
         Mode::Inspector => render_inspector(buf, content, state, &theme),

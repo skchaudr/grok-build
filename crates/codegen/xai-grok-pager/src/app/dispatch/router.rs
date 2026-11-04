@@ -1451,7 +1451,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                 .map_err(|e| tracing::warn!(%e, "traces: index open failed"))
                 .ok();
             agent.active_modal = Some(crate::views::modal::ActiveModal::Traces {
-                state: Box::new(crate::views::traces_modal::TracesModalState::open(index)),
+                state: Box::new(crate::views::traces_modal::TracesModalState::open(index).with_board()),
             });
             vec![Effect::ScanTraces { agent_id: id }]
         }
