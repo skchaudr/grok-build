@@ -7485,7 +7485,7 @@ mod tests {
         let mut state = TracesModalState::open_with_hosts(None, vec![]);
         state.clear_status();
         state.sessions = (0..n)
-            .map(|i| SessionRow { id: format!("s{i}"), title: format!("task {i}"), ..row("grok", "/h/x.jsonl") })
+            .map(|i| SessionRow { id: format!("s{i}"), title: format!("task {i}"), ..row("dsh", "/h/x.jsonl") })
             .collect();
         state.rebuild_ledger();
         state
@@ -7546,6 +7546,17 @@ mod tests {
         assert!(matches!(click_at(&mut state, 40, 5), InputOutcome::Changed));
         assert_eq!(state.mode, Mode::Trajectory);
         assert_eq!(state.session.as_ref().map(|s| s.id.as_str()), Some("s2"));
+    }
+
+    #[test]
+    fn second_click_on_a_past_grok_row_opens_it_read_only() {
+        let mut state = ledger_rows(6);
+        state.sessions[2].source = "grok".into();
+        state.rebuild_ledger();
+        let _ = paint_ledger(&mut state, 80, 12);
+        assert!(matches!(click_at(&mut state, 40, 5), InputOutcome::Changed));
+        let open = click_at(&mut state, 40, 5);
+        assert!(matches!(open, InputOutcome::Action(Action::TracesOpenGrok(r)) if r.id == "s2"));
     }
 
     #[test]
