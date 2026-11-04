@@ -1,0 +1,55 @@
+[48;2;47;48;54m  [38;2;197;201;199mtraces [38;2;117;121;127msab-mini + sab-air[39m                                                                                                                                       [38;2;137;146;167m⁙[38;2;117;121;127m 3 live[38;2;93;96;102m │ [38;2;117;121;127m◇ 582 ended[38;2;93;96;102m │ [38;2;196;116;110m◆[38;2;117;121;127m 22 failed[39m
+
+  [38;2;197;201;199mLive and recent[38;2;67;70;78m │ [38;2;197;201;199mLongest[38;2;67;70;78m │ [38;2;197;201;199mFailed[38;2;67;70;78m │ [38;2;197;201;199mBy project[38;2;67;70;78m │ [1m[38;2;197;201;199mBy harness[0m[48;2;47;48;54m                                                                                                                             [38;2;117;121;127mComfortable[39m
+
+  [1m[38;2;117;121;127m▾ Claude[0m[38;2;117;121;127m[48;2;47;48;54m 85 [38;2;67;70;78m─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────█
+[38;2;47;48;54m[48;2;67;70;78m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[39m[48;2;47;48;54m
+[48;2;67;70;78m [1m[38;2;197;201;199m▏[0m[38;2;137;146;167m[48;2;67;70;78m⁙[39m [1m[38;2;197;201;199mFirstmate orchestration workflow scripts[0m[38;2;117;121;127m[48;2;67;70;78m · Claude · grok-build[39m                                                                                                                   [38;2;117;121;127mSubagents 75 · 1m[39m [48;2;47;48;54m
+[48;2;67;70;78m [1m[38;2;197;201;199m▏[0m[48;2;67;70;78m  [38;2;197;201;199mThe test mod is written and passes the engine's validation. It does three things: - Records the id o…[39m                                                                                              [48;2;47;48;54m
+[38;2;67;70;78m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mDurable Pi vs Hermes for agents[38;2;117;121;127m · Claude · pi-durable-lab · sab-air[39m                                                                                                              [38;2;117;121;127mSubagents 8 · 22m[39m
+    [38;2;117;121;127mSession ended at a suggestion to reuse dpi's durable heartbeat instead of building one; no code change confirmed yet.[39m
+
+  [38;2;137;146;167m⁙[39m [38;2;197;201;199m(no prompt) · MyGraph[38;2;117;121;127m · Claude · MyGraph · sab-air[39m                                                                                                                                              [38;2;117;121;127m6h[39m
+    [38;2;117;121;127mWorking[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mReviewer's paradox in workflow scripts[38;2;117;121;127m · Claude · sab-orchestrate · sab-air[39m                                                                                                                     [38;2;117;121;127m6h[39m
+    [38;2;117;121;127mSession stalled after one Bash error while checking skills and daily-memory files, with the workflow fix still open.[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mCurrent git checkout status[38;2;117;121;127m · Claude · .claude · sab-air[39m                                                                                                                                       [38;2;117;121;127m10h[39m
+    [38;2;117;121;127mSession stalled on a git status check; the folder isn't a git repo, and the last event was about Ghostty clipboard access.[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mGrok build traces and trace-deck progress[38;2;117;121;127m · Claude · grok-build[39m                                                                                                                 [38;2;117;121;127mSubagents 44 · 10h[39m
+    [38;2;117;121;127mFleet spec committed and pushed with control surface added; product grounding still incomplete.[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mclaude code denylist hooks[38;2;117;121;127m · Claude · grok-build[39m                                                                                                                                 [38;2;117;121;127mSubagents 1 · 11h[39m
+    [38;2;117;121;127mAdded an `ask` rule for Workflow in global settings; you rejected a workflow run, and the reload-behavior docs check is still pending.[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mComparing ICM and OKF workflows[38;2;117;121;127m · Claude · MyGraph · sab-air[39m                                                                                                                    [38;2;117;121;127mSubagents 97 · 12h[39m
+    [38;2;117;121;127mBatch 1 shipped and pushed; `mygraph_ask` is ready, but 74 errors went unresolved.[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mWater and Stone consultation requests[38;2;117;121;127m · Claude · aqua-stone-studio · sab-air[39m                                                                                                                    [38;2;117;121;127m1d[39m
+    [38;2;117;121;127mThe session ended with the toolbar fixed to follow the selected piece, verified on the live preview at phone width.[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199muserpromptsubmit hooks config[38;2;117;121;127m · Claude · views[39m                                                                                                                                                  [38;2;117;121;127m1d[39m
+    [38;2;117;121;127mListed the prompt-submit hooks from settings; the user's complaint remains unfixed.[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mFirstmate orchestration workflow scripts[38;2;117;121;127m · Claude · grok-build[39m                                                                                                                   [38;2;117;121;127mSubagents 20 · 1d[39m
+    [38;2;117;121;127mThe session was investigating the traces view's expand and navigation behavior, and it ends unresolved, with the user asking what the original was supposed to do.[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199m(no prompt) · WATER_AND_STONE_WORKSPACE[38;2;117;121;127m · Claude · WATER_AND_STONE_WORKSPACE · sab-air[39m                                                                                                          [38;2;117;121;127m1d[39m
+    [38;2;117;121;127mTool[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mBenzi trial handoff 011[38;2;117;121;127m · Claude · aa-cli · sab-air[39m                                                                                                                                             [38;2;117;121;127m1d[39m
+    [38;2;117;121;127mThe 10,000-token run is in `.handoffs/014-graphify-class-queries.md`, verbatim (7c87eae, pushed). Th…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mOk[38;2;117;121;127m · Claude · tmp · sab-air[39m                                                                                                                                                                     [38;2;117;121;127m2d[39m
+    [38;2;117;121;127mok[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mOk reply[38;2;117;121;127m · Claude · tmp · sab-air[39m                                                                                                                                                               [38;2;117;121;127m2d[39m
+    [38;2;117;121;127mok[39m
+
+  [38;2;196;116;110m◆[39m [38;2;197;201;199mReply with just: LIVE-CHECK[38;2;117;121;127m · Claude · tmp · sab-air · [38;2;196;116;110mfailed[39m                                                                                                                                   [38;2;117;121;127m2d[39m
+    [38;2;117;121;127mNot logged in · Please run /login[39m
+
+  [1m[38;2;197;201;199mEnter[0m[38;2;117;121;127m[48;2;47;48;54m:follow[2m  │  [0;1m[38;2;197;201;199m[48;2;47;48;54me[0m[38;2;117;121;127m[48;2;47;48;54m:subagents[2m  │  [0;1m[38;2;197;201;199m[48;2;47;48;54mTab[0m[38;2;117;121;127m[48;2;47;48;54m:view[2m  │  [0;1m[38;2;197;201;199m[48;2;47;48;54mc[0m[38;2;117;121;127m[48;2;47;48;54m:compact                                                                                                                                             [39m

@@ -216,6 +216,9 @@ fn push_row<'a>(out: &mut Vec<Item<'a>>, d: &Dash, row: &'a SessionRow, depth: u
     let children = kids.get(&row.id).map(Vec::as_slice).unwrap_or(&[]);
     out.push(Item::Row { row, depth, kids: children.len().max(row.children as usize) });
     if d.open.contains(&row.id) && depth < 6 {
+        // grok's Tasks order: running first, then newest.
+        let mut children: Vec<&SessionRow> = children.iter().collect();
+        children.sort_by_key(|c| (!running(c, kids), std::cmp::Reverse(last_at(c))));
         for c in children {
             push_row(out, d, c, depth + 1, kids);
         }
@@ -281,12 +284,18 @@ impl TracesModalState {
 
     /// The newest ended roots without a current summary go to the `claude -p` workers, at most [`MAX_SUMMARIES`] per run.
     fn queue_summaries(&self, d: &mut Dash) {
+        // Wait for the other machines' rows, so the newest sessions are judged across all of them; never more than the cap.
+        let hosts_in = self.hosts.iter().all(|h| self.remote_rows.contains_key(h) || self.remote_err.contains_key(h));
+        if !hosts_in || d.asked.len() >= MAX_SUMMARIES {
+            return;
+        }
         let mut ended: Vec<&SessionRow> = self.shown_roots.iter().filter(|r| !running(r, &self.shown_children)).collect();
         ended.sort_by_key(|r| std::cmp::Reverse(last_at(r)));
         let want: Vec<&SessionRow> = ended
             .into_iter()
             .take(MAX_SUMMARIES)
             .filter(|r| !d.asked.contains(&r.id) && d.summaries.get(&r.id).is_none_or(|s| s.events != r.event_count))
+            .take(MAX_SUMMARIES - d.asked.len())
             .collect();
         if want.is_empty() {
             return;
@@ -405,7 +414,7 @@ fn dash_key(state: &mut TracesModalState, d: &mut Dash, key: &KeyEvent) -> Optio
         d.sel_key = items.get(d.sel).map(Item::key);
     };
     match key.code {
-        KeyCode::Char('g') if ctrl => d.view = d.view.step(1),
+        KeyCode::Char('g') if ctrl => set_view(d, d.view.step(1)),
         _ if ctrl => return None,
         KeyCode::Char('j') | KeyCode::Down => moved(d, sel + 1),
         KeyCode::Char('k') | KeyCode::Up => moved(d, sel.saturating_sub(1)),
@@ -413,8 +422,8 @@ fn dash_key(state: &mut TracesModalState, d: &mut Dash, key: &KeyEvent) -> Optio
         KeyCode::PageUp => moved(d, sel.saturating_sub(10)),
         KeyCode::Char('g') | KeyCode::Home => moved(d, 0),
         KeyCode::Char('G') | KeyCode::End => moved(d, len),
-        KeyCode::Tab => d.view = d.view.step(1),
-        KeyCode::BackTab => d.view = d.view.step(-1),
+        KeyCode::Tab => set_view(d, d.view.step(1)),
+        KeyCode::BackTab => set_view(d, d.view.step(-1)),
         KeyCode::Char('c') => d.compact = !d.compact,
         KeyCode::Char('e') | KeyCode::Char(' ') | KeyCode::Right | KeyCode::Char('l') | KeyCode::Left | KeyCode::Char('h') => {
             let expand = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
@@ -455,6 +464,12 @@ fn dash_key(state: &mut TracesModalState, d: &mut Dash, key: &KeyEvent) -> Optio
     Some(InputOutcome::Changed)
 }
 
+fn set_view(d: &mut Dash, v: View) {
+    d.view = v;
+    d.sel_key = None;
+    d.scroll = 0;
+}
+
 fn toggle(set: &mut HashSet<String>, k: &str) {
     if !set.remove(k) {
         set.insert(k.to_string());
@@ -493,6 +508,7 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, state: &mut TracesModalState)
 
 fn draw(buf: &mut Buffer, area: Rect, state: &TracesModalState, d: &mut Dash) {
     let theme = Theme::current();
+    ratatui::widgets::Clear.render(area, buf);
     buf.set_style(area, Style::default().bg(theme.bg_base));
     if area.height < 6 || area.width < 30 {
         return;
@@ -501,11 +517,14 @@ fn draw(buf: &mut Buffer, area: Rect, state: &TracesModalState, d: &mut Dash) {
     let pad = 2u16;
     let inner = Rect { x: area.x + pad, width: area.width.saturating_sub(pad * 2), ..area };
     let items = build(d, &state.shown_roots, &state.shown_children);
-    // Selection follows its row across refreshes and view changes; otherwise it stays put.
-    if let Some(k) = &d.sel_key
-        && let Some(i) = items.iter().position(|it| it.key() == *k)
-    {
-        d.sel = i;
+    // Selection follows its row across refreshes; a new view (or the first draw) starts on its first session.
+    match &d.sel_key {
+        Some(k) => {
+            if let Some(i) = items.iter().position(|it| it.key() == *k) {
+                d.sel = i;
+            }
+        }
+        None => d.sel = items.iter().position(|it| matches!(it, Item::Row { .. })).unwrap_or(0),
     }
     d.sel = d.sel.min(items.len().saturating_sub(1));
     d.sel_key = items.get(d.sel).map(Item::key);

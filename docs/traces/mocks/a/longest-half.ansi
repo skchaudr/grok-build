@@ -1,0 +1,55 @@
+[48;2;47;48;54m  [38;2;197;201;199mtraces [38;2;117;121;127msab-mini + sab-air[39m                                 [38;2;137;146;167m:[38;2;117;121;127m 4 live[38;2;93;96;102m │ [38;2;117;121;127m◇ 582 ended[38;2;93;96;102m │ [38;2;196;116;110m◆[38;2;117;121;127m 22 failed[39m
+
+  [38;2;197;201;199mLive and recent[38;2;67;70;78m │ [1m[38;2;197;201;199mLongest[0m[38;2;67;70;78m[48;2;47;48;54m │ [38;2;197;201;199mFailed[38;2;67;70;78m │ [38;2;197;201;199mBy project[38;2;67;70;78m │ [38;2;197;201;199mBy harness[39m                       [38;2;117;121;127mComfortable[39m
+
+  [1m[38;2;117;121;127m▾ Longest active time[0m[38;2;117;121;127m[48;2;47;48;54m 586 [38;2;67;70;78m─────────────────────────────────────────────────────────────────────█
+[38;2;47;48;54m[48;2;67;70;78m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[39m[48;2;47;48;54m
+[48;2;67;70;78m [1m[38;2;197;201;199m▏[0m[38;2;117;121;127m[48;2;67;70;78m◇[39m [1m[38;2;197;201;199mRead @.handoffs/001-product-design-pre-sprint.md[0m[38;2;117;121;127m[48;2;67;70;78m · DeepSeek · MyGraph[39m     [38;2;117;121;127m8h26m active · 1mo[39m [48;2;47;48;54m
+[48;2;67;70;78m [1m[38;2;197;201;199m▏[0m[48;2;67;70;78m  [38;2;197;201;199mTodoWrite[39m                                                                                    [48;2;47;48;54m
+[38;2;67;70;78m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mGrok build traces and trace-deck progress[38;2;117;121;127m · Claude · gro…[39m  [38;2;117;121;127mSubagents 44 · 7h00m active · 10h[39m
+    [38;2;117;121;127mFleet spec committed and pushed with control surface added; product grounding still incompl…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mTraces packet on Mini[38;2;117;121;127m · Claude · grok-build[39m                [38;2;117;121;127mSubagents 49 · 6h43m active · 13d[39m
+    [38;2;117;121;127mYou already have one pathway, and it's now the same on the Air and the Mini. Bare `grok` is…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mGrok Build custom fork lead[38;2;117;121;127m · Claude · grok-build[39m          [38;2;117;121;127mSubagents 89 · 4h55m active · 10d[39m
+    [38;2;117;121;127mYou're right, it's in this session, and my earlier search was broken (the filter threw out …[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mUse runtime worktree for Droid planning[38;2;117;121;127m · OMP · gddp-run…[39m  [38;2;117;121;127mSubagents 24 · 3h59m active · 3mo[39m
+    [38;2;117;121;127mWritten: `00 Inbox/daily_memory/omp-pi-20260721-1253.md` — includes the separate fixer attr…[39m
+
+  [38;2;137;146;167m:[39m [38;2;197;201;199mFirstmate orchestration workflow scripts[38;2;117;121;127m · Claude · grok-…[39m  [38;2;117;121;127mSubagents 75 · 3h20m active · 3m[39m
+    [38;2;117;121;127mThe test mod is written and passes the engine's validation. It does three things: - Records…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mLook at the recent git history and the filesystem and grok…[39m  [38;2;117;121;127mSubagents 1 · 2h10m active · 2d[39m
+    [38;2;117;121;127mTraces-follow spike review found two verified blockers, so the uncommitted fix isn't ready …[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mBRIEF-workflow-review[38;2;117;121;127m · Claude · grok-build[39m                  [38;2;117;121;127mSubagents 3 · 1h51m active · 8d[39m
+    [38;2;117;121;127mPi review ended with failure notes recorded; grok-build main is 4 commits ahead, unpushed, …[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mFirstmate orchestration workflow scripts[38;2;117;121;127m · Claude · grok-…[39m  [38;2;117;121;127mSubagents 20 · 1h33m active · 1d[39m
+    [38;2;117;121;127mThe session was investigating the traces view's expand and navigation behavior, and it ends…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mVision board spec redispatch[38;2;117;121;127m · Claude · aqua-stone-studio[39m                 [38;2;117;121;127m1h32m active · 11d[39m
+    [38;2;117;121;127mI wrote handoff 097, and it's committed and pushed. It holds the plan word for word and mar…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mbin/cell changes versus Fable's version[38;2;117;121;127m · Claude · sab-orchestrate[39m        [38;2;117;121;127m1h18m active · 10d[39m
+    [38;2;117;121;127mAgreed. An interactive session is the thing that wrote "Haiku is lead" into CLAUDE.md, the …[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mBb-into-traces fleet dispatch[38;2;117;121;127m · Claude · sab-orchestrate[39m    [38;2;117;121;127mSubagents 1 · 1h00m active · 10d[39m
+    [38;2;117;121;127mThen run these plans through the packet lane. It already does the whole chain with nobody w…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mBb vs Firstmate vs Pi workflows[38;2;117;121;127m · Claude · sab-orchestrate[39m    [38;2;117;121;127mSubagents 8 · 53m active · 10d[39m
+    [38;2;117;121;127mThe reconciliation is in the data from yesterday: the long sessions did not keep their cont…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mRebuild Graphify with DeepSeek backend[38;2;117;121;127m · OMP · .omp[39m           [38;2;117;121;127mSubagents 6 · 50m active · 3mo[39m
+    [38;2;117;121;127mThat's fair — I assumed "simple question = any model works" but you're seeing real quality …[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mCockpit TUI usability audit[38;2;117;121;127m · Claude · hub-rs[39m                 [38;2;117;121;127mSubagents 1 · 43m active · 13d[39m
+    [38;2;117;121;127mDone and pushed as `e5f5146`. You did say it, I had it filed as undecided. Fixed now. The b…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mSitrep[38;2;117;121;127m · dpi · dpi-work[39m                                       [38;2;117;121;127mSubagents 15 · 43m active · 6d[39m
+    [38;2;117;121;127mDurable Telegram bot launched; waiting on a test message to confirm replies.[39m
+
+  [1m[38;2;197;201;199mEnter[0m[38;2;117;121;127m[48;2;47;48;54m:open[2m  │  [0;1m[38;2;197;201;199m[48;2;47;48;54mTab[0m[38;2;117;121;127m[48;2;47;48;54m:view[2m  │  [0;1m[38;2;197;201;199m[48;2;47;48;54mc[0m[38;2;117;121;127m[48;2;47;48;54m:compact                                                         [39m

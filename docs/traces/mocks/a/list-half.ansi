@@ -1,0 +1,55 @@
+[48;2;47;48;54m  [38;2;197;201;199mtraces [38;2;117;121;127msab-mini + sab-air[38;2;196;178;138m · indexed 114 changed file…[39m     [38;2;137;146;167m⋅[38;2;117;121;127m 4 live[38;2;93;96;102m │ [38;2;117;121;127m◇ 582 ended[38;2;93;96;102m │ [38;2;196;116;110m◆[38;2;117;121;127m 22 failed[39m
+
+  [1m[38;2;197;201;199mLive and recent[0m[38;2;67;70;78m[48;2;47;48;54m │ [38;2;197;201;199mLongest[38;2;67;70;78m │ [38;2;197;201;199mFailed[38;2;67;70;78m │ [38;2;197;201;199mBy project[38;2;67;70;78m │ [38;2;197;201;199mBy harness[39m                       [38;2;117;121;127mComfortable[39m
+
+  [1m[38;2;117;121;127m▾ Live[0m[38;2;117;121;127m[48;2;47;48;54m 4 [38;2;67;70;78m──────────────────────────────────────────────────────────────────────────────────────█
+[39m
+  [38;2;137;146;167m⋅[39m [38;2;197;201;199m(no prompt) · MyGraph[38;2;117;121;127m · Claude · MyGraph · sab-air[39m                                        [38;2;117;121;127m1m[39m
+    [38;2;117;121;127mWorking[39m
+[38;2;47;48;54m[48;2;67;70;78m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[39m[48;2;47;48;54m
+[48;2;67;70;78m [1m[38;2;197;201;199m▏[0m[38;2;137;146;167m[48;2;67;70;78m⋅[39m [1m[38;2;197;201;199mFirstmate orchestration workflow scripts[0m[38;2;117;121;127m[48;2;67;70;78m · Claude · grok-build[39m             [38;2;117;121;127mSubagents 75 · 3m[39m [48;2;47;48;54m
+[48;2;67;70;78m [1m[38;2;197;201;199m▏[0m[48;2;67;70;78m  [38;2;197;201;199mThe test mod is written and passes the engine's validation. It does three things: - Records…[39m [48;2;47;48;54m
+[38;2;67;70;78m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[39m
+  [38;2;137;146;167m⋅[39m [38;2;197;201;199mSo I'm about to start making some moves towards ensuring my graph is turning into an ac…[39m  [38;2;117;121;127m2h[39m
+    [38;2;117;121;127mgrep: validate_objects|python3 tools/mygraph[39m
+
+  [38;2;137;146;167m⋅[39m [38;2;197;201;199m(no prompt) · MyGraph[38;2;117;121;127m · Claude · MyGraph · sab-air[39m                                        [38;2;117;121;127m6h[39m
+    [38;2;117;121;127mWorking[39m
+
+  [1m[38;2;117;121;127m▾ Recent[0m[38;2;117;121;127m[48;2;47;48;54m 582 [38;2;67;70;78m──────────────────────────────────────────────────────────────────────────────────[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mDurable Pi vs Hermes for agents[38;2;117;121;127m · Claude · pi-durable-lab · sab-air[39m        [38;2;117;121;127mSubagents 8 · 23m[39m
+    [38;2;117;121;127mSession ended at a suggestion to reuse dpi's durable heartbeat instead of building one; no …[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mn/grok-fork traces[38;2;117;121;127m · Grok · tmp[39m                                                           [38;2;117;121;127m1h[39m
+    [38;2;117;121;127mStuck locating n/grok-fork traces: path missing, recursive ls blocked, index lookup pending.[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mReviewer's paradox in workflow scripts[38;2;117;121;127m · Claude · sab-orchestrate · sab-air[39m               [38;2;117;121;127m6h[39m
+    [38;2;117;121;127mSession stalled after one Bash error while checking skills and daily-memory files, with the…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mI am in rex and there are images on this headless machine andI wanted to find out if th…[39m  [38;2;117;121;127m7h[39m
+    [38;2;117;121;127mPNGs copied to sab-air's docs/artifacts, but Rex rendering on the headless sab-mini remains…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mOrchestration Catalog in this repo is based off of cd ~/repos/sab-orchestrate/ and off …[39m  [38;2;117;121;127m7h[39m
+    [38;2;117;121;127mThe session ended with the catalog adding a "Two watchers" section, though one OSC 7501 rep…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199m52 directories[38;2;117;121;127m · Grok · repos · sab-air[39m                                                   [38;2;117;121;127m9h[39m
+    [38;2;117;121;127mSession ended with `j`, `dj`, and `djs` working again; the quote is in today's daily note.[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mCurrent git checkout status[38;2;117;121;127m · Claude · .claude · sab-air[39m                                 [38;2;117;121;127m10h[39m
+    [38;2;117;121;127mSession stalled on a git status check; the folder isn't a git repo, and the last event was …[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mGrok build traces and trace-deck progress[38;2;117;121;127m · Claude · grok-build[39m           [38;2;117;121;127mSubagents 44 · 10h[39m
+    [38;2;117;121;127mFleet spec committed and pushed with control surface added; product grounding still incompl…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mclaude code denylist hooks[38;2;117;121;127m · Claude · grok-build[39m                           [38;2;117;121;127mSubagents 1 · 11h[39m
+    [38;2;117;121;127mAdded an `ask` rule for Workflow in global settings; you rejected a workflow run, and the r…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mReview spec product in this repo - And then explain to me what the build would look li…[39m  [38;2;117;121;127m12h[39m
+    [38;2;117;121;127mSpec review is done and past-session integration is fixed; the first installed visual check…[39m
+
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mComparing ICM and OKF workflows[38;2;117;121;127m · Claude · MyGraph · sab-air[39m              [38;2;117;121;127mSubagents 97 · 12h[39m
+    [38;2;117;121;127mBatch 1 shipped and pushed; `mygraph_ask` is ready, but 74 errors went unresolved.[39m
+
+
+  [1m[38;2;197;201;199mEnter[0m[38;2;117;121;127m[48;2;47;48;54m:follow[2m  │  [0;1m[38;2;197;201;199m[48;2;47;48;54me[0m[38;2;117;121;127m[48;2;47;48;54m:subagents[2m  │  [0;1m[38;2;197;201;199m[48;2;47;48;54mTab[0m[38;2;117;121;127m[48;2;47;48;54m:view[2m  │  [0;1m[38;2;197;201;199m[48;2;47;48;54mc[0m[38;2;117;121;127m[48;2;47;48;54m:compact                                       [39m

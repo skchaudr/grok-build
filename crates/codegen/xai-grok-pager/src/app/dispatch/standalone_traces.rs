@@ -152,11 +152,25 @@ pub(crate) struct TraceFollow {
     session_id: String,
     len: u64,
     sent: usize,
-    pending: Vec<usize>,
+    /// Ids of calls sent while still running.
+    pending: std::collections::HashSet<String>,
 }
 
-fn is_pending(fed: &Fed) -> bool {
-    matches!(&fed.event, Event::Acp(acp::SessionUpdate::ToolCall(tc)) if matches!(tc.status, acp::ToolCallStatus::Pending | acp::ToolCallStatus::InProgress))
+/// The id of a call that has not finished yet.
+fn pending_id(fed: &Fed) -> Option<String> {
+    match &fed.event {
+        Event::Acp(acp::SessionUpdate::ToolCall(tc)) if matches!(tc.status, acp::ToolCallStatus::Pending | acp::ToolCallStatus::InProgress) => {
+            Some(tc.tool_call_id.0.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn call_id(fed: &Fed) -> Option<String> {
+    match &fed.event {
+        Event::Acp(acp::SessionUpdate::ToolCall(tc)) => Some(tc.tool_call_id.0.to_string()),
+        _ => None,
+    }
 }
 
 fn file_len(row: &xai_grok_traces::SessionRow) -> u64 {
@@ -177,39 +191,41 @@ pub(crate) fn poll_follow(app: &mut AppView) -> bool {
         return false;
     };
     follow.len = len;
-    let mut still = Vec::new();
+    let total = events.len();
     let mut out = Vec::new();
-    let mut events: Vec<Option<Fed>> = events.into_iter().map(Some).collect();
-    for &i in &follow.pending {
-        if let Some(fed) = events.get_mut(i).and_then(Option::take) {
-            if is_pending(&fed) {
-                still.push(i);
-            } else {
-                out.push(fed);
-            }
+    for (i, fed) in events.into_iter().enumerate() {
+        let id = call_id(&fed);
+        let was_pending = id.as_ref().is_some_and(|id| follow.pending.contains(id));
+        // A call sent while running goes again (an upsert) once it has finished; everything past what was sent is new.
+        if i < follow.sent && !(was_pending && pending_id(&fed).is_none()) {
+            continue;
         }
-    }
-    for (i, fed) in events.iter_mut().enumerate().skip(follow.sent) {
-        if let Some(fed) = fed.take() {
-            if is_pending(&fed) {
-                still.push(i);
+        match (pending_id(&fed), id) {
+            (Some(p), _) => {
+                follow.pending.insert(p);
             }
-            out.push(fed);
+            (None, Some(id)) => {
+                follow.pending.remove(&id);
+            }
+            _ => {}
         }
+        out.push(fed);
     }
-    follow.sent = follow.sent.max(events.len());
-    follow.pending = still;
+    follow.sent = follow.sent.max(total);
     let sid = follow.session_id.clone();
     agent.trace_follow = Some(follow);
     if out.is_empty() {
         return false;
     }
+    // The converter marks its events as replay; the handler takes those only inside a load window.
+    agent.session.loading_replay = true;
     agent.scrollback.begin_batch();
     for fed in out {
         super::super::acp_handler::handle(message(&sid, fed), app);
     }
     if let Some(agent) = super::ctx::get_active_agent_mut(app) {
         agent.scrollback.end_batch();
+        agent.session.loading_replay = false;
     }
     true
 }
@@ -309,7 +325,7 @@ fn open_feed_in(
     let follow = live.then(|| TraceFollow {
         len: file_len(&row),
         sent: events.len(),
-        pending: events.iter().enumerate().filter(|(_, f)| is_pending(f)).map(|(i, _)| i).collect(),
+        pending: events.iter().filter_map(pending_id).collect(),
         session_id: session_id.clone(),
         row: row.clone(),
     });

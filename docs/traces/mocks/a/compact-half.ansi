@@ -1,0 +1,55 @@
+[48;2;47;48;54m  [38;2;197;201;199mtraces [38;2;117;121;127msab-mini + sab-air[39m                                 [38;2;137;146;167m:[38;2;117;121;127m 4 live[38;2;93;96;102m │ [38;2;117;121;127m◇ 582 ended[38;2;93;96;102m │ [38;2;196;116;110m◆[38;2;117;121;127m 22 failed[39m
+
+  [1m[38;2;197;201;199mLive and recent[0m[38;2;67;70;78m[48;2;47;48;54m │ [38;2;197;201;199mLongest[38;2;67;70;78m │ [38;2;197;201;199mFailed[38;2;67;70;78m │ [38;2;197;201;199mBy project[38;2;67;70;78m │ [38;2;197;201;199mBy harness[39m                           [38;2;117;121;127mCompact[39m
+
+  [1m[38;2;117;121;127m▾ Live[0m[38;2;117;121;127m[48;2;47;48;54m 4 [38;2;67;70;78m──────────────────────────────────────────────────────────────────────────────────────█
+[39m  [38;2;137;146;167m:[39m [38;2;197;201;199m(no prompt) · MyGraph[38;2;117;121;127m · Claude · MyGraph · sab-air[39m                                        [38;2;117;121;127m1m[39m [38;2;67;70;78m█
+[39m[48;2;67;70;78m [1m[38;2;197;201;199m▏[0m[38;2;137;146;167m[48;2;67;70;78m:[39m [1m[38;2;197;201;199mFirstmate orchestration workflow scripts[0m[38;2;117;121;127m[48;2;67;70;78m · Claude · grok-build[39m             [38;2;117;121;127mSubagents 75 · 3m[39m [38;2;67;70;78m[48;2;47;48;54m█
+[39m  [38;2;137;146;167m:[39m [38;2;197;201;199mSo I'm about to start making some moves towards ensuring my graph is turning into an ac…[39m  [38;2;117;121;127m2h[39m [38;2;67;70;78m█
+[39m  [38;2;137;146;167m:[39m [38;2;197;201;199m(no prompt) · MyGraph[38;2;117;121;127m · Claude · MyGraph · sab-air[39m                                        [38;2;117;121;127m6h[39m
+  [1m[38;2;117;121;127m▾ Recent[0m[38;2;117;121;127m[48;2;47;48;54m 582 [38;2;67;70;78m──────────────────────────────────────────────────────────────────────────────────[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mDurable Pi vs Hermes for agents[38;2;117;121;127m · Claude · pi-durable-lab · sab-air[39m        [38;2;117;121;127mSubagents 8 · 23m[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mn/grok-fork traces[38;2;117;121;127m · Grok · tmp[39m                                                           [38;2;117;121;127m1h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mReviewer's paradox in workflow scripts[38;2;117;121;127m · Claude · sab-orchestrate · sab-air[39m               [38;2;117;121;127m6h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mI am in rex and there are images on this headless machine andI wanted to find out if th…[39m  [38;2;117;121;127m7h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mOrchestration Catalog in this repo is based off of cd ~/repos/sab-orchestrate/ and off …[39m  [38;2;117;121;127m7h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199m52 directories[38;2;117;121;127m · Grok · repos · sab-air[39m                                                   [38;2;117;121;127m9h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mCurrent git checkout status[38;2;117;121;127m · Claude · .claude · sab-air[39m                                 [38;2;117;121;127m10h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mGrok build traces and trace-deck progress[38;2;117;121;127m · Claude · grok-build[39m           [38;2;117;121;127mSubagents 44 · 10h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mclaude code denylist hooks[38;2;117;121;127m · Claude · grok-build[39m                           [38;2;117;121;127mSubagents 1 · 11h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mReview spec product in this repo - And then explain to me what the build would look li…[39m  [38;2;117;121;127m12h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mComparing ICM and OKF workflows[38;2;117;121;127m · Claude · MyGraph · sab-air[39m              [38;2;117;121;127mSubagents 97 · 12h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mBtw for the longer line ones can we bake in a two liner so im not constantly pushed to…[39m  [38;2;117;121;127m16h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mFor .dotfiles or local zsh, there are `ssp 1` up to 10 I think? All the colors are hea…[39m  [38;2;117;121;127m16h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mright now I am annoyed that Zed tasks do not work, like git status for the center term…[39m  [38;2;117;121;127m16h[39m
+  [38;2;196;116;110m◆[39m [38;2;197;201;199mMyGraph 11-03 11:37[38;2;117;121;127m · dpi · dpi-work · [38;2;196;116;110mfailed[39m                                            [38;2;117;121;127m16h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mI am trying to understand the angle I should take with this project still; the early b…[39m  [38;2;117;121;127m16h[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mTesting[38;2;117;121;127m · Pi · SSD · sab-air[39m                                                              [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mcan you find the grok build fork on the SSD and then scan how traces is rendered and pr…[39m  [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mFor sure in the center since I am moving my workspace to that, the botooooom dock si pp…[39m  [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mWater and Stone consultation requests[38;2;117;121;127m · Claude · aqua-stone-studio · sab-air[39m              [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mI'll check your Zed tasks and keymap config first.[38;2;117;121;127m · Grok · sab-orchestrate · sab-air[39m     [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mflashcards/code/bash[38;2;117;121;127m · Pi · SSD · sab-air[39m                                                 [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199m@Water-and-Stone-Designers-Architects-Contractors.xlsx For each individua…[39m  [38;2;117;121;127mSubagents 5 · 1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199m(no prompt) · water-and-stone-private[38;2;117;121;127m · Grok · water-and-stone-private · sab-air[39m          [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199m(no prompt) · sab-orchestrate[38;2;117;121;127m · OMP · sab-orchestrate · sab-air[39m                           [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mgrokpi-shim-test[38;2;117;121;127m · dpi · dpi-work · sab-air[39m                                               [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199muserpromptsubmit hooks config[38;2;117;121;127m · Claude · views[39m                                            [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mFirstmate orchestration workflow scripts[38;2;117;121;127m · Claude · grok-build[39m             [38;2;117;121;127mSubagents 20 · 1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mSo this vision board is still in preview mode. First and foremost, the old version of a…[39m  [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mHello can you help me review web analytics and consultation requests for the website as…[39m  [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199m(no prompt) · WATER_AND_STONE_WORKSPACE[38;2;117;121;127m · Claude · WATER_AND_STONE_WORKSPACE · sab-air[39m    [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mBenzi trial handoff 011[38;2;117;121;127m · Claude · aa-cli · sab-air[39m                                       [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mHey can you change my rex config so that the effort commands just get booted out, it is…[39m  [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199m(no prompt) · aa-cli[38;2;117;121;127m · DeepSeek · aa-cli · sab-air[39m                                        [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199m(no prompt) · frontend-masters-courses[38;2;117;121;127m · DeepSeek · frontend-masters-courses · sab-air[39m    [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mGrok-Leader Persistent Agent Interface[38;2;117;121;127m · DeepSeek · .dsh · sab-air[39m                        [38;2;117;121;127m1d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mRead this repo and find out how, like you have done before, to update and add in new ef…[39m  [38;2;117;121;127m2d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mTesting if this Anthropic key actually works[38;2;117;121;127m · Pi · pi-durable-lab · sab-air[39m              [38;2;117;121;127m2d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mLook at the recent git history and the filesystem and grok-build fork and…[39m  [38;2;117;121;127mSubagents 1 · 2d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mDurable[38;2;117;121;127m · dpi · dpi-work[39m                                                                  [38;2;117;121;127m2d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mWhen referencing notes in this vault, use [[Note Name]] wikilink syntax so they become …[39m  [38;2;117;121;127m2d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mOk[38;2;117;121;127m · Claude · tmp · sab-air[39m                                                               [38;2;117;121;127m2d[39m
+  [38;2;117;121;127m◇[39m [38;2;197;201;199mOk reply[38;2;117;121;127m · Claude · tmp · sab-air[39m                                                         [38;2;117;121;127m2d[39m
+
+  [1m[38;2;197;201;199mEnter[0m[38;2;117;121;127m[48;2;47;48;54m:follow[2m  │  [0;1m[38;2;197;201;199m[48;2;47;48;54me[0m[38;2;117;121;127m[48;2;47;48;54m:subagents[2m  │  [0;1m[38;2;197;201;199m[48;2;47;48;54mTab[0m[38;2;117;121;127m[48;2;47;48;54m:view[2m  │  [0;1m[38;2;197;201;199m[48;2;47;48;54mc[0m[38;2;117;121;127m[48;2;47;48;54m:comfortable                                   [39m
