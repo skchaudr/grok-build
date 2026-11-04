@@ -183,7 +183,7 @@ pub(crate) fn to_feds(session_id: &str, pieces: &[Piece]) -> Vec<Fed> {
                 (Event::Acp(acp::SessionUpdate::ToolCall(tc)), Some(*start_ms), None)
             }
             Piece::Fill { id, input, output } => {
-                let raw = input.as_deref().map(input_value);
+                let raw = input.as_deref().map(|s| input_value(Some(s)));
                 let content = output.as_deref().filter(|t| !t.is_empty()).map(|t| vec![claude_feed::text_content(t)]);
                 let fields = update_fields(acp::ToolCallStatus::InProgress, raw, content);
                 let upd = acp::ToolCallUpdate::new(acp::ToolCallId::new(Arc::from(id.as_str())), fields);
