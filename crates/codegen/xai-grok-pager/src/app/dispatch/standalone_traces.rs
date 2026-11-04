@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use agent_client_protocol as acp;
 use xai_acp_lib::AcpClientMessage;
 use xai_grok_shell::extensions::notification::SessionNotification;
-use xai_grok_shell::session::storage::{ReplayEmission, ReplayPathHint, ReplayedUpdate, stream_replay_updates_at_hinted};
+use xai_grok_shell::session::storage::{
+    ReplayEmission, ReplayLookupFallback, ReplayPathHint, ReplayedUpdate, stream_replay_updates_at_hinted,
+};
 
 use crate::acp::claude_feed::{self, Event, Fed};
 use crate::acp::pi_feed;
@@ -105,16 +107,23 @@ pub(crate) fn open_grok_in(app: &mut AppView, row: xai_grok_traces::SessionRow, 
     let home = dir
         .and_then(|d| d.ancestors().find(|a| a.file_name().is_some_and(|n| n == "sessions")))
         .and_then(Path::parent);
+    // The session folder's own cwd finds `updates.jsonl` without scanning every session.
+    let folder_cwd = dir.and_then(Path::parent).and_then(xai_grok_config::decode_cwd_from_dirname);
     let feed = match (&sid, home) {
-        (Some(sid), Some(home)) => grok_feed(sid, home, row.cwd.as_deref()),
+        (Some(sid), Some(home)) => grok_feed(sid, home, folder_cwd.as_deref()),
         _ => Err(io::Error::other("not in a grok sessions directory")),
     };
-    // Bound to grok's own id, so opening a subagent finds its files under this session.
-    open_feed_in(app, sid.unwrap_or_else(|| row.id.clone()), row, feed, standalone);
+    // Bound to the index's `grok:` id, not grok's own: a tab with this session open must not get the replay.
+    open_feed_in(app, row.id.clone(), row, feed, standalone);
 }
 
 fn grok_feed(sid: &str, home: &Path, cwd: Option<&str>) -> io::Result<Vec<Fed>> {
-    let hint = ReplayPathHint { child_cwd: cwd.map(Path::new), ..Default::default() };
+    let hint = ReplayPathHint {
+        parent_cwd: cwd.map(Path::new),
+        child_cwd: None,
+        // The folder is known, so a miss means no `updates.jsonl`; scan only when its cwd can't be read.
+        fallback: if cwd.is_some() { ReplayLookupFallback::HintedOnly } else { ReplayLookupFallback::Relocation },
+    };
     let mut out = Vec::new();
     let emission = stream_replay_updates_at_hinted(sid, home, hint, |update| {
         let (event, meta) = match update {

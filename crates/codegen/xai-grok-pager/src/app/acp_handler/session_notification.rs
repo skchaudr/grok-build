@@ -654,7 +654,9 @@ pub(super) fn handle_session_notification_with_origin(
                 && let Some(ref sid) = agent.session.session_id
                 && let Some(info) = agent.subagent_sessions.get_mut(&child_session_id)
             {
-                crate::app::subagent::enrich_from_meta(info, &agent.session.cwd, sid.0.as_ref());
+                // A past grok session in traces is bound to its index id `grok:<id>`; its files are under `<id>`.
+                let sid = sid.0.strip_prefix("grok:").unwrap_or(&sid.0);
+                crate::app::subagent::enrich_from_meta(info, &agent.session.cwd, sid);
             }
             let (effective_child_cwd, effective_is_worktree) = derive_child_cwd(
                 &agent.session.cwd,

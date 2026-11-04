@@ -10,6 +10,7 @@ use std::path::Path;
 use agent_client_protocol as acp;
 use serde_json::{Map, Value, json};
 use xai_grok_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
+use xai_grok_tools::types::output::{ListDirContent, ListDirOutput, ToolOutput};
 
 use super::claude_feed::{
     Event, Fed, chunk, edit_content, num_of, one_line, str_of, text_content, text_of, tool_call,
@@ -68,7 +69,7 @@ pub(crate) fn convert(session: &Path, session_id: &str) -> io::Result<Vec<Fed>> 
 }
 
 /// A dpi conversation (`<agent.sqlite>#<conversation id>`): each entry's `model[0]` is a Pi message, so the rows
-/// become Pi `message` lines and go through the same converter.
+/// become Pi `message` lines and go through the same converter. A `pi.compaction` row becomes a Pi `compaction` line.
 pub(crate) fn convert_dpi(key: &str, session_id: &str) -> io::Result<Vec<Fed>> {
     let bad = |e: String| io::Error::new(io::ErrorKind::InvalidData, e);
     let (db, conv) = xai_grok_traces::dpi::split_key(key).ok_or_else(|| bad(format!("not a dpi key: {key}")))?;
@@ -81,13 +82,22 @@ pub(crate) fn convert_dpi(key: &str, session_id: &str) -> io::Result<Vec<Fed>> {
 fn convert_records(records: &[Value], session_id: &str) -> Vec<Fed> {
     let lines: Vec<String> = records
         .iter()
-        .filter_map(|r| r.pointer("/model/0").filter(|m| m.is_object()))
-        .map(|m| {
+        .filter_map(|r| Some((r, r.pointer("/model/0").filter(|m| m.is_object())?)))
+        .map(|(r, m)| {
             let ts = m
                 .get("timestamp")
                 .and_then(Value::as_i64)
                 .and_then(chrono::DateTime::from_timestamp_millis)
                 .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            if r.get("kind").and_then(Value::as_str) == Some("pi.compaction") {
+                // Its message is the summary handed to the model as a user turn: "...compacted into the following summary:\n\n<summary>...</summary>".
+                let text = text_of(m.get("content").unwrap_or(&Value::Null));
+                let summary = text
+                    .split_once("<summary>")
+                    .and_then(|(_, rest)| rest.rsplit_once("</summary>"))
+                    .map_or(text.as_str(), |(inner, _)| inner);
+                return json!({ "type": "compaction", "timestamp": ts, "summary": summary.trim() }).to_string();
+            }
             json!({ "type": "message", "timestamp": ts, "message": m }).to_string()
         })
         .collect();
@@ -319,6 +329,7 @@ impl Converter {
         } else {
             vec![text_content(text)]
         };
+        let mut raw_output = None;
         let (kind, title, raw_input, content) = match name {
             "bash" => (
                 acp::ToolKind::Execute,
@@ -332,19 +343,31 @@ impl Converter {
                 args.clone(),
                 body,
             ),
-            "find" => (
+            // grep is Search, as Claude's Grep is, so it folds into "Searched N patterns".
+            "find" | "grep" => (
                 acp::ToolKind::Search,
-                format!("find {}", s("pattern")),
+                format!("{name} {}", s("pattern")),
                 args.clone(),
                 body,
             ),
-            // grok has no ls kind: the pager draws a list-directory row for any call with a `target_directory`.
-            "ls" => (
-                acp::ToolKind::Other,
-                format!("ls {}", s("path")),
-                json!({ "target_directory": str_of(args, "path").unwrap_or_else(|| ".".into()) }),
-                body,
-            ),
+            // grok has no ls kind: the pager draws a list-directory row for any call with a `target_directory`,
+            // and reads the listing only from a ListDir `raw_output`.
+            "ls" => {
+                let dir = str_of(args, "path").unwrap_or_else(|| ".".into());
+                if !failed && !text.is_empty() {
+                    raw_output = serde_json::to_value(ToolOutput::ListDir(ListDirOutput::Content(ListDirContent {
+                        content: text.to_string(),
+                        absolute_root_path: dir.clone().into(),
+                    })))
+                    .ok();
+                }
+                (
+                    acp::ToolKind::Other,
+                    format!("ls {}", s("path")),
+                    json!({ "target_directory": dir }),
+                    body,
+                )
+            }
             "write" => {
                 let path = s("path");
                 let mut raw = args.clone();
@@ -382,7 +405,7 @@ impl Converter {
                 body,
             ),
         };
-        let tc = tool_call(id, kind, title, raw_input, status, content, None, dur);
+        let tc = tool_call(id, kind, title, raw_input, status, content, raw_output, dur);
         let tc = self.nest(tc);
         let m = self.meta(ts, start);
         self.push(Event::Acp(acp::SessionUpdate::ToolCall(tc)), m);

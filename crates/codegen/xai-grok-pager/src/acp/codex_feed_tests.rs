@@ -198,16 +198,20 @@ fn file_changes_become_edits_with_a_diff_per_hunk() {
 }
 
 #[test]
-fn a_spawn_call_becomes_a_subagent_row_per_child_thread() {
+fn a_spawn_agent_call_becomes_a_subagent_row_for_the_agent_id_in_its_output() {
     let tmp = tempfile::tempdir().unwrap();
+    let item = |p: Value| json!({ "timestamp": T, "type": "response_item", "payload": p });
     let path = write(
         tmp.path(),
         "rollout-s.jsonl",
         &[
-            done(T, json!({ "type": "CollabAgentToolCall", "id": "c1", "tool": "spawnAgent", "status": "completed",
-                "sender_thread_id": "parent", "receiver_thread_ids": ["child-1"], "prompt": "review the diff\nand report" }), None, 5),
-            done(T, json!({ "type": "CollabAgentToolCall", "id": "c2", "tool": "wait", "status": "completed",
-                "sender_thread_id": "parent", "receiver_thread_ids": ["child-1"] }), None, 6),
+            item(json!({ "type": "function_call", "name": "spawn_agent", "call_id": "call_1",
+                "arguments": json!({ "agent_type": "explorer", "message": "review the diff\nand report" }).to_string() })),
+            item(json!({ "type": "function_call_output", "call_id": "call_1", "output": "{\"agent_id\":\"child-1\",\"nickname\":\"Ada\"}" })),
+            item(json!({ "type": "function_call", "name": "wait_agent", "call_id": "call_2", "arguments": "{}" })),
+            item(json!({ "type": "function_call_output", "call_id": "call_2", "output": "{\"agent_id\":\"child-1\"}" })),
+            done(T, json!({ "type": "CollabAgentToolCall", "id": "call_2", "tool": "wait", "status": "completed",
+                "sender_thread_id": "parent", "receiver_thread_ids": [] }), None, 6),
         ],
         false,
     );
@@ -215,11 +219,39 @@ fn a_spawn_call_becomes_a_subagent_row_per_child_thread() {
     let spawns: Vec<_> = feed
         .iter()
         .filter_map(|f| match &f.event {
-            Event::Xai(XaiSessionUpdate::SubagentSpawned { child_session_id, parent_session_id, description, .. }) => {
-                Some((child_session_id.as_str(), parent_session_id.as_str(), description.as_str()))
+            Event::Xai(XaiSessionUpdate::SubagentSpawned { child_session_id, parent_session_id, subagent_type, description, .. }) => {
+                Some((child_session_id.as_str(), parent_session_id.as_str(), subagent_type.as_str(), description.as_str()))
             }
             _ => None,
         })
         .collect();
-    assert_eq!(spawns, vec![("child-1", "parent", "review the diff")], "wait is not a spawn");
+    assert_eq!(spawns, vec![("child-1", "parent", "explorer", "review the diff")], "wait is not a spawn");
+}
+
+#[test]
+fn mcp_and_web_search_items_become_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write(
+        tmp.path(),
+        "rollout-m.jsonl",
+        &[
+            done(T, json!({ "type": "McpToolCall", "id": "m1", "server": "docs", "tool": "lookup", "arguments": { "q": "zstd" },
+                "status": "failed", "result": { "content": [{ "type": "text", "text": "not found" }], "isError": true },
+                "duration": { "secs": 0, "nanos": 250_000_000 } }), None, 1_000),
+            done(T, json!({ "type": "WebSearch", "id": "w1", "query": "rust zstd crate", "action": { "type": "search" } }), None, 2_000),
+        ],
+        false,
+    );
+    let feed = convert(&path, "s").unwrap();
+    let cs = calls(&feed);
+    let got: Vec<_> = cs.iter().map(|t| (t.kind, t.title.as_str(), t.status)).collect();
+    assert_eq!(
+        got,
+        [
+            (acp::ToolKind::Other, "docs.lookup: zstd", acp::ToolCallStatus::Failed),
+            (acp::ToolKind::Search, "Web search: rust zstd crate", acp::ToolCallStatus::Completed),
+        ]
+    );
+    assert_eq!(crate::acp::tracker::content_blocks_text(&cs[0].content), "not found");
+    assert_eq!(cs[1].raw_input.as_ref().unwrap()["query"], "rust zstd crate");
 }

@@ -90,9 +90,11 @@ fn each_pi_tool_gets_its_kind_and_the_message_parts_come_through() {
                 call("c7", "workflow", json!({ "workflow": "wf", "action": "run" })),
                 call("c8", "bash", json!({ "command": "false" })),
                 call("c9", "bash", json!({ "command": "sleep 9" })),
+                call("c10", "grep", json!({ "path": "/a", "pattern": "fn main" })),
             ]),
         ),
         result(6, "c1", "out", false, 15, Value::Null),
+        result(6, "c6", "b.rs\nnew.rs", false, 1, Value::Null),
         result(6, "c8", "boom", true, 1, Value::Null),
     ]);
     assert!(matches!(
@@ -130,6 +132,7 @@ fn each_pi_tool_gets_its_kind_and_the_message_parts_come_through() {
             ("c7", Other, "workflow: wf"),
             ("c8", Execute, "false"),
             ("c9", Execute, "sleep 9"),
+            ("c10", Search, "grep fn main"),
         ]
     );
     let diff = |t: &acp::ToolCall| match &t.content[0] {
@@ -139,6 +142,9 @@ fn each_pi_tool_gets_its_kind_and_the_message_parts_come_through() {
     assert_eq!(diff(tcs[2]), (Some("one".into()), "two".into()));
     assert_eq!(diff(tcs[4]), (None, "fn main() {}".into()));
     assert_eq!(tcs[6].raw_input.as_ref().unwrap()["target_directory"], "/a");
+    // The ListDir block reads its listing from a ListDir raw_output, not from content.
+    let listing = serde_json::from_value::<ToolOutput>(tcs[6].raw_output.clone().unwrap()).unwrap();
+    assert!(matches!(listing, ToolOutput::ListDir(ListDirOutput::Content(c)) if c.content == "b.rs\nnew.rs"));
     // Outcome: result present, errored, or none yet; the duration is the result's own.
     assert_eq!(tcs[0].status, acp::ToolCallStatus::Completed);
     assert_eq!(tcs[0].meta.as_ref().unwrap()["durationMs"], 15);
@@ -363,6 +369,8 @@ fn dpi_records_go_through_the_pi_converter() {
         json!({ "kind": "pi.user", "model": [{ "role": "user", "content": "go", "timestamp": t }] }),
         json!({ "kind": "pi.assistant", "model": [{ "role": "assistant", "timestamp": t + 2000, "content": [call("c1", "bash", json!({ "command": "ls" }))] }] }),
         json!({ "kind": "pi.tool-result", "model": [{ "role": "toolResult", "toolCallId": "c1", "toolName": "bash", "isError": false, "timestamp": t + 3000, "content": [{ "type": "text", "text": "out" }] }] }),
+        json!({ "kind": "pi.compaction", "model": [{ "role": "user", "timestamp": t + 4000, "content": [{ "type": "text",
+            "text": "The conversation history before this point was compacted into the following summary:\n\n<summary>\nRan ls.\n</summary>" }] }] }),
         json!({ "kind": "pi.reset" }),
     ];
     let feed = convert_records(&records, "dpi:s:7");
@@ -370,5 +378,11 @@ fn dpi_records_go_through_the_pi_converter() {
     let tcs = calls(&feed);
     assert_eq!((tcs.len(), tcs[0].title.as_str()), (1, "ls"));
     assert_eq!(feed[0].meta.get("turnStartMs"), Some(&json!(t)));
+    let users = feed.iter().filter(|f| matches!(f.event, Event::Acp(acp::SessionUpdate::UserMessageChunk(_)))).count();
+    assert_eq!(users, 1, "the compaction summary is not a prompt");
+    assert!(matches!(
+        &feed.last().unwrap().event,
+        Event::Xai(XaiSessionUpdate::AutoCompactCompleted { summary_preview: Some(p), .. }) if p == "Ran ls."
+    ));
     assert!(convert_dpi("no-hash", "x").is_err());
 }

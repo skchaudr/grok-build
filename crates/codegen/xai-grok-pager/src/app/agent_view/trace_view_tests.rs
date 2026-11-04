@@ -290,10 +290,8 @@ fn the_transcript_lands_in_grok_blocks_with_no_composer() {
     assert_eq!(a.subagent_sessions.len(), 1);
 }
 
-/// A made-up grok session: its own `updates.jsonl` replays as is, and the xAI subagent spawn becomes the subagent row.
-#[test]
-fn a_past_grok_session_replays_its_updates_with_the_subagent_row() {
-    let tmp = tempfile::tempdir().unwrap();
+/// A made-up grok session `g1`, as the index lists it.
+fn grok_row(tmp: &tempfile::TempDir) -> xai_grok_traces::SessionRow {
     let cwd = "/work/demo";
     let dir = tmp.path().join("sessions").join(xai_grok_config::encode_cwd_dirname(cwd)).join("g1");
     std::fs::create_dir_all(&dir).unwrap();
@@ -308,16 +306,21 @@ fn a_past_grok_session_replays_its_updates_with_the_subagent_row() {
     ];
     let body: Vec<String> = lines.iter().map(Value::to_string).collect();
     std::fs::write(dir.join("updates.jsonl"), body.join("\n")).unwrap();
-    let row = xai_grok_traces::SessionRow {
+    xai_grok_traces::SessionRow {
         id: "grok:g1".into(),
         source: "grok".into(),
         file_path: dir.join("chat_history.jsonl"),
         cwd: Some(cwd.into()),
         ..Default::default()
-    };
+    }
+}
 
+/// Its own `updates.jsonl` replays as is, and the xAI subagent spawn becomes the subagent row.
+#[test]
+fn a_past_grok_session_replays_its_updates_with_the_subagent_row() {
+    let tmp = tempfile::tempdir().unwrap();
     let mut app = app();
-    standalone_traces::open_grok_in(&mut app, row, true);
+    standalone_traces::open_grok_in(&mut app, grok_row(&tmp), true);
     let a = agent(&app);
     assert!(a.active_modal.is_none(), "the list steps aside");
     assert_eq!(a.composer_route(), ComposerRoute::Hidden);
@@ -326,6 +329,20 @@ fn a_past_grok_session_replays_its_updates_with_the_subagent_row() {
     assert!(b.iter().any(|x| matches!(x, RenderBlock::AgentMessage(_))));
     assert!(b.iter().any(|x| matches!(x, RenderBlock::Subagent(_))), "the subagent row survives");
     assert_eq!(a.subagent_sessions.len(), 1);
+}
+
+/// A tab with the same grok session open keeps its scrollback: the replay is bound to the index id.
+#[test]
+fn a_past_grok_session_open_in_a_tab_replays_only_into_its_own_view() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app();
+    let origin = AgentId(0);
+    app.next_agent_id = 1;
+    app.agents.get_mut(&origin).unwrap().bind_session_id(agent_client_protocol::SessionId::new("g1"));
+    standalone_traces::open_grok_in(&mut app, grok_row(&tmp), false);
+    assert_ne!(app.active_view, ActiveView::Agent(origin));
+    assert!(blocks(agent(&app)).iter().any(|x| matches!(x, RenderBlock::AgentMessage(_))));
+    assert_eq!(app.agents[&origin].scrollback.len(), 0, "the live tab gets none of the replay");
 }
 
 #[test]

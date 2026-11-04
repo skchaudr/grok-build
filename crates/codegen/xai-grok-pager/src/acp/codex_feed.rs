@@ -1,7 +1,9 @@
 //! A Codex rollout (`~/.codex/sessions/**/rollout-*.jsonl[.zst]`) turned into the events grok's session-event handler receives.
-//! Only `event_msg` `item_completed` entries are read: messages, reasoning, `CommandExecution` and `FileChange`.
-//! The `exec` JavaScript wrapper (`custom_tool_call`) and the `response_item` copies of the same calls are ignored.
+//! `event_msg` `item_completed` entries give messages, reasoning, `CommandExecution`, `FileChange`, `McpToolCall` and `WebSearch`.
+//! Spawns are only in `response_item`: a `spawn_agent` `function_call` and its `function_call_output` (`{"agent_id": ...}`).
+//! The `exec` JavaScript wrapper (`custom_tool_call`) and the other `response_item` copies of the same calls are ignored.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -10,7 +12,7 @@ use agent_client_protocol as acp;
 use serde_json::{Map, Value, json};
 use xai_grok_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
 
-use super::claude_feed::{Event, Fed, bash_raw, chunk, num_of, str_of, text_content, tool_call};
+use super::claude_feed::{Event, Fed, bash_raw, chunk, num_of, one_line, str_of, text_content, text_of, tool_call};
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
@@ -29,15 +31,30 @@ pub(crate) fn convert(rollout: &Path, session_id: &str) -> io::Result<Vec<Fed>> 
         prompt_id: String::new(),
         prompts: 0,
     };
+    // `spawn_agent` calls waiting for their output, by call id.
+    let mut spawns: HashMap<String, Value> = HashMap::new();
     for line in String::from_utf8_lossy(&raw).lines() {
         let Ok(l) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if l.get("type").and_then(Value::as_str) == Some("event_msg")
-            && l.pointer("/payload/type").and_then(Value::as_str) == Some("item_completed")
-            && let Some(item) = l.pointer("/payload/item")
-        {
-            c.item(&l, item);
+        let at = |k: &str| l.pointer(k).and_then(Value::as_str);
+        match (at("/type"), at("/payload/type")) {
+            (Some("event_msg"), Some("item_completed")) => {
+                if let Some(item) = l.pointer("/payload/item") {
+                    c.item(&l, item);
+                }
+            }
+            (Some("response_item"), Some("function_call")) if at("/payload/name") == Some("spawn_agent") => {
+                if let Some(id) = at("/payload/call_id") {
+                    spawns.insert(id.to_string(), l.clone());
+                }
+            }
+            (Some("response_item"), Some("function_call_output")) => {
+                if let Some(call) = at("/payload/call_id").and_then(|id| spawns.remove(id)) {
+                    c.spawn(&call, &l);
+                }
+            }
+            _ => {}
         }
     }
     Ok(c.out)
@@ -72,6 +89,11 @@ fn user_text(item: &Value) -> Option<String> {
     ];
     let t = text.trim_start();
     (!t.is_empty() && !HARNESS.iter().any(|h| t.starts_with(h))).then_some(text)
+}
+
+fn line_ts(line: &Value) -> Option<i64> {
+    let s = line.get("timestamp")?.as_str()?;
+    chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.timestamp_millis())
 }
 
 fn duration_ms(item: &Value) -> Option<i64> {
@@ -129,12 +151,7 @@ impl Converter {
     fn item(&mut self, line: &Value, item: &Value) {
         // The times sit beside `item`, not in it.
         let payload = line.get("payload").unwrap_or(&Value::Null);
-        let end = num_of(payload, "completed_at_ms").or_else(|| {
-            let s = line.get("timestamp")?.as_str()?;
-            chrono::DateTime::parse_from_rfc3339(s)
-                .ok()
-                .map(|d| d.timestamp_millis())
-        });
+        let end = num_of(payload, "completed_at_ms").or_else(|| line_ts(line));
         let began = num_of(payload, "started_at_ms");
         match item.get("type").and_then(Value::as_str) {
             Some("UserMessage") => {
@@ -200,7 +217,23 @@ impl Converter {
             }
             Some("CommandExecution") => self.command(item, end, began),
             Some("FileChange") => self.file_change(item, end, began),
-            Some("CollabAgentToolCall") => self.spawn(item, end),
+            Some("McpToolCall") => self.mcp(item, end, began),
+            Some("WebSearch") => {
+                let id = str_of(item, "id").unwrap_or_else(|| format!("{}-ws{}", self.sid, self.seq + 1));
+                let query = str_of(item, "query").unwrap_or_default();
+                let tc = tool_call(
+                    &id,
+                    acp::ToolKind::Search,
+                    format!("Web search: {query}"),
+                    json!({ "query": query }),
+                    acp::ToolCallStatus::Completed,
+                    Vec::new(),
+                    None,
+                    None,
+                );
+                let m = self.meta(end, end);
+                self.push(Event::Acp(acp::SessionUpdate::ToolCall(tc)), m);
+            }
             _ => {}
         }
     }
@@ -312,41 +345,78 @@ impl Converter {
         }
     }
 
-    /// A spawn call is a subagent row; the child thread's own rollout is its transcript. Other collab tools (wait, send) are skipped.
-    fn spawn(&mut self, item: &Value, ts: Option<i64>) {
-        let tool = item.get("tool").and_then(Value::as_str).unwrap_or("");
-        if !tool.eq_ignore_ascii_case("spawnAgent") && tool != "spawn_agent" {
-            return;
-        }
-        let prompt = str_of(item, "prompt").unwrap_or_default();
-        let description = prompt.lines().next().filter(|l| !l.is_empty()).unwrap_or("subagent").to_string();
-        let children: Vec<String> = item
-            .get("receiver_thread_ids")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-            .unwrap_or_default();
-        for child in children {
-            let spawned = XaiSessionUpdate::SubagentSpawned {
-                subagent_id: child.clone(),
-                attempt_id: None,
-                parent_session_id: self.sid.clone(),
-                parent_prompt_id: None,
-                child_session_id: child,
-                subagent_type: "subagent".into(),
-                description: description.clone(),
-                effective_context_source: None,
-                context_normalized: false,
-                capability_mode: None,
-                persona: None,
-                role: None,
-                model: None,
-                resumed_from: None,
-                workflow_run_id: None,
-                agent_address: None,
-            };
-            let m = self.meta(ts, None);
-            self.push(Event::Xai(spawned), m);
-        }
+    /// An MCP call is an Other row with its `server.tool` name, arguments and result text.
+    fn mcp(&mut self, item: &Value, end: Option<i64>, began: Option<i64>) {
+        let id = str_of(item, "id").unwrap_or_else(|| format!("{}-mcp{}", self.sid, self.seq + 1));
+        let name = format!(
+            "{}.{}",
+            str_of(item, "server").unwrap_or_default(),
+            str_of(item, "tool").unwrap_or_default()
+        );
+        let args = item.get("arguments").cloned().unwrap_or(Value::Null);
+        let failed = item.get("status").and_then(Value::as_str) == Some("failed")
+            || item.pointer("/result/isError") == Some(&Value::Bool(true));
+        let text = item.pointer("/result/content").map(text_of).unwrap_or_default();
+        let dur = duration_ms(item).or_else(|| end.zip(began).map(|(e, b)| (e - b).max(0)));
+        let start = began.or_else(|| end.zip(dur).map(|(e, d)| e - d));
+        let tc = tool_call(
+            &id,
+            acp::ToolKind::Other,
+            one_line(&name, &args),
+            args,
+            if failed {
+                acp::ToolCallStatus::Failed
+            } else {
+                acp::ToolCallStatus::Completed
+            },
+            if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![text_content(&text)]
+            },
+            None,
+            dur,
+        );
+        let m = self.meta(start, start);
+        self.push(Event::Acp(acp::SessionUpdate::ToolCall(tc)), m);
+    }
+
+    /// A `spawn_agent` call is a subagent row; the child thread is the `agent_id` in its output, and its own rollout is its transcript.
+    fn spawn(&mut self, call: &Value, out: &Value) {
+        let output = out.pointer("/payload/output");
+        let parsed = output
+            .and_then(Value::as_str)
+            .and_then(|o| serde_json::from_str::<Value>(o).ok());
+        let Some(child) = parsed.as_ref().or(output).and_then(|o| str_of(o, "agent_id")) else {
+            return; // a failed spawn has no child
+        };
+        let args = call
+            .pointer("/payload/arguments")
+            .and_then(Value::as_str)
+            .and_then(|a| serde_json::from_str::<Value>(a).ok())
+            .unwrap_or(Value::Null);
+        let message = str_of(&args, "message").unwrap_or_default();
+        let description = message.lines().next().filter(|l| !l.is_empty()).unwrap_or("subagent").to_string();
+        let spawned = XaiSessionUpdate::SubagentSpawned {
+            subagent_id: child.clone(),
+            attempt_id: None,
+            parent_session_id: self.sid.clone(),
+            parent_prompt_id: None,
+            child_session_id: child,
+            subagent_type: str_of(&args, "agent_type").unwrap_or_else(|| "subagent".into()),
+            description,
+            effective_context_source: None,
+            context_normalized: false,
+            capability_mode: None,
+            persona: None,
+            role: None,
+            model: None,
+            resumed_from: None,
+            workflow_run_id: None,
+            agent_address: None,
+        };
+        let m = self.meta(line_ts(call), None);
+        self.push(Event::Xai(spawned), m);
     }
 
     fn meta(&mut self, ts: Option<i64>, stream_start: Option<i64>) -> Map<String, Value> {
