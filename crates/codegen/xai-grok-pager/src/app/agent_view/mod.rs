@@ -1408,6 +1408,8 @@ pub struct AgentView {
     pub(crate) trace_return: Option<Box<crate::views::traces_modal::TracesModalState>>,
     /// Set when `/traces` opened this view from inside a grok session: the agent Esc returns to; this view is then closed.
     pub(crate) trace_origin: Option<crate::app::agent::AgentId>,
+    /// Live Claude or Pi session: receipts and spans keep feeding this view until Esc.
+    pub(crate) trace_live: Option<crate::acp::live_feed::TraceLive>,
     /// Hit area for the [✗] close button in the subagent frame title bar.
     pub hit_subagent_frame_close: HitArea,
     /// Whether the `/share` slash command is available (mirrors

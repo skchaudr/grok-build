@@ -26,6 +26,9 @@ const TOOL: [&str; 3] = ["tool_name", "toolName", "tool"];
 const TOOL_INPUT: [&str; 3] = ["tool_input", "toolInput", "input"];
 const TOOL_USE_ID: [&str; 3] = ["tool_use_id", "toolUseId", "toolCallId"];
 const AGENT_ID: [&str; 3] = ["agent_id", "agentId", "subagentId"];
+const IS_ERROR: [&str; 2] = ["is_error", "isError"];
+const DURATION_MS: [&str; 2] = ["duration_ms", "durationMs"];
+const PARENT_TOOL: [&str; 2] = ["parent_tool_use_id", "parentToolUseId"];
 const NOTIFICATION_TYPE: [&str; 2] = ["notification_type", "notificationType"];
 const HARNESS_PID: [&str; 1] = ["harness_pid"];
 
@@ -57,6 +60,15 @@ pub fn extract(source: &str, input: &[u8]) -> Receipt {
     });
     r.tool_use_id = first_str(&v, &TOOL_USE_ID);
     r.agent_id = first_str(&v, &AGENT_ID);
+    r.is_error = IS_ERROR.iter().find_map(|k| v.get(*k)?.as_bool());
+    r.duration_ms = DURATION_MS.iter().find_map(|k| {
+        let n = v.get(*k)?;
+        n.as_i64().or_else(|| n.as_f64().map(|f| f as i64))
+    });
+    r.parent_tool_use_id = first_str(&v, &PARENT_TOOL);
+    if matches!(r.event.as_str(), "PostToolUseFailure" | "PermissionDenied" | "postToolUseFailure") {
+        r.is_error = Some(true);
+    }
     r.harness_pid = HARNESS_PID.iter().find_map(|k| v.get(*k)?.as_i64()).filter(|p| *p > 0);
     if source == "cursor" {
         cursor_tool(&v, &mut r);

@@ -305,6 +305,11 @@ pub struct LiveReceipt {
     pub detail: Option<String>,
     pub tool_use_id: Option<String>,
     pub at_ms: i64,
+    /// Set on the end receipt. `None` when the hook did not say.
+    pub is_error: Option<bool>,
+    pub duration_ms: Option<i64>,
+    /// The spawning call, when the end receipt carries it.
+    pub parent_tool_use_id: Option<String>,
 }
 
 /// A turn boundary: what the session did when a receipt of this kind arrived.

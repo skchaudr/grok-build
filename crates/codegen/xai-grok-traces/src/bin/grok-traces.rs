@@ -1,4 +1,4 @@
-//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--watch] [--recent N] | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]`.
+//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--watch] [--recent N] | live-json <id> | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]`.
 //!
 //! `hook` runs once per harness event: it must be fast, silent and always
 //! exit 0 so it can never block an agent.
@@ -14,7 +14,7 @@ use xai_grok_traces::follow::{Follower, find_live_root, recent_table};
 use xai_grok_traces::live;
 use xai_grok_traces::wake::{self, Waker};
 use xai_grok_traces::hook::{MAX_STDIN_BYTES, extract, ingest};
-use xai_grok_traces::remote::{event_to_json, session_to_json};
+use xai_grok_traces::remote::{event_to_json, live_dump_json, session_to_json};
 use xai_grok_traces::{EventFilter, SessionFilter, TraceIndex, default_db_path, user_roots};
 
 const HOOK_BUSY: Duration = Duration::from_millis(250);
@@ -33,6 +33,7 @@ fn main() -> ExitCode {
         Some("live") => live_cmd(&args[1..]),
         Some("doctor") => finish(doctor(&args[1..])),
         Some("events") => finish(events(&args[1..])),
+        Some("live-json") => live_json(&args[1..]),
         Some("raw") => raw(&args[1..]),
         Some("follow") => finish(follow(&args[1..])),
         Some("version") => {
@@ -40,7 +41,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--watch] [--recent N] | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]");
+            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--watch] [--recent N] | live-json <id> | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]");
             ExitCode::from(2)
         }
     }
@@ -237,6 +238,41 @@ fn live_cmd(args: &[String]) -> ExitCode {
             w.drain();
         }
     }
+}
+
+/// One session's transcript and receipts, for the other machine's live view. Exit 2 = no id, 3 = unknown session.
+fn live_json(args: &[String]) -> ExitCode {
+    let Some(id) = args.first() else {
+        eprintln!("grok-traces: live-json needs a session id");
+        return ExitCode::from(2);
+    };
+    let idx = match TraceIndex::open(&default_db_path()) {
+        Ok(idx) => idx,
+        Err(e) => {
+            eprintln!("grok-traces: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let row = match idx.session(id) {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            eprintln!("grok-traces: no such session {id}");
+            return ExitCode::from(3);
+        }
+        Err(e) => {
+            eprintln!("grok-traces: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let transcript = std::fs::read_to_string(&row.file_path).unwrap_or_default();
+    let receipts = idx.session_receipts(&row.id).unwrap_or_default();
+    let pid_alive = row.harness_pid.map(|pid| match row.harness_start {
+        Some(start) => live::alive(pid, start),
+        None => live::alive_pid(pid),
+    });
+    let file_name = row.file_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    println!("{}", live_dump_json(&row.source, &file_name, &transcript, pid_alive, &receipts));
+    ExitCode::SUCCESS
 }
 
 fn events(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {

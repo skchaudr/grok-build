@@ -57,7 +57,7 @@ pub(crate) fn in_list(names: &[&str]) -> String {
 /// `(source, keyed session id, unkeyed native key)`.
 type ReceiptKeys = (String, Option<String>, Option<String>);
 
-const LIVE_COLS: &str = "r.id, r.session_id, r.native_session, r.agent_id, r.event, r.tool, r.detail, r.tool_use_id, r.at_ms";
+const LIVE_COLS: &str = "r.id, r.session_id, r.native_session, r.agent_id, r.event, r.tool, r.detail, r.tool_use_id, r.at_ms, r.is_error, r.duration_ms, r.parent_tool_use_id";
 
 fn live_receipt(r: &rusqlite::Row<'_>) -> rusqlite::Result<LiveReceipt> {
     Ok(LiveReceipt {
@@ -70,6 +70,9 @@ fn live_receipt(r: &rusqlite::Row<'_>) -> rusqlite::Result<LiveReceipt> {
         detail: r.get(6)?,
         tool_use_id: r.get(7)?,
         at_ms: r.get(8)?,
+        is_error: r.get::<_, Option<i64>>(9)?.map(|n| n != 0),
+        duration_ms: r.get(10)?,
+        parent_tool_use_id: r.get(11)?,
     })
 }
 
@@ -95,6 +98,12 @@ pub struct Receipt {
     pub harness_start: Option<i64>,
     /// The harness and its ancestors up to pid 1 as `a>b>c`, at most 12 entries (see `live::via_of`).
     pub harness_chain: Option<String>,
+    /// End receipt: the call failed. `None` when this event does not say.
+    pub is_error: Option<bool>,
+    /// End receipt: how long the call took.
+    pub duration_ms: Option<i64>,
+    /// End receipt: the call that spawned this one.
+    pub parent_tool_use_id: Option<String>,
 }
 
 impl TraceIndex {
@@ -103,11 +112,11 @@ impl TraceIndex {
         let at = if r.at_ms == 0 { now_ms() } else { r.at_ms };
         self.conn().execute(
             "INSERT INTO trace_receipts (at_ms, source, event, native_session, path, session_id, tool, cwd,
-             detail, tool_use_id, agent_id, harness_pid, harness_start, harness_chain)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             detail, tool_use_id, agent_id, harness_pid, harness_start, harness_chain, is_error, duration_ms, parent_tool_use_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 at, r.source, r.event, r.native_session, r.path, r.session_id, r.tool, r.cwd, r.detail, r.tool_use_id, r.agent_id,
-                r.harness_pid, r.harness_start, r.harness_chain
+                r.harness_pid, r.harness_start, r.harness_chain, r.is_error.map(|b| i64::from(b)), r.duration_ms, r.parent_tool_use_id
             ],
         )?;
         let id = self.conn().last_insert_rowid();

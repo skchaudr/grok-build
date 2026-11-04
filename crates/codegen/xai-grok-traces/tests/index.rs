@@ -568,7 +568,7 @@ fn old_schema_is_replaced_not_migrated() {
     idx.scan(&e.roots).unwrap();
     assert_eq!(all(&idx).len(), 6);
     let stats = idx.stats().unwrap();
-    assert_eq!(stats.schema_version.as_deref(), Some("9"));
+    assert_eq!(stats.schema_version.as_deref(), Some("10"));
     assert_eq!(stats.parser_version.as_deref(), Some("9"));
     let names: Vec<String> = fs::read_dir(e.db.parent().unwrap()).unwrap().map(|d| d.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert!(names.iter().all(|n| !n.contains(".old.")), "old db removed: {names:?}");
@@ -591,7 +591,7 @@ fn schema_6_db_is_rebuilt_on_open() {
     let c = rusqlite::Connection::open(&e.db).unwrap();
     let cols: Vec<String> = c.prepare("SELECT name FROM pragma_table_info('trace_receipts')").unwrap()
         .query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
-    for want in ["detail", "tool_use_id", "agent_id", "harness_pid", "harness_start"] {
+    for want in ["detail", "tool_use_id", "agent_id", "harness_pid", "harness_start", "is_error", "duration_ms", "parent_tool_use_id"] {
         assert!(cols.iter().any(|c| c == want), "{want} in {cols:?}");
     }
     let idx_cols: i64 = c.query_row("SELECT count(*) FROM pragma_index_info('trace_receipts_session')", [], |r| r.get(0)).unwrap();
@@ -749,6 +749,10 @@ fn hook_extract_live_fields() {
     assert_eq!((g.native_session.as_deref(), g.agent_id.as_deref()), (Some("p1"), Some("k1")));
     let stop = extract("claude", br#"{"hook_event_name":"SubagentStop","agent_id":"a1","agent_transcript_path":"/p/s/subagents/agent-a1.jsonl"}"#);
     assert_eq!(stop.detail.as_deref(), Some("/p/s/subagents/agent-a1.jsonl"));
+    let end = extract("claude", br#"{"hook_event_name":"PostToolUse","tool_use_id":"tu1","is_error":true,"duration_ms":1500,"parent_tool_use_id":"parent1"}"#);
+    assert_eq!((end.is_error, end.duration_ms, end.parent_tool_use_id.as_deref()), (Some(true), Some(1500), Some("parent1")));
+    let denied = extract("claude", br#"{"hook_event_name":"PostToolUseFailure","tool_use_id":"tu2"}"#);
+    assert_eq!(denied.is_error, Some(true));
 }
 
 /// `proc_pidinfo` is macOS-only; on other hosts a payload pid has no start time and is not stored.

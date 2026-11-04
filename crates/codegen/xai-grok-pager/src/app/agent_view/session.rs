@@ -411,6 +411,7 @@ impl AgentView {
             role: AgentRole::Root,
             trace_return: None,
             trace_origin: None,
+            trace_live: None,
             hit_subagent_frame_close: Default::default(),
             sharing_enabled: false,
             memory_mode: None,
@@ -630,6 +631,7 @@ impl AgentView {
     }
     /// Empty a read-only past-session view: scrollback, tracker, plan, subagents and the session binding.
     pub(crate) fn clear_trace_content(&mut self) {
+        self.trace_live = None;
         drop(self.take_replay_rebuilt_state());
         self.subagent_sessions.clear();
         self.subagent_views.clear();

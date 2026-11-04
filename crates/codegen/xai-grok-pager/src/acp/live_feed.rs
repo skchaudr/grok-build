@@ -1,0 +1,389 @@
+//! Live Claude and Pi sessions: one row per call, filled in place, completed only with content.
+//!
+//! The worker owns the merger. The view drains `Tail` on the existing one-second poll.
+//! Phoenix is fetched off the UI thread. A dead Phoenix leaves receipts and the transcript running.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use agent_client_protocol as acp;
+use serde_json::{Map, Value, json};
+use xai_grok_traces::merge::{self, Merger, Piece};
+use xai_grok_traces::{TraceIndex, default_db_path, live, phoenix, remote};
+
+use super::claude_feed::{self, Event, Fed};
+
+const PHOENIX_WAIT: Duration = Duration::from_millis(800);
+const WAKE_WAIT: Duration = Duration::from_secs(1);
+
+pub(crate) struct Update {
+    pub events: Vec<Fed>,
+    pub life: String,
+    pub running: Option<String>,
+    pub phoenix_offline: bool,
+}
+
+pub(crate) struct Tail {
+    rx: mpsc::Receiver<Update>,
+    stop: Arc<AtomicBool>,
+    _join: Option<JoinHandle<()>>,
+}
+
+impl Tail {
+    /// Last status, with every pending batch's events concatenated.
+    pub(crate) fn try_recv(&self) -> Option<Update> {
+        let mut last = None;
+        let mut events = Vec::new();
+        while let Ok(mut u) = self.rx.try_recv() {
+            events.append(&mut u.events);
+            last = Some(u);
+        }
+        last.map(|mut u| {
+            u.events = events;
+            u
+        })
+    }
+}
+
+impl Drop for Tail {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+/// What the status line shows: `alive · Running Bash … 3.2s · Phoenix offline`.
+pub(crate) struct TraceLive {
+    pub tail: Tail,
+    pub session_id: String,
+    pub life: String,
+    pub running: Option<(String, Instant)>,
+    pub phoenix_offline: bool,
+}
+
+impl TraceLive {
+    pub(crate) fn line(&self) -> String {
+        let mut s = self.life.clone();
+        if let Some((name, at)) = &self.running {
+            s.push_str(&format!(" · Running {name} … {:.1}s", at.elapsed().as_secs_f64()));
+        }
+        if self.phoenix_offline {
+            s.push_str(" · Phoenix offline");
+        }
+        s
+    }
+}
+
+pub(crate) struct Job {
+    pub source: String,
+    pub session_id: String,
+    pub file_path: PathBuf,
+    pub native_id: Option<String>,
+    pub host: Option<String>,
+    pub harness_pid: Option<i64>,
+    pub harness_start: Option<i64>,
+    pub merger: Merger,
+    pub remote: bool,
+}
+
+pub(crate) fn start(job: Job) -> Tail {
+    let (tx, rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let join = std::thread::Builder::new().name("traces-live".into()).spawn(move || run(job, tx, flag)).ok();
+    Tail { rx, stop, _join: join }
+}
+
+fn run(mut job: Job, tx: mpsc::Sender<Update>, stop: Arc<AtomicBool>) {
+    let waker = xai_grok_traces::wake::Waker::bind_default();
+    let mut primed = false;
+    loop {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        if primed {
+            waker.wait(WAKE_WAIT);
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+        }
+        primed = true;
+        let (transcript, receipts, pid_alive, file_name) = if job.remote {
+            remote_snapshot(&job)
+        } else {
+            local_snapshot(&job)
+        };
+        let spans = fetch_spans(&job.source, &file_name, job.native_id.as_deref());
+        let offline = spans.is_err();
+        let (pieces, _) = job.merger.ingest(&job.source, &transcript, &receipts, spans.as_deref().map_err(|_| ()));
+        let life = merge::session_life(&job.source, &receipts, pid_alive).to_string();
+        let running = job.merger.running();
+        let events = to_feds(&job.session_id, &pieces);
+        if tx.send(Update { events, life, running, phoenix_offline: offline }).is_err() {
+            break;
+        }
+    }
+}
+
+fn local_snapshot(job: &Job) -> (String, Vec<live::LiveReceipt>, Option<bool>, String) {
+    // shortcut: re-reads the whole file each wake, switch to a byte offset if a session misses the one-second tail.
+    let transcript = std::fs::read_to_string(&job.file_path).unwrap_or_default();
+    let file_name = job.file_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let idx = TraceIndex::open_with(&default_db_path(), Some(Duration::from_millis(200))).ok();
+    let receipts = idx.as_ref().and_then(|i| i.session_receipts(&job.session_id).ok()).unwrap_or_default();
+    let row = idx.as_ref().and_then(|i| i.session(&job.session_id).ok().flatten());
+    let pid = row.as_ref().and_then(|r| r.harness_pid).or(job.harness_pid);
+    let start = row.as_ref().and_then(|r| r.harness_start).or(job.harness_start);
+    let alive = pid.map(|pid| match start {
+        Some(start) => live::alive(pid, start),
+        None => live::alive_pid(pid),
+    });
+    (transcript, receipts, alive, file_name)
+}
+
+fn remote_snapshot(job: &Job) -> (String, Vec<live::LiveReceipt>, Option<bool>, String) {
+    let Some(label) = job.host.as_deref() else {
+        return (String::new(), Vec::new(), None, String::new());
+    };
+    let Some(target) = remote::hosts().into_iter().find(|t| remote::label(t) == label) else {
+        return (String::new(), Vec::new(), None, String::new());
+    };
+    // Exit 2 means the other machine's grok-traces is older than live-json. Spans still merge locally.
+    match remote::fetch_live_dump(&target, &job.session_id) {
+        Ok(d) => (d.transcript, d.receipts, d.pid_alive, d.file_name),
+        Err(_) => (String::new(), Vec::new(), None, String::new()),
+    }
+}
+
+fn fetch_spans(source: &str, file_name: &str, native_id: Option<&str>) -> Result<Vec<phoenix::PhoenixSpan>, ()> {
+    if source.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sid = merge::phoenix_session_id(file_name, native_id);
+    if sid.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Today's Pi emitter may stamp session.id as pi-<epoch>, so this key can miss. Receipts still open the rows.
+    phoenix::fetch_session_spans(phoenix::DEFAULT_BASE, source, &sid, PHOENIX_WAIT).map_err(|_| ())
+}
+
+pub(crate) fn to_feds(session_id: &str, pieces: &[Piece]) -> Vec<Fed> {
+    let mut out = Vec::new();
+    for (n, piece) in pieces.iter().enumerate() {
+        let (event, ts, dur) = match piece {
+            Piece::User(t) => (Event::Acp(acp::SessionUpdate::UserMessageChunk(claude_feed::chunk(t))), None, None),
+            Piece::Text(t) => (Event::Acp(acp::SessionUpdate::AgentMessageChunk(claude_feed::chunk(t))), None, None),
+            Piece::Thinking(t) => (Event::Acp(acp::SessionUpdate::AgentThoughtChunk(claude_feed::chunk(t))), None, None),
+            Piece::Open { id, tool, start_ms, input, .. } => {
+                let raw = input_value(input.as_deref());
+                let title = title_of(tool, &raw);
+                let tc = claude_feed::tool_call(id, kind_of(tool), title, raw, acp::ToolCallStatus::InProgress, Vec::new(), None, None);
+                (Event::Acp(acp::SessionUpdate::ToolCall(tc)), Some(*start_ms), None)
+            }
+            Piece::Fill { id, input, output } => {
+                let raw = input.as_deref().map(input_value);
+                let content = output.as_deref().filter(|t| !t.is_empty()).map(|t| vec![claude_feed::text_content(t)]);
+                let fields = update_fields(acp::ToolCallStatus::InProgress, raw, content);
+                let upd = acp::ToolCallUpdate::new(acp::ToolCallId::new(Arc::from(id.as_str())), fields);
+                (Event::Acp(acp::SessionUpdate::ToolCallUpdate(upd)), None, None)
+            }
+            Piece::Complete { id, tool, start_ms, end_ms, error, input, output, fresh, .. } => {
+                let raw = input_value(input.as_deref());
+                let status = if *error { acp::ToolCallStatus::Failed } else { acp::ToolCallStatus::Completed };
+                let content = content_of(tool, &raw, output, *error);
+                let dur = (*end_ms - *start_ms).max(0);
+                let event = if *fresh {
+                    let tc = claude_feed::tool_call(id, kind_of(tool), title_of(tool, &raw), raw, status, content, None, Some(dur));
+                    Event::Acp(acp::SessionUpdate::ToolCall(tc))
+                } else {
+                    let fields = update_fields(status, Some(raw), Some(content));
+                    let upd = acp::ToolCallUpdate::new(acp::ToolCallId::new(Arc::from(id.as_str())), fields);
+                    Event::Acp(acp::SessionUpdate::ToolCallUpdate(upd))
+                };
+                (event, Some(*end_ms), Some(dur))
+            }
+        };
+        out.push(Fed { event, meta: meta(session_id, n, ts, dur) });
+    }
+    out
+}
+
+fn meta(session_id: &str, n: usize, ts: Option<i64>, dur: Option<i64>) -> Map<String, Value> {
+    let mut m = Map::new();
+    m.insert("isReplay".into(), json!(true));
+    m.insert("eventId".into(), json!(format!("{session_id}-live-{n}")));
+    if let Some(ts) = ts {
+        m.insert("agentTimestampMs".into(), json!(ts));
+    }
+    if let Some(d) = dur {
+        m.insert("durationMs".into(), json!(d));
+    }
+    m
+}
+
+fn input_value(raw: Option<&str>) -> Value {
+    match raw {
+        Some(s) => serde_json::from_str(s).unwrap_or_else(|_| json!({ "input": s })),
+        None => Value::Null,
+    }
+}
+
+fn kind_of(name: &str) -> acp::ToolKind {
+    match name.to_ascii_lowercase().as_str() {
+        "bash" => acp::ToolKind::Execute,
+        "read" => acp::ToolKind::Read,
+        "grep" | "glob" | "find" | "websearch" => acp::ToolKind::Search,
+        "edit" | "write" | "multiedit" => acp::ToolKind::Edit,
+        "webfetch" => acp::ToolKind::Fetch,
+        _ => acp::ToolKind::Other,
+    }
+}
+
+fn str_at<'a>(v: &'a Value, k: &str) -> &'a str {
+    v.get(k).and_then(Value::as_str).unwrap_or("")
+}
+
+fn title_of(name: &str, input: &Value) -> String {
+    let t = match name.to_ascii_lowercase().as_str() {
+        "bash" => {
+            let d = str_at(input, "description");
+            let cmd = str_at(input, "command");
+            let t = if d.is_empty() { cmd } else { d };
+            t.lines().next().unwrap_or("").trim().to_string()
+        }
+        "read" => {
+            let p = {
+                let a = str_at(input, "file_path");
+                if a.is_empty() { str_at(input, "path") } else { a }
+            };
+            if p.is_empty() { String::new() } else { format!("Read {p}") }
+        }
+        "edit" | "write" | "multiedit" => {
+            let a = str_at(input, "file_path");
+            if a.is_empty() { str_at(input, "path").to_string() } else { a.to_string() }
+        }
+        _ => claude_feed::one_line(name, input),
+    };
+    if t.is_empty() || t.eq_ignore_ascii_case("task") || t.eq_ignore_ascii_case("todowrite") || t == "Updating plan" {
+        format!("{name} call")
+    } else {
+        t
+    }
+}
+
+fn content_of(tool: &str, input: &Value, output: &str, failed: bool) -> Vec<acp::ToolCallContent> {
+    if matches!(tool.to_ascii_lowercase().as_str(), "edit" | "write" | "multiedit") {
+        let path = {
+            let a = str_at(input, "file_path");
+            if a.is_empty() { str_at(input, "path").to_string() } else { a.to_string() }
+        };
+        let (old, new) = if let Some(edits) = input.get("edits").and_then(Value::as_array) {
+            let old = edits.iter().map(|e| str_at(e, "old_string").to_string() + str_at(e, "oldText")).collect::<Vec<_>>().join("\n");
+            let new = edits.iter().map(|e| str_at(e, "new_string").to_string() + str_at(e, "newText")).collect::<Vec<_>>().join("\n");
+            (Some(old), new)
+        } else {
+            let old = {
+                let a = str_at(input, "old_string");
+                let b = if a.is_empty() { str_at(input, "oldText") } else { a };
+                if b.is_empty() { None } else { Some(b.to_string()) }
+            };
+            let new = {
+                let a = str_at(input, "new_string");
+                let b = if a.is_empty() { str_at(input, "newText") } else { a };
+                let c = if b.is_empty() { str_at(input, "content") } else { b };
+                c.to_string()
+            };
+            (old, new)
+        };
+        return claude_feed::edit_content(failed, output, &path, old, new);
+    }
+    if output.is_empty() { Vec::new() } else { vec![claude_feed::text_content(output)] }
+}
+
+fn update_fields(status: acp::ToolCallStatus, input: Option<Value>, content: Option<Vec<acp::ToolCallContent>>) -> acp::ToolCallUpdateFields {
+    let mut f = acp::ToolCallUpdateFields::new().status(Some(status));
+    if let Some(i) = input {
+        f = f.raw_input(Some(i));
+    }
+    if let Some(c) = content {
+        f = f.content(Some(c));
+    }
+    f
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::acp::meta::NotificationMeta;
+    use crate::acp::tracker::AcpUpdateTracker;
+    use crate::scrollback::state::ScrollbackState;
+
+    fn apply(pieces: &[Piece]) -> ScrollbackState {
+        let mut tracker = AcpUpdateTracker::new();
+        let mut sb = ScrollbackState::new();
+        for fed in to_feds("s", pieces) {
+            let meta = NotificationMeta::from_json(Some(&fed.meta));
+            let Event::Acp(update) = fed.event else { continue };
+            tracker.handle_update(update, &meta, &mut sb);
+        }
+        sb
+    }
+
+    #[test]
+    fn open_then_complete_is_one_row() {
+        let input = Some(r#"{"command":"ls"}"#.to_string());
+        let open = Piece::Open { id: "c1".into(), tool: "Bash".into(), start_ms: 1_000, input: input.clone(), parent: None };
+        let mut sb = apply(&[open]);
+        assert_eq!(sb.len(), 1);
+        assert!(sb.iter_entries().all(|(_, e)| e.is_running));
+        let done = Piece::Complete {
+            id: "c1".into(),
+            tool: "Bash".into(),
+            start_ms: 1_000,
+            end_ms: 1_500,
+            error: false,
+            input,
+            output: "ok".into(),
+            fresh: false,
+            parent: None,
+        };
+        sb = apply(&[
+            Piece::Open { id: "c1".into(), tool: "Bash".into(), start_ms: 1_000, input: done_input(), parent: None },
+            done,
+        ]);
+        assert_eq!(sb.len(), 1);
+        assert!(sb.iter_entries().all(|(_, e)| !e.is_running));
+        let fresh = Piece::Complete {
+            id: "c2".into(),
+            tool: "MultiEdit".into(),
+            start_ms: 1,
+            end_ms: 2,
+            error: false,
+            input: Some(r#"{"file_path":"a.rs","edits":[{"old_string":"a","new_string":"b"},{"old_string":"c","new_string":"d"}]}"#.into()),
+            output: "ok".into(),
+            fresh: true,
+            parent: Some("c1".into()),
+        };
+        let feds = to_feds("s", std::slice::from_ref(&fresh));
+        assert_eq!(feds.len(), 1, "MultiEdit is one row");
+        let sb = apply(&[Piece::Complete {
+            id: "c2".into(),
+            tool: "MultiEdit".into(),
+            start_ms: 1,
+            end_ms: 2,
+            error: false,
+            input: Some(r#"{"file_path":"a.rs","edits":[{"old_string":"a","new_string":"b"}]}"#.into()),
+            output: "ok".into(),
+            fresh: true,
+            parent: None,
+        }]);
+        assert_eq!(sb.len(), 1);
+        assert!(sb.iter_entries().all(|(_, e)| !e.is_running));
+    }
+
+    fn done_input() -> Option<String> {
+        Some(r#"{"command":"ls"}"#.into())
+    }
+}

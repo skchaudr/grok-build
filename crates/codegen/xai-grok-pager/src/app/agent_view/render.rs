@@ -1416,6 +1416,12 @@ impl AgentView {
         let location_budget = left_budget.saturating_sub(upgrade_reserve);
         use unicode_width::UnicodeWidthStr;
         let mut location: Vec<Span> = Vec::new();
+        if let Some(live) = &self.trace_live {
+            location.push(Span::styled(
+                format!("{} ", live.line()),
+                bg.fg(theme.accent_running),
+            ));
+        }
         if let Some(machine) = self.machine_name.as_deref().filter(|name| !name.is_empty()) {
             location.push(Span::styled(
                 format!("{machine} "),

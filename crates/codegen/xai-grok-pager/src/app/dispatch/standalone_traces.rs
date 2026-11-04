@@ -14,6 +14,7 @@ use xai_grok_shell::session::storage::{
 };
 
 use crate::acp::claude_feed::{self, Event, Fed};
+use crate::acp::live_feed::{self, Job, TraceLive};
 use crate::acp::pi_feed;
 use crate::acp::codex_feed;
 use crate::acp::tracker::AcpUpdateTracker;
@@ -82,6 +83,10 @@ pub(crate) fn open_claude(app: &mut AppView, row: xai_grok_traces::SessionRow) {
 /// `grok traces` replays into its own view. Inside a grok session the replay gets a new agent view, so the user's session
 /// is left as it was.
 pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
+    if row.status == xai_grok_traces::Status::Active && matches!(row.source.as_str(), "claude" | "pi") {
+        open_live_in(app, row, standalone);
+        return;
+    }
     let feed = if row.source == "pi" {
         pi_feed::convert(&row.file_path, &row.id)
     } else if row.source == "dpi" {
@@ -192,6 +197,132 @@ fn open_feed_in(
     agent.session.finish_turn(&mut agent.scrollback);
     agent.scrollback.finish_all_running();
     agent.mark_turn_finished(crate::app::cancel_latency::TurnEnd::Aborted);
+}
+
+/// A live Claude or Pi session. The row opens as running the moment a receipt or span is known.
+/// Phoenix is read on the worker. A missing transcript still opens: receipts are enough.
+fn open_live_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
+    let ActiveView::Agent(origin) = app.active_view else { return };
+    let Some(agent) = app.agents.get_mut(&origin) else { return };
+    let Some(state) = agent.active_modal.take().and_then(|m| match m {
+        ActiveModal::Traces { state } => Some(state),
+        other => {
+            agent.active_modal = Some(other);
+            None
+        }
+    }) else { return };
+    let agent = if standalone {
+        agent.clear_trace_content();
+        agent
+    } else {
+        let id = AgentId(app.next_agent_id);
+        app.next_agent_id += 1;
+        let view = read_only_view(app, id);
+        app.agents.insert(id, view);
+        super::ctx::switch_to_agent(app, id, super::ctx::SwitchCause::Load);
+        let agent = app.agents.get_mut(&id).expect("just inserted");
+        agent.trace_origin = Some(origin);
+        agent
+    };
+    agent.trace_return = Some(state);
+    agent.set_active_pane(crate::app::agent_view::AgentPane::Scrollback, true);
+    agent.bind_session_id(acp::SessionId::new(row.id.clone()));
+    if let Some(cwd) = row.cwd.as_deref() {
+        agent.session.cwd = cwd.into();
+        agent.session.tracker.set_session_cwd(cwd);
+    }
+    let session_id = row.id.clone();
+    let remote = row.host.is_some();
+    let (pieces, merger, life) = if remote {
+        (Vec::new(), xai_grok_traces::merge::Merger::default(), "alive".to_string())
+    } else {
+        let transcript = std::fs::read_to_string(&row.file_path).unwrap_or_default();
+        let (receipts, pid_alive) = match xai_grok_traces::TraceIndex::open(&xai_grok_traces::default_db_path()) {
+            Ok(idx) => {
+                let receipts = idx.session_receipts(&row.id).unwrap_or_default();
+                let pid_alive = row.harness_pid.map(|pid| match row.harness_start {
+                    Some(start) => xai_grok_traces::live::alive(pid, start),
+                    None => xai_grok_traces::live::alive_pid(pid),
+                });
+                (receipts, pid_alive)
+            }
+            Err(_) => (Vec::new(), None),
+        };
+        let life = xai_grok_traces::merge::session_life(&row.source, &receipts, pid_alive).to_string();
+        let (pieces, merger, _) = xai_grok_traces::merge::load(&row.source, &transcript, &receipts, Ok(&[]));
+        (pieces, merger, life)
+    };
+    let running = merger.running().map(|n| (n, std::time::Instant::now()));
+    let events = live_feed::to_feds(&session_id, &pieces);
+    agent.begin_replay_window();
+    agent.scrollback.begin_batch();
+    for fed in events {
+        super::super::acp_handler::handle(message(&session_id, fed), app);
+    }
+    let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
+    agent.scrollback.end_batch();
+    agent.session.loading_replay = false;
+    agent.trace_live = Some(TraceLive {
+        tail: live_feed::start(Job {
+            source: row.source,
+            session_id: session_id.clone(),
+            file_path: row.file_path,
+            native_id: row.native_id,
+            host: row.host,
+            harness_pid: row.harness_pid,
+            harness_start: row.harness_start,
+            merger,
+            remote,
+        }),
+        session_id,
+        life,
+        running,
+        phoenix_offline: false,
+    });
+}
+
+/// Apply whatever the live worker has queued. True when the status line or the scrollback changed,
+/// or a call is running and its clock should tick.
+pub(crate) fn drain_live(app: &mut AppView) -> bool {
+    let ActiveView::Agent(_) = app.active_view else { return false };
+    let Some(agent) = super::ctx::get_active_agent_mut(app) else { return false };
+    let Some(live) = agent.trace_live.as_mut() else { return false };
+    let clock = live.running.is_some();
+    let Some(update) = live.tail.try_recv() else { return clock };
+    let mut changed = false;
+    if live.life != update.life {
+        live.life = update.life;
+        changed = true;
+    }
+    if live.phoenix_offline != update.phoenix_offline {
+        live.phoenix_offline = update.phoenix_offline;
+        changed = true;
+    }
+    match (&live.running, update.running.as_deref()) {
+        (Some((have, _)), Some(next)) if have == next => {}
+        (_, Some(next)) => {
+            live.running = Some((next.to_string(), std::time::Instant::now()));
+            changed = true;
+        }
+        (Some(_), None) => {
+            live.running = None;
+            changed = true;
+        }
+        (None, None) => {}
+    }
+    let session_id = live.session_id.clone();
+    let events = update.events;
+    if events.is_empty() {
+        return changed || clock;
+    }
+    agent.scrollback.begin_batch();
+    for fed in events {
+        super::super::acp_handler::handle(message(&session_id, fed), app);
+    }
+    if let Some(agent) = super::ctx::get_active_agent_mut(app) {
+        agent.scrollback.end_batch();
+    }
+    true
 }
 
 /// Esc in the read-only view: put the sessions list back, on the session it was opened from when there is one.

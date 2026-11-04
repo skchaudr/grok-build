@@ -969,6 +969,12 @@ impl TracesModalState {
         self.selected_session().filter(|s| s.host.is_none() && matches!(s.source.as_str(), "claude" | "pi" | "dpi" | "codex" | "grok")).cloned()
     }
 
+    /// Enter on a live Claude or Pi row (this machine or another) opens the session view.
+    fn live_to_open(&self) -> Option<SessionRow> {
+        let row = self.selected_session()?;
+        (row.status == Status::Active && matches!(row.source.as_str(), "claude" | "pi")).then(|| row.clone())
+    }
+
     /// Enter on a live local row follows it instead of opening its trajectory.
     fn selected_live(&self) -> bool {
         self.index.is_some() && self.selected_session().is_some_and(|s| s.host.is_none() && s.status == Status::Active)
@@ -2767,26 +2773,37 @@ impl TracesModalState {
         }
     }
 
-    fn live_open(&mut self) {
-        let view = self.live_view(Instant::now());
-        let Some(i) = self.live_pos(&view.lines) else {
-            return;
-        };
-        let row = &view.lines[i].row;
-        let session = if row.host.is_some() {
-            Some(remote_session(row))
-        } else {
-            self.index
-                .as_ref()
-                .and_then(|ix| ix.session(&row.session_id).ok().flatten())
+    fn live_open(&mut self) -> Option<Action> {
+        let (session, missing) = {
+            let view = self.live_view(Instant::now());
+            let Some(i) = self.live_pos(&view.lines) else {
+                return None;
+            };
+            let row = &view.lines[i].row;
+            if row.host.is_some() {
+                (Some(remote_session(row)), None)
+            } else {
+                let id = row.session_id.clone();
+                let session = self.index.as_ref().and_then(|ix| ix.session(&id).ok().flatten());
+                let missing = session.is_none().then_some(id);
+                (session, missing)
+            }
         };
         match session {
+            Some(mut s) if matches!(s.source.as_str(), "claude" | "pi") => {
+                s.status = Status::Active;
+                Some(Action::TracesOpenClaude(Box::new(s)))
+            }
             Some(s) => {
                 self.live_return = true;
                 self.trail.clear();
                 self.open_session(s);
+                None
             }
-            None => self.set_status(format!("cannot open {}", row.session_id)),
+            None => {
+                self.set_status(format!("cannot open {}", missing.unwrap_or_default()));
+                None
+            }
         }
     }
 
@@ -3875,6 +3892,9 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                             let open = if row.source == "grok" { Action::TracesOpenGrok(row) } else { Action::TracesOpenClaude(row) };
                             return InputOutcome::Action(open);
                         }
+                        if let Some(row) = state.live_to_open() {
+                            return InputOutcome::Action(Action::TracesOpenClaude(Box::new(row)));
+                        }
                         if state.selected_live() {
                             state.open_follow();
                         } else {
@@ -3911,7 +3931,11 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                 KeyCode::Left | KeyCode::Char('h') => return state.live_collapse(),
                 KeyCode::Right | KeyCode::Char('l') => return state.live_expand(),
                 KeyCode::Char('c') => return state.live_toggle(),
-                KeyCode::Char('o') | KeyCode::Enter => state.live_open(),
+                KeyCode::Char('o') | KeyCode::Enter => {
+                    if let Some(action) = state.live_open() {
+                        return InputOutcome::Action(action);
+                    }
+                }
                 KeyCode::Char('/') => state.typing = Typing::Live,
                 KeyCode::Char('q') => state.live_back(),
                 KeyCode::Esc if !state.live_query.is_empty() => state.live_query.clear(),
@@ -7729,9 +7753,9 @@ mod tests {
         state.sessions[0].source = "pi".into();
         state.rebuild_ledger();
         assert!(state.selected_live());
-        press(&mut state, KeyCode::Enter);
-        assert_eq!(state.mode, Mode::Follow);
-        press(&mut state, KeyCode::Esc);
+        let enter = handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(enter, InputOutcome::Action(Action::TracesOpenClaude(r)) if r.source == "pi" && r.status == Status::Active));
+        assert_eq!(state.mode, Mode::List);
         state.sessions[0].status = Status::Completed;
         state.rebuild_ledger();
         let enter = handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -7765,9 +7789,9 @@ mod tests {
         let (_tmp, mut state) = claude_fixture();
         // The fixture's files are fresh, so its row is live.
         assert!(state.selected_live());
-        press(&mut state, KeyCode::Enter);
-        assert_eq!(state.mode, Mode::Follow);
-        press(&mut state, KeyCode::Esc);
+        let enter = handle_traces_key(&mut state, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(enter, InputOutcome::Action(Action::TracesOpenClaude(r)) if r.source == "claude" && r.status == Status::Active));
+        assert_eq!(state.mode, Mode::List);
         state.sessions[0].status = Status::Completed;
         state.rebuild_ledger();
         assert!(!state.selected_live());
@@ -9038,12 +9062,9 @@ mod live_tests {
         press(&mut s, KeyCode::Char('j'));
         assert_eq!(s.live_sel.as_deref(), Some("zz"));
         press(&mut s, KeyCode::Char('k'));
-        press(&mut s, KeyCode::Char('o'));
-        assert_eq!(s.mode, Mode::Trajectory);
-        assert_eq!(s.session.as_ref().map(|x| x.id.as_str()), Some(id.as_str()));
-        press(&mut s, KeyCode::Esc);
+        let open = handle_traces_key(&mut s, &KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert!(matches!(open, InputOutcome::Action(Action::TracesOpenClaude(r)) if r.id == id && r.source == "pi" && r.status == Status::Active));
         assert_eq!(s.mode, Mode::Live);
-        assert!(!s.live_return && s.session.is_none());
         assert_eq!(s.live_sel.as_deref(), Some(id.as_str()));
         // A row the index does not know cannot be opened.
         press(&mut s, KeyCode::Char('j'));
@@ -9067,14 +9088,13 @@ mod live_tests {
         );
         s.live_sel = Some("sab-air:b".into());
         // The row's host label is what the ledger matches on; this target's label differs, so no ssh is attempted.
-        press(&mut s, KeyCode::Char('o'));
-        assert_eq!(s.mode, Mode::Trajectory);
-        let sess = s.session.as_ref().unwrap();
-        assert_eq!(
-            (sess.id.as_str(), sess.host.as_deref(), sess.source.as_str()),
-            ("sab-air:b", Some("sab-air"), "pi")
-        );
-        assert!(s.live_return);
+        let open = handle_traces_key(&mut s, &KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert!(matches!(
+            &open,
+            InputOutcome::Action(Action::TracesOpenClaude(r))
+                if r.id == "sab-air:b" && r.host.as_deref() == Some("sab-air") && r.source == "pi" && r.status == Status::Active
+        ));
+        assert_eq!(s.mode, Mode::Live);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::live::{LIVE_SCHEMA, LiveRow};
+use crate::live::{LIVE_SCHEMA, LiveReceipt, LiveRow};
 use crate::query::{EventRow, SessionRow, Status};
 
 pub const WALL_TIMEOUT: Duration = Duration::from_secs(4);
@@ -467,6 +467,97 @@ pub fn fetch_events_with(ssh: &Ssh, target: &str, session_id: &str, q: &EventQue
     }
 }
 
+/// Transcript, receipts and pid liveness for one session. `pid_alive` is null when the harness pid is unknown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveDump {
+    pub source: String,
+    pub file_name: String,
+    pub transcript: String,
+    pub pid_alive: Option<bool>,
+    pub receipts: Vec<LiveReceipt>,
+}
+
+pub fn live_dump_json(source: &str, file_name: &str, transcript: &str, pid_alive: Option<bool>, receipts: &[LiveReceipt]) -> Value {
+    json!({
+        "source": source,
+        "file_name": file_name,
+        "transcript": transcript,
+        "pid_alive": pid_alive,
+        "receipts": receipts.iter().map(receipt_json).collect::<Vec<_>>(),
+    })
+}
+
+fn receipt_json(r: &LiveReceipt) -> Value {
+    json!({
+        "id": r.id,
+        "session_id": r.session_id,
+        "native_session": r.native_session,
+        "agent_id": r.agent_id,
+        "event": r.event,
+        "tool": r.tool,
+        "detail": r.detail,
+        "tool_use_id": r.tool_use_id,
+        "at_ms": r.at_ms,
+        "is_error": r.is_error,
+        "duration_ms": r.duration_ms,
+        "parent_tool_use_id": r.parent_tool_use_id,
+    })
+}
+
+pub fn live_dump_parse(v: &Value) -> Option<LiveDump> {
+    let source = v.get("source")?.as_str()?.to_string();
+    let file_name = v.get("file_name").and_then(Value::as_str).unwrap_or("").to_string();
+    let transcript = v.get("transcript").and_then(Value::as_str).unwrap_or("").to_string();
+    let pid_alive = v.get("pid_alive").and_then(Value::as_bool);
+    let receipts = v
+        .get("receipts")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(receipt_parse).collect())
+        .unwrap_or_default();
+    Some(LiveDump { source, file_name, transcript, pid_alive, receipts })
+}
+
+fn opt_str(v: &Value, key: &str) -> Option<String> {
+    v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+fn receipt_parse(v: &Value) -> LiveReceipt {
+    LiveReceipt {
+        id: v.get("id").and_then(Value::as_i64).unwrap_or(0),
+        session_id: opt_str(v, "session_id"),
+        native_session: opt_str(v, "native_session"),
+        agent_id: opt_str(v, "agent_id"),
+        event: v.get("event").and_then(Value::as_str).unwrap_or("").to_string(),
+        tool: opt_str(v, "tool"),
+        detail: opt_str(v, "detail"),
+        tool_use_id: opt_str(v, "tool_use_id"),
+        at_ms: v.get("at_ms").and_then(Value::as_i64).unwrap_or(0),
+        is_error: v.get("is_error").and_then(Value::as_bool),
+        duration_ms: v.get("duration_ms").and_then(Value::as_i64),
+        parent_tool_use_id: opt_str(v, "parent_tool_use_id"),
+    }
+}
+
+/// `grok-traces live-json <id>` on `target`. Exit 2 is an older binary.
+pub fn fetch_live_dump(target: &str, session_id: &str) -> Result<LiveDump> {
+    fetch_live_dump_with(&Ssh::default(), target, session_id)
+}
+
+pub fn fetch_live_dump_with(ssh: &Ssh, target: &str, session_id: &str) -> Result<LiveDump> {
+    let id = remote_id(target, session_id);
+    safe_id(target, id)?;
+    let o = run(ssh, target, &format!("{REMOTE_BIN} live-json {id}"))?;
+    match o.code {
+        0 => {
+            let v: Value = serde_json::from_str(o.stdout.trim()).map_err(|e| Error::Parse { host: target.into(), detail: e.to_string() })?;
+            live_dump_parse(&v).ok_or_else(|| Error::Parse { host: target.into(), detail: "live-json missing source".into() })
+        }
+        2 => Err(Error::Remote { host: target.into(), detail: "remote grok-traces is too old for live-json; update it".into() }),
+        3 => Err(Error::Remote { host: target.into(), detail: "no such session".into() }),
+        _ => Err(remote_failed(target, &o)),
+    }
+}
+
 /// `Ok(None)` = the remote has no such line.
 pub fn fetch_raw(target: &str, session_id: &str, line: i64) -> Result<Option<String>> {
     fetch_raw_with(&Ssh::default(), target, session_id, line)
@@ -481,5 +572,35 @@ pub fn fetch_raw_with(ssh: &Ssh, target: &str, session_id: &str, line: i64) -> R
         3 => Ok(None),
         2 => Err(Error::Remote { host: target.into(), detail: "remote grok-traces is too old for raw; update it".into() }),
         _ => Err(remote_failed(target, &o)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_dump_roundtrip_keeps_end_fields_and_a_null_pid() {
+        let r = LiveReceipt {
+            id: 7,
+            event: "PostToolUse".into(),
+            tool_use_id: Some("c1".into()),
+            at_ms: 50,
+            is_error: Some(true),
+            duration_ms: Some(1500),
+            parent_tool_use_id: Some("p".into()),
+            ..Default::default()
+        };
+        let v = live_dump_json("claude", "a.jsonl", "hi", None, &[r]);
+        let d = live_dump_parse(&v).unwrap();
+        assert_eq!(d.source, "claude");
+        assert_eq!(d.file_name, "a.jsonl");
+        assert_eq!(d.transcript, "hi");
+        assert_eq!(d.pid_alive, None);
+        assert_eq!(d.receipts[0].is_error, Some(true));
+        assert_eq!(d.receipts[0].duration_ms, Some(1500));
+        assert_eq!(d.receipts[0].parent_tool_use_id.as_deref(), Some("p"));
+        let again = live_dump_json("pi", "b.jsonl", "", Some(false), &[]);
+        assert_eq!(live_dump_parse(&again).unwrap().pid_alive, Some(false));
     }
 }
