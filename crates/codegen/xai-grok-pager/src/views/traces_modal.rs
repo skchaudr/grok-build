@@ -564,7 +564,8 @@ impl TracesModalState {
 
     /// The board as the top screen, with generated summaries on (`/traces` and `grok traces`).
     pub fn with_board(mut self) -> Self {
-        self.board = board::Board::new(true);
+        // `GROK_TRACES_NO_SUMMARIES=1` reads cached summaries but makes no new ones (screenshots, tests).
+        self.board = board::Board::new(std::env::var_os("GROK_TRACES_NO_SUMMARIES").is_none());
         self.board_home = true;
         self.mode = Mode::Board;
         self

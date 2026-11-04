@@ -90,6 +90,9 @@ impl Line {
     }
 }
 
+/// Subagents listed under an open session before the rest become a count.
+const MAX_SHOWN_KIDS: usize = 12;
+
 fn last_at(r: &SessionRow) -> i64 {
     r.last_event_at.or(r.updated_at).unwrap_or(0)
 }
@@ -232,11 +235,15 @@ impl TracesModalState {
         for d in self.details(r, kids) {
             out.push(Line::Detail(d));
         }
-        // Running subagents first, then the most recent.
+        // Running subagents first, then the most recent; past the cap, a count (the session view has them all).
         let mut kids: Vec<&SessionRow> = kids.iter().collect();
         kids.sort_by_key(|c| (c.status != Status::Active, std::cmp::Reverse(last_at(c))));
-        for c in kids {
+        let more = kids.len().saturating_sub(MAX_SHOWN_KIDS);
+        for c in kids.into_iter().take(MAX_SHOWN_KIDS) {
             self.push_row(out, c, depth + 1);
+        }
+        if more > 0 {
+            out.push(Line::Detail(format!("{more} older subagents: Enter opens the session, which lists them all")));
         }
     }
 
@@ -307,6 +314,7 @@ impl TracesModalState {
     fn set_view(&mut self, view: View) {
         self.board.view = view;
         self.board.scroll = 0;
+        self.board.sel = None;
     }
 
     fn toggle_open(&mut self) -> bool {

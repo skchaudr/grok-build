@@ -1,0 +1,50 @@
+[48;2;47;48;54m [38;2;117;121;127m              [39m [38;2;93;96;102m         [38;2;197;201;199m                                      [39m                                                                                                                         [38;2;117;121;127m           [39m
+  [38;2;117;121;127mtraces · all machines[39m                                                                                                                                             [38;2;137;146;167m⋅ 1 live[38;2;117;121;127m │ [38;2;196;116;110m◆ 25 failed[38;2;117;121;127m │ ◇ 584[39m
+
+  [38;2;117;121;127mLive · Recent[39m   [38;2;117;121;127mLongest[39m   [38;2;117;121;127mFailed[39m   [38;2;117;121;127mProjects[39m   [1m[38;2;197;201;199mHarness[0m[48;2;47;48;54m
+
+  [1m[38;2;117;121;127m▾ Claude[0m[38;2;117;121;127m[48;2;47;48;54m 84 [38;2;67;70;78m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+
+  [1m[38;2;197;201;199m[48;2;67;70;78m▏[0m[48;2;67;70;78m [38;2;117;121;127m◇[39m [38;2;197;201;199mDurable Pi vs Hermes for agents[38;2;117;121;127m · 8 subagents · sab-air · pi-durable-lab[39m                                                                                                        [38;2;117;121;127m3h58m · 31m[39m [48;2;47;48;54m
+  [1m[38;2;197;201;199m[48;2;67;70;78m▏[0m[48;2;67;70;78m   [38;2;197;201;199mThe session ended with the dpi model fix verified, but the dpi-tui fork commit and submodule sync left unfinished after a merge conflict.[39m                                                   [48;2;47;48;54m
+
+    [38;2;137;146;167m⸬[39m [38;2;197;201;199mFirstmate orchestration workflow scripts[38;2;117;121;127m · 75 subagents · grok-build[39m                                                                                                            [38;2;117;121;127m6h13m · 42m[39m
+      [38;2;117;121;127mI've started the three Opus agents. Each works in its own copy of grok-build on its own branch, buil…[39m
+
+    [38;2;117;121;127m◇[39m [38;2;197;201;199mReviewer's paradox in workflow scripts[38;2;117;121;127m · sab-air · sab-orchestrate[39m                                                                                                                  [38;2;117;121;127m5m · 5h[39m
+      [38;2;117;121;127mSession ended with an agent note saved to Obsidian, while the user's daily-memory path request remains unanswered.[39m
+
+    [38;2;117;121;127m◇[39m [38;2;197;201;199mCurrent git checkout status[38;2;117;121;127m · sab-air · .claude[39m                                                                                                                                    [38;2;117;121;127m32m · 9h[39m
+      [38;2;117;121;127mRex-keys synced and clipboard paths checked; the Ghostty-clipboard image paste fix is still unresolved.[39m
+
+    [38;2;117;121;127m◇[39m [38;2;197;201;199mGrok build traces and trace-deck progress[38;2;117;121;127m · 44 subagents · grok-build[39m                                                                                                            [38;2;117;121;127m6h59m · 9h[39m
+      [38;2;117;121;127mSpec for the traces-collapse product is committed and pushed (`162b1f26`), but the product still isn't fully defined.[39m
+
+    [38;2;117;121;127m◇[39m [38;2;197;201;199mclaude code denylist hooks[38;2;117;121;127m · 1 subagent · grok-build[39m                                                                                                                               [38;2;117;121;127m5m · 10h[39m
+      [38;2;117;121;127mAdded `"ask": ["Workflow"]` to global settings; live sessions pick it up, but I haven't verified bypass-mode enforcement.[39m
+
+    [38;2;117;121;127m◇[39m [38;2;197;201;199mComparing ICM and OKF workflows[38;2;117;121;127m · 97 subagents · sab-air · MyGraph[39m                                                                                                              [38;2;117;121;127m9h29m · 12h[39m
+      [38;2;117;121;127mBatch 1 finished and pushed: `mygraph_ask` is live, MCP registered on both machines, and the reviewer's fixes landed.[39m
+
+    [38;2;117;121;127m◇[39m [38;2;197;201;199mWater and Stone consultation requests[38;2;117;121;127m · sab-air · aqua-stone-studio[39m                                                                                                              [38;2;117;121;127m1h55m · 1d[39m
+      [38;2;117;121;127mToolbar now sits on the selected piece and was checked on the live preview at phone width; the stock-photo library is live, but the handoff was never written.[39m
+
+    [38;2;117;121;127m◇[39m [38;2;197;201;199muserpromptsubmit hooks config[38;2;117;121;127m · views[39m                                                                                                                                              [38;2;117;121;127m25s · 1d[39m
+      [38;2;117;121;127mThe session ended with the UserPromptSubmit hook list unshown, blocked by the recursive-grep guard.[39m
+
+    [38;2;117;121;127m◇[39m [38;2;197;201;199mFirstmate orchestration workflow scripts[38;2;117;121;127m · 20 subagents · grok-build[39m                                                                                                             [38;2;117;121;127m3h43m · 1d[39m
+      [38;2;117;121;127mTraces viewer's list/expand behavior was being investigated; no code changes made, session ended on `/compact`.[39m
+
+    [38;2;117;121;127m◇[39m [38;2;197;201;199m(no prompt) · WATER_AND_STONE_WORKSPACE[38;2;117;121;127m · sab-air · WATER_AND_STONE_WORKSPACE[39m                                                                                                      [38;2;117;121;127m19s · 1d[39m
+      [38;2;117;121;127mTool[39m
+
+    [38;2;117;121;127m◇[39m [38;2;197;201;199mBenzi trial handoff 011[38;2;117;121;127m · sab-air · aa-cli[39m                                                                                                                                       [38;2;117;121;127m1h17m · 1d[39m
+      [38;2;117;121;127mThe 10,000-token run is in `.handoffs/014-graphify-class-queries.md`, verbatim (7c87eae, pushed). Th…[39m
+
+    [38;2;117;121;127m◇[39m [38;2;197;201;199mOk[38;2;117;121;127m · sab-air · tmp[39m                                                                                                                                                                  [38;2;117;121;127m2s · 2d[39m
+      [38;2;117;121;127mok[39m
+
+ [38;2;67;70;78m   [38;2;117;121;127m◇[38;2;67;70;78m [38;2;197;201;199mOk reply[38;2;117;121;127m · sab-air · tmp[38;2;67;70;78m                                                                                                                                                            [38;2;117;121;127m4s · 2d[38;2;67;70;78m  [39m
+ [38;2;67;70;78m [38;2;197;201;199m    [38;2;117;121;127mok[38;2;197;201;199m                                                                                                                                                                                          [38;2;67;70;78m [39m
+ [38;2;67;70;78m                                                                                                                                                               [38;2;137;140;141m               [38;2;117;121;127m                 [38;2;67;70;78m   [39m
+  [38;2;117;121;127mTab:view  │  c:compact  │  e:subagents  │  H:machine  │  /:search[39m
