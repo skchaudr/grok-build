@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Air client: Mini owns the hub. Workers come from ~/.config/gk/workers.tsv
-# (built-in mini and khoj when that file is absent).
+# (built-in mini and air when that file is absent).
 # Usage:
 #   gk [worker] [grok options, e.g. --resume ID or --cwd /remote/path]
 #   gk all [grok options]   # every registered worker as --agent-choice
@@ -34,12 +34,6 @@ load_builtin() {
   remember mini
   worker_kind[mini]=local
   worker_agent[mini]='/Users/sab-mini/.grok/bin/grok-team-hub --no-auto-update agent --no-leader stdio'
-  remember khoj
-  worker_kind[khoj]=ssh
-  worker_user[khoj]=sab-mini
-  worker_host[khoj]=100.75.255.75
-  worker_script[khoj]=/home/sab-mini/.dsh/scripts/grok-khoj-worker
-  worker_known[khoj]=/Users/sab-mini/.ssh/known_hosts.grok-hub
   # The Air itself, reached from the Mini hub over ssh.
   remember air
   worker_kind[air]=ssh

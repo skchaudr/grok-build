@@ -13,11 +13,11 @@
 #          One pager offering several agents (repeated --agent-choice NAME=CMD, first is
 #          the default). 'all' = $GB_ALL (default "claude pi"). Leading args that are agent names
 #          are the agents; the rest go to the pager.
-#          Add remote machines as EXTRA choices (never home): 'gb all +khoj', 'gb claude pi +khoj',
-#          or GB_REMOTE_CHOICES=khoj[,name]. Each adds <machine>-<agent> for the agents selected
+#          Add remote machines as EXTRA choices (never home): 'gb all +NAME', 'gb claude pi +NAME',
+#          or GB_REMOTE_CHOICES=NAME[,NAME]. Each adds <machine>-<agent> for the agents selected
 #          (claude, pi) as 'ssh -T -o BatchMode=yes <user@host> <absolute remote cmd>'; the local
 #          leader spawns it. Machines: ~/.config/gb/machines.tsv (TAB: name, user@host, claude cmd,
-#          pi cmd; absolute remote paths) else the built-in khoj. Needs non-interactive ssh to work.
+#          pi cmd; absolute remote paths). Needs non-interactive ssh to work.
 #        gb native [args...] → stock grok binary, args passed through.
 # Agent: normal|prime|prime-h2|claude|cursor|pi|codex|dsh|dsh-stock|fork; omit to pick.
 #        prime-h2 = prime-agent behind the Harness² ACP proxy (skills + guardrails injected; run dir,
@@ -80,11 +80,8 @@ declare -A CMD=(
   [fork]="grok agent stdio"
   [normal]="normal grok"
 )
-# Remote machines: extra named choices. Built-in khoj; machines.tsv overrides/adds.
+# Remote machines: extra named choices, from machines.tsv only (no built-ins).
 declare -A RM_HOST RM_CLAUDE RM_PI
-RM_HOST[khoj]=sab-mini@${GB_KHOJ_HOST:-100.75.255.75}  # tailscale IP (khoj-38w does not resolve on the Macs)
-RM_CLAUDE[khoj]="env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=/home/sab-mini/.local/bin/claude /home/sab-mini/.local/bin/claude-agent-acp"
-RM_PI[khoj]=/usr/bin/pi-acp
 if [ -f "$HOME/.config/gb/machines.tsv" ]; then
   while IFS=$'\t' read -r n h c p _; do
     case "$n" in ""|\#*) continue;; esac
