@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# fh-clean — list deletable debris on one machine (build dirs, build logs, clean worktrees) and
+# delete only what you confirm, item by item. Without a terminal it only lists.
+# Usage: fh-clean HOST
+# Note: a repo's own target/ can hold the pager binary you run (marked SHARED); deleting it means a rebuild.
+set -uo pipefail
+. "$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd)/fh-lib.sh"
+h="${1:?usage: fh-clean HOST}"
+
+list=$(fh_run "$h" "$FH_ENV"'
+for p in "$HOME"/repos/*/target "$HOME"/.dsh/.worktrees/*/target; do
+  [ -d "$p" ] || continue
+  note=""; [ -x "$p/release/xai-grok-pager" ] && note="SHARED: holds the pager binary"
+  echo "target|$p|$(du -sm "$p" | cut -f1)|$note"
+done
+[ -f "$HOME/gb-build.log" ] && echo "log|$HOME/gb-build.log|$(du -sm "$HOME/gb-build.log" | cut -f1)|"
+for p in "$HOME"/repos/*/.worktrees/* "$HOME"/.dsh/.worktrees/*; do
+  [ -e "$p/.git" ] || continue
+  dirty=$(git -C "$p" status --porcelain | wc -l | tr -d " ")
+  ahead=$(git -C "$p" rev-list --count @{u}..HEAD 2>/dev/null || echo "no-upstream")
+  [ "$dirty" = 0 ] && [ "$ahead" = 0 ] && note="clean, pushed" || note="KEEP? dirty=$dirty unpushed=$ahead"
+  echo "worktree|$p|$(du -sm "$p" | cut -f1)|$note"
+done' 2>&1) || { echo "unreachable: $h"; exit 1; }
+
+[ -z "$list" ] && { echo "nothing to clean on $h"; exit 0; }
+echo "$list" | awk -F'|' '{printf "%-9s %6.1fG  %s  %s\n",$1,$3/1024,$2,$4}'
+[ -t 0 ] || { echo "(no terminal: list only)"; exit 0; }
+
+echo
+while IFS='|' read -r type path mb note; do
+  case "$type|$path" in
+    target\|*/target|log\|*/gb-build.log|worktree\|*/.worktrees/*) ;;
+    *) echo "skip (unexpected path): $path"; continue;;
+  esac
+  printf 'delete %s %s (%sM) %s ? [y/N] ' "$type" "$path" "$mb" "$note"
+  read -r ans </dev/tty
+  [ "$ans" = y ] || continue
+  if [ "$type" = worktree ]; then
+    fh_run "$h" "cd \"\$(git -C '$path' rev-parse --git-common-dir)/..\" && git worktree remove '$path'"
+  else
+    fh_run "$h" "rm -rf '$path'"
+  fi && echo "  deleted"
+done <<<"$list"

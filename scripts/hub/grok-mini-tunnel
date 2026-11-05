@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# One connection, supervised by the existing hermes-proxies:grok-mini tmux pane.
+# Bootstrap Mini's Background service on connection; no GUI login/admin needed.
+set -euo pipefail
+mkdir -p "$HOME/.grok"
+mini=sab-mini@100.66.99.64
+local_sock="$HOME/.grok/leader-mini-hub.sock"
+remote_sock=/Users/sab-mini/.grok/leader-hub.sock
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+say() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
+
+say "Connecting to the Mini hub ($mini)..."
+hub=$(/usr/bin/ssh "${ssh_opts[@]}" "$mini" '
+  set -e
+  domain="user/$(id -u)"
+  launchctl print "$domain/com.sab.grok-hub" >/dev/null 2>&1 ||
+    launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/com.sab.grok-hub.plist"
+  pid=$(launchctl print "$domain/com.sab.grok-hub" 2>/dev/null | awk "/^\tpid = /{print \$3}")
+  ver=$(~/.grok/bin/grok-team-hub --version 2>/dev/null || true)
+  echo "pid ${pid:-none}, ${ver:-version unknown}"
+') || { say "Could not reach the Mini over ssh (exit $?). Is it awake and on Tailscale?"; exit 255; }
+say "Mini hub service: $hub"
+
+/usr/bin/ssh -NT "${ssh_opts[@]}" -o ExitOnForwardFailure=yes -o StreamLocalBindUnlink=yes \
+  -L "$local_sock:$remote_sock" "$mini" &
+fwd=$!
+trap 'kill $fwd 2>/dev/null' INT TERM EXIT
+for _ in $(seq 1 20); do
+  if python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect(sys.argv[1])' "$local_sock" 2>/dev/null; then
+    say "Connected: $local_sock -> Mini $remote_sock"
+    say "gk / gk all / gk ask use this link. Quiet while healthy; a reconnect is logged here."
+    break
+  fi
+  kill -0 $fwd 2>/dev/null || break
+  sleep 1
+done
+set +e
+wait $fwd
+code=$?
+trap - INT TERM EXIT
+case $code in
+  0) say "Link closed by the Mini (hub restarted or ssh session ended)." ;;
+  255) say "ssh failed (network drop, Mini asleep, or the forward could not bind)." ;;
+  *) say "Link ended with exit $code." ;;
+esac
+exit $code

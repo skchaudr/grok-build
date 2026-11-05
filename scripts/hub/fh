@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# fh — fleet health, read-only. Disk, load, running builds, big build dirs, per machine.
+# Usage: fh [host...]      default hosts: $FH_HOSTS (local sab-air sab-mini)
+# Warns when disk is >= 85% used or load exceeds the core count.
+set -uo pipefail
+. "$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd)/fh-lib.sh"
+
+probe=$FH_ENV'
+cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc)
+load=$(uptime | sed "s/.*load averages*: *//" | awk "{print \$1}" | tr -d ,)
+line=$(df -h "$HOME" | tail -1)
+pct=$(echo "$line" | grep -o "[0-9]*%" | head -1)
+echo "host: $(hostname -s)"
+echo "disk: $(echo "$line" | awk "{print \$4}") free ($pct used)"
+echo "load: $load on $cores cores"
+echo "builds:"
+ps -Ao pid,ni,pcpu,etime,args | grep -E "cargo (build|test)|rustc " | grep -v grep | cut -c1-110 | head -5 | sed "s/^/  /"
+echo "big dirs (>=500M):"
+du -sm "$HOME"/repos/*/target "$HOME"/.dsh/.worktrees/*/target "$HOME"/.dsh/.worktrees/* "$HOME"/repos/*/.worktrees/* 2>/dev/null | awk "\$1>=500{printf \"  %5.1fG  %s\n\", \$1/1024, \$2}" | sort -rn | head -8
+warn=""
+[ "${pct%\%}" -ge 85 ] && warn="DISK ${pct} USED"
+awk -v l="$load" -v c="$cores" "BEGIN{exit !(l>c)}" && warn="$warn LOAD>${cores}"
+[ -n "$warn" ] && echo "!! $warn"
+true
+'
+hosts=("$@"); [ ${#hosts[@]} -eq 0 ] && read -ra hosts <<<"$FH_HOSTS"
+for h in "${hosts[@]}"; do
+  echo "== $h"
+  fh_run "$h" "$probe" 2>&1 || echo "  unreachable"
+done

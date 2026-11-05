@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# fh-stop — stop cargo/rustc builds on one machine and show what was running.
+# Usage: fh-stop HOST      (HOST = local | sab-air | sab-mini | any ssh alias)
+set -uo pipefail
+. "$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd)/fh-lib.sh"
+h="${1:?usage: fh-stop HOST}"
+fh_run "$h" 'echo "stopping on $(hostname -s):"; ps -Ao pid,etime,args | grep -E "cargo (build|test)|rustc " | grep -v grep | cut -c1-100
+pkill -f "cargo (build|test)"; pkill rustc; sleep 1
+n=$(pgrep -f "cargo (build|test)|rustc " | wc -l); echo "still running: $n"'

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Mini: sign a Grok binary with a stable self-signed identity so macOS privacy
+# grants (removable-volume access) survive rebuilds. Ad-hoc signatures change
+# every build, and TCC keys ad-hoc grants to that exact build.
+# Usage: grok-sign BINARY [IDENTIFIER]   (creates the identity on first use)
+# One-time, in a GUI Terminal on the Mini (ssh cannot show the auth dialog):
+#   security add-trusted-cert -r trustRoot -p codeSign -k ~/Library/Keychains/grok-sign.keychain-db ~/.grok/sign/cert.pem
+set -euo pipefail
+bin=${1:?usage: grok-sign BINARY [IDENTIFIER]}
+ident=${2:-com.sab.grok-team-hub}
+dir="$HOME/.grok/sign"
+kc="$HOME/Library/Keychains/grok-sign.keychain-db"
+cn="Grok Local Signing"
+mkdir -p "$dir"; chmod 700 "$dir"
+if [[ ! -f $kc ]]; then
+  umask 077
+  head -c 24 /dev/urandom | base64 >"$dir/keychain-pass"
+  pass=$(<"$dir/keychain-pass")
+  /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=$cn" \
+    -keyout "$dir/key.pem" -out "$dir/cert.pem" \
+    -addext "keyUsage=critical,digitalSignature" -addext "extendedKeyUsage=critical,codeSigning" 2>/dev/null
+  /usr/bin/openssl pkcs12 -export -inkey "$dir/key.pem" -in "$dir/cert.pem" \
+    -out "$dir/id.p12" -passout "pass:$pass" -name "$cn"
+  security create-keychain -p "$pass" "$kc"
+  security set-keychain-settings "$kc"   # no auto-lock timeout
+  security unlock-keychain -p "$pass" "$kc"
+  security import "$dir/id.p12" -k "$kc" -P "$pass" -T /usr/bin/codesign
+  security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$kc" >/dev/null
+  rm -f "$dir/key.pem" "$dir/id.p12"
+fi
+# codesign only finds identities in the user search list, even with --keychain.
+security list-keychains -d user | grep -q grok-sign.keychain-db ||
+  security list-keychains -d user -s $(security list-keychains -d user | tr -d '"') "$kc"
+security unlock-keychain -p "$(<"$dir/keychain-pass")" "$kc"
+hash=$(security find-certificate -c "$cn" -Z "$kc" | awk '/SHA-1 hash:/{print $3}')
+codesign --force --keychain "$kc" -s "$hash" -i "$ident" "$bin"
+codesign -d -r- "$bin" 2>&1 | grep designated

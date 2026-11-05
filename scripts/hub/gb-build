@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# gb-build — build the Grok Build pager on a machine, safely.
+# Usage: gb-build [-y] [HOST]      HOST = local (default) | sab-air | sab-mini
+# Installs ~/.grok/bin/grok-fork (what `gb`/`grok` run); a sab-mini build also rsyncs it to sab-air.
+# Refuses under 20G free disk. Runs at lowest CPU priority. Says which machine it will heat and asks first
+# (use -y to skip the question; required when there is no terminal). Remote builds run detached; watch with `fh`.
+set -uo pipefail
+. "$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd)/fh-lib.sh"
+yes=0; [ "${1:-}" = -y ] && { yes=1; shift; }
+h="${1:-local}"
+
+info=$(fh_run "$h" "$FH_ENV"'
+free=$(df -g "$HOME" 2>/dev/null | tail -1 | awk "{print \$4}")
+[ -z "$free" ] && free=$(df -BG "$HOME" | tail -1 | awk "{print \$4}" | tr -d G)
+cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc)
+load=$(uptime | sed "s/.*load averages*: *//" | awk "{print \$1}" | tr -d ,)
+echo "$(hostname -s) $free $cores $load"') || { echo "unreachable: $h"; exit 1; }
+read -r name free cores load <<<"$info"
+
+if [ "${free:-0}" -lt 20 ]; then echo "refused: $name has only ${free}G free (need 20G). Run: fh-clean $h"; exit 1; fi
+echo "Build the pager on $name: ${cores} cores, load ${load}, ${free}G free. It will run hot for ~7-15 min at lowest priority."
+if [ $yes = 0 ]; then
+  [ -t 0 ] || { echo "no terminal: pass -y to confirm"; exit 1; }
+  printf 'go? [y/N] '; read -r a; [ "$a" = y ] || { echo cancelled; exit 1; }
+fi
+
+build=$FH_ENV'
+[ -x "$HOME/.local/protoc-29.3/bin/protoc" ] && export PROTOC="$HOME/.local/protoc-29.3/bin/protoc"
+cd "$HOME/repos/grok-build" && git pull -q --ff-only origin main
+nice -n 19 cargo build --release -p xai-grok-pager-bin && install -m755 target/release/xai-grok-pager "$HOME/.grok/bin/grok-fork" && echo "installed ~/.grok/bin/grok-fork on $(hostname -s)" \
+  && { "$HOME/.dsh/scripts/grok-hub-sync" || echo "WARNING: grok-hub-sync failed; leader/hub keep the old binary"; }'
+# After a Mini build, ship the binary to Air (same arch); Air never builds. GB_NO_DEPLOY=1 skips.
+deploy='
+cd "$HOME/repos/grok-build" && rsync -a target/release/xai-grok-pager sab-air:repos/grok-build/target/release/xai-grok-pager \
+  && rsync -a target/release/xai-grok-pager sab-air:.grok/bin/grok-fork && ssh sab-air "cd repos/grok-build && git pull -q --ff-only origin main" \
+  && echo "deployed grok-fork to sab-air"'
+[ "$h" = sab-mini ] && [ -z "${GB_NO_DEPLOY:-}" ] && build="$build && $deploy"
+if [ "$h" = local ]; then
+  bash -c "$build"
+else
+  fh_run "$h" "( nohup bash -c $(printf %q "$build") > \$HOME/gb-build.log 2>&1 & ); echo started on $name; echo log: ~/gb-build.log; echo watch: fh $h"
+fi

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# grok-hub-sync: Mini only. After ~/.grok/bin/grok-fork is installed, re-sign it with the stable
+# "Grok Local Signing" identity (grok-sign) and copy it over ~/.grok/bin/grok-team-hub, the path that
+# holds the macOS privacy grant and is run by launchd com.sab.grok-leader and com.sab.grok-hub.
+# Copy goes to .new then mv, previous hub kept as grok-team-hub.bak. Idempotent: identical bytes => no copy, no restart.
+# Usage: grok-hub-sync [--no-kickstart]     Exits 0 silently on machines without the hub plist (Air).
+set -euo pipefail
+bin="$HOME/.grok/bin"; fork="$bin/grok-fork"; hub="$bin/grok-team-hub"
+kick=1; [ "${1:-}" = --no-kickstart ] && kick=0
+[ -f "$HOME/Library/LaunchAgents/com.sab.grok-hub.plist" ] || exit 0
+[ -x "$fork" ] || { echo "grok-hub-sync: $fork missing" >&2; exit 1; }
+[ -f "$HOME/Library/Keychains/grok-sign.keychain-db" ] || { echo "grok-hub-sync: no grok-sign keychain; run grok-sign once (see its header)" >&2; exit 1; }
+
+# Re-signing rewrites the bytes, so only sign when the fork is not already signed by the stable identity.
+sig=$(codesign -dvv "$fork" 2>&1 || true)
+[[ $sig == *"Authority=Grok Local Signing"* ]] ||
+  "$(dirname "$(readlink "$0" || echo "$0")")/grok-sign" "$fork" >/dev/null
+sig=$(codesign -dv "$fork" 2>&1 || true)
+[[ $sig == *"Signature=adhoc"* ]] && { echo "grok-hub-sync: $fork still ad-hoc signed" >&2; exit 1; }
+
+if [ -x "$hub" ] && cmp -s "$fork" "$hub"; then
+  echo "grok-hub-sync: grok-team-hub already matches signed grok-fork"; changed=0
+else
+  [ -e "$hub" ] && cp -p "$hub" "$hub.bak"
+  cp "$fork" "$hub.new" && chmod +x "$hub.new" && mv "$hub.new" "$hub"
+  echo "grok-hub-sync: grok-team-hub updated from signed grok-fork (backup: grok-team-hub.bak)"; changed=1
+fi
+
+if [ $changed = 1 ] && [ $kick = 1 ]; then
+  for j in com.sab.grok-leader com.sab.grok-hub; do
+    launchctl kickstart -k "gui/$(id -u)/$j" 2>/dev/null || launchctl kickstart -k "user/$(id -u)/$j" \
+      || { echo "grok-hub-sync: kickstart $j failed" >&2; exit 1; }
+    echo "grok-hub-sync: kickstarted $j"
+  done
+fi

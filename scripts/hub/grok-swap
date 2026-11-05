@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# grok-swap: swap grok-team-hub (Mini, launchd) and grok-team-client (Air) to ~/.grok/bin/grok-fork.
+#
+# Usage:
+#   grok-swap [--hub] [--client] [--yes]            default: both; dry run without --yes
+#   grok-swap [--hub] [--client] --rollback <sha> [--yes]
+#
+# Env:
+#   GROK_SWAP_SSH        ssh binary (default /usr/bin/ssh); every remote call goes through it
+#   GROK_SWAP_MINI       Mini ssh host (default sab-mini@100.66.99.64)
+#   GROK_SWAP_AIR        Air ssh host (default sab-air)
+#   GROK_SWAP_AIR_LOCAL  1 = Air steps run locally, 0 = via ssh, auto (default) = local if hostname contains "air"
+set -euo pipefail
+
+SSH="${GROK_SWAP_SSH:-/usr/bin/ssh}"
+MINI="${GROK_SWAP_MINI:-sab-mini@100.66.99.64}"
+AIR="${GROK_SWAP_AIR:-sab-air}"
+BIN='~/.grok/bin'
+FORK="$BIN/grok-fork"
+HUB_LABEL="com.sab.grok-hub"
+DRY_OLD_SHA="<old-sha>"
+MINI_DSH_REMOTE=origin
+AIR_DSH_REMOTE=personal
+
+DO_HUB=0
+DO_CLIENT=0
+YES=0
+ROLLBACK=""
+
+die() { echo "grok-swap: error: $*" >&2; exit 1; }
+
+usage() {
+  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --hub) DO_HUB=1 ;;
+    --client) DO_CLIENT=1 ;;
+    --yes) YES=1 ;;
+    --rollback)
+      shift
+      [[ $# -gt 0 ]] || die "--rollback needs a sha"
+      ROLLBACK="$1"
+      ;;
+    --rollback=*) ROLLBACK="${1#*=}" ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown argument: $1 (see --help)" ;;
+  esac
+  shift
+done
+
+if (( DO_HUB == 0 && DO_CLIENT == 0 )); then
+  DO_HUB=1
+  DO_CLIENT=1
+fi
+if [[ -n "$ROLLBACK" && ! "$ROLLBACK" =~ ^[0-9a-f]{7,40}$ ]]; then
+  die "--rollback sha must be 7-40 lowercase hex chars"
+fi
+
+air_is_local() {
+  case "${GROK_SWAP_AIR_LOCAL:-auto}" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  local h
+  h="$(hostname -s 2>/dev/null || true)"
+  [[ "$h" == *[Aa][Ii][Rr]* ]]
+}
+
+host_for() { if [[ "$1" == mini ]]; then echo "$MINI"; else echo "$AIR"; fi; }
+
+# sync_dsh WHERE REMOTE: fast-forward ~/.dsh to REMOTE/main.
+# ff-only so uncommitted edits are never discarded. Failure warns and continues.
+sync_dsh() {
+  local where="$1" remote="$2"
+  local cmd="cd ~/.dsh && git fetch -q ${remote} && git merge --ff-only ${remote}/main"
+  if ! exec_cmd "$where" "$cmd"; then
+    echo "grok-swap: warning: ~/.dsh ff-only sync to ${remote}/main failed on $where; local changes left untouched; continuing" >&2
+  fi
+}
+
+# exec_cmd WHERE CMD: print the command to stderr; run it only with --yes.
+# Output of the command goes to stdout (only when running).
+exec_cmd() {
+  local where="$1" cmd="$2"
+  if [[ "$where" == air ]] && air_is_local; then
+    echo "+ [air/local] $cmd" >&2
+    if (( YES )); then bash -c "$cmd"; fi
+  else
+    echo "+ [$where $(host_for "$where")] $cmd" >&2
+    if (( YES )); then "$SSH" "$(host_for "$where")" "$cmd"; fi
+  fi
+}
+
+# short_sha: first hex run of 7+ chars from stdin, cut to 8.
+short_sha() { grep -oE '[0-9a-f]{7,40}' | head -n1 | cut -c1-8 || true; }
+
+# old_sha WHERE NAME: sha reported by the installed binary; placeholder in dry run.
+old_sha() {
+  local where="$1" name="$2" out sha
+  if (( YES )); then
+    out="$(exec_cmd "$where" "$BIN/$name --version")" || die "$name --version failed on $where"
+    sha="$(printf '%s\n' "$out" | short_sha)"
+    [[ -n "$sha" ]] || die "no git sha in '$name --version' output on $where"
+    echo "$sha"
+  else
+    exec_cmd "$where" "$BIN/$name --version" >/dev/null
+    echo "$DRY_OLD_SHA"
+  fi
+}
+
+# preflight WHERE NAME: everything checked before any mutation.
+preflight() {
+  local where="$1" name="$2"
+  if [[ -z "$ROLLBACK" ]]; then
+    exec_cmd "$where" "test -x $FORK" || die "grok-fork missing or not executable on $where ($FORK)"
+  else
+    exec_cmd "$where" "test -f $BIN/$name.$ROLLBACK" || die "backup $BIN/$name.$ROLLBACK missing on $where"
+  fi
+  exec_cmd "$where" "test -x $BIN/$name" || die "$name missing on $where ($BIN/$name)"
+}
+
+# replace WHERE NAME OLD: back up current binary (never overwrite), then atomically install.
+replace() {
+  local where="$1" name="$2" old="$3" src
+  if [[ -z "$ROLLBACK" ]]; then src="$FORK"; else src="$BIN/$name.$ROLLBACK"; fi
+  exec_cmd "$where" "cp -n $BIN/$name $BIN/$name.$old"
+  local sign=""
+  # Mini hub: a stable signature keeps the macOS drive-access grant across swaps (scripts/grok-sign).
+  [[ "$where" == mini ]] && sign=" && { [ ! -f ~/Library/Keychains/grok-sign.keychain-db ] || ~/.dsh/scripts/grok-sign $BIN/$name.new; }"
+  exec_cmd "$where" "cp $src $BIN/$name.new && chmod +x $BIN/$name.new$sign && mv $BIN/$name.new $BIN/$name"
+}
+
+SOCK_CHECK_PY="import os,socket,sys,time
+p=os.path.join(os.environ['HOME'],'.grok','leader-hub.sock')
+end=time.time()+20
+while time.time()<end:
+    s=socket.socket(socket.AF_UNIX)
+    try:
+        s.connect(p); print('OK'); sys.exit(0)
+    except OSError:
+        pass
+    finally:
+        s.close()
+    time.sleep(1)
+print('FAIL'); sys.exit(1)"
+
+hub_kickstart_and_verify() {
+  exec_cmd mini "launchctl kickstart -k gui/\$(id -u)/$HUB_LABEL || launchctl kickstart -k user/\$(id -u)/$HUB_LABEL" \
+    || die "launchctl kickstart failed on Mini"
+  exec_cmd mini "launchctl kickstart -k gui/\$(id -u)/com.sab.grok-leader || launchctl kickstart -k user/\$(id -u)/com.sab.grok-leader" \
+    || die "launchctl kickstart (leader) failed on Mini"
+  echo "note: hub signed \"Grok Local Signing\"; Full Disk Access stays across this swap."
+  local out
+  if (( YES )); then
+    out="$(exec_cmd mini "python3 -c \"$SOCK_CHECK_PY\"" 2>/dev/null)" || true
+    if [[ "$out" == *OK* ]]; then
+      echo "socket: OK ($HUB_LABEL accepting on ~/.grok/leader-hub.sock)"
+    else
+      echo "socket: FAIL (no connect to ~/.grok/leader-hub.sock within 20s). Client NOT swapped."
+      exit 1
+    fi
+  else
+    exec_cmd mini "python3 -c \"$SOCK_CHECK_PY\"" >/dev/null
+    echo "socket: (dry run, not checked)"
+  fi
+}
+
+# ---- preflight: all selected targets, before any mutation ----
+if (( DO_HUB )); then
+  preflight mini grok-team-hub
+fi
+if (( DO_CLIENT )); then
+  preflight air grok-team-client
+fi
+
+HUB_OLD=""
+CLIENT_OLD=""
+if (( DO_HUB )); then HUB_OLD="$(old_sha mini grok-team-hub)"; fi
+if (( DO_CLIENT )); then CLIENT_OLD="$(old_sha air grok-team-client)"; fi
+
+# ---- mutate ----
+if (( DO_HUB )); then
+  replace mini grok-team-hub "$HUB_OLD"
+  hub_kickstart_and_verify
+  sync_dsh mini "$MINI_DSH_REMOTE"
+fi
+if (( DO_CLIENT )); then
+  replace air grok-team-client "$CLIENT_OLD"
+  echo "client: swapped on air (restart running grok-team-client sessions to pick it up)"
+  sync_dsh air "$AIR_DSH_REMOTE"
+fi
+
+if (( YES )); then
+  echo "done."
+else
+  echo "dry run: nothing executed. Re-run with --yes to apply."
+fi

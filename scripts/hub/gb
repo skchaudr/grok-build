@@ -1,0 +1,432 @@
+#!/usr/bin/env bash
+# gb — pick an ACP agent with fzf, run it inside the Grok Build pager.
+# Usage: gb [agent] [pager args...]
+#        gb --resume|-r <id> [pager args...]
+#        gb --resume=<id> [pager args...]
+#          With no agent, find the one store that owns <id> (a unique prefix is enough)
+#          and resume it. An exact id wins over prefix-only hits. Native grok
+#          sessions are directories under ~/.grok/sessions/<cwd>/ and resume on
+#          the fork pager with no --agent-cmd. When the store records a cwd that
+#          exists and is not $PWD, gb cds there and prints 'gb: resuming in <cwd>'.
+#          Unknown id and ambiguous matches exit nonzero.
+#        gb all | gb <a> <b> ... [pager args...]
+#          One pager offering several agents (repeated --agent-choice NAME=CMD, first is
+#          the default). 'all' = $GB_ALL (default "claude pi"). Leading args that are agent names
+#          are the agents; the rest go to the pager.
+#          Add remote machines as EXTRA choices (never home): 'gb all +khoj', 'gb claude pi +khoj',
+#          or GB_REMOTE_CHOICES=khoj[,name]. Each adds <machine>-<agent> for the agents selected
+#          (claude, pi) as 'ssh -T -o BatchMode=yes <user@host> <absolute remote cmd>'; the local
+#          leader spawns it. Machines: ~/.config/gb/machines.tsv (TAB: name, user@host, claude cmd,
+#          pi cmd; absolute remote paths) else the built-in khoj. Needs non-interactive ssh to work.
+#        gb native [args...] → stock grok binary, args passed through.
+# Agent: normal|prime|prime-h2|claude|cursor|pi|codex|dsh|dsh-stock|fork; omit to pick.
+#        prime-h2 = prime-agent behind the Harness² ACP proxy (skills + guardrails injected; run dir,
+#        trajectory.txt and session map under ~/.prime/harness2). GB_PRIME_H2 overrides the command.
+#        `normal` is the stock grok binary (alias: native). `fork` is the fork
+#        pager hosting `grok agent stdio` (this id used to be named grok).
+# Env:   GB_PAGER overrides the pager binary. GB_NATIVE overrides the stock binary.
+#        GB_CLAUDE_ACP overrides the claude adapter command (default: the pinned
+#        ~/.local/bin/claude-agent-acp launcher, else claude-acp).
+#        GB_PI_ACP overrides the pi adapter (default: patched pi-acp run script, else stock pi-acp).
+#        GB_PRINT_CMD=1 prints the pager argv (one arg per line) instead of exec'ing it.
+#        GB_CODEX_MODEL overrides the codex model. Agent launches set GROK_RESUME_CMD="grok <agent>"
+#        so the pager's quit hint names the agent (needs a pager with that support).
+#        GB_DSH_PROVIDER / GB_DSH_MODEL pick the DSH route (default openrouter / inception/mercury-2.5; needs OPENROUTER_API_KEY).
+set -euo pipefail
+
+# Fork pager: the pinned copy gb-build installs (immune to stock auto-update), else the build tree.
+PAGER_BIN="${GB_PAGER:-}"
+[ -z "$PAGER_BIN" ] && for c in "$HOME/.grok/bin/grok-fork" "$HOME/repos/grok-build/target/release/xai-grok-pager"; do
+  [ -x "$c" ] && { PAGER_BIN=$c; break; }
+done
+[ -n "${GB_PRINT_PAGER:-}" ] && { echo "$PAGER_BIN"; exit 0; }
+CODEX_MODEL="${GB_CODEX_MODEL:-gpt-5.5}"
+DSH_PROVIDER="${GB_DSH_PROVIDER:-openrouter}"
+DSH_MODEL="${GB_DSH_MODEL:-inception/mercury-2.5}"
+
+# Pinned claude-agent-acp (native subagent sessions), installed by
+# claude-agent-acp-update. Not Zed's npx registry copy. Fall back to
+# claude-acp (patched @zed-industries/claude-code-acp 0.16.2).
+if [ -n "${GB_CLAUDE_ACP:-}" ]; then
+  CLAUDE_ACP_CMD=$GB_CLAUDE_ACP
+elif [ -x "$HOME/.local/bin/claude-agent-acp" ]; then
+  CLAUDE_ACP_CMD="$HOME/.local/bin/claude-agent-acp"
+elif command -v claude-agent-acp >/dev/null 2>&1; then
+  CLAUDE_ACP_CMD=claude-agent-acp
+elif command -v claude-acp >/dev/null 2>&1; then
+  CLAUDE_ACP_CMD=claude-acp
+elif [ -x "$HOME/.local/bin/claude-acp" ]; then
+  CLAUDE_ACP_CMD="$HOME/.local/bin/claude-acp"
+else
+  CLAUDE_ACP_CMD=claude-code-acp
+fi
+
+# Patched pi-acp (Pi-Coding-Agent/pi-acp-patched) when present, else the stock adapter.
+PI_ACP_BIN="${GB_PI_ACP:-}"
+if [ -z "$PI_ACP_BIN" ]; then
+  PI_ACP_BIN=pi-acp
+  if [ -x "$HOME/repos/Pi-Coding-Agent/pi-acp-patched/run" ]; then PI_ACP_BIN="$HOME/repos/Pi-Coding-Agent/pi-acp-patched/run"; fi
+fi
+
+declare -A CMD=(
+  [prime]="prime-agent --mode acp"
+  [prime-h2]="${GB_PRIME_H2:-prime-h2 acp}"
+  [claude]="env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=$(command -v claude) $CLAUDE_ACP_CMD"
+  [cursor]="cursor-agent acp"
+  [pi]="$PI_ACP_BIN"
+  [codex]="codex-acp -c model=\"$CODEX_MODEL\""
+  [dsh]="env DSH_ACP_PROVIDER=$DSH_PROVIDER DSH_ACP_MODEL=$DSH_MODEL dsh --profile acp-enhanced"
+  [dsh-stock]="dsh --profile acp"
+  [fork]="grok agent stdio"
+  [normal]="normal grok"
+)
+# Remote machines: extra named choices. Built-in khoj; machines.tsv overrides/adds.
+declare -A RM_HOST RM_CLAUDE RM_PI
+RM_HOST[khoj]=sab-mini@${GB_KHOJ_HOST:-100.75.255.75}  # tailscale IP (khoj-38w does not resolve on the Macs)
+RM_CLAUDE[khoj]="env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=/home/sab-mini/.local/bin/claude /home/sab-mini/.local/bin/claude-agent-acp"
+RM_PI[khoj]=/usr/bin/pi-acp
+if [ -f "$HOME/.config/gb/machines.tsv" ]; then
+  while IFS=$'\t' read -r n h c p _; do
+    case "$n" in ""|\#*) continue;; esac
+    RM_HOST[$n]=$h; RM_CLAUDE[$n]=$c; RM_PI[$n]=$p
+  done <"$HOME/.config/gb/machines.tsv"
+fi
+# Host keys: use gk's pinned known_hosts file when present (GB_KNOWN_HOSTS overrides); gb never writes ~/.ssh.
+rm_ssh() {
+  local kh="${GB_KNOWN_HOSTS:-$HOME/.ssh/known_hosts.grok-hub}" opt=""
+  [ -f "$kh" ] && opt="-o UserKnownHostsFile=$kh "
+  printf 'ssh -T -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 %s%s %s' "$opt" "$1" "$2"
+}
+ORDER=(normal prime prime-h2 claude cursor pi codex dsh dsh-stock fork)
+
+[ -x "$PAGER_BIN" ] || { echo "gb: pager not found at $PAGER_BIN (set GB_PAGER)" >&2; exit 1; }
+
+# Print "agent<TAB>full-id<TAB>where" for every store entry whose id equals or
+# starts with the query. Stores checked (this machine):
+#   cursor  ~/.cursor/acp-sessions/<id>/
+#   claude  ~/.claude/projects/*/<id>.jsonl
+#   native  ~/.grok/sessions/*/<id>/   (directories only; prompt_history.jsonl is not a session)
+#   pi      ~/.pi/pi-acp/session-map.json
+#   prime-h2 ~/.prime/harness2/acp/session-map.json
+#   codex   ~/.codex/session_index.jsonl and ~/.codex/sessions/**/rollout-*-<id>.jsonl
+#   dsh     ~/.dsh/sessions/*/<id>/
+gb_session_matches() {
+  python3 - "$HOME" "$1" <<'PY'
+import json, re, sys
+from pathlib import Path
+
+home, query = Path(sys.argv[1]), sys.argv[2]
+seen = set()
+found = []
+uuid_re = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+def hit(agent, full, where):
+    full = str(full)
+    if not full.startswith(query):
+        return
+    key = (agent, full)
+    if key in seen:
+        return
+    seen.add(key)
+    found.append((agent, full, where))
+
+cursor = home / ".cursor/acp-sessions"
+if cursor.is_dir():
+    for path in cursor.iterdir():
+        if path.is_dir():
+            hit("cursor", path.name, path)
+
+claude = home / ".claude/projects"
+if claude.is_dir():
+    for proj in claude.iterdir():
+        if not proj.is_dir():
+            continue
+        for path in proj.glob("*.jsonl"):
+            hit("claude", path.stem, path)
+
+grok = home / ".grok/sessions"
+if grok.is_dir():
+    for proj in grok.iterdir():
+        if not proj.is_dir():
+            continue
+        for path in proj.iterdir():
+            if path.is_dir():
+                hit("native", path.name, path)
+
+pi_map = home / ".pi/pi-acp/session-map.json"
+if pi_map.is_file():
+    try:
+        data = json.loads(pi_map.read_text())
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    sessions = data.get("sessions") if isinstance(data, dict) else None
+    if isinstance(sessions, dict):
+        for sid in sessions:
+            hit("pi", sid, pi_map)
+
+index = home / ".codex/session_index.jsonl"
+if index.is_file():
+    try:
+        lines = index.read_text().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        sid = row.get("id") if isinstance(row, dict) else None
+        if isinstance(sid, str):
+            hit("codex", sid, index)
+
+codex = home / ".codex/sessions"
+if codex.is_dir():
+    for path in codex.rglob("*.jsonl"):
+        for sid in uuid_re.findall(path.name):
+            hit("codex", sid, path)
+
+dsh = home / ".dsh/sessions"
+if dsh.is_dir():
+    for proj in dsh.iterdir():
+        if not proj.is_dir():
+            continue
+        for path in proj.iterdir():
+            if path.is_dir():
+                hit("dsh", path.name, path)
+
+prime = home / ".prime/agent/sessions"
+if prime.is_dir():
+    for path in prime.glob("*.info-cache.json"):
+        sid = path.name.replace(".info-cache.json", "")
+        hit("prime", sid, path)
+
+h2_map = home / ".prime/harness2/acp/session-map.json"
+if h2_map.is_file():
+    try:
+        data = json.loads(h2_map.read_text())
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    sessions = data.get("sessions") if isinstance(data, dict) else None
+    if isinstance(sessions, dict):
+        for sid in sessions:
+            hit("prime-h2", sid, h2_map)
+
+exact = [row for row in found if row[1] == query]
+for agent, full, where in (exact or found):
+    print(f"{agent}\t{full}\t{where}")
+PY
+}
+
+gb_unknown_session() {
+  echo "gb: session '$1' not found in:" >&2
+  echo "  $HOME/.prime/agent/sessions/<id>.info-cache.json" >&2
+  echo "  $HOME/.prime/harness2/acp/session-map.json" >&2
+  echo "  $HOME/.cursor/acp-sessions/<id>" >&2
+  echo "  $HOME/.claude/projects/*/<id>.jsonl" >&2
+  echo "  $HOME/.grok/sessions/*/<id>/" >&2
+  echo "  $HOME/.pi/pi-acp/session-map.json" >&2
+  echo "  $HOME/.codex/sessions and $HOME/.codex/session_index.jsonl" >&2
+  echo "  $HOME/.dsh/sessions/*/<id>" >&2
+  exit 1
+}
+
+# Print the session's original cwd, or nothing when this store has no cheap path.
+# native: url-decoded parent directory name. cursor: meta.json cwd.
+# claude: cwd field in the jsonl. pi, prime-h2: session-map cwd. codex: rollout session_meta cwd.
+# dsh's project key is lossy, so it is skipped.
+gb_session_cwd() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+from pathlib import Path
+from urllib.parse import unquote
+
+agent, sid, where = sys.argv[1:]
+path = Path(where)
+cwd = ""
+
+def from_jsonl_cwd(file):
+    try:
+        lines = file.open()
+    except OSError:
+        return ""
+    with lines:
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            found = row.get("cwd")
+            payload = row.get("payload")
+            if not isinstance(found, str) and isinstance(payload, dict):
+                found = payload.get("cwd")
+            if isinstance(found, str) and found:
+                return found
+    return ""
+
+if agent == "native":
+    cwd = unquote(path.parent.name)
+elif agent == "cursor":
+    try:
+        meta = json.loads((path / "meta.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        meta = {}
+    if isinstance(meta, dict) and isinstance(meta.get("cwd"), str):
+        cwd = meta["cwd"]
+elif agent == "claude":
+    cwd = from_jsonl_cwd(path)
+elif agent in ("pi", "prime-h2"):
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    sessions = data.get("sessions") if isinstance(data, dict) else None
+    entry = sessions.get(sid) if isinstance(sessions, dict) else None
+    if isinstance(entry, dict) and isinstance(entry.get("cwd"), str):
+        cwd = entry["cwd"]
+elif agent == "codex" and path.is_file() and path.suffix == ".jsonl" and path.name != "session_index.jsonl":
+    cwd = from_jsonl_cwd(path)
+elif agent == "prime":
+    try:
+        data = json.loads(path.read_text())
+        cwd = data.get("state", {}).get("acc", {}).get("header", {}).get("cwd", "")
+    except Exception:
+        pass
+
+if cwd:
+    print(cwd)
+PY
+}
+
+# exec, or with GB_PRINT_CMD=1 print the argv one arg per line.
+gb_exec() {
+  if [ -n "${GB_PRINT_CMD:-}" ]; then printf '%s\n' "$@"; exit 0; fi
+  exec "$@"
+}
+
+launch() {
+  local agent="$1" full="$2" session_cwd="$3"
+  shift 3
+  if [ -n "$session_cwd" ] && [ -d "$session_cwd" ] && [ "$session_cwd" != "$PWD" ]; then
+    echo "gb: resuming in $session_cwd" >&2
+    cd "$session_cwd"
+  fi
+  if [ "$agent" = native ]; then
+    gb_exec "$PAGER_BIN" --resume "$full" "$@"
+  fi
+  gb_exec env -u PAGER GROK_RESUME_CMD="grok $agent" "$PAGER_BIN" --agent-cmd "${CMD[$agent]}" --resume "$full" "$@"
+}
+
+if [ "${1:-}" = "--resume" ] || [ "${1:-}" = "-r" ] || [[ "${1:-}" == --resume=* ]]; then
+  if [[ "${1:-}" == --resume=* ]]; then
+    id="${1#--resume=}"
+    shift
+  else
+    id="${2:-}"
+    shift 2
+  fi
+  if [ -z "$id" ] || [[ "$id" == -* ]]; then
+    echo "gb: --resume requires a session id" >&2
+    exit 2
+  fi
+  matches=$(gb_session_matches "$id")
+  if [ -z "$matches" ]; then
+    gb_unknown_session "$id"
+  fi
+  count=$(printf '%s\n' "$matches" | wc -l)
+  if [ "$count" -gt 1 ]; then
+    echo "gb: session '$id' matches more than one agent:" >&2
+    printf '%s\n' "$matches" | while IFS=$'\t' read -r agent full where; do
+      echo "  $agent $full ($where)" >&2
+    done
+    exit 1
+  fi
+  IFS=$'\t' read -r agent full where <<<"$matches"
+  launch "$agent" "$full" "$(gb_session_cwd "$agent" "$full" "$where")" "$@"
+fi
+
+gb_pick_agent() {
+  if [ -n "${GROK_AGENT_PICK:-}" ]; then
+    printf '%s\n' "$GROK_AGENT_PICK"
+    return 0
+  fi
+  for k in "${ORDER[@]}"; do printf '%-10s %s\n' "$k" "${CMD[$k]}"; done \
+    | fzf --height=~40% --reverse --prompt='agent > ' --header="pager in $PWD" \
+    | awk '{print $1}'
+}
+
+if [ -n "${GB_PICK_ONLY:-}" ]; then
+  pick=$(gb_pick_agent) || exit 0
+  [ -n "$pick" ] || exit 0
+  printf '%s\n' "$pick"
+  exit 0
+fi
+
+extra=()
+# Pull +machine tokens out of the args; GB_REMOTE_CHOICES adds more.
+remotes=(); rest=()
+for a in "$@"; do
+  if [[ "$a" == +?* && -n "${RM_HOST[${a#+}]:-}" ]]; then remotes+=("${a#+}")
+  elif [[ "$a" == +?* ]]; then echo "gb: unknown machine '${a#+}' (add it to ~/.config/gb/machines.tsv)" >&2; exit 2
+  else rest+=("$a"); fi
+done
+if [ -n "${GB_REMOTE_CHOICES:-}" ]; then
+  IFS=, read -ra envr <<<"$GB_REMOTE_CHOICES"
+  for m in "${envr[@]}"; do
+    [ -n "${RM_HOST[$m]:-}" ] || { echo "gb: unknown machine '$m'" >&2; exit 2; }
+    remotes+=("$m")
+  done
+fi
+set -- "${rest[@]}"
+pick="${1:-}"
+# `native` is the old name of normal grok. Resume still tags those sessions native.
+[ "$pick" = native ] && pick=normal
+# Multi-agent: 'all', or two or more leading agent names.
+multi=()
+if [ "$pick" = all ]; then
+  shift
+  read -ra multi <<<"${GB_ALL:-prime claude pi}"
+elif [ -n "$pick" ] && [ -n "${CMD[$pick]:-}" ] && [ "$pick" != normal ] && [ -n "${2:-}" ] && [ -n "${CMD[$2]:-}" ] && [ "$2" != normal ]; then
+  while [ $# -gt 0 ] && [ -n "${CMD[$1]:-}" ] && [ "$1" != normal ]; do multi+=("$1"); shift; done
+fi
+# Remotes make a single agent a multi-choice launch too.
+if [ ${#remotes[@]} -gt 0 ] && [ ${#multi[@]} -eq 0 ]; then
+  if [ -n "$pick" ] && [ -n "${CMD[$pick]:-}" ] && [ "$pick" != normal ]; then
+    multi=("$pick"); shift
+  else
+    read -ra multi <<<"${GB_ALL:-prime claude pi}"
+  fi
+fi
+if [ ${#multi[@]} -gt 0 ]; then
+  args=()
+  for a in "${multi[@]}"; do args+=(--agent-choice "$a=${CMD[$a]}"); done
+  for m in "${remotes[@]}"; do
+    for a in "${multi[@]}"; do
+      case "$a" in
+        claude) rc=${RM_CLAUDE[$m]:-} ;;
+        pi) rc=${RM_PI[$m]:-} ;;
+        *) echo "gb: +$m has no $a command (claude, pi only)" >&2; continue ;;
+      esac
+      [ -n "$rc" ] && args+=(--agent-choice "$m-$a=$(rm_ssh "${RM_HOST[$m]}" "$rc")")
+    done
+  done
+  gb_exec env -u PAGER GROK_RESUME_CMD="grok ${multi[0]}" "$PAGER_BIN" "${args[@]}" "$@"
+fi
+if [ -z "$pick" ]; then
+  pick=$(gb_pick_agent) || exit 0
+elif [ -n "${CMD[$pick]:-}" ]; then
+  shift
+  extra=("$@")
+fi
+[ -n "${CMD[$pick]:-}" ] || { echo "gb: unknown agent '$pick' (${ORDER[*]})" >&2; exit 2; }
+[ "$pick" = normal ] && gb_exec "${GB_NATIVE:-$HOME/.grok/bin/grok}" "${extra[@]}"
+
+# The shell's PAGER (e.g. less) collides with the pager binary's env lookups.
+gb_exec env -u PAGER GROK_RESUME_CMD="grok $pick" "$PAGER_BIN" --agent-cmd "${CMD[$pick]}" "${extra[@]}"

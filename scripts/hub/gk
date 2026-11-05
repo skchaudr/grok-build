@@ -1,0 +1,350 @@
+#!/usr/bin/env bash
+# Air client: Mini owns the hub. Workers come from ~/.config/gk/workers.tsv
+# (built-in mini and khoj when that file is absent).
+# Usage:
+#   gk [worker] [grok options, e.g. --resume ID or --cwd /remote/path]
+#   gk all [grok options]   # every registered worker as --agent-choice
+#   gk ask WORKER PROMPT
+#   gk workers
+#   gk add-worker NAME USER@HOST [--script PATH] [--known-hosts FILE]
+set -euo pipefail
+
+GK_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+registry="${GK_WORKERS:-$HOME/.config/gk/workers.tsv}"
+declare -a worker_names=()
+declare -A worker_kind=() worker_agent=() worker_user=() worker_host=() worker_script=() worker_known=()
+
+remember() {
+  local name=$1 n
+  if ((${#worker_names[@]})); then
+    for n in "${worker_names[@]}"; do
+      [[ $n == "$name" ]] && return 0
+    done
+  fi
+  worker_names+=("$name")
+}
+
+ssh_agent() {
+  printf 'ssh -T -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o UserKnownHostsFile=%s %s@%s %s' \
+    "$4" "$1" "$2" "$3"
+}
+
+load_builtin() {
+  remember mini
+  worker_kind[mini]=local
+  worker_agent[mini]='/Users/sab-mini/.grok/bin/grok-team-hub --no-auto-update agent --no-leader stdio'
+  remember khoj
+  worker_kind[khoj]=ssh
+  worker_user[khoj]=sab-mini
+  worker_host[khoj]=100.75.255.75
+  worker_script[khoj]=/home/sab-mini/.dsh/scripts/grok-khoj-worker
+  worker_known[khoj]=/Users/sab-mini/.ssh/known_hosts.grok-hub
+  # The Air itself, reached from the Mini hub over ssh.
+  remember air
+  worker_kind[air]=ssh
+  worker_user[air]=sab-mini
+  worker_host[air]=100.93.242.91
+  worker_script[air]='/Users/sab-mini/.grok/bin/grok-team-client --no-auto-update agent --no-leader stdio'
+  worker_known[air]=/Users/sab-mini/.ssh/known_hosts
+}
+
+load_registry() {
+  [[ -f $registry ]] || return 0
+  local line name kind
+  while IFS= read -r line || [[ -n ${line:-} ]]; do
+    [[ -z $line || $line == \#* ]] && continue
+    IFS=$'\t' read -r name kind _f3 _f4 _f5 _f6 <<<"$line"
+    case $kind in
+      local)
+        remember "$name"
+        worker_kind[$name]=local
+        worker_agent[$name]=${line#*$'\t'local$'\t'}
+        ;;
+      ssh)
+        [[ -n ${_f3:-} && -n ${_f4:-} && -n ${_f5:-} && -n ${_f6:-} ]] || {
+          echo "gk: bad ssh worker line: $name" >&2
+          exit 1
+        }
+        remember "$name"
+        worker_kind[$name]=ssh
+        worker_user[$name]=$_f3
+        worker_host[$name]=$_f4
+        worker_script[$name]=$_f5
+        worker_known[$name]=$_f6
+        ;;
+      *)
+        echo "gk: bad registry line: $line" >&2
+        exit 1
+        ;;
+    esac
+  done <"$registry"
+}
+
+registered_names() {
+  local n
+  for n in "${worker_names[@]}"; do
+    printf '%s\n' "$n"
+  done
+}
+
+reject_unknown() {
+  echo "gk: unknown worker '$1'" >&2
+  echo "registered: ${worker_names[*]}" >&2
+  exit 2
+}
+
+add_worker() {
+  local name=${1:-} spec=${2:-}
+  if [[ -z $name || -z $spec ]]; then
+    echo 'Usage: gk add-worker NAME USER@HOST [--script PATH] [--known-hosts FILE]' >&2
+    exit 2
+  fi
+  shift 2
+  local script= known=
+  while (($#)); do
+    case $1 in
+      --script)
+        [[ $# -ge 2 ]] || { echo 'gk: --script needs a path' >&2; exit 2; }
+        script=$2
+        shift 2
+        ;;
+      --known-hosts)
+        [[ $# -ge 2 ]] || { echo 'gk: --known-hosts needs a file' >&2; exit 2; }
+        known=$2
+        shift 2
+        ;;
+      *)
+        echo "gk: unknown option: $1" >&2
+        exit 2
+        ;;
+    esac
+  done
+  if [[ ! $name =~ ^[A-Za-z0-9._-]+$ || $name == workers || $name == add-worker || $name == ask || $name == all ]]; then
+    echo "gk: invalid worker name: $name" >&2
+    exit 2
+  fi
+  if [[ ! $spec =~ ^([^@[:space:]]+)@([^@[:space:]]+)$ ]]; then
+    echo "gk: expected USER@HOST, got: $spec" >&2
+    exit 2
+  fi
+  local user=${BASH_REMATCH[1]} host=${BASH_REMATCH[2]}
+  [[ -n $script ]] || script="/home/${user}/.dsh/scripts/grok-khoj-worker"
+  [[ -n $known ]] || known="$HOME/.ssh/known_hosts.grok-hub"
+  # agent-cmd runs inside the Mini hub process, so the worker probe has to start there.
+  local hub=${GK_HUB:-sab-mini@100.66.99.64}
+  local inner err rc
+  inner=$(printf 'ssh -T -o BatchMode=yes -o ConnectTimeout=8 -o UserKnownHostsFile=%q %q true' "$known" "${user}@${host}")
+  set +e
+  err=$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$hub" "$inner" 2>&1)
+  rc=$?
+  set -e
+  if ((rc != 0)); then
+    if grep -qiE 'host key verification failed|authenticity of host' <<<"$err"; then
+      echo "gk: host key for $host is not in $known" >&2
+      printf "ssh %s 'ssh-keyscan -H %s >> %s'\n" "$hub" "$host" "$known" >&2
+      exit 1
+    fi
+    echo "gk: $user@$host unreachable" >&2
+    [[ -n $err ]] && printf '%s\n' "$err" >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname "$registry")"
+  printf '%s\tssh\t%s\t%s\t%s\t%s\n' "$name" "$user" "$host" "$script" "$known" >>"$registry"
+  echo "registered $name"
+}
+
+ask_finish() {
+  local rc=$1 err=$2 secs=$3 out=$4 detail=
+  if ((rc == 0)); then
+    cat "$out"
+    rm -f "$err" "$out"
+    exit 0
+  fi
+  detail=$(tail -n1 "$err" 2>/dev/null || true)
+  rm -f "$err" "$out"
+  if ((rc == 142 || rc == 124)); then
+    echo "gk: ask timed out after ${secs}s" >&2
+    exit 1
+  fi
+  if [[ -n $detail ]]; then
+    echo "gk: ask failed (rc=$rc): $detail" >&2
+  else
+    echo "gk: ask failed (rc=$rc)" >&2
+  fi
+  exit 1
+}
+
+# Headless one-shot, same shape as gk-smoke deep_run. The Mini hub socket is
+# forwarded onto Air, so khoj and the Mini ssh there instead of dialing it locally.
+ask_local() {
+  local agent=$1 prompt=$2 secs=$3
+  local pager=${GB_PAGER:-$HOME/.grok/bin/grok-team-client}
+  local sock=$HOME/.grok/leader-mini-hub.sock
+  local out err rc
+  out=$(mktemp)
+  err=$(mktemp)
+  set +e
+  (
+    cd /
+    GROK_WORKSPACE_DASHBOARD=0 perl -e 'alarm shift; exec @ARGV' "$secs" "$pager" \
+      --no-auto-update --leader --leader-socket "$sock" \
+      --agent-cmd "$agent" -p "$prompt"
+  ) >"$out" 2>"$err"
+  rc=$?
+  set -e
+  ask_finish "$rc" "$err" "$secs" "$out"
+}
+
+ask_via_air() {
+  local agent=$1 prompt=$2 secs=$3
+  local oneshot wrapped out err rc
+  oneshot=$(printf 'cd / && GROK_WORKSPACE_DASHBOARD=0 ~/.grok/bin/grok-team-client --no-auto-update --leader --leader-socket ~/.grok/leader-mini-hub.sock --agent-cmd %q -p %q' "$agent" "$prompt")
+  wrapped=$(printf 'perl -e %q %q bash -c %q' 'alarm shift; exec @ARGV' "$secs" "$oneshot")
+  out=$(mktemp)
+  err=$(mktemp)
+  set +e
+  perl -e 'alarm shift; exec @ARGV' "$secs" ssh -T -o BatchMode=yes -o ConnectTimeout=8 sab-air "$wrapped" >"$out" 2>"$err"
+  rc=$?
+  set -e
+  ask_finish "$rc" "$err" "$secs" "$out"
+}
+
+ask_main() {
+  local worker=${1:-}
+  if [[ -z $worker || $worker == -* ]]; then
+    echo 'Usage: gk ask WORKER PROMPT' >&2
+    exit 2
+  fi
+  shift
+  local prompt=${*:-}
+  if [[ -z $prompt ]]; then
+    echo 'Usage: gk ask WORKER PROMPT' >&2
+    exit 2
+  fi
+  if [[ -z ${worker_kind[$worker]+x} ]]; then
+    reject_unknown "$worker"
+  fi
+  local secs=${GK_ASK_TIMEOUT:-600}
+  if [[ ! $secs =~ ^[0-9]+$ ]] || ((secs < 1)); then
+    echo 'gk: GK_ASK_TIMEOUT must be a positive number of seconds' >&2
+    exit 2
+  fi
+  local agent host
+  case ${worker_kind[$worker]} in
+    local) agent=${worker_agent[$worker]} ;;
+    ssh) agent=$(ssh_agent "${worker_user[$worker]}" "${worker_host[$worker]}" "${worker_script[$worker]}" "${worker_known[$worker]}") ;;
+    *) reject_unknown "$worker" ;;
+  esac
+  host=$(hostname -s 2>/dev/null || hostname)
+  if [[ ${GK_ASK_LOCAL:-} == 1 || $host == sab-air ]]; then
+    ask_local "$agent" "$prompt" "$secs"
+  else
+    ask_via_air "$agent" "$prompt" "$secs"
+  fi
+}
+
+load_builtin
+load_registry
+
+case ${1:-} in
+  workers)
+    shift
+    if (($#)); then
+      echo 'Usage: gk workers' >&2
+      exit 2
+    fi
+    registered_names
+    exit 0
+    ;;
+  add-worker)
+    shift
+    add_worker "$@"
+    exit 0
+    ;;
+  ask)
+    shift
+    ask_main "$@"
+    ;;
+esac
+
+all_mode=0
+if [[ ${1:-} == all ]]; then
+  all_mode=1
+  shift
+fi
+
+agent_for() {
+  local worker=$1
+  case ${worker_kind[$worker]} in
+    local) printf '%s' "${worker_agent[$worker]}" ;;
+    ssh) ssh_agent "${worker_user[$worker]}" "${worker_host[$worker]}" "${worker_script[$worker]}" "${worker_known[$worker]}" ;;
+    *) reject_unknown "$worker" ;;
+  esac
+}
+
+worker=mini
+if ((all_mode)); then
+  :
+else
+  case ${1:-} in
+    '' | -*) ;;
+    *)
+      if [[ -n ${worker_kind[$1]+x} ]]; then
+        worker=$1
+        shift
+      else
+        reject_unknown "$1"
+      fi
+      ;;
+  esac
+fi
+
+pager="${GB_PAGER:-$HOME/.grok/bin/grok}"
+if [[ -z ${GB_PAGER:-} && -x $HOME/.grok/bin/grok-team-client ]]; then
+  pager="$HOME/.grok/bin/grok-team-client"
+fi
+sock="$HOME/.grok/leader-mini-hub.sock"
+# This build's `leader info` selects by PID, not --leader-socket.
+# Resolve the exact forwarded socket first so another live leader cannot pass.
+hub_unreachable() {
+  local gb="${GK_FALLBACK_GB:-$GK_SCRIPT_DIR/gb}"
+  echo 'gk: Mini hub unavailable — starting locally instead (check hermes-proxies:grok-mini).' >&2
+  if [[ -n ${GK_FALLBACK_AGENT:-} ]]; then
+    exec "$gb" "$GK_FALLBACK_AGENT" "$@"
+  fi
+  exec "$gb" "$@"
+}
+
+pid=$("$pager" leader list --json | python3 -c '
+import json,sys
+try:
+    rows=json.load(sys.stdin)
+    print(next(r["pid"] for r in rows if r.get("socketPath")==sys.argv[1] and r.get("classification")=="Reachable"))
+except (ValueError, TypeError, AttributeError, KeyError, StopIteration):
+    sys.exit(1)
+' "$sock") || hub_unreachable "$@"
+if ! "$pager" leader info --pid "$pid" --json | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    ok=d.get("classification")=="Reachable" and (d.get("info") or {}).get("socket_path")=="/Users/sab-mini/.grok/leader-hub.sock"
+except (ValueError, TypeError, AttributeError):
+    ok=False
+sys.exit(0 if ok else 1)
+'; then
+  hub_unreachable "$@"
+fi
+# Use a directory present on either worker; --cwd can select a remote project.
+cd /
+# The fleet dashboard reads the leader roster (all clients, incl. --agent-cmd sessions); the workspace one does not.
+if ((all_mode)); then
+  choice_args=()
+  local_name=
+  for local_name in "${worker_names[@]}"; do
+    choice_args+=(--agent-choice "$(printf '%s=%s' "$local_name" "$(agent_for "$local_name")")")
+  done
+  exec env GROK_WORKSPACE_DASHBOARD=0 "$pager" --no-auto-update --leader --leader-socket "$sock" "${choice_args[@]}" "$@"
+fi
+agent=$(agent_for "$worker")
+exec env GROK_WORKSPACE_DASHBOARD=0 "$pager" --no-auto-update --leader --leader-socket "$sock" --agent-cmd "$agent" "$@"
