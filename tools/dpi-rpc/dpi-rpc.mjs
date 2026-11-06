@@ -36,6 +36,7 @@ const TOKEN = pick("DPI_TOKEN");
 let session = process.env.DPI_SESSION || null;
 let agent = process.env.DPI_AGENT || "main";
 let running = false;
+let awaitingRun = false; // a prompt was sent and its run_start has not arrived
 let device = null;
 let stream = null;
 const toolOutput = new Map();
@@ -70,6 +71,7 @@ function translate(e) {
   switch (e.type) {
     case "run_start":
       running = true;
+      awaitingRun = false;
       return [{ type: "agent_start" }];
     case "run_end":
       running = false;
@@ -117,18 +119,50 @@ function translate(e) {
   }
 }
 
+// The backend writes ": ping" every 15s. A laptop that slept keeps a dead socket
+// that never errors, so silence past this limit means reconnect.
+const STREAM_SILENCE_MS = 45_000;
+
+const maxEntryId = (entries, floor) =>
+  (entries ?? []).reduce((m, x) => (Number.isInteger(x?.id) && x.id > m ? x.id : m), floor);
+
+// After a reconnect: replay the entries this TUI missed, and end a turn that
+// finished while the stream was down so the TUI does not wait on it forever.
+async function catchUp(snapshot, lastSeen) {
+  const missed = (snapshot?.entries ?? []).filter((x) => Number.isInteger(x?.id) && x.id > lastSeen);
+  // A prompt this TUI sent ran entirely while the stream was down: open the run so it is acknowledged.
+  if (awaitingRun && missed.length) for (const t of translate({ type: "run_start" })) out(t);
+  for (const entry of missed) for (const t of translate({ type: "message_end", entry })) out(t);
+  if (!running) return;
+  try {
+    const a = await api("GET", agentPath());
+    if (!a.busy) for (const t of translate({ type: "run_end" })) out(t);
+  } catch (err) {
+    log(`catch-up: ${err.message}`);
+  }
+}
+
 async function runStream(signal) {
+  let lastSeen = null; // highest entry id delivered; null until the first snapshot
   for (let backoff = 500; !signal.aborted; backoff = Math.min(backoff * 2, 10000)) {
+    const conn = new AbortController();
+    const onAbort = () => conn.abort();
+    signal.addEventListener("abort", onAbort, { once: true });
+    let heard = Date.now();
+    const watchdog = setInterval(() => {
+      if (Date.now() - heard > STREAM_SILENCE_MS) conn.abort(new Error(`no data for ${STREAM_SILENCE_MS / 1000}s`));
+    }, 5_000);
     try {
       const res = await fetch(BASE + "/v1" + agentPath() + "/events", {
         headers: { authorization: `Bearer ${TOKEN}`, accept: "text/event-stream" },
-        signal,
+        signal: conn.signal,
       });
       if (!res.ok) throw new Error(`events: HTTP ${res.status}`);
       backoff = 500;
       const decoder = new TextDecoder();
       let buf = "";
       for await (const chunk of res.body) {
+        heard = Date.now();
         buf += decoder.decode(chunk, { stream: true });
         let i;
         while ((i = buf.indexOf("\n\n")) >= 0) {
@@ -137,12 +171,24 @@ async function runStream(signal) {
           const data = frame.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart()).join("\n");
           if (!data) continue;
           const msg = JSON.parse(data);
-          if (msg.type === "batch") for (const e of msg.events) for (const t of translate(e)) out(t);
+          if (msg.type === "snapshot") {
+            if (lastSeen !== null) await catchUp(msg.snapshot, lastSeen);
+            lastSeen = maxEntryId(msg.snapshot?.entries, lastSeen ?? 0);
+          } else if (msg.type === "batch") {
+            for (const e of msg.events) {
+              for (const t of translate(e)) out(t);
+              if (Number.isInteger(e.entry?.id)) lastSeen = Math.max(lastSeen ?? 0, e.entry.id);
+            }
+          }
         }
       }
+      throw new Error("stream ended");
     } catch (err) {
       if (signal.aborted) return;
-      log(`stream: ${err.message}; reconnecting`);
+      log(`stream: ${conn.signal.reason?.message ?? err.message}; reconnecting`);
+    } finally {
+      clearInterval(watchdog);
+      signal.removeEventListener("abort", onAbort);
     }
     await new Promise((r) => setTimeout(r, backoff));
   }
@@ -184,6 +230,7 @@ function attach() {
   stream?.abort();
   stream = new AbortController();
   running = false;
+  awaitingRun = false;
   runStream(stream.signal);
 }
 
@@ -228,6 +275,7 @@ async function sessionStats() {
 async function send(content, whenBusy) {
   if (typeof content !== "string") content = JSON.stringify(content);
   await api("POST", agentPath() + "/messages", { content, whenBusy, requestId: randomUUID() });
+  if (!running) awaitingRun = true;
 }
 
 const handlers = {
