@@ -28,7 +28,7 @@ build=$FH_ENV'
 [ -x "$HOME/.local/protoc-29.3/bin/protoc" ] && export PROTOC="$HOME/.local/protoc-29.3/bin/protoc"
 cd "$HOME/repos/grok-build" && git pull -q --ff-only origin main
 nice -n 19 cargo build --release -p xai-grok-pager-bin && install -m755 target/release/xai-grok-pager "$HOME/.grok/bin/grok-fork" && echo "installed ~/.grok/bin/grok-fork on $(hostname -s)" \
-  && { "$HOME/.dsh/scripts/grok-hub-sync" || echo "WARNING: grok-hub-sync failed; leader/hub keep the old binary"; }'
+  && { "$HOME/.grok-hub/scripts/hub/grok-hub-sync" || echo "WARNING: grok-hub-sync failed; leader/hub keep the old binary"; }'
 # After a Mini build, ship the binary to Air (same arch); Air never builds. GB_NO_DEPLOY=1 skips.
 deploy='
 cd "$HOME/repos/grok-build" && rsync -a target/release/xai-grok-pager sab-air:repos/grok-build/target/release/xai-grok-pager \

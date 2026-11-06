@@ -1,5 +1,5 @@
 # grok-picker.zsh — bare `grok` is normal Grok. Named variants stay explicit.
-# Source from ~/.config/zsh/local.zsh:  source ~/.dsh/scripts/grok-picker.zsh
+# Source from ~/.config/zsh/local.zsh:  source ~/.grok-hub/scripts/hub/grok-picker.zsh
 #   grok                 -> normal Grok (stock binary). No pickers.
 #   grok "prompt"        -> same, prompt and flags included
 #   grok pi              -> Pi in the fork pager

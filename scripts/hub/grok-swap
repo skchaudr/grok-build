@@ -128,7 +128,7 @@ replace() {
   exec_cmd "$where" "cp -n $BIN/$name $BIN/$name.$old"
   local sign=""
   # Mini hub: a stable signature keeps the macOS drive-access grant across swaps (scripts/grok-sign).
-  [[ "$where" == mini ]] && sign=" && { [ ! -f ~/Library/Keychains/grok-sign.keychain-db ] || ~/.dsh/scripts/grok-sign $BIN/$name.new; }"
+  [[ "$where" == mini ]] && sign=" && { [ ! -f ~/Library/Keychains/grok-sign.keychain-db ] || ~/.grok-hub/scripts/hub/grok-sign $BIN/$name.new; }"
   exec_cmd "$where" "cp $src $BIN/$name.new && chmod +x $BIN/$name.new$sign && mv $BIN/$name.new $BIN/$name"
 }
 

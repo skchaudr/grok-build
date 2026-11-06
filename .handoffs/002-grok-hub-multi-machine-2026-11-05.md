@@ -18,11 +18,10 @@ Sab built this Oct 9–22 and lost it: it lived in `~/.dsh/scripts` (dsh-home), 
 
 The last three are in `~/.config/gk/workers.tsv` on the Air and the Mini. khoj is retired for good. sabibp-1 was offline (Tailscale last seen 48 days ago, LAN `192.168.1.212` times out), so it is not set up. old-air also has `pi-acp` and `claude-agent-acp`.
 
-**Install layout.** `~/.dsh/scripts/<name>` are symlinks to `/Users/sab-mini/repos/grok-build/.worktrees/hub/scripts/hub/<name>`, a worktree on branch `hub-live` that tracks `origin/main`, so branch switches in the main checkout don't break `grok`. On the Mini, `~/repos/grok-build` links to `/Volumes/Mini-SSD/offload/repos/grok-build`. Update: `git -C ~/repos/grok-build/.worktrees/hub pull --ff-only`.
+**Install layout.** `~/.grok-hub` is a worktree on branch `hub-live` tracking `origin/main` (internal disk, outside `~/repos`); `local.zsh` sources `grok-picker.zsh` and `grok-mini-shell.zsh` from `~/.grok-hub/scripts/hub/`. Nothing in `~/.dsh` any more. On the Mini, `~/repos/grok-build` links to `/Volumes/Mini-SSD/offload/repos/grok-build`. Update: `git -C ~/.grok-hub pull --ff-only`.
 
 **Open:**
-- `fh-clean` lists clean worktrees under `~/repos/*/.worktrees/` as deletable, which includes the hub worktree. On the Mini the worktree also needs the USB SSD mounted. Proposed fix, not done: move the pinned worktree to `~/.grok-hub` and repoint the dsh-home symlinks.
-- `gk add-worker` still defaults `--script` to the khoj-era `grok-khoj-worker`; pass `--script` for every new machine.
+- `gk add-worker` now requires `--script`.
 - Interactive `gk <worker>` sessions were not opened in this pass; only `gk ask` (headless, same leader path).
 - sabibp-1 and the future VM: power on, then `gk add-worker NAME USER@HOST --script '<abs path> agent --no-leader stdio' --known-hosts /Users/sab-mini/.ssh/known_hosts`.
 - grok-pi is installed only on the Air (0.1.11, older than its source); the Mini has none.
