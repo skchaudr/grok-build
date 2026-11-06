@@ -103,7 +103,7 @@ ORDER=(normal prime prime-h2 claude cursor pi codex dsh dsh-stock fork)
 #   cursor  ~/.cursor/acp-sessions/<id>/
 #   claude  ~/.claude/projects/*/<id>.jsonl
 #   native  ~/.grok/sessions/*/<id>/   (directories only; prompt_history.jsonl is not a session)
-#   pi      ~/.pi/pi-acp/session-map.json
+#   pi      ~/.pi/pi-acp/session-map.json, then ~/.pi/agent/sessions/**/*_<id>.jsonl (plain pi)
 #   prime-h2 ~/.prime/harness2/acp/session-map.json
 #   codex   ~/.codex/session_index.jsonl and ~/.codex/sessions/**/rollout-*-<id>.jsonl
 #   dsh     ~/.dsh/sessions/*/<id>/
@@ -162,6 +162,13 @@ if pi_map.is_file():
     if isinstance(sessions, dict):
         for sid in sessions:
             hit("pi", sid, pi_map)
+
+# Plain pi sessions (never through pi-acp). pi-acp's loadSession resolves them by id.
+pi_dir = home / ".pi/agent/sessions"
+if pi_dir.is_dir():
+    for path in pi_dir.rglob("*.jsonl"):
+        for sid in uuid_re.findall(path.name):
+            hit("pi", sid, path)
 
 index = home / ".codex/session_index.jsonl"
 if index.is_file():
@@ -226,6 +233,7 @@ gb_unknown_session() {
   echo "  $HOME/.claude/projects/*/<id>.jsonl" >&2
   echo "  $HOME/.grok/sessions/*/<id>/" >&2
   echo "  $HOME/.pi/pi-acp/session-map.json" >&2
+  echo "  $HOME/.pi/agent/sessions/**/*_<id>.jsonl" >&2
   echo "  $HOME/.codex/sessions and $HOME/.codex/session_index.jsonl" >&2
   echo "  $HOME/.dsh/sessions/*/<id>" >&2
   exit 1
@@ -278,6 +286,8 @@ elif agent == "cursor":
     if isinstance(meta, dict) and isinstance(meta.get("cwd"), str):
         cwd = meta["cwd"]
 elif agent == "claude":
+    cwd = from_jsonl_cwd(path)
+elif agent == "pi" and path.suffix == ".jsonl":
     cwd = from_jsonl_cwd(path)
 elif agent in ("pi", "prime-h2"):
     try:
