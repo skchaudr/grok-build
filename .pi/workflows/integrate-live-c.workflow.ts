@@ -79,11 +79,11 @@ export default defineWorkflow({
       run: ({ outputs }): Selection => {
         const inspection = outputs.inspect_grok_work as Inspection;
         const answer = outputs.choose_changes as { input: { ids: string } };
-        const ids = [...new Set(answer.input.ids.trim().split(/[\s,]+/))];
+        const ids = [...new Set(answer.input.ids.trim().split(/[\s,]+/).filter(Boolean))];
         const unknown = ids.filter((id) => !inspection.changes.some((c) => c.id === id));
         const changes = inspection.changes.filter((c) => ids.includes(c.id));
         const missing = [...new Set(changes.flatMap((c) => c.dependencies).filter((id) => !ids.includes(id)))];
-        const reason = unknown.length ? `Unknown IDs: ${unknown.join(", ")}. Please choose again.` : missing.length ? `Required dependencies not selected: ${missing.join(", ")}. Please choose again; nothing is added automatically.` : "Selection accepted.";
+        const reason = !ids.length ? "Select at least one change ID." : unknown.length ? `Unknown IDs: ${unknown.join(", ")}. Please choose again.` : missing.length ? `Required dependencies not selected: ${missing.join(", ")}. Please choose again; nothing is added automatically.` : "Selection accepted.";
         return { valid: !unknown.length && !missing.length && changes.length > 0, reason, base: inspection.base, changes };
       },
     }),
@@ -108,12 +108,13 @@ export default defineWorkflow({
     verify: shell({
       effect: idempotentEffect("integrate-live-c.verify"), timeoutMs: 1_860_000,
       exec: () => ({
-        command: "bash", cwd, timeoutMs: 1_800_000, maxOutputChars: 30_000,
+        command: "bash", cwd, timeoutMs: 1_800_000,
         args: ["-c", [
           "set -euo pipefail",
           `test "$(git branch --show-current)" = '${branch}'`,
           "git diff --quiet && git diff --cached --quiet",
           "git merge-base --is-ancestor 1d7a903d HEAD",
+          "export PATH=\"$HOME/.cargo/bin:$PATH\"",
           "export CARGO_TARGET_DIR=\"$PWD/target\"",
           "cargo build --release -p xai-grok-pager-bin",
           "cargo test --release -p xai-grok-traces --lib",
@@ -124,6 +125,9 @@ export default defineWorkflow({
         ].join("\n")],
       }),
       parse: (r) => {
+        if ([r.stdout, r.stderr].some((stream) => stream.endsWith("\n…[output truncated]"))) {
+          throw new Error("Verification output was truncated; inspect the build/test output before retrying. No passing revision can be established from this capture.");
+        }
         const log = `${r.stdout}\n${r.stderr}`;
         const passed = [...log.matchAll(/test result: ok\. (\d+) passed/g)];
         if (passed.length < 2 || passed.some((m) => Number(m[1]) === 0)) throw new Error("The selected test groups must actually run and pass tests.");
