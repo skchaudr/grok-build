@@ -66,7 +66,8 @@ try {
   const preflight = [
     "set -euo pipefail",
     'test "$(git branch --show-current)" = "$1"',
-    "git diff --quiet && git diff --cached --quiet",
+    "git diff --quiet",
+    "git diff --cached --quiet",
     'git merge-base --is-ancestor "$2" HEAD',
   ].join("\n");
   if (await run("preflight", "bash", ["-c", preflight, "preflight", branch, cRevision])) {

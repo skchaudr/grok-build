@@ -162,7 +162,8 @@ export default defineWorkflow({
           args: ["-c", [
             "set -euo pipefail",
             `test "$(git branch --show-current)" = '${branch}'`,
-            "git diff --quiet && git diff --cached --quiet",
+            "git diff --quiet",
+            "git diff --cached --quiet",
             `test "$(git rev-parse HEAD)" = '${revision}'`,
             `test "$(git rev-parse main)" = '${base}'`,
             "git switch main", `git merge --ff-only '${revision}'`, "git rev-parse HEAD",
