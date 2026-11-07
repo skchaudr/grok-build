@@ -7,6 +7,7 @@ import {
 const cwd = fileURLToPath(new URL("../../", import.meta.url));
 const branch = "integrate/traces-live-c";
 const live = "66dfb6157f8be2354dfca215ebe25665880828e9";
+const verificationScript = fileURLToPath(new URL("./verify-live-c.mjs", import.meta.url));
 type Change = { id: string; title: string; files: string[]; issues: string; dependencies: string[] };
 type Inspection = { base: string; changes: Change[]; findings: string };
 type Selection = { valid: boolean; reason: string; base: string; changes: Change[] };
@@ -107,46 +108,31 @@ export default defineWorkflow({
     }),
     verify: shell({
       effect: idempotentEffect("integrate-live-c.verify"), timeoutMs: 1_860_000,
-      exec: () => ({
-        command: "bash", cwd, timeoutMs: 1_800_000,
-        args: ["-c", [
-          "set -euo pipefail",
-          `test "$(git branch --show-current)" = '${branch}'`,
-          "git diff --quiet && git diff --cached --quiet",
-          "git merge-base --is-ancestor 1d7a903d HEAD",
-          "export PATH=\"$HOME/.cargo/bin:$PATH\"",
-          "export CARGO_TARGET_DIR=\"$PWD/target\"",
-          "cargo build --release -p xai-grok-pager-bin",
-          "cargo test --release -p xai-grok-traces --lib",
-          "cargo test --release -p xai-grok-pager --lib traces_modal::",
-          // This module exists only when the corresponding live-feed change was selected.
-          "if test -f crates/codegen/xai-grok-pager/src/acp/live_feed.rs; then cargo test --release -p xai-grok-pager --lib acp::live_feed::tests::; fi",
-          "git rev-parse HEAD",
-        ].join("\n")],
+      exec: ({ state }) => ({
+        command: process.execPath, cwd, timeoutMs: 1_800_000,
+        args: [verificationScript, cwd, branch, "1d7a903d", state.runId],
       }),
       parse: (r) => {
-        if ([r.stdout, r.stderr].some((stream) => stream.endsWith("\n…[output truncated]"))) {
-          throw new Error("Verification output was truncated; inspect the build/test output before retrying. No passing revision can be established from this capture.");
-        }
-        const log = `${r.stdout}\n${r.stderr}`;
-        const passed = [...log.matchAll(/test result: ok\. (\d+) passed/g)];
-        if (passed.length < 2 || passed.some((m) => Number(m[1]) === 0)) throw new Error("The selected test groups must actually run and pass tests.");
-        const revision = r.stdout.trim().split(/\r?\n/).pop()!;
-        if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error("Missing verified revision.");
-        return { revision, log };
+        const receipt = JSON.parse(r.stdout) as { ok: boolean; revision: string | null; logDirectory: string | null; checks: unknown[]; anomalies: unknown[] };
+        if (typeof receipt.ok !== "boolean" || !Array.isArray(receipt.checks) || !Array.isArray(receipt.anomalies)) throw new Error("Invalid verification receipt.");
+        if (receipt.ok && (!/^[a-f0-9]{40}$/.test(receipt.revision ?? "") || !receipt.checks.length || receipt.anomalies.length)) throw new Error("Passing verification requires a revision, checks, and no anomalies.");
+        return receipt;
       },
+    }),
+    verification_result: compute({
+      run: ({ outputs }) => ({ ok: (outputs.verify as { ok: boolean }).ok }),
     }),
     recovery_gate: humanDecision({
       audience: "operator", choices: recoveryChoices,
       request: ({ outputs, results }) => {
-        const evidence = { selection: outputs.select_changes, integration: results.integrate, verification: results.verify, repair: results.repair, merge: results.merge };
+        const evidence = { selection: outputs.select_changes, integration: results.integrate, verification: outputs.verify ?? results.verify, repair: results.repair, merge: results.merge };
         return {
           title: "Integration/build problem: recover or end?", subject: evidence,
           presentation: {
             schema: "pi-workflows.decision-presentation.v1",
             summary: "Choose whether to authorize recovery here or end this run and design another workflow.",
             blocks: [
-              { kind: "paragraph", text: "The saved step results are available in /piw. The excerpt below shows the current failure context; it may omit longer logs." },
+              { kind: "paragraph", text: "Build/test logs are saved at the log paths in the verification receipt. Only check results and anomaly excerpts are included below. Other step failures remain available in /piw." },
               { kind: "preformatted", text: JSON.stringify(evidence, null, 2).slice(-15_000) },
             ],
           },
@@ -158,7 +144,8 @@ export default defineWorkflow({
       prompt: ({ outputs, results }) => [
         `Work in ${cwd}. Human-authorized recovery: ${JSON.stringify(outputs.recovery_gate)}`,
         `Approved selection: ${JSON.stringify(outputs.select_changes)}`,
-        `Failure evidence: ${JSON.stringify({ integration: results.integrate, verification: results.verify, repair: results.repair, merge: results.merge })}`,
+        `Failure evidence: ${JSON.stringify({ integration: results.integrate, verification: outputs.verify ?? results.verify, repair: results.repair, merge: results.merge })}`,
+        "Read saved logs only for anomalous checks, starting at the reported excerpt; do not load successful build/test logs into context.",
         "Perform only the authorized recovery while preserving C and the selected scope. Commit explicit task files only. Do not weaken checks, edit the workflow, touch unrelated work, push or deploy.",
         "Do not build/test here; return ready=true when the committed candidate is ready for the program's build/test step. Return ready=false with the reason if another human decision is needed.",
         "A failure returns to the human gate; this authorization does not permit automatic repeated repair attempts.",
@@ -200,7 +187,8 @@ export default defineWorkflow({
     { from: "select_changes", switch: { on: "$.valid", cases: { true: "integrate", false: "choose_changes" } } },
     { from: "integrate", switch: { on: "$result.outcome", cases: { ok: "candidate_ready", failed: "recovery_gate", timed_out: "recovery_gate" } } },
     { from: "candidate_ready", switch: { on: "$.ready", cases: { true: "verify", false: "recovery_gate" } } },
-    { from: "verify", switch: { on: "$result.outcome", cases: { ok: "merge", failed: "recovery_gate", timed_out: "recovery_gate" } } },
+    { from: "verify", switch: { on: "$result.outcome", cases: { ok: "verification_result", failed: "recovery_gate", timed_out: "recovery_gate" } } },
+    { from: "verification_result", switch: { on: "$.ok", cases: { true: "merge", false: "recovery_gate" } } },
     humanDecisionEdge({ from: "recovery_gate", choices: recoveryChoices, cases: { repair: "repair", end: "ended" } }),
     { from: "repair", switch: { on: "$result.outcome", cases: { ok: "candidate_ready", failed: "recovery_gate", timed_out: "recovery_gate" } } },
     { from: "merge", switch: { on: "$result.outcome", cases: { ok: "finish", failed: "recovery_gate", timed_out: "recovery_gate" } } },
