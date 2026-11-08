@@ -3593,23 +3593,26 @@ fn claude_session_forwards_pager_effort_as_text_native_does_not() {
         "native /effort must stay a pager command: {effects:?}"
     );
 
-    let mut claude = test_app_with_agent();
-    claude.external_agent = true;
-    claude.external_agent_label = Some("claude-agent".into());
-    {
+    // A fresh app per text: the first forwarded prompt starts a turn, which would queue the next one.
+    let claude_app = || {
+        let mut claude = test_app_with_agent();
+        claude.external_agent = true;
+        claude.external_agent_label = Some("claude-agent".into());
         let agent = claude.agents.get_mut(&AgentId(0)).unwrap();
         let registry = agent.prompt.slash_controller.registry_mut();
         registry.set_external_agent_with_label(true, Some("claude-agent".into()));
         let models = agent.session.models.clone();
         agent.prompt.sync_acp_commands(&[], None, &models);
-    }
+        claude
+    };
     for text in ["/effort high", "/hooks", "/plugin"] {
-        let effects = dispatch(Action::SendPrompt(text.into()), &mut claude);
+        let effects = dispatch(Action::SendPrompt(text.into()), &mut claude_app());
         assert!(
             matches!(effects.first(), Some(Effect::SendPrompt { text: t, .. }) if t == text),
             "{text} must be forwarded verbatim: {effects:?}"
         );
     }
+    let claude = claude_app();
     let registry = agent_ref(&claude, AgentId(0)).prompt.slash_controller.registry();
     assert!(crate::slash::is_command_complete("/effort", registry), "bare /effort submits");
 }
