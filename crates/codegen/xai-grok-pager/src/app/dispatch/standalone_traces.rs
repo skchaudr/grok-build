@@ -278,7 +278,7 @@ fn open_live_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone:
     }
     let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     agent.scrollback.end_batch();
-    agent.session.loading_replay = false;
+    finish_live_load(agent);
     agent.trace_live = Some(TraceLive {
         tail: live_feed::start(Job {
             source: row.source,
@@ -341,8 +341,21 @@ pub(crate) fn drain_live(app: &mut AppView) -> bool {
     }
     if let Some(agent) = super::ctx::get_active_agent_mut(app) {
         agent.scrollback.end_batch();
+        settle(agent);
     }
     true
+}
+
+/// Close the load window and open at the tail, following it the way `G` does, until the user scrolls up.
+pub(super) fn finish_live_load(agent: &mut AgentView) {
+    agent.session.loading_replay = false;
+    settle(agent);
+    agent.scrollback.goto_bottom();
+}
+
+/// A thought or text block in a transcript is already whole, so nothing the feed applied stays running.
+fn settle(agent: &mut AgentView) {
+    agent.session.tracker.close_open_message_for_steer(&mut agent.scrollback);
 }
 
 /// Esc in the read-only view: put the sessions list back, on the session it was opened from when there is one.

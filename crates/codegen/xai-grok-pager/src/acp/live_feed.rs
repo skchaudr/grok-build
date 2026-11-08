@@ -180,40 +180,56 @@ fn fetch_spans(source: &str, file_name: &str, native_id: Option<&str>) -> Result
 pub(crate) fn to_feds(session_id: &str, pieces: &[Piece]) -> Vec<Fed> {
     let mut out = Vec::new();
     for (n, piece) in pieces.iter().enumerate() {
+        let mut stream_start = None;
         let (event, ts, dur) = match piece {
             Piece::User(t) => (Event::Acp(acp::SessionUpdate::UserMessageChunk(claude_feed::chunk(t))), None, None),
             Piece::Text(t) => (Event::Acp(acp::SessionUpdate::AgentMessageChunk(claude_feed::chunk(t))), None, None),
-            Piece::Thinking(t) => (Event::Acp(acp::SessionUpdate::AgentThoughtChunk(claude_feed::chunk(t))), None, None),
-            Piece::Open { id, tool, start_ms, input, .. } => {
+            Piece::Thinking { text, at_ms, dur_ms } => {
+                // The tracker times a thought as agentTimestampMs - streamStartMs; without both it uses the wall clock (0.0s here).
+                stream_start = dur_ms.map(|d| at_ms - d);
+                let ts = stream_start.map(|_| *at_ms);
+                (Event::Acp(acp::SessionUpdate::AgentThoughtChunk(claude_feed::chunk(text))), ts, None)
+            }
+            Piece::Open { id, tool, start_ms, input, label, .. } => {
                 let raw = input_value(input.as_deref());
-                let title = title_of(tool, &raw);
+                let title = title(tool, &raw, label.as_deref());
                 let tc = claude_feed::tool_call(id, kind_of(tool), title, raw, acp::ToolCallStatus::InProgress, Vec::new(), None, None);
                 (Event::Acp(acp::SessionUpdate::ToolCall(tc)), Some(*start_ms), None)
             }
-            Piece::Fill { id, input, output } => {
+            Piece::Fill { id, tool, input, output } => {
                 let raw = input.as_deref().map(|s| input_value(Some(s)));
                 let content = output.as_deref().filter(|t| !t.is_empty()).map(|t| vec![claude_feed::text_content(t)]);
-                let fields = update_fields(acp::ToolCallStatus::InProgress, raw, content);
+                let mut fields = update_fields(acp::ToolCallStatus::InProgress, None, content);
+                if let Some(raw) = raw {
+                    fields = fields.title(Some(title_of(tool, &raw))).raw_input(Some(raw));
+                }
                 let upd = acp::ToolCallUpdate::new(acp::ToolCallId::new(Arc::from(id.as_str())), fields);
                 (Event::Acp(acp::SessionUpdate::ToolCallUpdate(upd)), None, None)
             }
-            Piece::Complete { id, tool, start_ms, end_ms, error, input, output, fresh, .. } => {
+            Piece::Complete { id, tool, start_ms, end_ms, error, input, label, output, fresh, .. } => {
                 let raw = input_value(input.as_deref());
+                let title = title(tool, &raw, label.as_deref());
                 let status = if *error { acp::ToolCallStatus::Failed } else { acp::ToolCallStatus::Completed };
                 let content = content_of(tool, &raw, output, *error);
                 let dur = (*end_ms - *start_ms).max(0);
                 let event = if *fresh {
-                    let tc = claude_feed::tool_call(id, kind_of(tool), title_of(tool, &raw), raw, status, content, None, Some(dur));
+                    let tc = claude_feed::tool_call(id, kind_of(tool), title, raw, status, content, None, Some(dur));
                     Event::Acp(acp::SessionUpdate::ToolCall(tc))
                 } else {
-                    let fields = update_fields(status, Some(raw), Some(content));
+                    // A null input would wipe what an earlier fill set; the title always goes, so a row never keeps "Bash call".
+                    let raw = (!raw.is_null()).then_some(raw);
+                    let fields = update_fields(status, raw, Some(content)).title(Some(title));
                     let upd = acp::ToolCallUpdate::new(acp::ToolCallId::new(Arc::from(id.as_str())), fields);
                     Event::Acp(acp::SessionUpdate::ToolCallUpdate(upd))
                 };
                 (event, Some(*end_ms), Some(dur))
             }
         };
-        out.push(Fed { event, meta: meta(session_id, n, ts, dur) });
+        let mut m = meta(session_id, n, ts, dur);
+        if let Some(s) = stream_start {
+            m.insert("streamStartMs".into(), json!(s));
+        }
+        out.push(Fed { event, meta: m });
     }
     out
 }
@@ -251,6 +267,14 @@ fn kind_of(name: &str) -> acp::ToolKind {
 
 fn str_at<'a>(v: &'a Value, k: &str) -> &'a str {
     v.get(k).and_then(Value::as_str).unwrap_or("")
+}
+
+/// The transcript's input names the call; before it has any, the receipt's detail does. Never the bare tool name when either exists.
+fn title(name: &str, input: &Value, label: Option<&str>) -> String {
+    match label.filter(|l| input.is_null() && !l.trim().is_empty()) {
+        Some(l) => l.lines().next().unwrap_or(l).trim().to_string(),
+        None => title_of(name, input),
+    }
 }
 
 fn title_of(name: &str, input: &Value) -> String {
@@ -342,7 +366,7 @@ mod tests {
     #[test]
     fn open_then_complete_is_one_row() {
         let input = Some(r#"{"command":"ls"}"#.to_string());
-        let open = Piece::Open { id: "c1".into(), tool: "Bash".into(), start_ms: 1_000, input: input.clone(), parent: None };
+        let open = Piece::Open { id: "c1".into(), tool: "Bash".into(), start_ms: 1_000, input: input.clone(), label: None, parent: None };
         let mut sb = apply(&[open]);
         assert_eq!(sb.len(), 1);
         assert!(sb.iter_entries().all(|(_, e)| e.is_running));
@@ -353,12 +377,13 @@ mod tests {
             end_ms: 1_500,
             error: false,
             input,
+            label: None,
             output: "ok".into(),
             fresh: false,
             parent: None,
         };
         sb = apply(&[
-            Piece::Open { id: "c1".into(), tool: "Bash".into(), start_ms: 1_000, input: done_input(), parent: None },
+            Piece::Open { id: "c1".into(), tool: "Bash".into(), start_ms: 1_000, input: done_input(), label: None, parent: None },
             done,
         ]);
         assert_eq!(sb.len(), 1);
@@ -370,6 +395,7 @@ mod tests {
             end_ms: 2,
             error: false,
             input: Some(r#"{"file_path":"a.rs","edits":[{"old_string":"a","new_string":"b"},{"old_string":"c","new_string":"d"}]}"#.into()),
+            label: None,
             output: "ok".into(),
             fresh: true,
             parent: Some("c1".into()),
@@ -383,6 +409,7 @@ mod tests {
             end_ms: 2,
             error: false,
             input: Some(r#"{"file_path":"a.rs","edits":[{"old_string":"a","new_string":"b"}]}"#.into()),
+            label: None,
             output: "ok".into(),
             fresh: true,
             parent: None,

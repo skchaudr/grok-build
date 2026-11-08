@@ -23,7 +23,8 @@ pub struct Item {
 pub enum ItemKind {
     User(String),
     Text(String),
-    Thinking(String),
+    /// Text and the line's `thinkingDurationMs`.
+    Thinking(String, Option<i64>),
     Call { id: String, tool: String, input: String },
     Result { id: String, output: String, is_error: bool },
 }
@@ -33,9 +34,11 @@ pub enum ItemKind {
 pub enum Piece {
     User(String),
     Text(String),
-    Thinking(String),
-    Open { id: String, tool: String, start_ms: i64, input: Option<String>, parent: Option<String> },
-    Fill { id: String, input: Option<String>, output: Option<String> },
+    /// A finished thought: `at_ms` is when it was written, `dur_ms` how long it took.
+    Thinking { text: String, at_ms: i64, dur_ms: Option<i64> },
+    /// `label` is the receipt's one-line detail, for while the transcript has no input for the call.
+    Open { id: String, tool: String, start_ms: i64, input: Option<String>, label: Option<String>, parent: Option<String> },
+    Fill { id: String, tool: String, input: Option<String>, output: Option<String> },
     Complete {
         id: String,
         tool: String,
@@ -43,6 +46,7 @@ pub enum Piece {
         end_ms: i64,
         error: bool,
         input: Option<String>,
+        label: Option<String>,
         output: String,
         fresh: bool,
         parent: Option<String>,
@@ -58,6 +62,9 @@ struct Signal {
     error: Option<bool>,
     from_span: bool,
     parent: Option<String>,
+    detail: Option<String>,
+    /// A subagent's call (its receipt has an agent id): its content is in the subagent's own transcript.
+    sub: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -79,6 +86,8 @@ struct Call {
     parent: Option<String>,
     /// No receipt or span has named it: the transcript alone opens it, and its result ends it.
     transcript_only: bool,
+    detail: Option<String>,
+    sub: bool,
 }
 
 impl Call {
@@ -100,6 +109,8 @@ impl Call {
             done: false,
             parent: None,
             transcript_only,
+            detail: None,
+            sub: false,
         }
     }
 }
@@ -114,35 +125,21 @@ pub struct Merger {
 impl Merger {
     /// A call is starting or ending. `items` is the transcript as it reads right now.
     pub fn on_signal(&mut self, call_id: String, tool: Option<String>, start_ms: Option<i64>, end_ms: Option<i64>, error: Option<bool>, from_span: bool, parent: Option<String>, items: &[Item]) -> Vec<Piece> {
-        let sig = Signal { call_id, tool, start_ms, end_ms, error, from_span, parent };
+        self.signal(Signal { call_id, tool, start_ms, end_ms, error, from_span, parent, detail: None, sub: false }, items)
+    }
+
+    fn signal(&mut self, sig: Signal, items: &[Item]) -> Vec<Piece> {
         let id = self.upsert(sig);
-        let before = match call_ord(items, &id) {
-            Some(o) => o,
-            None => hold_ord(&self.calls, items, Some(&id)),
-        };
-        let mut out = self.prose(items, before);
+        let before = call_ord(items, &id).unwrap_or(u64::MAX);
+        let mut out = self.flow(items, before);
         self.absorb(items, Some(&id));
         out.extend(self.emit(&id));
         out
     }
 
-    /// Transcript grew, or the tail should be flushed after a batch of signals. Emits in transcript order;
-    /// a call no receipt or span has named still opens from its transcript line, so it never holds back later text.
+    /// Transcript grew, or the tail should be flushed after a batch of signals.
     pub fn on_tail(&mut self, items: &[Item]) -> Vec<Piece> {
-        for it in items {
-            if let ItemKind::Call { id, .. } = &it.kind {
-                self.calls.entry(id.clone()).or_insert_with(|| Call::new(it.at_ms, true));
-            }
-        }
-        self.absorb(items, None);
-        let mut out = Vec::new();
-        for it in items {
-            match &it.kind {
-                ItemKind::Call { id, .. } => out.extend(self.emit(id)),
-                ItemKind::Result { .. } => {}
-                _ => out.extend(self.prose(std::slice::from_ref(it), u64::MAX)),
-            }
-        }
+        let mut out = self.flow(items, u64::MAX);
         let ids: Vec<String> = self.calls.keys().cloned().collect();
         for id in ids {
             out.extend(self.emit(&id));
@@ -155,12 +152,12 @@ impl Merger {
         let items = parse(source, transcript);
         let mut pieces = Vec::new();
         for sig in receipt_signals(source, receipts) {
-            pieces.extend(self.on_signal(sig.call_id, sig.tool, sig.start_ms, sig.end_ms, sig.error, sig.from_span, sig.parent, &items));
+            pieces.extend(self.signal(sig, &items));
         }
         let offline = spans.is_err();
         if let Ok(spans) = spans {
             for sig in span_signals(spans) {
-                pieces.extend(self.on_signal(sig.call_id, sig.tool, sig.start_ms, sig.end_ms, sig.error, sig.from_span, sig.parent, &items));
+                pieces.extend(self.signal(sig, &items));
             }
         }
         if !crate::live::strict_ids(source) {
@@ -225,22 +222,37 @@ impl Merger {
         if c.parent.is_none() {
             c.parent = sig.parent;
         }
+        if c.detail.is_none() {
+            c.detail = sig.detail;
+        }
+        c.sub |= sig.sub;
         id
     }
 
-    fn prose(&mut self, items: &[Item], before: u64) -> Vec<Piece> {
+    /// Everything ordered before `before`, in transcript order. A call no receipt or span has named still opens
+    /// from its transcript line, so it never holds back what follows it.
+    fn flow(&mut self, items: &[Item], before: u64) -> Vec<Piece> {
+        let items = &items[..items.partition_point(|it| it.ord < before)];
+        for it in items {
+            if let ItemKind::Call { id, .. } = &it.kind {
+                self.calls.entry(id.clone()).or_insert_with(|| Call::new(it.at_ms, true));
+            }
+        }
+        self.absorb(items, None);
         let mut out = Vec::new();
         for it in items {
-            if it.ord >= before || !self.seen.insert(it.ord) {
+            if let ItemKind::Call { id, .. } = &it.kind {
+                out.extend(self.emit(id));
+                continue;
+            }
+            if matches!(it.kind, ItemKind::Result { .. }) || !self.seen.insert(it.ord) {
                 continue;
             }
             match &it.kind {
                 ItemKind::User(t) => out.push(Piece::User(t.clone())),
                 ItemKind::Text(t) => out.push(Piece::Text(t.clone())),
-                ItemKind::Thinking(t) => out.push(Piece::Thinking(t.clone())),
-                ItemKind::Call { .. } | ItemKind::Result { .. } => {
-                    self.seen.remove(&it.ord);
-                }
+                ItemKind::Thinking(t, dur) => out.push(Piece::Thinking { text: t.clone(), at_ms: it.at_ms, dur_ms: *dur }),
+                ItemKind::Call { .. } | ItemKind::Result { .. } => {}
             }
         }
         out
@@ -280,7 +292,8 @@ impl Merger {
         if c.done {
             return Vec::new();
         }
-        let ready = c.output.is_some() && c.end_ms.is_some();
+        // A subagent's result is in its own transcript, never this one: its end is enough.
+        let ready = (c.output.is_some() || c.sub) && c.end_ms.is_some();
         if !c.opened && ready {
             c.opened = true;
             c.done = true;
@@ -296,16 +309,17 @@ impl Merger {
                 tool: c.tool.clone(),
                 start_ms: c.start_ms,
                 input: c.input.clone(),
+                label: c.detail.clone(),
                 parent: c.parent.clone(),
             });
             c.input_dirty = false;
         }
         if c.input_dirty || c.output_dirty {
-            out.push(Piece::Fill { id: id.to_string(), input: c.input.clone(), output: c.output.clone() });
+            out.push(Piece::Fill { id: id.to_string(), tool: c.tool.clone(), input: c.input.clone(), output: c.output.clone() });
             c.input_dirty = false;
             c.output_dirty = false;
         }
-        if c.output.is_some() && c.end_ms.is_some() {
+        if ready {
             c.done = true;
             out.push(complete_piece(id, c, false));
         }
@@ -321,6 +335,7 @@ fn complete_piece(id: &str, c: &Call, fresh: bool) -> Piece {
         end_ms: c.end_ms.unwrap_or(c.start_ms),
         error: if c.error_set { c.error } else { c.out_err },
         input: c.input.clone(),
+        label: c.detail.clone(),
         output: c.output.clone().unwrap_or_default(),
         fresh,
         parent: c.parent.clone(),
@@ -332,25 +347,6 @@ fn call_ord(items: &[Item], id: &str) -> Option<u64> {
         ItemKind::Call { id: cid, .. } if cid == id => Some(it.ord),
         _ => None,
     })
-}
-
-/// Ordinal of the earliest call line that is not opened yet, other than `opening`.
-fn hold_ord(calls: &HashMap<String, Call>, items: &[Item], opening: Option<&str>) -> u64 {
-    items
-        .iter()
-        .find_map(|it| match &it.kind {
-            ItemKind::Call { id, .. } => {
-                if opening == Some(id.as_str()) {
-                    return None;
-                }
-                if calls.get(id).is_some_and(|c| c.opened) {
-                    return None;
-                }
-                Some(it.ord)
-            }
-            _ => None,
-        })
-        .unwrap_or(u64::MAX)
 }
 
 /// Alive, ended or failed from the receipts and the harness pid. Transcript silence is not a signal.
@@ -388,6 +384,7 @@ fn receipt_signals(source: &str, receipts: &[LiveReceipt]) -> Vec<Signal> {
     for r in receipts {
         let Some(id) = r.tool_use_id.clone().filter(|s| !s.is_empty()) else { continue };
         let parent = r.parent_tool_use_id.clone();
+        let (detail, sub) = (r.detail.clone().filter(|d| !d.is_empty()), r.agent_id.as_deref().is_some_and(|a| !a.is_empty()));
         match norm(source, &r.event, r.detail.as_deref()) {
             Some(Ev::Pre) => out.push(Signal {
                 call_id: id,
@@ -397,6 +394,8 @@ fn receipt_signals(source: &str, receipts: &[LiveReceipt]) -> Vec<Signal> {
                 error: None,
                 from_span: false,
                 parent,
+                detail,
+                sub,
             }),
             Some(Ev::Post) => out.push(Signal {
                 call_id: id,
@@ -406,6 +405,8 @@ fn receipt_signals(source: &str, receipts: &[LiveReceipt]) -> Vec<Signal> {
                 error: r.is_error,
                 from_span: false,
                 parent,
+                detail,
+                sub,
             }),
             _ => {}
         }
@@ -432,6 +433,8 @@ fn span_signals(spans: &[PhoenixSpan]) -> Vec<Signal> {
             error: None,
             from_span: true,
             parent: None,
+            detail: None,
+            sub: false,
         });
         let start = s.start.timestamp_millis();
         let end = s.end.timestamp_millis();
@@ -506,7 +509,7 @@ fn parse_claude(text: &str) -> Vec<Item> {
                 Some("thinking") => {
                     let body = b.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
                     let body = if body.trim().is_empty() { "\u{200b}".to_string() } else { body.to_string() };
-                    push(&mut out, &mut ord, at, ItemKind::Thinking(body));
+                    push(&mut out, &mut ord, at, ItemKind::Thinking(body, v.get("thinkingDurationMs").and_then(|d| d.as_i64())));
                 }
                 Some("text") => {
                     let body = b.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
@@ -611,7 +614,7 @@ fn parse_pi(text: &str) -> Vec<Item> {
                 Some("thinking") => {
                     let body = b.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
                     let body = if body.trim().is_empty() { "\u{200b}".to_string() } else { body.to_string() };
-                    push(&mut out, &mut ord, at, ItemKind::Thinking(body));
+                    push(&mut out, &mut ord, at, ItemKind::Thinking(body, None));
                 }
                 Some("text") => {
                     let body = b.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
@@ -789,6 +792,35 @@ mod tests {
         let (next, _) = m.ingest("claude", &done, &[], Ok(&[]));
         assert!(next.iter().any(|p| matches!(p, Piece::Complete { id, end_ms, start_ms, .. } if id == "c1" && end_ms - start_ms == 2_500)), "{next:?}");
         assert!(m.running().is_none());
+    }
+
+    /// Session 40e362e8: a subagent's Bash calls land on the parent's receipts (agent_id set) but never in its transcript.
+    #[test]
+    fn a_subagent_call_is_labelled_from_its_receipt_and_ends_on_its_post() {
+        let sub = |r: LiveReceipt| LiveReceipt { agent_id: Some("a7c7757506b19c0c4".into()), detail: Some("git status --short".into()), ..r };
+        let (pieces, m, _) = load("claude", "", &[sub(pre("toolu_S", "Bash", 1_000)), sub(post("toolu_S", 1_300, Some(false)))], Ok(&[]));
+        assert!(matches!(pieces.as_slice(), [Piece::Open { .. }, Piece::Complete { id, label: Some(l), input: None, .. }] if id == "toolu_S" && l == "git status --short"), "{pieces:?}");
+        assert!(m.running().is_none());
+        let (pieces, _, _) = load("claude", "", &[sub(pre("toolu_S", "Bash", 1_000))], Ok(&[]));
+        assert!(matches!(pieces.as_slice(), [Piece::Open { label: Some(l), .. }] if l == "git status --short"), "{pieces:?}");
+    }
+
+    #[test]
+    fn calls_without_receipts_keep_their_place_before_a_receipted_call_and_thoughts_keep_their_duration() {
+        let text = r#"{"type":"assistant","timestamp":"2026-11-08T22:38:00.000Z","message":{"content":[{"type":"tool_use","id":"a","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","timestamp":"2026-11-08T22:38:01.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"a","content":"x"}]}}
+{"type":"assistant","timestamp":"2026-11-08T22:38:03.000Z","thinkingDurationMs":1193,"message":{"content":[{"type":"thinking","thinking":"","signature":"s"}]}}
+{"type":"assistant","timestamp":"2026-11-08T22:38:04.000Z","message":{"content":[{"type":"tool_use","id":"b","name":"Bash","input":{"command":"pwd"}}]}}"#;
+        let (pieces, _, _) = load("claude", text, &[pre("b", "Bash", 1)], Ok(&[]));
+        let order: Vec<String> = pieces
+            .iter()
+            .map(|p| match p {
+                Piece::Complete { id, .. } | Piece::Open { id, .. } => id.clone(),
+                Piece::Thinking { dur_ms, .. } => format!("thought {dur_ms:?}"),
+                _ => "other".into(),
+            })
+            .collect();
+        assert_eq!(order, ["a", "thought Some(1193)", "b"], "{pieces:?}");
     }
 
     #[test]
