@@ -6766,6 +6766,14 @@ fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
         crate::theme::ThemeKind::JetBrainsIslandsDark => {
             crate::theme::Theme::jetbrains_islands_dark()
         }
+        crate::theme::ThemeKind::NightOwl => crate::theme::Theme::night_owl(),
+        crate::theme::ThemeKind::OneDarkPro => crate::theme::Theme::one_dark_pro(),
+        crate::theme::ThemeKind::NstlgyDark => crate::theme::Theme::nstlgy_dark(),
+        crate::theme::ThemeKind::SeveranceDark => crate::theme::Theme::severance_dark(),
+        crate::theme::ThemeKind::QuasiMonochromeDark => crate::theme::Theme::quasi_monochrome_dark(),
+        crate::theme::ThemeKind::JetBrainsIslandsLight => crate::theme::Theme::jetbrains_islands_light(),
+        crate::theme::ThemeKind::MonosamiLight => crate::theme::Theme::monosami_light(),
+        crate::theme::ThemeKind::MonosamiInkLight => crate::theme::Theme::monosami_ink_light(),
         // Both bg tokens are Reset (bandless palette), so the two-tone
         // assertion below does not apply — the preview reads via the
         // underline cue instead.

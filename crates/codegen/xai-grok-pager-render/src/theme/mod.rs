@@ -41,6 +41,14 @@ pub enum ThemeKind {
     KanagawaWave = 8,
     Kanagawa = 9,
     JetBrainsIslandsDark = 10,
+    NightOwl = 11,
+    OneDarkPro = 12,
+    NstlgyDark = 13,
+    SeveranceDark = 14,
+    QuasiMonochromeDark = 15,
+    JetBrainsIslandsLight = 16,
+    MonosamiLight = 17,
+    MonosamiInkLight = 18,
     /// Follow system appearance. Disk stores `"auto"`; `cache::CURRENT` holds only the resolved concrete kind. Excluded from [`ALL`].
     Auto = 4,
 }
@@ -57,6 +65,14 @@ impl ThemeKind {
         ThemeKind::KanagawaWave,
         ThemeKind::Kanagawa,
         ThemeKind::JetBrainsIslandsDark,
+        ThemeKind::NightOwl,
+        ThemeKind::OneDarkPro,
+        ThemeKind::NstlgyDark,
+        ThemeKind::SeveranceDark,
+        ThemeKind::QuasiMonochromeDark,
+        ThemeKind::JetBrainsIslandsLight,
+        ThemeKind::MonosamiLight,
+        ThemeKind::MonosamiInkLight,
         ThemeKind::Terminal,
     ];
 
@@ -115,6 +131,14 @@ impl ThemeKind {
             Self::KanagawaWave => "kanagawa-wave",
             Self::Kanagawa => "kanagawa",
             Self::JetBrainsIslandsDark => "jetbrains-islands-dark",
+            Self::NightOwl => "night-owl",
+            Self::OneDarkPro => "one-dark-pro",
+            Self::NstlgyDark => "nstlgy-dark",
+            Self::SeveranceDark => "severance-dark",
+            Self::QuasiMonochromeDark => "quasi-monochrome-dark",
+            Self::JetBrainsIslandsLight => "jetbrains-islands-light",
+            Self::MonosamiLight => "monosami-light",
+            Self::MonosamiInkLight => "monosami-ink-light",
             Self::Terminal => "terminal",
             Self::Auto => "auto",
         }
@@ -128,9 +152,18 @@ impl ThemeKind {
             Self::GrokDay => false,
             Self::RosePineMoon => true,
             Self::OscuraMidnight => true,
-            Self::KansoMist | Self::KanagawaWave | Self::Kanagawa | Self::JetBrainsIslandsDark => {
-                true
-            }
+            Self::KansoMist
+            | Self::KanagawaWave
+            | Self::Kanagawa
+            | Self::JetBrainsIslandsDark
+            | Self::NightOwl
+            | Self::OneDarkPro
+            | Self::NstlgyDark
+            | Self::SeveranceDark
+            | Self::QuasiMonochromeDark
+            | Self::JetBrainsIslandsLight
+            | Self::MonosamiLight
+            | Self::MonosamiInkLight => true,
             // Reset plus named ANSI-16 entries only — nothing to quantize.
             Self::Terminal => false,
             // Auto is resolved to a concrete theme before rendering.
@@ -156,6 +189,14 @@ impl ThemeKind {
             Self::KanagawaWave => &["kanagawa_wave"],
             Self::Kanagawa => &["kanagawa-default"],
             Self::JetBrainsIslandsDark => &["jetbrains", "islands-dark", "jetbrains-islands"],
+            Self::NightOwl => &["nightowl", "night-owl-no-italics"],
+            Self::OneDarkPro => &["onedark", "one-dark"],
+            Self::NstlgyDark => &["nstlgy"],
+            Self::SeveranceDark => &["severance"],
+            Self::QuasiMonochromeDark => &["quasi-monochrome", "monochrome"],
+            Self::JetBrainsIslandsLight => &["islands-light", "jetbrains-light"],
+            Self::MonosamiLight => &["monosami"],
+            Self::MonosamiInkLight => &["monosami-ink", "inklight", "ink-light"],
             Self::Terminal => &["terminal-default", "transparent", "native"],
             Self::Auto => &["system"],
         }
@@ -215,6 +256,14 @@ pub fn display_name_for_canonical(value: &str) -> &str {
         "kanagawa-wave" => "Kanagawa Wave",
         "kanagawa" => "Kanagawa",
         "jetbrains-islands-dark" => "JetBrains Islands Dark",
+        "night-owl" => "Night Owl",
+        "one-dark-pro" => "One Dark Pro",
+        "nstlgy-dark" => "Nstlgy Dark",
+        "severance-dark" => "Severance Dark",
+        "quasi-monochrome-dark" => "Quasi Monochrome Dark",
+        "jetbrains-islands-light" => "JetBrains Islands Light",
+        "monosami-light" => "Monosami Light",
+        "monosami-ink-light" => "Monosami Ink Light",
         "terminal" => "Terminal",
         other => other,
     }
@@ -336,6 +385,14 @@ impl Theme {
             ThemeKind::KanagawaWave => Self::kanagawa_wave(),
             ThemeKind::Kanagawa => Self::kanagawa(),
             ThemeKind::JetBrainsIslandsDark => Self::jetbrains_islands_dark(),
+            ThemeKind::NightOwl => Self::night_owl(),
+            ThemeKind::OneDarkPro => Self::one_dark_pro(),
+            ThemeKind::NstlgyDark => Self::nstlgy_dark(),
+            ThemeKind::SeveranceDark => Self::severance_dark(),
+            ThemeKind::QuasiMonochromeDark => Self::quasi_monochrome_dark(),
+            ThemeKind::JetBrainsIslandsLight => Self::jetbrains_islands_light(),
+            ThemeKind::MonosamiLight => Self::monosami_light(),
+            ThemeKind::MonosamiInkLight => Self::monosami_ink_light(),
             // Handled by the early return above.
             ThemeKind::Terminal => Self::terminal(),
             // Auto is resolved to a concrete theme before being stored; if reached, fall back to GrokNight
@@ -773,6 +830,14 @@ mod tests {
         assert!(Theme::kanagawa_wave().is_dark());
         assert!(Theme::kanagawa().is_dark());
         assert!(Theme::jetbrains_islands_dark().is_dark());
+        assert!(Theme::night_owl().is_dark());
+        assert!(Theme::one_dark_pro().is_dark());
+        assert!(Theme::nstlgy_dark().is_dark());
+        assert!(Theme::severance_dark().is_dark());
+        assert!(Theme::quasi_monochrome_dark().is_dark());
+        assert!(!Theme::jetbrains_islands_light().is_dark());
+        assert!(!Theme::monosami_light().is_dark());
+        assert!(!Theme::monosami_ink_light().is_dark());
         assert!(!Theme::grokday().is_dark());
     }
 
@@ -1072,6 +1137,14 @@ mod tests {
                 ThemeKind::KanagawaWave => Theme::kanagawa_wave(),
                 ThemeKind::Kanagawa => Theme::kanagawa(),
                 ThemeKind::JetBrainsIslandsDark => Theme::jetbrains_islands_dark(),
+                ThemeKind::NightOwl => Theme::night_owl(),
+                ThemeKind::OneDarkPro => Theme::one_dark_pro(),
+                ThemeKind::NstlgyDark => Theme::nstlgy_dark(),
+                ThemeKind::SeveranceDark => Theme::severance_dark(),
+                ThemeKind::QuasiMonochromeDark => Theme::quasi_monochrome_dark(),
+                ThemeKind::JetBrainsIslandsLight => Theme::jetbrains_islands_light(),
+                ThemeKind::MonosamiLight => Theme::monosami_light(),
+                ThemeKind::MonosamiInkLight => Theme::monosami_ink_light(),
                 // Reset plus named ANSI entries: the scrollbar rides the
                 // terminal's own fg/bg contrast, so there is no RGB delta.
                 ThemeKind::Terminal => continue,
@@ -1316,6 +1389,14 @@ mod tests {
             ("kanagawa", ThemeKind::Kanagawa),
             ("jetbrains-islands-dark", ThemeKind::JetBrainsIslandsDark),
             ("jetbrains", ThemeKind::JetBrainsIslandsDark),
+            ("night-owl", ThemeKind::NightOwl),
+            ("one-dark-pro", ThemeKind::OneDarkPro),
+            ("nstlgy-dark", ThemeKind::NstlgyDark),
+            ("severance-dark", ThemeKind::SeveranceDark),
+            ("quasi-monochrome-dark", ThemeKind::QuasiMonochromeDark),
+            ("jetbrains-islands-light", ThemeKind::JetBrainsIslandsLight),
+            ("monosami-light", ThemeKind::MonosamiLight),
+            ("monosami-ink-light", ThemeKind::MonosamiInkLight),
         ] {
             assert_eq!(ThemeKind::from_name(name), Some(kind), "{name}");
             assert_eq!(canonical_name(name), Some(kind.display_name()));
@@ -1325,7 +1406,7 @@ mod tests {
     #[test]
     fn zed_port_tmthemes_load_with_matching_background() {
         use syntect::highlighting::{Color, ThemeSet};
-        let assets: [(&[u8], Theme); 4] = [
+        let assets: [(&[u8], Theme); 12] = [
             (
                 include_bytes!("../../assets/kanso-mist.tmTheme"),
                 Theme::kanso_mist(),
@@ -1341,6 +1422,38 @@ mod tests {
             (
                 include_bytes!("../../assets/jetbrains-islands-dark.tmTheme"),
                 Theme::jetbrains_islands_dark(),
+            ),
+            (
+                include_bytes!("../../assets/night-owl.tmTheme"),
+                Theme::night_owl(),
+            ),
+            (
+                include_bytes!("../../assets/one-dark-pro.tmTheme"),
+                Theme::one_dark_pro(),
+            ),
+            (
+                include_bytes!("../../assets/nstlgy-dark.tmTheme"),
+                Theme::nstlgy_dark(),
+            ),
+            (
+                include_bytes!("../../assets/severance-dark.tmTheme"),
+                Theme::severance_dark(),
+            ),
+            (
+                include_bytes!("../../assets/quasi-monochrome-dark.tmTheme"),
+                Theme::quasi_monochrome_dark(),
+            ),
+            (
+                include_bytes!("../../assets/jetbrains-islands-light.tmTheme"),
+                Theme::jetbrains_islands_light(),
+            ),
+            (
+                include_bytes!("../../assets/monosami-light.tmTheme"),
+                Theme::monosami_light(),
+            ),
+            (
+                include_bytes!("../../assets/monosami-ink-light.tmTheme"),
+                Theme::monosami_ink_light(),
             ),
         ];
         for (bytes, theme) in assets {

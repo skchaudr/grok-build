@@ -764,6 +764,11 @@ mod tests {
             ThemeKind::KanagawaWave,
             ThemeKind::Kanagawa,
             ThemeKind::JetBrainsIslandsDark,
+            ThemeKind::NightOwl,
+            ThemeKind::OneDarkPro,
+            ThemeKind::NstlgyDark,
+            ThemeKind::SeveranceDark,
+            ThemeKind::QuasiMonochromeDark,
         ] {
             assert!(theme_is_dark(dark), "{dark:?} should be dark");
         }

@@ -400,8 +400,9 @@ impl ScrollbackPane {
 
                     // Selection border fades with content.
                     // If needed, use opacity.max(0.5) to enforce a minimum visibility floor.
-                    let border_color = blend_color(theme.bg_base, theme.selection_border_visible(), opacity)
-                        .unwrap_or(theme.selection_border_visible());
+                    let border_color =
+                        blend_color(theme.bg_base, theme.selection_border_visible(), opacity)
+                            .unwrap_or(theme.selection_border_visible());
 
                     // Top is clipped only when content is actually being clipped off (clip_top > 0)
                     // When clip_top == 0, the full header is visible (just fading), so show full border
@@ -465,10 +466,12 @@ impl ScrollbackPane {
             // Check if there's room for top corners
             let top_clipped = screen_row == 0 && area.y == 0;
 
-            let sel_box =
-                SelectionBox::new(selection_area, Style::default().fg(theme.selection_border_visible()))
-                    .with_top_clipped(top_clipped)
-                    .with_bottom_clipped(false);
+            let sel_box = SelectionBox::new(
+                selection_area,
+                Style::default().fg(theme.selection_border_visible()),
+            )
+            .with_top_clipped(top_clipped)
+            .with_bottom_clipped(false);
 
             pinned_header_selection_box = Some(sel_box);
         }
@@ -1057,10 +1060,12 @@ impl ScrollbackPane {
                 let bottom_clipped =
                     selected.bottom_clipped || bottom > content_area.y + content_area.height;
 
-                let sel_box =
-                    SelectionBox::new(selected.area, Style::default().fg(theme.selection_border_visible()))
-                        .with_top_clipped(top_clipped)
-                        .with_bottom_clipped(bottom_clipped);
+                let sel_box = SelectionBox::new(
+                    selected.area,
+                    Style::default().fg(theme.selection_border_visible()),
+                )
+                .with_top_clipped(top_clipped)
+                .with_bottom_clipped(bottom_clipped);
 
                 content_output.output.selection_box = Some(sel_box);
                 content_output.output.selected_entry_area = selected_entry_rect;
@@ -1106,10 +1111,12 @@ impl ScrollbackPane {
                     let top_clipped = group_start_vy < viewport_start;
                     let bottom_clipped = group_end_vy > viewport_end;
 
-                    let sel_box =
-                        SelectionBox::new(sel_area, Style::default().fg(theme.selection_border_visible()))
-                            .with_top_clipped(top_clipped)
-                            .with_bottom_clipped(bottom_clipped);
+                    let sel_box = SelectionBox::new(
+                        sel_area,
+                        Style::default().fg(theme.selection_border_visible()),
+                    )
+                    .with_top_clipped(top_clipped)
+                    .with_bottom_clipped(bottom_clipped);
 
                     content_output.output.selection_box = Some(sel_box);
                     content_output.output.selected_entry_area = selected_entry_rect;
@@ -1126,9 +1133,12 @@ impl ScrollbackPane {
             // Bottom is not clipped since there's a gap row (pinned_height includes gap)
             let bottom_clipped = false;
 
-            let sel_box = SelectionBox::new(sel_area, Style::default().fg(theme.selection_border_visible()))
-                .with_top_clipped(top_clipped)
-                .with_bottom_clipped(bottom_clipped);
+            let sel_box = SelectionBox::new(
+                sel_area,
+                Style::default().fg(theme.selection_border_visible()),
+            )
+            .with_top_clipped(top_clipped)
+            .with_bottom_clipped(bottom_clipped);
 
             content_output.output.selection_box = Some(sel_box);
             return content_output;

@@ -1,8 +1,8 @@
 # Zed theme ports
 
-Four Zed themes ported faithfully: `kanso-mist` (Kanso Mist, Borderless + No italics), `kanagawa-wave`, `kanagawa`, `jetbrains-islands-dark`. Select with `/theme kanso-mist` or `[ui] theme = "kanso-mist"`. All need truecolor.
+Twelve Zed themes ported faithfully: `kanso-mist` (Kanso Mist, Borderless + No italics), `kanagawa-wave`, `kanagawa`, `jetbrains-islands-dark`, `night-owl` (No Italics), `one-dark-pro`, `nstlgy-dark`, `severance-dark`, `quasi-monochrome-dark`, and light `jetbrains-islands-light`, `monosami-light`, `monosami-ink-light`. Select with `/theme kanso-mist` or `[ui] theme = "kanso-mist"`. All need truecolor.
 
-Generated, not hand-written: `scripts/themes/zed_port.py <zed-themes-dir> <repo-root>` writes `crates/codegen/xai-grok-pager-render/src/theme/zed_ports.rs` and `assets/<slug>.tmTheme`. Source JSON is not vendored; copy it read-only from `~/Library/Application Support/Zed/extensions/installed/{kanso,kanagawa-themes,jetbrains-themes}/themes/`. Translucent Zed colors are composited over `editor.background`; alpha-0 colors are skipped in fallback chains.
+Generated, not hand-written: `scripts/themes/zed_port.py <zed-themes-dir> <repo-root>` writes `crates/codegen/xai-grok-pager-render/src/theme/zed_ports.rs` and `assets/<slug>.tmTheme`. Source JSON is not vendored; copy it read-only from `~/Library/Application Support/Zed/extensions/installed/{kanso,kanagawa-themes,jetbrains-themes,night-owlz,one-dark-pro,nstlgy-dark,severance-theme,quasi-monochrome,monosami}/themes/`. Sparse themes missing a UI or syntax key fall back through `UI_FALLBACKS` / `SYNTAX_FALLBACKS` in the script. Translucent Zed colors are composited over `editor.background`; alpha-0 colors are skipped in fallback chains.
 
 ## UI mapping (Grok field ← Zed key, first visible wins)
 

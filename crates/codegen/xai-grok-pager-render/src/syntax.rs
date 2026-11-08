@@ -26,6 +26,14 @@ static SYNTECT_KANSO_MIST: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_KANAGAWA_WAVE: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_KANAGAWA: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_JETBRAINS_ISLANDS_DARK: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_NIGHT_OWL: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_ONE_DARK_PRO: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_NSTLGY_DARK: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_SEVERANCE_DARK: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_QUASI_MONOCHROME_DARK: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_JETBRAINS_ISLANDS_LIGHT: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_MONOSAMI_LIGHT: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_MONOSAMI_INK_LIGHT: OnceLock<Syntect> = OnceLock::new();
 
 /// Convert syntect style to ratatui foreground-only style, quantized for terminal color support (or polarity-safe under the terminal-native lock).
 pub fn syntect_to_ratatui_fg(style: syntect::highlighting::Style) -> Style {
@@ -143,6 +151,22 @@ pub fn get_syntect() -> &'static Syntect {
         ThemeKind::JetBrainsIslandsDark => SYNTECT_JETBRAINS_ISLANDS_DARK.get_or_init(|| {
             Syntect::new(include_bytes!("../assets/jetbrains-islands-dark.tmTheme"))
         }),
+        ThemeKind::NightOwl => SYNTECT_NIGHT_OWL
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/night-owl.tmTheme"))),
+        ThemeKind::OneDarkPro => SYNTECT_ONE_DARK_PRO
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/one-dark-pro.tmTheme"))),
+        ThemeKind::NstlgyDark => SYNTECT_NSTLGY_DARK
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/nstlgy-dark.tmTheme"))),
+        ThemeKind::SeveranceDark => SYNTECT_SEVERANCE_DARK
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/severance-dark.tmTheme"))),
+        ThemeKind::QuasiMonochromeDark => SYNTECT_QUASI_MONOCHROME_DARK
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/quasi-monochrome-dark.tmTheme"))),
+        ThemeKind::JetBrainsIslandsLight => SYNTECT_JETBRAINS_ISLANDS_LIGHT
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/jetbrains-islands-light.tmTheme"))),
+        ThemeKind::MonosamiLight => SYNTECT_MONOSAMI_LIGHT
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/monosami-light.tmTheme"))),
+        ThemeKind::MonosamiInkLight => SYNTECT_MONOSAMI_INK_LIGHT
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/monosami-ink-light.tmTheme"))),
     }
 }
 

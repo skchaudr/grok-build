@@ -277,7 +277,10 @@ impl Theme {
         let bold_underline = Modifier::BOLD | Modifier::UNDERLINED;
         match (self.warning, self.bg_base) {
             (Color::Reset, _) => Style::new().add_modifier(Modifier::REVERSED | bold_underline),
-            (fill, Color::Reset) => Style::new().bg(fill).fg(Color::Black).add_modifier(bold_underline),
+            (fill, Color::Reset) => Style::new()
+                .bg(fill)
+                .fg(Color::Black)
+                .add_modifier(bold_underline),
             (fill, ink) => Style::new().bg(fill).fg(ink).add_modifier(bold_underline),
         }
     }
@@ -391,7 +394,11 @@ fn contrast(a: Color, b: Color) -> Option<f64> {
         let Color::Rgb(r, g, b) = c else { return None };
         let lin = |v: u8| {
             let v = f64::from(v) / 255.0;
-            if v <= 0.039_28 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            if v <= 0.039_28 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
         };
         Some(0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b))
     }
@@ -405,10 +412,21 @@ mod visibility_tests {
 
     #[test]
     fn selection_border_meets_contrast_in_every_rgb_theme() {
-        for theme in [Theme::tokyonight(), Theme::kanso_mist(), Theme::kanagawa(), Theme::jetbrains_islands_dark()] {
+        for theme in [
+            Theme::tokyonight(),
+            Theme::kanso_mist(),
+            Theme::kanagawa(),
+            Theme::jetbrains_islands_dark(),
+        ] {
             let border = theme.selection_border_visible();
-            assert!(contrast(border, theme.bg_base).is_none_or(|c| c >= 3.0), "{border:?}");
+            assert!(
+                contrast(border, theme.bg_base).is_none_or(|c| c >= 3.0),
+                "{border:?}"
+            );
         }
-        assert_eq!(contrast(Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255)).map(f64::round), Some(21.0));
+        assert_eq!(
+            contrast(Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255)).map(f64::round),
+            Some(21.0)
+        );
     }
 }

@@ -19,6 +19,15 @@ PORTS = [
     ("kanagawa", "kanagawa", "kanagawa-themes_themes_Kanagawa.json", "Kanagawa"),
     ("jetbrains-islands-dark", "jetbrains_islands_dark",
      "jetbrains-themes_themes_jetbrains-islands-dark.json", "JetBrains Islands Dark"),
+    ("night-owl", "night_owl", "night-owlz_themes_NightOwl.json", "Night Owl No Italics"),
+    ("one-dark-pro", "one_dark_pro", "one-dark.json", "One Dark Pro"),
+    ("nstlgy-dark", "nstlgy_dark", "nstlgy-dark.json", "Nstlgy Dark"),
+    ("severance-dark", "severance_dark", "severance.json", "Severance Dark"),
+    ("quasi-monochrome-dark", "quasi_monochrome_dark", "quasi-monochrome.json", "Quasi Monochrome Dark"),
+    ("jetbrains-islands-light", "jetbrains_islands_light",
+     "jetbrains-themes_themes_jetbrains-islands-light.json", "JetBrains Islands Light"),
+    ("monosami-light", "monosami_light", "monosami_themes_monosami.json", "Monosami Light"),
+    ("monosami-ink-light", "monosami_ink_light", "monosami_themes_monosami.json", "Monosami Ink Light"),
 ]
 
 # Zed syntax key -> TextMate scopes. Later rows win ties (syntect: more specific selector wins).
@@ -82,6 +91,8 @@ def load(path):
 
 def parse(hexstr):
     h = hexstr.lstrip("#")
+    if len(h) in (3, 4):  # CSS short form (#fff, #fff8)
+        h = "".join(c * 2 for c in h)
     r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
     a = int(h[6:8], 16) / 255 if len(h) == 8 else 1.0
     return r, g, b, a
@@ -98,6 +109,39 @@ def mix(fg, bg, t):
     return tuple(round(c * t + d * (1 - t)) for c, d in zip(fg, bg))
 
 
+UI_FALLBACKS = {
+    "text.muted": ("text.placeholder", "editor.line_number", "text"),
+    "text.placeholder": ("text.muted", "editor.line_number", "text"),
+    "text.accent": ("border.focused", "terminal.ansi.blue", "text"),
+    "info": ("text.accent", "terminal.ansi.blue"),
+    "error": ("terminal.ansi.red",),
+    "success": ("terminal.ansi.green",),
+    "warning": ("terminal.ansi.yellow",),
+    "created": ("terminal.ansi.green", "success"),
+    "deleted": ("terminal.ansi.red", "error"),
+    "modified": ("terminal.ansi.yellow", "warning"),
+    "border": ("border.variant", "text.placeholder"),
+    "border.variant": ("border", "text.placeholder"),
+    "border.focused": ("border", "text.accent"),
+    "border.selected": ("border.focused", "border"),
+    "editor.line_number": ("text.muted", "text.placeholder"),
+    "editor.foreground": ("text",),
+    "text": ("editor.foreground",),
+    "scrollbar.track.background": ("editor.background",),
+    "scrollbar.thumb.background": ("border", "text.placeholder"),
+}
+
+SYNTAX_FALLBACKS = {
+    "title": ("keyword", "function"),
+    "text.literal": ("string",),
+    "link_text": ("link_uri", "string"),
+    "link_uri": ("link_text", "string"),
+    "type": ("constructor", "keyword"),
+    "boolean": ("constant", "number"),
+    "constant": ("boolean", "number"),
+}
+
+
 class Port:
     def __init__(self, style):
         self.s = style
@@ -106,14 +150,15 @@ class Port:
 
     def ui(self, *keys):
         """First key with a visible (alpha > 0) value, composited over the editor bg."""
-        for k in keys:
+        # Sparse themes omit keys the richer ones define; UI_FALLBACKS supplies near-equivalents last
+        for k in keys + tuple(a for k in keys for a in UI_FALLBACKS.get(k, ())):
             v = self.s.get(k)
             if v and parse(v)[3] > 0:
                 return over(v, self.base)
         raise KeyError(keys)
 
     def syntax(self, *keys):
-        for k in keys:
+        for k in keys + tuple(a for k in keys for a in SYNTAX_FALLBACKS.get(k, ())):
             v = (self.syn.get(k) or {}).get("color")
             if v:
                 return over(v, self.base)

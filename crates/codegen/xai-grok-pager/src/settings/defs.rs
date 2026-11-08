@@ -80,6 +80,46 @@ const THEME_CHOICES: &[EnumChoice] = &[
         description: "Zed JetBrains Islands Dark; needs truecolor.",
     },
     EnumChoice {
+        canonical: "night-owl",
+        display: "Night Owl",
+        description: "Zed Night Owl (no italics); needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "one-dark-pro",
+        display: "One Dark Pro",
+        description: "Zed One Dark Pro; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "nstlgy-dark",
+        display: "Nstlgy Dark",
+        description: "Zed Nstlgy Dark; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "severance-dark",
+        display: "Severance Dark",
+        description: "Zed Severance Dark; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "quasi-monochrome-dark",
+        display: "Quasi Monochrome Dark",
+        description: "Zed Quasi Monochrome Dark; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "jetbrains-islands-light",
+        display: "JetBrains Islands Light",
+        description: "Zed JetBrains Islands Light; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "monosami-light",
+        display: "Monosami Light",
+        description: "Zed Monosami Light; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "monosami-ink-light",
+        display: "Monosami Ink Light",
+        description: "Zed Monosami Ink Light; needs truecolor.",
+    },
+    EnumChoice {
         canonical: "terminal",
         display: "Terminal",
         description: "Terminal's own background and text colors.",
@@ -485,6 +525,46 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
         canonical: "jetbrains-islands-dark",
         display: "JetBrains Islands Dark",
         description: "Zed JetBrains Islands Dark; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "night-owl",
+        display: "Night Owl",
+        description: "Zed Night Owl (no italics); needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "one-dark-pro",
+        display: "One Dark Pro",
+        description: "Zed One Dark Pro; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "nstlgy-dark",
+        display: "Nstlgy Dark",
+        description: "Zed Nstlgy Dark; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "severance-dark",
+        display: "Severance Dark",
+        description: "Zed Severance Dark; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "quasi-monochrome-dark",
+        display: "Quasi Monochrome Dark",
+        description: "Zed Quasi Monochrome Dark; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "jetbrains-islands-light",
+        display: "JetBrains Islands Light",
+        description: "Zed JetBrains Islands Light; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "monosami-light",
+        display: "Monosami Light",
+        description: "Zed Monosami Light; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "monosami-ink-light",
+        display: "Monosami Ink Light",
+        description: "Zed Monosami Ink Light; needs truecolor.",
     },
     EnumChoice {
         canonical: "terminal",
