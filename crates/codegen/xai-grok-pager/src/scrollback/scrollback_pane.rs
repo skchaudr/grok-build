@@ -38,6 +38,8 @@ pub struct ScrollbackPane {
     /// When set, every visible content row is post-painted to invert cells matching this regex (scrollback search).
     /// `None` disables highlighting.
     pub search_highlight: Option<regex::Regex>,
+    /// Ordinal of the current search match within the selected entry; painted in the current-match style.
+    pub search_current: Option<usize>,
     /// Absolute paths of media generated in this transcript.
     /// Used to resolve the short relative paths the model prints (`images/1.jpg`) into clickable `file://` links.
     /// Empty disables relative-path resolution.
@@ -84,6 +86,7 @@ impl ScrollbackPane {
             dim_from_entry: None,
             hovered_entry: None,
             search_highlight: None,
+            search_current: None,
             media_paths: Vec::new(),
         }
     }
@@ -112,6 +115,12 @@ impl ScrollbackPane {
     /// Set the regex whose matches are inverted on every visible content row.
     pub fn with_search_highlight(mut self, re: Option<regex::Regex>) -> Self {
         self.search_highlight = re;
+        self
+    }
+
+    /// Set which match inside the selected entry is the current one.
+    pub fn with_search_current(mut self, nth: Option<usize>) -> Self {
+        self.search_current = nth;
         self
     }
 
@@ -391,8 +400,8 @@ impl ScrollbackPane {
 
                     // Selection border fades with content.
                     // If needed, use opacity.max(0.5) to enforce a minimum visibility floor.
-                    let border_color = blend_color(theme.bg_base, theme.selection_border, opacity)
-                        .unwrap_or(theme.selection_border);
+                    let border_color = blend_color(theme.bg_base, theme.selection_border_visible(), opacity)
+                        .unwrap_or(theme.selection_border_visible());
 
                     // Top is clipped only when content is actually being clipped off (clip_top > 0)
                     // When clip_top == 0, the full header is visible (just fading), so show full border
@@ -457,7 +466,7 @@ impl ScrollbackPane {
             let top_clipped = screen_row == 0 && area.y == 0;
 
             let sel_box =
-                SelectionBox::new(selection_area, Style::default().fg(theme.selection_border))
+                SelectionBox::new(selection_area, Style::default().fg(theme.selection_border_visible()))
                     .with_top_clipped(top_clipped)
                     .with_bottom_clipped(false);
 
@@ -931,6 +940,7 @@ impl ScrollbackPane {
             self.mouse_pos,
             relative_dim_from,
             self.search_highlight.as_ref(),
+            self.search_current,
             content_y0,
             entry_index_base,
             &self.media_paths,
@@ -1048,7 +1058,7 @@ impl ScrollbackPane {
                     selected.bottom_clipped || bottom > content_area.y + content_area.height;
 
                 let sel_box =
-                    SelectionBox::new(selected.area, Style::default().fg(theme.selection_border))
+                    SelectionBox::new(selected.area, Style::default().fg(theme.selection_border_visible()))
                         .with_top_clipped(top_clipped)
                         .with_bottom_clipped(bottom_clipped);
 
@@ -1097,7 +1107,7 @@ impl ScrollbackPane {
                     let bottom_clipped = group_end_vy > viewport_end;
 
                     let sel_box =
-                        SelectionBox::new(sel_area, Style::default().fg(theme.selection_border))
+                        SelectionBox::new(sel_area, Style::default().fg(theme.selection_border_visible()))
                             .with_top_clipped(top_clipped)
                             .with_bottom_clipped(bottom_clipped);
 
@@ -1116,7 +1126,7 @@ impl ScrollbackPane {
             // Bottom is not clipped since there's a gap row (pinned_height includes gap)
             let bottom_clipped = false;
 
-            let sel_box = SelectionBox::new(sel_area, Style::default().fg(theme.selection_border))
+            let sel_box = SelectionBox::new(sel_area, Style::default().fg(theme.selection_border_visible()))
                 .with_top_clipped(top_clipped)
                 .with_bottom_clipped(bottom_clipped);
 

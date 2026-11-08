@@ -164,6 +164,7 @@ fn render_with_selection_boundaries(
         None,
         None,
         None,
+        None,
         0,
         0,
         &[],

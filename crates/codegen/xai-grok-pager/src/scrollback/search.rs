@@ -426,6 +426,13 @@ impl ScrollbackSearchState {
         self.current.and_then(|i| self.matches.get(i))
     }
 
+    /// Ordinal of the current match among the matches in its own entry.
+    pub fn current_nth_in_entry(&self) -> Option<usize> {
+        let i = self.current?;
+        let id = self.matches.get(i)?.entry_id;
+        Some(self.matches[..i].iter().rev().take_while(|m| m.entry_id == id).count())
+    }
+
     /// Cursor position within the match list (0-based), if there are matches.
     pub fn current_index(&self) -> Option<usize> {
         self.current

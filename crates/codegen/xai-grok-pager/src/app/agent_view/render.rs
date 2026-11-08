@@ -1533,6 +1533,11 @@ impl AgentView {
             } else {
                 None
             };
+            let search_current = self
+                .scrollback_search
+                .as_ref()
+                .filter(|_| search_active)
+                .and_then(|s| s.current_nth_in_entry());
             self.ensure_media_link_paths();
             let sb_rendered = crate::scrollback::ScrollbackPane::new()
                 .active(sb_focused)
@@ -1540,6 +1545,7 @@ impl AgentView {
                 .with_dim_from(rewind_dim_from)
                 .with_hovered_entry(self.hovered_entry)
                 .with_search_highlight(search_highlight)
+                .with_search_current(search_current)
                 .with_media_paths(self.media_link_paths.clone())
                 .render_with_scratch_and_selection_boundaries(
                     layout.scrollback_content,

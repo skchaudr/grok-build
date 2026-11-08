@@ -259,6 +259,29 @@ impl Theme {
             .add_modifier(ratatui::style::Modifier::UNDERLINED)
     }
 
+    /// Border for the selected transcript block. Many palettes ship a near-background `selection_border`
+    /// (about 1.5:1), which hides the current block while navigating; below 3:1 the accent is used instead.
+    pub fn selection_border_visible(&self) -> Color {
+        const MIN: f64 = 3.0;
+        if contrast(self.selection_border, self.bg_base).is_none_or(|c| c >= MIN) {
+            return self.selection_border;
+        }
+        [self.accent_assistant, self.text_secondary]
+            .into_iter()
+            .find(|&c| contrast(c, self.bg_base).is_some_and(|r| r >= MIN))
+            .unwrap_or(self.text_primary)
+    }
+
+    /// Style for the current search match; the other matches stay inverted, so this one needs a solid fill.
+    pub fn search_current_style(&self) -> Style {
+        let bold_underline = Modifier::BOLD | Modifier::UNDERLINED;
+        match (self.warning, self.bg_base) {
+            (Color::Reset, _) => Style::new().add_modifier(Modifier::REVERSED | bold_underline),
+            (fill, Color::Reset) => Style::new().bg(fill).fg(Color::Black).add_modifier(bold_underline),
+            (fill, ink) => Style::new().bg(fill).fg(ink).add_modifier(bold_underline),
+        }
+    }
+
     /// Get a style with dim text (gray_dim, dimmest).
     ///
     /// Same Reset-to-DIM rule as [`Self::muted`]: bandless palettes retarget `gray_dim` to bright black for decoration, so content stays on the polarity-safe DIM path and only direct `fg(gray_dim)` sites pick up the bright black.
@@ -360,4 +383,32 @@ pub fn pulse_brightness(tick: u64, speed: f32) -> f32 {
     let t = tick as f32 * speed;
     let sin_val = t.sin();
     sin_val * sin_val
+}
+
+/// WCAG contrast ratio between two truecolor values; `None` for named/indexed colors the terminal resolves.
+fn contrast(a: Color, b: Color) -> Option<f64> {
+    fn luminance(c: Color) -> Option<f64> {
+        let Color::Rgb(r, g, b) = c else { return None };
+        let lin = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.039_28 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        Some(0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b))
+    }
+    let (la, lb) = (luminance(a)?, luminance(b)?);
+    Some((la.max(lb) + 0.05) / (la.min(lb) + 0.05))
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::*;
+
+    #[test]
+    fn selection_border_meets_contrast_in_every_rgb_theme() {
+        for theme in [Theme::tokyonight(), Theme::kanso_mist(), Theme::kanagawa(), Theme::jetbrains_islands_dark()] {
+            let border = theme.selection_border_visible();
+            assert!(contrast(border, theme.bg_base).is_none_or(|c| c >= 3.0), "{border:?}");
+        }
+        assert_eq!(contrast(Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255)).map(f64::round), Some(21.0));
+    }
 }

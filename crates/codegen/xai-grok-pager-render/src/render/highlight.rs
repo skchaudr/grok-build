@@ -87,6 +87,47 @@ pub fn paint_match_highlights(
     }
 }
 
+/// Repaint the `nth` match on this single row (0-based, counted left to right) with `style` so the current
+/// match stands out from the inverted rest. Returns how many matches the row holds so callers can carry the
+/// count across rows.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_nth_match(
+    buf: &mut Buffer,
+    area: Rect,
+    row_y: u16,
+    text: &str,
+    re: &regex::Regex,
+    nth: usize,
+    style: ratatui::style::Style,
+    map_visual: bool,
+) -> usize {
+    let mut count = 0;
+    for m in re.find_iter(text) {
+        if count == nth {
+            let log_start = byte_offset_to_display_col(text, m.start());
+            let log_end = byte_offset_to_display_col(text, m.end());
+            let ranges = if map_visual && is_enabled() && needs_bidi(text) {
+                logical_cols_to_visual(text, log_start, log_end)
+            } else {
+                vec![(log_start, log_end)]
+            };
+            for (col_start, col_end) in ranges {
+                for col in col_start..col_end {
+                    let x = area.x + col as u16;
+                    if x < area.x + area.width
+                        && let Some(cell) = buf.cell_mut((x, row_y))
+                    {
+                        cell.modifier.remove(ratatui::style::Modifier::REVERSED);
+                        cell.set_style(style);
+                    }
+                }
+            }
+        }
+        count += 1;
+    }
+    count
+}
+
 /// Apply the terminal's REVERSED attribute so the fg/bg swap is native and respects the user's theme.
 fn invert_cell(cell: &mut ratatui::buffer::Cell) {
     cell.modifier.insert(ratatui::style::Modifier::REVERSED);

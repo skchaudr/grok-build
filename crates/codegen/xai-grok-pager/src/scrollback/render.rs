@@ -212,6 +212,7 @@ pub fn render_scrolled_entries_with_scratch(
         mouse_pos,
         dim_from_entry,
         search_highlight,
+        None,
         content_y0,
         entry_index_base,
         media_paths,
@@ -235,6 +236,8 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
     mouse_pos: Option<(u16, u16)>,
     dim_from_entry: Option<usize>,
     search_highlight: Option<&regex::Regex>,
+    // Ordinal of the current search match inside the selected entry (search reveal selects that entry)
+    search_current: Option<usize>,
     content_y0: usize,
     entry_index_base: usize,
     media_paths: &[std::path::PathBuf],
@@ -490,6 +493,22 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                 joiner_to_previous: None,
             });
         }
+        // Matches above the viewport still count toward the current match's ordinal
+        let mut current_nth = search_highlight
+            .zip(search_current)
+            .filter(|_| is_selected)
+            .and_then(|(re, nth)| {
+                let above: usize = mapped_lines
+                    .iter()
+                    .take(content_skip)
+                    .map(|line| {
+                        highlight_text.clear();
+                        line_plain_text_into(&line.content, &mut highlight_text);
+                        re.find_iter(&highlight_text).count()
+                    })
+                    .sum();
+                nth.checked_sub(above)
+            });
         for (block_line_idx, line) in mapped_lines.iter().enumerate().skip(content_skip) {
             if screen_y >= max_y {
                 break;
@@ -513,6 +532,19 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                     // Scrollback content paints bidi-reordered; remap matches.
                     true,
                 );
+                if let Some(nth) = current_nth {
+                    let on_row = crate::render::highlight::paint_nth_match(
+                        buf,
+                        entry_row_layout.content,
+                        screen_y,
+                        &highlight_text,
+                        re,
+                        nth,
+                        theme.search_current_style(),
+                        true,
+                    );
+                    current_nth = nth.checked_sub(on_row);
+                }
             }
             if let (Some(range_id), Some(cols)) = (
                 line.selection_range,
