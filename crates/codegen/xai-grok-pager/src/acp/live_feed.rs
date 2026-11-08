@@ -22,7 +22,8 @@ const WAKE_WAIT: Duration = Duration::from_secs(1);
 pub(crate) struct Update {
     pub events: Vec<Fed>,
     pub life: String,
-    pub running: Option<String>,
+    /// Call id and tool name.
+    pub running: Option<(String, String)>,
     pub phoenix_offline: bool,
 }
 
@@ -33,6 +34,11 @@ pub(crate) struct Tail {
 }
 
 impl Tail {
+    #[cfg(test)]
+    pub(crate) fn from_rx(rx: mpsc::Receiver<Update>) -> Self {
+        Tail { rx, stop: Arc::new(AtomicBool::new(false)), _join: None }
+    }
+
     /// Last status, with every pending batch's events concatenated.
     pub(crate) fn try_recv(&self) -> Option<Update> {
         let mut last = None;
@@ -59,14 +65,15 @@ pub(crate) struct TraceLive {
     pub tail: Tail,
     pub session_id: String,
     pub life: String,
-    pub running: Option<(String, Instant)>,
+    /// Call id, tool name, and when that call was first seen running.
+    pub running: Option<(String, String, Instant)>,
     pub phoenix_offline: bool,
 }
 
 impl TraceLive {
     pub(crate) fn line(&self) -> String {
         let mut s = self.life.clone();
-        if let Some((name, at)) = &self.running {
+        if let Some((_, name, at)) = &self.running {
             s.push_str(&format!(" · Running {name} … {:.1}s", at.elapsed().as_secs_f64()));
         }
         if self.phoenix_offline {
@@ -110,10 +117,17 @@ fn run(mut job: Job, tx: mpsc::Sender<Update>, stop: Arc<AtomicBool>) {
             }
         }
         primed = true;
-        let (transcript, receipts, pid_alive, file_name) = if job.remote {
-            remote_snapshot(&job)
-        } else {
-            local_snapshot(&job)
+        let snap = if job.remote { remote_snapshot(&job) } else { Ok(local_snapshot(&job)) };
+        let (transcript, receipts, pid_alive, file_name) = match snap {
+            Ok(s) => s,
+            Err(e) => {
+                // Not empty data: an empty snapshot would read as "alive" with nothing new.
+                let update = Update { events: Vec::new(), life: format!("remote fetch failed: {e}"), running: job.merger.running(), phoenix_offline: false };
+                if tx.send(update).is_err() {
+                    break;
+                }
+                continue;
+            }
         };
         let spans = fetch_spans(&job.source, &file_name, job.native_id.as_deref());
         let offline = spans.is_err();
@@ -143,18 +157,12 @@ fn local_snapshot(job: &Job) -> (String, Vec<live::LiveReceipt>, Option<bool>, S
     (transcript, receipts, alive, file_name)
 }
 
-fn remote_snapshot(job: &Job) -> (String, Vec<live::LiveReceipt>, Option<bool>, String) {
-    let Some(label) = job.host.as_deref() else {
-        return (String::new(), Vec::new(), None, String::new());
-    };
-    let Some(target) = remote::hosts().into_iter().find(|t| remote::label(t) == label) else {
-        return (String::new(), Vec::new(), None, String::new());
-    };
-    // Exit 2 means the other machine's grok-traces is older than live-json. Spans still merge locally.
-    match remote::fetch_live_dump(&target, &job.session_id) {
-        Ok(d) => (d.transcript, d.receipts, d.pid_alive, d.file_name),
-        Err(_) => (String::new(), Vec::new(), None, String::new()),
-    }
+fn remote_snapshot(job: &Job) -> Result<(String, Vec<live::LiveReceipt>, Option<bool>, String), String> {
+    let label = job.host.as_deref().ok_or("no host on the row")?;
+    let target = remote::hosts().into_iter().find(|t| remote::label(t) == label).ok_or_else(|| format!("{label} is not in the hosts file"))?;
+    // Exit 2 means the other machine's grok-traces is older than live-json.
+    let d = remote::fetch_live_dump(&target, &job.session_id).map_err(|e| e.to_string())?;
+    Ok((d.transcript, d.receipts, d.pid_alive, d.file_name))
 }
 
 fn fetch_spans(source: &str, file_name: &str, native_id: Option<&str>) -> Result<Vec<phoenix::PhoenixSpan>, ()> {
@@ -381,6 +389,24 @@ mod tests {
         }]);
         assert_eq!(sb.len(), 1);
         assert!(sb.iter_entries().all(|(_, e)| !e.is_running));
+    }
+
+    #[test]
+    fn live_remote_fetch_failure_is_an_error_not_empty_data() {
+        let job = |host: Option<&str>| Job {
+            source: "claude".into(),
+            session_id: "s".into(),
+            file_path: PathBuf::new(),
+            native_id: None,
+            host: host.map(str::to_string),
+            harness_pid: None,
+            harness_start: None,
+            merger: Merger::default(),
+            remote: true,
+        };
+        assert!(remote_snapshot(&job(None)).is_err());
+        let err = remote_snapshot(&job(Some("no-such-host-for-this-test"))).unwrap_err();
+        assert!(err.contains("not in the hosts file"), "{err}");
     }
 
     fn done_input() -> Option<String> {

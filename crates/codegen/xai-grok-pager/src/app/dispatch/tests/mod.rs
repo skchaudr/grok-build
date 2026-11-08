@@ -4,6 +4,7 @@ mod billing;
 mod cta_e2e;
 mod dashboard;
 mod jump;
+mod live_traces;
 mod mid_text_btw;
 mod mid_text_goal;
 mod modes;

@@ -251,7 +251,7 @@ fn open_live_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone:
     let session_id = row.id.clone();
     let remote = row.host.is_some();
     let (pieces, merger, life) = if remote {
-        (Vec::new(), xai_grok_traces::merge::Merger::default(), "alive".to_string())
+        (Vec::new(), xai_grok_traces::merge::Merger::default(), "unknown".to_string())
     } else {
         let transcript = std::fs::read_to_string(&row.file_path).unwrap_or_default();
         let (receipts, pid_alive) = match xai_grok_traces::TraceIndex::open(&xai_grok_traces::default_db_path()) {
@@ -269,7 +269,7 @@ fn open_live_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone:
         let (pieces, merger, _) = xai_grok_traces::merge::load(&row.source, &transcript, &receipts, Ok(&[]));
         (pieces, merger, life)
     };
-    let running = merger.running().map(|n| (n, std::time::Instant::now()));
+    let running = merger.running().map(|(id, n)| (id, n, std::time::Instant::now()));
     let events = live_feed::to_feds(&session_id, &pieces);
     agent.begin_replay_window();
     agent.scrollback.begin_batch();
@@ -315,10 +315,10 @@ pub(crate) fn drain_live(app: &mut AppView) -> bool {
         live.phoenix_offline = update.phoenix_offline;
         changed = true;
     }
-    match (&live.running, update.running.as_deref()) {
-        (Some((have, _)), Some(next)) if have == next => {}
-        (_, Some(next)) => {
-            live.running = Some((next.to_string(), std::time::Instant::now()));
+    match (&live.running, update.running) {
+        (Some((have, _, _)), Some((next, _))) if *have == next => {}
+        (_, Some((next, name))) => {
+            live.running = Some((next, name, std::time::Instant::now()));
             changed = true;
         }
         (Some(_), None) => {
@@ -333,7 +333,10 @@ pub(crate) fn drain_live(app: &mut AppView) -> bool {
         return changed || clock;
     }
     agent.scrollback.begin_batch();
-    for fed in events {
+    for mut fed in events {
+        // As live updates: a replay after the load window is dropped, and each batch restarts its event ids at 0.
+        fed.meta.remove("isReplay");
+        fed.meta.remove("eventId");
         super::super::acp_handler::handle(message(&session_id, fed), app);
     }
     if let Some(agent) = super::ctx::get_active_agent_mut(app) {
