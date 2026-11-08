@@ -19,13 +19,22 @@ pub const COMMON_EXTERNAL_AGENT_COMMANDS: &[&str] = &[
 pub const EXTERNAL_COMMON_STUB_COMMANDS: &[&str] = &["usage", "context", "compact", "login"];
 
 /// Short agent name from an `--agent-cmd` line, for notices when the session reports no agent name.
-/// Skips a leading `env` and its `VAR=value` pairs, takes the program's basename, and drops an `-acp` / `-code-acp` suffix.
+/// Skips a leading `env`, its `VAR=value` pairs and `-u NAME` unsets, takes the program's basename, and drops an `-acp` / `-code-acp` suffix.
 pub fn agent_label_from_cmd(cmd: &str) -> Option<String> {
     let mut words = cmd.split_whitespace().peekable();
     if words.peek() == Some(&"env") {
         words.next();
     }
-    let program = words.find(|w| !w.contains('=') && !w.starts_with('-'))?;
+    let mut program = None;
+    while let Some(w) = words.next() {
+        if matches!(w, "-u" | "--unset") {
+            words.next(); // `env -u NAME` takes an argument
+        } else if !w.contains('=') && !w.starts_with('-') {
+            program = Some(w);
+            break;
+        }
+    }
+    let program = program?;
     let base = program.rsplit('/').next().unwrap_or(program);
     let label = base
         .strip_suffix("-code-acp")
@@ -110,6 +119,14 @@ mod tests {
     fn agent_label_from_cmd_names_the_program() {
         assert_eq!(
             agent_label_from_cmd("env CLAUDE_CODE_EXECUTABLE=/usr/bin/claude /home/u/.local/bin/claude-acp"),
+            Some("claude".to_string())
+        );
+        assert_eq!(
+            agent_label_from_cmd("env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=/Users/sab-mini/.local/bin/claude /Users/sab-mini/.local/bin/claude-agent-acp"),
+            Some("claude-agent".to_string())
+        );
+        assert_eq!(
+            agent_label_from_cmd("env -u FOO -u BAR claude-acp"),
             Some("claude".to_string())
         );
         assert_eq!(agent_label_from_cmd("pi-acp"), Some("pi".to_string()));

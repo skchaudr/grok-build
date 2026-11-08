@@ -251,9 +251,14 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         !meta.is_replay && !agent.session.loading_replay
                     } else if let acp::SessionUpdate::UsageUpdate(ref usage) = notif.request.update
                     {
-                        agent.apply_context_used(usage.used, usage.size);
+                        // Claude's adapter reports used=0 after /compact when the SDK omits post_tokens; keep the last number.
+                        let stale_zero = usage.used == 0
+                            && agent.context_state.as_ref().is_some_and(|c| c.used > 0);
+                        if !stale_zero {
+                            agent.apply_context_used(usage.used, usage.size);
+                        }
                         advance_reconnect_cursor(agent, &mut meta);
-                        is_active
+                        is_active && !stale_zero
                     } else if let acp::SessionUpdate::ConfigOptionUpdate(ref update) =
                         notif.request.update
                         // Native explicit-model sessions use the generic handler below.

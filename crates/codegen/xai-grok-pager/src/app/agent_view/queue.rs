@@ -347,10 +347,13 @@ impl AgentView {
             && completed
             && !saw_agent_text
         {
+            let text = if name == "compact" {
+                "Conversation compacted".to_string()
+            } else {
+                format!("/{name} returned no output from {label} (not supported through ACP)")
+            };
             self.scrollback
-                .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                    "/{name} returned no output from {label} (not supported through ACP)"
-                )));
+                .push_block(crate::scrollback::block::RenderBlock::system(text));
         }
     }
 
