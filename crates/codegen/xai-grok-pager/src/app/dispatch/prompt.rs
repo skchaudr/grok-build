@@ -1019,7 +1019,15 @@ pub(super) fn dispatch_send_prompt_submission(
                     let reg = agent.prompt.slash_controller.registry();
                     let is_builtin = reg.is_builtin(invocation.token);
                     // Bypasses only the menu-only hide (hard gates still return `None`); see `CommandRegistry::get_for_dispatch`
-                    let command = reg.get_for_dispatch(invocation.token).cloned();
+                    let command = reg
+                        .get_for_dispatch(invocation.token)
+                        .filter(|_| {
+                            !(external_claude
+                                && crate::slash::external_common::claude_forwards_builtin(
+                                    invocation.token,
+                                ))
+                        })
+                        .cloned();
                     (is_builtin, command)
                 };
                 {

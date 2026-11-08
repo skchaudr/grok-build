@@ -3583,6 +3583,37 @@ fn external_agent_forwards_advertised_usage_as_a_prompt() {
     );
 }
 
+/// `/effort high` runs the pager command in a native session but is sent as text in a Claude session.
+#[test]
+fn claude_session_forwards_pager_effort_as_text_native_does_not() {
+    let mut native = test_app_with_agent();
+    let effects = dispatch(Action::SendPrompt("/effort high".into()), &mut native);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::SendPrompt { .. })),
+        "native /effort must stay a pager command: {effects:?}"
+    );
+
+    let mut claude = test_app_with_agent();
+    claude.external_agent = true;
+    claude.external_agent_label = Some("claude-agent".into());
+    {
+        let agent = claude.agents.get_mut(&AgentId(0)).unwrap();
+        let registry = agent.prompt.slash_controller.registry_mut();
+        registry.set_external_agent_with_label(true, Some("claude-agent".into()));
+        let models = agent.session.models.clone();
+        agent.prompt.sync_acp_commands(&[], None, &models);
+    }
+    for text in ["/effort high", "/hooks", "/plugin"] {
+        let effects = dispatch(Action::SendPrompt(text.into()), &mut claude);
+        assert!(
+            matches!(effects.first(), Some(Effect::SendPrompt { text: t, .. }) if t == text),
+            "{text} must be forwarded verbatim: {effects:?}"
+        );
+    }
+    let registry = agent_ref(&claude, AgentId(0)).prompt.slash_controller.registry();
+    assert!(crate::slash::is_command_complete("/effort", registry), "bare /effort submits");
+}
+
 /// External agent advertising `/usage`, with a forwarded `/usage` turn running.
 fn external_usage_turn(app: &mut AppView, id: AgentId) {
     app.external_agent = true;

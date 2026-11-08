@@ -16,12 +16,6 @@ fn is_indexed_user_prompt(block: &RenderBlock) -> bool {
     matches!(block, RenderBlock::UserPrompt(b) if !b.is_interjection)
 }
 
-/// External Claude sessions have no `x.ai/rewind/*` methods; rewind is a local picker plus `session/fork`.
-fn is_claude_session(app: &AppView) -> bool {
-    app.external_agent
-        && crate::slash::external_common::is_claude_label(app.external_agent_label.as_deref())
-}
-
 /// Rewind points for a Claude session, one per user prompt in scrollback (the adapter cannot restore files).
 fn local_rewind_points(scrollback: &ScrollbackState) -> Vec<crate::views::rewind::RewindPointInfo> {
     (0..scrollback.len())
@@ -109,7 +103,7 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
-    let claude = is_claude_session(app);
+    let claude = app.is_claude_session();
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -162,7 +156,7 @@ pub(super) fn dispatch_rewind_show_picker(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
-    let claude = is_claude_session(app);
+    let claude = app.is_claude_session();
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -208,7 +202,7 @@ pub(super) fn dispatch_rewind_picker_select(app: &mut AppView, prompt_index: usi
         return vec![];
     };
     let confirm = app.current_ui.confirm_before_rewind_enabled();
-    let claude = is_claude_session(app);
+    let claude = app.is_claude_session();
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -275,7 +269,7 @@ pub(super) fn dispatch_rewind_confirm(app: &mut AppView, target: usize) -> Vec<E
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
-    let claude = is_claude_session(app);
+    let claude = app.is_claude_session();
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -482,7 +476,7 @@ pub(super) fn handle_rewind_points_loaded(
     points: Vec<crate::views::rewind::RewindPointInfo>,
 ) -> Vec<Effect> {
     let confirm = app.current_ui.confirm_before_rewind_enabled();
-    let claude = is_claude_session(app);
+    let claude = app.is_claude_session();
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };

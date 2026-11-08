@@ -1722,6 +1722,11 @@ impl AppView {
     pub fn is_voice_tier_restricted(&self) -> bool {
         self.tier_restricted_commands.iter().any(|c| c == "voice")
     }
+    /// The pager is hosting a Claude ACP adapter (see [`crate::slash::claude_menu`]).
+    pub fn is_claude_session(&self) -> bool {
+        self.external_agent
+            && crate::slash::external_common::is_claude_label(self.external_agent_label.as_deref())
+    }
     /// Draw-time expiry can flip the live-announcement predicate between pushes.
     /// Resync the slash gate only when it diverges from the stored flags (checked per frame, fan-out runs only on change).
     pub fn resync_announcement_slash_gate_on_divergence(&mut self) {

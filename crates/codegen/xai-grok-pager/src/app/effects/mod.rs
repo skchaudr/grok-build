@@ -5016,8 +5016,38 @@ pub(crate) fn execute(
             new_session_id,
         } => {
             let tx = acp_tx.clone();
+            let claude = session_flags.external_agent
+                && crate::slash::external_common::is_claude_label(
+                    session_flags.external_agent_label.as_deref(),
+                );
             tasks
                 .spawn(async move {
+                    // Claude has no `x.ai/session/fork` (Method not found); standard `session/fork` with no fork point copies the whole session.
+                    if claude {
+                        // `session/fork` mints its own id; a requested one can't be honored.
+                        if new_session_id.is_some() {
+                            return TaskResult::ForkSessionFailed {
+                                agent_id,
+                                error: "Claude can't fork into a chosen session id".into(),
+                            };
+                        }
+                        let req = acp::ForkSessionRequest::new(
+                            parent_session_id.clone(),
+                            parent_cwd.clone(),
+                        );
+                        return match acp_send(req, &tx).await {
+                            Ok(resp) => TaskResult::ForkSessionReady {
+                                agent_id,
+                                new_session_id: resp.session_id,
+                                cwd: parent_cwd,
+                                parent_session_id,
+                            },
+                            Err(e) => TaskResult::ForkSessionFailed {
+                                agent_id,
+                                error: sanitize_user_error(&format!("fork failed: {e}")),
+                            },
+                        };
+                    }
                     let sid_str = parent_session_id.0.to_string();
                     let parent_cwd_str = parent_cwd.to_string_lossy().into_owned();
                     if let Some(ref nid) = new_session_id

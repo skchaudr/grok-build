@@ -151,6 +151,8 @@ pub struct CommandRegistry {
     saved_workflows: Vec<WorkflowChoice>,
     /// Names the last sync dropped: a sorted `reserved` run, then a sorted `duplicate` run.
     skipped_acp_names: Vec<String>,
+    /// Last catalog given to `apply_acp_commands`, so a Claude flip of the label can re-run name reservation.
+    acp_catalog: Vec<agent_client_protocol::AvailableCommand>,
     /// This pager is driving an external ACP agent (`--agent-cmd`). Yielded builtins stay hidden
     /// so an advertised command of the same name is sent to that agent as a prompt.
     external_agent: bool,
@@ -189,6 +191,7 @@ impl CommandRegistry {
             available_tools: None,
             saved_workflows: Vec::new(),
             skipped_acp_names: Vec::new(),
+            acp_catalog: Vec::new(),
             external_agent: false,
             external_agent_label: "agent".to_string(),
         };
@@ -441,9 +444,17 @@ impl CommandRegistry {
             .then_some(self.external_agent_label.as_str())
     }
 
+    /// This registry serves a Claude ACP host; see [`super::claude_menu`].
+    pub fn is_claude_session(&self) -> bool {
+        self.external_agent
+            && super::external_common::is_claude_label(Some(self.external_agent_label.as_str()))
+    }
+
     /// Human-readable agent name for unsupported-command notices.
     pub fn set_external_agent_label(&mut self, label: impl Into<String>) {
+        let was_claude = self.is_claude_session();
         self.external_agent_label = label.into();
+        self.reapply_acp_if_claude_flipped(was_claude);
         if self.external_agent {
             self.sync_external_common_stubs();
             self.rebuild_triggers();
@@ -463,6 +474,7 @@ impl CommandRegistry {
         enabled: bool,
         label: Option<String>,
     ) -> bool {
+        let was_claude = self.is_claude_session();
         if let Some(label) = label {
             self.external_agent_label = label;
         }
@@ -483,9 +495,18 @@ impl CommandRegistry {
             }
             self.remove_external_common_stubs();
         }
+        self.reapply_acp_if_claude_flipped(was_claude);
         self.sync_external_common_stubs();
         self.rebuild_triggers();
         true
+    }
+
+    /// Claude sessions release hidden builtin names to the adapter, decided in `apply_acp_commands`; redo it when the session turns (non-)Claude after a catalog arrived.
+    fn reapply_acp_if_claude_flipped(&mut self, was_claude: bool) {
+        if was_claude != self.is_claude_session() && !self.acp_catalog.is_empty() {
+            let catalog = std::mem::take(&mut self.acp_catalog);
+            self.apply_acp_commands(&catalog);
+        }
     }
 
     fn yields_to_external_agent(&self, name: &str) -> bool {
@@ -572,6 +593,15 @@ impl CommandRegistry {
                 self.hidden.insert(name.to_string());
             }
         }
+        self.acp_catalog = commands.to_vec();
+        // Claude: `hidden` is keyed by name and would also hide the adapter's own `/recap`, so it is visible iff advertised.
+        if self.is_claude_session() {
+            if commands.iter().any(|c| c.name.eq_ignore_ascii_case("recap")) {
+                self.hidden.remove("recap");
+            } else {
+                self.hidden.insert("recap".to_string());
+            }
+        }
         // Remove old ACP-sourced commands.
         let mut i = 0;
         while i < self.commands.len() {
@@ -583,10 +613,14 @@ impl CommandRegistry {
             }
         }
 
+        // A Claude session hides some Grok builtins; their names (and aliases) go to the adapter's command of the same name.
+        let claude = self.is_claude_session();
         let builtin_keys: HashSet<String> = self
             .commands
             .iter()
-            .flat_map(|c| {
+            .zip(self.sources.iter())
+            .filter(|(c, s)| !(claude && super::claude_menu::hides(c.name(), **s)))
+            .flat_map(|(c, _)| {
                 std::iter::once(c.name().to_lowercase())
                     .chain(c.aliases().iter().map(|a| a.to_lowercase()))
             })
@@ -601,10 +635,12 @@ impl CommandRegistry {
             {
                 return false;
             }
+            // Claude sessions have no unified Grok hooks/plugins UI, so the adapter's `/reload-plugins` is not blocked.
             builtin_keys.contains(name)
-                || BLOCKED_ACP_NAMES
-                    .iter()
-                    .any(|b| b.eq_ignore_ascii_case(name))
+                || (!claude
+                    && BLOCKED_ACP_NAMES
+                        .iter()
+                        .any(|b| b.eq_ignore_ascii_case(name)))
         };
 
         // Shadowed builtins are by design; a shadowed skill or workflow breaks `PAGER_COMMAND_KEYS`
@@ -682,7 +718,8 @@ impl CommandRegistry {
 
             // Menu-hidden commands keep their key entries (so `get_for_dispatch()` resolves a typed invocation) but emit no triggers
             // This is the inverse of the restricted trade-off below
-            let menu_only = self.menu_hidden.contains(canonical);
+            let menu_only = self.menu_hidden.contains(canonical)
+                || (self.is_claude_session() && super::claude_menu::hides(canonical, source));
 
             // Restricted commands (per-user deny list, e.g. tier restrictions) deliberately stay listed.
             // They keep their triggers/key entries so the dropdown, ghost completion, and palette show them like any other command (discoverability)

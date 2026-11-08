@@ -637,6 +637,32 @@ fn open_fork_question_refuses_when_existing_question_is_open() {
     assert!(qv.local_kind.is_none(), "must not overwrite ACP question");
 }
 
+/// A Claude session in a git repo never sees the worktree modal and forks in place.
+#[test]
+fn dispatch_fork_claude_skips_worktree_modal_and_forks_in_place() {
+    let mut app = fork_test_app();
+    app.external_agent = true;
+    app.external_agent_label = Some("claude-agent".into());
+    let effects = dispatch(Action::Fork(fork_args(None, None)), &mut app);
+    assert!(
+        matches!(effects.as_slice(), [Effect::ForkSession { .. }]),
+        "got {effects:?}"
+    );
+    assert!(app.agents.values().all(|a| a.question_view.is_none()));
+}
+
+#[test]
+fn dispatch_fork_claude_worktree_flag_toasts_unsupported() {
+    let mut app = fork_test_app();
+    app.external_agent = true;
+    app.external_agent_label = Some("claude-agent".into());
+    let effects = dispatch(Action::Fork(fork_args(Some(true), None)), &mut app);
+    assert!(effects.is_empty());
+    assert_eq!(app.agents.len(), 1, "no placeholder agent created");
+    let toast = app.agents.get(&AgentId(0)).and_then(|a| a.toast.as_ref());
+    assert!(toast.is_some_and(|t| t.0.contains("can't fork into a worktree")));
+}
+
 #[test]
 fn dispatch_fork_resolved_no_worktree_emits_fork_effect() {
     let mut app = fork_test_app();

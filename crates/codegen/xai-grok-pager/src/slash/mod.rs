@@ -9,6 +9,7 @@
 //! - [`CommandRegistry`]: maps names/aliases to command implementations.
 
 pub mod acp_command;
+pub mod claude_menu;
 pub mod command;
 pub mod commands;
 pub mod external_common;
@@ -67,6 +68,8 @@ impl MenuGroup {
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct MenuKey {
     group: MenuGroup,
+    /// [`claude_menu::trigger_rank`]; always `0` outside Claude sessions.
+    claude_rank: usize,
     /// `false` first, so a curated tag pulls its row to the top of the band.
     untagged: bool,
     /// Zero for skills, which are ranked by name instead.
@@ -78,6 +81,7 @@ struct MenuKey {
 impl MenuKey {
     fn new(
         group: MenuGroup,
+        claude_rank: usize,
         row: &SuggestionRow,
         canonical: &str,
         mru: &mut mru::SlashMru,
@@ -90,6 +94,7 @@ impl MenuKey {
 
         Self {
             group,
+            claude_rank,
             untagged: row.tag.is_none(),
             recency: std::cmp::Reverse(recency),
             name,
@@ -1025,7 +1030,7 @@ impl SlashController {
             let mut rows = Vec::new();
             // Retain canonicals so tags are set in a second pass, keeping the `takes_args_now` command callback outside any tag-map borrow
             let mut canonicals: Vec<&str> = Vec::new();
-            let mut groups: Vec<MenuGroup> = Vec::new();
+            let mut groups: Vec<(MenuGroup, usize)> = Vec::new();
             for (i, trigger) in triggers.iter().enumerate() {
                 if !visible_indices.contains(&i) {
                     continue;
@@ -1042,7 +1047,13 @@ impl SlashController {
                         colliding_command_indices.contains(&trigger.command_index),
                     ));
                     canonicals.push(trigger.canonical.as_str());
-                    groups.push(MenuGroup::of(&trigger.provenance));
+                    // Claude sessions: adapter skills/plugin commands carry no skill meta, so the registry classifies them.
+                    let group = if claude_menu::trigger_is_skill(&self.registry, trigger) {
+                        MenuGroup::OtherSkill
+                    } else {
+                        MenuGroup::of(&trigger.provenance)
+                    };
+                    groups.push((group, claude_menu::trigger_rank(&self.registry, trigger)));
                 }
             }
             // Tag from the data map in one scoped borrow; key off canonical (never the alias/display)
@@ -1059,8 +1070,11 @@ impl SlashController {
                 rows.into_iter()
                     .zip(canonicals)
                     .zip(groups)
-                    .map(|((row, canonical), group)| {
-                        (MenuKey::new(group, &row, canonical, &mut mru), row)
+                    .map(|((row, canonical), (group, claude_rank))| {
+                        (
+                            MenuKey::new(group, claude_rank, &row, canonical, &mut mru),
+                            row,
+                        )
                     })
                     .collect()
             };
@@ -1170,9 +1184,14 @@ impl SlashController {
             .iter()
             .map(|t| trigger_owns_typed_name(t, trimmed))
             .collect();
+        let claude_ranks: Vec<usize> = visible_triggers
+            .iter()
+            .map(|t| claude_menu::trigger_rank(&self.registry, t))
+            .collect();
         deduped.sort_by(|a, b| {
             b.0.cmp(&a.0)
                 .then_with(|| owns_typed_name.get(b.1).cmp(&owns_typed_name.get(a.1)))
+                .then_with(|| claude_ranks.get(a.1).cmp(&claude_ranks.get(b.1)))
                 .then_with(|| mru_scores.get(b.1).cmp(&mru_scores.get(a.1)))
                 .then_with(|| {
                     let a_builtin = sort_meta
@@ -1457,6 +1476,10 @@ pub fn is_command_complete(line: &str, registry: &CommandRegistry) -> bool {
     let Some(invocation) = parse_invocation(line) else {
         return false;
     };
+    // Claude gets these as typed text and the CLI accepts them bare (`/effort` reports the level)
+    if registry.is_claude_session() && external_common::claude_forwards_builtin(invocation.token) {
+        return true;
+    }
     // Dispatch-tier lookup (menu-only hide; see `CommandRegistry::get_for_dispatch`)
     // Menu-hidden commands still run on Enter, so their arg contract gates completeness the same way
     let Some(command) = registry.get_for_dispatch(invocation.token) else {

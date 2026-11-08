@@ -35,6 +35,14 @@ pub(in crate::app::dispatch) fn dispatch_fork(
         app.show_toast("Cannot fork: session is still being created");
         return vec![];
     }
+    // Claude forks through standard `session/fork` in the same cwd; there is no worktree path, so never ask.
+    if app.is_claude_session() {
+        if args.worktree_override == Some(true) {
+            app.show_toast("Claude sessions can't fork into a worktree");
+            return vec![];
+        }
+        return dispatch_fork_resolved(app, false, args.directive);
+    }
     match args.worktree_override {
         Some(true) if !in_git_repo => {
             app.show_toast("Cannot create worktree: not in a git repository");

@@ -45,7 +45,23 @@ pub fn agent_label_from_cmd(cmd: &str) -> Option<String> {
 
 /// True when an external-agent label names a Claude ACP host (`claude`, `claude-agent`, `claude-code`, …).
 pub fn is_claude_label(label: Option<&str>) -> bool {
-    label.is_some_and(|l| l.starts_with("claude"))
+    // Also the adapter's own name, `@agentclientprotocol/claude-agent-acp`.
+    label.is_some_and(|l| {
+        let name = l.rsplit('/').next().unwrap_or(l);
+        name.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("claude"))
+    })
+}
+
+/// Pager builtins that stay forwarded to a Claude session as typed text, so the Claude CLI answers instead.
+/// `/hooks`, `/plugin(s)`, `/marketplace` need grok-only ACP methods (`x.ai/hooks/list`, ...) and the CLI prints
+/// "isn't available in this environment"; `/effort` needs model effort metadata the adapter doesn't send
+/// (it exposes effort as a separate config option), so the CLI applies the level.
+const CLAUDE_FORWARDED_BUILTINS: &[&str] = &["effort", "hooks", "plugin", "plugins", "marketplace"];
+
+pub fn claude_forwards_builtin(token: &str) -> bool {
+    CLAUDE_FORWARDED_BUILTINS
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(token))
 }
 
 fn description_for(name: &str) -> &'static str {
@@ -111,8 +127,27 @@ mod tests {
         assert!(is_claude_label(Some("claude")));
         assert!(is_claude_label(Some("claude-agent")));
         assert!(is_claude_label(Some("claude-code")));
+        assert!(is_claude_label(Some("@agentclientprotocol/claude-agent-acp")));
+        assert!(is_claude_label(Some("Claude Agent")));
         assert!(!is_claude_label(Some("pi")));
         assert!(!is_claude_label(None));
+    }
+
+    /// The `grok claude` command line must resolve to a Claude label: the context-tally guard in `dispatch/prompt.rs` keys on it.
+    #[test]
+    fn grok_claude_agent_cmd_resolves_to_a_claude_label() {
+        let cmd = "env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=/Users/u/.local/bin/claude /Users/u/.local/bin/claude-agent-acp";
+        assert!(is_claude_label(agent_label_from_cmd(cmd).as_deref()));
+    }
+
+    #[test]
+    fn claude_forwards_effort_and_extension_modals_only() {
+        for t in ["effort", "Effort", "hooks", "plugin", "plugins", "marketplace"] {
+            assert!(claude_forwards_builtin(t), "{t}");
+        }
+        for t in ["model", "new", "copy", "export", "settings", "fork"] {
+            assert!(!claude_forwards_builtin(t), "{t}");
+        }
     }
 
     #[test]
