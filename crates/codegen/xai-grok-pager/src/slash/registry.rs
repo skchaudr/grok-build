@@ -593,7 +593,9 @@ impl CommandRegistry {
                 self.hidden.insert(name.to_string());
             }
         }
-        self.acp_catalog = commands.to_vec();
+        if self.acp_catalog.as_slice() != commands {
+            self.acp_catalog = commands.to_vec();
+        }
         // Claude: `hidden` is keyed by name and would also hide the adapter's own `/recap`, so it is visible iff advertised.
         if self.is_claude_session() {
             if commands.iter().any(|c| c.name.eq_ignore_ascii_case("recap")) {

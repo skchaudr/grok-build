@@ -5025,6 +5025,7 @@ pub(crate) fn execute(
                     // Claude has no `x.ai/session/fork` (Method not found); standard `session/fork` with no fork point copies the whole session.
                     if claude {
                         // `session/fork` mints its own id; a requested one can't be honored.
+                        // The startup `--fork` path passes `Some(new_session_id)`, so it fails here for Claude.
                         if new_session_id.is_some() {
                             return TaskResult::ForkSessionFailed {
                                 agent_id,

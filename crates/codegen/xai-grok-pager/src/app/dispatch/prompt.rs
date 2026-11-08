@@ -1044,10 +1044,21 @@ pub(super) fn dispatch_send_prompt_submission(
                     });
                 }
                 if let Some(command) = command {
+                    let claude_override = (external_claude && is_builtin)
+                        .then(|| {
+                            crate::slash::claude_menu::typed_builtin_override(
+                                command.name(),
+                                invocation.token,
+                                invocation.args,
+                            )
+                        })
+                        .flatten();
                     // Central screen-mode gate
                     // A fully-typed invocation thus earns a hint that names the way out instead of leaking to the model
                     // A refusal added here must also extend the pre-check in `EditedCommandGate` (`dispatch::queue`)
-                    if let Some(refusal) = command
+                    if let Some(result) = claude_override {
+                        result
+                    } else if let Some(refusal) = command
                         .mode_support()
                         .refusal(invocation.token, ctx.screen_mode)
                     {

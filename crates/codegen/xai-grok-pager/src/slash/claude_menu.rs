@@ -3,6 +3,7 @@
 //! All Claude-specific data lives in this file; upstream command files stay untouched. Hooks:
 //! `CommandRegistry` (hide + free names for the adapter) and `SlashController` (order + skill group).
 
+use super::command::CommandResult;
 use super::registry::{CommandRegistry, CommandSource, CommandTrigger};
 
 /// Most-used commands, in menu order (30-day usage). Matches canonical names and aliases.
@@ -73,7 +74,8 @@ const ADAPTER_COMMANDS: &[&str] = &[
     "usage-credits",
 ];
 
-/// Grok-only builtins and stubs, hidden from the menu (still resolvable when typed in full).
+/// Builtins hidden from a Claude session's menu: those that send a grok-only `x.ai/*` request the stock
+/// claude-agent-acp lacks. Typed in full they show a notice instead (see [`typed_builtin_override`]).
 /// Hiding also frees their names, so the adapter's command of the same name shows instead:
 /// `config-agents` (alias `agents`), `loop` (tool-gated off for Claude), `recap` (Grok-shell gate).
 const HIDDEN: &[&str] = &[
@@ -82,14 +84,9 @@ const HIDDEN: &[&str] = &[
     "privacy",
     "feedback",
     "marketplace",
-    "tutorial",
-    "release-notes",
-    "docs",
     "personas",
-    "import-claude",
     "config-agents",
-    "voice",
-    "announcements",
+    // Not an `x.ai` request, but the name must stay free for the adapter's own `/loop`.
     "loop",
     "recap",
     // Builtins whose action is an `x.ai/*` request the adapter lacks; evidence in `.claude-menu-undecided.md`.
@@ -122,6 +119,20 @@ pub fn hides(name: &str, source: CommandSource) -> bool {
         CommandSource::Acp => listed(HIDDEN_ADAPTER, name),
         _ => listed(HIDDEN, name),
     }
+}
+
+/// What a Claude session does with a typed pager builtin: `None` runs it, `Some` replaces the run.
+/// A hidden builtin would send its `x.ai/*` request, so it gets a notice instead. `recap` (reached via the
+/// `summarize` alias once the adapter advertises it) goes to the adapter's `/recap`.
+pub fn typed_builtin_override(canonical: &str, token: &str, args: &str) -> Option<CommandResult> {
+    if !hides(canonical, CommandSource::Builtin) {
+        return None;
+    }
+    Some(if canonical.eq_ignore_ascii_case("recap") {
+        CommandResult::PassThrough(format!("/recap {args}").trim_end().to_string())
+    } else {
+        CommandResult::Message(format!("/{token} isn't available in Claude sessions"))
+    })
 }
 
 /// Sort rank for a Claude session menu; lower sorts first. `0` outside Claude sessions.
@@ -195,6 +206,23 @@ mod tests {
         assert!(!hides("compact", CommandSource::Builtin));
         assert!(hides("__remote-workflow", CommandSource::Acp));
         assert!(!hides("__remote-workflow", CommandSource::Builtin));
+    }
+
+    #[test]
+    fn typed_hidden_builtin_gets_a_notice_and_recap_goes_to_the_adapter() {
+        assert!(matches!(
+            typed_builtin_override("share", "share", ""),
+            Some(CommandResult::Message(m)) if m == "/share isn't available in Claude sessions"
+        ));
+        assert!(matches!(
+            typed_builtin_override("recap", "summarize", "short"),
+            Some(CommandResult::PassThrough(t)) if t == "/recap short"
+        ));
+        assert!(typed_builtin_override("theme", "theme", "").is_none());
+        // Pager-local entries dropped from HIDDEN run normally.
+        for name in ["announcements", "tutorial", "docs", "voice"] {
+            assert!(typed_builtin_override(name, name, "").is_none(), "{name}");
+        }
     }
 
     struct Dummy(&'static str, &'static [&'static str]);
