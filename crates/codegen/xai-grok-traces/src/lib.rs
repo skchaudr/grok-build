@@ -14,6 +14,7 @@ mod index;
 mod lines;
 mod links;
 pub mod live;
+pub mod merge;
 pub mod normalize;
 pub mod phoenix;
 mod query;

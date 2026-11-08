@@ -30,8 +30,8 @@ use crate::bb::{Bb, BbThread, thread_key};
 /// 7: DSH prompt size (`inputTokens` + cache read/write) and `request/context.contextWindow`; Cursor context (`usage.inputTokens` / hook `input_tokens`) and `contextTokenLimit` window; bb `thread/contextWindowUsage/updated`; fills `duration_ms` from a tool call's matching result timestamp; re-reads grok transcripts so a subagent's parent comes from `subagents/<id>/meta.json`.
 pub const PARSER_VERSION: i64 = 9;
 /// Bump when the table layout changes; a mismatch rebuilds the (disposable) db.
-/// 8 adds `trace_event_usage.call_id` so an appended result can still find its call.
-pub const SCHEMA_VERSION: i64 = 9;
+/// 10 adds `is_error`, `duration_ms` and `parent_tool_use_id` on `trace_receipts` (the end receipt).
+pub const SCHEMA_VERSION: i64 = 10;
 /// Size the index may use (db + `-wal`). Passing it is normal: the oldest sessions are evicted
 /// down to `EVICT_TO_PERCENT` of it. It is a cache of pointers, so this is not an alert.
 pub const SIZE_BUDGET: u64 = 256 * 1024 * 1024;
@@ -123,7 +123,8 @@ CREATE INDEX IF NOT EXISTS trace_event_usage_call ON trace_event_usage(sk, call_
 CREATE TABLE IF NOT EXISTS trace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS trace_receipts (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
   event TEXT NOT NULL, native_session TEXT, path TEXT, session_id TEXT, tool TEXT, cwd TEXT,
-  detail TEXT, tool_use_id TEXT, agent_id TEXT, harness_pid INTEGER, harness_start INTEGER, harness_chain TEXT);
+  detail TEXT, tool_use_id TEXT, agent_id TEXT, harness_pid INTEGER, harness_start INTEGER, harness_chain TEXT,
+  is_error INTEGER, duration_ms INTEGER, parent_tool_use_id TEXT);
 CREATE INDEX IF NOT EXISTS trace_receipts_session ON trace_receipts(session_id, at_ms, id);
 CREATE INDEX IF NOT EXISTS trace_receipts_at ON trace_receipts(at_ms, id);
 -- Receipts not yet keyed to a session row: the native-id branch of every receipt match, and the receipt-only grouping.

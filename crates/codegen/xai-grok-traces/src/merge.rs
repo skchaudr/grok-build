@@ -1,0 +1,703 @@
+//! One stream per session: spans and receipts are the structure, the transcript is the content.
+//!
+//! A call opens when a receipt or a span says it started. Text already in the transcript and ordered
+//! before that call is emitted first. The row stays running until the result text is in the transcript
+//! and an end (span or receipt) has arrived; only then does it complete. A later fill never follows a
+//! completion, so the tracker keeps a single row.
+
+use std::collections::{HashMap, HashSet};
+
+use crate::live::{Ev, LiveReceipt, norm};
+use crate::phoenix::{PhoenixSpan, SpanStatus};
+
+/// One piece of a harness transcript, in file order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Item {
+    pub ord: u64,
+    pub kind: ItemKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ItemKind {
+    User(String),
+    Text(String),
+    Thinking(String),
+    Call { id: String, tool: String, input: String },
+    Result { id: String, output: String, is_error: bool },
+}
+
+/// What the view should append. `Complete { fresh: true }` is the only event for that call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Piece {
+    User(String),
+    Text(String),
+    Thinking(String),
+    Open { id: String, tool: String, start_ms: i64, input: Option<String>, parent: Option<String> },
+    Fill { id: String, input: Option<String>, output: Option<String> },
+    Complete {
+        id: String,
+        tool: String,
+        start_ms: i64,
+        end_ms: i64,
+        error: bool,
+        input: Option<String>,
+        output: String,
+        fresh: bool,
+        parent: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct Signal {
+    call_id: String,
+    tool: Option<String>,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    error: Option<bool>,
+    from_span: bool,
+    parent: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct Call {
+    tool: String,
+    start_ms: i64,
+    start_span: bool,
+    end_ms: Option<i64>,
+    end_span: bool,
+    error: bool,
+    error_set: bool,
+    input: Option<String>,
+    output: Option<String>,
+    out_err: bool,
+    input_dirty: bool,
+    output_dirty: bool,
+    opened: bool,
+    done: bool,
+    parent: Option<String>,
+}
+
+/// Running merge for one session. Feed it signals, then the transcript tail each time.
+#[derive(Default)]
+pub struct Merger {
+    calls: HashMap<String, Call>,
+    seen: HashSet<u64>,
+}
+
+impl Merger {
+    /// A call is starting or ending. `items` is the transcript as it reads right now.
+    pub fn on_signal(&mut self, call_id: String, tool: Option<String>, start_ms: Option<i64>, end_ms: Option<i64>, error: Option<bool>, from_span: bool, parent: Option<String>, items: &[Item]) -> Vec<Piece> {
+        let sig = Signal { call_id, tool, start_ms, end_ms, error, from_span, parent };
+        let id = self.upsert(sig);
+        let before = match call_ord(items, &id) {
+            Some(o) => o,
+            None => hold_ord(&self.calls, items, Some(&id)),
+        };
+        let mut out = self.prose(items, before);
+        self.absorb(items, Some(&id));
+        out.extend(self.emit(&id));
+        out
+    }
+
+    /// Transcript grew, or the tail should be flushed after a batch of signals.
+    pub fn on_tail(&mut self, items: &[Item]) -> Vec<Piece> {
+        let before = hold_ord(&self.calls, items, None);
+        let mut out = self.prose(items, before);
+        self.absorb(items, None);
+        let ids: Vec<String> = self.calls.keys().cloned().collect();
+        for id in ids {
+            out.extend(self.emit(&id));
+        }
+        out
+    }
+
+    /// Receipts and spans the view has now. Calls and prose already emitted stay put.
+    pub fn ingest(&mut self, source: &str, transcript: &str, receipts: &[LiveReceipt], spans: Result<&[PhoenixSpan], ()>) -> (Vec<Piece>, bool) {
+        let items = parse(source, transcript);
+        let mut pieces = Vec::new();
+        for sig in receipt_signals(source, receipts) {
+            pieces.extend(self.on_signal(sig.call_id, sig.tool, sig.start_ms, sig.end_ms, sig.error, sig.from_span, sig.parent, &items));
+        }
+        let offline = spans.is_err();
+        if let Ok(spans) = spans {
+            for sig in span_signals(spans) {
+                pieces.extend(self.on_signal(sig.call_id, sig.tool, sig.start_ms, sig.end_ms, sig.error, sig.from_span, sig.parent, &items));
+            }
+        }
+        pieces.extend(self.on_tail(&items));
+        (pieces, offline)
+    }
+
+    /// Tool name of the newest call that is on screen and not finished.
+    pub fn running(&self) -> Option<String> {
+        self.calls
+            .values()
+            .filter(|c| c.opened && !c.done)
+            .max_by_key(|c| c.start_ms)
+            .map(|c| if c.tool.is_empty() { "tool".to_string() } else { c.tool.clone() })
+    }
+
+    fn upsert(&mut self, sig: Signal) -> String {
+        let id = sig.call_id.clone();
+        let c = self.calls.entry(id.clone()).or_insert_with(|| Call {
+            tool: String::new(),
+            start_ms: sig.start_ms.unwrap_or(0),
+            start_span: false,
+            end_ms: None,
+            end_span: false,
+            error: false,
+            error_set: false,
+            input: None,
+            output: None,
+            out_err: false,
+            input_dirty: false,
+            output_dirty: false,
+            opened: false,
+            done: false,
+            parent: None,
+        });
+        if c.tool.is_empty() {
+            if let Some(t) = sig.tool.clone() {
+                c.tool = t;
+            }
+        }
+        if let Some(ms) = sig.start_ms {
+            if sig.from_span || !c.start_span {
+                c.start_ms = ms;
+                c.start_span = sig.from_span;
+            }
+        }
+        if let Some(ms) = sig.end_ms {
+            if sig.from_span || !c.end_span {
+                c.end_ms = Some(ms);
+                c.end_span = sig.from_span;
+            }
+        }
+        if let Some(e) = sig.error {
+            if sig.from_span || !c.end_span {
+                c.error = e;
+                c.error_set = true;
+            }
+        }
+        if c.parent.is_none() {
+            c.parent = sig.parent;
+        }
+        id
+    }
+
+    fn prose(&mut self, items: &[Item], before: u64) -> Vec<Piece> {
+        let mut out = Vec::new();
+        for it in items {
+            if it.ord >= before || !self.seen.insert(it.ord) {
+                continue;
+            }
+            match &it.kind {
+                ItemKind::User(t) => out.push(Piece::User(t.clone())),
+                ItemKind::Text(t) => out.push(Piece::Text(t.clone())),
+                ItemKind::Thinking(t) => out.push(Piece::Thinking(t.clone())),
+                ItemKind::Call { .. } | ItemKind::Result { .. } => {
+                    self.seen.remove(&it.ord);
+                }
+            }
+        }
+        out
+    }
+
+    fn absorb(&mut self, items: &[Item], only: Option<&str>) {
+        for it in items {
+            match &it.kind {
+                ItemKind::Call { id, tool, input } if only.is_none_or(|o| o == id) => {
+                    let Some(c) = self.calls.get_mut(id) else { continue };
+                    if c.tool.is_empty() {
+                        c.tool = tool.clone();
+                    }
+                    if c.input.is_none() && !input.is_empty() {
+                        c.input = Some(input.clone());
+                        c.input_dirty = true;
+                    }
+                }
+                ItemKind::Result { id, output, is_error } if only.is_none_or(|o| o == id) => {
+                    let Some(c) = self.calls.get_mut(id) else { continue };
+                    if c.output.is_none() {
+                        c.output = Some(output.clone());
+                        c.out_err = *is_error;
+                        c.output_dirty = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn emit(&mut self, id: &str) -> Vec<Piece> {
+        let Some(c) = self.calls.get_mut(id) else { return Vec::new() };
+        if c.done {
+            return Vec::new();
+        }
+        let ready = c.output.is_some() && c.end_ms.is_some();
+        if !c.opened && ready {
+            c.opened = true;
+            c.done = true;
+            c.input_dirty = false;
+            c.output_dirty = false;
+            return vec![complete_piece(id, c, true)];
+        }
+        let mut out = Vec::new();
+        if !c.opened {
+            c.opened = true;
+            out.push(Piece::Open {
+                id: id.to_string(),
+                tool: c.tool.clone(),
+                start_ms: c.start_ms,
+                input: c.input.clone(),
+                parent: c.parent.clone(),
+            });
+            c.input_dirty = false;
+        }
+        if c.input_dirty || c.output_dirty {
+            out.push(Piece::Fill { id: id.to_string(), input: c.input.clone(), output: c.output.clone() });
+            c.input_dirty = false;
+            c.output_dirty = false;
+        }
+        if c.output.is_some() && c.end_ms.is_some() {
+            c.done = true;
+            out.push(complete_piece(id, c, false));
+        }
+        out
+    }
+}
+
+fn complete_piece(id: &str, c: &Call, fresh: bool) -> Piece {
+    Piece::Complete {
+        id: id.to_string(),
+        tool: c.tool.clone(),
+        start_ms: c.start_ms,
+        end_ms: c.end_ms.unwrap_or(c.start_ms),
+        error: if c.error_set { c.error } else { c.out_err },
+        input: c.input.clone(),
+        output: c.output.clone().unwrap_or_default(),
+        fresh,
+        parent: c.parent.clone(),
+    }
+}
+
+fn call_ord(items: &[Item], id: &str) -> Option<u64> {
+    items.iter().find_map(|it| match &it.kind {
+        ItemKind::Call { id: cid, .. } if cid == id => Some(it.ord),
+        _ => None,
+    })
+}
+
+/// Ordinal of the earliest call line that is not opened yet, other than `opening`.
+fn hold_ord(calls: &HashMap<String, Call>, items: &[Item], opening: Option<&str>) -> u64 {
+    items
+        .iter()
+        .find_map(|it| match &it.kind {
+            ItemKind::Call { id, .. } => {
+                if opening == Some(id.as_str()) {
+                    return None;
+                }
+                if calls.get(id).is_some_and(|c| c.opened) {
+                    return None;
+                }
+                Some(it.ord)
+            }
+            _ => None,
+        })
+        .unwrap_or(u64::MAX)
+}
+
+/// Alive, ended or failed from the receipts and the harness pid. Transcript silence is not a signal.
+pub fn session_life(source: &str, receipts: &[LiveReceipt], pid_alive: Option<bool>) -> &'static str {
+    let last = receipts.iter().rev().find_map(|r| norm(source, &r.event, r.detail.as_deref()));
+    match last {
+        Some(Ev::End { .. }) => "ended",
+        Some(Ev::Idle { failed: true }) => "failed",
+        _ if pid_alive == Some(false) => "ended",
+        _ => "alive",
+    }
+}
+
+/// Replay what the view has now. `spans` `Err` means Phoenix did not answer; receipts and the transcript still merge.
+pub fn load(source: &str, transcript: &str, receipts: &[LiveReceipt], spans: Result<&[PhoenixSpan], ()>) -> (Vec<Piece>, Merger, bool) {
+    let mut merger = Merger::default();
+    let (pieces, offline) = merger.ingest(source, transcript, receipts, spans);
+    (pieces, merger, offline)
+}
+
+/// Phoenix project is the harness name. The session key is the id the emitter put on `session.id`.
+pub fn phoenix_session_id(file_name: &str, native_id: Option<&str>) -> String {
+    let stem = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
+    let stem = stem.strip_suffix(".jsonl").unwrap_or(stem);
+    if !stem.is_empty() {
+        return stem.to_string();
+    }
+    native_id.and_then(|n| n.rsplit(['/', '\\']).next()).unwrap_or("").to_string()
+}
+
+fn receipt_signals(source: &str, receipts: &[LiveReceipt]) -> Vec<Signal> {
+    let mut out = Vec::new();
+    for r in receipts {
+        let Some(id) = r.tool_use_id.clone().filter(|s| !s.is_empty()) else { continue };
+        let parent = r.parent_tool_use_id.clone();
+        match norm(source, &r.event, r.detail.as_deref()) {
+            Some(Ev::Pre) => out.push(Signal {
+                call_id: id,
+                tool: r.tool.clone(),
+                start_ms: Some(r.at_ms),
+                end_ms: None,
+                error: None,
+                from_span: false,
+                parent,
+            }),
+            Some(Ev::Post) => out.push(Signal {
+                call_id: id,
+                tool: r.tool.clone(),
+                start_ms: None,
+                end_ms: Some(r.at_ms),
+                error: r.is_error,
+                from_span: false,
+                parent,
+            }),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn span_signals(spans: &[PhoenixSpan]) -> Vec<Signal> {
+    let mut call_of: HashMap<&str, &str> = HashMap::new();
+    for s in spans {
+        if let Some(id) = s.call_id.as_deref() {
+            call_of.insert(s.span_id.as_str(), id);
+        }
+    }
+    let mut grouped: HashMap<String, Signal> = HashMap::new();
+    for s in spans {
+        let Some(id) = s.call_id.clone() else { continue };
+        let parent = s.parent_id.as_deref().and_then(|p| call_of.get(p)).map(|c| (*c).to_string());
+        let e = grouped.entry(id.clone()).or_insert_with(|| Signal {
+            call_id: id,
+            tool: None,
+            start_ms: None,
+            end_ms: None,
+            error: None,
+            from_span: true,
+            parent: None,
+        });
+        let start = s.start.timestamp_millis();
+        let end = s.end.timestamp_millis();
+        e.start_ms = Some(e.start_ms.map_or(start, |x| x.min(start)));
+        e.end_ms = Some(e.end_ms.map_or(end, |x| x.max(end)));
+        if s.tool_name.is_some() && e.tool.is_none() {
+            e.tool = s.tool_name.clone();
+        }
+        if e.parent.is_none() {
+            e.parent = parent;
+        }
+        match s.status {
+            SpanStatus::Error => e.error = Some(true),
+            SpanStatus::Ok if e.error.is_none() => e.error = Some(false),
+            _ => {}
+        }
+    }
+    let mut v: Vec<Signal> = grouped.into_values().collect();
+    v.sort_by_key(|s| s.start_ms.unwrap_or(0));
+    v
+}
+
+/// Claude jsonl or Pi jsonl, content items only.
+pub fn parse(source: &str, transcript: &str) -> Vec<Item> {
+    if source == "pi" {
+        parse_pi(transcript)
+    } else {
+        parse_claude(transcript)
+    }
+}
+
+fn parse_claude(text: &str) -> Vec<Item> {
+    let mut out = Vec::new();
+    let mut ord = 0u64;
+    let push = |out: &mut Vec<Item>, ord: &mut u64, kind: ItemKind| {
+        out.push(Item { ord: *ord, kind });
+        *ord += 1;
+    };
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if v.get("isMeta").and_then(|x| x.as_bool()) == Some(true) {
+            continue;
+        }
+        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let content = v.pointer("/message/content").cloned().unwrap_or(serde_json::Value::Null);
+        if kind == "user" {
+            if let Some(blocks) = content.as_array() {
+                for b in blocks {
+                    if b.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                        let Some(id) = b.get("tool_use_id").and_then(|t| t.as_str()).filter(|s| !s.is_empty()) else { continue };
+                        push(&mut out, &mut ord, ItemKind::Result {
+                            id: id.to_string(),
+                            output: block_text(b.get("content").unwrap_or(&serde_json::Value::Null)),
+                            is_error: b.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false),
+                        });
+                    }
+                }
+            }
+            let text = block_text(&content);
+            if let Some(text) = user_text(&text) {
+                push(&mut out, &mut ord, ItemKind::User(text));
+            }
+            continue;
+        }
+        if kind != "assistant" {
+            continue;
+        }
+        let Some(blocks) = content.as_array() else { continue };
+        for b in blocks {
+            match b.get("type").and_then(|t| t.as_str()) {
+                Some("thinking") => {
+                    let body = b.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                    let body = if body.trim().is_empty() { "\u{200b}".to_string() } else { body.to_string() };
+                    push(&mut out, &mut ord, ItemKind::Thinking(body));
+                }
+                Some("text") => {
+                    let body = b.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+                    if !body.is_empty() {
+                        push(&mut out, &mut ord, ItemKind::Text(body.to_string()));
+                    }
+                }
+                Some("tool_use") => {
+                    let id = b.get("id").and_then(|t| t.as_str()).unwrap_or("");
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let tool = b.get("name").and_then(|t| t.as_str()).unwrap_or("tool").to_string();
+                    let input = b.get("input").cloned().unwrap_or(serde_json::Value::Null).to_string();
+                    push(&mut out, &mut ord, ItemKind::Call { id: id.to_string(), tool, input });
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+fn user_text(text: &str) -> Option<String> {
+    let t = text.trim();
+    if t.is_empty() {
+        return None;
+    }
+    const HARNESS: [&str; 5] = ["<task-notification>", "<local-command-", "<system-reminder>", "<command-message>", "[Request interrupted by user"];
+    if HARNESS.iter().any(|h| t.starts_with(h)) {
+        return None;
+    }
+    Some(text.to_string())
+}
+
+fn block_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(a) => a
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()).or_else(|| b.as_str()))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
+}
+
+fn parse_pi(text: &str) -> Vec<Item> {
+    let all: Vec<serde_json::Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let entries = active_branch(all);
+    let mut out = Vec::new();
+    let mut ord = 0u64;
+    let push = |out: &mut Vec<Item>, ord: &mut u64, kind: ItemKind| {
+        out.push(Item { ord: *ord, kind });
+        *ord += 1;
+    };
+    for e in entries {
+        let kind = e.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if kind == "custom_message" {
+            let t = block_text(e.get("content").unwrap_or(&serde_json::Value::Null));
+            if !t.trim().is_empty() {
+                push(&mut out, &mut ord, ItemKind::User(t));
+            }
+            continue;
+        }
+        if kind != "message" {
+            continue;
+        }
+        let role = e.pointer("/message/role").and_then(|r| r.as_str()).unwrap_or("");
+        let content = e.pointer("/message/content").cloned().unwrap_or(serde_json::Value::Null);
+        if role == "toolResult" {
+            let m = &e["message"];
+            let Some(id) = m.get("toolCallId").and_then(|t| t.as_str()).filter(|s| !s.is_empty()) else { continue };
+            push(&mut out, &mut ord, ItemKind::Result {
+                id: id.to_string(),
+                output: block_text(m.get("content").unwrap_or(&serde_json::Value::Null)),
+                is_error: m.get("isError").and_then(|x| x.as_bool()).unwrap_or(false),
+            });
+            continue;
+        }
+        if role == "user" {
+            let t = block_text(&content);
+            if !t.trim().is_empty() {
+                push(&mut out, &mut ord, ItemKind::User(t));
+            }
+            continue;
+        }
+        if role != "assistant" {
+            continue;
+        }
+        let Some(blocks) = content.as_array() else { continue };
+        for b in blocks {
+            match b.get("type").and_then(|t| t.as_str()) {
+                Some("thinking") => {
+                    let body = b.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                    let body = if body.trim().is_empty() { "\u{200b}".to_string() } else { body.to_string() };
+                    push(&mut out, &mut ord, ItemKind::Thinking(body));
+                }
+                Some("text") => {
+                    let body = b.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+                    if !body.is_empty() {
+                        push(&mut out, &mut ord, ItemKind::Text(body.to_string()));
+                    }
+                }
+                Some("toolCall") => {
+                    let id = b.get("id").and_then(|t| t.as_str()).unwrap_or("");
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let tool = b.get("name").and_then(|t| t.as_str()).unwrap_or("tool").to_string();
+                    let input = b.get("arguments").cloned().unwrap_or(serde_json::Value::Null).to_string();
+                    push(&mut out, &mut ord, ItemKind::Call { id: id.to_string(), tool, input });
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// The chain of `parentId`s from the last entry, oldest first. A file with no ids is the whole file.
+fn active_branch(all: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let id = |e: &serde_json::Value| e.get("id").and_then(|v| v.as_str()).map(str::to_string);
+    let Some(last) = all.iter().rposition(|e| id(e).is_some()) else {
+        return all;
+    };
+    let index: HashMap<String, usize> = all.iter().enumerate().filter_map(|(i, e)| id(e).map(|id| (id, i))).collect();
+    let (mut chain, mut seen, mut cur) = (vec![last], HashSet::from([last]), last);
+    while let Some(p) = all[cur].get("parentId").and_then(|v| v.as_str()).and_then(|p| index.get(p).copied()).filter(|p| seen.insert(*p)) {
+        chain.push(p);
+        cur = p;
+    }
+    chain.into_iter().rev().map(|i| all[i].clone()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::phoenix::{PhoenixSpan, SpanStatus};
+    use chrono::{TimeZone, Utc};
+    fn pre(id: &str, tool: &str, at: i64) -> LiveReceipt {
+        LiveReceipt { event: "PreToolUse".into(), tool: Some(tool.into()), tool_use_id: Some(id.into()), at_ms: at, ..Default::default() }
+    }
+    fn post(id: &str, at: i64, error: Option<bool>) -> LiveReceipt {
+        LiveReceipt { event: "PostToolUse".into(), tool_use_id: Some(id.into()), at_ms: at, is_error: error, ..Default::default() }
+    }
+    #[test]
+    fn receipt_before_transcript_opens_one_running_row_and_completes_only_with_content() {
+        let mut m = Merger::default();
+        let open = m.on_signal("c1".into(), Some("Bash".into()), Some(10), None, None, false, None, &[]);
+        assert!(matches!(open.as_slice(), [Piece::Open { id, .. }] if id == "c1"));
+        assert_eq!(m.running().as_deref(), Some("Bash"));
+
+        let text = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"looking"},{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"a.txt"}]}}"#;
+        let items = parse("claude", text);
+        let filled = m.on_tail(&items);
+        assert!(filled.iter().any(|p| matches!(p, Piece::Text(t) if t == "looking")));
+        assert!(filled.iter().any(|p| matches!(p, Piece::Fill { output: Some(o), .. } if o == "a.txt")));
+        assert!(!filled.iter().any(|p| matches!(p, Piece::Complete { .. })), "result without an end stays running");
+
+        let done = m.on_signal("c1".into(), None, None, Some(40), Some(false), false, None, &items);
+        assert!(matches!(done.as_slice(), [Piece::Complete { fresh: false, output, error: false, .. }] if output == "a.txt"));
+        assert!(m.running().is_none());
+        assert!(m.on_signal("c1".into(), Some("Bash".into()), Some(10), None, None, false, None, &items).is_empty());
+    }
+
+    #[test]
+    fn text_already_in_the_tail_is_emitted_before_the_open() {
+        let text = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"},{"type":"tool_use","id":"c1","name":"Read","input":{"file_path":"a"}}]}}"#;
+        let (pieces, _, _) = load("claude", text, &[pre("c1", "Read", 5)], Ok(&[]));
+        let kinds: Vec<&str> = pieces
+            .iter()
+            .map(|p| match p {
+                Piece::Text(_) => "text",
+                Piece::Open { .. } => "open",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["text", "open"]);
+    }
+
+    #[test]
+    fn late_text_follows_the_row() {
+        let mut m = Merger::default();
+        let open = m.on_signal("c1".into(), Some("Bash".into()), Some(1), None, None, false, None, &[]);
+        assert!(matches!(open[0], Piece::Open { .. }));
+        let items = parse("claude", r#"{"type":"assistant","message":{"content":[{"type":"text","text":"late"},{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}"#);
+        let next = m.on_tail(&items);
+        assert!(matches!(next.first(), Some(Piece::Text(t)) if t == "late"), "{next:?}");
+    }
+
+    #[test]
+    fn span_with_content_is_one_completed_row_and_a_dead_phoenix_still_opens_from_the_receipt() {
+        let text = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"ok"}]}}"#;
+        let span = PhoenixSpan {
+            span_id: "s".into(),
+            trace_id: "t".into(),
+            call_id: Some("c1".into()),
+            name: "claude tool:Bash".into(),
+            hook_event: None,
+            tool_name: Some("Bash".into()),
+            start: Utc.timestamp_millis_opt(1_000).unwrap(),
+            end: Utc.timestamp_millis_opt(2_500).unwrap(),
+            status: SpanStatus::Ok,
+            parent_id: None,
+            session_id: Some("sess".into()),
+            agent_id: None,
+            transcript_path: None,
+        };
+        let (pieces, _, offline) = load("claude", text, &[], Ok(std::slice::from_ref(&span)));
+        assert!(!offline);
+        assert!(matches!(pieces.as_slice(), [Piece::Complete { fresh: true, start_ms: 1000, end_ms: 2500, .. }]));
+
+        let (pieces, merger, offline) = load("claude", "", &[pre("c1", "Bash", 5)], Err(()));
+        assert!(offline);
+        assert!(matches!(pieces.as_slice(), [Piece::Open { .. }]));
+        assert_eq!(merger.running().as_deref(), Some("Bash"));
+        assert_eq!(session_life("claude", &[pre("c1", "Bash", 5)], Some(true)), "alive");
+    }
+
+    #[test]
+    fn one_call_id_never_opens_twice_and_end_without_content_waits() {
+        let text = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"ls"}}]}}"#;
+        let items = parse("claude", text);
+        let mut m = Merger::default();
+        m.on_signal("c1".into(), Some("Bash".into()), Some(1), Some(9), Some(true), true, None, &items);
+        let again = m.on_signal("c1".into(), Some("Bash".into()), Some(1), Some(9), Some(true), true, None, &items);
+        assert!(again.is_empty(), "{again:?}");
+        assert!(m.running().is_some(), "ended span with no result stays open");
+    }
+
+    #[test]
+    fn session_life_uses_the_end_receipt_or_a_dead_pid() {
+        let end = LiveReceipt { event: "SessionEnd".into(), at_ms: 9, ..Default::default() };
+        assert_eq!(session_life("claude", &[pre("c", "Bash", 1), end.clone()], Some(true)), "ended");
+        let fail = LiveReceipt { event: "StopFailure".into(), at_ms: 3, ..Default::default() };
+        assert_eq!(session_life("claude", &[fail], Some(true)), "failed");
+        assert_eq!(session_life("claude", &[pre("c", "Bash", 1)], Some(false)), "ended");
+        assert_eq!(session_life("claude", &[], None), "alive");
+    }
+}

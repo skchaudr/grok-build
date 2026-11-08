@@ -2035,7 +2035,7 @@ pub(crate) async fn run(
         } else if dashboard_poll_at.is_none() {
             dashboard_poll_at = Some(Instant::now());
         }
-        if traces_state_mut(&mut app).is_none() && !super::dispatch::traces_live::tailing() {
+        if !traces_poll_wanted(&app) && !super::dispatch::traces_live::tailing() {
             traces_poll_at = None;
         } else if traces_poll_at.is_none() {
             traces_poll_at = Some(Instant::now() + TRACES_POLL_INTERVAL);
@@ -2555,7 +2555,8 @@ pub(crate) async fn run(
                 // Re-armed by the loop-top check above.
                 traces_poll_at = None;
                 let tailed = super::dispatch::traces_live::tick(&mut app);
-                if traces_state_mut(&mut app).is_some_and(|state| state.poll_live()) || tailed {
+                let live_dirty = super::dispatch::standalone_traces::drain_live(&mut app);
+                if live_dirty || tailed || traces_state_mut(&mut app).is_some_and(|state| state.poll_live()) {
                     presenter.request(false);
                 }
             }
@@ -4067,6 +4068,13 @@ fn process_effects(
     }
     false
 }
+/// The traces list, or a live Claude/Pi session view, both of which wake on the one-second poll.
+fn traces_poll_wanted(app: &AppView) -> bool {
+    let ActiveView::Agent(id) = app.active_view else { return false };
+    let Some(agent) = app.agents.get(&id) else { return false };
+    matches!(agent.active_modal, Some(crate::views::modal::ActiveModal::Traces { .. })) || agent.trace_live.is_some()
+}
+
 /// The open `/traces` modal of the active agent, if any.
 fn traces_state_mut(app: &mut AppView) -> Option<&mut crate::views::traces_modal::TracesModalState> {
     let ActiveView::Agent(id) = app.active_view else { return None };
