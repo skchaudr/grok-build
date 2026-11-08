@@ -634,7 +634,7 @@ fn concurrent_opens_of_an_old_schema_db_rebuild_it_once() {
             .collect();
         for h in handles {
             let schema = h.join().unwrap().unwrap_or_else(|err| panic!("round {round}: {err}"));
-            assert_eq!(schema.as_deref(), Some("9"));
+            assert_eq!(schema.as_deref(), Some("10"));
         }
         assert_eq!(leftovers(&e.db), Vec::<String>::new(), "round {round}: old db and lock cleaned up");
         // And the rebuilt db is usable and consistent.
