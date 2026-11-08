@@ -462,3 +462,45 @@ fn agent_acp_list_maps_id_title_cwd_and_updated_at() {
         Some("2026-10-12T10:00:00Z")
     );
 }
+
+/// Adapter-shaped rows (`updatedAt` with millis + `Z`): recent rows survive parsing in list order.
+#[test]
+fn external_agent_recent_rows_survive_in_adapter_order() {
+    let stamp = |days: i64| {
+        (chrono::Utc::now() - chrono::Duration::days(days))
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string()
+    };
+    let response = acp::ListSessionsResponse::new(vec![
+        acp::SessionInfo::new(
+            acp::SessionId::new("40e362e8-0d31-4d5a-bd05-916ffa9f77a5"),
+            std::path::PathBuf::from("/Volumes/Mini-SSD/offload/repos/grok-build"),
+        )
+        .title("Grok Claude parity gaps")
+        .updated_at(stamp(0)),
+        acp::SessionInfo::new(
+            acp::SessionId::new("3020d0ab-0000-4000-8000-000000000000"),
+            std::path::PathBuf::from("/Volumes/Mini-SSD/offload/repos/grok-build"),
+        )
+        .title("Firstmate orchestration workflow scripts")
+        .updated_at(stamp(3)),
+        acp::SessionInfo::new(
+            acp::SessionId::new("old-one"),
+            std::path::PathBuf::from("/Volumes/Mini-SSD/offload/repos/grok-build"),
+        )
+        .title("Old")
+        .updated_at(stamp(14)),
+    ]);
+    let entries = parse(agent_acp_list_to_unified_payload(&response));
+    let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "40e362e8-0d31-4d5a-bd05-916ffa9f77a5",
+            "3020d0ab-0000-4000-8000-000000000000",
+            "old-one"
+        ]
+    );
+    assert!(entries.iter().all(|e| e.source == "local"));
+    assert_eq!(entries[0].summary, "Grok Claude parity gaps");
+}

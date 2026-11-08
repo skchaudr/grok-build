@@ -16,6 +16,33 @@ fn is_indexed_user_prompt(block: &RenderBlock) -> bool {
     matches!(block, RenderBlock::UserPrompt(b) if !b.is_interjection)
 }
 
+/// External Claude sessions have no `x.ai/rewind/*` methods; rewind is a local picker plus `session/fork`.
+fn is_claude_session(app: &AppView) -> bool {
+    app.external_agent
+        && crate::slash::external_common::is_claude_label(app.external_agent_label.as_deref())
+}
+
+/// Rewind points for a Claude session, one per user prompt in scrollback (the adapter cannot restore files).
+fn local_rewind_points(scrollback: &ScrollbackState) -> Vec<crate::views::rewind::RewindPointInfo> {
+    (0..scrollback.len())
+        .filter_map(|i| scrollback.get(i))
+        .filter_map(|e| match &e.block {
+            RenderBlock::UserPrompt(b) if !b.is_interjection => Some(b),
+            _ => None,
+        })
+        .enumerate()
+        // The first prompt has no fork point (nothing precedes it); /new is the way back to empty.
+        .skip(1)
+        .map(|(prompt_index, b)| crate::views::rewind::RewindPointInfo {
+            prompt_index,
+            created_at: String::new(),
+            num_file_snapshots: 0,
+            prompt_preview: Some(b.text.split_whitespace().collect::<Vec<_>>().join(" ")),
+            has_file_changes: false,
+        })
+        .collect()
+}
+
 fn stash_prompt(prompt: &mut PromptWidget) -> Option<StashedPrompt> {
     if prompt.text().is_empty() {
         None
@@ -82,6 +109,7 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let claude = is_claude_session(app);
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -97,6 +125,10 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
     let selected_shell_idx =
         selected_idx.and_then(|idx| shell_prompt_index_at(&agent.scrollback, idx));
 
+    if claude && agent.session.state.is_busy() {
+        app.show_toast("Stop the current turn first, then rewind");
+        return vec![];
+    }
     if agent.session.state.is_busy() {
         let anchor = agent.scrollback.len().saturating_sub(1);
         let draft = stash_prompt(&mut agent.prompt);
@@ -116,6 +148,10 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
         selected_prompt_index: selected_shell_idx,
     });
 
+    if claude {
+        let points = local_rewind_points(&agent.scrollback);
+        return handle_rewind_points_loaded(app, id, points);
+    }
     vec![Effect::FetchRewindPoints {
         agent_id: id,
         session_id,
@@ -126,6 +162,7 @@ pub(super) fn dispatch_rewind_show_picker(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let claude = is_claude_session(app);
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -137,6 +174,10 @@ pub(super) fn dispatch_rewind_show_picker(app: &mut AppView) -> Vec<Effect> {
     // Rewind takes input priority over the `/jump` picker; close a lingering one first so it can't reappear (stale) after rewind finishes
     agent.dismiss_jump_picker();
 
+    if claude && agent.session.state.is_busy() {
+        app.show_toast("Stop the current turn first, then rewind");
+        return vec![];
+    }
     if agent.session.state.is_busy() {
         let anchor = agent.scrollback.len().saturating_sub(1);
         let draft = stash_prompt(&mut agent.prompt);
@@ -152,6 +193,10 @@ pub(super) fn dispatch_rewind_show_picker(app: &mut AppView) -> Vec<Effect> {
         selected_prompt_index: None,
     });
 
+    if claude {
+        let points = local_rewind_points(&agent.scrollback);
+        return handle_rewind_points_loaded(app, id, points);
+    }
     vec![Effect::FetchRewindPoints {
         agent_id: id,
         session_id,
@@ -163,6 +208,7 @@ pub(super) fn dispatch_rewind_picker_select(app: &mut AppView, prompt_index: usi
         return vec![];
     };
     let confirm = app.current_ui.confirm_before_rewind_enabled();
+    let claude = is_claude_session(app);
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -188,6 +234,7 @@ pub(super) fn dispatch_rewind_picker_select(app: &mut AppView, prompt_index: usi
         draft,
         preview,
         confirm,
+        claude,
     )
 }
 
@@ -228,6 +275,7 @@ pub(super) fn dispatch_rewind_confirm(app: &mut AppView, target: usize) -> Vec<E
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let claude = is_claude_session(app);
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -237,7 +285,7 @@ pub(super) fn dispatch_rewind_confirm(app: &mut AppView, target: usize) -> Vec<E
         .map(|s| s.anchor_entry_idx)
         .unwrap_or(0);
     let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
-    enter_executing(agent, id, target, anchor, draft)
+    enter_executing(agent, id, target, anchor, draft, claude)
 }
 
 /// "Yes, and don't ask again": quiet-persist confirm-before-rewind off, then execute.
@@ -284,6 +332,7 @@ fn enter_executing(
     target: usize,
     anchor: usize,
     draft: Option<StashedPrompt>,
+    claude: bool,
 ) -> Vec<Effect> {
     let Some(session_id) = agent.session.session_id.clone() else {
         if let Some(d) = draft {
@@ -293,6 +342,15 @@ fn enter_executing(
         agent.rewind_points = None;
         return vec![];
     };
+    if claude && target == 0 {
+        if let Some(d) = draft {
+            agent.prompt.restore(d);
+        }
+        agent.rewind_state = None;
+        agent.rewind_points = None;
+        agent.show_toast("Can't rewind to the first prompt \u{2014} use /new");
+        return vec![];
+    }
     agent.rewind_state = Some(RewindState {
         phase: RewindPhase::Executing {
             target_prompt_index: target,
@@ -301,6 +359,22 @@ fn enter_executing(
         stashed_draft: draft,
         selected_prompt_index: None,
     });
+    if claude {
+        let prompt_text = find_user_prompt_entry_for_shell_index(&agent.scrollback, target)
+            .and_then(|i| agent.scrollback.get(i))
+            .and_then(|e| match &e.block {
+                RenderBlock::UserPrompt(b) => Some(b.text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        return vec![Effect::ClaudeRewindFork {
+            agent_id,
+            session_id,
+            cwd: agent.session.cwd.clone(),
+            target_prompt_index: target,
+            prompt_text,
+        }];
+    }
     vec![Effect::RewindExecute {
         agent_id,
         session_id,
@@ -317,6 +391,7 @@ fn begin_rewind(
     draft: Option<StashedPrompt>,
     prompt_preview: Option<String>,
     confirm: bool,
+    claude: bool,
 ) -> Vec<Effect> {
     if confirm {
         agent.rewind_state = Some(RewindState {
@@ -331,7 +406,7 @@ fn begin_rewind(
         });
         return vec![];
     }
-    enter_executing(agent, agent_id, target, anchor, draft)
+    enter_executing(agent, agent_id, target, anchor, draft, claude)
 }
 
 pub(super) fn dispatch_rewind_success(
@@ -407,6 +482,7 @@ pub(super) fn handle_rewind_points_loaded(
     points: Vec<crate::views::rewind::RewindPointInfo>,
 ) -> Vec<Effect> {
     let confirm = app.current_ui.confirm_before_rewind_enabled();
+    let claude = is_claude_session(app);
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };
@@ -449,6 +525,7 @@ pub(super) fn handle_rewind_points_loaded(
                 draft,
                 preview,
                 confirm,
+                claude,
             );
         }
     }
@@ -473,6 +550,37 @@ pub(super) fn handle_rewind_points_loaded(
     });
     agent.scrollback.scroll_to_entry_center(initial_anchor);
     vec![]
+}
+
+/// `session/fork` for a Claude rewind succeeded: swap in the forked session (its replay rebuilds the transcript up to the fork point) and put the rewound prompt back in the composer.
+pub(super) fn handle_claude_rewind_fork_ready(
+    app: &mut AppView,
+    agent_id: AgentId,
+    new_session_id: agent_client_protocol::SessionId,
+    cwd: std::path::PathBuf,
+    parent_session_id: agent_client_protocol::SessionId,
+    prompt_text: String,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    agent.rewind_state = None;
+    agent.rewind_points = None;
+    agent.set_last_turn_summary(None);
+    // The replay re-adds every kept turn; drop the old transcript so it is not shown twice
+    drop(agent.take_replay_rebuilt_state());
+    let effects = super::session::fork::handle_fork_session_ready(
+        app,
+        agent_id,
+        new_session_id,
+        cwd,
+        parent_session_id,
+    );
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.prompt.set_text_discarding_images(&prompt_text);
+        agent.set_active_pane(crate::app::agent_view::ActivePane::Prompt, false);
+    }
+    effects
 }
 
 pub(super) fn handle_rewind_execute_failed(

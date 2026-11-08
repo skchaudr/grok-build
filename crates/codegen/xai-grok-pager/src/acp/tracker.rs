@@ -1207,6 +1207,8 @@ impl AcpUpdateTracker {
         let raw = extract_text_from_content(&chunk.content);
         let home = home_dir();
         let text = redact_display_home(&raw, &home);
+        let limits_only = limits_only_usage(&text).map(str::to_owned);
+        let text = limits_only.map_or(text, std::borrow::Cow::Owned);
         if text.is_empty() {
             return false;
         }
@@ -1997,6 +1999,15 @@ fn parent_tool_call_id(tc: &acp::ToolCall) -> Option<&str> {
 
 fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_default()
+}
+
+/// Claude's `/usage` reply keeps only the limits block: the adapter's markdown (`formatUsageResponse`) appends `### This session` after a `---` rule, native text appends "What's contributing to your limits usage?".
+fn limits_only_usage(text: &str) -> Option<&str> {
+    if let Some(i) = text.find("\n---\n\n### This session") {
+        return text.starts_with("## Usage").then(|| text[..i].trim_end());
+    }
+    let i = text.find("contributing to your limits usage")?;
+    Some(text[..text[..i].rfind('\n').map_or(0, |n| n + 1)].trim_end())
 }
 
 /// The pane must not paint `/home/<user>/…`. A startup listing of extension files is the case that
@@ -3317,6 +3328,31 @@ fn make_relative_path(path: &str) -> String {
     }
     path.to_string()
 }
+#[cfg(test)]
+mod usage_trim_tests {
+    use super::limits_only_usage;
+
+    #[test]
+    fn structured_usage_keeps_limits_only() {
+        let text = "## Usage\n\n### Limits\n\n**5-hour limit** — **22%**\n\n`████░░░░`\n\n---\n\n### This session\n\n| Cost |\n\n---\n\n### What’s using your limits?\n\nx";
+        assert_eq!(
+            limits_only_usage(text),
+            Some("## Usage\n\n### Limits\n\n**5-hour limit** — **22%**\n\n`████░░░░`")
+        );
+    }
+
+    #[test]
+    fn native_usage_cuts_at_contributions_line() {
+        let text = "Weekly: 22%\n\nWhat's contributing to your limits usage?\nMCP x 3%";
+        assert_eq!(limits_only_usage(text), Some("Weekly: 22%"));
+    }
+
+    #[test]
+    fn other_text_is_untouched() {
+        assert_eq!(limits_only_usage("hello\n---\n\nworld"), None);
+    }
+}
+
 #[cfg(test)]
 mod home_redact_tests {
     use super::redact_display_home;

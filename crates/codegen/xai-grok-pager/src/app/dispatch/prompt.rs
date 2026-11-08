@@ -1761,9 +1761,14 @@ pub(super) fn handle_prompt_response(
             wire_cancellation_category.as_deref(),
             wire_cancellation_context.as_ref(),
         );
+        // Claude's `usage.totalTokens` is the turn's token tally, not occupancy; `usage_update` already set it
+        let usage_is_tally = app.external_agent
+            && crate::slash::external_common::is_claude_label(app.external_agent_label.as_deref());
         if let Ok(response) = result.as_ref()
-            && let Some(reported) =
-                crate::acp::meta::reported_context(response.meta.as_ref(), response.usage.as_ref())
+            && let Some(reported) = crate::acp::meta::reported_context(
+                response.meta.as_ref(),
+                response.usage.as_ref().filter(|_| !usage_is_tally),
+            )
         {
             let window = reported
                 .window

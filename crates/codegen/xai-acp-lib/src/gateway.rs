@@ -189,6 +189,9 @@ impl<C: acp::Agent + 'static> AcpGatewayReceiver<acp::ClientSide, C> {
                 AcpAgentMessage::ListSessions(args) => {
                     handle!(args, self.tracing, conn, list_sessions, spawn, on_meta);
                 }
+                AcpAgentMessage::ForkSession(args) => {
+                    handle!(args, self.tracing, conn, fork_session, spawn, on_meta);
+                }
                 AcpAgentMessage::SetSessionMode(args) => {
                     handle!(args, self.tracing, conn, set_session_mode, spawn, on_meta);
                 }
@@ -504,6 +507,13 @@ impl acp::Agent for AcpGatewaySender<acp::ClientSide> {
         &self,
         args: acp::ListSessionsRequest,
     ) -> AcpResult<acp::ListSessionsResponse> {
+        self.forward(args).await
+    }
+
+    async fn fork_session(
+        &self,
+        args: acp::ForkSessionRequest,
+    ) -> AcpResult<acp::ForkSessionResponse> {
         self.forward(args).await
     }
 

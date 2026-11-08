@@ -88,7 +88,8 @@ pub(in crate::app::dispatch) fn dispatch_fetch_session_list(app: &mut AppView) -
         kind_filter,
         headless_policy: active_picker_headless_policy(app),
     }];
-    let foreign_effect = if app.chat_mode {
+    // An external agent lists its own sessions; a ~/.claude scan would add duplicate rows that resume through a skill prompt.
+    let foreign_effect = if app.chat_mode || app.external_agent {
         app.foreign_scan_coordinator.begin_request(foreign_seq);
         None
     } else {

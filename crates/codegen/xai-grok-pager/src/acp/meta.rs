@@ -283,6 +283,22 @@ mod tests {
         assert_eq!(reported.window, None);
     }
 
+    /// External adapters (claude-agent-acp) return `usage` as the turn's token tally; the caller withholds it so `usage_update` occupancy survives.
+    #[test]
+    fn withheld_usage_never_reports_context_but_explicit_meta_still_does() {
+        let response: acp::PromptResponse = serde_json::from_str(
+            r#"{"stopReason":"end_turn","usage":{"totalTokens":900000,"inputTokens":1,"outputTokens":1}}"#,
+        )
+        .expect("usage shape");
+        assert!(reported_context(response.meta.as_ref(), None).is_none());
+        let with_meta: acp::PromptResponse = serde_json::from_str(
+            r#"{"stopReason":"end_turn","_meta":{"used":54000},"usage":{"totalTokens":900000,"inputTokens":1,"outputTokens":1}}"#,
+        )
+        .expect("meta shape");
+        let reported = reported_context(with_meta.meta.as_ref(), None).expect("meta");
+        assert_eq!(reported.used, 54_000);
+    }
+
     #[test]
     fn notification_meta_reads_used_and_size_when_total_tokens_is_absent() {
         let meta_json = json!({ "used": 42_000u64, "size": 200_000u64 });

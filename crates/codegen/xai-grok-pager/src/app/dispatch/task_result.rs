@@ -21,7 +21,8 @@ use super::prompt::{
 };
 use super::queue::push_and_page_flip;
 use super::rewind::{
-    dispatch_rewind_success, handle_rewind_execute_failed, handle_rewind_points_loaded,
+    dispatch_rewind_success, handle_claude_rewind_fork_ready, handle_rewind_execute_failed,
+    handle_rewind_points_loaded,
 };
 use super::router::{dispatch, dispatch_action_result};
 use super::session::foreign::{
@@ -551,6 +552,20 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             cwd,
             parent_session_id,
         } => handle_fork_session_ready(app, agent_id, new_session_id, cwd, parent_session_id),
+        TaskResult::ClaudeRewindForkReady {
+            agent_id,
+            new_session_id,
+            cwd,
+            parent_session_id,
+            prompt_text,
+        } => handle_claude_rewind_fork_ready(
+            app,
+            agent_id,
+            new_session_id,
+            cwd,
+            parent_session_id,
+            prompt_text,
+        ),
         TaskResult::ForkSessionFailed { agent_id, error } => {
             handle_fork_session_failed(app, agent_id, error)
         }

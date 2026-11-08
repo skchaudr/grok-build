@@ -1,6 +1,8 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 //! This module takes [`Effect`] values produced by [`super::dispatch`] and spawns them as async tasks on a [`JoinSet`].
 //! When tasks complete, the event loop converts their output into [`TaskResult`] and feeds it back through dispatch.
+mod claude_rewind;
+mod claude_title;
 mod helpers;
 mod session_list;
 use super::actions;
@@ -3796,11 +3798,18 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::RenameSession { agent_id, session_id, title, cwd, kind } => {
+        Effect::RenameSession { agent_id, session_id, title, cwd, kind, external } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    match session_rename_rpc(
+                    // External agents have no rename method; write the title into the transcript.
+                    let result = if external {
+                        let (sid, t) = (session_id.0.to_string(), title.clone());
+                        tokio::task::spawn_blocking(move || claude_title::append_custom_title(&sid, &t))
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()))
+                    } else {
+                        session_rename_rpc(
                             &tx,
                             actions::RenameSessionRequest::for_rename(
                                 session_id.0.to_string(),
@@ -3810,7 +3819,8 @@ pub(crate) fn execute(
                             ),
                         )
                         .await
-                    {
+                    };
+                    match result {
                         Ok(()) => {
                             TaskResult::RenameSessionComplete {
                                 agent_id,
@@ -4876,6 +4886,52 @@ pub(crate) fn execute(
                                 error: sanitize_user_error(&e.to_string()),
                             }
                         }
+                    }
+                });
+        }
+        Effect::ClaudeRewindFork {
+            agent_id,
+            session_id,
+            cwd,
+            target_prompt_index,
+            prompt_text,
+        } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let fail = |error: String| TaskResult::RewindExecuteFailed { agent_id, error };
+                    let sid = session_id.0.to_string();
+                    let transcript = match tokio::task::spawn_blocking(move || {
+                        claude_rewind::read_transcript(&sid)
+                    })
+                    .await
+                    {
+                        Ok(Ok(t)) => t,
+                        Ok(Err(e)) => return fail(e),
+                        Err(e) => return fail(e.to_string()),
+                    };
+                    let Some(message_id) = claude_rewind::fork_point_message_id(
+                        &transcript,
+                        target_prompt_index,
+                    ) else {
+                        return fail("couldn't find that prompt in the Claude transcript".into());
+                    };
+                    let meta = serde_json::json!({
+                        "jetbrains": {"air": {"fork": {"version": 1, "messageId": message_id}}}
+                    });
+                    let req = acp::ForkSessionRequest::new(session_id.clone(), cwd.clone())
+                        .meta(meta.as_object().cloned());
+                    match acp_send(req, &tx).await {
+                        Ok(resp) => {
+                            TaskResult::ClaudeRewindForkReady {
+                                agent_id,
+                                new_session_id: resp.session_id,
+                                cwd,
+                                parent_session_id: session_id,
+                                prompt_text,
+                            }
+                        }
+                        Err(e) => fail(sanitize_user_error(&format!("rewind failed: {e}"))),
                     }
                 });
         }

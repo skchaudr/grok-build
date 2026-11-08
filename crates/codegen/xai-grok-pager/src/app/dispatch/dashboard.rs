@@ -1678,6 +1678,7 @@ pub(super) fn dispatch_dashboard_commit_rename(app: &mut AppView) -> Vec<Effect>
         return vec![];
     };
     let mut effects = Vec::new();
+    let external = app.external_agent;
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         if let Some(session_id) = agent.session.session_id.clone() {
             let cwd = agent.session.cwd.clone();
@@ -1688,6 +1689,7 @@ pub(super) fn dispatch_dashboard_commit_rename(app: &mut AppView) -> Vec<Effect>
                 title,
                 cwd,
                 kind: agent.rename_kind(),
+                external,
             });
         } else {
             agent.display_name = Some(title);

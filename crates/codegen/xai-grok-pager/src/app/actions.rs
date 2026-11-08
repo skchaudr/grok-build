@@ -2173,6 +2173,8 @@ pub enum Effect {
         title: String,
         cwd: std::path::PathBuf,
         kind: SessionKind,
+        /// External ACP agent: write the title to its transcript instead of `x.ai/session/rename`.
+        external: bool,
     },
     /// Unpin the current session title (`/rename --auto`).
     ResetSessionTitle {
@@ -2240,6 +2242,15 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         target_prompt_index: usize,
+    },
+    /// `/rewind` for an external Claude session: fork the transcript just before prompt `target_prompt_index` (files are not restored).
+    ClaudeRewindFork {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        cwd: std::path::PathBuf,
+        target_prompt_index: usize,
+        /// Prompt text put back in the composer once the fork loads.
+        prompt_text: String,
     },
     /// Fetch billing/credit usage from the agent's `x.ai/billing` extension.
     /// When `silent` is true the result updates `credit_balance` without pushing a system message into scrollback.
@@ -3208,6 +3219,14 @@ pub enum TaskResult {
     ForkSessionFailed {
         agent_id: AgentId,
         error: String,
+    },
+    /// `session/fork` for a Claude rewind completed; load the forked session and restore `prompt_text`.
+    ClaudeRewindForkReady {
+        agent_id: AgentId,
+        new_session_id: acp::SessionId,
+        cwd: std::path::PathBuf,
+        parent_session_id: acp::SessionId,
+        prompt_text: String,
     },
     RewindPointsLoaded {
         agent_id: AgentId,

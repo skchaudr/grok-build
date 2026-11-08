@@ -421,7 +421,9 @@ pub(crate) fn filter_session_entries(
             source_filter.matches(&e.source, e.session_kind.as_deref())
                 && (query.is_empty()
                     || fuzzy_matches_session(&e.id, &q)
-                    || fuzzy_matches_session(&e.summary, &q))
+                    || fuzzy_matches_session(&e.summary, &q)
+                    // cwd lets "grok-build" find sessions whose title never names the repo.
+                    || fuzzy_matches_session(&e.cwd, &q))
         })
         .map(|(i, _)| i)
         .collect()
@@ -1001,6 +1003,18 @@ mod tests {
         );
         assert_eq!(effective_filter_query(" hit ", Some("hit")), "");
         assert_eq!(effective_filter_query("", None), "");
+    }
+    #[test]
+    fn filter_matches_cwd_so_repo_search_finds_untitled_by_repo_rows() {
+        let mut recent = make_entry("40e362e8", "x");
+        recent.summary = "Grok Claude parity gaps".into();
+        recent.cwd = "/Volumes/Mini-SSD/offload/repos/grok-build".into();
+        let other = make_entry("abc", "y");
+        let entries = vec![recent, other];
+        assert_eq!(
+            filter_session_entries(Some(&entries), "grok-build", SourceFilter::All),
+            vec![0]
+        );
     }
     fn make_entry(id: &str, repo: &str) -> SessionPickerEntry {
         SessionPickerEntry {

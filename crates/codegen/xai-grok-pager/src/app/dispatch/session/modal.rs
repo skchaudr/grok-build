@@ -104,6 +104,7 @@ pub(in crate::app::dispatch) fn dispatch_rename_session(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let external = app.external_agent;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -124,6 +125,7 @@ pub(in crate::app::dispatch) fn dispatch_rename_session(
         title,
         cwd: agent.session.cwd.clone(),
         kind: agent.rename_kind(),
+        external,
     }]
 }
 /// Unpin the current session title via `x.ai/session/rename` with `resetToAuto`.
