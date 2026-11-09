@@ -36,6 +36,22 @@ Port list:
 5. The welcome screen shows Grok branding, not Pi's (grok-pi's `ExternalUiProfile`, a pager feature).
 6. Unverified: tool cards, `pi/ui/*` widgets and subagent rendering all need a live turn, and paid turns are Sab's.
 
+## Step 2: per-session agent profile (2003e4e6)
+
+- Each `AgentView` keeps `agent_label`, taken from its picker command. `AppView::agent_label(id)` resolves the picker label first, then the name the backend reports, then the launch agent's. `is_claude_session`, the new `is_pi_session`, rewind, fork, the slash label, child steer, usage tally and the effects' session flags all read it.
+- Shortcut: a session resumed from the dashboard has no picker command. If its backend reports no name, it takes the launch agent's label.
+
+Leader fix found on screen (1800daf9): grok-pi-acp sends a new session's commands, model and title before its `session/new` reply. The leader dropped them as unrouted (`server.rs`, "relay-owned session"). It now holds them while an external `session/new` is in flight and sends them after the reply.
+
+On screen (private leader, `claude` + `grok-pi` picker): the grok-pi session shows Pi's 126-entry menu with `/skill:*` and `/subagents-*`, and the Claude session in the same pager keeps Claude's menu, with no Pi skills.
+
+## Step 3: `pi/ui/*` (18f46cb3)
+
+- `acp_handler/pi_ui.rs` is hooked as the fallback arm of `handle_ext_notification`.
+- Ported onto native surfaces: status goes to the status bar; widget goes to new rows above the prompt (`pi_widgets` layout row); notify goes to scrollback (info) or a toast (warning, error); title, editor_text, cancel_interaction, compaction_summary (as a system block) and btw_history are handled; reset_extension_ui clears the statuses and widgets.
+- Acknowledged with no surface: `remote_tui`, `shortcuts`, `session_catalog` and `plan_file`. Because of that, grok-pi-acp now defaults Remote TUI off (`PI_GROK_REMOTE_TUI=1` turns it back on).
+- Not seen on screen: no status or widget appeared at session start, and extensions emit them during turns.
+
 ## Open items from the map
 
 1. Answered: the adapter compiles against grok-fork once Dwsy's `session/workflow` changes are in (8 errors before, all in workflow host types).
