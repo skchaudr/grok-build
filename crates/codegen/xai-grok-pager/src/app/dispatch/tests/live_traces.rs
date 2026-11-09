@@ -76,10 +76,11 @@ fn live_traces_rows_carry_the_receipt_label_then_the_description_and_open_at_the
     let mut app = test_app_with_agent();
     let sid = "test-session";
     let sub = |r: LiveReceipt| LiveReceipt { agent_id: Some("a7c7757506b19c0c4".into()), ..r };
+    const T: i64 = 1_794_178_915_000; // 23:01:55Z, after the thought
     let thought = r#"{"type":"assistant","timestamp":"2026-11-08T23:01:54.867Z","thinkingDurationMs":1193,"message":{"content":[{"type":"thinking","thinking":"","signature":"s"}]}}"#;
     let mut receipts = vec![
-        sub(receipt("PreToolUse", "toolu_S", 1_000, "git status --short")),
-        receipt("PreToolUse", "toolu_C", 2_000, "herdr pane send-keys w3E:p8 Enter"),
+        sub(receipt("PreToolUse", "toolu_S", T + 1_000, "git status --short")),
+        receipt("PreToolUse", "toolu_C", T + 2_000, "herdr pane send-keys w3E:p8 Enter"),
     ];
     let (pieces, mut merger, _) = merge::load("claude", thought, &receipts, Ok(&[]));
     let tx = open(&mut app, &pieces, &merger);
@@ -100,10 +101,10 @@ fn live_traces_rows_carry_the_receipt_label_then_the_description_and_open_at_the
         assert_eq!(agent.scrollback.selected(), Some(agent.scrollback.len() - 1), "the view opens on the last row");
     }
 
-    let rest = r#"{"type":"assistant","timestamp":"2026-11-08T23:01:55.862Z","message":{"content":[{"type":"tool_use","id":"toolu_C","name":"Bash","input":{"command":"herdr pane send-keys w3E:p8 Enter","description":"Open the session in grok view"}}]}}
-{"type":"user","timestamp":"2026-11-08T23:01:56.100Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_C","content":"ok"}]}}
-{"type":"assistant","timestamp":"2026-11-08T23:01:57.000Z","message":{"content":[{"type":"text","text":"Opened."}]}}"#;
-    receipts.extend([sub(receipt("PostToolUse", "toolu_S", 1_300, "git status --short")), receipt("PostToolUse", "toolu_C", 2_400, "herdr pane send-keys w3E:p8 Enter")]);
+    let rest = r#"{"type":"assistant","timestamp":"2026-11-08T23:01:56.900Z","message":{"content":[{"type":"tool_use","id":"toolu_C","name":"Bash","input":{"command":"herdr pane send-keys w3E:p8 Enter","description":"Open the session in grok view"}}]}}
+{"type":"user","timestamp":"2026-11-08T23:01:57.300Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_C","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-11-08T23:01:58.000Z","message":{"content":[{"type":"text","text":"Opened."}]}}"#;
+    receipts.extend([sub(receipt("PostToolUse", "toolu_S", T + 1_300, "git status --short")), receipt("PostToolUse", "toolu_C", T + 2_400, "herdr pane send-keys w3E:p8 Enter")]);
     let (next, _) = merger.ingest("claude", &format!("{thought}\n{rest}"), &receipts, Ok(&[]));
     tx.send(Update { events: live_feed::to_feds(sid, &next), life: "alive".into(), running: merger.running(), phoenix_offline: false }).unwrap();
     assert!(drain_live(&mut app));

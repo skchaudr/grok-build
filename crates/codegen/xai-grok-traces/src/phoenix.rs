@@ -93,10 +93,12 @@ pub fn parse_page(v: &Value) -> (Vec<PhoenixSpan>, Option<String>) {
 /// session with no spans, so callers must resolve the emitted id first.
 pub fn fetch_session_spans(base: &str, project: &str, session_id: &str, timeout: Duration) -> Result<Vec<PhoenixSpan>, String> {
     let deadline = Instant::now() + timeout;
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(timeout)
-        .build()
-        .map_err(|e| format!("phoenix client: {e}"))?;
+    // One client per process: building one loads the system trust store, which cost the live view's poll most of its CPU.
+    static CLIENT: std::sync::OnceLock<Result<reqwest::blocking::Client, String>> = std::sync::OnceLock::new();
+    let client = CLIENT
+        .get_or_init(|| reqwest::blocking::Client::builder().build().map_err(|e| format!("phoenix client: {e}")))
+        .as_ref()
+        .map_err(Clone::clone)?;
     let url = format!("{}/v1/projects/{project}/spans", base.trim_end_matches('/'));
     // JSON-quoted so a numeric-looking session id still matches as a string.
     let filter = format!("session.id:{}", Value::String(session_id.to_owned()));

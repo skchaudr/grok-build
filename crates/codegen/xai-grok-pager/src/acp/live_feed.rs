@@ -93,6 +93,55 @@ pub(crate) struct Job {
     pub harness_start: Option<i64>,
     pub merger: Merger,
     pub remote: bool,
+    pub subs: SubCache,
+}
+
+/// Size and mtime of a file, for skipping a poll when nothing it reads has changed.
+type FileStamp = (u64, Option<std::time::SystemTime>);
+
+fn file_stamp(p: &std::path::Path) -> FileStamp {
+    std::fs::metadata(p).map(|m| (m.len(), m.modified().ok())).unwrap_or((0, None))
+}
+
+/// Claude keeps a session's subagent transcripts in `<session>/subagents/agent-*.jsonl`.
+fn subagent_files(transcript: &std::path::Path) -> Vec<PathBuf> {
+    let dir = transcript.with_extension("").join("subagents");
+    let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "jsonl")).collect())
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// Parsed calls and results of each subagent transcript, re-read only when the file changed.
+#[derive(Default)]
+pub(crate) struct SubCache(std::collections::HashMap<PathBuf, (FileStamp, Vec<merge::Item>)>);
+
+impl SubCache {
+    pub(crate) fn items(&mut self, transcript: &std::path::Path) -> Vec<merge::Item> {
+        let mut out = Vec::new();
+        for f in subagent_files(transcript) {
+            let st = file_stamp(&f);
+            let fresh = self.0.get(&f).is_none_or(|(have, _)| *have != st);
+            if fresh {
+                let text = std::fs::read_to_string(&f).unwrap_or_default();
+                let items = merge::parse("claude", &text)
+                    .into_iter()
+                    .filter(|i| matches!(i.kind, merge::ItemKind::Call { .. } | merge::ItemKind::Result { .. }))
+                    .collect();
+                self.0.insert(f.clone(), (st, items));
+            }
+            out.extend(self.0[&f].1.iter().cloned());
+        }
+        out
+    }
+}
+
+/// Everything a local poll reads: the transcript, the subagent transcripts, and this session's newest receipt.
+fn local_stamp(transcript: &std::path::Path, newest_receipt: Option<(i64, i64)>) -> (Vec<FileStamp>, Option<(i64, i64)>) {
+    let mut v = vec![file_stamp(transcript)];
+    v.extend(subagent_files(transcript).iter().map(|f| file_stamp(f)));
+    (v, newest_receipt)
 }
 
 pub(crate) fn start(job: Job) -> Tail {
@@ -106,6 +155,9 @@ pub(crate) fn start(job: Job) -> Tail {
 fn run(mut job: Job, tx: mpsc::Sender<Update>, stop: Arc<AtomicBool>) {
     let waker = xai_grok_traces::wake::Waker::bind_default();
     let mut primed = false;
+    let mut last: Option<(Vec<FileStamp>, Option<(i64, i64)>)> = None;
+    let mut idx: Option<Option<TraceIndex>> = None;
+    let (mut receipts_seen, mut life_sent, mut offline_sent) = (Vec::new(), String::new(), false);
     loop {
         if stop.load(Ordering::Acquire) {
             break;
@@ -117,7 +169,26 @@ fn run(mut job: Job, tx: mpsc::Sender<Update>, stop: Arc<AtomicBool>) {
             }
         }
         primed = true;
-        let snap = if job.remote { remote_snapshot(&job) } else { Ok(local_snapshot(&job)) };
+        if !job.remote {
+            // Nothing the poll reads changed: no transcript parse, no database, no Phoenix. Only the pid can end the session.
+            let idx = idx.get_or_insert_with(|| TraceIndex::open_with(&default_db_path(), Some(Duration::from_millis(200))).ok());
+            let newest = idx.as_ref().and_then(|i| i.last_receipt_key(&job.session_id).ok().flatten());
+            let stamp = local_stamp(&job.file_path, newest);
+            if last.as_ref() == Some(&stamp) {
+                let life = merge::session_life(&job.source, &receipts_seen, pid_alive(job.harness_pid, job.harness_start)).to_string();
+                if life != life_sent {
+                    life_sent = life.clone();
+                    if tx.send(Update { events: Vec::new(), life, running: job.merger.running(), phoenix_offline: offline_sent }).is_err() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            last = Some(stamp);
+            let items = job.subs.items(&job.file_path);
+            job.merger.set_subagent_items(&items);
+        }
+        let snap = if job.remote { remote_snapshot(&job) } else { Ok(local_snapshot(&mut job)) };
         let (transcript, receipts, pid_alive, file_name) = match snap {
             Ok(s) => s,
             Err(e) => {
@@ -133,6 +204,7 @@ fn run(mut job: Job, tx: mpsc::Sender<Update>, stop: Arc<AtomicBool>) {
         let offline = spans.is_err();
         let (pieces, _) = job.merger.ingest(&job.source, &transcript, &receipts, spans.as_deref().map_err(|_| ()));
         let life = merge::session_life(&job.source, &receipts, pid_alive).to_string();
+        (receipts_seen, life_sent, offline_sent) = (receipts, life.clone(), offline);
         let running = job.merger.running();
         let events = to_feds(&job.session_id, &pieces);
         if tx.send(Update { events, life, running, phoenix_offline: offline }).is_err() {
@@ -141,20 +213,23 @@ fn run(mut job: Job, tx: mpsc::Sender<Update>, stop: Arc<AtomicBool>) {
     }
 }
 
-fn local_snapshot(job: &Job) -> (String, Vec<live::LiveReceipt>, Option<bool>, String) {
+fn pid_alive(pid: Option<i64>, start: Option<i64>) -> Option<bool> {
+    pid.map(|pid| match start {
+        Some(start) => live::alive(pid, start),
+        None => live::alive_pid(pid),
+    })
+}
+
+fn local_snapshot(job: &mut Job) -> (String, Vec<live::LiveReceipt>, Option<bool>, String) {
     // shortcut: re-reads the whole file each wake, switch to a byte offset if a session misses the one-second tail.
     let transcript = std::fs::read_to_string(&job.file_path).unwrap_or_default();
     let file_name = job.file_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let idx = TraceIndex::open_with(&default_db_path(), Some(Duration::from_millis(200))).ok();
     let receipts = idx.as_ref().and_then(|i| i.session_receipts(&job.session_id).ok()).unwrap_or_default();
     let row = idx.as_ref().and_then(|i| i.session(&job.session_id).ok().flatten());
-    let pid = row.as_ref().and_then(|r| r.harness_pid).or(job.harness_pid);
-    let start = row.as_ref().and_then(|r| r.harness_start).or(job.harness_start);
-    let alive = pid.map(|pid| match start {
-        Some(start) => live::alive(pid, start),
-        None => live::alive_pid(pid),
-    });
-    (transcript, receipts, alive, file_name)
+    job.harness_pid = row.as_ref().and_then(|r| r.harness_pid).or(job.harness_pid);
+    job.harness_start = row.as_ref().and_then(|r| r.harness_start).or(job.harness_start);
+    (transcript, receipts, pid_alive(job.harness_pid, job.harness_start), file_name)
 }
 
 fn remote_snapshot(job: &Job) -> Result<(String, Vec<live::LiveReceipt>, Option<bool>, String), String> {
@@ -165,7 +240,7 @@ fn remote_snapshot(job: &Job) -> Result<(String, Vec<live::LiveReceipt>, Option<
     Ok((d.transcript, d.receipts, d.pid_alive, d.file_name))
 }
 
-fn fetch_spans(source: &str, file_name: &str, native_id: Option<&str>) -> Result<Vec<phoenix::PhoenixSpan>, ()> {
+pub(crate) fn fetch_spans(source: &str, file_name: &str, native_id: Option<&str>) -> Result<Vec<phoenix::PhoenixSpan>, ()> {
     if source.is_empty() {
         return Ok(Vec::new());
     }
@@ -430,10 +505,34 @@ mod tests {
             harness_start: None,
             merger: Merger::default(),
             remote: true,
+            subs: SubCache::default(),
         };
         assert!(remote_snapshot(&job(None)).is_err());
         let err = remote_snapshot(&job(Some("no-such-host-for-this-test"))).unwrap_err();
         assert!(err.contains("not in the hosts file"), "{err}");
+    }
+
+    /// An idle live view used 15-28% CPU: every second it re-read and re-parsed the transcript and all subagent
+    /// transcripts and refetched Phoenix. The stamp it now checks first stays put until something it reads changes.
+    #[test]
+    fn live_poll_stamp_is_stable_while_idle_and_subagent_files_are_reparsed_only_when_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("s.jsonl");
+        std::fs::write(&main, "{}\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("s/subagents")).unwrap();
+        let sub = dir.path().join("s/subagents/agent-a1.jsonl");
+        let call = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_X","name":"Bash","input":{"command":"ls"}}]}}"#;
+        std::fs::write(&sub, format!("{call}\n")).unwrap();
+        let first = local_stamp(&main, Some((1, 1)));
+        assert_eq!(first, local_stamp(&main, Some((1, 1))), "nothing changed, nothing to do");
+        assert_ne!(first, local_stamp(&main, Some((2, 2))), "a new receipt is a change");
+
+        let mut cache = SubCache::default();
+        assert_eq!(cache.items(&main).len(), 1);
+        let result = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_X","content":"a"}]}}"#;
+        std::fs::write(&sub, format!("{call}\n{result}\n")).unwrap();
+        assert_ne!(first, local_stamp(&main, Some((1, 1))), "a subagent transcript grew");
+        assert_eq!(cache.items(&main).len(), 2, "the grown file is re-read");
     }
 
     fn done_input() -> Option<String> {

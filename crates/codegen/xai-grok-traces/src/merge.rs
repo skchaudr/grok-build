@@ -120,9 +120,23 @@ impl Call {
 pub struct Merger {
     calls: HashMap<String, Call>,
     seen: HashSet<u64>,
+    /// Input and result of subagent calls, from their own transcripts: id -> (input, (output, is_error)).
+    subs: HashMap<String, (Option<String>, Option<(String, bool)>)>,
 }
 
 impl Merger {
+    /// The calls and results in the session's subagent transcripts. Their rows take input and output from here.
+    pub fn set_subagent_items(&mut self, items: &[Item]) {
+        self.subs.clear();
+        for it in items {
+            match &it.kind {
+                ItemKind::Call { id, input, .. } if !input.is_empty() => self.subs.entry(id.clone()).or_default().0 = Some(input.clone()),
+                ItemKind::Result { id, output, is_error } => self.subs.entry(id.clone()).or_default().1 = Some((output.clone(), *is_error)),
+                _ => {}
+            }
+        }
+    }
+
     /// A call is starting or ending. `items` is the transcript as it reads right now.
     pub fn on_signal(&mut self, call_id: String, tool: Option<String>, start_ms: Option<i64>, end_ms: Option<i64>, error: Option<bool>, from_span: bool, parent: Option<String>, items: &[Item]) -> Vec<Piece> {
         self.signal(Signal { call_id, tool, start_ms, end_ms, error, from_span, parent, detail: None, sub: false }, items)
@@ -130,7 +144,11 @@ impl Merger {
 
     fn signal(&mut self, sig: Signal, items: &[Item]) -> Vec<Piece> {
         let id = self.upsert(sig);
-        let before = call_ord(items, &id).unwrap_or(u64::MAX);
+        // A call this transcript does not have (a subagent's, or one not written yet) goes after what was written before it started.
+        let before = call_ord(items, &id).unwrap_or_else(|| {
+            let start = self.calls[&id].start_ms;
+            items.iter().find(|it| it.at_ms > start && start > 0).map_or(u64::MAX, |it| it.ord)
+        });
         let mut out = self.flow(items, before);
         self.absorb(items, Some(&id));
         out.extend(self.emit(&id));
@@ -150,15 +168,16 @@ impl Merger {
     /// Receipts and spans the view has now. Calls and prose already emitted stay put.
     pub fn ingest(&mut self, source: &str, transcript: &str, receipts: &[LiveReceipt], spans: Result<&[PhoenixSpan], ()>) -> (Vec<Piece>, bool) {
         let items = parse(source, transcript);
-        let mut pieces = Vec::new();
-        for sig in receipt_signals(source, receipts) {
-            pieces.extend(self.signal(sig, &items));
-        }
+        let mut sigs = receipt_signals(source, receipts);
         let offline = spans.is_err();
         if let Ok(spans) = spans {
-            for sig in span_signals(spans) {
-                pieces.extend(self.signal(sig, &items));
-            }
+            sigs.extend(span_signals(spans));
+        }
+        // One timeline: a call only spans know about lands among the receipted calls of its time, not after all of them.
+        sigs.sort_by_key(|s| s.start_ms.or(s.end_ms).unwrap_or(0));
+        let mut pieces = Vec::new();
+        for sig in sigs {
+            pieces.extend(self.signal(sig, &items));
         }
         if !crate::live::strict_ids(source) {
             self.close_denied();
@@ -240,7 +259,7 @@ impl Merger {
         }
         self.absorb(items, None);
         let mut out = Vec::new();
-        for it in items {
+        for (k, it) in items.iter().enumerate() {
             if let ItemKind::Call { id, .. } = &it.kind {
                 out.extend(self.emit(id));
                 continue;
@@ -251,7 +270,24 @@ impl Merger {
             match &it.kind {
                 ItemKind::User(t) => out.push(Piece::User(t.clone())),
                 ItemKind::Text(t) => out.push(Piece::Text(t.clone())),
-                ItemKind::Thinking(t, dur) => out.push(Piece::Thinking { text: t.clone(), at_ms: it.at_ms, dur_ms: *dur }),
+                ItemKind::Thinking(t, dur) => {
+                    // Claude often writes a second signature-only block (3 ms) right after a thought: one row, durations summed.
+                    let (mut text, mut dur) = (t.clone(), *dur);
+                    for next in items[k + 1..].iter().take_while(|n| matches!(n.kind, ItemKind::Thinking(..))) {
+                        let ItemKind::Thinking(t2, d2) = &next.kind else { break };
+                        if !self.seen.insert(next.ord) {
+                            continue;
+                        }
+                        if t2 != ZWSP {
+                            text = if text == ZWSP { t2.clone() } else { format!("{text}\n\n{t2}") };
+                        }
+                        dur = match (dur, d2) {
+                            (Some(a), Some(b)) => Some(a + b),
+                            (a, b) => a.or(*b),
+                        };
+                    }
+                    out.push(Piece::Thinking { text, at_ms: it.at_ms, dur_ms: dur });
+                }
                 ItemKind::Call { .. } | ItemKind::Result { .. } => {}
             }
         }
@@ -291,6 +327,17 @@ impl Merger {
         let Some(c) = self.calls.get_mut(id) else { return Vec::new() };
         if c.done {
             return Vec::new();
+        }
+        if let Some((input, result)) = self.subs.get(id) {
+            if c.input.is_none() && input.is_some() {
+                c.input = input.clone();
+                c.input_dirty = true;
+            }
+            if c.output.is_none() && let Some((output, err)) = result {
+                c.output = Some(output.clone());
+                c.out_err = *err;
+                c.output_dirty = true;
+            }
         }
         // A subagent's result is in its own transcript, never this one: its end is enough.
         let ready = (c.output.is_some() || c.sub) && c.end_ms.is_some();
@@ -446,6 +493,7 @@ fn span_signals(spans: &[PhoenixSpan]) -> Vec<Signal> {
         if e.parent.is_none() {
             e.parent = parent;
         }
+        e.sub |= s.agent_id.as_deref().is_some_and(|a| !a.is_empty());
         match s.status {
             SpanStatus::Error => e.error = Some(true),
             SpanStatus::Ok if e.error.is_none() => e.error = Some(false),
@@ -508,7 +556,7 @@ fn parse_claude(text: &str) -> Vec<Item> {
             match b.get("type").and_then(|t| t.as_str()) {
                 Some("thinking") => {
                     let body = b.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
-                    let body = if body.trim().is_empty() { "\u{200b}".to_string() } else { body.to_string() };
+                    let body = if body.trim().is_empty() { ZWSP.to_string() } else { body.to_string() };
                     push(&mut out, &mut ord, at, ItemKind::Thinking(body, v.get("thinkingDurationMs").and_then(|d| d.as_i64())));
                 }
                 Some("text") => {
@@ -532,6 +580,9 @@ fn parse_claude(text: &str) -> Vec<Item> {
     }
     out
 }
+
+/// Stands in for a signature-only thought, which grok would otherwise drop.
+const ZWSP: &str = "\u{200b}";
 
 fn ts_ms(v: &serde_json::Value) -> i64 {
     v.get("timestamp")
@@ -613,7 +664,7 @@ fn parse_pi(text: &str) -> Vec<Item> {
             match b.get("type").and_then(|t| t.as_str()) {
                 Some("thinking") => {
                     let body = b.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
-                    let body = if body.trim().is_empty() { "\u{200b}".to_string() } else { body.to_string() };
+                    let body = if body.trim().is_empty() { ZWSP.to_string() } else { body.to_string() };
                     push(&mut out, &mut ord, at, ItemKind::Thinking(body, None));
                 }
                 Some("text") => {
@@ -821,6 +872,84 @@ mod tests {
             })
             .collect();
         assert_eq!(order, ["a", "thought Some(1193)", "b"], "{pieces:?}");
+    }
+
+    /// Session 40e362e8: 263 subagent calls had Phoenix spans (agent_id set) and no receipts, so rows read "Run Bash call"
+    /// and never ended. Their input and result are in the subagent's own transcript.
+    #[test]
+    fn a_span_only_subagent_call_takes_its_content_from_the_subagent_transcript() {
+        let span = PhoenixSpan {
+            span_id: "s".into(),
+            trace_id: "t".into(),
+            call_id: Some("toolu_X".into()),
+            name: "claude tool:Bash".into(),
+            hook_event: Some("PostToolUse".into()),
+            tool_name: Some("Bash".into()),
+            start: Utc.timestamp_millis_opt(1_000).unwrap(),
+            end: Utc.timestamp_millis_opt(1_400).unwrap(),
+            status: SpanStatus::Ok,
+            parent_id: None,
+            session_id: Some("sess".into()),
+            agent_id: Some("a7f9c89128fb351e2".into()),
+            transcript_path: None,
+        };
+        let sub = parse("claude", r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_X","name":"Bash","input":{"command":"ls","description":"List the repo"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_X","content":"a.txt"}]}}"#);
+        let mut m = Merger::default();
+        m.set_subagent_items(&sub);
+        let (pieces, _) = m.ingest("claude", "", &[], Ok(std::slice::from_ref(&span)));
+        assert!(
+            matches!(pieces.as_slice(), [Piece::Complete { input: Some(i), output, fresh: true, .. }] if i.contains("List the repo") && output == "a.txt"),
+            "{pieces:?}"
+        );
+        let mut bare = Merger::default();
+        let (pieces, _) = bare.ingest("claude", "", &[], Ok(std::slice::from_ref(&span)));
+        assert!(matches!(pieces.as_slice(), [Piece::Complete { .. }]), "with no subagent transcript the span's end still ends it: {pieces:?}");
+    }
+
+    /// Spans arrive after receipts; a call only a span names still lands at its time, not after all history.
+    #[test]
+    fn a_span_only_call_lands_between_the_receipted_calls_of_its_time() {
+        let text = r#"{"type":"assistant","timestamp":"2026-11-08T22:00:01.000Z","message":{"content":[{"type":"tool_use","id":"a","name":"Bash","input":{"command":"one"}}]}}
+{"type":"user","timestamp":"2026-11-08T22:00:02.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"a","content":"x"}]}}
+{"type":"assistant","timestamp":"2026-11-08T22:00:10.000Z","message":{"content":[{"type":"text","text":"later"},{"type":"tool_use","id":"b","name":"Bash","input":{"command":"two"}}]}}"#;
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-11-08T22:00:00Z").unwrap().timestamp_millis();
+        let span = PhoenixSpan {
+            span_id: "s".into(),
+            trace_id: "t".into(),
+            call_id: Some("x".into()),
+            name: "claude tool:Bash".into(),
+            hook_event: None,
+            tool_name: Some("Bash".into()),
+            start: Utc.timestamp_millis_opt(t0 + 5_000).unwrap(),
+            end: Utc.timestamp_millis_opt(t0 + 6_000).unwrap(),
+            status: SpanStatus::Ok,
+            parent_id: None,
+            session_id: None,
+            agent_id: Some("a1".into()),
+            transcript_path: None,
+        };
+        let receipts = [pre("a", "Bash", t0 + 1_000), post("a", t0 + 2_000, Some(false)), pre("b", "Bash", t0 + 10_000)];
+        let (pieces, _, _) = load("claude", text, &receipts, Ok(std::slice::from_ref(&span)));
+        let order: Vec<String> = pieces
+            .iter()
+            .filter_map(|p| match p {
+                Piece::Open { id, .. } | Piece::Complete { id, fresh: true, .. } => Some(id.clone()),
+                Piece::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(order, ["a", "x", "later", "b"], "{pieces:?}");
+    }
+
+    #[test]
+    fn a_trailing_signature_only_thought_folds_into_the_one_before() {
+        let text = r#"{"type":"assistant","timestamp":"2026-11-08T23:53:32.000Z","thinkingDurationMs":4101,"message":{"content":[{"type":"thinking","thinking":"","signature":"s"}]}}
+{"type":"assistant","timestamp":"2026-11-08T23:53:32.100Z","thinkingDurationMs":5,"message":{"content":[{"type":"thinking","thinking":"","signature":"s"}]}}
+{"type":"assistant","timestamp":"2026-11-08T23:53:41.000Z","message":{"content":[{"type":"tool_use","id":"c","name":"Bash","input":{"command":"ls"}}]}}"#;
+        let (pieces, _, _) = load("claude", text, &[], Ok(&[]));
+        let thoughts: Vec<_> = pieces.iter().filter_map(|p| if let Piece::Thinking { dur_ms, .. } = p { Some(*dur_ms) } else { None }).collect();
+        assert_eq!(thoughts, [Some(4106)]);
     }
 
     #[test]

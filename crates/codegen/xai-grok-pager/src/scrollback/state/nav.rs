@@ -1084,7 +1084,9 @@ impl ScrollbackState {
         }
     }
 
-    /// If follow mode clipped a one- or two-line tool row and the next row is also a tool, pull that parent back on screen.
+    /// If follow mode clipped a one- or two-line tool row that heads a run of tools (a parent above its children),
+    /// pull it back on screen. A row inside a longer run of tools is not a parent: pulling it up would hide the
+    /// newest row below the viewport on every frame.
     fn reveal_clipped_parent_tool(&mut self) {
         let top = self.scroll_offset;
         if top == 0 {
@@ -1114,11 +1116,10 @@ impl ScrollbackState {
             .entries
             .get_index(i)
             .is_some_and(|(_, entry)| matches!(entry.block, RenderBlock::ToolCall(_)));
-        let next_is_tool = self
-            .entries
-            .get_index(i + 1)
-            .is_some_and(|(_, entry)| matches!(entry.block, RenderBlock::ToolCall(_)));
-        if is_tool && next_is_tool {
+        let tool_at = |j: usize| self.entries.get_index(j).is_some_and(|(_, entry)| matches!(entry.block, RenderBlock::ToolCall(_)));
+        let next_is_tool = tool_at(i + 1);
+        let prev_is_tool = i > 0 && tool_at(i - 1);
+        if is_tool && next_is_tool && !prev_is_tool {
             self.scroll_offset = y;
         }
     }
@@ -1153,6 +1154,19 @@ mod tests {
             "parent row scrolled off: y={y} scroll={}",
             state.scroll_offset()
         );
+    }
+
+    /// The live traces view: a long run of one-line tool rows. Following must end on the newest row.
+    #[test]
+    fn follow_keeps_the_newest_row_on_screen_in_a_long_run_of_tools() {
+        let mut state = ScrollbackState::new();
+        state.push_block(user_block("go"));
+        for i in 0..60 {
+            state.push_block(tool_block(&format!("cmd {i}")));
+        }
+        state.enable_follow();
+        state.prepare_layout(80, 10);
+        assert_eq!(state.scroll_offset(), state.max_scroll_offset(), "the newest row is below the viewport");
     }
 
     #[test]

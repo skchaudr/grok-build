@@ -250,6 +250,7 @@ fn open_live_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone:
     }
     let session_id = row.id.clone();
     let remote = row.host.is_some();
+    let mut subs = live_feed::SubCache::default();
     let (pieces, merger, life) = if remote {
         (Vec::new(), xai_grok_traces::merge::Merger::default(), "unknown".to_string())
     } else {
@@ -266,7 +267,12 @@ fn open_live_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone:
             Err(_) => (Vec::new(), None),
         };
         let life = xai_grok_traces::merge::session_life(&row.source, &receipts, pid_alive).to_string();
-        let (pieces, merger, _) = xai_grok_traces::merge::load(&row.source, &transcript, &receipts, Ok(&[]));
+        let mut merger = xai_grok_traces::merge::Merger::default();
+        merger.set_subagent_items(&subs.items(&row.file_path));
+        // Spans too, so calls only Phoenix knows (a subagent's, with no receipts) land at their time instead of after all history.
+        let file_name = row.file_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let spans = live_feed::fetch_spans(&row.source, &file_name, row.native_id.as_deref());
+        let (pieces, _) = merger.ingest(&row.source, &transcript, &receipts, spans.as_deref().map_err(|_| ()));
         (pieces, merger, life)
     };
     let running = merger.running().map(|(id, n)| (id, n, std::time::Instant::now()));
@@ -290,6 +296,7 @@ fn open_live_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone:
             harness_start: row.harness_start,
             merger,
             remote,
+            subs,
         }),
         session_id,
         life,
