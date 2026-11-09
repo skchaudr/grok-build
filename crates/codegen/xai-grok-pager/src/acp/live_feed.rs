@@ -241,8 +241,8 @@ fn remote_snapshot(job: &Job) -> Result<(String, Vec<live::LiveReceipt>, Option<
 }
 
 pub(crate) fn fetch_spans(source: &str, file_name: &str, native_id: Option<&str>) -> Result<Vec<phoenix::PhoenixSpan>, ()> {
-    // shortcut: dpi has no span emitter and its file name is `agent.sqlite#<id>`, a key no emitter stamps; key it when one exists.
-    if source.is_empty() || source == "dpi" {
+    // shortcut: dpi and Codex have no span emitter (Codex has no otel config here); key them when one exists.
+    if source.is_empty() || matches!(source, "dpi" | "codex") {
         return Ok(Vec::new());
     }
     let sid = merge::phoenix_session_id(file_name, native_id);

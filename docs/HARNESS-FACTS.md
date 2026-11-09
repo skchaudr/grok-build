@@ -2,7 +2,7 @@
 
 One place for per-harness facts that agents keep rediscovering. Check here before researching; update here when you learn something. Every row names its source and whether it was **live**-tested, read from **code/schema**, or only **documented**.
 
-Last updated 2026-11-01.
+Last updated 2026-11-09.
 
 ## Session logs
 
@@ -10,7 +10,7 @@ Last updated 2026-11-01.
 |---|---|
 | Claude Code | `~/.claude/projects/*/*.jsonl` |
 | Pi | `~/.pi/agent/sessions/**/*.jsonl` (the mini has almost no tool calls; the Air has real ones) |
-| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl.zst` (`zstd -dc`), also `archived_sessions` |
+| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` (the 2026-11-03 rollout on the mini is plain) or `.jsonl.zst` (`zstd -dc`), also `archived_sessions` |
 | Cursor | `~/.cursor/projects/*/agent-transcripts/**/*.jsonl` |
 | Grok | `~/.grok/sessions/<cwd>/<id>/updates.jsonl` (`rawInput`) |
 
@@ -47,6 +47,24 @@ Pi paths are under `~/.pi/agent/install/releases/<ver>/node_modules/@earendil-wo
 | Grok | `PreToolUse`, `SubagentStart`, `SubagentStop` in `~/.grok/hooks/traces.json` (all `grok-traces hook grok`, registered 2026-11-01) | not checked; capture-only | not checked | `async: true` is ignored by grok (`xai-grok-hooks/src/config.rs:101-111` has no such field); hooks run synchronously, so PreToolUse adds a process spawn before each tool (`xai-grok-hooks/src/dispatcher.rs:320-340`, `xai-grok-shell/src/session/acp_session_impl/tool_calls.rs:1310-1320`). PreToolUse payload `toolUseId`, `toolName`, `toolInput` (`xai-grok-hooks/src/event.rs:474-480`, camelCase), fired at `tool_calls.rs:2798`; `xai-grok-traces/src/hook.rs:26` `TOOL_USE_ID` aliases cover `toolUseId` | code; not run live |
 
 Open: for every harness, one live session proving the deny **reason** reaches the model and the model retries.
+
+## Codex hooks (live feed)
+
+Codex 0.163.0 on both Macs. Read from code/schema 2026-11-09 (openai/codex `9f04d88`) and Codex's own `hooks/list`; **no live Codex turn has fired them yet**.
+
+- **Trust gate.** A `~/.codex/hooks.json` hook runs only if `config.toml` has `[hooks.state."<hooks.json path>:<event>:<group>:<handler>"]` with `trusted_hash` equal to its current hash and `enabled` not `false` (`codex-rs/hooks/src/engine/discovery.rs:811-924`). Untrusted hooks are skipped silently; `codex --dangerously-bypass-hook-trust` is the only bypass. The hash is over a normalized TOML identity (`discovery.rs:972-998`), so read it, do not compute it: `codex app-server` JSON-RPC `initialize` then `hooks/list` (`{"cwds":[...]}`) returns each hook's `key`, `currentHash`, `trustStatus`, `enabled` without starting a thread.
+- **Keys are positions.** Inserting a group shifts every later key: old trust entries then point at different hooks (`modified`), and the moved hooks become `untrusted`. Re-run `hooks/list` after any hooks.json edit.
+- **2026-11-09 state.** The mini's six `grok-traces hook codex` hooks were `untrusted`/`modified` (so zero Codex receipts ever); now trusted+enabled (backup `~/.codex/config.toml.bak-2026-11-09`). sab-air's were already trusted; `session_start`, `user_prompt_submit` and `stop` are trusted but **disabled** there (a `/hooks` toggle), left as found.
+- **Events.** PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, SessionStart, SessionEnd, SubagentStart, SubagentStop, Interrupt, UserPromptSubmit, Stop. No `PostToolUseFailure`: the hooks.json entries under it never run.
+- **Payload** (`codex-rs/hooks/schema/generated/*.command.input.schema.json`): Claude's snake_case names. Every event: `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`, `permission_mode`; tool events add `turn_id`, `tool_name`, `tool_use_id`, `tool_input`; PostToolUse adds `tool_response`; Stop adds `last_assistant_message`; SubagentStop adds `agent_id`, `agent_transcript_path`.
+- **Tool names** (`codex-rs/core/src/tools/hook_names.rs`): shell is `Bash` (`tool_input.command`), patches `apply_patch` (matcher aliases `Write`, `Edit`), spawns `spawn_agent` (alias `Agent`), MCP `mcp__<server>__<tool>`.
+- **Ids.** `tool_use_id` is the call id (`core/src/tools/registry.rs:150`). In code mode the model calls an `exec` JavaScript tool (`custom_tool_call`); each nested call gets `call_id = "exec-<uuid>"` (`core/src/tools/code_mode/delegate.rs:323`), which is also the rollout's `item_completed` item id. grok-traces skips `exec`/`wait` wrapper receipts (`merge.rs` `receipt_signals`).
+- **Rollout content.** `event_msg` `item_completed` items: `UserMessage`, `AgentMessage`, `Reasoning` (encrypted, `summary_text` usually empty, item spans ~1 ms so no thinking time), `CommandExecution` (`command` argv, `aggregated_output`, `exit_code`), `FileChange` (`changes` by path), `McpToolCall`, `WebSearch`. A call's item lands only when it finishes; there is no `item_started`, so a running call is known from its hook alone.
+- **Phoenix.** No otel config in `~/.codex/config.toml`; the live feed does not query Phoenix for Codex.
+
+## Pi extension result (live feed)
+
+`tool_execution_end` carries `result` (`AgentToolResult`: `{content: [{type: "text", text}], details?}`), `isError`, `durationMs?`, `parentToolCallId?` (Pi `dist/core/extensions/types.d.ts:872-882`). `~/.pi/agent/extensions/traces.ts` forwards the text blocks' first 1024 chars as `result` (2026-11-09, both Macs identical, backups `traces.ts.bak-2026-11-09`); a driven `tool_execution_end` landed in `trace_receipts` with a 1024-char `result`.
 
 ## Grok subagent hooks
 

@@ -376,6 +376,9 @@ pub fn boundary(source: &str, event: &str, detail: Option<&str>) -> Option<Bound
     match (source, event) {
         ("claude", "SessionStart") => (detail != Some("compact")).then_some(Idle),
         ("claude", "Stop" | "StopFailure") => Some(Idle),
+        ("codex", "SessionStart" | "Stop") => Some(Idle),
+        ("codex", "UserPromptSubmit") => Some(Prompt),
+        ("codex", "SessionEnd") => Some(End),
         ("claude", "Notification") => (detail == Some("idle_prompt")).then_some(Idle),
         ("claude", "UserPromptSubmit") => Some(Prompt),
         ("claude", "SessionEnd") => Some(End),
@@ -396,8 +399,8 @@ pub fn boundary(source: &str, event: &str, detail: Option<&str>) -> Option<Bound
 /// (sent by the Pi extension from the child's session, naming the parent's file).
 pub fn child_kind(source: &str, event: &str) -> Option<Child> {
     match (source, event) {
-        ("claude" | "grok", "SubagentStart") | ("cursor", "subagentStart") | ("pi", "child_start") => Some(Child::Start),
-        ("claude" | "grok", "SubagentStop") | ("cursor", "subagentStop") => Some(Child::Stop),
+        ("claude" | "grok" | "codex", "SubagentStart") | ("cursor", "subagentStart") | ("pi", "child_start") => Some(Child::Start),
+        ("claude" | "grok" | "codex", "SubagentStop") | ("cursor", "subagentStop") => Some(Child::Stop),
         _ => None,
     }
 }
@@ -439,15 +442,15 @@ pub fn norm(source: &str, event: &str, detail: Option<&str>) -> Option<Ev> {
         return Some(if c == Child::Start { Ev::ChildStart } else { Ev::ChildStop });
     }
     match (source, event) {
-        ("claude" | "grok", "PreToolUse") | ("pi" | "dpi", "tool_execution_start") => Some(Ev::Pre),
+        ("claude" | "grok" | "codex", "PreToolUse") | ("pi" | "dpi", "tool_execution_start") => Some(Ev::Pre),
         ("cursor", "preToolUse" | "beforeShellExecution" | "beforeMCPExecution" | "beforeReadFile") => Some(Ev::Pre),
-        ("claude", "PostToolUse" | "PostToolUseFailure" | "PermissionDenied") | ("grok", "PostToolUse") | ("pi" | "dpi", "tool_execution_end") => Some(Ev::Post),
+        ("claude", "PostToolUse" | "PostToolUseFailure" | "PermissionDenied") | ("grok" | "codex", "PostToolUse") | ("pi" | "dpi", "tool_execution_end") => Some(Ev::Post),
         ("cursor", "postToolUse" | "postToolUseFailure" | "afterShellExecution" | "afterMCPExecution") => Some(Ev::Post),
         ("cursor", "afterFileEdit" | "afterAgentThought" | "afterAgentResponse") => Some(Ev::Tick),
-        ("claude", "PermissionRequest") => Some(Ev::Ask),
+        ("claude" | "codex", "PermissionRequest") => Some(Ev::Ask),
         ("claude", "Notification") => detail.is_some_and(|d| ASK_NOTIFICATIONS.contains(&d)).then_some(Ev::Ask),
-        ("claude", "PreCompact") | ("cursor", "preCompact") => Some(Ev::CompactStart),
-        ("claude", "PostCompact") => Some(Ev::CompactEnd),
+        ("claude" | "codex", "PreCompact") | ("cursor", "preCompact") => Some(Ev::CompactStart),
+        ("claude" | "codex", "PostCompact") => Some(Ev::CompactEnd),
         _ => None,
     }
 }
@@ -953,7 +956,7 @@ pub fn arrange(groups: Vec<Vec<LiveRow>>) -> Vec<LiveRow> {
 }
 
 /// The live screen's rows: `live_sessions` → not-alive dropped (a missing pid stays; a pid without a start gets a pid-only check) → same-process supersede
-/// for claude/pi → `turn_receipts` → fold → children attached → ordered.
+/// for claude/pi/codex → `turn_receipts` → fold → children attached → ordered.
 pub fn fold_all(index: &TraceIndex, now_ms: i64, alive: impl Fn(i64, Option<i64>) -> bool) -> Result<Vec<LiveRow>> {
     let mut sessions: Vec<SessionRow> = index
         .live_sessions()?
@@ -964,14 +967,14 @@ pub fn fold_all(index: &TraceIndex, now_ms: i64, alive: impl Fn(i64, Option<i64>
     type Process = (String, i64, Option<i64>);
     let mut newest: std::collections::HashMap<Process, ((i64, i64), String)> = std::collections::HashMap::new();
     for s in &sessions {
-        let (Some(pid), true) = (s.harness_pid, matches!(s.source.as_str(), "claude" | "pi")) else { continue };
+        let (Some(pid), true) = (s.harness_pid, matches!(s.source.as_str(), "claude" | "pi" | "codex")) else { continue };
         let key = index.last_receipt_key(&s.id)?.unwrap_or((i64::MIN, 0));
         let slot = newest.entry((s.source.clone(), pid, s.harness_start)).or_insert((key, s.id.clone()));
         if key > slot.0 {
             *slot = (key, s.id.clone());
         }
     }
-    sessions.retain(|s| match (s.harness_pid, matches!(s.source.as_str(), "claude" | "pi")) {
+    sessions.retain(|s| match (s.harness_pid, matches!(s.source.as_str(), "claude" | "pi" | "codex")) {
         (Some(pid), true) => newest.get(&(s.source.clone(), pid, s.harness_start)).is_some_and(|(_, id)| *id == s.id),
         _ => true,
     });
@@ -1069,7 +1072,8 @@ mod tests {
         assert_eq!((b("cursor", "stop", None), b("cursor", "beforeSubmitPrompt", None), b("cursor", "sessionEnd", None)), (Some(Idle), Some(Prompt), Some(End)));
         assert_eq!(b("cursor", "sessionStart", None), Some(Idle));
         // Case-sensitive per source; tools and ticks are no boundary.
-        assert_eq!((b("cursor", "Stop", None), b("claude", "stop", None), b("claude", "PreToolUse", None), b("codex", "Stop", None)), (None, None, None, None));
+        assert_eq!((b("cursor", "Stop", None), b("claude", "stop", None), b("claude", "PreToolUse", None), b("omp", "Stop", None)), (None, None, None, None));
+        assert_eq!((b("codex", "Stop", None), b("codex", "UserPromptSubmit", None), b("codex", "SessionEnd", None)), (Some(Idle), Some(Prompt), Some(End)));
         assert_eq!(b("cursor", "afterAgentResponse", None), None);
     }
 
@@ -1783,7 +1787,8 @@ mod seq {
             assert_eq!(n("cursor", e, None), Some(Tick), "{e}");
         }
         assert_eq!((n("cursor", "preCompact", None), n("cursor", "subagentStop", None)), (Some(CompactStart), Some(ChildStop)));
-        assert_eq!((n("claude", "unparsed", None), n("codex", "Stop", None)), (None, None));
+        assert_eq!((n("claude", "unparsed", None), n("omp", "Stop", None)), (None, None));
+        assert_eq!((n("codex", "PreToolUse", None), n("codex", "PostToolUse", None), n("codex", "Stop", None)), (Some(Pre), Some(Post), Some(Idle { failed: false })));
         assert!(strict_ids("pi") && !strict_ids("claude") && !strict_ids("cursor"));
     }
 

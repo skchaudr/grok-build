@@ -982,10 +982,10 @@ impl TracesModalState {
         self.selected_session().filter(|s| s.host.is_none() && matches!(s.source.as_str(), "claude" | "pi" | "dpi" | "codex" | "grok")).cloned()
     }
 
-    /// Enter on a live Claude or Pi row (this machine or another) opens the session view.
+    /// Enter on a live row of a live-feed harness (this machine or another) opens the session view.
     fn live_to_open(&self) -> Option<SessionRow> {
         let row = self.selected_session()?;
-        (row.status == Status::Active && matches!(row.source.as_str(), "claude" | "pi")).then(|| row.clone())
+        (row.status == Status::Active && matches!(row.source.as_str(), "claude" | "pi" | "dpi" | "codex")).then(|| row.clone())
     }
 
     /// Enter on a live local row follows it instead of opening its trajectory.
@@ -2812,7 +2812,7 @@ impl TracesModalState {
             }
         };
         match session {
-            Some(mut s) if matches!(s.source.as_str(), "claude" | "pi") => {
+            Some(mut s) if matches!(s.source.as_str(), "claude" | "pi" | "dpi" | "codex") => {
                 s.status = Status::Active;
                 Some(Action::TracesOpenClaude(Box::new(s)))
             }

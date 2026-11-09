@@ -333,12 +333,12 @@ impl TraceIndex {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Sessions of `claude`, `pi` and `cursor` with receipts whose newest turn boundary is not `End`,
+    /// Sessions of `claude`, `pi`, `cursor`, `dpi` and `codex` with receipts whose newest turn boundary is not `End`,
     /// plus receipt-only Cursor rows (chats seen in hooks whose transcript is not indexed yet).
     /// Liveness of every row, receipt-only included, is the caller's `alive(harness_pid, harness_start)`;
     /// a row with a NULL pid stays until its newest boundary is `End`. Same-process supersede is the caller's too.
     pub fn live_sessions(&self) -> Result<Vec<SessionRow>> {
-        const SOURCES: [&str; 4] = ["claude", "pi", "cursor", "dpi"];
+        const SOURCES: [&str; 5] = ["claude", "pi", "cursor", "dpi", "codex"];
         let now = now_ms();
         let conn = self.conn();
         let sql = format!(

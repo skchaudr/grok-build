@@ -960,3 +960,16 @@ fn hook_receipts_keep_description_and_result_head_and_old_dbs_gain_the_columns()
     assert_eq!(rows[0].0.as_deref(), Some("Read leader proof"));
     assert_eq!(rows[1].1.as_deref().map(|r| r.chars().count()), Some(RESULT_CHARS));
 }
+
+/// Codex hooks send Claude's field names (`hook_event_name`, `tool_use_id`, `tool_input`, `tool_response`); the Pi
+/// extension forwards `tool_execution_end`'s result text as `result`. Both land as a capped `result`.
+#[test]
+fn codex_and_pi_end_receipts_carry_the_result_head() {
+    use xai_grok_traces::hook::{RESULT_CHARS, extract};
+    let codex = serde_json::json!({"hook_event_name":"PostToolUse","session_id":"019a","turn_id":"t","transcript_path":"/x/rollout.jsonl","cwd":"/w","model":"gpt","permission_mode":"default","tool_name":"Bash","tool_use_id":"exec-7","tool_input":{"command":"cargo test"},"tool_response":"test result: ok"});
+    let r = extract("codex", codex.to_string().as_bytes());
+    assert_eq!((r.event.as_str(), r.tool_use_id.as_deref(), r.detail.as_deref(), r.result.as_deref()), ("PostToolUse", Some("exec-7"), Some("cargo test"), Some("test result: ok")));
+    let pi = serde_json::json!({"event":"tool_execution_end","tool":"bash","session_id":"s","tool_use_id":"c1","tool_input":{"command":"ls"},"is_error":false,"result":"y".repeat(RESULT_CHARS * 2)});
+    let r = extract("pi", pi.to_string().as_bytes());
+    assert_eq!(r.result.map(|t| t.chars().count()), Some(RESULT_CHARS));
+}

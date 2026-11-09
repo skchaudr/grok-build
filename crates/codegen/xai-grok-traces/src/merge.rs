@@ -489,6 +489,11 @@ fn receipt_signals(source: &str, receipts: &[LiveReceipt]) -> Vec<Signal> {
     let mut out = Vec::new();
     for r in receipts {
         let Some(id) = r.tool_use_id.clone().filter(|s| !s.is_empty()) else { continue };
+        // shortcut: Codex code mode's `exec`/`wait` script wrappers are skipped, as the replay converter skips them; the
+        // calls nested in them carry the content. Revisit if a plain Codex tool takes either name.
+        if source == "codex" && matches!(r.tool.as_deref(), Some("exec" | "wait")) {
+            continue;
+        }
         let parent = r.parent_tool_use_id.clone();
         let (detail, sub) = (r.detail.clone().filter(|d| !d.is_empty()), r.agent_id.as_deref().is_some_and(|a| !a.is_empty()));
         let (description, result) = (r.description.clone().filter(|d| !d.is_empty()), r.result.clone().filter(|d| !d.is_empty()));
@@ -571,10 +576,12 @@ fn span_signals(spans: &[PhoenixSpan]) -> Vec<Signal> {
     v
 }
 
-/// Claude jsonl or Pi jsonl (a dpi conversation arrives as Pi lines, see `live::transcript`), content items only.
+/// Claude, Pi or Codex jsonl (a dpi conversation arrives as Pi lines, see `live::transcript`), content items only.
 pub fn parse(source: &str, transcript: &str) -> Vec<Item> {
     if matches!(source, "pi" | "dpi") {
         parse_pi(transcript)
+    } else if source == "codex" {
+        parse_codex(transcript)
     } else {
         parse_claude(transcript)
     }
@@ -750,6 +757,104 @@ fn parse_pi(text: &str) -> Vec<Item> {
                 }
                 _ => {}
             }
+        }
+    }
+    out
+}
+
+/// A Codex rollout: `event_msg` `item_completed` entries only (what the replay converter reads). A call's item lands
+/// when it finishes, so a running call is known from its receipts alone. Item ids are the hooks' `tool_use_id`: a
+/// code-mode call nested in an `exec` script is `exec-<uuid>` on both. Reasoning is encrypted and carries no thinking
+/// time (its item spans ~1 ms), so a thought has no duration.
+fn parse_codex(text: &str) -> Vec<Item> {
+    use serde_json::{Value, json};
+    let mut out = Vec::new();
+    let mut ord = 0u64;
+    let mut push = |at_ms: i64, kind: ItemKind| {
+        out.push(Item { ord, at_ms, kind });
+        ord += 1;
+    };
+    let joined = |v: Option<&Value>, key: &str| -> String {
+        v.and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|b| b.as_str().or_else(|| b.get(key)?.as_str())).collect::<Vec<_>>().join("\n\n"))
+            .unwrap_or_default()
+    };
+    for line in text.lines() {
+        let Ok(l) = serde_json::from_str::<Value>(line) else { continue };
+        if l.pointer("/payload/type").and_then(Value::as_str) != Some("item_completed") {
+            continue;
+        }
+        let Some(item) = l.pointer("/payload/item") else { continue };
+        let num = |k: &str| l.pointer(&format!("/payload/{k}")).and_then(Value::as_i64);
+        let end = num("completed_at_ms").unwrap_or_else(|| ts_ms(&l));
+        let start = num("started_at_ms").unwrap_or(end);
+        let id = item.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let str_at = |k: &str| item.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let failed = str_at("status") == "failed";
+        let mut call = |tool: &str, input: Value, output: String, is_error: bool| {
+            if id.is_empty() {
+                return;
+            }
+            push(start, ItemKind::Call { id: id.clone(), tool: tool.to_string(), input: input.to_string() });
+            push(end, ItemKind::Result { id: id.clone(), output, is_error });
+        };
+        match item.get("type").and_then(Value::as_str) {
+            Some("UserMessage") => {
+                let t = item.get("content").and_then(Value::as_array).map(|a| {
+                    a.iter().filter_map(|b| b.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n\n")
+                });
+                const HARNESS: [&str; 4] = ["<environment_context>", "<user_instructions>", "<turn_aborted>", "The following is the Codex agent history"];
+                if let Some(t) = t.filter(|t| !t.trim().is_empty() && !HARNESS.iter().any(|h| t.trim_start().starts_with(h))) {
+                    push(end, ItemKind::User(t));
+                }
+            }
+            Some("AgentMessage") => {
+                let t = joined(item.get("content"), "text");
+                if !t.trim().is_empty() {
+                    push(end, ItemKind::Text(t.trim().to_string()));
+                }
+            }
+            Some("Reasoning") => {
+                let t = joined(item.get("summary_text"), "text");
+                push(end, ItemKind::Thinking(if t.trim().is_empty() { ZWSP.to_string() } else { t }, None));
+            }
+            Some("CommandExecution") => {
+                // `["/bin/zsh", "-lc", script]` is the script; any other argv is joined.
+                let argv: Vec<&str> = item.get("command").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                let script = match argv.as_slice() {
+                    [_, "-lc" | "-c", script] => (*script).to_string(),
+                    other => other.join(" "),
+                };
+                let output = ["aggregated_output", "formatted_output"].iter().find_map(|k| item.get(*k).and_then(Value::as_str)).unwrap_or("");
+                let code = item.get("exit_code").and_then(Value::as_i64);
+                call("Bash", json!({ "command": script }), output.to_string(), failed || code.is_some_and(|c| c != 0));
+            }
+            Some("FileChange") => {
+                // One file reads as the Claude tool it amounts to; several stay one apply_patch row, as the hook names it.
+                let changes = item.get("changes").and_then(Value::as_object);
+                let diff = |c: &Value| c.get("unified_diff").or_else(|| c.get("content")).and_then(Value::as_str).unwrap_or("").to_string();
+                let (tool, input, output) = match changes.map(|c| c.iter().collect::<Vec<_>>()).as_deref() {
+                    Some([(path, c)]) if c.get("type").and_then(Value::as_str) == Some("add") => {
+                        ("Write", json!({ "file_path": path, "content": diff(c) }), String::new())
+                    }
+                    Some([(path, c)]) => ("apply_patch", json!({ "file_path": path }), diff(c)),
+                    Some(all) => (
+                        "apply_patch",
+                        json!({ "files": all.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>() }),
+                        all.iter().map(|(_, c)| diff(c)).collect::<Vec<_>>().join("\n"),
+                    ),
+                    None => ("apply_patch", Value::Null, String::new()),
+                };
+                call(tool, input, if failed { str_at("stderr") } else { output }, failed);
+            }
+            Some("McpToolCall") => {
+                let tool = format!("mcp__{}__{}", str_at("server"), str_at("tool"));
+                let output = item.pointer("/result/content").map(block_text).unwrap_or_default();
+                let is_error = failed || item.pointer("/result/isError") == Some(&Value::Bool(true));
+                call(&tool, item.get("arguments").cloned().unwrap_or(Value::Null), output, is_error);
+            }
+            Some("WebSearch") => call("WebSearch", json!({ "query": str_at("query") }), String::new(), false),
+            _ => {}
         }
     }
     out
@@ -1067,6 +1172,57 @@ mod tests {
         assert!(matches!(late.as_slice(), [Piece::Complete { output, fresh: false, .. }] if output == "full text of the proof"), "{late:?}");
         let (again, _) = m.ingest("claude", text, &both, Ok(&[]));
         assert!(again.is_empty(), "{again:?}");
+    }
+
+    /// Codex: a rollout's `item_completed` items are the transcript and its hooks (Claude's event names) open and
+    /// finish the calls. exec-2's item never lands, so its hook result finishes it; the code-mode `exec` wrapper is no row.
+    #[test]
+    fn a_codex_rollout_merges_live_and_a_call_without_its_item_completes_from_receipts() {
+        let text = r#"{"timestamp":"2026-11-09T10:00:00.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"list the repo"}]},"completed_at_ms":1794218400000}}
+{"timestamp":"2026-11-09T10:00:00.100Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"<environment_context>cwd</environment_context>"}]}}}
+{"timestamp":"2026-11-09T10:00:01.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","id":"rs_1","summary_text":[]},"started_at_ms":1794218400999,"completed_at_ms":1794218401000}}
+{"timestamp":"2026-11-09T10:00:02.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"exec-1","command":["/bin/zsh","-lc","ls"],"status":"completed","aggregated_output":"a.txt\n","exit_code":0},"started_at_ms":1794218401500,"completed_at_ms":1794218402000}}
+{"timestamp":"2026-11-09T10:00:05.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"text","text":"Listed."}]},"completed_at_ms":1794218405000}}"#;
+        let r = |r: LiveReceipt, detail: &str| LiveReceipt { detail: Some(detail.into()), ..r };
+        let receipts = [
+            r(pre("call_wrap", "exec", 1_794_218_401_400), "const r = await tools.exec_command({cmd:\"ls\"})"),
+            r(pre("exec-1", "Bash", 1_794_218_401_500), "ls"),
+            r(post("exec-1", 1_794_218_402_000, None), "ls"),
+            r(pre("exec-2", "Bash", 1_794_218_403_000), "cargo test"),
+            LiveReceipt { result: Some("test result: ok".into()), ..r(post("exec-2", 1_794_218_404_000, None), "cargo test") },
+        ];
+        let (pieces, m, _) = load("codex", text, &receipts, Err(()));
+        let shape: Vec<String> = pieces
+            .iter()
+            .map(|p| match p {
+                Piece::User(t) => format!("user {t}"),
+                Piece::Text(t) => format!("text {t}"),
+                Piece::Thinking { dur_ms, .. } => format!("thought {dur_ms:?}"),
+                Piece::Open { id, label, .. } => format!("open {id} {label:?}"),
+                Piece::Fill { id, output, .. } => format!("fill {id} {output:?}"),
+                Piece::Complete { id, output, error, .. } => format!("done {id} {output:?} {error}"),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                "user list the repo",
+                "thought None",
+                "open exec-1 Some(\"ls\")",
+                "fill exec-1 Some(\"a.txt\\n\")",
+                "done exec-1 \"a.txt\\n\" false",
+                "open exec-2 Some(\"cargo test\")",
+                "done exec-2 \"test result: ok\" false",
+                "text Listed.",
+            ],
+            "{pieces:?}"
+        );
+        assert!(m.running().is_none());
+        let stop = LiveReceipt { event: "Stop".into(), ..Default::default() };
+        let end = LiveReceipt { event: "SessionEnd".into(), ..Default::default() };
+        assert_eq!(session_life("codex", &[stop.clone()], None), "alive");
+        assert_eq!(session_life("codex", &[stop, end], None), "ended");
     }
 
     #[test]
