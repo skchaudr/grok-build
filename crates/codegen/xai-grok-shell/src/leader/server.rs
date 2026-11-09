@@ -2127,6 +2127,9 @@ pub async fn run_leader_server(
     let mut pending_external_cwd: HashMap<String, String> = HashMap::new();
     let mut pending_external_prompt: HashMap<String, String> = HashMap::new();
     let mut pending_external_new: HashMap<String, PendingExternalNew> = HashMap::new();
+    // External agents may announce a new session's commands, model and title before its `session/new`
+    // reply routes the session id (grok-pi-acp does). Held here and sent after that reply.
+    let mut early_external_updates: HashMap<String, Vec<Arc<str>>> = HashMap::new();
     let mut external_titles = ExternalTitles {
         from_agent: HashSet::new(),
         from_prompt: HashSet::new(),
@@ -2910,7 +2913,8 @@ pub async fn run_leader_server(
                     && let Some(client) = clients.get_mut(&client_id)
                     && let Some(json) = json.as_mut()
                 {
-                    if let Some(session_id) = extract_session_id_from_result(json) {
+                    let routed_session = extract_session_id_from_result(json);
+                    if let Some(session_id) = routed_session.clone() {
                         let first_route = !session_backend.contains_key(&session_id);
                         let pid = backend_pid(&backend, &externals);
                         match session_backend.get_mut(&session_id) {
@@ -3003,6 +3007,17 @@ pub async fn run_leader_server(
                         match client.tx.send(ClientOutbound::Acp(restored_payload)) {
                             Ok(()) => {
                                 trace!(client_id = client_id.0, "Routed response via request ID");
+                                if let Some(held) = routed_session
+                                    .as_deref()
+                                    .and_then(|sid| early_external_updates.remove(sid))
+                                {
+                                    for early in held {
+                                        let _ = client.tx.send(ClientOutbound::Acp(early));
+                                    }
+                                }
+                                if pending_external_new.is_empty() {
+                                    early_external_updates.clear();
+                                }
                             }
                             Err(e) => {
                                 warn!(client_id = client_id.0, error = %e, "Failed to send response to client (channel closed)");
@@ -3356,6 +3371,16 @@ pub async fn run_leader_server(
                         .is_some_and(|s| !session_subscribers.contains_key(s.as_str()));
                 if !is_notification {
                     trace!("Dropping non-routable response (likely relay-originated)");
+                } else if is_relay_session_notification
+                    && !backend.is_native()
+                    && !pending_external_new.is_empty()
+                    && let Some(sid) = session_id.as_ref()
+                {
+                    let held = early_external_updates.entry(sid.clone()).or_default();
+                    if held.len() < MAX_BUFFERED_LIVE_PER_LOAD {
+                        held.push(payload);
+                    }
+                    trace!(session_id = sid.as_str(), "Held external notification until session/new routes");
                 } else if is_relay_session_notification {
                     if let Some(ChildSessionEvent::Finished(child_sid)) =
                         json.as_ref().and_then(extract_child_session_event)

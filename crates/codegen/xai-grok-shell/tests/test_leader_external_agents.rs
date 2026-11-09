@@ -186,6 +186,27 @@ async fn external_session_is_answered_by_the_fake_agent_not_the_native_backend()
     server.cancel.cancel();
 }
 
+/// grok-pi-acp sends a new session's commands before its `session/new` reply; the leader holds
+/// them until the reply has routed the session, instead of dropping them as unrouted.
+#[tokio::test]
+async fn updates_sent_before_the_session_new_reply_reach_the_client_after_it() {
+    let mut server = start_ready().await;
+    let cmd = fake_cmd("fake-early-commands");
+    let mut client = connect(&server.sock, "ext-early", Some(&cmd)).await;
+    initialize(&mut client).await;
+    let created = session_new(&mut client, 2).await;
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_string();
+    let update = recv_where(&mut client, |j| {
+        j.pointer("/params/update/sessionUpdate").and_then(|v| v.as_str())
+            == Some("available_commands_update")
+    })
+    .await;
+    assert_eq!(update["params"]["sessionId"], sid.as_str());
+    assert_eq!(update["params"]["update"]["availableCommands"][0]["name"], "tree");
+    client.cancel();
+    server.cancel.cancel();
+}
+
 #[tokio::test]
 async fn two_clients_with_the_same_command_share_one_process_and_live_updates() {
     let server = start_ready().await;

@@ -138,6 +138,21 @@ for raw in sys.stdin:
                 continue
         sid = f"s-{pid}-{len(sessions) + 1}"
         sessions[sid] = True
+        if command == "fake-early-commands":
+            # Like grok-pi-acp: announce the session's commands before the session/new reply.
+            emit(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": sid,
+                        "update": {
+                            "sessionUpdate": "available_commands_update",
+                            "availableCommands": [{"name": "tree", "description": "Pi tree"}],
+                        },
+                    },
+                }
+            )
         if persist_dir:
             os.makedirs(persist_dir, exist_ok=True)
             open(persist_path(sid), "w", encoding="utf-8").close()
