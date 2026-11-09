@@ -85,7 +85,7 @@ pub(crate) fn open_claude(app: &mut AppView, row: xai_grok_traces::SessionRow) {
 /// `grok traces` replays into its own view. Inside a grok session the replay gets a new agent view, so the user's session
 /// is left as it was.
 pub(crate) fn open_claude_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
-    if row.status == xai_grok_traces::Status::Active && matches!(row.source.as_str(), "claude" | "pi") {
+    if row.status == xai_grok_traces::Status::Active && matches!(row.source.as_str(), "claude" | "pi" | "dpi") {
         open_live_in(app, row, standalone);
         return;
     }
@@ -216,7 +216,7 @@ fn open_feed_in(
     agent.mark_turn_finished(crate::app::cancel_latency::TurnEnd::Aborted);
 }
 
-/// A live Claude or Pi session. The row opens as running the moment a receipt or span is known.
+/// A live Claude, Pi or dpi session. The row opens as running the moment a receipt or span is known.
 /// Phoenix is read on the worker. A missing transcript still opens: receipts are enough.
 fn open_live_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone: bool) {
     let ActiveView::Agent(origin) = app.active_view else { return };
@@ -254,7 +254,7 @@ fn open_live_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone:
     let (pieces, merger, life) = if remote {
         (Vec::new(), xai_grok_traces::merge::Merger::default(), "unknown".to_string())
     } else {
-        let transcript = std::fs::read_to_string(&row.file_path).unwrap_or_default();
+        let transcript = xai_grok_traces::live::transcript(&row.source, &row.file_path);
         let (receipts, pid_alive) = match xai_grok_traces::TraceIndex::open(&xai_grok_traces::default_db_path()) {
             Ok(idx) => {
                 let receipts = idx.session_receipts(&row.id).unwrap_or_default();

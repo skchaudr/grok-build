@@ -302,6 +302,37 @@ impl DpiDb {
     }
 }
 
+/// A conversation as Pi session lines, the format every Pi reader (the live merge, the replay converter) parses.
+/// A compaction's message is the summary handed to the model as a user turn: its `<summary>` becomes a `compaction` line.
+pub fn pi_lines(records: &[Value]) -> Vec<String> {
+    records
+        .iter()
+        .filter_map(|r| Some((r, r.pointer("/model/0").filter(|m| m.is_object())?)))
+        .map(|(r, m)| {
+            let ts = m
+                .get("timestamp")
+                .and_then(Value::as_i64)
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            if r.get("kind").and_then(Value::as_str) == Some("pi.compaction") {
+                let text = crate::merge::block_text(m.get("content").unwrap_or(&Value::Null));
+                let summary = text
+                    .split_once("<summary>")
+                    .and_then(|(_, rest)| rest.rsplit_once("</summary>"))
+                    .map_or(text.as_str(), |(inner, _)| inner);
+                return json!({ "type": "compaction", "timestamp": ts, "summary": summary.trim() }).to_string();
+            }
+            json!({ "type": "message", "timestamp": ts, "message": m }).to_string()
+        })
+        .collect()
+}
+
+/// The conversation a [`conv_key`] names, as Pi jsonl; empty when it cannot be read.
+pub fn pi_transcript(key: &str) -> String {
+    let Some((db, conv)) = split_key(key) else { return String::new() };
+    DpiDb::open(Path::new(db)).and_then(|d| d.records(conv)).map(|r| pi_lines(&r).join("\n")).unwrap_or_default()
+}
+
 /// One entry → the shared [`NormalizedEvent`]. `record.model[0]` is a Pi-shaped message, so it goes through the
 /// same path a Pi session line does. An entry with no message (`pi.reset`) is a noise marker named by its kind.
 pub fn map_entry(record: &Value) -> NormalizedEvent {
@@ -457,5 +488,50 @@ mod tests {
         assert_eq!(db.records(3).unwrap().len(), 2);
         assert!(db.conn.execute("DELETE FROM entries", []).is_err());
         assert!(DpiDb::open(&tmp.path().join("missing.sqlite")).is_err());
+    }
+
+    /// A running dpi session goes through the live merge: its conversation reads as Pi lines, a change to its db or WAL
+    /// wakes the poll, and a receipt opens a call the conversation has not written yet.
+    #[test]
+    fn a_dpi_conversation_merges_live_like_a_pi_session() {
+        use crate::live::{LiveReceipt, transcript, transcript_files};
+        use crate::merge::{Piece, load};
+        let tmp = tempfile::tempdir().unwrap();
+        fixture(tmp.path());
+        let db = db_path(tmp.path(), "sess-a");
+        let key = PathBuf::from(conv_key(&db, 1));
+        assert_eq!(transcript_files("dpi", &key), [db.clone(), PathBuf::from(format!("{}-wal", db.display()))]);
+        let pre = LiveReceipt {
+            event: "tool_execution_start".into(),
+            tool: Some("bash".into()),
+            tool_use_id: Some("call_3".into()),
+            detail: Some("cargo test".into()),
+            at_ms: BASE + 9_000,
+            ..Default::default()
+        };
+        let (pieces, m, _) = load("dpi", &transcript("dpi", &key), &[pre], Err(()));
+        let shape: Vec<String> = pieces
+            .iter()
+            .map(|p| match p {
+                Piece::User(t) => format!("user {t}"),
+                Piece::Text(t) => format!("text {t}"),
+                Piece::Thinking { text, dur_ms, .. } => format!("thought {text} {dur_ms:?}"),
+                Piece::Open { id, label, .. } => format!("open {id} {label:?}"),
+                Piece::Complete { id, output, error, .. } => format!("done {id} {output:?} {error}"),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                "user fix the bug",
+                "thought hmm None",
+                "done call_1 \"a.txt\\n\" false",
+                "done call_2 \"boom\" true",
+                "text Done.",
+                "open call_3 Some(\"cargo test\")",
+            ]
+        );
+        assert_eq!(m.running().map(|(id, _)| id), Some("call_3".to_string()));
     }
 }

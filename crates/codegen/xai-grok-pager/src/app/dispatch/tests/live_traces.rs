@@ -171,3 +171,28 @@ fn live_traces_a_later_thought_keeps_its_transcript_duration() {
         .collect();
     assert_eq!(times, [Some(1193), Some(1164)]);
 }
+
+/// Session pi-durable-lab (dpi): every thought read "Thought for 0.0s". Pi records no thinking duration, so a thought
+/// that arrives whole reads "Thought", never a wall-clock 0.0s, including one a stream start pre-created.
+#[test]
+fn live_traces_an_untimed_dpi_thought_reads_thought_not_zero() {
+    let mut app = test_app_with_agent();
+    let text = r#"{"type":"message","timestamp":"2026-11-09T01:15:20.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"check the stream"},{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"ls"}}]}}
+{"type":"message","timestamp":"2026-11-09T01:15:23.000Z","message":{"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"a"}],"isError":false}}
+{"type":"message","timestamp":"2026-11-09T01:15:34.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"now commit"},{"type":"toolCall","id":"c2","name":"bash","arguments":{"command":"pwd"}}]}}"#;
+    let (pieces, mut merger, _) = merge::load("dpi", "", &[], Ok(&[]));
+    let tx = open(&mut app, &pieces, &merger);
+    let (next, _) = merger.ingest("dpi", text, &[], Ok(&[]));
+    tx.send(Update { events: live_feed::to_feds("test-session", &next), life: "alive".into(), running: merger.running(), phoenix_offline: false }).unwrap();
+    assert!(drain_live(&mut app));
+    let agent = get_active_agent_mut(&mut app).unwrap();
+    let thoughts: Vec<_> = agent
+        .scrollback
+        .iter_entries()
+        .filter_map(|(_, e)| match &e.block {
+            RenderBlock::Thinking(t) => Some((e.is_running, t.elapsed_time_ms())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thoughts, [(false, None), (false, None)]);
+}

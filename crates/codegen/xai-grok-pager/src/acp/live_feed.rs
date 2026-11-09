@@ -138,8 +138,8 @@ impl SubCache {
 }
 
 /// Everything a local poll reads: the transcript, the subagent transcripts, and this session's newest receipt.
-fn local_stamp(transcript: &std::path::Path, newest_receipt: Option<(i64, i64)>) -> (Vec<FileStamp>, Option<(i64, i64)>) {
-    let mut v = vec![file_stamp(transcript)];
+fn local_stamp(source: &str, transcript: &std::path::Path, newest_receipt: Option<(i64, i64)>) -> (Vec<FileStamp>, Option<(i64, i64)>) {
+    let mut v: Vec<FileStamp> = live::transcript_files(source, transcript).iter().map(|f| file_stamp(f)).collect();
     v.extend(subagent_files(transcript).iter().map(|f| file_stamp(f)));
     (v, newest_receipt)
 }
@@ -173,7 +173,7 @@ fn run(mut job: Job, tx: mpsc::Sender<Update>, stop: Arc<AtomicBool>) {
             // Nothing the poll reads changed: no transcript parse, no database, no Phoenix. Only the pid can end the session.
             let idx = idx.get_or_insert_with(|| TraceIndex::open_with(&default_db_path(), Some(Duration::from_millis(200))).ok());
             let newest = idx.as_ref().and_then(|i| i.last_receipt_key(&job.session_id).ok().flatten());
-            let stamp = local_stamp(&job.file_path, newest);
+            let stamp = local_stamp(&job.source, &job.file_path, newest);
             if last.as_ref() == Some(&stamp) {
                 let life = merge::session_life(&job.source, &receipts_seen, pid_alive(job.harness_pid, job.harness_start)).to_string();
                 if life != life_sent {
@@ -222,7 +222,7 @@ fn pid_alive(pid: Option<i64>, start: Option<i64>) -> Option<bool> {
 
 fn local_snapshot(job: &mut Job) -> (String, Vec<live::LiveReceipt>, Option<bool>, String) {
     // shortcut: re-reads the whole file each wake, switch to a byte offset if a session misses the one-second tail.
-    let transcript = std::fs::read_to_string(&job.file_path).unwrap_or_default();
+    let transcript = live::transcript(&job.source, &job.file_path);
     let file_name = job.file_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let idx = TraceIndex::open_with(&default_db_path(), Some(Duration::from_millis(200))).ok();
     let receipts = idx.as_ref().and_then(|i| i.session_receipts(&job.session_id).ok()).unwrap_or_default();
@@ -241,7 +241,8 @@ fn remote_snapshot(job: &Job) -> Result<(String, Vec<live::LiveReceipt>, Option<
 }
 
 pub(crate) fn fetch_spans(source: &str, file_name: &str, native_id: Option<&str>) -> Result<Vec<phoenix::PhoenixSpan>, ()> {
-    if source.is_empty() {
+    // shortcut: dpi has no span emitter and its file name is `agent.sqlite#<id>`, a key no emitter stamps; key it when one exists.
+    if source.is_empty() || source == "dpi" {
         return Ok(Vec::new());
     }
     let sid = merge::phoenix_session_id(file_name, native_id);
@@ -264,10 +265,8 @@ pub(crate) fn to_feds(session_id: &str, pieces: &[Piece]) -> Vec<Fed> {
                 // otherwise runs its own wall-clock timer, which reads 0.0s for a thought that arrives whole).
                 stream_start = dur_ms.map(|d| at_ms - d);
                 let ts = stream_start.map(|_| *at_ms);
-                let mut chunk = claude_feed::chunk(text);
-                if let Some(d) = dur_ms {
-                    chunk = chunk.meta(Some(Map::from_iter([("durationMs".to_string(), json!(d))])));
-                }
+                // Always present: a null durationMs (Pi and dpi record none) still marks the thought as arriving whole.
+                let chunk = claude_feed::chunk(text).meta(Some(Map::from_iter([("durationMs".to_string(), json!(dur_ms))])));
                 (Event::Acp(acp::SessionUpdate::AgentThoughtChunk(chunk)), ts, None)
             }
             Piece::Open { id, tool, start_ms, input, label, .. } => {
@@ -528,15 +527,15 @@ mod tests {
         let sub = dir.path().join("s/subagents/agent-a1.jsonl");
         let call = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_X","name":"Bash","input":{"command":"ls"}}]}}"#;
         std::fs::write(&sub, format!("{call}\n")).unwrap();
-        let first = local_stamp(&main, Some((1, 1)));
-        assert_eq!(first, local_stamp(&main, Some((1, 1))), "nothing changed, nothing to do");
-        assert_ne!(first, local_stamp(&main, Some((2, 2))), "a new receipt is a change");
+        let first = local_stamp("claude", &main, Some((1, 1)));
+        assert_eq!(first, local_stamp("claude", &main, Some((1, 1))), "nothing changed, nothing to do");
+        assert_ne!(first, local_stamp("claude", &main, Some((2, 2))), "a new receipt is a change");
 
         let mut cache = SubCache::default();
         assert_eq!(cache.items(&main).len(), 1);
         let result = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_X","content":"a"}]}}"#;
         std::fs::write(&sub, format!("{call}\n{result}\n")).unwrap();
-        assert_ne!(first, local_stamp(&main, Some((1, 1))), "a subagent transcript grew");
+        assert_ne!(first, local_stamp("claude", &main, Some((1, 1))), "a subagent transcript grew");
         assert_eq!(cache.items(&main).len(), 2, "the grown file is re-read");
     }
 

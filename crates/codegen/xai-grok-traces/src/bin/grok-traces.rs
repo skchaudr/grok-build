@@ -264,7 +264,7 @@ fn live_json(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let transcript = std::fs::read_to_string(&row.file_path).unwrap_or_default();
+    let transcript = live::transcript(&row.source, &row.file_path);
     let receipts = idx.session_receipts(&row.id).unwrap_or_default();
     let pid_alive = row.harness_pid.map(|pid| match row.harness_start {
         Some(start) => live::alive(pid, start),

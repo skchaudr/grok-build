@@ -80,28 +80,7 @@ pub(crate) fn convert_dpi(key: &str, session_id: &str) -> io::Result<Vec<Fed>> {
 }
 
 fn convert_records(records: &[Value], session_id: &str) -> Vec<Fed> {
-    let lines: Vec<String> = records
-        .iter()
-        .filter_map(|r| Some((r, r.pointer("/model/0").filter(|m| m.is_object())?)))
-        .map(|(r, m)| {
-            let ts = m
-                .get("timestamp")
-                .and_then(Value::as_i64)
-                .and_then(chrono::DateTime::from_timestamp_millis)
-                .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-            if r.get("kind").and_then(Value::as_str) == Some("pi.compaction") {
-                // Its message is the summary handed to the model as a user turn: "...compacted into the following summary:\n\n<summary>...</summary>".
-                let text = text_of(m.get("content").unwrap_or(&Value::Null));
-                let summary = text
-                    .split_once("<summary>")
-                    .and_then(|(_, rest)| rest.rsplit_once("</summary>"))
-                    .map_or(text.as_str(), |(inner, _)| inner);
-                return json!({ "type": "compaction", "timestamp": ts, "summary": summary.trim() }).to_string();
-            }
-            json!({ "type": "message", "timestamp": ts, "message": m }).to_string()
-        })
-        .collect();
-    convert_text(&lines.join("\n"), session_id)
+    convert_text(&xai_grok_traces::dpi::pi_lines(records).join("\n"), session_id)
 }
 
 fn convert_text(text: &str, session_id: &str) -> Vec<Fed> {

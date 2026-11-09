@@ -571,9 +571,9 @@ fn span_signals(spans: &[PhoenixSpan]) -> Vec<Signal> {
     v
 }
 
-/// Claude jsonl or Pi jsonl, content items only.
+/// Claude jsonl or Pi jsonl (a dpi conversation arrives as Pi lines, see `live::transcript`), content items only.
 pub fn parse(source: &str, transcript: &str) -> Vec<Item> {
-    if source == "pi" {
+    if matches!(source, "pi" | "dpi") {
         parse_pi(transcript)
     } else {
         parse_claude(transcript)
@@ -669,7 +669,7 @@ fn user_text(text: &str) -> Option<String> {
     Some(text.to_string())
 }
 
-fn block_text(v: &serde_json::Value) -> String {
+pub(crate) fn block_text(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Array(a) => a

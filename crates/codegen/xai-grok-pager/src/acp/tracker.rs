@@ -1256,7 +1256,8 @@ impl AcpUpdateTracker {
         }
         let is_replay = meta.is_replay;
         // A thought that arrives whole with its duration (a transcript's, via the live traces feed) has no local timer to run.
-        let whole_ms = thought.meta.as_ref().and_then(|m| m.get("durationMs")).and_then(serde_json::Value::as_i64);
+        // `Some(None)`: whole but untimed (Pi and dpi record no thinking duration), so it reads "Thought", never 0.0s.
+        let whole_ms = thought.meta.as_ref().and_then(|m| m.get("durationMs")).map(serde_json::Value::as_i64);
         let is_new = self.current_thinking.is_none();
         let id = *self.current_thinking.get_or_insert_with(|| {
             let block = if is_replay || whole_ms.is_some() {
@@ -1274,9 +1275,9 @@ impl AcpUpdateTracker {
         if let Some(ms) = whole_ms {
             // The block may be one a stream start pre-created with a wall-clock timer; finish() would freeze that at ~0.
             if let Some(RenderBlock::Thinking(t)) = scrollback.get_by_id_mut(id).map(|e| &mut e.block) {
-                t.set_elapsed_time_ms(Some(ms));
+                t.set_whole(ms);
             }
-            self.last_thinking_elapsed_ms = Some(ms);
+            self.last_thinking_elapsed_ms = ms;
         } else if let (Some(agent_ts), Some(stream_start)) =
             (meta.agent_timestamp_ms, meta.stream_start_ms)
         {

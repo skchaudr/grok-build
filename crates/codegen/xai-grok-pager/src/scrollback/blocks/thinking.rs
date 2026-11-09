@@ -207,6 +207,12 @@ impl ThinkingBlock {
         self.elapsed_time_ms = time_ms;
     }
 
+    /// A thought that arrived whole: its recorded duration, or none, and no local timer to freeze.
+    pub fn set_whole(&mut self, time_ms: Option<i64>) {
+        self.started_at = None;
+        self.elapsed_time_ms = time_ms;
+    }
+
     /// Set the raw mode, re-rendering if it changed.
     pub fn set_raw_mode(&mut self, raw: bool) {
         self.content.set_raw_mode(raw);

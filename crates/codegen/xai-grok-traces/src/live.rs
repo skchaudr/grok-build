@@ -258,6 +258,22 @@ pub fn via_of(chain: &str) -> Option<String> {
     .map(str::to_string)
 }
 
+/// What the live merge reads as a session's transcript: its file, or a dpi conversation (`<agent.sqlite>#<id>`) as Pi lines.
+pub fn transcript(source: &str, path: &std::path::Path) -> String {
+    if source == "dpi" {
+        return crate::dpi::pi_transcript(&path.to_string_lossy());
+    }
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// The files whose change means `transcript` may read differently: a dpi db is written through its WAL.
+pub fn transcript_files(source: &str, path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    match crate::dpi::split_key(&path.to_string_lossy()).filter(|_| source == "dpi") {
+        Some((db, _)) => vec![db.into(), format!("{db}-wal").into()],
+        None => vec![path.to_path_buf()],
+    }
+}
+
 /// The process exists and is not a zombie (no start time to compare).
 pub fn alive_pid(pid: i64) -> bool {
     #[cfg(unix)]
