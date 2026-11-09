@@ -1125,6 +1125,9 @@ impl AgentView {
                 inner_width.saturating_sub(layout_cfg.block_pad_left + layout_cfg.block_pad_right);
             crate::views::model_notice_banner::height(notice, text_width)
         });
+        // shortcut: every widget line takes one row, capped so a chatty extension cannot starve the scrollback.
+        let pi_widget_lines: Vec<String> = self.pi_widgets.values().flatten().cloned().collect();
+        let pi_widgets_height = (pi_widget_lines.len() as u16).min(area.height / 4);
         let _tool_usage_height = 0u16;
         let btw_height =
             crate::views::btw_overlay::btw_panel_height(self.btw_state.as_ref(), inner_width);
@@ -1166,6 +1169,7 @@ impl AgentView {
             follow_ups_height,
             dock_height,
             prompt_gap,
+            pi_widgets_height,
             model_notice_height,
             voice_recording_height,
             shortcuts_height: 1,
@@ -1333,6 +1337,10 @@ impl AgentView {
                     active_subagent_tokens,
                 ),
             );
+        }
+        if !self.pi_statuses.is_empty() {
+            let joined = self.pi_statuses.values().cloned().collect::<Vec<_>>().join(" · ");
+            status.push("pi_status", pi_ansi_line(&joined, theme.text_secondary));
         }
         if let Some(mcp_line) = self.mcp_init_progress.as_ref().and_then(|p| {
             crate::views::agent_status::mcp_status_line(p, self.scrollback.animation_tick(), &theme)
@@ -2260,6 +2268,18 @@ impl AgentView {
             }
         }
         self.draw_plugin_cta(buf, layout.plugin_cta, &theme);
+        for (row, line) in (layout.pi_widgets.y..layout.pi_widgets.bottom()).zip(&pi_widget_lines) {
+            let row = Rect {
+                x: layout.pi_widgets.x.saturating_add(layout_cfg.block_pad_left),
+                y: row,
+                width: layout
+                    .pi_widgets
+                    .width
+                    .saturating_sub(layout_cfg.block_pad_left + layout_cfg.block_pad_right),
+                height: 1,
+            };
+            ratatui::widgets::Paragraph::new(pi_ansi_line(line, theme.text_secondary)).render(row, buf);
+        }
         if let Some(notice) = &model_notice {
             let row = layout.model_notice;
             let inset = Rect {
@@ -5102,4 +5122,13 @@ mod status_line_draw_tests {
             "a frame with no row must not export a width the script would read as the 80-column fallback"
         );
     }
+}
+
+/// One Pi extension line (statuses and widgets carry ANSI colour from Pi's theme) as a ratatui line.
+fn pi_ansi_line(text: &str, fg: ratatui::style::Color) -> Line<'static> {
+    use ansi_to_tui::IntoText;
+    text.into_text()
+        .ok()
+        .and_then(|text| text.lines.into_iter().next())
+        .unwrap_or_else(|| Line::styled(text.to_owned(), Style::default().fg(fg)))
 }

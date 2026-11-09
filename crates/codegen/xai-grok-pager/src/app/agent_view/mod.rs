@@ -1459,6 +1459,10 @@ pub struct AgentView {
     pub display_name: Option<String>,
     /// Machine name from `--agent-choice`, shown in the session header.
     pub machine_name: Option<String>,
+    /// Pi extension statuses (`pi/ui/status`), shown in the status bar.
+    pub pi_statuses: std::collections::BTreeMap<String, String>,
+    /// Pi extension widgets (`pi/ui/widget`), shown above the prompt.
+    pub pi_widgets: std::collections::BTreeMap<String, Vec<String>>,
     /// Agent label from the `--agent-choice` command (`claude-agent`, `grok-pi`), so each session keeps its own profile.
     pub agent_label: Option<String>,
     /// Short title from shell `SessionSummaryGenerated` or `summary.json` on load/resume.

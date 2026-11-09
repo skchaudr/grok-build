@@ -439,6 +439,8 @@ impl AgentView {
             display_name: None,
             machine_name: None,
             agent_label: None,
+            pi_statuses: Default::default(),
+            pi_widgets: Default::default(),
             generated_session_title: None,
             title_unpin_committed: false,
             last_turn_summary: None,

@@ -68,7 +68,7 @@ use xai_acp_lib::{AcpAgentGatewayReceiver, LineBufferedRead};
 
 use cli::{Args, normalize_compound_short_flags, pi_args_with_startup_flags};
 use runtime_config::{
-    bash_bridge_enabled, bash_control_meta_for_adapter, env_flag_default_off, env_flag_default_on,
+    bash_bridge_enabled, bash_control_meta_for_adapter, env_flag_default_off,
     eval_mcp_enabled, eval_v2_language, eval_v2_only_enabled, eval_v2_only_tool_policy_applies,
     eval_version, normal_f2_tool_policy_applies, resolve_bash_max_wait_mins,
 };
@@ -191,7 +191,8 @@ async fn run(mut args: Args) -> Result<()> {
         .then(native_commands_extension::write_native_commands_extension)
         .transpose()
         .context("failed to create Pi native commands extension")?;
-    let remote_tui_enabled = bridge && env_flag_default_on("PI_GROK_REMOTE_TUI");
+    // Off until the pager has a Remote TUI surface: its frames would be invisible and its keys unrouted.
+    let remote_tui_enabled = bridge && env_flag_default_off("PI_GROK_REMOTE_TUI");
     let remote_tui_extension = remote_tui_enabled
         .then(remote_tui_extension::write_remote_tui_extension)
         .transpose()

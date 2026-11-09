@@ -32,6 +32,7 @@ mod follow_ups;
 mod interactions;
 mod mcp;
 mod permissions;
+mod pi_ui;
 mod prompt_origin;
 mod queue;
 mod routing;
@@ -702,7 +703,7 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         }
         "x.ai/mcp/elicit_complete" => handle_mcp_elicit_complete(notif, app),
         "x.ai/mcp/servers_updated" => handle_mcp_servers_updated(notif, app),
-        _ => false,
+        _ => pi_ui::handle(notif, app),
     }
 }
 /// Record the shell's latest `session/new` setup step so a create timeout can name where it stalled.

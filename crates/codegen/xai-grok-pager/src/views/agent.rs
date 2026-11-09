@@ -123,6 +123,8 @@ pub struct AgentViewLayoutParams {
     pub dock_height: u16,
     /// 0 or 1: the gap row between turn status (or scrollback) and the prompt.
     pub prompt_gap: u16,
+    /// Pi extension widget rows above the model notice and prompt, 0 when there are none.
+    pub pi_widgets_height: u16,
     /// The current model's notice row directly above the prompt, 0 when it has none.
     pub model_notice_height: u16,
     pub voice_recording_height: u16,
@@ -153,6 +155,7 @@ pub struct AgentViewLayout {
     /// above the prompt; zero-area when hidden.
     pub dock: Rect,
     /// The current model's notice, directly above the record indicator and the prompt.
+    pub pi_widgets: Rect,
     pub model_notice: Rect,
     /// Single-row record indicator ("◉ Recording") directly above the prompt, shown only while voice capture is active.
     pub voice_recording: Rect,
@@ -192,6 +195,7 @@ impl AgentViewLayout {
             follow_ups_height,
             dock_height,
             prompt_gap,
+            pi_widgets_height,
             model_notice_height,
             voice_recording_height,
             shortcuts_height,
@@ -267,6 +271,9 @@ impl AgentViewLayout {
         }
         if prompt_gap > 0 {
             constraints.push(Constraint::Length(prompt_gap));
+        }
+        if pi_widgets_height > 0 {
+            constraints.push(Constraint::Length(pi_widgets_height));
         }
         if model_notice_height > 0 {
             constraints.push(Constraint::Length(model_notice_height));
@@ -354,6 +361,11 @@ impl AgentViewLayout {
         if prompt_gap > 0 {
             chunks.next();
         }
+        let pi_widgets = if pi_widgets_height > 0 {
+            chunks.next().unwrap_or_default()
+        } else {
+            Rect::default()
+        };
         let model_notice = if model_notice_height > 0 {
             chunks.next().unwrap_or_default()
         } else {
@@ -407,6 +419,7 @@ impl AgentViewLayout {
             plugin_cta,
             follow_ups,
             dock,
+            pi_widgets,
             model_notice,
             voice_recording,
             prompt,
