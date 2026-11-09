@@ -2,9 +2,9 @@
 
 Repo: /Volumes/Mini-SSD/offload/repos/grok-build, branch main. Work in place.
 
-Plan: `docs/grok-pi-dual-agent-map.md`, written by an earlier Opus agent. Execute its "What is left, in order" table, steps 1 to 6, in its order. Step 1 runs the adapter against the unchanged pager first; what renders wrong is the port list for the later steps.
+Plan: `docs/grok-pi-dual-agent-map.md`, written by an earlier Opus agent. Execute its "What is left, in order" table, steps 1 to 5, in its order. Stop before step 6 and report back; step 6 is coordinated with Sab. Step 1 runs the adapter against the unchanged pager first; what renders wrong is the port list for the later steps.
 
-Sab's words: "I meant for grok pi to be one harness grokbuild our fork chooses from, like completion." "Leave the themes but sure they actually made their own settings." So step 6 = grok-pi's settings, no themes. The dpi shim is not asked for.
+Sab's words: "I meant for grok pi to be one harness grokbuild our fork chooses from, like completion." "Leave the themes but sure they actually made their own settings." "Based on the Opus plan... run until Step 6, at which point, it began coordinating with us again." So stop at step 6 (settings, no themes; that comes later).
 
 Rules:
 - Answer the map's "Open, unverified" items as you reach them.
