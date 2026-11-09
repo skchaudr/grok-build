@@ -144,3 +144,30 @@ fn live_traces_a_call_shows_description_and_result_from_receipts_alone() {
     });
     assert_eq!(row, Some((false, Some("# Proof".to_string()))), "finished with the hook's result");
 }
+
+/// Session 3a2e442b at 01:15:34: a 1164 ms thought showed "Thought for 0.0s". Every thought after the first starts a
+/// new stream, which pre-creates a thinking block with a wall-clock timer; the transcript's duration must win.
+#[test]
+fn live_traces_a_later_thought_keeps_its_transcript_duration() {
+    let mut app = test_app_with_agent();
+    let text = r#"{"type":"assistant","timestamp":"2026-11-09T01:15:20.000Z","thinkingDurationMs":1193,"message":{"content":[{"type":"thinking","thinking":"","signature":"s"}]}}
+{"type":"assistant","timestamp":"2026-11-09T01:15:22.000Z","message":{"content":[{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","timestamp":"2026-11-09T01:15:23.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"a"}]}}
+{"type":"assistant","timestamp":"2026-11-09T01:15:34.103Z","thinkingDurationMs":1164,"message":{"content":[{"type":"thinking","thinking":"","signature":"s"}]}}
+{"type":"assistant","timestamp":"2026-11-09T01:15:34.852Z","message":{"content":[{"type":"tool_use","id":"c2","name":"Bash","input":{"command":"pwd"}}]}}"#;
+    let (pieces, mut merger, _) = merge::load("claude", "", &[], Ok(&[]));
+    let tx = open(&mut app, &pieces, &merger);
+    let (next, _) = merger.ingest("claude", text, &[], Ok(&[]));
+    tx.send(Update { events: live_feed::to_feds("test-session", &next), life: "alive".into(), running: merger.running(), phoenix_offline: false }).unwrap();
+    assert!(drain_live(&mut app));
+    let agent = get_active_agent_mut(&mut app).unwrap();
+    let times: Vec<_> = agent
+        .scrollback
+        .iter_entries()
+        .filter_map(|(_, e)| match &e.block {
+            RenderBlock::Thinking(t) => Some(t.elapsed_time_ms()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(times, [Some(1193), Some(1164)]);
+}

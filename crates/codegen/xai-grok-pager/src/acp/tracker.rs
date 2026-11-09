@@ -1272,6 +1272,10 @@ impl AcpUpdateTracker {
             stamp_replayed_row(scrollback, id, meta);
         }
         if let Some(ms) = whole_ms {
+            // The block may be one a stream start pre-created with a wall-clock timer; finish() would freeze that at ~0.
+            if let Some(RenderBlock::Thinking(t)) = scrollback.get_by_id_mut(id).map(|e| &mut e.block) {
+                t.set_elapsed_time_ms(Some(ms));
+            }
             self.last_thinking_elapsed_ms = Some(ms);
         } else if let (Some(agent_ts), Some(stream_start)) =
             (meta.agent_timestamp_ms, meta.stream_start_ms)
