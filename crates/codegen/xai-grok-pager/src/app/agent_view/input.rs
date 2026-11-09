@@ -360,6 +360,17 @@ impl AgentView {
         if let Some(outcome) = self.intercept_takeover_input(ev, registry, prompt_paging) {
             return outcome;
         }
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+        {
+            if key.code == crate::views::side_panel::TOGGLE_KEY && key.modifiers.is_empty() {
+                self.side_panel.toggle();
+                return InputOutcome::Changed;
+            }
+            if self.key_owner() == KeyOwner::SidePanel && self.side_panel.handle_key(key) {
+                return InputOutcome::Changed;
+            }
+        }
         if self.dismiss_jump_picker_if_suppressed()
             && let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release

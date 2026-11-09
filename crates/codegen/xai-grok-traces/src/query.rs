@@ -418,6 +418,16 @@ impl TraceIndex {
         Ok(self.conn().query_row(&sql, [id], |r| session_row(r, now)).optional()?)
     }
 
+    /// The session a harness calls `native` (its own session id), whichever source indexed it.
+    pub fn session_by_harness_id(&self, native: &str) -> Result<Option<SessionRow>> {
+        for source in crate::SOURCES {
+            if let Some(id) = self.session_by_native(source, native)? {
+                return self.session(&id);
+            }
+        }
+        Ok(None)
+    }
+
     /// Active time per session updated at or after `since_ms`: see [`ACTIVE_SQL`].
     pub fn active_ms(&self, since_ms: i64) -> Result<std::collections::HashMap<String, i64>> {
         let mut stmt = self.conn().prepare(&active_sql(since_ms))?;

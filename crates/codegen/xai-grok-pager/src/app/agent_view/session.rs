@@ -402,6 +402,7 @@ impl AgentView {
             rewind_points: None,
             jump_state: None,
             timeline_rail: None,
+            side_panel: Default::default(),
             timeline_hover: None,
             timeline_hover_preview: None,
             session_agent_name: None,

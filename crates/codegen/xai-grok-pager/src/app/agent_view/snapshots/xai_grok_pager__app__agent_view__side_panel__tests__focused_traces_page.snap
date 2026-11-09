@@ -1,0 +1,28 @@
+---
+source: crates/codegen/xai-grok-pager/src/app/agent_view/side_panel_tests.rs
+expression: "draw(&mut agent, 110, 24)"
+---
+                                                                │ ◀  ∿ Traces   ◆ Info  ▸
+  /work/grok-build                    84K / 200K │ [Dashboard]  │ ───────────────────────────────────────────
+                                                                │ ● live  grok · grok-4.5 · side panel · -
+                                                                │ ▶ you  add the side panel
+                                                                │ → Bash  cargo test                   ✓ 0.4s
+                                                                │ → Read  src/views/s…  ✗ exit 1  no such fi…
+                                                                │
+                                                                │
+                                                                │
+                                                                │
+                                                                │
+                                                                │
+                                                                │
+                                                                │
+                                                                │
+                                                                │
+                                                                │
+                                                                │
+  ╭──────────────────────────────────────────────────────────╮  │
+  │ ❯ Build anything                                         │  │
+  ╰─────────────────────────────────────────────── Grok 4.5 ─╯  │
+                                                                │
+                                                                │ live tail
+                                                                │ Esc chat · ←/→ panels · z zoom · +/- width

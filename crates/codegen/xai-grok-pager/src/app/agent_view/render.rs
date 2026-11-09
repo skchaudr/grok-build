@@ -277,6 +277,8 @@ impl AgentView {
     fn shortcuts_bar_content(&self, registry: &ActionRegistry) -> ShortcutsBarContent {
         use crate::views::shortcuts_bar::HintItem;
         match self.key_owner() {
+            // The panel paints its own key footer.
+            KeyOwner::SidePanel => ShortcutsBarContent::Hidden,
             KeyOwner::LineViewer => self.line_viewer_bar(),
             KeyOwner::BlockViewer => ShortcutsBarContent::Surface(
                 self.block_viewer
@@ -567,6 +569,46 @@ impl AgentView {
     /// It appends `Ctrl+\\:dashboard` (and, when the overlay header can cycle, the `Ctrl+[/]:prev/next agent` chip) to the bottom shortcuts bar.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        registry: &ActionRegistry,
+        scratch: &mut ScratchBuffer,
+        pending_hint: Option<PendingHint>,
+        overlay_focused: bool,
+        banner: super::BannerSlotParams<'_>,
+        in_dashboard_overlay: bool,
+        link_spans_out: &mut Vec<xai_ratatui_inline::LinkSpan>,
+        app_params: AppRenderParams<'_>,
+    ) -> (
+        Option<(u16, u16)>,
+        Option<crate::terminal::overlay::PostFlush>,
+    ) {
+        // The side panel is split off first, so no early return in the chat's draw (modals, subagent takeover) can drop it.
+        let (chat, panel) = self.side_panel.split(area);
+        let out = if chat.width > 0 {
+            self.draw_chat(
+                chat,
+                buf,
+                registry,
+                scratch,
+                pending_hint,
+                overlay_focused,
+                banner,
+                in_dashboard_overlay,
+                link_spans_out,
+                app_params,
+            )
+        } else {
+            (None, None)
+        };
+        if let Some(panel) = panel {
+            self.draw_side_panel(panel, buf);
+        }
+        out
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn draw_chat(
         &mut self,
         area: Rect,
         buf: &mut Buffer,

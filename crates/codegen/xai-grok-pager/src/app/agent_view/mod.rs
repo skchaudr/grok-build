@@ -182,6 +182,7 @@ mod trace_view_tests;
 #[cfg(test)]
 mod model_notice_tests;
 mod rewind;
+mod side_panel;
 mod role;
 pub(crate) use role::{AgentRole, ChildLink, ComposerRoute, ViewSurface};
 mod selection;
@@ -1382,6 +1383,8 @@ pub struct AgentView {
     /// Timeline sidebar rail geometry for the current frame (`None` means
     /// hidden). Set by the renderer, consumed by mouse hit-testing.
     pub(crate) timeline_rail: Option<crate::views::timeline::TimelineRail>,
+    /// The F3 side panel beside the chat.
+    pub(crate) side_panel: crate::views::side_panel::SidePanel,
     /// Rail part under the mouse; drives hover styling and the tick
     /// preview popup.
     pub(crate) timeline_hover: Option<crate::views::timeline::TimelineHit>,

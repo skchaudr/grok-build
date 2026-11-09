@@ -46,6 +46,8 @@ pub(crate) enum KeyOwner {
     BlockViewer,
     /// A blocking card with the keyboard. Permission outranks the line viewer
     Card(BlockingCard),
+    /// The F3 side panel with the keyboard. Only a permission request outranks it: the chat behind keeps working until Esc.
+    SidePanel,
     /// The plan-approval prompt with its preview closed.
     PlanApproval,
     /// Nothing is blocking: the focused pane and the global bindings.
@@ -126,6 +128,8 @@ impl AgentView {
         let card = self.blocking_card().filter(|_| !parked);
         if card == Some(BlockingCard::Permission) {
             KeyOwner::Card(BlockingCard::Permission)
+        } else if self.side_panel.has_keys() {
+            KeyOwner::SidePanel
         } else if self.line_viewer.is_some() {
             KeyOwner::LineViewer
         } else if self.block_viewer.is_some() {

@@ -2556,7 +2556,8 @@ pub(crate) async fn run(
                 traces_poll_at = None;
                 let tailed = super::dispatch::traces_live::tick(&mut app);
                 let live_dirty = super::dispatch::standalone_traces::drain_live(&mut app);
-                if live_dirty || tailed || traces_state_mut(&mut app).is_some_and(|state| state.poll_live()) {
+                let panel_dirty = side_panel_agent_mut(&mut app).is_some_and(|agent| agent.poll_side_panel());
+                if live_dirty || tailed || panel_dirty || traces_state_mut(&mut app).is_some_and(|state| state.poll_live()) {
                     presenter.request(false);
                 }
             }
@@ -4072,7 +4073,13 @@ fn process_effects(
 fn traces_poll_wanted(app: &AppView) -> bool {
     let ActiveView::Agent(id) = app.active_view else { return false };
     let Some(agent) = app.agents.get(&id) else { return false };
-    matches!(agent.active_modal, Some(crate::views::modal::ActiveModal::Traces { .. })) || agent.trace_live.is_some()
+    matches!(agent.active_modal, Some(crate::views::modal::ActiveModal::Traces { .. })) || agent.trace_live.is_some() || agent.side_panel.open
+}
+
+/// The active agent while its side panel is open.
+fn side_panel_agent_mut(app: &mut AppView) -> Option<&mut super::agent_view::AgentView> {
+    let ActiveView::Agent(id) = app.active_view else { return None };
+    app.agents.get_mut(&id).filter(|agent| agent.side_panel.open)
 }
 
 /// The open `/traces` modal of the active agent, if any.
