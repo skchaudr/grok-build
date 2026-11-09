@@ -501,6 +501,8 @@ fn receipt_json(r: &LiveReceipt) -> Value {
         "is_error": r.is_error,
         "duration_ms": r.duration_ms,
         "parent_tool_use_id": r.parent_tool_use_id,
+        "description": r.description,
+        "result": r.result,
     })
 }
 
@@ -535,6 +537,8 @@ fn receipt_parse(v: &Value) -> LiveReceipt {
         is_error: v.get("is_error").and_then(Value::as_bool),
         duration_ms: v.get("duration_ms").and_then(Value::as_i64),
         parent_tool_use_id: opt_str(v, "parent_tool_use_id"),
+        description: opt_str(v, "description"),
+        result: opt_str(v, "result"),
     }
 }
 

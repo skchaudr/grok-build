@@ -1034,15 +1034,18 @@ impl ScrollbackState {
         let range = self.visible_entry_range();
         if !range.is_empty() {
             let last_selectable = self.find_last_selectable_in_range(range);
+            // Compared against the tail as of the previous pass too: a row appended since is already the new tail,
+            // so checking only the current tail would leave the selection one row behind for good.
             let should_select = self.selected.is_none()
                 || (self.appearance.scrollback.scroll.follow_auto_select
-                    && self.selected == last_selectable);
+                    && (self.selected == last_selectable || (self.selected.is_some() && self.selected == self.follow_tail_selected)));
             if should_select {
                 // Re-query in case entries were added since we last checked
                 let range = self.visible_entry_range();
                 self.selected = self.find_last_selectable_in_range(range);
                 self.sync_current_turn();
             }
+            self.follow_tail_selected = self.selected.filter(|_| self.selected == self.find_last_selectable_in_range(self.visible_entry_range()));
         }
     }
 
@@ -1167,6 +1170,25 @@ mod tests {
         state.enable_follow();
         state.prepare_layout(80, 10);
         assert_eq!(state.scroll_offset(), state.max_scroll_offset(), "the newest row is below the viewport");
+    }
+
+    /// The live traces view: the selection sat on the previous call while the newest one ran.
+    #[test]
+    fn follow_selection_tracks_rows_appended_after_it() {
+        let mut state = ScrollbackState::new();
+        for i in 0..5 {
+            state.push_block(tool_block(&format!("cmd {i}")));
+        }
+        state.enable_follow();
+        state.prepare_layout(80, 10);
+        assert_eq!(state.selected(), Some(4));
+        state.push_block(tool_block("cmd 5"));
+        state.prepare_layout(80, 10);
+        assert_eq!(state.selected(), Some(5), "the selection follows the newest row");
+        state.set_selected(Some(2));
+        state.push_block(tool_block("cmd 6"));
+        state.prepare_layout(80, 10);
+        assert_eq!(state.selected(), Some(2), "a selection the user moved stays put");
     }
 
     #[test]

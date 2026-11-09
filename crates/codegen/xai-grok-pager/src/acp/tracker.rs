@@ -1255,9 +1255,11 @@ impl AcpUpdateTracker {
             return false;
         }
         let is_replay = meta.is_replay;
+        // A thought that arrives whole with its duration (a transcript's, via the live traces feed) has no local timer to run.
+        let whole_ms = thought.meta.as_ref().and_then(|m| m.get("durationMs")).and_then(serde_json::Value::as_i64);
         let is_new = self.current_thinking.is_none();
         let id = *self.current_thinking.get_or_insert_with(|| {
-            let block = if is_replay {
+            let block = if is_replay || whole_ms.is_some() {
                 RenderBlock::thinking_streaming_replay()
             } else {
                 RenderBlock::thinking_streaming()
@@ -1269,7 +1271,9 @@ impl AcpUpdateTracker {
         if is_new {
             stamp_replayed_row(scrollback, id, meta);
         }
-        if let (Some(agent_ts), Some(stream_start)) =
+        if let Some(ms) = whole_ms {
+            self.last_thinking_elapsed_ms = Some(ms);
+        } else if let (Some(agent_ts), Some(stream_start)) =
             (meta.agent_timestamp_ms, meta.stream_start_ms)
         {
             self.last_thinking_elapsed_ms = Some(agent_ts - stream_start);

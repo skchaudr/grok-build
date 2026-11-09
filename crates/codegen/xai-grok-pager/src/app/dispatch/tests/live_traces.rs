@@ -91,11 +91,8 @@ fn live_traces_rows_carry_the_receipt_label_then_the_description_and_open_at_the
     );
     {
         let agent = get_active_agent_mut(&mut app).unwrap();
-        let thought = agent.scrollback.iter_entries().find_map(|(_, e)| match &e.block {
-            RenderBlock::Thinking(t) => Some((e.is_running, t.elapsed_time_ms())),
-            _ => None,
-        });
-        assert_eq!(thought, Some((false, Some(1193))), "the thought is finished and timed from the transcript");
+        let thought = agent.scrollback.iter_entries().any(|(_, e)| matches!(&e.block, RenderBlock::Thinking(_)));
+        assert!(!thought, "a thought with nothing after it yet waits: the next poll may add a block to fold into it");
         agent.scrollback.prepare_layout(80, 10);
         assert!(agent.scrollback.is_follow_mode());
         assert_eq!(agent.scrollback.selected(), Some(agent.scrollback.len() - 1), "the view opens on the last row");
@@ -117,7 +114,33 @@ fn live_traces_rows_carry_the_receipt_label_then_the_description_and_open_at_the
         "the transcript's description back-fills the row"
     );
     let agent = get_active_agent_mut(&mut app).unwrap();
+    let thought = agent.scrollback.iter_entries().find_map(|(_, e)| match &e.block {
+        RenderBlock::Thinking(t) => Some((e.is_running, t.elapsed_time_ms())),
+        _ => None,
+    });
+    assert_eq!(thought, Some((false, Some(1193))), "the thought is finished and timed from the transcript");
     assert!(agent.scrollback.iter_entries().all(|(_, e)| !e.is_running), "nothing stays running");
     agent.scrollback.prepare_layout(80, 10);
     assert!(agent.scrollback.is_follow_mode(), "still following the tail");
+}
+
+/// Sab: a call is complete live from its hook receipts; the transcript line here never arrives.
+#[test]
+fn live_traces_a_call_shows_description_and_result_from_receipts_alone() {
+    let mut app = test_app_with_agent();
+    let sid = "test-session";
+    let pre = LiveReceipt { description: Some("Read leader proof".into()), ..receipt("PreToolUse", "toolu_H", 1_000, "cat docs/a.md") };
+    let post = LiveReceipt { result: Some("# Proof".into()), ..receipt("PostToolUse", "toolu_H", 1_200, "cat docs/a.md") };
+    let (pieces, mut merger, _) = merge::load("claude", "", std::slice::from_ref(&pre), Ok(&[]));
+    let tx = open(&mut app, &pieces, &merger);
+    assert_eq!(commands(&mut app), [("cat docs/a.md".to_string(), Some("Read leader proof".to_string()))], "the description shows on Pre");
+    let (next, _) = merger.ingest("claude", "", &[pre, post], Ok(&[]));
+    tx.send(Update { events: live_feed::to_feds(sid, &next), life: "alive".into(), running: merger.running(), phoenix_offline: false }).unwrap();
+    assert!(drain_live(&mut app));
+    let agent = get_active_agent_mut(&mut app).unwrap();
+    let row = agent.scrollback.iter_entries().find_map(|(_, e)| match &e.block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(x)) => Some((e.is_running, x.output.clone())),
+        _ => None,
+    });
+    assert_eq!(row, Some((false, Some("# Proof".to_string()))), "finished with the hook's result");
 }

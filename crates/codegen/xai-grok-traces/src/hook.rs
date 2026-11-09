@@ -16,6 +16,8 @@ use crate::roots::{Format, Root, resolve};
 /// Stdin beyond this is discarded.
 pub const MAX_STDIN_BYTES: usize = 16 * 1024 * 1024;
 const FIELD_CHARS: usize = 512;
+/// Head of a call's result kept on its end receipt: enough to read the call live, small enough that 100k receipts stay small.
+pub const RESULT_CHARS: usize = 1024;
 
 const EVENT: [&str; 4] = ["hook_event_name", "hookEventName", "event", "type"];
 const SESSION: [&str; 4] = ["session_id", "sessionId", "conversation_id", "thread_id"];
@@ -29,6 +31,8 @@ const AGENT_ID: [&str; 3] = ["agent_id", "agentId", "subagentId"];
 const IS_ERROR: [&str; 2] = ["is_error", "isError"];
 const DURATION_MS: [&str; 2] = ["duration_ms", "durationMs"];
 const PARENT_TOOL: [&str; 2] = ["parent_tool_use_id", "parentToolUseId"];
+/// Claude's PostToolUse `tool_response`; Pi's `tool_execution_end` result when its extension forwards it.
+const TOOL_RESPONSE: [&str; 3] = ["tool_response", "toolResponse", "result"];
 const NOTIFICATION_TYPE: [&str; 2] = ["notification_type", "notificationType"];
 const HARNESS_PID: [&str; 1] = ["harness_pid"];
 
@@ -76,7 +80,34 @@ pub fn extract(source: &str, input: &[u8]) -> Receipt {
     if r.detail.is_none() {
         r.detail = detail(source, &v, &r);
     }
+    if let Some(input) = TOOL_INPUT.iter().find_map(|k| v.get(*k)) {
+        r.description = first_str(input, &["description"]);
+    }
+    r.result = TOOL_RESPONSE.iter().find_map(|k| v.get(*k)).map(response_text).filter(|t| !t.is_empty()).map(|t| t.chars().take(RESULT_CHARS).collect());
     r
+}
+
+/// A tool result as text: a string as is, Bash's stdout then stderr, a `content` string or text blocks, else compact JSON.
+fn response_text(v: &Value) -> String {
+    if let Some(s) = v.as_str() {
+        return s.to_string();
+    }
+    let field = |k: &str| v.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+    if v.get("stdout").is_some() || v.get("stderr").is_some() {
+        return [field("stdout"), field("stderr")].into_iter().flatten().collect::<Vec<_>>().join("\n");
+    }
+    if let Some(c) = v.get("content") {
+        if let Some(s) = c.as_str() {
+            return s.to_string();
+        }
+        if let Some(a) = c.as_array() {
+            return a.iter().filter_map(|b| b.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("");
+        }
+    }
+    if let Some(s) = v.pointer("/file/content").and_then(Value::as_str) {
+        return s.to_string();
+    }
+    v.to_string()
 }
 
 /// Cursor's `before*`/`after*` events carry no `tool_name`: the event says which tool it is.

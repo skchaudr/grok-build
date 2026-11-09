@@ -65,6 +65,9 @@ struct Signal {
     detail: Option<String>,
     /// A subagent's call (its receipt has an agent id): its content is in the subagent's own transcript.
     sub: bool,
+    /// From the hook: the call's description (start) and the head of its result (end).
+    description: Option<String>,
+    result: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +91,11 @@ struct Call {
     transcript_only: bool,
     detail: Option<String>,
     sub: bool,
+    description: Option<String>,
+    /// The hook's head of the result, shown until the transcript has the full one.
+    receipt_result: Option<String>,
+    /// Completed on the hook's result: the transcript's full result, when it lands, updates the row once more.
+    done_on_receipt: bool,
 }
 
 impl Call {
@@ -111,7 +119,30 @@ impl Call {
             transcript_only,
             detail: None,
             sub: false,
+            description: None,
+            receipt_result: None,
+            done_on_receipt: false,
         }
+    }
+
+    /// What the transcript would say about the call's input, built from the hook alone until the transcript does.
+    fn shown_input(&self) -> Option<String> {
+        if self.input.is_some() {
+            return self.input.clone();
+        }
+        let mut m = serde_json::Map::new();
+        let key = match self.tool.as_str() {
+            "Bash" | "Shell" | "bash" | "shell" => Some("command"),
+            "Read" | "Edit" | "Write" | "MultiEdit" | "read" | "edit" | "write" => Some("file_path"),
+            _ => None,
+        };
+        if let (Some(k), Some(d)) = (key, &self.detail) {
+            m.insert(k.into(), d.clone().into());
+        }
+        if let Some(d) = &self.description {
+            m.insert("description".into(), d.clone().into());
+        }
+        (!m.is_empty()).then(|| serde_json::Value::Object(m).to_string())
     }
 }
 
@@ -139,7 +170,7 @@ impl Merger {
 
     /// A call is starting or ending. `items` is the transcript as it reads right now.
     pub fn on_signal(&mut self, call_id: String, tool: Option<String>, start_ms: Option<i64>, end_ms: Option<i64>, error: Option<bool>, from_span: bool, parent: Option<String>, items: &[Item]) -> Vec<Piece> {
-        self.signal(Signal { call_id, tool, start_ms, end_ms, error, from_span, parent, detail: None, sub: false }, items)
+        self.signal(Signal { call_id, tool, start_ms, end_ms, error, from_span, parent, detail: None, sub: false, description: None, result: None }, items)
     }
 
     fn signal(&mut self, sig: Signal, items: &[Item]) -> Vec<Piece> {
@@ -244,14 +275,20 @@ impl Merger {
         if c.detail.is_none() {
             c.detail = sig.detail;
         }
+        if c.description.is_none() {
+            c.description = sig.description;
+        }
+        if c.receipt_result.is_none() {
+            c.receipt_result = sig.result;
+        }
         c.sub |= sig.sub;
         id
     }
 
     /// Everything ordered before `before`, in transcript order. A call no receipt or span has named still opens
     /// from its transcript line, so it never holds back what follows it.
-    fn flow(&mut self, items: &[Item], before: u64) -> Vec<Piece> {
-        let items = &items[..items.partition_point(|it| it.ord < before)];
+    fn flow(&mut self, all: &[Item], before: u64) -> Vec<Piece> {
+        let items = &all[..all.partition_point(|it| it.ord < before)];
         for it in items {
             if let ItemKind::Call { id, .. } = &it.kind {
                 self.calls.entry(id.clone()).or_insert_with(|| Call::new(it.at_ms, true));
@@ -271,9 +308,16 @@ impl Merger {
                 ItemKind::User(t) => out.push(Piece::User(t.clone())),
                 ItemKind::Text(t) => out.push(Piece::Text(t.clone())),
                 ItemKind::Thinking(t, dur) => {
-                    // Claude often writes a second signature-only block (3 ms) right after a thought: one row, durations summed.
+                    // Claude often writes a second thinking block (3-5 ms) right after a thought: one row, durations summed.
+                    // A thought run still at the end of the transcript may be followed by such a block next poll, so it waits
+                    // for whatever comes after it (a thought always precedes the text or call of its message).
+                    let run = all[k + 1..].iter().take_while(|n| matches!(n.kind, ItemKind::Thinking(..))).count();
+                    if k + 1 + run == all.len() {
+                        self.seen.remove(&it.ord);
+                        continue;
+                    }
                     let (mut text, mut dur) = (t.clone(), *dur);
-                    for next in items[k + 1..].iter().take_while(|n| matches!(n.kind, ItemKind::Thinking(..))) {
+                    for next in all[k + 1..].iter().take_while(|n| matches!(n.kind, ItemKind::Thinking(..))) {
                         let ItemKind::Thinking(t2, d2) = &next.kind else { break };
                         if !self.seen.insert(next.ord) {
                             continue;
@@ -285,6 +329,10 @@ impl Merger {
                             (Some(a), Some(b)) => Some(a + b),
                             (a, b) => a.or(*b),
                         };
+                    }
+                    // An empty thought of a few ms (Claude writes them after some tool results) would only read "Thought for 0.0s".
+                    if text == ZWSP && dur.is_some_and(|d| d < 100) {
+                        continue;
                     }
                     out.push(Piece::Thinking { text, at_ms: it.at_ms, dur_ms: dur });
                 }
@@ -325,9 +373,6 @@ impl Merger {
 
     fn emit(&mut self, id: &str) -> Vec<Piece> {
         let Some(c) = self.calls.get_mut(id) else { return Vec::new() };
-        if c.done {
-            return Vec::new();
-        }
         if let Some((input, result)) = self.subs.get(id) {
             if c.input.is_none() && input.is_some() {
                 c.input = input.clone();
@@ -339,8 +384,22 @@ impl Merger {
                 c.output_dirty = true;
             }
         }
+        if c.done {
+            // Finished on the hook's head of the result; the transcript's full one updates the row once.
+            if c.done_on_receipt && c.output.is_some() {
+                c.done_on_receipt = false;
+                c.input_dirty = false;
+                c.output_dirty = false;
+                return vec![complete_piece(id, c, false)];
+            }
+            return Vec::new();
+        }
         // A subagent's result is in its own transcript, never this one: its end is enough.
-        let ready = (c.output.is_some() || c.sub) && c.end_ms.is_some();
+        // The hook's result is enough to finish: tool calls are complete from hooks alone, the transcript may lag.
+        let ready = (c.output.is_some() || c.receipt_result.is_some() || c.sub) && c.end_ms.is_some();
+        if ready && c.output.is_none() && c.receipt_result.is_some() {
+            c.done_on_receipt = true;
+        }
         if !c.opened && ready {
             c.opened = true;
             c.done = true;
@@ -355,7 +414,7 @@ impl Merger {
                 id: id.to_string(),
                 tool: c.tool.clone(),
                 start_ms: c.start_ms,
-                input: c.input.clone(),
+                input: c.shown_input(),
                 label: c.detail.clone(),
                 parent: c.parent.clone(),
             });
@@ -381,9 +440,9 @@ fn complete_piece(id: &str, c: &Call, fresh: bool) -> Piece {
         start_ms: c.start_ms,
         end_ms: c.end_ms.unwrap_or(c.start_ms),
         error: if c.error_set { c.error } else { c.out_err },
-        input: c.input.clone(),
+        input: c.shown_input(),
         label: c.detail.clone(),
-        output: c.output.clone().unwrap_or_default(),
+        output: c.output.clone().or_else(|| c.receipt_result.clone()).unwrap_or_default(),
         fresh,
         parent: c.parent.clone(),
     }
@@ -432,6 +491,7 @@ fn receipt_signals(source: &str, receipts: &[LiveReceipt]) -> Vec<Signal> {
         let Some(id) = r.tool_use_id.clone().filter(|s| !s.is_empty()) else { continue };
         let parent = r.parent_tool_use_id.clone();
         let (detail, sub) = (r.detail.clone().filter(|d| !d.is_empty()), r.agent_id.as_deref().is_some_and(|a| !a.is_empty()));
+        let (description, result) = (r.description.clone().filter(|d| !d.is_empty()), r.result.clone().filter(|d| !d.is_empty()));
         match norm(source, &r.event, r.detail.as_deref()) {
             Some(Ev::Pre) => out.push(Signal {
                 call_id: id,
@@ -443,6 +503,8 @@ fn receipt_signals(source: &str, receipts: &[LiveReceipt]) -> Vec<Signal> {
                 parent,
                 detail,
                 sub,
+                description,
+                result,
             }),
             Some(Ev::Post) => out.push(Signal {
                 call_id: id,
@@ -454,6 +516,8 @@ fn receipt_signals(source: &str, receipts: &[LiveReceipt]) -> Vec<Signal> {
                 parent,
                 detail,
                 sub,
+                description,
+                result,
             }),
             _ => {}
         }
@@ -482,6 +546,8 @@ fn span_signals(spans: &[PhoenixSpan]) -> Vec<Signal> {
             parent: None,
             detail: None,
             sub: false,
+            description: None,
+            result: None,
         });
         let start = s.start.timestamp_millis();
         let end = s.end.timestamp_millis();
@@ -850,7 +916,7 @@ mod tests {
     fn a_subagent_call_is_labelled_from_its_receipt_and_ends_on_its_post() {
         let sub = |r: LiveReceipt| LiveReceipt { agent_id: Some("a7c7757506b19c0c4".into()), detail: Some("git status --short".into()), ..r };
         let (pieces, m, _) = load("claude", "", &[sub(pre("toolu_S", "Bash", 1_000)), sub(post("toolu_S", 1_300, Some(false)))], Ok(&[]));
-        assert!(matches!(pieces.as_slice(), [Piece::Open { .. }, Piece::Complete { id, label: Some(l), input: None, .. }] if id == "toolu_S" && l == "git status --short"), "{pieces:?}");
+        assert!(matches!(pieces.as_slice(), [Piece::Open { .. }, Piece::Complete { id, label: Some(l), .. }] if id == "toolu_S" && l == "git status --short"), "{pieces:?}");
         assert!(m.running().is_none());
         let (pieces, _, _) = load("claude", "", &[sub(pre("toolu_S", "Bash", 1_000))], Ok(&[]));
         assert!(matches!(pieces.as_slice(), [Piece::Open { label: Some(l), .. }] if l == "git status --short"), "{pieces:?}");
@@ -942,6 +1008,32 @@ mod tests {
         assert_eq!(order, ["a", "x", "later", "b"], "{pieces:?}");
     }
 
+    /// Session 40e362e8 at 00:32:44: a 4803 ms thought, then a 5 ms one written a moment later. A poll between the two
+    /// lines showed the second as its own "Thought for 0.0s".
+    #[test]
+    fn a_thought_split_across_polls_is_still_one_row() {
+        let a = r#"{"type":"assistant","timestamp":"2026-11-09T00:32:44.000Z","thinkingDurationMs":4803,"message":{"content":[{"type":"thinking","thinking":"","signature":"s"}]}}"#;
+        let b = r#"{"type":"assistant","timestamp":"2026-11-09T00:32:44.100Z","thinkingDurationMs":5,"message":{"content":[{"type":"thinking","thinking":"check the tail","signature":"s"}]}}"#;
+        let c = r#"{"type":"assistant","timestamp":"2026-11-09T00:32:49.000Z","message":{"content":[{"type":"tool_use","id":"c","name":"Bash","input":{"command":"ls"}}]}}"#;
+        let mut m = Merger::default();
+        let thoughts = |p: &[Piece]| p.iter().filter_map(|p| if let Piece::Thinking { text, dur_ms, .. } = p { Some((text.clone(), *dur_ms)) } else { None }).collect::<Vec<_>>();
+        let (first, _) = m.ingest("claude", a, &[], Ok(&[]));
+        assert!(thoughts(&first).is_empty(), "a thought at the end waits: {first:?}");
+        let (second, _) = m.ingest("claude", &format!("{a}\n{b}"), &[], Ok(&[]));
+        assert!(thoughts(&second).is_empty(), "{second:?}");
+        let (third, _) = m.ingest("claude", &format!("{a}\n{b}\n{c}"), &[], Ok(&[]));
+        assert_eq!(thoughts(&third), [("check the tail".to_string(), Some(4808))]);
+    }
+
+    /// Session 40e362e8 line 7348: a 3 ms signature-only thought after a tool result.
+    #[test]
+    fn an_empty_thought_of_a_few_ms_is_not_a_row() {
+        let text = r#"{"type":"assistant","timestamp":"2026-11-08T21:41:41.000Z","thinkingDurationMs":3,"message":{"content":[{"type":"thinking","thinking":"","signature":"s"}]}}
+{"type":"assistant","timestamp":"2026-11-08T21:41:41.500Z","message":{"content":[{"type":"tool_use","id":"c","name":"Bash","input":{"command":"ls"}}]}}"#;
+        let (pieces, _, _) = load("claude", text, &[], Ok(&[]));
+        assert!(!pieces.iter().any(|p| matches!(p, Piece::Thinking { .. })), "{pieces:?}");
+    }
+
     #[test]
     fn a_trailing_signature_only_thought_folds_into_the_one_before() {
         let text = r#"{"type":"assistant","timestamp":"2026-11-08T23:53:32.000Z","thinkingDurationMs":4101,"message":{"content":[{"type":"thinking","thinking":"","signature":"s"}]}}
@@ -950,6 +1042,31 @@ mod tests {
         let (pieces, _, _) = load("claude", text, &[], Ok(&[]));
         let thoughts: Vec<_> = pieces.iter().filter_map(|p| if let Piece::Thinking { dur_ms, .. } = p { Some(*dur_ms) } else { None }).collect();
         assert_eq!(thoughts, [Some(4106)]);
+    }
+
+    /// Sab: tool calls are complete live from hooks alone. A call whose transcript line never arrives still shows its
+    /// description the moment its Pre lands and finishes with the hook's result on Post; a late transcript result
+    /// replaces the head with the full text once.
+    #[test]
+    fn a_call_is_complete_from_its_receipts_and_a_late_transcript_result_replaces_the_head() {
+        let pre_r = LiveReceipt { detail: Some("cat docs/a.md".into()), description: Some("Read leader proof".into()), ..pre("toolu_H", "Bash", 1_000) };
+        let post_r = LiveReceipt { result: Some("# Proof (head)".into()), ..post("toolu_H", 1_200, Some(false)) };
+        let mut m = Merger::default();
+        let (opened, _) = m.ingest("claude", "", std::slice::from_ref(&pre_r), Ok(&[]));
+        assert!(matches!(opened.as_slice(), [Piece::Open { input: Some(i), .. }] if i.contains("Read leader proof") && i.contains("cat docs/a.md")), "{opened:?}");
+        let both = [pre_r, post_r];
+        let (done, _) = m.ingest("claude", "", &both, Ok(&[]));
+        assert!(matches!(done.as_slice(), [Piece::Complete { output, error: false, .. }] if output == "# Proof (head)"), "{done:?}");
+        assert!(m.running().is_none(), "finished without any transcript");
+        let (none, _) = m.ingest("claude", "", &both, Ok(&[]));
+        assert!(none.is_empty(), "{none:?}");
+
+        let text = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_H","name":"Bash","input":{"command":"cat docs/a.md","description":"Read leader proof"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_H","content":"full text of the proof"}]}}"#;
+        let (late, _) = m.ingest("claude", text, &both, Ok(&[]));
+        assert!(matches!(late.as_slice(), [Piece::Complete { output, fresh: false, .. }] if output == "full text of the proof"), "{late:?}");
+        let (again, _) = m.ingest("claude", text, &both, Ok(&[]));
+        assert!(again.is_empty(), "{again:?}");
     }
 
     #[test]

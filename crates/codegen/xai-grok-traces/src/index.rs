@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS trace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS trace_receipts (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
   event TEXT NOT NULL, native_session TEXT, path TEXT, session_id TEXT, tool TEXT, cwd TEXT,
   detail TEXT, tool_use_id TEXT, agent_id TEXT, harness_pid INTEGER, harness_start INTEGER, harness_chain TEXT,
-  is_error INTEGER, duration_ms INTEGER, parent_tool_use_id TEXT);
+  is_error INTEGER, duration_ms INTEGER, parent_tool_use_id TEXT, description TEXT, result TEXT);
 CREATE INDEX IF NOT EXISTS trace_receipts_session ON trace_receipts(session_id, at_ms, id);
 CREATE INDEX IF NOT EXISTS trace_receipts_at ON trace_receipts(at_ms, id);
 -- Receipts not yet keyed to a session row: the native-id branch of every receipt match, and the receipt-only grouping.
@@ -755,6 +755,7 @@ impl TraceIndex {
     /// Opens a db that `peek` found current.
     fn attach(mode: JournalMode, db: &Path, busy: Option<Duration>) -> Result<Self> {
         let conn = Self::connect(mode, db, busy)?;
+        add_receipt_columns(&conn);
         Ok(Self { conn, db: db.to_path_buf(), limits: Limits::default(), capped_files: 0, grok_spawns: None })
     }
 
@@ -1502,6 +1503,24 @@ fn stamp_grok_children(tx: &Transaction<'_>, source: &str, chat_history: &Path) 
         )?;
     }
     Ok(())
+}
+
+
+/// Receipt columns added after schema 10, added in place: a schema bump would retire the db and every receipt in it,
+/// and an older hook binary would then stop recording against the newer schema.
+fn add_receipt_columns(conn: &Connection) {
+    for col in ["description", "result"] {
+        let have = conn
+            .query_row("SELECT 1 FROM pragma_table_info('trace_receipts') WHERE name = ?1", [col], |_| Ok(()))
+            .optional()
+            .ok()
+            .flatten()
+            .is_some();
+        if !have {
+            // Another process may add it first; the duplicate-column error is that race, not a failure.
+            let _ = conn.execute_batch(&format!("ALTER TABLE trace_receipts ADD COLUMN {col} TEXT"));
+        }
+    }
 }
 
 #[cfg(test)]

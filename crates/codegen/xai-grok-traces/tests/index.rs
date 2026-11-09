@@ -923,3 +923,40 @@ fn a_payload_harness_pid_still_builds_the_chain() {
         assert_eq!(chain, None);
     }
 }
+
+/// Tool calls are complete from hooks alone: the start receipt keeps the call's description, the end receipt the
+/// head of its result (capped at `RESULT_CHARS`). A schema-10 db without those columns gets them in place.
+#[test]
+fn hook_receipts_keep_description_and_result_head_and_old_dbs_gain_the_columns() {
+    use xai_grok_traces::hook::{RESULT_CHARS, extract};
+    let e = env();
+    drop(TraceIndex::open(&e.db).unwrap());
+    {
+        let c = rusqlite::Connection::open(&e.db).unwrap();
+        c.execute_batch("ALTER TABLE trace_receipts DROP COLUMN description; ALTER TABLE trace_receipts DROP COLUMN result;").unwrap();
+    }
+    let mut idx = TraceIndex::open(&e.db).unwrap();
+    let pre = extract(
+        "claude",
+        br#"{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"command":"cat docs/a.md","description":"Read leader proof"}}"#,
+    );
+    assert_eq!(pre.description.as_deref(), Some("Read leader proof"));
+    let long = "x".repeat(RESULT_CHARS * 3);
+    let post_json = serde_json::json!({"hook_event_name":"PostToolUse","session_id":"s","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"command":"cat docs/a.md"},"tool_response":{"stdout": format!("# Proof\n{long}"),"stderr":"","interrupted":false}});
+    let post = extract("claude", post_json.to_string().as_bytes());
+    let result = post.result.clone().unwrap();
+    assert!(result.starts_with("# Proof\nxxx"), "{result:.40}");
+    assert_eq!(result.chars().count(), RESULT_CHARS);
+    idx.record_receipt(&pre).unwrap();
+    idx.record_receipt(&post).unwrap();
+    let c = rusqlite::Connection::open(&e.db).unwrap();
+    let rows: Vec<(Option<String>, Option<String>)> = c
+        .prepare("SELECT description, result FROM trace_receipts WHERE tool_use_id = 'toolu_1' ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(rows[0].0.as_deref(), Some("Read leader proof"));
+    assert_eq!(rows[1].1.as_deref().map(|r| r.chars().count()), Some(RESULT_CHARS));
+}

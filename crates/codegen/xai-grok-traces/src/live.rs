@@ -310,6 +310,10 @@ pub struct LiveReceipt {
     pub duration_ms: Option<i64>,
     /// The spawning call, when the end receipt carries it.
     pub parent_tool_use_id: Option<String>,
+    /// Start receipt: the call's own description of itself (Claude's `tool_input.description`).
+    pub description: Option<String>,
+    /// End receipt: the head of the call's result.
+    pub result: Option<String>,
 }
 
 /// A turn boundary: what the session did when a receipt of this kind arrived.

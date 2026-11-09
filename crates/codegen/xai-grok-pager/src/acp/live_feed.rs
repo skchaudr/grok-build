@@ -260,10 +260,15 @@ pub(crate) fn to_feds(session_id: &str, pieces: &[Piece]) -> Vec<Fed> {
             Piece::User(t) => (Event::Acp(acp::SessionUpdate::UserMessageChunk(claude_feed::chunk(t))), None, None),
             Piece::Text(t) => (Event::Acp(acp::SessionUpdate::AgentMessageChunk(claude_feed::chunk(t))), None, None),
             Piece::Thinking { text, at_ms, dur_ms } => {
-                // The tracker times a thought as agentTimestampMs - streamStartMs; without both it uses the wall clock (0.0s here).
+                // A new stream start splits it from the thought before; durationMs on the chunk times it (a live thought
+                // otherwise runs its own wall-clock timer, which reads 0.0s for a thought that arrives whole).
                 stream_start = dur_ms.map(|d| at_ms - d);
                 let ts = stream_start.map(|_| *at_ms);
-                (Event::Acp(acp::SessionUpdate::AgentThoughtChunk(claude_feed::chunk(text))), ts, None)
+                let mut chunk = claude_feed::chunk(text);
+                if let Some(d) = dur_ms {
+                    chunk = chunk.meta(Some(Map::from_iter([("durationMs".to_string(), json!(d))])));
+                }
+                (Event::Acp(acp::SessionUpdate::AgentThoughtChunk(chunk)), ts, None)
             }
             Piece::Open { id, tool, start_ms, input, label, .. } => {
                 let raw = input_value(input.as_deref());

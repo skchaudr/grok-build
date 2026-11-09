@@ -105,6 +105,10 @@ pub struct ScrollbackState {
     /// Whether auto-scroll is enabled (follow new content).
     follow_mode: bool,
 
+    /// The row the last follow pass left selected as the tail. If the selection is still there, rows appended since
+    /// are tail content it tracks; a selection the user moved is left alone.
+    follow_tail_selected: Option<usize>,
+
     /// When true, handle_follow_mode skips the scroll-to-bottom on the first call, preserving a scroll position set by scroll_to_entry_top.
     /// Cleared after one use.
     /// This lets dispatch_send_prompt position the prompt at the viewport top while still enabling follow for new content.
@@ -241,6 +245,7 @@ impl ScrollbackState {
             total_height: 0,
             viewport_height: 0,
             follow_mode: true,
+            follow_tail_selected: None,
             follow_preserve_scroll: false,
             follow_preserve_content_generation: 0,
             pin_reserve_active: false,
