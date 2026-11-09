@@ -3982,10 +3982,10 @@ pub(crate) fn session_flags_for_effects(
         resume_local_miss: app.resume_local_miss.clone(),
         external_agent: app.external_agent,
         external_agent_label: app.external_agent.then(|| {
-            app.external_agent_label
-                .clone()
+            app.agent_label(app.active_view.agent_id())
                 .filter(|label| !label.trim().is_empty())
-                .unwrap_or_else(|| "agent".to_string())
+                .unwrap_or("agent")
+                .to_string()
         }),
     }
 }

@@ -506,6 +506,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
         && let Some(agent) = app.agents.get_mut(&agent_id)
     {
         agent.machine_name = Some(choice.name.clone());
+        agent.agent_label = crate::slash::external_common::agent_label_from_cmd(&choice.cmd);
     }
     effects.push(Effect::CreateSession {
         agent_id,
@@ -1374,6 +1375,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
         && let Some(agent) = app.agents.get_mut(&agent_id)
     {
         agent.machine_name = Some(choice.name.clone());
+        agent.agent_label = crate::slash::external_common::agent_label_from_cmd(&choice.cmd);
     }
     effects.push(Effect::CreateWorktreeSession {
         agent_id,

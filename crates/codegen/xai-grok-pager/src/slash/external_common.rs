@@ -52,6 +52,14 @@ pub fn is_claude_label(label: Option<&str>) -> bool {
     })
 }
 
+/// True when an external-agent label names Pi: `pi` (pi-acp, and Pi's own session info) or `grok-pi` (grok-pi-acp).
+pub fn is_pi_label(label: Option<&str>) -> bool {
+    label.is_some_and(|l| {
+        let name = l.rsplit('/').next().unwrap_or(l);
+        name.eq_ignore_ascii_case("pi") || name.eq_ignore_ascii_case("grok-pi")
+    })
+}
+
 /// Pager builtins that stay forwarded to a Claude session as typed text, so the Claude CLI answers instead.
 /// `/hooks`, `/plugin(s)`, `/marketplace` need grok-only ACP methods (`x.ai/hooks/list`, ...) and the CLI prints
 /// "isn't available in this environment"; `/effort` needs model effort metadata the adapter doesn't send
@@ -131,6 +139,12 @@ mod tests {
         assert!(is_claude_label(Some("Claude Agent")));
         assert!(!is_claude_label(Some("pi")));
         assert!(!is_claude_label(None));
+        assert!(!is_claude_label(Some("grok-pi")));
+        assert!(is_pi_label(Some("pi")));
+        assert!(is_pi_label(Some("grok-pi")));
+        assert!(is_pi_label(agent_label_from_cmd("/opt/bin/grok-pi-acp").as_deref()));
+        assert!(!is_pi_label(Some("claude-agent")));
+        assert!(!is_pi_label(None));
     }
 
     /// The `grok claude` command line must resolve to a Claude label: the context-tally guard in `dispatch/prompt.rs` keys on it.

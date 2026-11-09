@@ -280,9 +280,8 @@ fn claude_child_steer_refused(
 
 pub(super) const PI_CHILD_FINISHED_STEER_NOTICE: &str = "subagent finished; message not sent";
 
-fn external_agent_supports_child_steer(app: &AppView) -> bool {
-    app.external_agent
-        && !crate::slash::external_common::is_claude_label(app.external_agent_label.as_deref())
+fn external_agent_supports_child_steer(app: &AppView, id: AgentId) -> bool {
+    app.external_agent && !app.is_claude_agent(id)
 }
 
 /// Mid-run steer for external Pi (and other non-Claude ACP subagent hosts): `session/prompt` on the child session only.
@@ -293,7 +292,7 @@ fn try_dispatch_external_pi_child_steer(
     consume_input: bool,
     screen_mode_is_minimal: bool,
 ) -> Option<Vec<Effect>> {
-    if !consume_input || !external_agent_supports_child_steer(app) {
+    if !consume_input || !external_agent_supports_child_steer(app, parent_id) {
         return None;
     }
     let parent = app.agents.get_mut(&parent_id)?;
@@ -850,8 +849,7 @@ pub(super) fn dispatch_send_prompt_submission(
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
     let leader_mode = app.leader_mode;
     let screen_mode_is_minimal = app.screen_mode.is_minimal();
-    let external_claude = app.external_agent
-        && crate::slash::external_common::is_claude_label(app.external_agent_label.as_deref());
+    let external_claude = app.is_claude_agent(id);
     if consume_input && !literal && external_claude {
         let refused = app
             .agents
@@ -1662,6 +1660,8 @@ pub(super) fn handle_prompt_response(
     // The leader's `running_prompt_id` broadcast can arrive before this `PromptResponse`
     // Take any stashed adoption now; it is applied after `finish_turn` clears `current_prompt_id` below
     let pending_adoption = app.pending_running_adoptions.remove(&agent_id);
+    // Claude's `usage.totalTokens` is the turn's token tally, not occupancy; `usage_update` already set it
+    let usage_is_tally = app.is_claude_agent(agent_id);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         // Discard PromptResponses that don't belong to the currently active prompt
         // They belong to a turn the user rewound, or to a queued prompt that never became the running turn
@@ -1780,9 +1780,6 @@ pub(super) fn handle_prompt_response(
             wire_cancellation_category.as_deref(),
             wire_cancellation_context.as_ref(),
         );
-        // Claude's `usage.totalTokens` is the turn's token tally, not occupancy; `usage_update` already set it
-        let usage_is_tally = app.external_agent
-            && crate::slash::external_common::is_claude_label(app.external_agent_label.as_deref());
         if let Ok(response) = result.as_ref()
             && let Some(reported) = crate::acp::meta::reported_context(
                 response.meta.as_ref(),

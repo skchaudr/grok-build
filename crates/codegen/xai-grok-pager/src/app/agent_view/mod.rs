@@ -1459,6 +1459,8 @@ pub struct AgentView {
     pub display_name: Option<String>,
     /// Machine name from `--agent-choice`, shown in the session header.
     pub machine_name: Option<String>,
+    /// Agent label from the `--agent-choice` command (`claude-agent`, `grok-pi`), so each session keeps its own profile.
+    pub agent_label: Option<String>,
     /// Short title from shell `SessionSummaryGenerated` or `summary.json` on load/resume.
     /// Precedence in the dashboard title is below `display_name`, above first-prompt text.
     pub generated_session_title: Option<String>,

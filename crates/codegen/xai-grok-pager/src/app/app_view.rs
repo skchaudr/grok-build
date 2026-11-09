@@ -1722,10 +1722,28 @@ impl AppView {
     pub fn is_voice_tier_restricted(&self) -> bool {
         self.tier_restricted_commands.iter().any(|c| c == "voice")
     }
-    /// The pager is hosting a Claude ACP adapter (see [`crate::slash::claude_menu`]).
+    /// Label of the external agent behind session `id` (the launch agent's when `id` is unknown).
+    pub fn agent_label(&self, id: Option<AgentId>) -> Option<&str> {
+        if !self.external_agent {
+            return None;
+        }
+        let launch = self.external_agent_label.as_deref();
+        match id.and_then(|id| self.agents.get(&id)) {
+            Some(agent) => agent.agent_label(launch),
+            None => launch,
+        }
+    }
+    /// Session `id` is hosted by a Claude ACP adapter (see [`crate::slash::claude_menu`]).
+    pub fn is_claude_agent(&self, id: AgentId) -> bool {
+        crate::slash::external_common::is_claude_label(self.agent_label(Some(id)))
+    }
+    /// The session on screen is hosted by a Claude ACP adapter.
     pub fn is_claude_session(&self) -> bool {
-        self.external_agent
-            && crate::slash::external_common::is_claude_label(self.external_agent_label.as_deref())
+        crate::slash::external_common::is_claude_label(self.agent_label(self.active_view.agent_id()))
+    }
+    /// The session on screen is hosted by Pi (`grok-pi-acp`, `pi-acp`).
+    pub fn is_pi_session(&self) -> bool {
+        crate::slash::external_common::is_pi_label(self.agent_label(self.active_view.agent_id()))
     }
     /// Draw-time expiry can flip the live-announcement predicate between pushes.
     /// Resync the slash gate only when it diverges from the stored flags (checked per frame, fan-out runs only on change).
@@ -5419,14 +5437,14 @@ impl AppView {
                     })
                     .collect(),
             );
+            let label = self.external_agent.then(|| {
+                agent
+                    .agent_label(self.external_agent_label.as_deref())
+                    .unwrap_or("agent")
+                    .to_string()
+            });
             let mut registry = agent.prompt.slash_controller.registry_mut();
-            if self.external_agent {
-                let label = agent
-                    .session_agent_name
-                    .as_deref()
-                    .filter(|s| !s.trim().is_empty())
-                    .or(self.external_agent_label.as_deref())
-                    .unwrap_or("agent");
+            if let Some(label) = label {
                 registry.set_external_agent_label(label);
             }
             let external_catalog_changed = registry.set_external_agent(self.external_agent);

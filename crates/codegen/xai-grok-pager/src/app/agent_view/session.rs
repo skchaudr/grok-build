@@ -27,6 +27,15 @@ fn post_turn_plan_review_default() -> bool {
     false
 }
 impl AgentView {
+    /// The agent behind this session: its picker command, else the name its backend reports, else `launch`.
+    /// shortcut: a session resumed from the dashboard has no picker command; if its backend reports no name it
+    /// takes the launch agent's label. Upgrade when the leader reports each session's backend.
+    pub fn agent_label<'a>(&'a self, launch: Option<&'a str>) -> Option<&'a str> {
+        self.agent_label
+            .as_deref()
+            .or_else(|| self.session_agent_name.as_deref().filter(|s| !s.trim().is_empty()))
+            .or(launch)
+    }
     /// Always bumps [`Self::last_turn_summary_gen`] so a concurrent disk hydrate that captured an older generation cannot overwrite this write.
     pub(crate) fn set_last_turn_summary(&mut self, summary: Option<String>) {
         self.last_turn_summary = summary;
@@ -429,6 +438,7 @@ impl AgentView {
             pending_recap_entry: None,
             display_name: None,
             machine_name: None,
+            agent_label: None,
             generated_session_title: None,
             title_unpin_committed: false,
             last_turn_summary: None,

@@ -3617,6 +3617,19 @@ fn claude_session_forwards_pager_effort_as_text_native_does_not() {
     assert!(crate::slash::is_command_complete("/effort", registry), "bare /effort submits");
 }
 
+/// A picker session keeps its own agent profile: a grok-pi session under a Claude launch agent is not Claude.
+#[test]
+fn picker_session_profile_follows_its_own_agent_not_the_launch_agent() {
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    app.external_agent_label = Some("claude-agent".into());
+    assert!(app.is_claude_session(), "no picker label: launch agent's profile");
+    app.agents.get_mut(&AgentId(0)).unwrap().agent_label = Some("grok-pi".into());
+    assert!(!app.is_claude_session());
+    assert!(app.is_pi_session());
+    assert!(!app.is_claude_agent(AgentId(0)));
+}
+
 /// External agent advertising `/usage`, with a forwarded `/usage` turn running.
 fn external_usage_turn(app: &mut AppView, id: AgentId) {
     app.external_agent = true;
