@@ -9,10 +9,12 @@ Repo: /Volumes/Mini-SSD/offload/repos/grok-build, branch main. Work in place, co
 - "Grok build TUI is just more performant… true proper application" — a real ratatui layout split, not an overlay.
 - Reference: dsh-tui's panel (tabs `◀ ≡ ▸ ◆ Info ∿ # ? ♥ ▸`; Info page with Session / Model / Context / Runtime sections incl. status, background jobs, subagents; footer `Esc chat · ←/→ panels · z zoom · +/- width`) and Sab's Claude Code mod pane (5h usage bar, context bar).
 
-## Proposed by Claude (not decided by Sab; list these atop your report)
-- Toggle key F3 (free). Ctrl+B is SendToBackground; do not take it.
+## Sab's choices (from his messages and the dsh-tui screens he showed)
 - In the panel: Esc returns focus to chat, ←/→ switch pages, `z` swaps sizes (panel big, chat small), `+`/`-` width. Chat keeps working while the panel is open.
-- Pages v1: **Traces** (this session's live calls, the compact version of `/traces` follow, reusing the live feed/live follow rows) and **Info** (session id, cwd, branch, model, effort, mode, context %, status, subagents, background jobs; 5h usage when the harness reports it).
+- Pages: a small **Traces** view (this session's live calls, reusing the live feed/live follow rows) and an **Info** page like dsh-tui's (session, model, effort, mode, context, status, background jobs, subagents), plus the 5h usage and context bars from his Claude Code mod pane when the harness reports them.
+
+## Claude's only substitution (list it atop your report)
+- Toggle key F3 instead of dsh-tui's Ctrl+B, because Ctrl+B is SendToBackground in grok-build.
 
 ## Code map (from the earlier scout; verify)
 - `ActiveModal` is a single slot; the panel needs its own field, not a modal.
