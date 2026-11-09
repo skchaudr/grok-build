@@ -8,7 +8,7 @@ use crate::render::wrapping::{
     byte_offset_to_display_col, byte_range_to_row_cols, wrap_byte_ranges_matching,
 };
 
-/// Post-pass invert so matches show regardless of underlying colors. Stops at `viewport_bottom`.
+/// Post-pass that paints matches in the theme's search style so they show regardless of underlying colors. Stops at `viewport_bottom`.
 /// Remap match columns to visual cells only when the caller painted bidi-reordered; logical painters must pass `map_visual = false`.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_match_highlights(
@@ -26,6 +26,7 @@ pub fn paint_match_highlights(
     if text.is_empty() {
         return;
     }
+    let style = crate::theme::Theme::current().search_match_style();
 
     if single_row {
         let map_bidi = map_visual && is_enabled() && needs_bidi(text);
@@ -43,7 +44,7 @@ pub fn paint_match_highlights(
                     if x < area.x + area.width
                         && let Some(cell) = buf.cell_mut((x, row_y))
                     {
-                        invert_cell(cell);
+                        paint_cell(cell, style);
                     }
                 }
             }
@@ -79,7 +80,7 @@ pub fn paint_match_highlights(
                     if x < area.x + area.width
                         && let Some(cell) = buf.cell_mut((x, y))
                     {
-                        invert_cell(cell);
+                        paint_cell(cell, style);
                     }
                 }
             }
@@ -117,8 +118,7 @@ pub fn paint_nth_match(
                     if x < area.x + area.width
                         && let Some(cell) = buf.cell_mut((x, row_y))
                     {
-                        cell.modifier.remove(ratatui::style::Modifier::REVERSED);
-                        cell.set_style(style);
+                        paint_cell(cell, style);
                     }
                 }
             }
@@ -128,7 +128,9 @@ pub fn paint_nth_match(
     count
 }
 
-/// Apply the terminal's REVERSED attribute so the fg/bg swap is native and respects the user's theme.
-fn invert_cell(cell: &mut ratatui::buffer::Cell) {
-    cell.modifier.insert(ratatui::style::Modifier::REVERSED);
+/// DIM would fade the ink; REVERSED is cleared so the current-match style, which has none, does not inherit it.
+fn paint_cell(cell: &mut ratatui::buffer::Cell, style: ratatui::style::Style) {
+    cell.modifier
+        .remove(ratatui::style::Modifier::DIM | ratatui::style::Modifier::REVERSED);
+    cell.set_style(style);
 }

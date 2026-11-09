@@ -272,17 +272,44 @@ impl Theme {
             .unwrap_or(self.text_primary)
     }
 
-    /// Style for the current search match; the other matches stay inverted, so this one needs a solid fill.
-    pub fn search_current_style(&self) -> Style {
-        let bold_underline = Modifier::BOLD | Modifier::UNDERLINED;
-        match (self.warning, self.bg_base) {
-            (Color::Reset, _) => Style::new().add_modifier(Modifier::REVERSED | bold_underline),
-            (fill, Color::Reset) => Style::new()
-                .bg(fill)
-                .fg(Color::Black)
-                .add_modifier(bold_underline),
-            (fill, ink) => Style::new().bg(fill).fg(ink).add_modifier(bold_underline),
+    /// Style for every search match but the current one: REVERSED over the theme's primary text and base, so the match
+    /// shows as a solid text-colored fill. Bare REVERSED kept matches in dim or faint text at that text's own low contrast.
+    pub fn search_match_style(&self) -> Style {
+        let reversed = Style::new().add_modifier(Modifier::REVERSED);
+        match (self.text_primary, self.bg_base) {
+            (Color::Reset, _) | (_, Color::Reset) => reversed,
+            (text, base) => reversed.fg(text).bg(base),
         }
+    }
+
+    /// Style for the current search match: the warning fill with black or white ink, the fill stepped toward white or
+    /// black until the pair reaches 4.5:1. Light themes used to paint their pale background as ink (2.2:1 on JetBrains Islands Light).
+    pub fn search_current_style(&self) -> Style {
+        const MIN: f64 = 4.5;
+        let bold_underline = Modifier::BOLD | Modifier::UNDERLINED;
+        if self.warning == Color::Reset {
+            return Style::new().add_modifier(Modifier::REVERSED | bold_underline);
+        }
+        let (black, white) = (Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255));
+        // Quantized palettes cannot be measured; every warning fill we ship is light enough for black ink
+        let Some(on_black) = contrast(self.warning, black) else {
+            return Style::new()
+                .bg(self.warning)
+                .fg(Color::Black)
+                .add_modifier(bold_underline);
+        };
+        let (ink, toward) = if on_black >= contrast(self.warning, white).unwrap_or(0.0) {
+            (black, white)
+        } else {
+            (white, black)
+        };
+        let fill = (0..=10u8)
+            .filter_map(|step| {
+                crate::render::color::blend_color(self.warning, toward, f32::from(step) / 10.0)
+            })
+            .find(|&c| contrast(c, ink).is_some_and(|r| r >= MIN))
+            .unwrap_or(toward);
+        Style::new().bg(fill).fg(ink).add_modifier(bold_underline)
     }
 
     /// Get a style with dim text (gray_dim, dimmest).
@@ -409,6 +436,45 @@ fn contrast(a: Color, b: Color) -> Option<f64> {
 #[cfg(test)]
 mod visibility_tests {
     use super::*;
+
+    fn every_theme() -> [Theme; 17] {
+        [
+            Theme::groknight(),
+            Theme::grokday(),
+            Theme::tokyonight(),
+            Theme::rosepine_moon(),
+            Theme::oscura_midnight(),
+            Theme::kanso_mist(),
+            Theme::kanagawa_wave(),
+            Theme::kanagawa(),
+            Theme::jetbrains_islands_dark(),
+            Theme::night_owl(),
+            Theme::one_dark_pro(),
+            Theme::nstlgy_dark(),
+            Theme::severance_dark(),
+            Theme::quasi_monochrome_dark(),
+            Theme::jetbrains_islands_light(),
+            Theme::monosami_light(),
+            Theme::monosami_ink_light(),
+        ]
+    }
+
+    #[test]
+    fn search_matches_are_readable_in_every_theme() {
+        for theme in every_theme() {
+            let current = theme.search_current_style();
+            let other = theme.search_match_style();
+            for style in [current, other] {
+                let (Some(fg), Some(bg)) = (style.fg, style.bg) else {
+                    panic!("{style:?} has no explicit colors");
+                };
+                let c = contrast(fg, bg).unwrap();
+                assert!(c >= 4.5, "{fg:?} on {bg:?} is {c:.2}:1");
+            }
+            // `other` is REVERSED, so its on-screen fill is its fg
+            assert_ne!(current.bg, other.fg);
+        }
+    }
 
     #[test]
     fn selection_border_meets_contrast_in_every_rgb_theme() {
