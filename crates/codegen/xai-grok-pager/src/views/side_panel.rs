@@ -204,26 +204,20 @@ impl SidePanel {
                 }
                 None => false,
             },
-            Traces::Looking(rx) => {
-                let mut found = None;
-                loop {
-                    match rx.try_recv() {
-                        Ok(Some(row)) => found = Some(row),
-                        Ok(None) => continue,
-                        Err(mpsc::TryRecvError::Empty) => break,
-                        Err(mpsc::TryRecvError::Disconnected) => {
-                            self.traces = Traces::Failed("traces index unavailable".into());
-                            return true;
-                        }
-                    }
+            Traces::Looking(rx) => match found_row(rx) {
+                Ok(None) => false,
+                Ok(Some(row)) => {
+                    self.traces = Traces::Following(Box::new(Follow::open(
+                        xai_grok_traces::default_db_path(),
+                        row,
+                    )));
+                    true
                 }
-                let Some(row) = found else { return false };
-                self.traces = Traces::Following(Box::new(Follow::open(
-                    xai_grok_traces::default_db_path(),
-                    row,
-                )));
-                true
-            }
+                Err(()) => {
+                    self.traces = Traces::Failed("traces index unavailable".into());
+                    true
+                }
+            },
             Traces::Following(f) => f.poll(now_ms),
             Traces::Failed(_) => false,
         }
@@ -341,6 +335,19 @@ impl SidePanel {
         let mut f = Follow::bare(root);
         f.apply(items, now_ms);
         self.traces = Traces::Following(Box::new(f));
+    }
+}
+
+/// The lookup worker's answer so far. The worker exits right after sending the row, so a hang-up only means
+/// failure when no row came first.
+fn found_row(rx: &mpsc::Receiver<Option<SessionRow>>) -> Result<Option<SessionRow>, ()> {
+    let mut found = None;
+    loop {
+        match rx.try_recv() {
+            Ok(row) => found = found.or(row),
+            Err(mpsc::TryRecvError::Empty) => return Ok(found),
+            Err(mpsc::TryRecvError::Disconnected) => return found.map(Some).ok_or(()),
+        }
     }
 }
 
@@ -481,6 +488,30 @@ mod tests {
         );
         let (chat, side) = panel(true, true, true).split(area);
         assert_eq!((chat.width, side.unwrap().width), (46, 74));
+    }
+
+    #[test]
+    fn a_row_sent_just_before_the_worker_exits_is_kept() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(None).unwrap();
+        tx.send(Some(SessionRow {
+            id: "grok:abc".into(),
+            ..Default::default()
+        }))
+        .unwrap();
+        drop(tx);
+        assert_eq!(
+            found_row(&rx).unwrap().map(|r| r.id),
+            Some("grok:abc".into())
+        );
+        let (tx, rx) = mpsc::channel::<Option<SessionRow>>();
+        drop(tx);
+        assert!(
+            found_row(&rx).is_err(),
+            "a hang-up with no row is a failure"
+        );
+        let (_tx, rx) = mpsc::channel::<Option<SessionRow>>();
+        assert!(found_row(&rx).unwrap().is_none(), "still looking");
     }
 
     #[test]
