@@ -15,6 +15,12 @@ default-run = "xai-grok-pager"
 name = "xai-grok-pager"
 path = "src/main.rs"
 
+# grok-pi's Pi agent as a stdio ACP agent for the leader's agent picker.
+[[bin]]
+name = "grok-pi-acp"
+path = "src/bin/grok-pi-acp.rs"
+required-features = ["pi-grok"]
+
 [dependencies]
 # The pager library (all application logic + the public API main.rs drives).
 xai-grok-pager = { path = "../xai-grok-pager", default-features = false }
@@ -31,6 +37,8 @@ xai-grok-telemetry = { workspace = true }
 xai-grok-workspace = { workspace = true }
 xai-crash-handler = { path = "../xai-crash-handler" }
 xai-acp-lib = { workspace = true }
+pi-grok-adapter = { path = "../pi-grok-adapter", optional = true }
+agent-client-protocol = { workspace = true }
 
 # Async runtime + misc.
 tokio = { workspace = true, features = [
@@ -97,6 +105,7 @@ clap = { workspace = true, features = ["derive"] }
 [features]
 default = [
     "stock",
+    "pi-grok",
     "jemalloc",
     "sandbox-enforce",
     ]
@@ -114,6 +123,8 @@ stock = [
     "xai-grok-shell/default",
     "xai-grok-update/default",
 ]
+# grok-pi-acp and the single-binary helpers it shares.
+pi-grok = ["dep:pi-grok-adapter", "clap", "tempfile", "toml"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc-ctl"]
 # xai-grok-workspace no longer enables sandbox-enforce by default, so enable it here.
 sandbox-enforce = ["xai-grok-pager/sandbox-enforce", "xai-grok-workspace/sandbox-enforce"]

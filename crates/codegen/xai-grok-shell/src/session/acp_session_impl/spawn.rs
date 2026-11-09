@@ -1703,11 +1703,15 @@ pub(crate) async fn spawn_session_actor(
             active_work.clone(),
             workflow_store,
             workflow_notify,
-            tool_context.subagent_event_tx.clone().unwrap_or_else(|| {
-                tracing::warn!(
-                    "workflow manager: no subagent coordinator; agent() spawns will fail"
-                );
-                tokio::sync::mpsc::unbounded_channel().0
+            std::sync::Arc::new(crate::session::workflow::backend::GrokSubagentBackend {
+                subagent_event_tx: tool_context.subagent_event_tx.clone().unwrap_or_else(|| {
+                    tracing::warn!(
+                        "workflow manager: no subagent coordinator; agent() spawns will fail"
+                    );
+                    tokio::sync::mpsc::unbounded_channel().0
+                }),
+                parent_session_id: session_info.id.0.to_string(),
+                task_model_selection: task_model_selection.clone(),
             }),
             Arc::new(|name: &str, fields: &serde_json::Value, replayed: bool| {
                 if !replayed {

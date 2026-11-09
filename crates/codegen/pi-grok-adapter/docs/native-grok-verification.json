@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 2,
+  "passed": false,
+  "workspace": "/Users/dengwenyu/Dev/AI/pi-grok-build",
+  "piSource": "/Users/dengwenyu/Dev/AI/pi-grok-build/pi-main",
+  "checks": {
+    "adapter_is_workspace_library": {
+      "passed": true,
+      "detail": "pi-grok-adapter is a library-only workspace member; the former standalone TUI target is absent"
+    },
+    "adapter_has_no_terminal_dependencies": {
+      "passed": true,
+      "detail": "no terminal/rendering dependencies in the Pi adapter"
+    },
+    "adapter_has_no_renderer_input_or_terminal_loop": {
+      "passed": true,
+      "detail": "adapter only translates Pi JSONL RPC to ACP"
+    },
+    "composition_binary_is_native_grok_package": {
+      "passed": true,
+      "detail": "grok-pi is a second composition root in xai-grok-pager-bin",
+      "evidence": "crates/codegen/xai-grok-pager-bin/src/bin/grok-pi.rs"
+    },
+    "composition_binary_does_not_render": {
+      "passed": true,
+      "detail": "grok-pi performs process/ACP composition only"
+    },
+    "binary_enters_production_grok_pager": {
+      "passed": true,
+      "detail": "grok-pi enters Grok's production terminal initialization, writer, event loop and restore path"
+    },
+    "native_grok_tui_components_present": {
+      "passed": true,
+      "detail": "native prompt, slash, question, status, scrollback, minimal and Markdown components are present"
+    },
+    "uploaded_grok_tree_is_byte_identical_outside_declared_seams": {
+      "passed": false,
+      "detail": "missing=['crates/codegen/xai-grok-pager/src/diagnostics.rs', 'crates/codegen/xai-grok-pager/src/slash/commands/terminal_setup.rs', 'crates/codegen/xai-grok-pager/src/views/settings_modal.rs', 'crates/codegen/xai-grok-pager/tests/pty_e2e/endline_wake_markers_close_each_wakeup.rs', 'crates/codegen/xai-grok-pager/tests/pty_e2e/esc_mid_turn_from_prompt_is_swallowed_preserves_draft.rs', 'crates/codegen/xai-grok-pager/tests/pty_e2e/esc_mid_turn_from_scrollback_is_swallowed.rs', 'crates/codegen/xai-grok-pager/tests/pty_e2e/minimal/minimal_esc_mid_turn_is_swallowed.rs', 'crates/codegen/xai-grok-pager/tests/pty_e2e/minimal/minimal_transcript_expands_collapsed_thinking.rs', 'crates/codegen/xai-grok-shell/skills/best-of-n/SKILL.md', 'crates/codegen/xai-grok-shell/skills/check-work/SKILL.md']; mismatched=['.gitignore', 'LICENSE', 'README.md', 'crates/build/xai-proto-build/src/find_protoc.rs', 'crates/build/xai-proto-build/src/lib.rs', 'crates/codegen/xai-chat-state/src/actor/mod.rs', 'crates/codegen/xai-chat-state/src/actor/mutations.rs', 'crates/codegen/xai-chat-state/src/actor/queries.rs', 'crates/codegen/xai-chat-state/src/actor/request_builder.rs', 'crates/codegen/xai-chat-state/src/actor/tests.rs']; unexpected additions=['.DS_Store', '.github/workflows/release.yml', '.github/workflows/website.yml', '.gitmodules', '.grok-pi/pi-resources.toml', '.pi/fabric.json', '.pi/fabric/mesh/state.json', '.pi/skills/upstream-changelog/SKILL.md', '.pi/skills/upstream-changelog/assets/entry-template.md', '.pi/skills/upstream-changelog/references/area-map.md']"
+    },
+    "message_animation_renderer_seams_are_declared": {
+      "passed": true,
+      "detail": "three exact native message-animation renderer/state seams are declared"
+    },
+    "native_renderer_input_markdown_hashes_match_outside_declared_seams": {
+      "passed": false,
+      "detail": "renderer mismatches: ['crates/codegen/xai-grok-markdown/src/colors.rs', 'crates/codegen/xai-grok-markdown/src/lib.rs', 'crates/codegen/xai-grok-pager-minimal/Cargo.toml', 'crates/codegen/xai-grok-pager-minimal/src/auth.rs', 'crates/codegen/xai-grok-pager-minimal/src/commit.rs', 'crates/codegen/xai-grok-pager-minimal/src/lib.rs', 'crates/codegen/xai-grok-pager-minimal/src/live.rs', 'crates/codegen/xai-grok-pager-minimal/src/overlay.rs', 'crates/codegen/xai-grok-pager-minimal/src/panel.rs', 'crates/codegen/xai-grok-pager-minimal/src/welcome.rs', 'crates/codegen/xai-grok-pager/src/app/agent_view/input.rs', 'crates/codegen/xai-grok-pager/src/app/agent_view/interactions.rs', 'crates/codegen/xai-grok-pager/src/app/agent_view/links.rs', 'crates/codegen/xai-grok-pager/src/app/agent_view/media.rs', 'crates/codegen/xai-grok-pager/src/app/agent_view/mod.rs', 'crates/codegen/xai-grok-pager/src/app/agent_view/modals.rs', 'crates/codegen/xai-grok-pager/src/app/agent_view/notices.rs', 'crates/codegen/xai-grok-pager/src/app/agent_view/panes.rs', 'crates/codegen/xai-grok-pager/src/app/agent_view/paste.rs', 'crates/codegen/xai-grok-pager/src/app/agent_view/plan.rs']"
+    },
+    "modified_surface_is_exact_and_semantic": {
+      "passed": true,
+      "detail": "exactly 54 workspace/ACP/state/dispatch/slash/logo/message-animation seams are declared; no second TUI or broad renderer rewrite"
+    },
+    "no_fallback_or_old_custom_tui": {
+      "passed": true,
+      "detail": "no fallback acknowledgement, old pi-grok-tui crate, or custom renderer remains"
+    },
+    "slash_surface_uses_grok_native_commands_and_pi_catalog": {
+      "passed": false,
+      "detail": "builtins=['exit', 'help', 'hotkeys', 'new', 'compact', 'model', 'effort', 'rename', 'resume', 'session-info', 'tree', 'tree-map', 'fork', 'clone', 'reload', 'notify', 'dashboard', 'recap', 'btw', 'copy', 'find', 'jump', 'review-session', 'review-message', 'transcript', 'export', 'expand', 'queue', 'multiline', 'compact-mode', 'vim-mode', 'theme', 'timestamps', 'timeline', 'toggle-mouse-reporting', 'voice', 'doctor', 'pi-config', 'pi-shortcut-manager']; forbidden local commands=['fork', 'voice']",
+      "evidence": [
+        "exit",
+        "help",
+        "hotkeys",
+        "new",
+        "compact",
+        "model",
+        "effort",
+        "rename",
+        "resume",
+        "session-info",
+        "tree",
+        "tree-map",
+        "fork",
+        "clone",
+        "reload",
+        "notify",
+        "dashboard",
+        "recap",
+        "btw",
+        "copy",
+        "find",
+        "jump",
+        "review-session",
+        "review-message",
+        "transcript",
+        "export",
+        "expand",
+        "queue",
+        "multiline",
+        "compact-mode",
+        "vim-mode",
+        "theme",
+        "timestamps",
+        "timeline",
+        "toggle-mouse-reporting",
+        "voice",
+        "doctor",
+        "pi-config",
+        "pi-shortcut-manager"
+      ]
+    },
+    "pi_commands_are_dynamic_acp_commands": {
+      "passed": true,
+      "detail": "Pi extension/prompt/skill commands are discovered from get_commands and merged by Grok's native ACP slash registry"
+    },
+    "adapter_rpc_calls_exist_in_uploaded_pi": {
+      "passed": true,
+      "detail": "validated 13 adapter RPC calls against Pi rpc-types.ts"
+    },
+    "all_pi_extension_ui_methods_use_native_grok_surfaces": {
+      "passed": true,
+      "detail": "all 9 Pi Extension UI methods map to Grok toast/status/widget/title/prompt/question surfaces"
+    },
+    "pi_runtime_events_are_projected_to_acp": {
+      "passed": true,
+      "detail": "validated 20 Pi lifecycle, stream, tool, queue, compaction, retry and UI event routes"
+    },
+    "adapter_event_routes_exist_in_uploaded_pi": {
+      "passed": true,
+      "detail": "all 20 routed events exist in the uploaded Pi source contract"
+    },
+    "pi_semantics_feed_grok_native_views": {
+      "passed": true,
+      "detail": "history, Markdown/reasoning streams, images, tools, model/effort, steer/follow-up and Bash are mapped into ACP"
+    },
+    "extension_dialog_semantics_match_pi": {
+      "passed": true,
+      "detail": "Pi timeouts cancel Grok QuestionView; confirm/value/cancel response shapes match rpc-types.ts"
+    },
+    "documentation_describes_native_grok_architecture": {
+      "passed": true,
+      "detail": "README and capabilities identify the production Grok pager and the headless Pi adapter"
+    }
+  }
+}
