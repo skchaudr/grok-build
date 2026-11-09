@@ -6,3 +6,6 @@
 /.pi/lane/
 .claude/packet.json
 target-*/
+
+# Third-party clone kept locally (Sab, 2026-11-09)
+/TokenEconomizer/

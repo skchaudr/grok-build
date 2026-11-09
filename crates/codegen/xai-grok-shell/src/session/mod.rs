@@ -588,7 +588,8 @@ pub mod turn_completion;
 pub mod unified_list;
 pub(crate) mod user_message;
 pub(crate) mod wire_tags;
-pub(crate) mod workflow;
+/// Workflow engine host (Rhai + journal). Public for grok-pi External runtime seams.
+pub mod workflow;
 pub mod worktree;
 pub(crate) mod worktree_cleanup;
 pub mod worktree_pool;

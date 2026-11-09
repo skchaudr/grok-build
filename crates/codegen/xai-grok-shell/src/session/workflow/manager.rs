@@ -10,9 +10,8 @@ use xai_grok_telemetry::events::{WorkflowRunStarted, WorkflowSourceKind};
 use xai_grok_tools::implementations::grok_build::workflow::WorkflowControl;
 use xai_workflow::{Journal, WorkflowOutcome, WorkflowRunParams};
 
-use super::host_service::{
-    HostDrainOutcome, TelemetryHook, WorkflowHostParams, spawn_workflow_host_service,
-};
+use super::backend::{HostDrainOutcome, WorkflowAgentBackend};
+use super::host_service::{TelemetryHook, WorkflowHostParams, spawn_workflow_host_service};
 use super::notify::WorkflowNotifySender;
 use super::registry::{ResolvedWorkflow, WorkflowSource, bundled_file_is_managed};
 use super::store::WorkflowRunStore;
@@ -42,7 +41,7 @@ pub(crate) struct LaunchSpec {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum LaunchError {
+pub enum LaunchError {
     #[error("workflow run not found: {0}")]
     UnknownRun(String),
     #[error("journal error: {0}")]
@@ -85,9 +84,7 @@ pub(crate) struct WorkflowManager {
     active_work: Arc<std::sync::atomic::AtomicUsize>,
     store: WorkflowRunStore,
     notify: WorkflowNotifySender,
-    subagent_event_tx: mpsc::UnboundedSender<
-        xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
-    >,
+    backend: Arc<dyn WorkflowAgentBackend>,
     telemetry: TelemetryHook,
     session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
     templates: HashMap<String, String>,
@@ -108,9 +105,7 @@ impl WorkflowManager {
         active_work: Arc<std::sync::atomic::AtomicUsize>,
         store: WorkflowRunStore,
         notify: WorkflowNotifySender,
-        subagent_event_tx: mpsc::UnboundedSender<
-            xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
-        >,
+        backend: Arc<dyn WorkflowAgentBackend>,
         telemetry: TelemetryHook,
         session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
         templates: HashMap<String, String>,
@@ -125,7 +120,7 @@ impl WorkflowManager {
             active_work,
             store,
             notify,
-            subagent_event_tx,
+            backend,
             telemetry,
             session_cmd_tx,
             templates,
@@ -327,7 +322,7 @@ impl WorkflowManager {
                 tracker: self.tracker.clone(),
                 store: self.store.clone(),
                 notify: self.notify.clone(),
-                subagent_event_tx: self.subagent_event_tx.clone(),
+                backend: self.backend.clone(),
                 parent_session_id: self.session_id.clone(),
                 allow_fork_context,
                 effort: spec.effort,
@@ -562,7 +557,9 @@ impl WorkflowManager {
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             store,
             notify,
-            mpsc::unbounded_channel().0,
+            Arc::new(super::backend::MockWorkflowAgentBackend {
+                output: Arc::from("mock"),
+            }),
             Arc::new(|_, _, _| {}),
             mpsc::unbounded_channel().0,
             std::collections::HashMap::new(),
@@ -609,20 +606,7 @@ impl WorkflowManager {
     }
 
     fn cancel_children_for_run(&self, run_id: &str) -> bool {
-        let (respond_to, _response) = oneshot::channel();
-        self.subagent_event_tx
-            .send(
-                xai_grok_tools::implementations::grok_build::task::types::SubagentEvent::Cancel(
-                    xai_grok_tools::implementations::grok_build::task::types::SubagentCancelRequest {
-                        parent_session_id: Some(self.session_id.clone()),
-                        target: xai_grok_tools::implementations::grok_build::task::types::SubagentCancelTarget::WorkflowRunId(
-                            run_id.to_owned(),
-                        ),
-                        respond_to,
-                    },
-                ),
-            )
-            .is_ok()
+        self.backend.request_cancel_run_children(run_id)
     }
 
     pub(crate) fn pause(&mut self, run_id: &str) -> bool {
@@ -984,7 +968,11 @@ mod tests {
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             store,
             notify,
-            subagent_tx,
+            Arc::new(crate::session::workflow::backend::GrokSubagentBackend {
+                subagent_event_tx: subagent_tx,
+                parent_session_id: "test-session".into(),
+                task_model_selection: LatchedTaskModelSelection::default(),
+            }),
             Arc::new(|_, _, _| {}),
             mpsc::unbounded_channel().0,
             HashMap::new(),

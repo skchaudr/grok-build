@@ -41,14 +41,14 @@ struct RunSource {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct WorkflowRunStore {
+pub struct WorkflowRunStore {
     session_dir: Option<PathBuf>,
     persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     sources: Arc<parking_lot::Mutex<HashMap<String, RunSource>>>,
 }
 
 impl WorkflowRunStore {
-    pub(crate) fn new(
+    pub fn new(
         session_dir: Option<PathBuf>,
         persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     ) -> Self {

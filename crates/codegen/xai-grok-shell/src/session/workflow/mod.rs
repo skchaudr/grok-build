@@ -1,3 +1,5 @@
+pub(crate) mod backend;
+pub(crate) mod external;
 pub(crate) mod host_service;
 pub(crate) mod listing;
 pub(crate) mod manager;
@@ -7,6 +9,19 @@ pub(crate) mod request_service;
 pub(crate) mod schema_contract;
 pub(crate) mod store;
 pub(crate) mod tracker;
+
+// Narrow External/Pi seam: agent spawn backends + runtime handle.
+pub use backend::{
+    GrokSubagentBackend, HostDrainOutcome, MockWorkflowAgentBackend, WorkflowAgentBackend,
+    WorkflowAgentSpawnRequest, WorkflowAgentSpawnResult,
+};
+pub use external::{ExternalWorkflowRuntime, ExternalWorkflowRuntimeConfig};
+pub use manager::LaunchError;
+pub use notify::WorkflowNotifySender;
+pub use notify::{build_workflow_updated, workflow_session_notification_json};
+pub use registry::{WorkflowListing, list_workflows};
+pub use store::WorkflowRunStore;
+pub use tracker::WorkflowRunState;
 
 #[cfg(test)]
 mod builtin_tests {

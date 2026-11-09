@@ -12,6 +12,8 @@ use xai_grok_tools::implementations::grok_build::task::types::{
 };
 use xai_workflow::{AgentOpts, AgentResult, BudgetState, HostError, WorkflowHostRequest};
 
+pub(crate) use super::backend::HostDrainOutcome;
+use super::backend::{WorkflowAgentBackend, WorkflowAgentSpawnRequest};
 use super::notify::WorkflowNotifySender;
 use super::schema_contract::{
     SCHEMA_CONTRACT_RETRIES, compile_contract_schema, contract_prompt, validate_contract_output,
@@ -79,9 +81,8 @@ pub(crate) struct WorkflowHostParams {
     pub tracker: Arc<parking_lot::Mutex<WorkflowTracker>>,
     pub store: super::store::WorkflowRunStore,
     pub notify: WorkflowNotifySender,
-    pub subagent_event_tx: mpsc::UnboundedSender<
-        xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
-    >,
+    /// Pluggable spawn backend (Grok subagent channel or Pi bridge).
+    pub backend: Arc<dyn WorkflowAgentBackend>,
     pub parent_session_id: String,
     pub allow_fork_context: bool,
     pub effort: Option<xai_grok_sampling_types::ReasoningEffort>,
@@ -90,12 +91,6 @@ pub(crate) struct WorkflowHostParams {
     pub stats: Arc<WorkflowAgentStats>,
     pub cancel: CancellationToken,
     pub task_model_selection: LatchedTaskModelSelection,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostDrainOutcome {
-    Drained,
-    TimedOut,
 }
 
 pub(crate) fn spawn_workflow_host_service(
@@ -595,12 +590,20 @@ impl HostService {
                 row.rebind(&retry_id);
                 retry_id
             };
-            let request = spawn_once(
-                child_id.clone(),
-                next_prompt.clone(),
-                resume_child,
+            let spawn_req = WorkflowAgentSpawnRequest {
+                id: child_id.clone(),
+                prompt: next_prompt.clone(),
+                description: description.clone(),
+                subagent_type: subagent_type.clone(),
+                parent_session_id: self.params.parent_session_id.clone(),
+                resume_from: resume_child,
+                model: opts.model.clone(),
+                capability_mode,
+                isolation,
                 fork_context,
-            );
+                run_id: self.params.run_id.clone(),
+                cancel_token: cancel_token.clone(),
+            };
 
             let now_running = self.active_agents.fetch_add(1, Ordering::Relaxed) + 1;
             self.params
@@ -609,11 +612,10 @@ impl HostService {
                 .fetch_max(now_running, Ordering::Relaxed);
             self.tick();
 
-            let backend = ChannelBackend::new(self.params.subagent_event_tx.clone());
-            let result_fut = backend.spawn(request, None);
-            tokio::pin!(result_fut);
+            let spawn_fut = self.params.backend.spawn_and_await(spawn_req);
+            tokio::pin!(spawn_fut);
             let result = tokio::select! {
-                result = &mut result_fut => result,
+                result = &mut spawn_fut => result,
                 _ = self.params.cancel.cancelled() => {
                     cancel_token.cancel();
                     self.active_agents.fetch_sub(1, Ordering::Relaxed);
@@ -623,11 +625,16 @@ impl HostService {
             };
             self.active_agents.fetch_sub(1, Ordering::Relaxed);
 
-            let Ok(result) = result else {
-                row.finish("failed", total_tokens, total_duration);
-                return Err(HostError::Failed(
-                    "subagent coordinator channel closed before completion".into(),
-                ));
+            let result = match result {
+                Ok(r) => r,
+                Err(HostError::Cancelled) => {
+                    row.finish("cancelled", total_tokens, total_duration);
+                    return Err(HostError::Cancelled);
+                }
+                Err(e) => {
+                    row.finish("failed", total_tokens, total_duration);
+                    return Err(e);
+                }
             };
             total_tokens = total_tokens.saturating_add(result.total_tokens_used);
             total_duration += result.duration_ms;
@@ -722,33 +729,10 @@ impl HostService {
     }
 
     async fn cancel_and_drain_children(&self) -> HostDrainOutcome {
-        let (respond_to, response) = oneshot::channel();
-        if self
-            .params
-            .subagent_event_tx
-            .send(SubagentEvent::Cancel(SubagentCancelRequest {
-                parent_session_id: Some(self.params.parent_session_id.clone()),
-                target: SubagentCancelTarget::WorkflowRunId(self.params.run_id.clone()),
-                respond_to,
-            }))
-            .is_err()
-        {
-            tracing::warn!(run_id = %self.params.run_id, "workflow child cancellation channel closed");
-            return HostDrainOutcome::TimedOut;
-        }
-        if matches!(
-            tokio::time::timeout(WORKFLOW_CHILD_DRAIN_TIMEOUT, response).await,
-            Ok(Ok(_))
-        ) {
-            HostDrainOutcome::Drained
-        } else {
-            tracing::warn!(
-                run_id = %self.params.run_id,
-                timeout_ms = WORKFLOW_CHILD_DRAIN_TIMEOUT.as_millis() as u64,
-                "workflow child cancel/drain timed out"
-            );
-            HostDrainOutcome::TimedOut
-        }
+        self.params
+            .backend
+            .cancel_run_children(&self.params.run_id)
+            .await
     }
 
     fn render_template(&self, name: &str, vars: &serde_json::Value) -> Result<String, HostError> {
@@ -981,15 +965,14 @@ mod tests {
     use crate::session::workflow::store::WorkflowRunStore;
     use crate::session::workflow::tracker::WorkflowTracker;
 
-    /// The returned receiver keeps the persistence channel open for the test's lifetime.
+    /// Everything but the per-test tracker and agent backend; the returned
+    /// receiver keeps the persistence channel open for the test's lifetime.
     fn test_host_params(
         run_id: &str,
         max_concurrent_agents: usize,
         scratch_suffix: &str,
         tracker: Arc<parking_lot::Mutex<WorkflowTracker>>,
-        subagent_event_tx: mpsc::UnboundedSender<
-            xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
-        >,
+        backend: Arc<dyn WorkflowAgentBackend>,
     ) -> (WorkflowHostParams, mpsc::UnboundedReceiver<PersistenceMsg>) {
         let (persist_tx, persist_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
         let store = WorkflowRunStore::new(None, persist_tx.clone());
@@ -1009,7 +992,7 @@ mod tests {
                 tracker,
                 store,
                 notify,
-                subagent_event_tx,
+                backend,
                 parent_session_id: "parent".into(),
                 allow_fork_context: false,
                 effort: None,
@@ -1048,13 +1031,16 @@ mod tests {
         assert_eq!(tracker.get(&run_id).unwrap().agents_used, 10);
 
         let tracker = Arc::new(parking_lot::Mutex::new(tracker));
-        let (subagent_tx, _subagent_rx) = mpsc::unbounded_channel();
         let (params, _persist_rx) = test_host_params(
             &run_id,
             2,
             "wf-scratch-reserve-rollback",
             tracker.clone(),
-            subagent_tx,
+            Arc::new(
+                crate::session::workflow::backend::MockWorkflowAgentBackend {
+                    output: Arc::from(""),
+                },
+            ),
         );
         let cancel = params.cancel.clone();
 
@@ -1104,13 +1090,16 @@ mod tests {
         assert_eq!(tracker.get(&run_id).unwrap().agents_used, 50);
 
         let tracker = Arc::new(parking_lot::Mutex::new(tracker));
-        let (subagent_tx, _subagent_rx) = mpsc::unbounded_channel();
         let (params, _persist_rx) = test_host_params(
             &run_id,
             2,
             "wf-scratch-release-persist",
             tracker.clone(),
-            subagent_tx,
+            Arc::new(
+                crate::session::workflow::backend::MockWorkflowAgentBackend {
+                    output: Arc::from(""),
+                },
+            ),
         );
         let cancel = params.cancel.clone();
 
@@ -1160,7 +1149,11 @@ mod tests {
             1,
             "wf-scratch-agent-slots",
             tracker.clone(),
-            subagent_tx,
+            Arc::new(crate::session::workflow::backend::GrokSubagentBackend {
+                subagent_event_tx: subagent_tx,
+                parent_session_id: "parent".into(),
+                task_model_selection: LatchedTaskModelSelection::default(),
+            }),
         );
         let cancel = params.cancel.clone();
         let (host_tx, host_rx) = mpsc::unbounded_channel();

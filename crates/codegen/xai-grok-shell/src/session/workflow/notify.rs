@@ -8,7 +8,7 @@ use super::store::WorkflowRunStore;
 use super::tracker::WorkflowRunState;
 
 #[derive(Clone)]
-pub(crate) struct WorkflowNotifySender {
+pub struct WorkflowNotifySender {
     session_id: agent_client_protocol::SessionId,
     gateway: xai_acp_lib::AcpAgentGatewaySender,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
@@ -16,7 +16,7 @@ pub(crate) struct WorkflowNotifySender {
 }
 
 impl WorkflowNotifySender {
-    pub(crate) fn new(
+    pub fn new(
         session_id: agent_client_protocol::SessionId,
         gateway: xai_acp_lib::AcpAgentGatewaySender,
         persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
@@ -94,7 +94,7 @@ impl WorkflowNotifySender {
     }
 }
 
-pub(crate) fn build_workflow_updated(
+pub fn build_workflow_updated(
     state: &WorkflowRunState,
     elapsed_ms: u64,
     _active_agents: u32,
@@ -269,4 +269,19 @@ mod tests {
             _ => panic!("expected WorkflowUpdated"),
         }
     }
+}
+
+/// Serialize a pager-facing `x.ai/session_notification` payload for External hosts.
+pub fn workflow_session_notification_json(
+    session_id: &str,
+    state: &WorkflowRunState,
+    elapsed_ms: u64,
+) -> serde_json::Value {
+    let update = build_workflow_updated(state, elapsed_ms, 0);
+    let notification = XaiSessionNotification {
+        session_id: agent_client_protocol::SessionId::new(session_id.to_string()),
+        update,
+        meta: None,
+    };
+    serde_json::to_value(notification).unwrap_or_else(|_| serde_json::json!({}))
 }
