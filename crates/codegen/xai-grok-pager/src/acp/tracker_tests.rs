@@ -5649,3 +5649,50 @@ fn model_calls_header_refreshes_on_tool_call_update() {
         other => panic!("expected Other block, got {other:?}"),
     }
 }
+
+/// grok-pi-acp tags codemode and eval calls with `raw_input.variant`; they land on their own cards, and the
+/// codemode card carries the nested calls the adapter folded into `raw_output`.
+#[test]
+fn grok_pi_codemode_and_eval_calls_render_as_their_cards() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(acp::ToolCallId::new(Arc::from("cm")), "codemode")
+                .status(acp::ToolCallStatus::Completed)
+                .raw_input(Some(serde_json::json!({ "variant": "Codemode", "code": "await tools.read('a')" })))
+                .raw_output(Some(serde_json::json!({
+                    "type": "Codemode",
+                    "calls": [{ "name": "read", "args": "a", "status": "ok", "durationMs": 1.5 }],
+                    "output": "done",
+                }))),
+        ),
+        &meta(),
+        &mut sb,
+    );
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(acp::ToolCallId::new(Arc::from("ev")), "eval")
+                .status(acp::ToolCallStatus::Completed)
+                .raw_input(Some(serde_json::json!({ "variant": "Eval", "language": "python", "code": "1 + 1" })))
+                .content(tool_text("2")),
+        ),
+        &meta(),
+        &mut sb,
+    );
+    let blocks: Vec<_> = (0..sb.len()).map(|i| &sb.get(i).unwrap().block).collect();
+    assert!(
+        blocks.iter().any(|block| matches!(
+            block,
+            RenderBlock::ToolCall(ToolCallBlock::Codemode(c)) if c.calls.len() == 1 && c.output.as_deref() == Some("done")
+        )),
+        "codemode card missing: {blocks:?}"
+    );
+    assert!(
+        blocks.iter().any(|block| matches!(
+            block,
+            RenderBlock::ToolCall(ToolCallBlock::Eval(e)) if e.language == "python" && e.output.as_deref() == Some("2")
+        )),
+        "eval card missing: {blocks:?}"
+    );
+}

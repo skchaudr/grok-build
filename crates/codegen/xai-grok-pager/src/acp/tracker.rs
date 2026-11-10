@@ -12,7 +12,8 @@ use crate::scrollback::blocks::tool::search::{
     SearchFileMatch, SearchInputMeta, SearchLineMatch, SearchOutputMode, SearchToolCallBlock,
 };
 use crate::scrollback::blocks::tool::{
-    DiscoveredTool, EditHighlightPhase, EditToolCallBlock, ExecuteToolCallBlock,
+    CodemodeToolCallBlock, DiscoveredTool, EditHighlightPhase, EditToolCallBlock, EvalToolCallBlock,
+    ExecuteToolCallBlock,
     IntegrationSearchToolCallBlock, LineRange, MemorySearchToolCallBlock, OtherToolCallBlock,
     ReadMediaKind, ReadToolCallBlock, ToolCallBlock, UseToolCallBlock, WebFetchToolCallBlock,
     WebSearchToolCallBlock,
@@ -2492,6 +2493,47 @@ fn tool_call_to_block_inner(
             }
             RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(block))
         }
+        // grok-pi codemode: the adapter folds the nested calls into the parent's raw output (Pi's own renderer
+        // shape); the script stays in raw_input.code. pi-acp's separate nested rows keep `apply_parent_nest`.
+        _ if extract_variant(tc) == Some("Codemode") => {
+            let code = extract_raw_field(tc, "code").unwrap_or_default();
+            let mut block = CodemodeToolCallBlock::new(code).with_raw_output(tc.raw_output.as_ref());
+            if block.output.is_none() {
+                // Older payloads carry the script output only as ACP text content.
+                let text = content_text(tc);
+                if !text.is_empty() {
+                    block = block.with_output(text);
+                }
+            }
+            if !success {
+                let text = block.output.take().unwrap_or_default();
+                block = block.with_error(if text.is_empty() { "Codemode script failed".to_owned() } else { text });
+            }
+            RenderBlock::ToolCall(ToolCallBlock::Codemode(block))
+        }
+        _ if extract_raw_field(tc, "variant").as_deref() == Some("Eval") => {
+            let language = extract_raw_field(tc, "language").unwrap_or_default();
+            let code = extract_raw_field(tc, "code").unwrap_or_default();
+            let mut block = EvalToolCallBlock::new(language, code);
+            if let Some(version) = extract_eval_bridge_version(tc) {
+                block = block.with_bridge_version(version);
+            }
+            if let Some(count) = extract_eval_tool_calls(tc) {
+                block = block.with_tool_calls(count);
+            }
+            if let Some(title) = extract_raw_field(tc, "title") {
+                block = block.with_title(title);
+            }
+            let text = content_text(tc);
+            if success {
+                if !text.is_empty() {
+                    block = block.with_output(text);
+                }
+            } else {
+                block = block.with_error(if text.is_empty() { "Eval failed".to_owned() } else { text });
+            }
+            RenderBlock::ToolCall(ToolCallBlock::Eval(block))
+        }
         _ if matches!(
             extract_raw_field(tc, "variant").as_deref(),
             Some("UseTool") | Some("MCPTool")
@@ -2916,6 +2958,29 @@ fn is_scheduler_tool(tc: &acp::ToolCall) -> bool {
     tc.title.starts_with("scheduler_")
         || extract_variant(tc).is_some_and(|v| v.starts_with("Scheduler"))
 }
+/// grok-pi Eval bridge generation (`v1` cell, `v2` orchestration), from the input or the result details.
+fn extract_eval_bridge_version(tc: &acp::ToolCall) -> Option<String> {
+    extract_raw_field(tc, "bridge_version")
+        .or_else(|| extract_raw_field(tc, "bridgeVersion"))
+        .or_else(|| {
+            let raw = tc.raw_output.as_ref()?;
+            raw.pointer("/details/bridgeVersion")
+                .or_else(|| raw.pointer("/details/bridge_version"))
+                .or_else(|| raw.get("bridgeVersion"))
+                .or_else(|| raw.get("bridge_version"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+}
+
+/// Host-tool calls an Eval cell made; `None` for payloads older than the counter.
+fn extract_eval_tool_calls(tc: &acp::ToolCall) -> Option<u64> {
+    let raw = tc.raw_output.as_ref()?;
+    raw.pointer("/details/toolCalls")
+        .or_else(|| raw.get("toolCalls"))
+        .and_then(serde_json::Value::as_u64)
+}
+
 /// Extract a string field from raw_input JSON.
 fn extract_raw_field(tc: &acp::ToolCall, field: &str) -> Option<String> {
     tc.raw_input

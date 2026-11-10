@@ -41,6 +41,9 @@ pub fn render_blocks_to_markdown<'a>(blocks: impl IntoIterator<Item = &'a Render
                 last_was_agent = true;
             }
             RenderBlock::ToolCall(tc) => {
+                if matches!(tc, ToolCallBlock::Eval(eval) if eval.effects_first()) {
+                    continue;
+                }
                 if !in_tools_section {
                     out.push_str("## Tools\n\n");
                     in_tools_section = true;
@@ -78,6 +81,9 @@ fn tool_summary(tc: &ToolCallBlock) -> String {
                 .map_or(String::new(), |d| format!(" ({})", d));
             format!("Execute: {}{}", ex.command, desc)
         }
+        ToolCallBlock::Eval(eval) => format!("Eval: {}", eval.title.as_deref().unwrap_or(eval.language.as_str())),
+        ToolCallBlock::Codemode(c) if c.calls.is_empty() => "Codemode".into(),
+        ToolCallBlock::Codemode(c) => format!("Codemode ({} calls)", c.calls.len()),
         ToolCallBlock::ListDir(l) => format!("ListDir: {}", l.path),
         ToolCallBlock::Search(s) => format!("Search: {}", s.pattern),
         ToolCallBlock::WebFetch(w) => format!("WebFetch: {}", w.url),

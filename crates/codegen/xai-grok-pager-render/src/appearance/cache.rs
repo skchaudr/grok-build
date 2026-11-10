@@ -1187,3 +1187,47 @@ mod tests {
         .unwrap();
     }
 }
+
+// -- grok-pi Eval and Bash cards (`[ui].pi_eval_v2_display_mode`, `[ui].pi_bash_command_format`) ---------
+
+thread_local! {
+    static PI_EVAL_V2_EFFECTS_FIRST_CURRENT: Cell<bool> = const { Cell::new(true) };
+    static PI_EVAL_V2_EFFECTS_FIRST_LOADED: Cell<bool> = const { Cell::new(false) };
+    static PI_BASH_COMMAND_FORMAT_CURRENT: Cell<bool> = const { Cell::new(false) };
+    static PI_BASH_COMMAND_FORMAT_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Eval v2 hides the orchestration source and leads with its nested effects unless the mode is `legacy`.
+pub fn load_pi_eval_v2_effects_first() -> bool {
+    PI_EVAL_V2_EFFECTS_FIRST_LOADED.with(|loaded| {
+        if !loaded.get() {
+            let effects_first =
+                load_str_from_effective_config("pi_eval_v2_display_mode").as_deref() != Some("legacy");
+            PI_EVAL_V2_EFFECTS_FIRST_CURRENT.with(|c| c.set(effects_first));
+            loaded.set(true);
+        }
+    });
+    PI_EVAL_V2_EFFECTS_FIRST_CURRENT.with(|c| c.get())
+}
+
+pub fn set_pi_eval_v2_effects_first(enabled: bool) {
+    PI_EVAL_V2_EFFECTS_FIRST_CURRENT.with(|c| c.set(enabled));
+    PI_EVAL_V2_EFFECTS_FIRST_LOADED.with(|l| l.set(true));
+}
+
+/// Reformat a one-line Eval/Bash command across lines for display.
+pub fn load_pi_bash_command_format() -> bool {
+    PI_BASH_COMMAND_FORMAT_LOADED.with(|loaded| {
+        if !loaded.get() {
+            let value = load_bool_from_effective_config("pi_bash_command_format", false);
+            PI_BASH_COMMAND_FORMAT_CURRENT.with(|c| c.set(value));
+            loaded.set(true);
+        }
+    });
+    PI_BASH_COMMAND_FORMAT_CURRENT.with(|c| c.get())
+}
+
+pub fn set_pi_bash_command_format(value: bool) {
+    PI_BASH_COMMAND_FORMAT_CURRENT.with(|c| c.set(value));
+    PI_BASH_COMMAND_FORMAT_LOADED.with(|l| l.set(true));
+}

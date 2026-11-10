@@ -909,7 +909,10 @@ impl RenderBlock {
             | RenderBlock::ToolCall(ToolCallBlock::WebSearch(_))
             | RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(_))
             | RenderBlock::ToolCall(ToolCallBlock::UseTool(_))
+            | RenderBlock::ToolCall(ToolCallBlock::Codemode(_))
             | RenderBlock::BgTask(_) => true,
+            // Effects-first Eval v2 shows its nested effects inline; the script source is not the content.
+            RenderBlock::ToolCall(ToolCallBlock::Eval(eval)) => !eval.effects_first(),
             // A finished read with neither text nor media still opens, to show its path and why it is empty. A running
             // one (clock going, no duration yet) waits for its content.
             RenderBlock::ToolCall(ToolCallBlock::Read(b)) => {

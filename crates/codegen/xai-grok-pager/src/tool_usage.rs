@@ -94,6 +94,7 @@ impl ToolCategory {
     pub fn from_tool_block(tc: &ToolCallBlock) -> Self {
         match tc {
             ToolCallBlock::Execute(_) => Self::Execute,
+            ToolCallBlock::Eval(_) | ToolCallBlock::Codemode(_) => Self::Other,
             ToolCallBlock::Read(_) => Self::Read,
             ToolCallBlock::Edit(_) => Self::Edit,
             ToolCallBlock::Search(_) => Self::Search,
@@ -346,6 +347,8 @@ impl ToolUsageStats {
     fn tool_block_is_failure(tc: &ToolCallBlock) -> bool {
         match tc {
             ToolCallBlock::Execute(b) => !b.is_success(),
+            ToolCallBlock::Eval(b) => !b.is_success(),
+            ToolCallBlock::Codemode(b) => !b.is_success(),
             ToolCallBlock::Read(b) => !b.is_success(),
             ToolCallBlock::Edit(b) => !b.is_success(),
             ToolCallBlock::Search(b) => !b.is_success(),
@@ -364,6 +367,8 @@ impl ToolUsageStats {
     fn tool_block_elapsed_ms(tc: &ToolCallBlock) -> Option<i64> {
         match tc {
             ToolCallBlock::Execute(b) => b.elapsed_ms(),
+            ToolCallBlock::Eval(b) => b.elapsed_ms(),
+            ToolCallBlock::Codemode(b) => b.elapsed_ms(),
             ToolCallBlock::Read(b) => b.elapsed_ms(),
             ToolCallBlock::Edit(b) => b.elapsed_ms(),
             ToolCallBlock::Search(b) => b.elapsed_ms(),
