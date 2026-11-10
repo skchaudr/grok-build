@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# pig — Pi in the fork pager through the fork's grok-pi-acp (`grok grok-pi`).
+# Dwsy's standalone @dwsy/grok-pi, which pig used to run, stays at ~/.local/bin/grok-pi.
+exec "$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd)/gb" grok-pi "$@"
