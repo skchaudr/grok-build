@@ -2125,6 +2125,8 @@ pub async fn run_leader_server(
     let external_publisher = control_state.external_roster.publisher();
     let mut external_rows: HashMap<String, RosterEntry> = HashMap::new();
     let mut pending_external_cwd: HashMap<String, String> = HashMap::new();
+    // An ACP `session/load` reply carries no `sessionId`; the request's id is the route to record.
+    let mut pending_external_load: HashMap<String, String> = HashMap::new();
     let mut pending_external_prompt: HashMap<String, String> = HashMap::new();
     let mut pending_external_new: HashMap<String, PendingExternalNew> = HashMap::new();
     // External agents may announce a new session's commands, model and title before its `session/new`
@@ -2327,6 +2329,7 @@ pub async fn run_leader_server(
                             roster_dirty |= external_rows.remove(&pending.provisional_id).is_some();
                         }
                         pending_external_cwd.remove(&ns_id);
+                        pending_external_load.remove(&ns_id);
                     }
                     if !detached_sessions.is_empty() {
                         let session_count = detached_sessions.len();
@@ -2787,6 +2790,9 @@ pub async fn run_leader_server(
                                 {
                                     let cwd = json.as_ref().map(request_cwd).unwrap_or_default();
                                     pending_external_cwd.insert(ns_id.clone(), cwd);
+                                    if let Some(sid) = json.as_ref().and_then(extract_session_id) {
+                                        pending_external_load.insert(ns_id.clone(), sid);
+                                    }
                                 }
                                 if is_initialize {
                                     pending_initialize.insert(ns_id.clone());
@@ -2851,6 +2857,7 @@ pub async fn run_leader_server(
                 }
                 let parsed_response = json.as_mut().and_then(parse_response_id);
                 let mut opened_cwd: Option<String> = None;
+                let mut opened_load: Option<String> = None;
                 let mut opened_machine: Option<String> = None;
                 let mut pending_removed = false;
                 let mut pending_replaced = false;
@@ -2858,6 +2865,7 @@ pub async fn run_leader_server(
                 if let Some((_, ref ns_id)) = parsed_response {
                     inflight.remove(ns_id);
                     opened_cwd = pending_external_cwd.remove(ns_id);
+                    opened_load = pending_external_load.remove(ns_id);
                     if let Some(pending) = pending_external_new.remove(ns_id) {
                         pending_removed = external_rows.remove(&pending.provisional_id).is_some();
                         opened_machine = pending.machine;
@@ -2913,7 +2921,8 @@ pub async fn run_leader_server(
                     && let Some(client) = clients.get_mut(&client_id)
                     && let Some(json) = json.as_mut()
                 {
-                    let routed_session = extract_session_id_from_result(json);
+                    let routed_session = extract_session_id_from_result(json)
+                        .or_else(|| opened_load.take().filter(|_| json.get("result").is_some()));
                     if let Some(session_id) = routed_session.clone() {
                         let first_route = !session_backend.contains_key(&session_id);
                         let pid = backend_pid(&backend, &externals);
@@ -3409,6 +3418,19 @@ pub async fn run_leader_server(
                     if let Err(e) = client.tx.send(ClientOutbound::Acp(payload)) {
                         warn!(client_id = client_id.0, error = %e, "Failed to send notification via fallback routing (channel closed)");
                     }
+                } else if !backend.is_native()
+                    && let Some(client_id) = external_backend_watcher(
+                        &backend,
+                        last_active_client,
+                        &session_backend,
+                        &session_subscribers,
+                    )
+                    && let Some(client) = clients.get(&client_id)
+                {
+                    debug!(client_id = client_id.0, "Routing session-less external notification to its session's client");
+                    if let Err(e) = client.tx.send(ClientOutbound::Acp(payload)) {
+                        warn!(client_id = client_id.0, error = %e, "Failed to send external notification (channel closed)");
+                    }
                 } else {
                     debug!("No client available for notification routing, message dropped");
                 }
@@ -3494,6 +3516,28 @@ fn resolve_backend(
         return BackendId::External(cmd);
     }
     BackendId::from_capabilities(caps)
+}
+
+/// The client for a session-less notification from an external agent (grok-pi's `pi/ui/*` widgets and Remote TUI
+/// frames): one watching a session on that agent, the last active client first. A picker-spawned agent's client
+/// launched on another backend, so [`client_on_backend`] alone would drop these.
+fn external_backend_watcher(
+    backend: &BackendId,
+    last_active: Option<ClientId>,
+    session_backend: &HashMap<String, SessionRoute>,
+    session_subscribers: &HashMap<String, std::collections::HashSet<ClientId>>,
+) -> Option<ClientId> {
+    let mut watchers = session_backend
+        .iter()
+        .filter(|(_, route)| &route.backend == backend)
+        .filter_map(|(sid, _)| session_subscribers.get(sid))
+        .flatten()
+        .copied();
+    let first = watchers.next()?;
+    if last_active == Some(first) {
+        return Some(first);
+    }
+    Some(watchers.find(|client| Some(*client) == last_active).unwrap_or(first))
 }
 
 fn client_on_backend(client: &ClientState, backend: &BackendId) -> bool {

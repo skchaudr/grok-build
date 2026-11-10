@@ -209,6 +209,11 @@ for raw in sys.stdin:
             else:
                 unknown_session(req_id)
             continue
+        if command == "fake-load-no-sid":
+            # Like grok-pi-acp: an ACP LoadSessionResponse has no sessionId.
+            sessions[sid] = True
+            result(req_id, identity())
+            continue
         result(
             req_id,
             {"sessionId": sid, "known": sid in sessions, **identity()},
@@ -229,6 +234,9 @@ for raw in sys.stdin:
                     }
                 )
                 continue
+        if command == "fake-sessionless-ui":
+            # Like grok-pi-acp: Pi extension UI (widgets, Remote TUI frames) carries no sessionId.
+            emit({"jsonrpc": "2.0", "method": "_pi/ui/widget", "params": {"widgetKey": "remote_tui", "widgetLines": ["xAI"]}})
         text = f"pid={pid} hostname={host} command={command}"
         if command == "fake-echo-prompt":
             text = prompt_summary(params.get("prompt"))

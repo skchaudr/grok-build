@@ -208,6 +208,59 @@ async fn updates_sent_before_the_session_new_reply_reach_the_client_after_it() {
 }
 
 #[tokio::test]
+async fn a_picker_agents_sessionless_notification_reaches_the_client_watching_its_session() {
+    let mut server = start_ready().await;
+    let launch = fake_cmd("fake-a");
+    let pi = fake_cmd("fake-sessionless-ui");
+    let mut client = connect(&server.sock, "picker", Some(&launch)).await;
+    initialize(&mut client).await;
+    client
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"session/new","params":{{"cwd":"/tmp","mcpServers":[],"_meta":{{"x.ai/agentCmd":{pi},"x.ai/agentName":"grok-pi"}}}}}}"#,
+            pi = serde_json::to_string(&pi).unwrap(),
+        ))
+        .unwrap();
+    let created = recv_where(&mut client, |j| j.pointer("/result/sessionId").is_some()).await;
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_string();
+    client
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{{"sessionId":"{sid}","prompt":[{{"type":"text","text":"/login"}}]}}}}"#
+        ))
+        .unwrap();
+    let widget = recv_where(&mut client, |j| j.pointer("/params/widgetKey").is_some()).await;
+    assert_eq!(widget["params"]["widgetLines"][0], "xAI");
+    client.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_session_loaded_on_a_picker_agent_keeps_routing_to_that_agent() {
+    let mut server = start_ready().await;
+    let launch = fake_cmd("fake-a");
+    let picked = fake_cmd("fake-load-no-sid");
+    let mut client = connect(&server.sock, "picker", Some(&launch)).await;
+    initialize(&mut client).await;
+    client
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"session/load","params":{{"sessionId":"pi-old","cwd":"/tmp","mcpServers":[],"_meta":{{"x.ai/agentCmd":{picked}}}}}}}"#,
+            picked = serde_json::to_string(&picked).unwrap(),
+        ))
+        .unwrap();
+    recv_where(&mut client, |j| j.get("id").and_then(|v| v.as_u64()) == Some(2)).await;
+    client
+        .send(
+            r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"pi-old","prompt":[{"type":"text","text":"hi"}]}}"#
+                .to_string(),
+        )
+        .unwrap();
+    let update = recv_where(&mut client, |j| j.pointer("/params/update/content/text").is_some()).await;
+    let text = update.pointer("/params/update/content/text").and_then(|v| v.as_str()).unwrap();
+    assert!(text.contains("command=fake-load-no-sid"), "the prompt went to the launch agent: {text}");
+    client.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
 async fn two_clients_with_the_same_command_share_one_process_and_live_updates() {
     let server = start_ready().await;
     let cmd = fake_cmd("fake-a");
