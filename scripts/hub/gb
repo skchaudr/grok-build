@@ -19,7 +19,7 @@
 #          leader spawns it. Machines: ~/.config/gb/machines.tsv (TAB: name, user@host, claude cmd,
 #          pi cmd; absolute remote paths). Needs non-interactive ssh to work.
 #        gb native [args...] → stock grok binary, args passed through.
-# Agent: normal|prime|prime-h2|claude|cursor|pi|codex|dsh|dsh-stock|fork; omit to pick.
+# Agent: normal|prime|prime-h2|claude|cursor|pi|grok-pi|codex|dsh|dsh-stock|fork; omit to pick.
 #        prime-h2 = prime-agent behind the Harness² ACP proxy (skills + guardrails injected; run dir,
 #        trajectory.txt and session map under ~/.prime/harness2). GB_PRIME_H2 overrides the command.
 #        `normal` is the stock grok binary (alias: native). `fork` is the fork
@@ -28,6 +28,7 @@
 #        GB_CLAUDE_ACP overrides the claude adapter command (default: the pinned
 #        ~/.local/bin/claude-agent-acp launcher, else claude-acp).
 #        GB_PI_ACP overrides the pi adapter (default: patched pi-acp run script, else stock pi-acp).
+#        GB_GROK_PI_ACP overrides grok-pi (default: ~/.grok/bin/grok-pi-acp, else the build tree).
 #        GB_PRINT_CMD=1 prints the pager argv (one arg per line) instead of exec'ing it.
 #        GB_CODEX_MODEL overrides the codex model. Agent launches set GROK_RESUME_CMD="grok <agent>"
 #        so the pager's quit hint names the agent (needs a pager with that support).
@@ -68,12 +69,19 @@ if [ -z "$PI_ACP_BIN" ]; then
   if [ -x "$HOME/repos/Pi-Coding-Agent/pi-acp-patched/run" ]; then PI_ACP_BIN="$HOME/repos/Pi-Coding-Agent/pi-acp-patched/run"; fi
 fi
 
+# grok-pi-acp (the fork's own Pi host): the installed copy, else the build tree.
+GROK_PI_ACP_BIN="${GB_GROK_PI_ACP:-}"
+[ -z "$GROK_PI_ACP_BIN" ] && for c in "$HOME/.grok/bin/grok-pi-acp" "$HOME/repos/grok-build/target/release/grok-pi-acp"; do
+  [ -x "$c" ] && { GROK_PI_ACP_BIN=$c; break; }
+done
+
 declare -A CMD=(
   [prime]="prime-agent --mode acp"
   [prime-h2]="${GB_PRIME_H2:-prime-h2 acp}"
   [claude]="env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=$(command -v claude) $CLAUDE_ACP_CMD"
   [cursor]="cursor-agent acp"
   [pi]="$PI_ACP_BIN"
+  [grok-pi]="${GROK_PI_ACP_BIN:-grok-pi-acp}"
   [codex]="codex-acp -c model=\"$CODEX_MODEL\""
   [dsh]="env DSH_ACP_PROVIDER=$DSH_PROVIDER DSH_ACP_MODEL=$DSH_MODEL dsh --profile acp-enhanced"
   [dsh-stock]="dsh --profile acp"
@@ -94,7 +102,7 @@ rm_ssh() {
   [ -f "$kh" ] && opt="-o UserKnownHostsFile=$kh "
   printf 'ssh -T -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 %s%s %s' "$opt" "$1" "$2"
 }
-ORDER=(normal prime prime-h2 claude cursor pi codex dsh dsh-stock fork)
+ORDER=(normal prime prime-h2 claude cursor pi grok-pi codex dsh dsh-stock fork)
 
 [ -x "$PAGER_BIN" ] || { echo "gb: pager not found at $PAGER_BIN (set GB_PAGER)" >&2; exit 1; }
 
