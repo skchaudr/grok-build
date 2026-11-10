@@ -367,8 +367,6 @@ struct HooksRunning {
 /// Does nothing else: no UI, no networking, just data transformation.
 #[derive(Debug, Default)]
 pub struct AcpUpdateTracker {
-    /// The 5-hour limit's percent from the last Claude `/usage` reply, for the side panel's usage bar.
-    pub(crate) five_hour_pct: Option<u8>,
     /// Entry currently receiving AgentMessageChunk deltas.
     /// None between turns or before first message chunk.
     current_agent_msg: Option<EntryId>,
@@ -1210,9 +1208,6 @@ impl AcpUpdateTracker {
         let home = home_dir();
         let text = redact_display_home(&raw, &home);
         let limits_only = limits_only_usage(&text).map(str::to_owned);
-        if let Some(pct) = limits_only.as_deref().and_then(five_hour_pct) {
-            self.five_hour_pct = Some(pct);
-        }
         let text = limits_only.map_or(text, std::borrow::Cow::Owned);
         if text.is_empty() {
             return false;
@@ -2022,15 +2017,6 @@ fn limits_only_usage(text: &str) -> Option<&str> {
     }
     let i = text.find("contributing to your limits usage")?;
     Some(text[..text[..i].rfind('\n').map_or(0, |n| n + 1)].trim_end())
-}
-
-/// `**5-hour limit** — **22%**` → 22: the first `N%` after the 5-hour label.
-fn five_hour_pct(text: &str) -> Option<u8> {
-    let rest = &text[text.find("5-hour")?..];
-    let digits_end = rest.find('%')?;
-    let digits = rest[..digits_end].trim_end();
-    let start = digits.rfind(|c: char| !c.is_ascii_digit()).map_or(0, |i| i + 1);
-    digits[start..].parse::<u8>().ok().map(|p| p.min(100))
 }
 
 /// The pane must not paint `/home/<user>/…`. A startup listing of extension files is the case that
@@ -3368,12 +3354,6 @@ mod usage_trim_tests {
     fn native_usage_cuts_at_contributions_line() {
         let text = "Weekly: 22%\n\nWhat's contributing to your limits usage?\nMCP x 3%";
         assert_eq!(limits_only_usage(text), Some("Weekly: 22%"));
-    }
-
-    #[test]
-    fn five_hour_percent_reads_from_the_limits_block() {
-        assert_eq!(super::five_hour_pct("### Limits\n\n**5-hour limit** — **22%**\n\n**Weekly** — **9%**"), Some(22));
-        assert_eq!(super::five_hour_pct("Weekly: 22%"), None);
     }
 
     #[test]

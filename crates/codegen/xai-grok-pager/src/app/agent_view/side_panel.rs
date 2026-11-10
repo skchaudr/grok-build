@@ -49,7 +49,7 @@ impl AgentView {
             effort: s.models.reasoning_effort.map(|e| e.to_string()),
             mode,
             context: self.context_state.as_ref().map(|c| (c.used, c.total)),
-            five_hour_pct: s.tracker.five_hour_pct,
+            five_hour_pct: self.side_panel.five_hour_pct,
             status,
             jobs: self
                 .dock_task_rows()

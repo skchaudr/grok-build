@@ -2,9 +2,9 @@
 //! tail of this session and an Info page. Esc hands the keyboard back to the chat, ←/→ switch pages, `z` swaps the
 //! panel and chat widths, `+`/`-` resize. The full-screen `/traces` modal is separate and unchanged.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
@@ -64,7 +64,8 @@ enum Traces {
     Idle,
     /// A worker polls the index once a second for this session's row; `None` is its heartbeat.
     Looking(mpsc::Receiver<Option<SessionRow>>),
-    Following(Box<Follow>),
+    /// The index handle reads an opened call's command and result.
+    Following(Box<Follow>, Option<TraceIndex>),
     Failed(String),
 }
 
@@ -75,6 +76,8 @@ pub struct SidePanel {
     pub page: Page,
     width: u16,
     traces: Traces,
+    /// Claude's 5-hour limit, from the statusline snapshots `ocq` reads.
+    pub five_hour_pct: Option<u8>,
 }
 
 impl Default for SidePanel {
@@ -86,6 +89,7 @@ impl Default for SidePanel {
             page: Page::default(),
             width: DEFAULT_WIDTH,
             traces: Traces::Idle,
+            five_hour_pct: None,
         }
     }
 }
@@ -128,7 +132,7 @@ impl SidePanel {
             // Zoomed, `width` is the chat's, so wider panel means a narrower chat.
             KeyCode::Char('+' | '=') => self.resize(!self.zoomed),
             KeyCode::Char('-' | '_') => self.resize(self.zoomed),
-            KeyCode::Char('j' | 'k' | 'g' | 'G' | 'e')
+            KeyCode::Char('j' | 'k' | 'g' | 'G' | 'e' | 'h' | 'l')
             | KeyCode::Up
             | KeyCode::Down
             | KeyCode::PageUp
@@ -138,7 +142,7 @@ impl SidePanel {
             | KeyCode::Tab
             | KeyCode::BackTab => {
                 if self.page == Page::Traces
-                    && let Traces::Following(f) = &mut self.traces
+                    && let Traces::Following(f, _) = &mut self.traces
                 {
                     f.key(key.code);
                 }
@@ -193,6 +197,13 @@ impl SidePanel {
         if !self.open {
             return false;
         }
+        let home = std::env::var("HOME").unwrap_or_default();
+        let five_hour = claude_five_hour_pct(&Path::new(&home).join(".cache/claude-status"));
+        let usage_moved = std::mem::replace(&mut self.five_hour_pct, five_hour) != five_hour;
+        usage_moved | self.poll_traces(native, now_ms)
+    }
+
+    fn poll_traces(&mut self, native: Option<&str>, now_ms: i64) -> bool {
         match &mut self.traces {
             Traces::Idle => match native.filter(|n| !n.is_empty()) {
                 Some(native) => {
@@ -207,10 +218,9 @@ impl SidePanel {
             Traces::Looking(rx) => match found_row(rx) {
                 Ok(None) => false,
                 Ok(Some(row)) => {
-                    self.traces = Traces::Following(Box::new(Follow::open(
-                        xai_grok_traces::default_db_path(),
-                        row,
-                    )));
+                    let db = xai_grok_traces::default_db_path();
+                    let index = TraceIndex::open_with(&db, Some(Duration::from_millis(200))).ok();
+                    self.traces = Traces::Following(Box::new(Follow::open(db, row)), index);
                     true
                 }
                 Err(()) => {
@@ -218,7 +228,7 @@ impl SidePanel {
                     true
                 }
             },
-            Traces::Following(f) => f.poll(now_ms),
+            Traces::Following(f, _) => f.poll(now_ms),
             Traces::Failed(_) => false,
         }
     }
@@ -302,8 +312,8 @@ impl SidePanel {
             }
             Page::Traces => {
                 let note = match &mut self.traces {
-                    Traces::Following(f) => {
-                        f.render(buf, body, None, theme, now_ms);
+                    Traces::Following(f, index) => {
+                        f.render(buf, body, index.as_ref(), theme, now_ms);
                         return;
                     }
                     Traces::Idle if info.session_id.is_none() => "no session yet".to_string(),
@@ -334,8 +344,31 @@ impl SidePanel {
     ) {
         let mut f = Follow::bare(root);
         f.apply(items, now_ms);
-        self.traces = Traces::Following(Box::new(f));
+        self.traces = Traces::Following(Box::new(f), None);
     }
+}
+
+/// The newest snapshot under a day old that carries a 5-hour limit, as `ocq` picks it. Claude Code's statusline
+/// writes one JSON file per session here.
+fn claude_five_hour_pct(dir: &Path) -> Option<u8> {
+    let now = SystemTime::now();
+    let mut files: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
+        .filter(|(m, _)| {
+            now.duration_since(*m)
+                .is_ok_and(|age| age < Duration::from_secs(86_400))
+        })
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.iter().find_map(|(_, p)| {
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(p).ok()?).ok()?;
+        let pct = v["rate_limits"]["five_hour"]["used_percentage"].as_f64()?;
+        Some(pct.clamp(0.0, 100.0).round() as u8)
+    })
 }
 
 /// The lookup worker's answer so far. The worker exits right after sending the row, so a hang-up only means
@@ -488,6 +521,35 @@ mod tests {
         );
         let (chat, side) = panel(true, true, true).split(area);
         assert_eq!((chat.width, side.unwrap().width), (46, 74));
+    }
+
+    #[test]
+    fn five_hour_reads_the_newest_snapshot_that_has_it() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(claude_five_hour_pct(dir.path()), None);
+        std::fs::write(
+            dir.path().join("a.json"),
+            r#"{"rate_limits":{"five_hour":{"used_percentage":22.4}}}"#,
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(
+            dir.path().join("b.json"),
+            r#"{"session_id":"no limits here"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            claude_five_hour_pct(dir.path()),
+            Some(22),
+            "a newer file without limits is skipped"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(
+            dir.path().join("c.json"),
+            r#"{"rate_limits":{"five_hour":{"used_percentage":61}}}"#,
+        )
+        .unwrap();
+        assert_eq!(claude_five_hour_pct(dir.path()), Some(61));
     }
 
     #[test]

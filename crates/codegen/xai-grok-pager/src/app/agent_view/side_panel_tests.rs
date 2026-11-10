@@ -26,7 +26,7 @@ fn agent() -> AgentView {
     agent.session.cwd = "/work/grok-build".into();
     agent.generated_session_title = Some("side panel".into());
     agent.apply_context_used(84_000, 200_000);
-    agent.session.tracker.five_hour_pct = Some(22);
+    agent.side_panel.five_hour_pct = Some(22);
     agent
 }
 
