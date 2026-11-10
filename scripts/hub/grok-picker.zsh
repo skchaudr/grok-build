@@ -3,6 +3,7 @@
 #   grok                 -> normal Grok (stock binary). No pickers.
 #   grok "prompt"        -> same, prompt and flags included
 #   grok pi              -> Pi in the fork pager
+#   grok grok-pi         -> Pi through the fork's own grok-pi-acp
 #   grok claude          -> Claude in the fork pager
 #   grok fork            -> fork pager hosting `grok agent stdio` (was the picker id `grok`)
 #   grok all             -> one fork pager offering claude and pi (GB_ALL); `grok claude pi` too
@@ -31,7 +32,7 @@ function grok {
             agent=$("$entry" pick-agent) || return 0
             "$entry" launch "$machine" "$agent" "$@"
             ;;
-    all|+?*|fork|claude|cursor|pi|codex|dsh|dsh-stock|prime)
+    all|+?*|fork|claude|cursor|pi|grok-pi|codex|dsh|dsh-stock|prime)
             "$gb" "$@"
             ;;
     --)     shift; env -u PAGER "$(GB_PRINT_PAGER=1 "$gb")" "$@" ;;

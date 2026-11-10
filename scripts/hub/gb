@@ -326,6 +326,25 @@ gb_exec() {
   exec "$@"
 }
 
+# A picked agent only runs through a leader (without one every session gets the first choice).
+# Each multi-agent launch gets its own leader, stopped when the pager exits: it always runs the
+# installed binary and leaves nothing behind. Args: env assignments then the pager argv.
+gb_leader_exec() {
+  gb_sock="$HOME/.grok/leader-gb-$$.sock"
+  if [ -n "${GB_PRINT_CMD:-}" ]; then printf '%s\n' "$@" --leader --leader-socket "$gb_sock"; exit 0; fi
+  "$PAGER_BIN" agent leader --no-auto-update --leader-socket "$gb_sock" </dev/null >/dev/null 2>>"$HOME/.grok/leader-gb.log" &
+  gb_leader=$!
+  local i=0
+  # Globals: the EXIT trap runs after this function's locals are gone.
+  trap 'kill "$gb_leader" 2>/dev/null; rm -f "$gb_sock" "$gb_sock".* "${gb_sock%.sock}.lock"' EXIT
+  while [ ! -S "$gb_sock" ] && [ $i -lt 50 ]; do
+    kill -0 "$gb_leader" 2>/dev/null || { echo "gb: the leader exited; see ~/.grok/leader-gb.log" >&2; exit 1; }
+    sleep 0.1; i=$((i + 1))
+  done
+  [ -S "$gb_sock" ] || { echo "gb: no leader on $gb_sock after 5s; see ~/.grok/leader-gb.log" >&2; exit 1; }
+  "$@" --leader --leader-socket "$gb_sock"
+}
+
 launch() {
   local agent="$1" full="$2" session_cwd="$3"
   shift 3
@@ -432,7 +451,8 @@ if [ ${#multi[@]} -gt 0 ]; then
       [ -n "$rc" ] && args+=(--agent-choice "$m-$a=$(rm_ssh "${RM_HOST[$m]}" "$rc")")
     done
   done
-  gb_exec env -u PAGER GROK_RESUME_CMD="grok ${multi[0]}" "$PAGER_BIN" "${args[@]}" "$@"
+  gb_leader_exec env -u PAGER GROK_RESUME_CMD="grok ${multi[0]}" "$PAGER_BIN" "${args[@]}" "$@"
+  exit
 fi
 if [ -z "$pick" ]; then
   pick=$(gb_pick_agent) || exit 0
