@@ -116,6 +116,17 @@ impl AgentView {
             return InputOutcome::Changed;
         };
 
+        // Pi `/tree` and `/tree-map` have their own key handlers (filters, search, labels, summary prompt).
+        if matches!(modal, ActiveModal::SessionTree { .. }) {
+            return self.handle_session_tree_input(&crossterm::event::Event::Key(*key));
+        }
+        if matches!(modal, ActiveModal::TreeMap { .. }) {
+            return self.handle_tree_map_input(key);
+        }
+        if matches!(modal, ActiveModal::Notifications { .. }) {
+            return self.handle_notifications_input(&crossterm::event::Event::Key(*key));
+        }
+
         // Picker-based modals: route Esc through ModalWindow chrome first, then delegate remaining keys to the picker input handler
         if matches!(
             modal,
@@ -505,7 +516,10 @@ impl AgentView {
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
-            | ActiveModal::RememberNoteReview { .. } => unreachable!(),
+            | ActiveModal::RememberNoteReview { .. }
+            | ActiveModal::SessionTree { .. }
+            | ActiveModal::TreeMap { .. }
+            | ActiveModal::Notifications { .. } => unreachable!(),
         }
     }
 
@@ -1383,6 +1397,23 @@ impl AgentView {
         use crate::views::modal_window::{self as mw, ModalWindowOutcome};
         use crossterm::event::MouseEventKind;
 
+        if matches!(self.active_modal, Some(ActiveModal::SessionTree { .. })) {
+            return self.handle_session_tree_modal_mouse(mouse);
+        }
+        if matches!(self.active_modal, Some(ActiveModal::TreeMap { .. })) {
+            return self.handle_tree_map_mouse(mouse);
+        }
+        if let Some(ActiveModal::Notifications { window, .. }) = &mut self.active_modal {
+            return match mw::handle_modal_mouse(window, mouse.kind, mouse.column, mouse.row) {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::Unhandled => InputOutcome::Unchanged,
+                _ => InputOutcome::Changed,
+            };
+        }
+
         // Picker-based modals: route through ModalWindow chrome first, then delegate content events to the picker input handler
         if matches!(
             self.active_modal,
@@ -1746,7 +1777,13 @@ impl AgentView {
 
             // EditConfirm has no draw arm and is no longer armed anywhere (the dirty pane-switch lock blocks instead)
             // Arming it would capture all input invisibly
-            if let modal::ActiveModal::CommandPalette {
+            if let modal::ActiveModal::SessionTree { state, window } = active_modal {
+                super::agent_view::pi_tree::draw_session_tree(buf, area, state, window, &theme, compact);
+            } else if let modal::ActiveModal::TreeMap { state, window } = active_modal {
+                super::agent_view::pi_tree::draw_tree_map(buf, area, state, window, &theme, compact);
+            } else if let modal::ActiveModal::Notifications { state, window } = active_modal {
+                super::agent_view::pi_tree::draw_notifications(buf, area, state, window, &theme, compact);
+            } else if let modal::ActiveModal::CommandPalette {
                 entries: _,
                 state,
                 window,

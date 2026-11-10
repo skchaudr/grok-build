@@ -444,6 +444,8 @@ impl AgentView {
             pi_remote_tui: Default::default(),
             pi_plan_file_path: None,
             pi_shortcuts: None,
+            fork_state: None,
+            pi_notifications: Vec::new(),
             generated_session_title: None,
             title_unpin_committed: false,
             last_turn_summary: None,

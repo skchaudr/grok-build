@@ -210,6 +210,21 @@ pub enum ActiveModal {
         /// Shared modal window chrome state.
         window: ModalWindowState,
     },
+    /// Pi session entry tree (`/tree`) with filters, search and a detail pane.
+    SessionTree {
+        state: crate::views::session_tree::SessionTreeState,
+        window: ModalWindowState,
+    },
+    /// Pi extension notifications for this session (`/notify`).
+    Notifications {
+        state: NotificationListState,
+        window: ModalWindowState,
+    },
+    /// Pi branch map (`/tree-map`): user messages only.
+    TreeMap {
+        state: crate::views::tree_map::TreeMapState,
+        window: ModalWindowState,
+    },
     /// Session picker (opened from /resume command or command palette).
     SessionPicker {
         /// Unified picker state.
@@ -649,6 +664,38 @@ pub(crate) fn filter_palette_entries(
     }
     result
 }
+/// One Pi extension notification kept for `/notify` (process-local, never persisted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiNotification {
+    pub message: String,
+    pub kind: Option<String>,
+}
+
+/// `/notify`: the session's Pi notifications, newest first, searchable.
+pub struct NotificationListState {
+    pub notifications: Vec<PiNotification>,
+    pub picker: crate::views::picker::PickerState,
+}
+
+impl NotificationListState {
+    pub fn new(notifications: Vec<PiNotification>) -> Self {
+        Self { notifications, picker: crate::views::picker::PickerState::default() }
+    }
+
+    pub fn filtered(&self) -> Vec<&PiNotification> {
+        let query = self.picker.query().to_lowercase();
+        self.notifications
+            .iter()
+            .rev()
+            .filter(|n| {
+                query.is_empty()
+                    || n.message.to_lowercase().contains(&query)
+                    || n.kind.as_deref().unwrap_or("info").to_lowercase().contains(&query)
+            })
+            .collect()
+    }
+}
+
 impl ActiveModal {
     pub fn hint_pairs(&self, drain_blocked: bool) -> Vec<(char, &'static str)> {
         match self {
@@ -672,7 +719,10 @@ impl ActiveModal {
             | ActiveModal::Traces { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
-            | ActiveModal::RememberNoteReview { .. } => vec![],
+            | ActiveModal::RememberNoteReview { .. }
+            | ActiveModal::SessionTree { .. }
+            | ActiveModal::TreeMap { .. }
+            | ActiveModal::Notifications { .. } => vec![],
         }
     }
     pub fn message(&self, drain_blocked: bool) -> &str {
@@ -686,6 +736,9 @@ impl ActiveModal {
             }
             ActiveModal::CommandPalette { .. } => "Commands",
             ActiveModal::SessionPicker { .. } => "Resume session",
+            ActiveModal::SessionTree { .. } => "Session tree",
+            ActiveModal::TreeMap { .. } => "Branch map",
+            ActiveModal::Notifications { .. } => "Notifications",
             ActiveModal::ArgPicker {
                 command,
                 args_query,

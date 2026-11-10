@@ -1360,6 +1360,51 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             }]
         }
         Action::Fork(args) => dispatch_fork(app, args),
+        Action::PiReload => super::session::pi_session::dispatch_pi_reload(app),
+        Action::PiClone => super::session::pi_session::dispatch_pi_clone(app),
+        Action::PiFork(entry_id) => super::session::pi_session::dispatch_pi_fork(app, entry_id),
+        Action::ShowNotifications => {
+            match super::ctx::get_active_agent_mut(app) {
+                Some(agent) => {
+                    let state = crate::views::modal::NotificationListState::new(agent.pi_notifications.clone());
+                    agent.active_modal = Some(crate::views::modal::ActiveModal::Notifications {
+                        state,
+                        window: crate::views::modal_window::ModalWindowState::new(),
+                    });
+                }
+                None => app.show_toast("No active session"),
+            }
+            vec![]
+        }
+        Action::ShowSessionTree => super::session::pi_session::dispatch_show_tree(app, false),
+        Action::ShowTreeMap => super::session::pi_session::dispatch_show_tree(app, true),
+        Action::NavigateSessionTree { entry_id, summarize, custom_instructions } => super::session::pi_session::dispatch_tree_op(
+            app,
+            crate::app::actions::PiSessionOp::NavigateTree { entry_id, summarize, custom_instructions },
+        ),
+        Action::LabelSessionTreeEntry { entry_id, label } => super::session::pi_session::dispatch_tree_op(
+            app,
+            crate::app::actions::PiSessionOp::TreeLabel { entry_id, label },
+        ),
+        Action::RollbackFilesPreview { entry_id } => super::session::pi_session::dispatch_tree_op(
+            app,
+            crate::app::actions::PiSessionOp::RollbackPreview { entry_id },
+        ),
+        Action::RollbackFilesExecute { entry_id } => super::session::pi_session::dispatch_tree_op(
+            app,
+            crate::app::actions::PiSessionOp::RollbackExecute { entry_id },
+        ),
+        Action::SessionTreeClosed => {
+            super::ctx::with_active_agent(app, |agent| {
+                if matches!(
+                    agent.active_modal,
+                    Some(crate::views::modal::ActiveModal::SessionTree { .. } | crate::views::modal::ActiveModal::TreeMap { .. })
+                ) {
+                    agent.active_modal = None;
+                }
+            });
+            vec![]
+        }
         Action::ForkAnswered {
             worktree,
             directive,

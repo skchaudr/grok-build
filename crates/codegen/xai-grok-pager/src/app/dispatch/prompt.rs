@@ -850,6 +850,7 @@ pub(super) fn dispatch_send_prompt_submission(
     let leader_mode = app.leader_mode;
     let screen_mode_is_minimal = app.screen_mode.is_minimal();
     let external_claude = app.is_claude_agent(id);
+    let external_pi = app.is_pi_agent(id);
     if consume_input && !literal && external_claude {
         let refused = app
             .agents
@@ -1050,7 +1051,12 @@ pub(super) fn dispatch_send_prompt_submission(
                                 invocation.args,
                             )
                         })
-                        .flatten();
+                        .flatten()
+                        .or_else(|| {
+                            (is_builtin && external_pi)
+                                .then(|| crate::slash::pi_menu::typed_builtin_override(command.name(), invocation.token))
+                                .flatten()
+                        });
                     // Central screen-mode gate
                     // A fully-typed invocation thus earns a hint that names the way out instead of leaking to the model
                     // A refusal added here must also extend the pre-check in `EditedCommandGate` (`dispatch::queue`)

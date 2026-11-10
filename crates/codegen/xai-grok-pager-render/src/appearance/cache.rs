@@ -1231,3 +1231,20 @@ pub fn set_pi_bash_command_format(value: bool) {
     PI_BASH_COMMAND_FORMAT_CURRENT.with(|c| c.set(value));
     PI_BASH_COMMAND_FORMAT_LOADED.with(|l| l.set(true));
 }
+
+thread_local! {
+    static PI_TREE_SKIP_SUMMARY_CURRENT: Cell<bool> = const { Cell::new(false) };
+    static PI_TREE_SKIP_SUMMARY_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `/tree` navigates without asking about a branch summary (`[ui].pi_tree_skip_summary_prompt`).
+pub fn load_pi_tree_skip_summary_prompt() -> bool {
+    PI_TREE_SKIP_SUMMARY_LOADED.with(|loaded| {
+        if !loaded.get() {
+            let value = load_bool_from_effective_config("pi_tree_skip_summary_prompt", false);
+            PI_TREE_SKIP_SUMMARY_CURRENT.with(|c| c.set(value));
+            loaded.set(true);
+        }
+    });
+    PI_TREE_SKIP_SUMMARY_CURRENT.with(|c| c.get())
+}

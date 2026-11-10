@@ -171,3 +171,14 @@ fn sessionless_pi_ui_lands_on_the_pi_session_not_the_claude_one_on_screen() {
     assert!(test_agent(&app, AgentId(0)).pi_widgets.is_empty());
     assert_eq!(test_agent(&app, AgentId(1)).pi_widgets.len(), 1);
 }
+
+#[test]
+fn pi_notifications_are_kept_for_notify() {
+    let mut app = make_app_with_agent("sess-pi");
+    handle_ext_notification(&pi("pi/ui/notify", serde_json::json!({ "message": "eval ready", "notifyType": "info" })), &mut app);
+    handle_ext_notification(&pi("pi/ui/notify", serde_json::json!({ "message": "quota low", "notifyType": "warning" })), &mut app);
+    let kept = &test_agent(&app, AgentId(0)).pi_notifications;
+    assert_eq!(kept.len(), 2);
+    let list = crate::views::modal::NotificationListState::new(kept.clone());
+    assert_eq!(list.filtered()[0].message, "quota low", "newest first");
+}

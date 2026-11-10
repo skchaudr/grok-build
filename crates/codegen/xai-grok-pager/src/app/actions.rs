@@ -53,6 +53,32 @@ impl ModelChoice {
 #[cfg_attr(test, derive(strum::AsRefStr))]
 #[allow(clippy::large_enum_variant)]
 pub enum Action {
+    /// Pi `/reload`: reload keybindings, extensions, skills, prompts and context files (`pi/session/reload`).
+    PiReload,
+    /// Pi `/clone`: a new session at the current leaf (`pi/session/clone`).
+    PiClone,
+    /// Pi `/fork`: branch from a user message; `None` opens the message picker (`pi/session/fork*`).
+    PiFork(Option<String>),
+    /// Pi `/notify`: list the session's Pi notifications.
+    ShowNotifications,
+    /// Pi `/tree`: open the session tree (`pi/session/tree`).
+    ShowSessionTree,
+    /// Pi `/tree-map`: open the branch map of user messages.
+    ShowTreeMap,
+    /// Move the Pi session's leaf to `entry_id`, optionally summarizing the branch left behind.
+    NavigateSessionTree {
+        entry_id: String,
+        summarize: bool,
+        custom_instructions: Option<String>,
+    },
+    /// Set or clear (`None`) a Pi tree entry's label.
+    LabelSessionTreeEntry { entry_id: String, label: Option<String> },
+    /// Preview restoring tracked files to a tree entry (pi-grok-rollback).
+    RollbackFilesPreview { entry_id: String },
+    /// Restore tracked files to a tree entry; the conversation leaf does not move.
+    RollbackFilesExecute { entry_id: String },
+    /// The `/tree` or `/tree-map` modal closed.
+    SessionTreeClosed,
     /// Quit the application.
     Quit,
     /// Restart the binary to pick up a downloaded update.
@@ -1435,6 +1461,12 @@ pub enum AfterSessionDelete {
 /// The event loop spawns these into a `JoinSet`; completions come back through [`TaskResult`] as `Action::TaskComplete`.
 #[derive(Debug)]
 pub enum Effect {
+    /// A `pi/session/*` request to the Pi behind a session; answered by [`TaskResult::PiSessionReply`].
+    PiSessionRequest {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        op: PiSessionOp,
+    },
     /// Run a `command` status line.
     RunStatusLineCommand(StatusLineRun),
     /// Create a new ACP session.
@@ -2474,6 +2506,12 @@ pub enum SessionSteerOutcome {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
+    /// Reply to [`Effect::PiSessionRequest`]: the result payload, or the error text.
+    PiSessionReply {
+        agent_id: AgentId,
+        op: PiSessionOp,
+        reply: Result<serde_json::Value, String>,
+    },
     /// Session lifecycle result paired with the memory mode pinned by the
     /// actor that produced it. The wrapper lets all lifecycle variants share
     /// one typed metadata path.
@@ -3450,3 +3488,131 @@ mod tests {
         );
     }
 }
+
+/// One user message Pi's `/fork` can branch from (`pi/session/fork_messages`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiForkMessage {
+    pub entry_id: String,
+    pub text: String,
+}
+
+/// The `pi/session/*` operations grok-pi-acp answers for the pager.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PiSessionOp {
+    Reload,
+    Clone,
+    ForkMessages,
+    Fork { entry_id: String },
+    /// The tree for `/tree` or `/tree-map` (`map` picks which modal the nodes fill).
+    Tree { map: bool },
+    NavigateTree { entry_id: String, summarize: bool, custom_instructions: Option<String> },
+    TreeLabel { entry_id: String, label: Option<String> },
+    RollbackPreview { entry_id: String },
+    RollbackExecute { entry_id: String },
+}
+
+impl PiSessionOp {
+    pub fn method(&self) -> &'static str {
+        match self {
+            Self::Reload => "pi/session/reload",
+            Self::Clone => "pi/session/clone",
+            Self::ForkMessages => "pi/session/fork_messages",
+            Self::Fork { .. } => "pi/session/fork",
+            Self::Tree { .. } => "pi/session/tree",
+            Self::NavigateTree { .. } => "pi/session/navigate_tree",
+            Self::TreeLabel { .. } => "pi/session/tree_label",
+            Self::RollbackPreview { .. } => "pi/session/rollback_preview",
+            Self::RollbackExecute { .. } => "pi/session/rollback_execute",
+        }
+    }
+
+    /// Request params; `sessionId` routes it through the leader to that session's Pi.
+    pub fn params(&self, session_id: &acp::SessionId) -> serde_json::Value {
+        let mut params = match self {
+            Self::Fork { entry_id } | Self::RollbackPreview { entry_id } | Self::RollbackExecute { entry_id } => {
+                serde_json::json!({ "entryId": entry_id })
+            }
+            Self::NavigateTree { entry_id, summarize, custom_instructions } => {
+                let mut params = serde_json::json!({ "entryId": entry_id, "summarize": summarize });
+                if let Some(text) = custom_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    params["customInstructions"] = text.into();
+                }
+                params
+            }
+            Self::TreeLabel { entry_id, label } => match label.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(text) => serde_json::json!({ "entryId": entry_id, "label": text }),
+                None => serde_json::json!({ "entryId": entry_id, "clear": true }),
+            },
+            _ => serde_json::json!({}),
+        };
+        params["sessionId"] = session_id.0.to_string().into();
+        params
+    }
+}
+
+/// Flattened Pi session-tree node for the `/tree` surface.
+#[derive(Debug, Clone)]
+pub struct SessionTreeNode {
+    pub id: String,
+    pub parent_id: Option<String>,
+    /// Structural depth from root (parent-chain length). Visual indent is
+    /// recomputed after filter using Pi TreeSelector branch-compression rules.
+    pub depth: usize,
+    pub is_leaf: bool,
+    pub is_current: bool,
+    pub on_active_path: bool,
+    pub role: String,
+    pub preview: String,
+    pub detail: String,
+    pub label: Option<String>,
+    pub label_timestamp: Option<String>,
+    pub entry_type: String,
+    pub timestamp: Option<String>,
+    pub child_ids: Vec<String>,
+    /// Assistant messages without text are hidden in default filter (Pi parity).
+    pub has_text: bool,
+}
+
+/// Filter modes aligned with Pi `TreeSelector` / settings `treeFilterMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionTreeFilter {
+    #[default]
+    Default,
+    NoTools,
+    UserOnly,
+    LabeledOnly,
+    All,
+}
+
+impl SessionTreeFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::NoTools => "no-tools",
+            Self::UserOnly => "user",
+            Self::LabeledOnly => "labeled",
+            Self::All => "all",
+        }
+    }
+
+    pub fn cycle_forward(self) -> Self {
+        match self {
+            Self::Default => Self::NoTools,
+            Self::NoTools => Self::UserOnly,
+            Self::UserOnly => Self::LabeledOnly,
+            Self::LabeledOnly => Self::All,
+            Self::All => Self::Default,
+        }
+    }
+
+    pub fn cycle_backward(self) -> Self {
+        match self {
+            Self::Default => Self::All,
+            Self::NoTools => Self::Default,
+            Self::UserOnly => Self::NoTools,
+            Self::LabeledOnly => Self::UserOnly,
+            Self::All => Self::LabeledOnly,
+        }
+    }
+}
+

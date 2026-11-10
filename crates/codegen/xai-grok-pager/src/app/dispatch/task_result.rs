@@ -734,6 +734,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.apply_foreign_resume_detection(launch_token, &canonical_cwd, hint);
             vec![]
         }
+        TaskResult::PiSessionReply { agent_id, op, reply } => {
+            super::session::pi_session::handle_pi_session_reply(app, agent_id, op, reply)
+        }
         TaskResult::SessionListFailed {
             host,
             generation,

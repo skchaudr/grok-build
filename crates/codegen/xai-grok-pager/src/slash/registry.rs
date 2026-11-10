@@ -450,11 +450,28 @@ impl CommandRegistry {
             && super::external_common::is_claude_label(Some(self.external_agent_label.as_str()))
     }
 
+    /// This registry serves Pi (`grok-pi-acp`, `pi-acp`); see [`super::pi_menu`].
+    pub fn is_pi_session(&self) -> bool {
+        self.external_agent && super::external_common::is_pi_label(Some(self.external_agent_label.as_str()))
+    }
+
+    /// The session's menu profile hides builtin `name` (Claude's or Pi's table).
+    fn profile_hides(&self, name: &str, source: CommandSource) -> bool {
+        (self.is_claude_session() && super::claude_menu::hides(name, source))
+            || (self.is_pi_session() && super::pi_menu::hides(name, source))
+            || (!self.is_pi_session() && super::pi_menu::pi_only(name, source))
+    }
+
+    /// Which hide table applies; a change re-applies the ACP catalog so freed names go to the adapter.
+    fn menu_profile(&self) -> (bool, bool) {
+        (self.is_claude_session(), self.is_pi_session())
+    }
+
     /// Human-readable agent name for unsupported-command notices.
     pub fn set_external_agent_label(&mut self, label: impl Into<String>) {
-        let was_claude = self.is_claude_session();
+        let was = self.menu_profile();
         self.external_agent_label = label.into();
-        self.reapply_acp_if_claude_flipped(was_claude);
+        self.reapply_acp_if_profile_flipped(was);
         if self.external_agent {
             self.sync_external_common_stubs();
             self.rebuild_triggers();
@@ -474,7 +491,7 @@ impl CommandRegistry {
         enabled: bool,
         label: Option<String>,
     ) -> bool {
-        let was_claude = self.is_claude_session();
+        let was = self.menu_profile();
         if let Some(label) = label {
             self.external_agent_label = label;
         }
@@ -495,15 +512,15 @@ impl CommandRegistry {
             }
             self.remove_external_common_stubs();
         }
-        self.reapply_acp_if_claude_flipped(was_claude);
+        self.reapply_acp_if_profile_flipped(was);
         self.sync_external_common_stubs();
         self.rebuild_triggers();
         true
     }
 
     /// Claude sessions release hidden builtin names to the adapter, decided in `apply_acp_commands`; redo it when the session turns (non-)Claude after a catalog arrived.
-    fn reapply_acp_if_claude_flipped(&mut self, was_claude: bool) {
-        if was_claude != self.is_claude_session() && !self.acp_catalog.is_empty() {
+    fn reapply_acp_if_profile_flipped(&mut self, was: (bool, bool)) {
+        if was != self.menu_profile() && !self.acp_catalog.is_empty() {
             let catalog = std::mem::take(&mut self.acp_catalog);
             self.apply_acp_commands(&catalog);
         }
@@ -615,13 +632,13 @@ impl CommandRegistry {
             }
         }
 
-        // A Claude session hides some Grok builtins; their names (and aliases) go to the adapter's command of the same name.
+        // A Claude or Pi session hides some Grok builtins; their names (and aliases) go to the adapter's command of the same name.
         let claude = self.is_claude_session();
         let builtin_keys: HashSet<String> = self
             .commands
             .iter()
             .zip(self.sources.iter())
-            .filter(|(c, s)| !(claude && super::claude_menu::hides(c.name(), **s)))
+            .filter(|(c, s)| !self.profile_hides(c.name(), **s))
             .flat_map(|(c, _)| {
                 std::iter::once(c.name().to_lowercase())
                     .chain(c.aliases().iter().map(|a| a.to_lowercase()))
@@ -721,7 +738,7 @@ impl CommandRegistry {
             // Menu-hidden commands keep their key entries (so `get_for_dispatch()` resolves a typed invocation) but emit no triggers
             // This is the inverse of the restricted trade-off below
             let menu_only = self.menu_hidden.contains(canonical)
-                || (self.is_claude_session() && super::claude_menu::hides(canonical, source));
+                || self.profile_hides(canonical, source);
 
             // Restricted commands (per-user deny list, e.g. tier restrictions) deliberately stay listed.
             // They keep their triggers/key entries so the dropdown, ghost completion, and palette show them like any other command (discoverability)

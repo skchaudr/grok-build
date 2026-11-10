@@ -4,3 +4,4 @@ pub(in crate::app::dispatch) mod lifecycle;
 pub(in crate::app::dispatch) mod load;
 pub(in crate::app::dispatch) mod modal;
 pub(in crate::app::dispatch) mod picker_routing;
+pub(in crate::app::dispatch) mod pi_session;

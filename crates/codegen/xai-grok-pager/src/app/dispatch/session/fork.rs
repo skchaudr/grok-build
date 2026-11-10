@@ -35,6 +35,14 @@ pub(in crate::app::dispatch) fn dispatch_fork(
         app.show_toast("Cannot fork: session is still being created");
         return vec![];
     }
+    // Pi branches at a user message of its own session tree (`pi/session/fork`), never into a worktree.
+    if app.is_pi_session() {
+        if args.worktree_override == Some(true) {
+            app.show_toast("Pi sessions can't fork into a worktree");
+            return vec![];
+        }
+        return super::pi_session::dispatch_pi_fork(app, args.directive);
+    }
     // Claude forks through standard `session/fork` in the same cwd; there is no worktree path, so never ask.
     if app.is_claude_session() {
         if args.worktree_override == Some(true) {

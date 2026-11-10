@@ -66,6 +66,12 @@ pub mod transcript;
 pub mod tutorial;
 pub mod usage;
 pub mod view_plan;
+pub mod reload;
+pub mod clone_cmd;
+pub mod tree;
+pub mod tree_map;
+pub mod notify;
+pub mod plan_mode;
 pub mod vim_mode;
 pub mod voice;
 pub mod workflow;
@@ -98,6 +104,12 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(loop_cmd::LoopCommand),
         Arc::new(plan::PlanCommand),
         Arc::new(view_plan::ViewPlanCommand),
+        Arc::new(reload::ReloadCommand),
+        Arc::new(clone_cmd::CloneCommand),
+        Arc::new(tree::TreeCommand),
+        Arc::new(tree_map::TreeMapCommand),
+        Arc::new(notify::NotifyCommand),
+        Arc::new(plan_mode::PlanModeCommand),
         Arc::new(remember::RememberCommand),
         Arc::new(memory::MemoryCommand),
         Arc::new(memory_ops::FlushCommand),

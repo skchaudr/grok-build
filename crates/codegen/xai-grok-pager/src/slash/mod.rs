@@ -17,6 +17,7 @@ pub mod matcher;
 pub(crate) mod mid_text_hoist;
 pub mod mode_support;
 pub mod mru;
+pub mod pi_menu;
 pub mod registry;
 
 use std::{

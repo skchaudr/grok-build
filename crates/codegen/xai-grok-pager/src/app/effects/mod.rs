@@ -524,6 +524,25 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::PiSessionRequest { agent_id, session_id, op } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let request = acp::ExtRequest::new(
+                    op.method(),
+                    serde_json::value::to_raw_value(&op.params(&session_id))
+                        .expect("serialize pi/session request")
+                        .into(),
+                );
+                let reply = match acp_send(request, &tx).await {
+                    Ok(response) => {
+                        let value: serde_json::Value = serde_json::from_str(response.0.get()).unwrap_or_default();
+                        Ok(value.get("result").cloned().unwrap_or(value))
+                    }
+                    Err(error) => Err(sanitize_user_error(&error.to_string())),
+                };
+                TaskResult::PiSessionReply { agent_id, op, reply }
+            });
+        }
         Effect::PiSessionList { session_id, cwd, host, generation, seq } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {

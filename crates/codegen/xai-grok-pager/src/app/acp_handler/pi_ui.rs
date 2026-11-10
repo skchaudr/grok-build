@@ -35,7 +35,9 @@ pub(super) fn handle(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
             };
             // A forwarded Pi command that only notifies did answer (see `push_silent_forwarded_slash_notice`).
             agent.session.turn_saw_agent_text = true;
-            match str_of(&["notifyType", "kind"]).as_deref() {
+            let kind = str_of(&["notifyType", "kind"]);
+            agent.pi_notifications.push(crate::views::modal::PiNotification { message: message.clone(), kind: kind.clone() });
+            match kind.as_deref() {
                 Some("info") => {
                     agent.scrollback.push_block(RenderBlock::system(message));
                 }

@@ -916,6 +916,10 @@ impl AgentView {
             } else {
                 0
             };
+        let fork_view_h = match &self.fork_state {
+            Some(state) if !self.jump_slot_taken() => crate::views::fork_picker::fork_picker_overlay_height(state, area.height),
+            _ => 0,
+        };
         let jump_view_h = if !self.jump_slot_taken() {
             if let Some(ref js) = self.jump_state {
                 crate::views::jump::jump_overlay_height(js, area.height)
@@ -1002,6 +1006,8 @@ impl AgentView {
             elicitation_view_h
         } else if rewind_view_h > 0 {
             rewind_view_h
+        } else if fork_view_h > 0 {
+            fork_view_h
         } else if jump_view_h > 0 {
             jump_view_h
         } else if cancel_turn_view_h > 0 {
@@ -2853,6 +2859,10 @@ impl AgentView {
                     &rw.phase,
                     prompt_focused,
                 );
+            }
+        } else if fork_view_h > 0 {
+            if let Some(state) = &self.fork_state {
+                crate::views::fork_picker::render_fork_picker_overlay(buf, layout.prompt, state, prompt_focused);
             }
         } else if jump_view_h > 0 {
             if let Some(ref js) = self.jump_state {
