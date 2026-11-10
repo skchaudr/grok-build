@@ -451,6 +451,7 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
         session_id: session_id_str,
         session_cwd: Some(session_cwd),
         chat_kind: conversation_entry,
+        agent_choice: None,
     }]
 }
 pub(in crate::app::dispatch) fn handle_fork_session_ready(
@@ -501,6 +502,7 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
         session_id: session_id_str,
         session_cwd: Some(cwd),
         chat_kind: conversation_entry,
+        agent_choice: None,
     }]
 }
 pub(in crate::app::dispatch) fn handle_fork_session_failed(

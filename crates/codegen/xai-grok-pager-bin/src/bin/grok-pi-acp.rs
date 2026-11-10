@@ -68,7 +68,7 @@ use xai_acp_lib::{AcpAgentGatewayReceiver, LineBufferedRead};
 
 use cli::{Args, normalize_compound_short_flags, pi_args_with_startup_flags};
 use runtime_config::{
-    bash_bridge_enabled, bash_control_meta_for_adapter, env_flag_default_off,
+    bash_bridge_enabled, bash_control_meta_for_adapter, env_flag_default_off, env_flag_default_on,
     eval_mcp_enabled, eval_v2_language, eval_v2_only_enabled, eval_v2_only_tool_policy_applies,
     eval_version, normal_f2_tool_policy_applies, resolve_bash_max_wait_mins,
 };
@@ -191,8 +191,8 @@ async fn run(mut args: Args) -> Result<()> {
         .then(native_commands_extension::write_native_commands_extension)
         .transpose()
         .context("failed to create Pi native commands extension")?;
-    // Off until the pager has a Remote TUI surface: its frames would be invisible and its keys unrouted.
-    let remote_tui_enabled = bridge && env_flag_default_off("PI_GROK_REMOTE_TUI");
+    // The pager draws its frames and routes its keys (`app/pi_remote_tui.rs`); `PI_GROK_REMOTE_TUI=0` opts out.
+    let remote_tui_enabled = bridge && env_flag_default_on("PI_GROK_REMOTE_TUI");
     let remote_tui_extension = remote_tui_enabled
         .then(remote_tui_extension::write_remote_tui_extension)
         .transpose()
@@ -434,7 +434,12 @@ async fn run(mut args: Args) -> Result<()> {
             .into_owned();
         env.push(("PI_GROK_REMOTE_TUI_META".into(), meta.clone()));
         unsafe { std::env::set_var("PI_GROK_REMOTE_TUI_META", meta) };
-        // stdout is the ACP pipe, so there is no host terminal size to forward here.
+        // stdout is the ACP pipe; the controlling terminal, when there is one, sizes the Remote TUI like
+        // interactive Pi. Without it the host renders at 80x24.
+        if let Some((cols, rows)) = controlling_terminal_size() {
+            env.push(("PI_GROK_REMOTE_TUI_WIDTH".into(), cols.to_string()));
+            env.push(("PI_GROK_REMOTE_TUI_ROWS".into(), rows.to_string()));
+        }
         let keys = std::env::temp_dir().join(format!(
             "pi-grok-shortcut-keys-host-{}.jsonl",
             std::process::id()
@@ -531,4 +536,14 @@ async fn run(mut args: Args) -> Result<()> {
         (tools_extension, rollback_ext),
     );
     handle_io.await.context("ACP stdio connection failed")
+}
+
+/// `TIOCGWINSZ` on `/dev/tty`: the terminal this agent's leader or pager was started from.
+fn controlling_terminal_size() -> Option<(u16, u16)> {
+    use std::os::fd::AsRawFd;
+    let tty = std::fs::File::open("/dev/tty").ok()?;
+    // SAFETY: TIOCGWINSZ fills a winsize for a valid fd and fails cleanly on anything else.
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let ok = unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) } == 0;
+    (ok && ws.ws_col > 0 && ws.ws_row > 0).then_some((ws.ws_col, ws.ws_row))
 }

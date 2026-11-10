@@ -4669,6 +4669,7 @@ mod tests {
             session_id: "other".into(),
             session_cwd: None,
             chat_kind: false,
+            agent_choice: None,
         };
         assert_eq!(
             take_load_restore_code(&mut app, std::slice::from_ref(&other_load)),
@@ -4701,6 +4702,7 @@ mod tests {
             session_id: "child".into(),
             session_cwd: None,
             chat_kind: false,
+            agent_choice: None,
         };
         assert_eq!(
             take_load_restore_code(&mut app, std::slice::from_ref(&load)),

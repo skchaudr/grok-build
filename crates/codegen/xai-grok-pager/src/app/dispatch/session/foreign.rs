@@ -79,17 +79,29 @@ pub(in crate::app::dispatch) fn dispatch_fetch_session_list(app: &mut AppView) -
         Some(generation) => (SessionPickerHost::AgentModal, generation),
         None => (SessionPickerHost::Welcome, app.session_picker_generation),
     };
-    let mut effects = vec![Effect::FetchSessionList {
-        host,
-        cwd_override: None,
-        generation,
-        query: None,
-        seq,
-        kind_filter,
-        headless_policy: active_picker_headless_policy(app),
+    let pi_session = (host == SessionPickerHost::AgentModal && app.is_pi_session())
+        .then(|| get_active_agent(app).and_then(|agent| agent.session.session_id.clone()))
+        .flatten();
+    let mut effects = vec![match pi_session {
+        Some(session_id) => Effect::PiSessionList {
+            session_id,
+            cwd: get_active_agent(app).map_or_else(|| app.cwd.clone(), |agent| agent.session.cwd.clone()),
+            host,
+            generation,
+            seq,
+        },
+        None => Effect::FetchSessionList {
+            host,
+            cwd_override: None,
+            generation,
+            query: None,
+            seq,
+            kind_filter,
+            headless_policy: active_picker_headless_policy(app),
+        },
     }];
     // An external agent lists its own sessions; a ~/.claude scan would add duplicate rows that resume through a skill prompt.
-    let foreign_effect = if app.chat_mode || app.external_agent {
+    let foreign_effect = if app.chat_mode || app.external_agent || app.is_pi_session() {
         app.foreign_scan_coordinator.begin_request(foreign_seq);
         None
     } else {

@@ -69,6 +69,10 @@ impl MachinePicker {
         self.open
     }
 
+    pub fn choice_named(&self, name: &str) -> Option<&AgentChoice> {
+        self.choices.iter().find(|choice| choice.name == name)
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.choices.iter().map(|choice| choice.name.as_str())
     }

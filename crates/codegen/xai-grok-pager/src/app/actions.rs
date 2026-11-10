@@ -1489,6 +1489,17 @@ pub enum Effect {
         session_cwd: Option<std::path::PathBuf>,
         /// Conversation-entry bit (`source == "conversation"`), not sticky `--chat`.
         chat_kind: bool,
+        /// `--agent-choice` backend that owns the session (a Pi row picked from a Pi session's `/resume`).
+        agent_choice: Option<crate::app::agent_choice::AgentChoice>,
+    },
+    /// `/resume` in a Pi session: ask that session's Pi for its sessions (`pi/session/list`). The rows come
+    /// back as a `pi/ui/session_catalog` notification; only a failed request reports here.
+    PiSessionList {
+        session_id: acp::SessionId,
+        cwd: std::path::PathBuf,
+        host: crate::views::session_picker_surface::SessionPickerHost,
+        generation: u64,
+        seq: u64,
     },
     /// Scan enabled foreign session stores without delaying the native list.
     ScanForeignSessions {
@@ -1756,6 +1767,13 @@ pub enum Effect {
     },
     /// Toggle plan mode: fire-and-forget signal to the shell.
     TogglePlanMode { session_id: acp::SessionId },
+    /// Pi Remote TUI: a key sequence (or `cancel`) for the open `ctx.ui.custom()` component, or a Pi
+    /// extension shortcut to dispatch. Fire-and-forget `pi/ui/*` notifications, sent in key order.
+    PiUiInput {
+        session_id: acp::SessionId,
+        method: &'static str,
+        params: serde_json::Value,
+    },
     /// Remove a server-owned queued prompt: fire-and-forget `x.ai/queue/remove`.
     /// The agent re-broadcasts the authoritative queue.
     QueueRemove {

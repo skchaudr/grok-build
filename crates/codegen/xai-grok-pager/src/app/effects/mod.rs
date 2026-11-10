@@ -141,6 +141,18 @@ pub(crate) fn execute(
     let mut meta = EffectMeta::default();
     let effect_is_send_now = matches!(effect, Effect::SendPromptNow { .. });
     match effect {
+        Effect::PiUiInput { session_id, method, mut params } => {
+            // Enqueued in place, not in a task: keystrokes must reach Pi in the order they were typed.
+            params["sessionId"] = session_id.0.to_string().into();
+            let request = acp::ExtNotification::new(
+                method,
+                serde_json::value::to_raw_value(&params).expect("serialize pi/ui input").into(),
+            );
+            let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+            if acp_tx.send(xai_acp_lib::AcpArgs { request, response_tx }.into()).is_err() {
+                tracing::warn!(method, "failed to enqueue pi/ui input");
+            }
+        }
         Effect::RegisterActiveSession { session_id, cwd } => {
             crate::app::signal_handler::set_current_session_id(Some(session_id.clone()));
             if let Err(e) = xai_grok_active_sessions::register(xai_grok_active_sessions::ActiveSession {
@@ -512,9 +524,34 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::LoadSession { agent_id, session_id, session_cwd, chat_kind } => {
+        Effect::PiSessionList { session_id, cwd, host, generation, seq } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "sessionId": session_id.0.to_string(),
+                    "cwd": cwd.to_string_lossy(),
+                    "scope": "current",
+                });
+                let request = acp::ExtRequest::new(
+                    "pi/session/list",
+                    serde_json::value::to_raw_value(&params).expect("serialize pi/session/list").into(),
+                );
+                match acp_send(request, &tx).await {
+                    Ok(_) => TaskResult::CancelComplete,
+                    Err(error) => TaskResult::SessionListFailed {
+                        host,
+                        generation,
+                        error: sanitize_user_error(&format!("{error}")),
+                        seq,
+                        query: None,
+                    },
+                }
+            });
+        }
+        Effect::LoadSession { agent_id, session_id, session_cwd, chat_kind, agent_choice } => {
             let tx = acp_tx.clone();
             let mut meta = session_flags.to_meta();
+            stamp_agent_choice(&mut meta, agent_choice.as_ref());
             let is_chat_path = chat_kind || session_flags.chat_mode;
             finalize_chat_session_meta(&mut meta, is_chat_path, session_flags);
             if let Some(rc) = session_flags.restore_code {

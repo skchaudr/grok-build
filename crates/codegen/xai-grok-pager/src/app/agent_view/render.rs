@@ -1125,9 +1125,17 @@ impl AgentView {
                 inner_width.saturating_sub(layout_cfg.block_pad_left + layout_cfg.block_pad_right);
             crate::views::model_notice_banner::height(notice, text_width)
         });
-        // shortcut: every widget line takes one row, capped so a chatty extension cannot starve the scrollback.
-        let pi_widget_lines: Vec<String> = self.pi_widgets.values().flatten().cloned().collect();
-        let pi_widgets_height = (pi_widget_lines.len() as u16).min(area.height / 4);
+        // A Remote TUI frame that is not a floating overlay sits above the prompt, ahead of the widgets.
+        let pi_remote_rows = if self.pi_remote_tui.is_overlay() { &[][..] } else { &self.pi_remote_tui.lines[..] };
+        let pi_widget_lines: Vec<Line<'static>> = pi_remote_rows
+            .iter()
+            .map(|line| crate::app::pi_remote_tui::ansi_line(line, &theme))
+            .chain(self.pi_widgets.values().flatten().map(|line| pi_ansi_line(line, theme.text_secondary)))
+            .collect();
+        // shortcut: every line takes one row, capped (a half for a Remote TUI screen, a quarter for widgets)
+        // so a chatty extension cannot starve the scrollback.
+        let pi_cap = if pi_remote_rows.is_empty() { area.height / 4 } else { area.height / 2 };
+        let pi_widgets_height = (pi_widget_lines.len() as u16).min(pi_cap);
         let _tool_usage_height = 0u16;
         let btw_height =
             crate::views::btw_overlay::btw_panel_height(self.btw_state.as_ref(), inner_width);
@@ -2268,6 +2276,8 @@ impl AgentView {
             }
         }
         self.draw_plugin_cta(buf, layout.plugin_cta, &theme);
+        // The draw buffer is reused between frames: a shorter frame line must not leave the old one's tail.
+        ratatui::widgets::Clear.render(layout.pi_widgets, buf);
         for (row, line) in (layout.pi_widgets.y..layout.pi_widgets.bottom()).zip(&pi_widget_lines) {
             let row = Rect {
                 x: layout.pi_widgets.x.saturating_add(layout_cfg.block_pad_left),
@@ -2278,7 +2288,7 @@ impl AgentView {
                     .saturating_sub(layout_cfg.block_pad_left + layout_cfg.block_pad_right),
                 height: 1,
             };
-            ratatui::widgets::Paragraph::new(pi_ansi_line(line, theme.text_secondary)).render(row, buf);
+            ratatui::widgets::Paragraph::new(line.clone()).render(row, buf);
         }
         if let Some(notice) = &model_notice {
             let row = layout.model_notice;
@@ -4392,6 +4402,25 @@ impl AgentView {
                 );
             }
         }
+        if let Some(rect) = self
+            .pi_remote_tui
+            .layout
+            .as_ref()
+            .filter(|_| self.pi_remote_tui.is_overlay())
+            .and_then(|layout| crate::app::pi_remote_tui::overlay_rect(area, layout, self.pi_remote_tui.lines.len()))
+        {
+            ratatui::widgets::Clear.render(rect, buf);
+            buf.set_style(rect, Style::default().bg(theme.bg_base));
+            for (y, line) in (rect.y..rect.bottom()).zip(&self.pi_remote_tui.lines) {
+                let line = crate::app::pi_remote_tui::ansi_line(line, &theme);
+                buf.set_line(rect.x, y, &line, rect.width);
+            }
+            self.frame_occluder_rects.push(rect);
+        }
+        // The prompt takes no keys while a Remote TUI component owns them.
+        if self.pi_remote_tui.is_open() {
+            prompt_cursor_pos = None;
+        }
         let on_link = self.hovered_link_idx.is_some();
         if supports_osc22() && on_link != self.last_pointer_on_link {
             self.last_pointer_on_link = on_link;
@@ -5127,7 +5156,9 @@ mod status_line_draw_tests {
 /// One Pi extension line (statuses and widgets carry ANSI colour from Pi's theme) as a ratatui line.
 fn pi_ansi_line(text: &str, fg: ratatui::style::Color) -> Line<'static> {
     use ansi_to_tui::IntoText;
-    text.into_text()
+    crate::app::pi_remote_tui::strip_apc(text)
+        .as_bytes()
+        .into_text()
         .ok()
         .and_then(|text| text.lines.into_iter().next())
         .unwrap_or_else(|| Line::styled(text.to_owned(), Style::default().fg(fg)))

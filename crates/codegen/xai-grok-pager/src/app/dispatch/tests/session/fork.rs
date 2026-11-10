@@ -1337,6 +1337,7 @@ fn fork_session_ready_emits_load_session_with_new_id() {
                 session_id,
                 session_cwd,
                 chat_kind,
+                agent_choice: _,
             },
         ] => {
             assert_eq!(*agent_id, AgentId(1));

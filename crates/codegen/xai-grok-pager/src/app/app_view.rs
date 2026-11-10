@@ -1741,6 +1741,10 @@ impl AppView {
     pub fn is_claude_session(&self) -> bool {
         crate::slash::external_common::is_claude_label(self.agent_label(self.active_view.agent_id()))
     }
+    /// Session `id` is hosted by Pi (`grok-pi-acp`, `pi-acp`).
+    pub fn is_pi_agent(&self, id: AgentId) -> bool {
+        crate::slash::external_common::is_pi_label(self.agent_label(Some(id)))
+    }
     /// The session on screen is hosted by Pi (`grok-pi-acp`, `pi-acp`).
     pub fn is_pi_session(&self) -> bool {
         crate::slash::external_common::is_pi_label(self.agent_label(self.active_view.agent_id()))
@@ -2263,6 +2267,52 @@ impl AppView {
     /// Handle a terminal event. Routes through the input layer stack:
     /// Pending action check (double-press confirmation)
     /// Quit always goes through double-press confirmation, even when escalated from agent-level (e.g., Ctrl-C while cancelling).
+    /// Pi sessions: an open Remote TUI component owns the keyboard (Ctrl+Shift+Esc drops it), otherwise a key
+    /// a Pi extension registered goes to Pi. A native dialog the component opened keeps its own input.
+    fn route_pi_input(&mut self, agent_id: AgentId, ev: &Event) -> Option<InputOutcome> {
+        use crate::app::actions::Effect;
+        use crossterm::event::KeyModifiers;
+        let agent = self.agents.get_mut(&agent_id)?;
+        if agent.active_modal.is_some() || agent.question_view.is_some() {
+            return None;
+        }
+        let session_id = agent.session.session_id.clone()?;
+        let input = |method, params| Effect::PiUiInput { session_id: session_id.clone(), method, params };
+        if let Some(id) = agent.pi_remote_tui.id.clone() {
+            let effect = match ev {
+                Event::Paste(text) if !text.is_empty() => Some(input(
+                    "pi/ui/remote_tui/input",
+                    serde_json::json!({ "id": id, "data": format!("\x1b[200~{text}\x1b[201~") }),
+                )),
+                Event::Key(key)
+                    if key.code == KeyCode::Esc
+                        && key.modifiers == KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                        && key.kind == KeyEventKind::Press =>
+                {
+                    agent.pi_remote_tui.clear();
+                    Some(input("pi/ui/remote_tui/cancel", serde_json::json!({ "id": id })))
+                }
+                Event::Key(key) => crate::app::pi_remote_tui::key_sequence(key)
+                    .map(|data| input("pi/ui/remote_tui/input", serde_json::json!({ "id": id, "data": data }))),
+                // Unsupported keys and clicks must not edit the hidden prompt; resize and focus go on.
+                Event::Mouse(_) | Event::Paste(_) => None,
+                _ => return None,
+            };
+            self.pending_effects.extend(effect);
+            return Some(InputOutcome::Changed);
+        }
+        let Event::Key(key) = ev else {
+            return None;
+        };
+        if key.kind == KeyEventKind::Release {
+            return None;
+        }
+        let key_id = agent.pi_shortcuts.as_ref()?.match_key(key)?.to_owned();
+        agent.show_toast(&format!("Shortcut: {key_id}"));
+        self.pending_effects
+            .push(input("pi/ui/shortcut_dispatch", serde_json::json!({ "key": key_id })));
+        Some(InputOutcome::Changed)
+    }
     pub fn handle_input(&mut self, ev: &Event) -> InputOutcome {
         self.handle_input_at_with_paste_provenance(ev, Instant::now(), PasteProvenance::Terminal)
     }
@@ -2336,6 +2386,11 @@ impl AppView {
                 return InputOutcome::Action(action);
             }
             self.pending_action = None;
+        }
+        if let ActiveView::Agent(agent_id) = self.active_view
+            && let Some(outcome) = self.route_pi_input(agent_id, ev)
+        {
+            return outcome;
         }
         let modal_open = self.is_scroll_blocking_modal_open();
         if let Event::Mouse(mouse) = ev

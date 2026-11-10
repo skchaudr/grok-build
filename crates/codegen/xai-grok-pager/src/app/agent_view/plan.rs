@@ -56,6 +56,9 @@ fn log_plan_submit(action: &str) {
 impl AgentView {
     /// Resolve the absolute path to the plan file for this session.
     fn plan_file_path(&self) -> Option<std::path::PathBuf> {
+        if let Some(path) = &self.pi_plan_file_path {
+            return Some(path.clone());
+        }
         let session_id = self.session.session_id.as_ref()?;
         let cwd_str = self.session.cwd.to_string_lossy().into_owned();
         let encoded_cwd = urlencoding::encode(&cwd_str);

@@ -291,12 +291,20 @@ fn dispatch_load_session_ungated(
         .slash_controller
         .registry_mut()
         .set_plugins_visible(!app.appearance.disable_plugins);
+    let agent_choice = app.pending_session_agent.take();
+    if let Some(choice) = agent_choice.as_ref()
+        && let Some(agent) = app.agents.get_mut(&agent_id)
+    {
+        agent.machine_name = Some(choice.name.clone());
+        agent.agent_label = crate::slash::external_common::agent_label_from_cmd(&choice.cmd);
+    }
     switch_to_agent(app, agent_id, SwitchCause::Load);
     effects.push(Effect::LoadSession {
         agent_id,
         session_id,
         session_cwd,
         chat_kind,
+        agent_choice,
     });
     effects
 }
@@ -399,6 +407,17 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
     }
     if crate::app::is_daemon_or_remote_control_row(&source) {
         return dispatch_daemon_session_pick(app, session_id, cwd);
+    }
+    if source == "pi" {
+        // A Pi row loads on the Pi backend whose `/resume` listed it, not on the launch agent.
+        let choice = get_active_agent(app)
+            .and_then(|agent| agent.machine_name.as_deref())
+            .and_then(|name| app.machine_picker.as_ref()?.choice_named(name).cloned());
+        if choice.is_some() {
+            app.pending_session_agent = choice;
+        }
+        let session_cwd = (!cwd.is_empty()).then(|| std::path::PathBuf::from(&cwd));
+        return dispatch_load_session(app, session_id, session_cwd, false);
     }
     if chat_kind {
         return dispatch_load_session(app, session_id, None, true);
@@ -1641,6 +1660,7 @@ pub(in crate::app::dispatch) fn handle_session_restored(
         session_cwd: Some(cwd),
         // Never a conversation entry (effects OR SessionFlags.chat_mode).
         chat_kind: false,
+        agent_choice: None,
     }]
 }
 pub(in crate::app::dispatch) fn handle_session_restore_failed(
