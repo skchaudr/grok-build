@@ -1,6 +1,6 @@
 # SPEC: the traces agent (ask about what you are looking at)
 
-Status: draft for Sab's review, 2026-11-11. Nothing built.
+Status: rev 2, 2026-11-11, after `REVIEW-traces-agent.md` and Sab's rulings. Nothing built.
 
 ## Intent (Sab's words, 2026-11-11)
 
@@ -18,13 +18,19 @@ Status: draft for Sab's review, 2026-11-11. Nothing built.
 - ACP updates reach agents that are not on screen (`dispatch/ctx.rs` `find_agent_by_session_id`, test `find_agent_by_session_id_finds_inactive_agent`), so a background grok session keeps streaming while you look at a trace.
 - grok loads `AGENTS.md` from a session's folder (`xai-grok-agent/src/prompt/agents_md.rs`).
 
+## Sab's rulings (2026-11-11, after the review)
+
+- The agent is grok-fork's own agent on Sab's models. No Claude or Pi choice, no picker: "any model that I can get in Pi, I can almost certainly get through Grok Fork. So just fucking make it Grok Fork".
+- So it is one agent and one session, across every trace view.
+- Transcript: "obviously I meant no forced transcript dumping into the agents context. OF COURSE it needs the transcript access." Nothing is dumped; the agent may read the transcript itself.
+
 ## Shape
 
-The trace stays the main view; the agent answers in a third F3 page, `✦ Ask` (Phoenix's layout: trace left, chat right). Sketch, not a screen:
+The trace stays the main view; the agent answers in a third F3 page, `✦ Ask`. Sketch, not a screen:
 
 ```
  claude · grok-build · 43d0aff9                 │ ∿ Traces  ◆ Info  ✦ Ask
- ◆ Bash  cargo test -p xai-grok-pager    2.1s   │ trace: claude 43d0aff9 · Bash · grok-build
+ ◆ Bash  cargo test -p xai-grok-pager    2.1s   │ trace: claude · Bash · ~/.claude/projects/…/43d0aff9….jsonl
  ◆ Read  traces_follow.rs                       │ > error[E0599]: no method named `select_row`
  ◆ Edit  traces_follow.rs                       │ why did this fail?
                                                 │
@@ -34,61 +40,49 @@ The trace stays the main view; the agent answers in a third F3 page, `✦ Ask` (
                                                 │ ╰────────────────────────────────────────╯
 ```
 
-- The Ask page shows the traces agent's own scrollback (its answers, streamed) above an input editor.
-- In a trace view, the block viewer's Enter quote goes to the Ask input instead of the hidden composer, opens the panel on Ask if closed, and leaves the viewer open, so `←`/`→` and more Enters keep adding quotes. Each quote is headed by one source line: `trace: <harness> <short id> · <entry: tool name, Thought, Message, Prompt> · <project>`.
-- Sending happens only from the Ask input (Enter sends, Opt+Enter newline, as the main composer). F3 focuses the panel; Esc returns keys to the trace.
+- Top of the page: the traces agent's latest exchange, painted by the dashboard's `paint_peek_live_tail(&ScrollbackState, area, buf)` (`views/dashboard/peek_tail.rs:49`). It is a tail; `o` on the page switches to the agent's own tab for the full history, and Esc there comes back.
+- Bottom: the traces agent's own prompt editor, so a draft survives moving between traces.
+- In a trace view, the block viewer's Enter quote (`viewer.rs:1179`) goes to that prompt through the existing `insert_quoted_reply`, headed by one source line: `trace: <harness> · <entry: tool name, Thought, Message, Prompt> · <transcript path>`. The panel opens on Ask; the viewer stays open so `←`/`→` and more Enters add quotes. This also ends today's behaviour, where the quote lands in the hidden composer unseen.
+- Keys: F3 focuses the panel. On Ask, every key types into the editor; Enter sends, Opt+Enter is a newline, Esc gives keys back to the trace. Pages and resize (`←`/`→`, `z`, `+`, `-`) work from the other pages only. Ctrl+N on Ask starts a fresh session (the old one stays in grok's session list).
+- Follow: `v` already opens the grok view of the followed session; the hint line says `v ask about this`. Follow itself gets no editor.
 
 ## The traces agent
 
-Sab, 2026-11-11: "it should be using the same things we are building across this grok build, which is I should be able to choose use grok-fork with my own models OR what if it was like grok claude and grok pi?!"
+- One grok-fork session. Folder `~/.grok/traces/agent/`; its id in `~/.grok/traces/agent-session`. The first send creates it on the pager's existing in-process connection (`Effect::CreateSession`, as any new tab); later launches resume it.
+- Identity: `~/.grok/traces/agent/AGENTS.md`, written once if missing, Sab edits it. Placeholder:
+  > You answer one-off questions about agent session traces. Each question quotes lines from a trace and names the harness, the entry and the transcript file. Answer from the quote first; read the transcript file when the quote is not enough. Questions are unrelated to each other unless they say otherwise. Be brief.
+- Normal tools, default mode. It lives in `app.agents`, so answers stream while you browse (`dispatch/ctx.rs` `find_agent_by_session_id`).
+- Standalone `grok-fork traces` skips the login screen (`event_loop.rs:1251`) but its agent thread still authenticates from `auth.json`. If a send fails (not logged in, credit, model), the Ask page shows the agent's error line.
 
-- The agent is any of the pager's agent choices (`app/agent_choice.rs`: `--agent-choice NAME=CMD` flags, which `scripts/hub/gb` passes for `claude`, `pi`, `grok-pi`, `codex`, `fork`…, or `[[agent_choice]]` in `~/.grok/config.toml`). With no choice it is the fork's own agent on your models. Picking uses the existing machine picker; it opens on the first send when there are two or more choices, and again from the Ask page to switch.
-- One session per agent choice, shared by every trace view. Folder `~/.grok/traces/agent/`; `~/.grok/traces/agent-sessions` keeps `name → session id`. The first send to a choice creates its session (`Effect::CreateSession` with `agent_choice`), later sends resume it on the same backend, as `dispatch/session/load.rs:411` already does for Pi rows.
-- Identity: one placeholder text Claude writes and Sab edits, as `AGENTS.md` (grok, Pi) and `CLAUDE.md` (Claude) in that folder: it answers one-off questions about quoted trace excerpts, says when the quote is not enough, and does not go looking for the transcript.
-- Context is only what is quoted plus the source lines. No transcript path is sent. Claude and Pi bring their own tools, so "no transcript" is held by the identity text, not by removing tools.
-- It lives in `app.agents` like any session, so its answers arrive while you browse.
+## States
 
-## States (each gets a render snapshot test)
-
-1. Ask page, agent never used: one line, `Enter on a line in the block viewer quotes it here`.
-2. Composing: quotes with source lines, then typed text.
-3. Running: streaming answer, running clock as grok's.
-4. Answered: history scrolls with the panel's keys.
-5. Failed: the agent's error line (auth, credit, model) in the page; the trace is unaffected.
-6. Narrow: panel at its 24-col minimum still shows input and the last answer lines; `z` widens it.
-7. Standalone `grok-fork traces` and `/traces` inside grok behave the same.
+1. Never used: `Enter on a line in the block viewer quotes it here`.
+2. Composing: source line, quote, typed text.
+3. Running: streaming tail.
+4. Answered.
+5. Failed: the error line.
+6. Narrow (24 cols): editor and the last answer lines still show.
 
 ## Build pieces
 
-1. `Page::Ask` in `views/side_panel.rs`.
-2. Draw the traces agent's chat (scrollback + editor) into the panel rect of the trace view: the one new mechanism, since today a view draws only its own agent.
-3. Key routing to the Ask input when the panel is focused.
-4. Trace-view quote redirect plus source line.
-5. Traces-agent lifecycle: create or resume by saved id, folder, placeholder `AGENTS.md`.
+1. `Page::Ask` in `views/side_panel.rs`: peek tail + the traces agent's prompt, drawn from the trace view's panel rect.
+2. Key routing on Ask to that prompt; send dispatches to the traces agent without switching views (the dashboard's prompt-without-attach path).
+3. Quote redirect + source line in trace views.
+4. Lifecycle: folder, placeholder `AGENTS.md`, create/resume by saved id, Ctrl+N.
 
-## Unknown until built
+## Tests and pass bar
 
-- Whether grok's folder-trust prompt blocks `~/.grok/traces/agent/` or its `AGENTS.md`.
-- Whether piece 2 can reuse `draw_chat` at panel width or needs a smaller chat draw.
-- Whether a grok session can run with tools off; `SessionMode::Ask` exists but what it allows is not read yet.
-- Which choices plain `grok-fork traces` (the `traces` alias) sees: it passes no `--agent-choice` flags and Sab's `config.toml` has no `[[agent_choice]]` tables. Adding those tables is not the answer: any choice makes the launch an external-agent launch (`app/cli.rs:929` `launches_external_agent`), which spawns the first choice's command at startup in place of the fork's own agent (`acp/mod.rs:232`, `cli.rs:939` `effective_agent_cmd`), and without a leader the picker is ignored (commit 2d60e6d6). So the Ask agent needs its own list, spawned only on its first send. Whether that spawn needs a leader (as `gb` runs) or a second in-process ACP connection is not read yet.
-- Whether claude-agent-acp and grok-pi-acp load `CLAUDE.md` / `AGENTS.md` from the session folder as their CLIs do.
+- Unit: quote in a trace view lands in the traces agent's prompt with its source line, never the hidden composer; a send carries the traces agent's session id; the saved id is reused; Ask keys reach the editor.
+- Render snapshots for states 1-6.
+- Screen, by the builder: open a Claude trace in `grok-fork traces` and in `/traces`, quote two entries, read the Ask page off the pane.
+- Pass bar is Sab's: his first send, an answer streaming into the panel beside the trace. Until he has seen that, the report says "answer streaming not seen".
 
-## Tests
+## Not verified
 
-- Render snapshots for states 1-7.
-- Quote in a trace view lands in the Ask input with its source line, never in the hidden composer.
-- A send uses the traces agent's session id, never the traced session's.
-- The saved id is reused on the second send.
-- Screen check: open a Claude trace, quote two entries, read the Ask input off the pane; stop before send (paid turn; the first send is Sab's).
-
-## Decisions for Sab
-
-- Layout: trace left, Ask in the F3 panel (recommended), or the traces agent full width with the trace in the panel.
-- Where the Ask agent's list comes from: its own config entry (only Ask reads it, nothing starts until a send), or the `traces` alias going through `gb` with the agents named (gb starts a private leader per launch).
-- Scope: trace views only, or also the Ask page in ordinary grok sessions (asking about your own session's calls).
-- The list/follow modal (no editor today) stays out of this slice.
+- A session created from standalone traces (never done there before).
+- The peek tail at 24-46 columns.
+- Whether grok's folder trust asks about `~/.grok/traces/agent/` (standalone marks trust done; `/traces` inside grok does not).
 
 ## Who decided
 
-Claude Opus 5.5, not Sab: the `✦ Ask` name, the source-line format, the folder and id file paths, quotes leaving the viewer open, the placeholder identity wording, the test list, one session per agent choice, identity held by text rather than by removing tools.
+Sab: the Ask panel, grok-fork as the agent, one session, quote by Enter/visual select, transcript readable but never dumped. Claude (Opus 5.5 draft, Fable 5.2 rev 2), not Sab: the `✦ Ask` name, the source-line format, folder and id paths, the placeholder wording, `o` and Ctrl+N, peek tail instead of a scrolling history, follow reaching Ask through `v`.
