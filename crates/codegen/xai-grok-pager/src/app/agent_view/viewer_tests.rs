@@ -1152,6 +1152,7 @@ fn comment_screen_row(agent: &AgentView) -> u16 {
 fn arrows_step_the_block_viewer_through_entries_that_have_one() {
     use crate::scrollback::block::RenderBlock;
     let mut agent = make_agent();
+    let prompt = agent.scrollback.push_block(RenderBlock::user_prompt("do the thing"));
     let first = agent.scrollback.push_block(RenderBlock::agent_message("first"));
     let call = agent.scrollback.push_block(RenderBlock::tool_call("Tool", "info", true));
     agent.scrollback.push_block(RenderBlock::system("no viewer"));
@@ -1171,4 +1172,5 @@ fn arrows_step_the_block_viewer_through_entries_that_have_one() {
     assert_eq!(press(&mut agent, KeyCode::Right), last, "stays on the last one");
     assert_eq!(press(&mut agent, KeyCode::Left), call);
     assert_eq!(press(&mut agent, KeyCode::Char('h')), first);
+    assert_eq!(press(&mut agent, KeyCode::Left), prompt, "a user prompt opens too");
 }

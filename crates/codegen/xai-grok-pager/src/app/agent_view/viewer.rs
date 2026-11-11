@@ -1036,6 +1036,7 @@ impl AgentView {
             RenderBlock::Thinking(_) | RenderBlock::AgentMessage(_) => {
                 BlockViewerPane::for_markdown(id, entry)
             }
+            RenderBlock::UserPrompt(b) => Some(BlockViewerPane::for_user_prompt(id, &b.text)),
             RenderBlock::ToolCall(ToolCallBlock::Execute(_)) => BlockViewerPane::for_execute(id, entry),
             RenderBlock::ToolCall(ToolCallBlock::Edit(_)) => BlockViewerPane::for_edit(id, entry),
             RenderBlock::ToolCall(ToolCallBlock::Read(_)) => BlockViewerPane::for_read(id, entry),

@@ -303,6 +303,13 @@ impl BlockViewerPane {
         })
     }
 
+    /// A user prompt: its text, line for line.
+    pub fn for_user_prompt(entry_id: EntryId, text: &str) -> Self {
+        let style = Style::default().fg(Theme::current().text_primary);
+        let lines = text.lines().map(|l| Line::from(Span::styled(l.to_owned(), style))).collect();
+        Self::for_static_content(entry_id, ViewerKind::PlainText, lines)
+    }
+
     /// Create a viewer for static content lines (shared by web_fetch and web_search).
     fn for_static_content(entry_id: EntryId, kind: ViewerKind, lines: Vec<Line<'static>>) -> Self {
         let config = ListPaneConfig {
@@ -1093,7 +1100,8 @@ impl BlockViewerPane {
             HintItem::new(crate::key!('v'), "select"),
             HintItem::new(crate::key!('w'), "wrap"),
         ];
-        if self.kind != ViewerKind::PlainText {
+        // Entry 0 is the sentinel of viewers not opened on a scrollback entry (plans, detached tasks).
+        if self.entry_id != EntryId::new(0) {
             hints.push(HintItem::paired(crate::key!(Left), crate::key!(Right), "prev/next"));
         }
         match self.kind {
