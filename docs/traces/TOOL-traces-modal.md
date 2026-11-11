@@ -75,8 +75,25 @@ The standalone command opens the Traces list directly. Alternatively, run `grok-
 - Reading the 12:56 message as "build a separate app and stop investing in the modal" (retracted 21:06).
 - Pre-today agent decisions: the 1 s local poll and the 10 s remote poll.
 
+### 2026-11-10 to 11-11 (follow layout, list keys, themes, install)
+
+**Sab said**
+- Follow: "the text seems misaligned, the text colored feels like its just blindly be rendered on screen rather than carefully placed... it feels sloppy"; grok view is the bar.
+- Terminal colour: "Rex 100% ought to identify itself lol We should do rex and herdr".
+- `r`: arm-then-confirm or copy the command, "Why can't both be viable options?"; `/` search: "Agreed do it".
+- Themes: "every single theme that I should be able to use in Grok build should one hundred percent be distinct and clear and visually confirmed and verified by any agent working on it"; the quasi-monochrome gold selection, bold and bright, is the model.
+- Install: consolidate into one build; grok-traces "needs to become part of the protocol as much as build here and rsync to sab air"; a second build needs his approval.
+
+**Implementing agent (Claude Opus 5.5) decided, not Sab**
+- Row details: the 50% dimmed green diamond for a finished call, gaps only around prompts and prose, no follow header, the 3-line prompt cap, times as `%-I:%M %p`.
+- `y` as the copy-resume key, and the wording of the `r` arm message.
+- Selection thresholds in `visibility_tests` (selection vs page and prompt band >= 1.25:1, text >= 4.5:1) and the new `bg_visual` of tokyonight, kanso_mist, one_dark_pro, oscura_midnight, rosepine_moon (nearest hue-keeping colour that passes).
+- Not bumping the index `PARSER_VERSION`, so Codex `exec` rows indexed before 2026-11-11 keep their JS.
+
 ## Open/unverified
 
 - The follow screen has no side-by-side layout with the prompt; the lead agent held that back as a separate decision.
 - The 1 s and 10 s intervals are unmeasured defaults, not choices.
-- The build and install commands above were not re-run while writing this page.
+- `scripts/install-fork.sh` last ran 2026-11-11 (grok-fork `bbe9e258`, grok-traces `f187b005`, checksums matched on both Macs).
+- The PTY follow tests (`traces_modal_follow.rs`, `traces_modal_follow_receipts.rs`) were updated for the new rows but not run.
+- Sab saw traces on sab-air look worse than on the Mini. Cause unknown: sab-air's local terminals (Rex, tmux from Rex) already get truecolor; only an ssh session drops `COLORTERM`.

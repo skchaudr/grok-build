@@ -36,6 +36,17 @@ Sampled 2026-10-26 from real logs on the mini.
 
 Pi paths are under `~/.pi/agent/install/releases/<ver>/node_modules/@earendil-works/pi-coding-agent/`.
 
+## Codex code-mode `exec` arguments
+
+A code-mode `exec` call's arguments are one JS string, not an object; shell commands sit inside it as `exec_command({cmd: "..."})`, possibly several per script. grok-traces reads the first `cmd` string (`classify.rs` `codemode_command`) and appends `+N` for the rest. Lines indexed before 2026-11-11 keep the JS's first line.
+
+## Terminal colour markers (2026-11-11, Mini and sab-air)
+
+- Rex sets `TERM_PROGRAM=rex`, `COLORTERM=truecolor`, `REX_SESSION`, `REX_BLOCK`.
+- herdr sets `HERDR_ENV=1`, `TERM=xterm-256color`, `COLORTERM=truecolor`.
+- ssh drops `COLORTERM`, so a remote shell reads as 256 colours.
+- The pager treats `TERM_PROGRAM=rex`, `REX_SESSION` or `HERDR_ENV` as truecolor (`xai-grok-pager-render/src/theme/color_support.rs` `truecolor_marker`).
+
 ## Pre-tool hooks: blocking a call
 
 | Harness | Hook | Deny output | Reason reaches model? | Source | Status |

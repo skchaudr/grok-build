@@ -6,7 +6,7 @@ Written 2026-10-28 by Sonnet 5.5 from `git log`, `gh pr view` and the code. Deci
 
 ## What it is
 
-The `grok-traces` binary (`crates/codegen/xai-grok-traces/src/bin/grok-traces.rs`). Subcommands: `hook <source>`, `scan`, `list`, `events <id> --json`, `raw`, `live --json [--watch]`, `follow`, `doctor`, `version`. It is the data source for `trace-deck` (`~/repos/trace-deck`) and for `/traces`. Installed `a02176a7` at `~/.grok/bin/grok-traces` on sab-mini and sab-air.
+The `grok-traces` binary (`crates/codegen/xai-grok-traces/src/bin/grok-traces.rs`). Subcommands: `hook <source>`, `scan`, `list`, `events <id> --json`, `raw`, `live --json [--watch]`, `follow`, `doctor`, `version`. It is the data source for `trace-deck` (`~/repos/trace-deck`) and for `/traces`. Installed `97fc76fe` (2026-11-11) at `~/.grok/bin/grok-traces` on sab-mini and sab-air; `scripts/install-fork.sh` installs it with grok-fork every time. Since then a Codex code-mode `exec` call's `follow --json` `what` is its first shell command (`+N` for more), not the JS's first line.
 
 ## How it works
 
