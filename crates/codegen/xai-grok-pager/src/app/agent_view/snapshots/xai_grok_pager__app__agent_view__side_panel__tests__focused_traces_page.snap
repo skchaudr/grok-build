@@ -4,10 +4,10 @@ expression: "draw(&mut agent, 110, 24)"
 ---
                                                                 │ ◀  ∿ Traces   ◆ Info  ▸
   /work/grok-build                    84K / 200K │ [Dashboard]  │ ───────────────────────────────────────────
-                                                                │ ● live  grok · grok-4.5 · side panel · -
-                                                                │ ▶ you  add the side panel
-                                                                │ → Bash  cargo test                   ✓ 0.4s
-                                                                │ → Read  src/views/s…  ✗ exit 1  no such fi…
+                                                                │  › add the side panel               4:00 PM
+                                                                │
+                                                                │ ◆ Bash  cargo test                     0.4s
+                                                                │ ◆ Read  src/views/s…  ✗ exit 1  no such fi…
                                                                 │
                                                                 │
                                                                 │
@@ -21,8 +21,8 @@ expression: "draw(&mut agent, 110, 24)"
                                                                 │
                                                                 │
   ╭──────────────────────────────────────────────────────────╮  │
-  │ ❯ Build anything                                         │  │
+  │ ❯                                                        │  │
   ╰─────────────────────────────────────────────── Grok 4.5 ─╯  │
                                                                 │
-                                                                │ live tail
+                                                                │
                                                                 │ Esc chat · ←/→ panels · z zoom · +/- width

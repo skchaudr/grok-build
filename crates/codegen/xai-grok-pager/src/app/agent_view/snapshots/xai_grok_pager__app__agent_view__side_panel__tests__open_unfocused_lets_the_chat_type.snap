@@ -27,8 +27,8 @@ expression: "draw(&mut agent, 110, 30)"
                                                                 │
                                                                 │
   ╭──────────────────────────────────────────────────────────╮  │
-  │ ❯ Build anything                                         │  │
+  │ ❯                                                        │  │
   ╰─────────────────────────────────────────────── Grok 4.5 ─╯  │
                                                                 │
-  Space:prompt  │  j/k:nav  │  Shift+l/h:turn  │  Ctrl+e:       │
+  Shift+Tab:mode  │  Ctrl+.:shortcuts                           │
                                                                 │ F3 focus panel

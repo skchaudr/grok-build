@@ -33,6 +33,8 @@ const REASONING_LINES: usize = 6;
 const MAX_INDENT: usize = 8;
 /// A prompt shows this many wrapped lines, then `… +N lines`.
 const USER_LINES: usize = 3;
+/// An agent message shows this many lines until `l` opens it (to `INLINE_MAX_LINES`).
+const TEXT_LINES: usize = 6;
 /// How far a finished call's diamond is dimmed toward the background, as grok's collapsed tool rows do
 /// (`scrollback.display.dim_accent` default).
 const DIM_ACCENT: f32 = 0.5;
@@ -460,9 +462,10 @@ impl Follow {
         }
     }
 
-    /// `l` / `h`: open or close the highlighted call's body inline. False when nothing changed.
+    /// `l` / `h`: open or close the highlighted call's body, message or reasoning inline. False when nothing changed.
     pub fn fold(&mut self, open: bool) -> bool {
-        let Some(i) = self.cursor.filter(|&i| self.call_at(i).is_some()) else { return false };
+        let foldable = |i: usize| matches!(self.rows[i].body, Body::Call(_) | Body::Text(_) | Body::Reasoning(_));
+        let Some(i) = self.cursor.filter(|&i| foldable(i)) else { return false };
         if open { self.open.insert(i) } else { self.open.remove(&i) }
     }
 
@@ -559,8 +562,9 @@ impl Follow {
                 let lead = lines.iter().take_while(|l| blank(l)).count();
                 lines.drain(..lead);
                 lines.dedup_by(|a, b| blank(a) && blank(b));
-                let more = lines.len().saturating_sub(INLINE_MAX_LINES);
-                lines.truncate(INLINE_MAX_LINES);
+                let cap = if self.open.contains(&i) { INLINE_MAX_LINES } else { TEXT_LINES };
+                let more = lines.len().saturating_sub(cap);
+                lines.truncate(cap);
                 let mut out: Vec<Line<'static>> = lines
                     .into_iter()
                     .map(|l| {
@@ -587,12 +591,13 @@ impl Follow {
                     Some(md) => md.output(avail).lines.into_iter().map(|l| l.content).filter(|l| !blank(l)).collect(),
                     None => wrap(t, avail, usize::MAX).0.into_iter().map(Line::from).collect(),
                 };
-                let more = all.len().saturating_sub(REASONING_LINES);
+                let cap = if self.open.contains(&i) { INLINE_MAX_LINES } else { REASONING_LINES };
+                let more = all.len().saturating_sub(cap);
                 let text = gray.add_modifier(Modifier::ITALIC);
                 let hang = " ".repeat(head.width());
                 let mut out: Vec<Line<'static>> = all
                     .into_iter()
-                    .take(REASONING_LINES)
+                    .take(cap)
                     .enumerate()
                     .map(|(n, l)| {
                         let mut spans = if n == 0 {
@@ -1080,11 +1085,26 @@ mod tests {
         let mut f = Follow::bare(session());
         let md = "**Done.** Two things:\n\n- first\n- second\n\n| Work | State |\n|---|---|\n| A1 | Landed |";
         f.apply(&[item("text", "root", 0, json!({ "text": md })), item("reasoning", "root", 0, json!({"text": "check `lexer.rs` **first**"}))], 0);
+        assert!(f.step(-1) && f.fold(true), "the table is past the folded message's first lines");
         let shown = screen(&mut f, 60, 18);
         assert!(shown.contains("◆ Thought  check lexer.rs first"), "reasoning is markdown too\n{shown}");
         assert!(shown.contains("Done. Two things:") && !shown.contains("**"), "{shown}");
         assert!(shown.contains("• first"), "{shown}");
         assert!(!shown.contains("|---|") && shown.contains("Landed"), "a table, not its pipes\n{shown}");
+    }
+
+    #[test]
+    fn a_long_message_starts_folded_and_l_opens_it() {
+        let mut f = Follow::bare(session());
+        let text: Vec<String> = (0..20).map(|n| format!("- para {n}")).collect();
+        f.apply(&[item("text", "root", 0, json!({ "text": text.join("\n") }))], 0);
+        let shown = screen(&mut f, 60, 40);
+        assert!(shown.contains("para 5") && !shown.contains("para 6") && shown.contains("… +14 lines"), "{shown}");
+        assert!(f.step(-1) && f.fold(true));
+        let shown = screen(&mut f, 60, 40);
+        assert!(shown.contains("para 19") && !shown.contains("… +"), "{shown}");
+        assert!(f.fold(false));
+        assert!(!screen(&mut f, 60, 40).contains("para 6"));
     }
 
     #[test]
