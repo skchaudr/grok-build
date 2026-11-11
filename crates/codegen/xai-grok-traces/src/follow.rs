@@ -250,6 +250,10 @@ pub fn json_event(ev: &EventRow, raw: Option<&str>, call_id: Option<&str>, agent
             v["call_id"] = json!(call_id);
             v["tool"] = json!(ev.title);
             v["what"] = json!(what);
+            // Additive (v stays 1): `what` is the call's own command or argument, not a written intent.
+            if !what.is_empty() && ev.intent.as_deref().map(first_line).is_none_or(str::is_empty) {
+                v["cmd"] = json!(true);
+            }
         }
         ("tool", Some("tool_result")) => {
             v["kind"] = json!("result");
@@ -1029,7 +1033,7 @@ mod tests {
     fn json_call_and_result() {
         let mut c = ev("tool", Some("tool"), "Bash", "cargo test");
         c.detail = Some("cargo test -p x".into());
-        assert_eq!(js(json_event(&c, None, Some("t1"), "a", 0)), r#"{"v":1,"kind":"call","agent":"a","depth":0,"line":1,"ts":null,"call_id":"t1","tool":"Bash","what":"cargo test -p x"}"#);
+        assert_eq!(js(json_event(&c, None, Some("t1"), "a", 0)), r#"{"v":1,"kind":"call","agent":"a","depth":0,"line":1,"ts":null,"call_id":"t1","tool":"Bash","what":"cargo test -p x","cmd":true}"#);
         c.intent = Some("run the tests".into());
         assert!(js(json_event(&c, None, Some("t1"), "a", 0)).ends_with(r#""what":"run the tests"}"#));
         c.intent = None;

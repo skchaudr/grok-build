@@ -317,13 +317,42 @@ pub fn call_intent(args: &Value) -> Option<String> {
     })
 }
 
+/// Codex code mode wraps shell calls in JS (`tools.exec_command({cmd:"ls"})`): the first command's headline,
+/// with `+N` when the script runs more.
+fn codemode_command(js: &str) -> Option<String> {
+    let mut cmds = js.match_indices("exec_command(").filter_map(|(at, _)| {
+        let rest = &js[at..];
+        let key = rest.find("cmd")?;
+        let after = rest[key + 3..].trim_start_matches(['"', '\'']).trim_start();
+        let after = after.strip_prefix(':')?.trim_start();
+        let quote = after.chars().next().filter(|c| matches!(c, '"' | '\'' | '`'))?;
+        let mut out = String::new();
+        let mut chars = after[1..].chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => match chars.next()? {
+                    'n' => out.push('\n'),
+                    't' => out.push('\t'),
+                    other => out.push(other),
+                },
+                c if c == quote => return Some(out),
+                c => out.push(c),
+            }
+        }
+        None
+    });
+    let first = command_headline(&cmds.next()?);
+    let more = cmds.count();
+    Some(if more == 0 { first } else { format!("{first}  +{more}") }).filter(|s| !s.trim().is_empty())
+}
+
 /// A compact summary of a tool call's arguments.
 pub fn call_detail(name: &str, args: &Value) -> Option<String> {
     if let Some(mcp) = mcp_name(name) {
         return Some(clip_line(&mcp));
     }
     match args {
-        Value::String(s) => patch_path(s).or_else(|| first_line(s)),
+        Value::String(s) => patch_path(s).or_else(|| codemode_command(s)).or_else(|| first_line(s)),
         Value::Object(m) => {
             let get = |keys: &[&str]| keys.iter().find_map(|k| str_of(m, k).filter(|s| !s.trim().is_empty()));
             if let Some(c) = command_of(m) {
@@ -438,6 +467,9 @@ mod tests {
         assert_eq!(d("mcp__github__create_issue", json!({"title": "t"})).as_deref(), Some("github.create_issue"));
         assert_eq!(d("exec_command", json!({"cmd": "ls -la", "workdir": "/w"})).as_deref(), Some("ls -la"));
         assert_eq!(d("apply_patch", Value::String("*** Begin Patch\n*** Update File: src/a/x.rs\n@@".into())).as_deref(), Some("a/x.rs"));
+        assert_eq!(d("exec", Value::String("const r = await tools.exec_command({cmd:\"cd /w && rg -n 'a\\\"b' src\", yield_time_ms: 1})".into())).as_deref(), Some("rg -n 'a\"b' src"));
+        assert_eq!(d("exec", Value::String("const r=await Promise.allSettled([\n tools.exec_command({cmd:\"python3 - <<'PY'\\nimport json\\nprint(1)\\nPY\"}),\n tools.exec_command({\"cmd\": 'ls'})])".into())).as_deref(), Some("python3 - <<'PY' ⏎ print(1)  +1"));
+        assert_eq!(d("exec", Value::String("const x = 1;\nconsole.log(x)".into())).as_deref(), Some("const x = 1;"), "no shell call: the first line");
         assert_eq!(d("TodoWrite", json!({"todos": []})), None);
         let long = "x".repeat(300);
         assert_eq!(d("Bash", json!({ "command": long })).unwrap().chars().count(), DETAIL_CHARS + 1);
