@@ -14,13 +14,14 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
+use xai_grok_traces::follow::short_model;
 use xai_grok_traces::{SessionRow, Status, source_label};
 
 use super::board::{self, Board};
 use super::{TracesModalState, clean_name, fmt_age, now_ms};
 use crate::app::app_view::InputOutcome;
 use crate::input::key::key;
-use crate::render::line_utils::truncate_str;
+use crate::render::line_utils::{truncate_line, truncate_str};
 use crate::theme::Theme;
 use crate::views::shortcuts_bar::{HintItem, ShortcutsBar};
 
@@ -196,7 +197,7 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, state: &mut TracesModalState)
     }
     let now = now_ms();
     let agents = roster(&state.shown_roots, &state.shown_children);
-    let (title, live, source, cwd, id) = state
+    let (title, live, source, cwd, id, model) = state
         .follow_view
         .as_ref()
         .map(|f| {
@@ -206,6 +207,7 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, state: &mut TracesModalState)
                 f.root.source.clone(),
                 f.root.cwd.clone(),
                 f.root.id.clone(),
+                f.root.model.clone(),
             )
         })
         .unwrap_or_default();
@@ -218,6 +220,7 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, state: &mut TracesModalState)
         &title,
         live,
         &source,
+        model.as_deref(),
         cwd.as_deref(),
         others.len(),
         &theme,
@@ -225,11 +228,13 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, state: &mut TracesModalState)
     let footer_y = area.y + area.height - 1;
     render_footer(buf, Rect::new(area.x, footer_y, area.width, 1), &theme);
 
+    // One row of air under the header, as grok's view leaves under its title bar, when the stream can spare it.
+    let air = u16::from(stream_h > MIN_STREAM);
     let stream = Rect::new(
         area.x + 2,
-        area.y + 1,
+        area.y + 1 + air,
         area.width.saturating_sub(4),
-        stream_h,
+        stream_h - air,
     );
     if let Some(f) = state.follow_view.as_mut() {
         f.render(buf, stream, state.index.as_ref(), &theme, now);
@@ -251,39 +256,43 @@ fn render_header(
     title: &str,
     live: bool,
     source: &str,
+    model: Option<&str>,
     cwd: Option<&str>,
     others: usize,
     theme: &Theme,
 ) {
     let bg = theme.bg_base;
     let (word, color) = if live {
-        ("● live", theme.accent_running)
+        ("● live", theme.accent_success)
     } else {
         ("■ ended", theme.gray)
     };
-    let where_ = format!("{} · {}", source_label(source), board::project(cwd));
-    let more = if others == 0 {
-        String::new()
-    } else {
-        format!(" · {others} other live")
-    };
-    let right = format!("{word}  {where_}{more}");
-    let left_w = (area.width as usize).saturating_sub(right.width() + 2);
-    let left = truncate_str(&format!("traces   {title}"), left_w);
-    buf.set_span(
-        area.x,
-        area.y,
-        &Span::styled(left, theme.muted().bg(bg).add_modifier(Modifier::BOLD)),
-        area.width,
-    );
-    let rw = right.width() as u16;
-    if rw + 2 < area.width {
-        buf.set_span(
-            area.x + area.width - rw,
-            area.y,
-            &Span::styled(right, Style::default().fg(color).bg(bg)),
-            rw,
-        );
+    let mut meta = vec![source_label(source).to_string()];
+    meta.extend(model.map(short_model));
+    meta.push(board::project(cwd));
+    if others > 0 {
+        meta.push(format!("{others} other live"));
+    }
+    let meta = format!("  {}", meta.join(" · "));
+    let rw = word.width() + meta.width();
+    let left_w = (area.width as usize).saturating_sub(rw + 2);
+    let line = Line::from(vec![
+        Span::styled("traces  ", theme.dim().bg(bg)),
+        Span::styled(
+            truncate_str(title, left_w.saturating_sub(8)),
+            Style::default()
+                .fg(theme.text_primary)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    buf.set_line(area.x, area.y, &line, left_w as u16);
+    if rw + 2 < area.width as usize {
+        let right = Line::from(vec![
+            Span::styled(word, Style::default().fg(color).bg(bg)),
+            Span::styled(meta, theme.muted().bg(bg)),
+        ]);
+        buf.set_line(area.x + area.width - rw as u16, area.y, &right, rw as u16);
     }
 }
 
@@ -292,8 +301,10 @@ fn render_footer(buf: &mut Buffer, area: Rect, theme: &Theme) {
     let hints = vec![
         HintItem::new(key!(Tab), "next live"),
         HintItem::new(key!('v'), "grok view"),
+        HintItem::new(key!('l'), "open call"),
         HintItem::new(key!('e'), "error"),
         HintItem::new(key!('G'), "tail"),
+        HintItem::new(key!(Esc), "back"),
     ];
     let inner = Rect {
         x: area.x + 2,
@@ -415,15 +426,22 @@ fn agent_line(buf: &mut Buffer, x: u16, y: u16, w: u16, row: &SessionRow, now: i
     } else {
         String::new()
     };
-    let lead = format!("{indent}{glyph} {}", clean_name(row));
     let room = (w as usize).saturating_sub(right.width() + 2);
-    let left = truncate_str(&format!("{lead}{doing}"), room);
-    buf.set_span(
-        x,
-        y,
-        &Span::styled(left, Style::default().fg(theme.accent_running).bg(bg)),
-        w,
+    let left = truncate_line(
+        Line::from(vec![
+            Span::styled(
+                format!("{indent}{glyph} "),
+                Style::default().fg(theme.accent_success).bg(bg),
+            ),
+            Span::styled(
+                clean_name(row),
+                Style::default().fg(theme.text_primary).bg(bg),
+            ),
+            Span::styled(doing, theme.muted().bg(bg)),
+        ]),
+        room,
     );
+    buf.set_line(x, y, &left, w);
     let rw = right.width() as u16;
     if rw + 2 < w {
         buf.set_span(x + w - rw, y, &Span::styled(right, theme.dim().bg(bg)), rw);

@@ -42,14 +42,14 @@ async fn traces_modal_follow_receipts() {
     // PreToolUse: the call row with its command, while the transcript has no call.
     hook("PreToolUse", serde_json::json!({ "tool_name": "Bash", "tool_use_id": "ptyrcpt1", "tool_input": { "command": "echo ptyreceiptcmd" } }));
     h.wait_for_text("ptyreceiptcmd", WAIT).expect("the call row with its command");
-    assert!(h.contains_text("→ Bash") && !h.contains_text("✓"), "open call\n{}", h.screen_contents());
+    assert!(h.screen_contents().lines().any(|l| l.contains("◆ Bash") && l.contains('…')), "open call\n{}", h.screen_contents());
     assert!(!std::fs::read_to_string(&transcript).unwrap().contains("ptyrcpt1"), "the transcript has no such call yet");
 
     // PostToolUse a moment later: closed, with the duration between the two receipts.
     std::thread::sleep(Duration::from_millis(1200));
     hook("PostToolUse", serde_json::json!({ "tool_name": "Bash", "tool_use_id": "ptyrcpt1", "tool_input": { "command": "echo ptyreceiptcmd" } }));
     // The gap between the two hook processes is not exact: any duration will do.
-    h.wait_until("a ✓ followed by a duration", WAIT, |h| h.screen_contents().split("✓ ").skip(1).any(|rest| rest.starts_with(|c: char| c.is_ascii_digit())))
+    h.wait_until("the call row ends in its duration", WAIT, |h| h.screen_contents().lines().any(|l| l.contains("◆ Bash") && !l.contains('…') && l.trim_end().strip_suffix('s').is_some_and(|r| r.ends_with(|c: char| c.is_ascii_digit()))))
         .expect("the call closes with a duration");
 
     // The transcript catches up: the call stays one row.
@@ -59,7 +59,7 @@ async fn traces_modal_follow_receipts() {
     hook("Stop", serde_json::json!({}));
     h.wait_for_text("ptyreceiptdone", WAIT).expect("the reply arrives");
     let screen = h.screen_contents();
-    assert_eq!(screen.matches("→ Bash").count(), 1, "one call row\n{screen}");
+    assert_eq!(screen.matches("◆ Bash").count(), 1, "one call row\n{screen}");
 
     // k pauses on the call: its output comes from the transcript line the call row was linked to.
     h.inject_keys(b"k").expect("pause on the call");
@@ -68,7 +68,7 @@ async fn traces_modal_follow_receipts() {
     h.wait_for_text("ptyreceiptout", WAIT).expect("l shows the call's output inline");
     assert!(!h.contains_text("could not read"), "{}", h.screen_contents());
     h.inject_keys(b"G").expect("resume the tail");
-    h.wait_for_text("live tail", WAIT).expect("tail pinned again");
+    h.wait_for_text_absent("paused", WAIT).expect("tail pinned again");
 
     append(&transcript, END);
     hook("SessionEnd", serde_json::json!({}));

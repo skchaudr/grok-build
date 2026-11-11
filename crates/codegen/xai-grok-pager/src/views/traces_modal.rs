@@ -7803,16 +7803,15 @@ mod tests {
         press(&mut state, KeyCode::Char('f'));
         assert_eq!(state.mode, Mode::Follow);
         follow_settled(&mut state);
-        let screen = modal_screen(&mut state, 100, 14);
-        assert!(screen.contains("▶ you  index everything please"), "{screen}");
-        assert!(screen.contains("→ Agent"), "{screen}");
-        assert!(screen.contains("● live"), "{screen}");
+        let screen = modal_screen(&mut state, 100, 30);
+        assert!(screen.contains("› index everything please"), "{screen}");
+        assert!(screen.contains("◆ Agent"), "{screen}");
         assert!(screen.contains("j/k scroll") && screen.contains("Tab agent") && screen.contains("e next error"), "hints\n{screen}");
         // j pauses the tail; G resumes it.
         press(&mut state, KeyCode::Char('k'));
         assert!(modal_screen(&mut state, 100, 14).contains("paused"));
         press(&mut state, KeyCode::Char('G'));
-        assert!(modal_screen(&mut state, 100, 14).contains("live tail"));
+        assert!(!modal_screen(&mut state, 100, 14).contains("paused"), "the pinned tail needs no status line");
         assert!(wants_esc(&state));
         press(&mut state, KeyCode::Esc);
         assert_eq!((state.mode, state.follow_view.is_none()), (Mode::List, true));

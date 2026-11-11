@@ -15,10 +15,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 use unicode_width::UnicodeWidthStr;
-use xai_grok_traces::follow::{Follower, header, short_model};
+use xai_grok_traces::follow::{Follower, short_model};
 use xai_grok_traces::{SessionRow, TraceIndex, user_roots};
 
-use crate::render::line_utils::truncate_str;
+use crate::render::color::blend_color;
+use crate::render::line_utils::{truncate_line, truncate_str};
+use crate::scrollback::blocks::markdown_content::MarkdownContent;
 use crate::theme::Theme;
 use crate::views::modal_window;
 use crate::views::traces_body::{self, INLINE_MAX_LINES};
@@ -29,6 +31,11 @@ const BACKLOG: usize = 200;
 /// Reasoning is dimmed context, not the thing being followed: this many lines, then `… +N lines`.
 const REASONING_LINES: usize = 6;
 const MAX_INDENT: usize = 8;
+/// A prompt shows this many wrapped lines, then `… +N lines`.
+const USER_LINES: usize = 3;
+/// How far a finished call's diamond is dimmed toward the background, as grok's collapsed tool rows do
+/// (`scrollback.display.dim_accent` default).
+const DIM_ACCENT: f32 = 0.5;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Res {
@@ -44,6 +51,8 @@ pub(super) struct Call {
     pub call_id: Option<String>,
     pub tool: String,
     pub what: String,
+    /// `what` is the call's own command, not a written intent: shell tools highlight it as code.
+    pub cmd: bool,
     /// When the call started (item time, else arrival): the in-flight timer counts from here.
     pub started_ms: i64,
     pub result: Option<Res>,
@@ -70,6 +79,8 @@ pub(super) struct Row {
     pub agent: String,
     pub depth: usize,
     pub body: Body,
+    /// The item's time, ms; prompts and agent text show it the way grok's view does.
+    pub ts: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,6 +126,8 @@ pub(super) struct Follow {
     bodies: HashMap<(String, i64, Option<i64>), String>,
     /// Call rows (indices into `rows`) shown with their body inline: `l` opens, `h` closes.
     open: HashSet<usize>,
+    /// Agent text rows rendered as markdown by grok's own renderer, wrap cached per width.
+    md: HashMap<usize, MarkdownContent>,
 }
 
 /// `0.4s`, `12s`, `2m05s`.
@@ -185,6 +198,7 @@ impl Follow {
             inflight: false,
             bodies: HashMap::new(),
             open: HashSet::new(),
+            md: HashMap::new(),
         }
     }
 
@@ -246,6 +260,7 @@ impl Follow {
                     call_id: v["call_id"].as_str().map(str::to_string),
                     tool: text(v, "tool"),
                     what: text(v, "what"),
+                    cmd: v["cmd"].as_bool().unwrap_or(false),
                     started_ms: last_ts,
                     result: None,
                     no_result: false,
@@ -332,7 +347,10 @@ impl Follow {
                 }
                 _ => continue,
             };
-            self.rows.push(Row { agent, depth, body });
+            if let Body::Text(t) = &body {
+                self.md.insert(self.rows.len(), MarkdownContent::new(t.as_str()));
+            }
+            self.rows.push(Row { agent, depth, body, ts: v["ts"].as_i64() });
         }
     }
 
@@ -485,92 +503,180 @@ impl Follow {
         let row = &self.rows[i];
         let ind = " ".repeat(2 * row.depth.min(MAX_INDENT));
         let w = width.saturating_sub(ind.width()).max(8);
-        let plain = |text: String, style: Style| Line::from(Span::styled(format!("{ind}{text}"), style));
-        let wrapped = |mark: &str, text: &str, cap: usize, style: Style| -> Vec<Line<'static>> {
-            let hang = " ".repeat(mark.width());
-            let avail = w.saturating_sub(mark.width()).max(1);
-            let all: Vec<&str> = text
+        let gray = Style::default().fg(theme.gray);
+        let faint = Style::default().fg(theme.gray_dim);
+        let plain = |spans: Vec<Span<'static>>| {
+            let mut all = vec![Span::raw(ind.clone())];
+            all.extend(spans);
+            Line::from(all)
+        };
+        // Word-wrapped at `avail` with blank lines dropped: the first `cap` lines and how many were cut.
+        let wrap = |text: &str, avail: usize, cap: usize| -> (Vec<String>, usize) {
+            let all: Vec<String> = text
                 .lines()
                 .map(str::trim_end)
                 .filter(|l| !l.trim().is_empty())
-                .flat_map(|l| modal_window::word_wrap(l, avail))
+                .flat_map(|l| modal_window::word_wrap(l, avail.max(1)).into_iter().map(str::to_string).collect::<Vec<_>>())
                 .collect();
-            let mut out: Vec<Line<'static>> =
-                all.iter().take(cap).enumerate().map(|(n, l)| plain(format!("{}{l}", if n == 0 { mark } else { hang.as_str() }), style)).collect();
-            if all.len() > cap {
-                out.push(plain(format!("{hang}… +{} lines", all.len() - cap), Style::default().fg(theme.gray)));
-            }
-            out
+            let more = all.len().saturating_sub(cap);
+            (all.into_iter().take(cap).collect(), more)
         };
         match &row.body {
+            // grok's prompt: a lifted band with the time on the right.
             Body::User(t) => {
-                let mut lines = t.lines().map(str::trim).filter(|l| !l.is_empty());
-                let head = lines.next().unwrap_or_default();
-                let more = lines.count();
-                let more = if more > 0 { format!(" (+{more} lines)") } else { String::new() };
-                let text = truncate_str(&format!("{ind}▶ you  {head}{more}"), width);
-                vec![Line::from(Span::styled(text, Style::default().fg(theme.accent_user).add_modifier(Modifier::BOLD)))]
+                let band = Style::default().bg(theme.bg_light);
+                let (lines, more) = wrap(t, w.saturating_sub(4), USER_LINES);
+                let mut out: Vec<Line<'static>> = lines
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, l)| {
+                        let lead = if n == 0 { Span::styled(" › ", band.fg(theme.gray)) } else { Span::styled("   ", band) };
+                        Line::from(vec![Span::raw(ind.clone()), lead, Span::styled(l, band.fg(theme.text_primary))])
+                    })
+                    .collect();
+                if more > 0 {
+                    out.push(Line::from(vec![Span::raw(ind.clone()), Span::styled(format!("   … +{more} lines"), band.fg(theme.gray))]));
+                }
+                for line in &mut out {
+                    let used = line.width();
+                    line.spans.push(Span::styled(" ".repeat(width.saturating_sub(used)), band));
+                }
+                if let Some(first) = out.first_mut() {
+                    right_align(first, clock(row.ts), width, band.fg(theme.gray));
+                }
+                out
             }
-            Body::Text(t) => wrapped("· ", t, INLINE_MAX_LINES, Style::default().fg(theme.text_primary)),
-            Body::Reasoning(t) => wrapped("~ ", t, REASONING_LINES, Style::default().fg(theme.gray).add_modifier(Modifier::DIM)),
+            // Agent text: grok's markdown renderer at this width, paragraphs and tables included.
+            Body::Text(t) => {
+                let mut lines: Vec<Line<'static>> = match self.md.get(&i) {
+                    Some(md) => md.output(w).lines.into_iter().map(|l| l.content).collect(),
+                    None => t.lines().map(|l| Line::from(l.to_string())).collect(),
+                };
+                // Blank edges come from the markdown; the gap between rows is the stream's.
+                while lines.last().is_some_and(blank) {
+                    lines.pop();
+                }
+                let lead = lines.iter().take_while(|l| blank(l)).count();
+                lines.drain(..lead);
+                lines.dedup_by(|a, b| blank(a) && blank(b));
+                let more = lines.len().saturating_sub(INLINE_MAX_LINES);
+                lines.truncate(INLINE_MAX_LINES);
+                let mut out: Vec<Line<'static>> = lines
+                    .into_iter()
+                    .map(|l| {
+                        let style = l.style;
+                        let mut line = plain(l.spans);
+                        line.style = style;
+                        line
+                    })
+                    .collect();
+                if more > 0 {
+                    out.push(plain(vec![Span::styled(format!("… +{more} lines"), gray)]));
+                }
+                if let Some(first) = out.first_mut() {
+                    right_align(first, clock(row.ts), width, gray);
+                }
+                out
+            }
+            // grok's "◆ Thought": a quiet row of the same family as the calls.
+            Body::Reasoning(t) => {
+                let head = "◆ Thought  ";
+                let (lines, more) = wrap(t, w.saturating_sub(head.width()), REASONING_LINES);
+                let text = gray.add_modifier(Modifier::ITALIC);
+                let hang = " ".repeat(head.width());
+                let mut out: Vec<Line<'static>> = lines
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, l)| {
+                        if n == 0 {
+                            plain(vec![Span::styled("◆ ", gray), Span::styled("Thought  ", gray.add_modifier(Modifier::BOLD)), Span::styled(l, text)])
+                        } else {
+                            plain(vec![Span::raw(hang.clone()), Span::styled(l, text)])
+                        }
+                    })
+                    .collect();
+                if more > 0 {
+                    out.push(plain(vec![Span::raw(hang), Span::styled(format!("… +{more} lines"), faint)]));
+                }
+                out
+            }
+            // grok's tool row: the diamond carries the outcome, the name and target stay quiet.
             Body::Call(c) => {
                 let failed = c.result.as_ref().is_some_and(|r| !r.ok);
-                let (status, color) = match (&c.result, c.no_result) {
-                    (Some(r), _) if r.ok => (format!("✓ {}", r.ms.map_or_else(String::new, took)).trim_end().to_string(), theme.accent_assistant),
-                    (Some(r), _) => (format!("✗ {}", first_line(&r.error)).trim_end().to_string(), theme.accent_error),
-                    (None, true) => ("no result".to_string(), theme.gray),
-                    (None, false) => (format!("… {}", span_text((now_ms - c.started_ms) / 1000)), theme.gray),
+                let (diamond, status, status_style) = match (&c.result, c.no_result) {
+                    (Some(r), _) if r.ok => (
+                        blend_color(theme.bg_base, theme.accent_success, DIM_ACCENT).unwrap_or(theme.accent_success),
+                        r.ms.map_or_else(String::new, took),
+                        faint,
+                    ),
+                    (Some(r), _) => (theme.accent_error, format!("✗ {}", first_line(&r.error)).trim_end().to_string(), Style::default().fg(theme.accent_error)),
+                    (None, true) => (theme.gray_dim, "no result".to_string(), faint),
+                    (None, false) => (theme.accent_running, format!("… {}", span_text((now_ms - c.started_ms) / 1000)), gray),
                 };
                 let status = truncate_str(&status, w / 2);
-                let head = format!("→ {}  ", c.tool);
-                let what = truncate_str(first_line(&c.what), w.saturating_sub(head.width() + status.width() + 2));
-                let pad = w.saturating_sub(head.width() + what.width() + status.width()).max(1);
-                let tool = if failed { theme.accent_error } else { theme.accent_tool };
-                let mut lines = vec![Line::from(vec![
-                    Span::raw(ind.clone()),
-                    Span::styled(head, Style::default().fg(tool).add_modifier(Modifier::BOLD)),
-                    Span::styled(what, Style::default().fg(theme.gray)),
-                    Span::raw(" ".repeat(pad)),
-                    Span::styled(status, Style::default().fg(color)),
-                ])];
+                let name = format!("{}  ", c.tool);
+                let name_style = if failed { Style::default().fg(theme.accent_error) } else { gray }.add_modifier(Modifier::BOLD);
+                let room = w.saturating_sub(2 + name.width() + status.width() + 2);
+                let what = truncate_str(first_line(&c.what), room);
+                let what_spans = if c.cmd && language(&c.tool) == Some("sh") {
+                    crate::views::tasks_pane::highlight_bash_command(&what)
+                } else {
+                    vec![Span::styled(what, gray)]
+                };
+                let mut spans = vec![Span::styled("◆ ", Style::default().fg(diamond)), Span::styled(name, name_style)];
+                spans.extend(what_spans);
+                let mut line = plain(spans);
+                right_align(&mut line, Some(status).filter(|s| !s.is_empty()), width, status_style);
+                let mut lines = vec![line];
                 if let Some(rows) = body {
                     lines.extend(body_lines(rows, &ind, &c.tool, failed, theme));
                 }
                 lines
             }
             Body::Start { model, label } => {
-                let model = model.as_deref().map(|m| format!("{} ", short_model(m))).unwrap_or_default();
-                let label = label.as_deref().filter(|l| !l.is_empty()).map(|l| format!("  {l}")).unwrap_or_default();
-                vec![plain(format!("↳ {model}started{label}"), Style::default().fg(theme.accent_user))]
+                let mut spans = vec![Span::styled("↳ ", faint)];
+                if let Some(m) = model {
+                    spans.push(Span::styled(format!("{} ", short_model(m)), Style::default().fg(theme.accent_model)));
+                }
+                spans.push(Span::styled("started", gray));
+                if let Some(l) = label.as_deref().filter(|l| !l.is_empty()) {
+                    spans.push(Span::styled(format!("  {}", truncate_str(first_line(l), w.saturating_sub(24))), Style::default().fg(theme.text_primary)));
+                }
+                vec![plain(spans)]
             }
-            Body::End if row.agent == self.root.id => vec![plain("■ ended".to_string(), Style::default().fg(theme.gray).add_modifier(Modifier::BOLD))],
-            Body::End => vec![plain("↳ ended".to_string(), Style::default().fg(theme.gray))],
-            Body::Resume => vec![plain("↻ resumed".to_string(), Style::default().fg(theme.gray))],
-            Body::Model(m) => vec![plain(format!("model → {}", short_model(m)), Style::default().fg(theme.accent_user))],
+            Body::End if row.agent == self.root.id => vec![plain(vec![Span::styled("■ ended", gray.add_modifier(Modifier::BOLD))])],
+            Body::End => vec![plain(vec![Span::styled("↳ ended", faint)])],
+            Body::Resume => vec![plain(vec![Span::styled("↻ resumed", gray)])],
+            Body::Model(m) => vec![plain(vec![Span::styled("model → ", gray), Span::styled(short_model(m), Style::default().fg(theme.accent_model))])],
         }
     }
 
-    /// Header line, the tail (or the paused window) of the rows, and a status line.
+    /// A blank line before the row at `pos` when it, or the visible row before it, is a prompt or agent text:
+    /// calls stay packed together and prose gets air, as in grok's view.
+    fn gap_before(&self, vis: &[usize], pos: usize) -> bool {
+        let spaced = |i: usize| matches!(self.rows[i].body, Body::User(_) | Body::Text(_));
+        pos > 0 && (spaced(vis[pos]) || spaced(vis[pos - 1]))
+    }
+
+    /// The tail (or the paused window) of the rows, and a status line when paused, filtered or failing.
+    /// The deck above draws the session's name and state.
     pub fn render(&mut self, buf: &mut Buffer, area: Rect, index: Option<&TraceIndex>, theme: &Theme, now_ms: i64) {
         if area.height < 3 {
             return;
         }
         let width = area.width as usize;
-        let state = if self.ended { "■ ended" } else { "● live" };
-        let state_color = if self.ended { theme.gray } else { theme.accent_running };
-        buf.set_span(area.x, area.y, &Span::styled(state, Style::default().fg(state_color).add_modifier(Modifier::BOLD)), area.width);
-        let title = truncate_str(&header(&self.root, None), width.saturating_sub(state.width() + 2));
-        buf.set_span(area.x + state.width() as u16 + 2, area.y, &Span::styled(title, Style::default().fg(theme.text_primary)), area.width);
-
         let paused = self.paused().then(|| format!("paused · {} new · G live", self.rows.len().saturating_sub(self.paused_len)));
-        let status = [Some(paused.unwrap_or_else(|| "live tail".to_string())), self.filter_name().map(|n| format!("agent: {n}")), self.err.as_ref().map(|e| format!("index: {e}"))]
+        let status = [paused, self.filter_name().map(|n| format!("agent: {n}")), self.err.as_ref().map(|e| format!("index: {e}"))]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
             .join(" · ");
-        buf.set_span(area.x, area.y + area.height - 1, &Span::styled(truncate_str(&status, width), Style::default().fg(theme.gray)), area.width);
+        let mut body = area;
+        if !status.is_empty() {
+            body.height -= 1;
+            buf.set_span(area.x, area.y + area.height - 1, &Span::styled(truncate_str(&status, width), Style::default().fg(theme.gray)), area.width);
+        }
 
-        let body = Rect { y: area.y + 1, height: area.height - 2, ..area };
         let hgt = body.height as usize;
         let vis = self.visible();
         if vis.is_empty() {
@@ -586,9 +692,14 @@ impl Follow {
                 Some((i, self.body_rows(i, index, width.saturating_sub(2 * depth))?))
             })
             .collect();
+        // A row's lines, its leading gap (if any) as an empty first line.
         let lines_at = |me: &Self, pos: usize| {
             let i = vis[pos];
-            me.row_lines(i, width, now_ms, theme, bodies.get(&i).map(Vec::as_slice))
+            let mut lines = me.row_lines(i, width, now_ms, theme, bodies.get(&i).map(Vec::as_slice));
+            if me.gap_before(&vis, pos) {
+                lines.insert(0, Line::default());
+            }
+            lines
         };
         let last = vis.len() - 1;
         match self.cursor.and_then(|c| vis.iter().position(|&i| i == c)) {
@@ -613,18 +724,52 @@ impl Follow {
         let mut y = body.y;
         for pos in self.top..vis.len() {
             let selected = self.cursor == Some(vis[pos]);
-            for line in lines_at(self, pos) {
+            let gap = self.gap_before(&vis, pos);
+            for (n, line) in lines_at(self, pos).into_iter().enumerate() {
+                if gap && n == 0 {
+                    // The window's first row needs no gap above it.
+                    if pos != self.top {
+                        y += 1;
+                    }
+                    continue;
+                }
                 if y >= body.y + body.height {
                     return;
                 }
                 if selected {
                     buf.set_style(Rect { x: body.x, y, width: body.width, height: 1 }, Style::default().bg(theme.bg_highlight));
                 }
-                buf.set_line(body.x, y, &line, body.width);
+                buf.set_line(body.x, y, &truncate_line(line, width), body.width);
                 y += 1;
             }
         }
     }
+}
+
+fn blank(l: &Line<'_>) -> bool {
+    l.spans.iter().all(|s| s.content.trim().is_empty())
+}
+
+/// `h:mm AM`, grok's scrollback timestamp.
+fn clock(ms: Option<i64>) -> Option<String> {
+    use chrono::TimeZone;
+    chrono::Local.timestamp_millis_opt(ms?).single().map(|t| t.format("%-I:%M %p").to_string())
+}
+
+/// Puts `right` at the line's right edge, inside any trailing fill, when it fits with two columns to spare.
+fn right_align(line: &mut Line<'static>, right: Option<String>, width: usize, style: Style) {
+    let Some(right) = right else { return };
+    while line.spans.last().is_some_and(|s| !s.content.is_empty() && s.content.trim().is_empty()) && line.spans.len() > 1 {
+        line.spans.pop();
+    }
+    let used = line.width();
+    if used + right.width() + 2 > width {
+        // No room: put the fill back.
+        line.spans.push(Span::styled(" ".repeat(width.saturating_sub(used)), style));
+        return;
+    }
+    line.spans.push(Span::styled(" ".repeat(width - used - right.width()), style));
+    line.spans.push(Span::styled(right, style));
 }
 
 fn now_ms() -> i64 {
@@ -755,20 +900,25 @@ mod tests {
 
         let screen = screen(&mut f, 70, 16);
         for want in [
-            "● live",
-            "▶ you  fix the parser (+1 lines)",
-            "~ the tokenizer",
-            "· I will patch",
-            "→ Bash  run the tests",
-            "✓ 0.4s",
+            " › fix the parser",
+            "   then run the tests",
+            "◆ Thought  the tokenizer",
+            "I will patch",
+            "◆ Bash  run the tests",
+            "0.4s",
             "  ↳ haiku-4-5 started  Check the lexer",
-            "  → Read  src/lexer.rs",
+            "  ◆ Read  src/lexer.rs",
             "✗ exit 1  no such file",
             "… 12s",
         ] {
             assert!(screen.contains(want), "missing {want:?}\n{screen}");
         }
-        assert!(screen.lines().any(|l| l.starts_with("  → Read")), "the subagent's rows sit two columns in\n{screen}");
+        assert!(screen.lines().any(|l| l.starts_with("  ◆ Read")), "the subagent's rows sit two columns in\n{screen}");
+        let lines: Vec<&str> = screen.lines().collect();
+        let text = lines.iter().position(|l| l.starts_with("I will patch")).unwrap();
+        assert!(lines[text - 1].is_empty() && lines[text + 1].is_empty(), "agent text has air around it\n{screen}");
+        let bash = lines.iter().position(|l| l.starts_with("◆ Bash  run the tests")).unwrap();
+        assert!(lines[bash + 1].starts_with("◆ Agent"), "calls stay packed together\n{screen}");
     }
 
     #[test]
@@ -848,9 +998,9 @@ mod tests {
         assert!(screen(&mut f, 70, 16).contains("paused · 2 new · G live"));
         assert!(f.key(KeyCode::Char('G')));
         assert!(!f.paused());
-        assert!(screen(&mut f, 70, 16).contains("live tail"));
+        assert!(!screen(&mut f, 70, 16).contains("paused"));
         let short = screen(&mut f, 70, 5);
-        assert!(short.contains("later still") && !short.contains("▶ you"), "a pinned short screen shows the newest rows\n{short}");
+        assert!(short.contains("later still") && !short.contains("fix the parser"), "a pinned short screen shows the newest rows\n{short}");
     }
 
     #[test]
@@ -908,6 +1058,60 @@ mod tests {
         assert_eq!(f.selected_call().map(|(a, c)| (a, c.line)), Some(("kid", 0)));
         f.key(KeyCode::Char('g'));
         assert!(f.selected_call().is_none(), "the first row is the prompt");
+    }
+
+    #[test]
+    fn agent_text_is_rendered_markdown_not_source() {
+        let mut f = Follow::bare(session());
+        let md = "**Done.** Two things:\n\n- first\n- second\n\n| Work | State |\n|---|---|\n| A1 | Landed |";
+        f.apply(&[item("text", "root", 0, json!({ "text": md }))], 0);
+        let shown = screen(&mut f, 60, 16);
+        assert!(shown.contains("Done. Two things:") && !shown.contains("**"), "{shown}");
+        assert!(shown.contains("• first"), "{shown}");
+        assert!(!shown.contains("|---|") && shown.contains("Landed"), "a table, not its pipes\n{shown}");
+    }
+
+    #[test]
+    fn a_command_is_highlighted_and_an_intent_is_not() {
+        let mut f = Follow::bare(session());
+        f.apply(
+            &[
+                item("call", "root", 0, json!({"line": 1, "call_id": "a", "tool": "exec", "what": "rg -n foo src", "cmd": true})),
+                call("root", 0, 2, "b", "Bash", "List the files"),
+            ],
+            0,
+        );
+        let theme = Theme::current();
+        let spans = |i: usize| f.row_lines(i, 60, 0, &theme, None)[0].spans.len();
+        assert!(spans(0) > spans(1), "the command gets token colours, the intent one muted span");
+    }
+
+    #[test]
+    fn the_diamond_carries_the_outcome_and_prose_outranks_calls() {
+        let mut f = Follow::bare(session());
+        f.apply(&stream(), 13_000);
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 70, 16);
+        let mut buf = Buffer::empty(area);
+        f.render(&mut buf, area, None, &theme, 13_000);
+        let at = |needle: &str| {
+            (0..16u16)
+                .find_map(|y| {
+                    let row: String = (0..70u16).map(|x| buf[(x, y)].symbol().to_string()).collect();
+                    row.find(needle).map(|b| (row[..b].chars().count() as u16, y))
+                })
+                .unwrap_or_else(|| panic!("{needle:?} not drawn"))
+        };
+        let fg = |needle: &str| {
+            let (x, y) = at(needle);
+            buf[(x, y)].fg
+        };
+        let done = blend_color(theme.bg_base, theme.accent_success, DIM_ACCENT).unwrap();
+        assert_eq!(fg("◆ Bash  run"), done, "a finished call's diamond is dimmed green");
+        assert_eq!(fg("◆ Read"), theme.accent_error, "a failed call's diamond is red");
+        assert_eq!(fg("I will patch"), theme.text_primary, "agent text is the brightest thing in the stream");
+        let (x, y) = at("◆ Bash  run the tests");
+        assert_eq!(buf[(x + 8, y)].fg, theme.gray, "a call's target is muted");
     }
 
     #[test]
