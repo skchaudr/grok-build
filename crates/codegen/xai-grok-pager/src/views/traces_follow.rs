@@ -51,8 +51,6 @@ pub(super) struct Call {
     pub call_id: Option<String>,
     pub tool: String,
     pub what: String,
-    /// `what` is the call's own command, not a written intent: shell tools highlight it as code.
-    pub cmd: bool,
     /// When the call started (item time, else arrival): the in-flight timer counts from here.
     pub started_ms: i64,
     pub result: Option<Res>,
@@ -126,7 +124,7 @@ pub(super) struct Follow {
     bodies: HashMap<(String, i64, Option<i64>), String>,
     /// Call rows (indices into `rows`) shown with their body inline: `l` opens, `h` closes.
     open: HashSet<usize>,
-    /// Agent text rows rendered as markdown by grok's own renderer, wrap cached per width.
+    /// Text and reasoning rows rendered as markdown by grok's own renderer, wrap cached per width.
     md: HashMap<usize, MarkdownContent>,
 }
 
@@ -260,7 +258,6 @@ impl Follow {
                     call_id: v["call_id"].as_str().map(str::to_string),
                     tool: text(v, "tool"),
                     what: text(v, "what"),
-                    cmd: v["cmd"].as_bool().unwrap_or(false),
                     started_ms: last_ts,
                     result: None,
                     no_result: false,
@@ -347,7 +344,7 @@ impl Follow {
                 }
                 _ => continue,
             };
-            if let Body::Text(t) = &body {
+            if let Body::Text(t) | Body::Reasoning(t) = &body {
                 self.md.insert(self.rows.len(), MarkdownContent::new(t.as_str()));
             }
             self.rows.push(Row { agent, depth, body, ts: v["ts"].as_i64() });
@@ -581,18 +578,27 @@ impl Follow {
             // grok's "◆ Thought": a quiet row of the same family as the calls.
             Body::Reasoning(t) => {
                 let head = "◆ Thought  ";
-                let (lines, more) = wrap(t, w.saturating_sub(head.width()), REASONING_LINES);
+                let avail = w.saturating_sub(head.width());
+                // Markdown, compacted (no blank lines) and recoloured muted italic; bold survives.
+                let all: Vec<Line<'static>> = match self.md.get(&i) {
+                    Some(md) => md.output(avail).lines.into_iter().map(|l| l.content).filter(|l| !blank(l)).collect(),
+                    None => wrap(t, avail, usize::MAX).0.into_iter().map(Line::from).collect(),
+                };
+                let more = all.len().saturating_sub(REASONING_LINES);
                 let text = gray.add_modifier(Modifier::ITALIC);
                 let hang = " ".repeat(head.width());
-                let mut out: Vec<Line<'static>> = lines
+                let mut out: Vec<Line<'static>> = all
                     .into_iter()
+                    .take(REASONING_LINES)
                     .enumerate()
                     .map(|(n, l)| {
-                        if n == 0 {
-                            plain(vec![Span::styled("◆ ", gray), Span::styled("Thought  ", gray.add_modifier(Modifier::BOLD)), Span::styled(l, text)])
+                        let mut spans = if n == 0 {
+                            vec![Span::styled("◆ ", gray), Span::styled("Thought  ", gray.add_modifier(Modifier::BOLD))]
                         } else {
-                            plain(vec![Span::raw(hang.clone()), Span::styled(l, text)])
-                        }
+                            vec![Span::raw(hang.clone())]
+                        };
+                        spans.extend(l.spans.into_iter().map(|s| Span::styled(s.content, s.style.patch(text))));
+                        plain(spans)
                     })
                     .collect();
                 if more > 0 {
@@ -618,14 +624,8 @@ impl Follow {
                 let name_style = if failed { Style::default().fg(theme.accent_error) } else { gray }.add_modifier(Modifier::BOLD);
                 let room = w.saturating_sub(2 + name.width() + status.width() + 2);
                 let what = truncate_str(first_line(&c.what), room);
-                let what_spans = if c.cmd && language(&c.tool) == Some("sh") {
-                    crate::views::tasks_pane::highlight_bash_command(&what)
-                } else {
-                    vec![Span::styled(what, gray)]
-                };
-                let mut spans = vec![Span::styled("◆ ", Style::default().fg(diamond)), Span::styled(name, name_style)];
-                spans.extend(what_spans);
-                let mut line = plain(spans);
+                // Muted even when it is a command, as grok's collapsed rows are: prose stays the brightest thing.
+                let mut line = plain(vec![Span::styled("◆ ", Style::default().fg(diamond)), Span::styled(name, name_style), Span::styled(what, gray)]);
                 right_align(&mut line, Some(status).filter(|s| !s.is_empty()), width, status_style);
                 let mut lines = vec![line];
                 if let Some(rows) = body {
@@ -1064,26 +1064,12 @@ mod tests {
     fn agent_text_is_rendered_markdown_not_source() {
         let mut f = Follow::bare(session());
         let md = "**Done.** Two things:\n\n- first\n- second\n\n| Work | State |\n|---|---|\n| A1 | Landed |";
-        f.apply(&[item("text", "root", 0, json!({ "text": md }))], 0);
-        let shown = screen(&mut f, 60, 16);
+        f.apply(&[item("text", "root", 0, json!({ "text": md })), item("reasoning", "root", 0, json!({"text": "check `lexer.rs` **first**"}))], 0);
+        let shown = screen(&mut f, 60, 18);
+        assert!(shown.contains("◆ Thought  check lexer.rs first"), "reasoning is markdown too\n{shown}");
         assert!(shown.contains("Done. Two things:") && !shown.contains("**"), "{shown}");
         assert!(shown.contains("• first"), "{shown}");
         assert!(!shown.contains("|---|") && shown.contains("Landed"), "a table, not its pipes\n{shown}");
-    }
-
-    #[test]
-    fn a_command_is_highlighted_and_an_intent_is_not() {
-        let mut f = Follow::bare(session());
-        f.apply(
-            &[
-                item("call", "root", 0, json!({"line": 1, "call_id": "a", "tool": "exec", "what": "rg -n foo src", "cmd": true})),
-                call("root", 0, 2, "b", "Bash", "List the files"),
-            ],
-            0,
-        );
-        let theme = Theme::current();
-        let spans = |i: usize| f.row_lines(i, 60, 0, &theme, None)[0].spans.len();
-        assert!(spans(0) > spans(1), "the command gets token colours, the intent one muted span");
     }
 
     #[test]
