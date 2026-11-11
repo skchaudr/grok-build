@@ -71,7 +71,7 @@ Sab, 2026-11-11: "it should be using the same things we are building across this
 - Whether grok's folder-trust prompt blocks `~/.grok/traces/agent/` or its `AGENTS.md`.
 - Whether piece 2 can reuse `draw_chat` at panel width or needs a smaller chat draw.
 - Whether a grok session can run with tools off; `SessionMode::Ask` exists but what it allows is not read yet.
-- Which choices plain `grok-fork traces` (the `traces` alias) sees: it passes no `--agent-choice` flags and Sab's `config.toml` has no `[[agent_choice]]` tables today, so it would offer only the fork's agent until one of those is added.
+- Which choices plain `grok-fork traces` (the `traces` alias) sees: it passes no `--agent-choice` flags and Sab's `config.toml` has no `[[agent_choice]]` tables. Adding those tables is not the answer: any choice makes the launch an external-agent launch (`app/cli.rs:929` `launches_external_agent`), which spawns the first choice's command at startup in place of the fork's own agent (`acp/mod.rs:232`, `cli.rs:939` `effective_agent_cmd`), and without a leader the picker is ignored (commit 2d60e6d6). So the Ask agent needs its own list, spawned only on its first send. Whether that spawn needs a leader (as `gb` runs) or a second in-process ACP connection is not read yet.
 - Whether claude-agent-acp and grok-pi-acp load `CLAUDE.md` / `AGENTS.md` from the session folder as their CLIs do.
 
 ## Tests
@@ -85,7 +85,7 @@ Sab, 2026-11-11: "it should be using the same things we are building across this
 ## Decisions for Sab
 
 - Layout: trace left, Ask in the F3 panel (recommended), or the traces agent full width with the trace in the panel.
-- Where `grok-fork traces` gets its agent choices: `[[agent_choice]]` tables in `~/.grok/config.toml` (every launch sees them), or the `traces` alias going through `gb` with the agents named.
+- Where the Ask agent's list comes from: its own config entry (only Ask reads it, nothing starts until a send), or the `traces` alias going through `gb` with the agents named (gb starts a private leader per launch).
 - Scope: trace views only, or also the Ask page in ordinary grok sessions (asking about your own session's calls).
 - The list/follow modal (no editor today) stays out of this slice.
 
