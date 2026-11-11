@@ -40,9 +40,12 @@ The trace stays the main view; the agent answers in a third F3 page, `✦ Ask` (
 
 ## The traces agent
 
-- One grok session for all trace views. Folder `~/.grok/traces/agent/`, id kept in `~/.grok/traces/agent-session`; the first send creates it, later sends resume it.
-- Identity: `~/.grok/traces/agent/AGENTS.md`, a short placeholder Claude writes and Sab edits: it answers one-off questions about quoted trace excerpts, says when the quote is not enough, and does not go looking for the transcript.
-- Context is only what is quoted plus the source lines. No transcript path is sent.
+Sab, 2026-11-11: "it should be using the same things we are building across this grok build, which is I should be able to choose use grok-fork with my own models OR what if it was like grok claude and grok pi?!"
+
+- The agent is any of the pager's agent choices (`app/agent_choice.rs`: `--agent-choice NAME=CMD` flags, which `scripts/hub/gb` passes for `claude`, `pi`, `grok-pi`, `codex`, `fork`…, or `[[agent_choice]]` in `~/.grok/config.toml`). With no choice it is the fork's own agent on your models. Picking uses the existing machine picker; it opens on the first send when there are two or more choices, and again from the Ask page to switch.
+- One session per agent choice, shared by every trace view. Folder `~/.grok/traces/agent/`; `~/.grok/traces/agent-sessions` keeps `name → session id`. The first send to a choice creates its session (`Effect::CreateSession` with `agent_choice`), later sends resume it on the same backend, as `dispatch/session/load.rs:411` already does for Pi rows.
+- Identity: one placeholder text Claude writes and Sab edits, as `AGENTS.md` (grok, Pi) and `CLAUDE.md` (Claude) in that folder: it answers one-off questions about quoted trace excerpts, says when the quote is not enough, and does not go looking for the transcript.
+- Context is only what is quoted plus the source lines. No transcript path is sent. Claude and Pi bring their own tools, so "no transcript" is held by the identity text, not by removing tools.
 - It lives in `app.agents` like any session, so its answers arrive while you browse.
 
 ## States (each gets a render snapshot test)
@@ -68,6 +71,8 @@ The trace stays the main view; the agent answers in a third F3 page, `✦ Ask` (
 - Whether grok's folder-trust prompt blocks `~/.grok/traces/agent/` or its `AGENTS.md`.
 - Whether piece 2 can reuse `draw_chat` at panel width or needs a smaller chat draw.
 - Whether a grok session can run with tools off; `SessionMode::Ask` exists but what it allows is not read yet.
+- Which choices plain `grok-fork traces` (the `traces` alias) sees: it passes no `--agent-choice` flags and Sab's `config.toml` has no `[[agent_choice]]` tables today, so it would offer only the fork's agent until one of those is added.
+- Whether claude-agent-acp and grok-pi-acp load `CLAUDE.md` / `AGENTS.md` from the session folder as their CLIs do.
 
 ## Tests
 
@@ -80,10 +85,10 @@ The trace stays the main view; the agent answers in a third F3 page, `✦ Ask` (
 ## Decisions for Sab
 
 - Layout: trace left, Ask in the F3 panel (recommended), or the traces agent full width with the trace in the panel.
-- Tools: none (read-only answers from quotes) or grok's normal tools.
+- Where `grok-fork traces` gets its agent choices: `[[agent_choice]]` tables in `~/.grok/config.toml` (every launch sees them), or the `traces` alias going through `gb` with the agents named.
 - Scope: trace views only, or also the Ask page in ordinary grok sessions (asking about your own session's calls).
 - The list/follow modal (no editor today) stays out of this slice.
 
 ## Who decided
 
-Claude Opus 5.5, not Sab: the `✦ Ask` name, the source-line format, the folder and id file paths, quotes leaving the viewer open, the placeholder identity wording, the test list.
+Claude Opus 5.5, not Sab: the `✦ Ask` name, the source-line format, the folder and id file paths, quotes leaving the viewer open, the placeholder identity wording, the test list, one session per agent choice, identity held by text rather than by removing tools.
