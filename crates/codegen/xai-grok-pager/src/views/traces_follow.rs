@@ -518,11 +518,14 @@ impl Follow {
             let more = all.len().saturating_sub(cap);
             (all.into_iter().take(cap).collect(), more)
         };
+        // Prose wraps short of the time column so the time always fits on its first line, as in grok's view.
+        let time = clock(row.ts);
+        let beside = time.as_ref().map_or(0, |t| t.width() + 2);
         match &row.body {
             // grok's prompt: a lifted band with the time on the right.
             Body::User(t) => {
                 let band = Style::default().bg(theme.bg_light);
-                let (lines, more) = wrap(t, w.saturating_sub(4), USER_LINES);
+                let (lines, more) = wrap(t, w.saturating_sub(4 + beside), USER_LINES);
                 let mut out: Vec<Line<'static>> = lines
                     .into_iter()
                     .enumerate()
@@ -539,14 +542,14 @@ impl Follow {
                     line.spans.push(Span::styled(" ".repeat(width.saturating_sub(used)), band));
                 }
                 if let Some(first) = out.first_mut() {
-                    right_align(first, clock(row.ts), width, band.fg(theme.gray));
+                    right_align(first, time, width, band.fg(theme.gray));
                 }
                 out
             }
             // Agent text: grok's markdown renderer at this width, paragraphs and tables included.
             Body::Text(t) => {
                 let mut lines: Vec<Line<'static>> = match self.md.get(&i) {
-                    Some(md) => md.output(w).lines.into_iter().map(|l| l.content).collect(),
+                    Some(md) => md.output(w.saturating_sub(beside).max(8)).lines.into_iter().map(|l| l.content).collect(),
                     None => t.lines().map(|l| Line::from(l.to_string())).collect(),
                 };
                 // Blank edges come from the markdown; the gap between rows is the stream's.
@@ -571,7 +574,7 @@ impl Follow {
                     out.push(plain(vec![Span::styled(format!("… +{more} lines"), gray)]));
                 }
                 if let Some(first) = out.first_mut() {
-                    right_align(first, clock(row.ts), width, gray);
+                    right_align(first, time, width, gray);
                 }
                 out
             }
@@ -1070,6 +1073,14 @@ mod tests {
         assert!(shown.contains("Done. Two things:") && !shown.contains("**"), "{shown}");
         assert!(shown.contains("• first"), "{shown}");
         assert!(!shown.contains("|---|") && shown.contains("Landed"), "a table, not its pipes\n{shown}");
+    }
+
+    #[test]
+    fn long_text_keeps_its_time_on_the_first_line() {
+        let mut f = Follow::bare(session());
+        f.apply(&[item("text", "root", 0, json!({ "text": "word ".repeat(60) }))], 0);
+        let first = draw(&mut f, 60, 12)[0].clone();
+        assert!(first.ends_with("AM") || first.ends_with("PM"), "{first:?}");
     }
 
     #[test]
