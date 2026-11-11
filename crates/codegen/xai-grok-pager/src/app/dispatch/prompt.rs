@@ -1411,6 +1411,15 @@ pub(super) fn dispatch_send_prompt_submission(
             // `agent` borrow ends here; push the optimistic echo via `app`.
             let sid_str = session_id.0.to_string();
             push_server_queue_echo(app, agent_id, &sid_str, &prompt_id, &text, "prompt");
+            // An external agent gets no queue echo, and claude-agent-acp feeds a mid-turn prompt straight into the running
+            // turn and drops its own replay ("the client already shows it"): paint it now or it is never shown.
+            if app.external_agent
+                && let Some(agent) = app.agents.get_mut(&agent_id)
+            {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::interjection_prompt(&text));
+            }
             crate::unified_log::info(
                 "prompt.send_server_authoritative",
                 Some(&sid_str),

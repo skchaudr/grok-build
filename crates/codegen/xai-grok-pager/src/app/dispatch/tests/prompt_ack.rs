@@ -377,3 +377,23 @@ fn late_prompt_response_after_the_fail_safe_leaves_the_pane_idle() {
         "the discarded response paints no marker and touches no state"
     );
 }
+
+/// Steer (or leader mode) sends a prompt typed mid-turn straight to the agent. An external agent echoes nothing back,
+/// so the pane paints it at send, or the user never sees what they wrote.
+#[test]
+fn a_mid_turn_send_to_an_external_agent_shows_in_the_scrollback() {
+    let mut app = test_app_with_agent();
+    app.leader_mode = true;
+    app.external_agent = true;
+    send_and_arm(&mut app, "first");
+    let effects = dispatch(Action::SendPrompt("steer this".into()), &mut app);
+    assert!(matches!(effects.as_slice(), [Effect::SendPrompt { .. }]), "{effects:?}");
+    let agent = agent_ref(&app, AgentId(0));
+    let prompts: Vec<&str> = (0..agent.scrollback.len())
+        .filter_map(|i| match &agent.scrollback.entry(i)?.block {
+            crate::scrollback::block::RenderBlock::UserPrompt(b) => Some(b.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prompts, ["first", "steer this"]);
+}
