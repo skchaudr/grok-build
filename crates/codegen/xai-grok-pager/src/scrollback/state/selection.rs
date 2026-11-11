@@ -174,6 +174,16 @@ impl ScrollbackState {
         // No selectable entry found before current, so stay where we are
     }
 
+    /// The block viewer moved to entry `idx`: select it when it is on screen, so closing the viewer lands there.
+    pub fn select_viewed(&mut self, idx: usize) {
+        if idx >= self.entries.len() || self.is_entry_hidden(idx) {
+            return;
+        }
+        self.selected = Some(idx);
+        self.sync_current_turn();
+        self.ensure_selected_visible(NavDirection::Down);
+    }
+
     pub fn clear_selection(&mut self) {
         self.selected = None;
     }

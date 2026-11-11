@@ -1093,6 +1093,9 @@ impl BlockViewerPane {
             HintItem::new(crate::key!('v'), "select"),
             HintItem::new(crate::key!('w'), "wrap"),
         ];
+        if self.kind != ViewerKind::PlainText {
+            hints.push(HintItem::paired(crate::key!(Left), crate::key!(Right), "prev/next"));
+        }
         match self.kind {
             ViewerKind::Markdown => {
                 hints.push(HintItem::new(crate::key!('r'), "raw"));

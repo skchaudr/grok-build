@@ -1147,3 +1147,28 @@ fn comment_screen_row(agent: &AgentView) -> u16 {
         .find(|&row| viewer.comment_id_at_screen_row(row, area) == Some(0))
         .expect("comment row is visible")
 }
+
+#[test]
+fn arrows_step_the_block_viewer_through_entries_that_have_one() {
+    use crate::scrollback::block::RenderBlock;
+    let mut agent = make_agent();
+    let first = agent.scrollback.push_block(RenderBlock::agent_message("first"));
+    let call = agent.scrollback.push_block(RenderBlock::tool_call("Tool", "info", true));
+    agent.scrollback.push_block(RenderBlock::system("no viewer"));
+    let last = agent.scrollback.push_block(RenderBlock::agent_message("last"));
+    agent.scrollback.prepare_layout(80, 40);
+    let pane = agent
+        .block_viewer_for_entry(agent.scrollback.get_by_id(first).unwrap())
+        .unwrap();
+    agent.install_block_viewer(pane);
+    let press = |agent: &mut AgentView, code| {
+        agent.handle_input(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)), &ActionRegistry::defaults());
+        agent.block_viewer.as_ref().expect("viewer stays open").entry_id
+    };
+    assert_eq!(press(&mut agent, KeyCode::Right), call);
+    assert_eq!(agent.scrollback.selected(), agent.scrollback.index_of_id(call));
+    assert_eq!(press(&mut agent, KeyCode::Char('l')), last, "the system line has no viewer");
+    assert_eq!(press(&mut agent, KeyCode::Right), last, "stays on the last one");
+    assert_eq!(press(&mut agent, KeyCode::Left), call);
+    assert_eq!(press(&mut agent, KeyCode::Char('h')), first);
+}

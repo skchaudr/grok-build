@@ -1024,6 +1024,71 @@ impl AgentView {
         self.block_viewer = Some(pane);
     }
 
+    /// The fullscreen viewer for a scrollback entry, if its block type has one.
+    pub(crate) fn block_viewer_for_entry(
+        &self,
+        entry: &crate::scrollback::entry::ScrollbackEntry,
+    ) -> Option<BlockViewerPane> {
+        use crate::scrollback::block::RenderBlock;
+        use crate::scrollback::blocks::ToolCallBlock;
+        let id = entry.id;
+        match &entry.block {
+            RenderBlock::Thinking(_) | RenderBlock::AgentMessage(_) => {
+                BlockViewerPane::for_markdown(id, entry)
+            }
+            RenderBlock::ToolCall(ToolCallBlock::Execute(_)) => BlockViewerPane::for_execute(id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::Edit(_)) => BlockViewerPane::for_edit(id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::Read(_)) => BlockViewerPane::for_read(id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::Search(_)) => BlockViewerPane::for_grep(id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::ListDir(_)) => BlockViewerPane::for_list_dir(id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::WebFetch(_)) => BlockViewerPane::for_web_fetch(id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::WebSearch(_)) => BlockViewerPane::for_web_search(id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(_)) => {
+                BlockViewerPane::for_integration_search(id, entry)
+            }
+            RenderBlock::ToolCall(ToolCallBlock::UseTool(_)) => BlockViewerPane::for_use_tool(id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::Other(_) | ToolCallBlock::Skill(_)) => {
+                BlockViewerPane::for_other(id, entry)
+            }
+            RenderBlock::BgTask(block) => {
+                let task = self.session.bg_tasks.get(&block.task_id);
+                Some(BlockViewerPane::for_bg_task(
+                    id,
+                    &block.task_id,
+                    task.map(|t| t.stdout.as_str()).unwrap_or(""),
+                    task.is_some_and(|t| t.status == crate::app::agent::BgTaskStatus::Running),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// `←`/`→` in the block viewer: reopen it on the previous or next scrollback entry that has a viewer
+    /// (calls inside a folded group included). False when the viewer is not on a scrollback entry.
+    fn step_block_viewer(&mut self, forward: bool) -> bool {
+        let Some(at) = self.block_viewer.as_ref().and_then(|v| self.scrollback.index_of_id(v.entry_id)) else {
+            return false;
+        };
+        let range = self.scrollback.visible_entry_range();
+        let order: Vec<usize> = if forward { (at + 1..range.end).collect() } else { (range.start..at).rev().collect() };
+        use crate::scrollback::block::BlockContent;
+        let pixels = crate::terminal::image::detect_graphics_protocol().supports_images();
+        let next = order.into_iter().find_map(|idx| {
+            let entry = self.scrollback.entry(idx)?;
+            let media = !entry.block.image_references().is_empty() || entry.block.inline_media().is_some();
+            if !entry.block.has_normal_fullscreen_viewer() || (media && !pixels) {
+                return None;
+            }
+            Some((idx, self.block_viewer_for_entry(entry)?))
+        });
+        if let Some((idx, pane)) = next {
+            self.dismiss_block_viewer();
+            self.scrollback.select_viewed(idx);
+            self.install_block_viewer(pane);
+        }
+        true
+    }
+
     pub(crate) fn try_take_idle_enter_quote(&mut self, key: &KeyEvent) -> IdleEnterQuote {
         let Some(viewer) = self.block_viewer.as_ref() else {
             return IdleEnterQuote::NotHandled;
@@ -1091,6 +1156,20 @@ impl AgentView {
         if viewer.is_close_key(key) {
             self.dismiss_block_viewer();
             return InputOutcome::Changed;
+        }
+
+        let idle = viewer.list_state.input_mode().is_none() && !viewer.list_state.visual_mode;
+        if idle && key.modifiers == KeyModifiers::NONE && key.kind == KeyEventKind::Press {
+            let forward = match key.code {
+                KeyCode::Right | KeyCode::Char('l') => Some(true),
+                KeyCode::Left | KeyCode::Char('h') => Some(false),
+                _ => None,
+            };
+            if let Some(forward) = forward
+                && self.step_block_viewer(forward)
+            {
+                return InputOutcome::Changed;
+            }
         }
 
         match self.try_take_idle_enter_quote(key) {

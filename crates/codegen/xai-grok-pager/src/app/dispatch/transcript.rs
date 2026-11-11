@@ -5,7 +5,6 @@ use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::{BlockContent, RenderBlock};
-use crate::scrollback::blocks::ToolCallBlock;
 use agent_client_protocol as acp;
 use xai_grok_telemetry::session_ctx::log_event;
 
@@ -271,8 +270,6 @@ pub(crate) fn dispatch_open_transcript_pager(app: &mut AppView) {
 /// Open the fullscreen block viewer for the selected entry.
 /// Falls back to the image viewer only for entries without a normal block viewer.
 pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
-    use crate::views::block_viewer::BlockViewerPane;
-
     with_active_agent(app, |agent| {
         let Some(idx) = agent.scrollback.selected() else {
             return;
@@ -304,62 +301,7 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
             return;
         }
 
-        // Try to create a normal viewer for the selected block type.
-        let viewer = match &entry.block {
-            RenderBlock::Thinking(_) | RenderBlock::AgentMessage(_) => {
-                BlockViewerPane::for_markdown(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::Execute(_)) => {
-                BlockViewerPane::for_execute(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::Edit(_)) => {
-                BlockViewerPane::for_edit(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::Read(_)) => {
-                BlockViewerPane::for_read(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::Search(_)) => {
-                BlockViewerPane::for_grep(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::ListDir(_)) => {
-                BlockViewerPane::for_list_dir(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::WebFetch(_)) => {
-                BlockViewerPane::for_web_fetch(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::WebSearch(_)) => {
-                BlockViewerPane::for_web_search(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(_)) => {
-                BlockViewerPane::for_integration_search(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::UseTool(_)) => {
-                BlockViewerPane::for_use_tool(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::Other(_) | ToolCallBlock::Skill(_)) => {
-                BlockViewerPane::for_other(entry.id, entry)
-            }
-            RenderBlock::BgTask(block) => {
-                let stdout = agent
-                    .session
-                    .bg_tasks
-                    .get(&block.task_id)
-                    .map(|t| t.stdout.as_str())
-                    .unwrap_or("");
-                let is_running = agent
-                    .session
-                    .bg_tasks
-                    .get(&block.task_id)
-                    .is_some_and(|t| t.status == crate::app::agent::BgTaskStatus::Running);
-                Some(BlockViewerPane::for_bg_task(
-                    entry.id,
-                    &block.task_id,
-                    stdout,
-                    is_running,
-                ))
-            }
-            _ => None,
-        };
+        let viewer = agent.block_viewer_for_entry(entry);
 
         if let Some(pane) = viewer {
             agent.install_block_viewer(pane);
