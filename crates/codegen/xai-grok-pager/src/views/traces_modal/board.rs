@@ -23,10 +23,11 @@ use unicode_width::UnicodeWidthStr;
 use xai_grok_traces::{SessionRow, Status, source_label};
 
 use super::summaries::Summaries;
-use super::{TracesModalState, clean_name, fmt_age, now_ms};
+use super::{TracesModalState, Typing, clean_name, fmt_age, now_ms};
 use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 use crate::input::key::key;
+use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
 use crate::views::shortcuts_bar::{HintItem, ShortcutsBar};
 
@@ -361,6 +362,19 @@ fn spawn_active(db: std::path::PathBuf, hosts: Vec<String>) -> mpsc::Receiver<Ha
 }
 
 pub fn handle_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
+    match key.code {
+        KeyCode::Char('/') => {
+            state.typing = Typing::Ledger;
+            return InputOutcome::Changed;
+        }
+        KeyCode::Esc if !state.query.is_empty() => {
+            state.query.clear();
+            state.deep = false;
+            state.refresh();
+            return InputOutcome::Changed;
+        }
+        _ => {}
+    }
     let items = state.board.as_mut().expect("board").items(&state.shown_roots, &state.shown_children);
     let b = state.board.as_mut().expect("board");
     match key.code {
@@ -422,6 +436,13 @@ pub fn handle_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome 
                 _ => None,
             };
             return state.resume(row);
+        }
+        KeyCode::Char('y') => {
+            let row = match b.selected(&items) {
+                Some(It::Row { row, .. }) => Some(row.clone()),
+                _ => None,
+            };
+            return state.copy_resume(row);
         }
         KeyCode::Char('R') => {
             state.scanning = true;
@@ -494,6 +515,16 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut TracesModalState) {
     let x = area.x + 2;
     let w = area.width.saturating_sub(4);
     render_header(buf, Rect::new(x, area.y, w, 1), state, &theme);
+    // The row under the tabs holds the search while one is typed or kept.
+    if state.typing == Typing::Ledger || !state.query.is_empty() {
+        let (text, style) = if state.typing == Typing::Ledger {
+            (format!("/{}▏", state.query), Style::default().fg(theme.text_primary).bg(theme.bg_base))
+        } else {
+            let deep = if state.deep { "  (events too)" } else { "" };
+            (format!("/{}{deep}   Esc clears", state.query), Style::default().fg(theme.fuzzy_accent).bg(theme.bg_base))
+        };
+        buf.set_line(x, area.y + 1, &Line::from(Span::styled(truncate_str(&text, w as usize), style)), w);
+    }
     let footer_y = area.y + area.height - 1;
     let status_h = u16::from(state.status.is_some() || state.scanning);
     let list = Rect::new(x, area.y + 2, w, area.height.saturating_sub(3 + status_h));
@@ -790,6 +821,8 @@ fn render_footer(buf: &mut Buffer, area: Rect, theme: &Theme) {
         HintItem::new(key!(Tab), "view"),
         HintItem::new(key!('c'), "compact"),
         HintItem::new(key!('r'), "resume"),
+        HintItem::new(key!('y'), "copy resume"),
+        HintItem::new(key!('/'), "search"),
     ];
     let inner = Rect { x: area.x + 2, width: area.width.saturating_sub(2), ..area };
     ShortcutsBar::new(&hints).render(inner, buf);

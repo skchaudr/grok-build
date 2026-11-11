@@ -108,6 +108,8 @@ pub struct TracesModalState {
     status_at: Option<Instant>,
     /// The resume command `r` just sent to `TracesCopy`; names the copy in the status line.
     copy_note: Option<String>,
+    /// The row a first `r` armed: resuming in grok can start a model turn, so the second `r` does it.
+    resume_armed: Option<String>,
     /// Index health problem (over cap, ...); shown red under the tabs.
     pub health: Option<String>,
     /// Hook receipts arrived within `RECEIPT_WINDOW_MS`.
@@ -415,12 +417,25 @@ pub fn resume_action(row: &SessionRow) -> Option<ResumeAction> {
     if let Some(t) = resume_target(row) {
         return Some(ResumeAction::InPager(t));
     }
+    resume_command(row).map(ResumeAction::CopyCommand)
+}
+
+/// The harness's own resume command for a row, to paste into a shell (`y`).
+pub fn resume_command(row: &SessionRow) -> Option<String> {
     let q = |s: &str| shlex::try_quote(s).map(|c| c.into_owned()).ok();
-    let path = q(row.file_path.to_str()?)?;
     let cd = match &row.cwd {
         Some(cwd) => format!("cd {} && ", q(cwd)?),
         None => String::new(),
     };
+    if let Some(t) = resume_target(row) {
+        let id = q(&t.native_id)?;
+        return Some(match t.source.as_str() {
+            "claude" => format!("{cd}claude --resume {id}"),
+            "codex" => format!("{cd}codex resume {id}"),
+            _ => format!("{cd}grok --resume {id}"),
+        });
+    }
+    let path = q(row.file_path.to_str()?)?;
     let cmd = match row.source.as_str() {
         "pi" => format!("{cd}pi --session {path}"),
         "omp" => format!("{cd}omp --resume {path}"),
@@ -428,7 +443,7 @@ pub fn resume_action(row: &SessionRow) -> Option<ResumeAction> {
         "cursor" => format!("cursor-agent --resume {}", q(row.file_path.file_stem()?.to_str()?)?),
         _ => return None,
     };
-    Some(ResumeAction::CopyCommand(cmd))
+    Some(cmd)
 }
 
 fn tab_source(tab: usize) -> Option<&'static str> {
@@ -450,6 +465,7 @@ impl TracesModalState {
             status: index.is_none().then(|| "trace index unavailable".to_string()),
             status_at: index.is_none().then(Instant::now),
             copy_note: None,
+            resume_armed: None,
             index,
             health: None,
             live: false,
@@ -918,7 +934,7 @@ impl TracesModalState {
             .filter(|r| !self.active_only || r.status == Status::Active)
             .filter(|r| {
                 q.is_empty()
-                    || [Some(&r.title), r.label.as_ref(), r.cwd.as_ref(), r.model.as_ref()].into_iter().flatten().any(|f| f.to_lowercase().contains(&q))
+                    || [Some(&r.title), r.label.as_ref(), r.cwd.as_ref(), r.model.as_ref(), Some(&r.source)].into_iter().flatten().any(|f| f.to_lowercase().contains(&q))
             })
             .collect();
         if !browse {
@@ -1898,8 +1914,30 @@ impl TracesModalState {
             return InputOutcome::Action(Action::TracesNotice { text: format!("remote session on {host}: resume it there") });
         }
         match resume_action(&row) {
-            Some(ResumeAction::InPager(t)) => InputOutcome::Action(Action::TracesResume { source: t.source, native_id: t.native_id }),
+            Some(ResumeAction::InPager(t)) if self.resume_armed.take().as_deref() == Some(row.id.as_str()) => {
+                InputOutcome::Action(Action::TracesResume { source: t.source, native_id: t.native_id })
+            }
+            Some(ResumeAction::InPager(_)) => {
+                self.resume_armed = Some(row.id.clone());
+                self.set_status("r again resumes it in grok, which can start a model turn · y copies its resume command");
+                InputOutcome::Changed
+            }
             Some(ResumeAction::CopyCommand(text)) => {
+                self.copy_note = Some(text.clone());
+                InputOutcome::Action(Action::TracesCopy { text })
+            }
+            None => InputOutcome::Action(Action::TracesNotice { text: format!("no resume command for {}", row.source) }),
+        }
+    }
+
+    /// `y`: the harness's own resume command, copied; nothing runs.
+    fn copy_resume(&mut self, row: Option<SessionRow>) -> InputOutcome {
+        let Some(row) = row else { return InputOutcome::Unchanged };
+        if let Some(host) = &row.host {
+            return InputOutcome::Action(Action::TracesNotice { text: format!("remote session on {host}: resume it there") });
+        }
+        match resume_command(&row) {
+            Some(text) => {
                 self.copy_note = Some(text.clone());
                 InputOutcome::Action(Action::TracesCopy { text })
             }
@@ -3718,7 +3756,8 @@ impl TracesModalState {
 
 /// Esc in a sub-view or an editor is handled here; only the ledger's Esc closes the modal.
 pub fn wants_esc(state: &TracesModalState) -> bool {
-    state.typing != Typing::No || state.mode != Mode::List
+    // A kept search is cleared by Esc before Esc leaves the list.
+    state.typing != Typing::No || state.mode != Mode::List || !state.query.is_empty()
 }
 
 /// Mouse in the list and the trajectory. A click selects; a click on the selected row (a double-click)
@@ -3765,6 +3804,9 @@ pub fn handle_traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
 fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
     if key.kind == KeyEventKind::Release {
         return InputOutcome::Unchanged;
+    }
+    if key.code != KeyCode::Char('r') {
+        state.resume_armed = None;
     }
     if state.mode == Mode::List && state.typing == Typing::No && state.board.is_some() {
         return board::handle_key(state, key);
@@ -3912,6 +3954,7 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                     return InputOutcome::Action(Action::TracesRescan);
                 }
                 KeyCode::Char('r') => return state.resume(state.selected_session().cloned()),
+                KeyCode::Char('y') => return state.copy_resume(state.selected_session().cloned()),
                 KeyCode::Enter => {
                     if !state.expand_selected_more() {
                         if let Some(row) = state.past_to_open() {
@@ -5458,6 +5501,41 @@ mod tests {
             file: None,
         });
         assert_eq!(state.status.as_deref(), Some(&*format!("copied: {want}")));
+    }
+
+    #[test]
+    fn r_on_a_claude_row_asks_first_and_y_copies_its_command() {
+        let mut state = list_state("claude", CLAUDE_PATH, vec![]);
+        state.sessions[0].cwd = Some("/w".into());
+        state.rebuild_ledger();
+        let key = |state: &mut TracesModalState, c: char| handle_traces_key(state, &KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        assert!(matches!(key(&mut state, 'r'), InputOutcome::Changed), "the first r only arms");
+        assert!(state.status.as_deref().is_some_and(|s| s.contains("r again") && s.contains("model turn")), "{:?}", state.status);
+        assert!(matches!(key(&mut state, 'r'), InputOutcome::Action(Action::TracesResume { .. })), "the second r resumes");
+        key(&mut state, 'r');
+        key(&mut state, 'j');
+        assert!(matches!(key(&mut state, 'r'), InputOutcome::Changed), "any other key disarms");
+        match key(&mut state, 'y') {
+            InputOutcome::Action(Action::TracesCopy { text }) => assert_eq!(text, "cd /w && claude --resume 3a680ac6-2551-4c67-88d3-a18d8b3bbe73"),
+            _ => panic!("y copies the harness command"),
+        }
+    }
+
+    #[test]
+    fn slash_searches_the_board_and_esc_clears_before_leaving() {
+        let mut state = list_state("claude", CLAUDE_PATH, vec![]);
+        state.board = Some(board::Board::new());
+        let press = |state: &mut TracesModalState, code: KeyCode| handle_traces_key(state, &KeyEvent::new(code, KeyModifiers::NONE));
+        press(&mut state, KeyCode::Char('/'));
+        assert_eq!(state.typing, Typing::Ledger);
+        for c in "codex".chars() {
+            press(&mut state, KeyCode::Char(c));
+        }
+        press(&mut state, KeyCode::Enter);
+        assert_eq!((state.typing, state.query.as_str()), (Typing::No, "codex"));
+        assert!(wants_esc(&state), "Esc clears the search first");
+        press(&mut state, KeyCode::Esc);
+        assert!(state.query.is_empty() && !wants_esc(&state), "then Esc may leave");
     }
 
     #[test]

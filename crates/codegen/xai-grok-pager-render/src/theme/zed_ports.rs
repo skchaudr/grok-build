@@ -54,7 +54,7 @@ impl Theme {
             diff_insert_fg: rgb(135, 169, 135),    // #87a987
             diff_equal_fg: rgb(117, 121, 127),     // #75797f
             diff_gutter_fg: rgb(117, 121, 127),    // #75797f
-            bg_visual: rgb(67, 70, 78),            // #43464e
+            bg_visual: rgb(24, 25, 30), // selection must stand apart from bg_light (the prompt band) and bg_base: >= 1.25:1, text >= 4.5:1 (visibility_tests)
             paste_bg: rgb(67, 70, 78),             // #43464e
             paste_fg: rgb(117, 121, 127),          // #75797f
             paste_dim: rgb(117, 121, 127),         // #75797f
@@ -404,7 +404,7 @@ impl Theme {
             diff_insert_fg: rgb(165, 224, 117),    // #a5e075
             diff_equal_fg: rgb(127, 131, 140),     // #7f838c
             diff_gutter_fg: rgb(73, 81, 98),       // #495162
-            bg_visual: rgb(52, 59, 72),            // #343b48
+            bg_visual: rgb(60, 67, 80), // selection must stand apart from bg_light (the prompt band) and bg_base: >= 1.25:1, text >= 4.5:1 (visibility_tests)
             paste_bg: rgb(30, 34, 39),             // #1e2227
             paste_fg: rgb(73, 81, 98),             // #495162
             paste_dim: rgb(73, 81, 98),            // #495162

@@ -201,7 +201,7 @@ impl Theme {
             diff_equal_fg: COMMENT,
             diff_gutter_fg: COMMENT,
 
-            bg_visual: rgb(40, 52, 87), // #283457, blue-tinted selection bg
+            bg_visual: rgb(52, 64, 100), // selection must stand apart from bg_light (the prompt band) and bg_base: >= 1.25:1, text >= 4.5:1 (visibility_tests)
 
             paste_bg: BG_STORM_DARK,
             paste_fg: FG_DARK,
@@ -474,6 +474,23 @@ mod visibility_tests {
             // `other` is REVERSED, so its on-screen fill is its fg
             assert_ne!(current.bg, other.fg);
         }
+    }
+
+    /// The selected row (traces follow, lists) paints `selection_overlay` with `text_primary` text. It must
+    /// stand apart from the page, from a lifted band (`bg_light`, the follow prompt) and from the old
+    /// highlight, and its text must read.
+    #[test]
+    fn selection_is_distinct_and_readable_in_every_theme() {
+        for theme in every_theme() {
+            let sel = theme.selection_overlay().bg.expect("banded themes select with a band");
+            for other in [theme.bg_base, theme.bg_light] {
+                let c = contrast(sel, other).unwrap();
+                assert!(c >= 1.25, "{sel:?} vs {other:?} is {c:.2}:1, too close to tell apart");
+            }
+            let c = contrast(theme.text_primary, sel).unwrap();
+            assert!(c >= 4.5, "{:?} on {sel:?} is {c:.2}:1", theme.text_primary);
+        }
+        assert!(Theme::terminal().selection_overlay().add_modifier.contains(Modifier::REVERSED), "bandless selects in reverse video");
     }
 
     #[test]

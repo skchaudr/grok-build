@@ -245,6 +245,13 @@ pub fn quantize(color: Color) -> Color {
 /// Without the fallback, themes there get quantized to the 16-color ANSI palette and the subtle bg/border/muted gradations collapse onto each other.
 fn terminal_supports_truecolor() -> bool {
     terminal_supports_truecolor_brand(terminal_context().brand)
+        || truecolor_marker(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+}
+
+/// Rex (`TERM_PROGRAM=rex`, `REX_SESSION`) and herdr (`HERDR_ENV`) draw 24-bit color. Both also set COLORTERM, but
+/// `REX_SESSION` and `HERDR_ENV` survive a tmux pane, where TERM_PROGRAM becomes `tmux`.
+fn truecolor_marker(get: impl Fn(&str) -> Option<String>) -> bool {
+    get("TERM_PROGRAM").is_some_and(|v| v.eq_ignore_ascii_case("rex")) || get("REX_SESSION").is_some() || get("HERDR_ENV").is_some()
 }
 
 fn terminal_supports_truecolor_brand(terminal: TerminalName) -> bool {
@@ -337,6 +344,16 @@ fn rgb_to_ansi16(r: u8, g: u8, b: u8) -> Color {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn rex_and_herdr_are_truecolor_terminals() {
+        let with = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
+        assert!(super::truecolor_marker(with(&[("TERM_PROGRAM", "rex")])));
+        assert!(super::truecolor_marker(with(&[("TERM_PROGRAM", "tmux"), ("REX_SESSION", "session:1")])), "a tmux pane inside Rex");
+        assert!(super::truecolor_marker(with(&[("HERDR_ENV", "1")])));
+        assert!(!super::truecolor_marker(with(&[("TERM_PROGRAM", "Apple_Terminal")])));
+    }
+
     use super::*;
 
     fn env(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {

@@ -739,13 +739,25 @@ impl Follow {
                 if y >= body.y + body.height {
                     return;
                 }
-                if selected {
-                    buf.set_style(Rect { x: body.x, y, width: body.width, height: 1 }, Style::default().bg(theme.bg_highlight));
-                }
                 buf.set_line(body.x, y, &truncate_line(line, width), body.width);
+                if selected {
+                    select_row(buf, Rect { x: body.x, y, width: body.width, height: 1 }, theme);
+                }
                 y += 1;
             }
         }
+    }
+}
+
+/// grok's selection on a drawn row: the theme's selection band (reverse video when bandless), bright bold text.
+/// A call's diamond keeps its outcome colour at full strength, as grok undims a selected row's bullet.
+fn select_row(buf: &mut Buffer, row: Rect, theme: &Theme) {
+    let dimmed = blend_color(theme.bg_base, theme.accent_success, DIM_ACCENT);
+    let diamonds: Vec<(u16, ratatui::style::Color)> =
+        (row.x..row.x + row.width).filter(|&x| buf[(x, row.y)].symbol() == "◆").map(|x| (x, buf[(x, row.y)].fg)).collect();
+    buf.set_style(row, theme.selection_overlay().fg(theme.text_primary).add_modifier(Modifier::BOLD));
+    for (x, fg) in diamonds {
+        buf[(x, row.y)].fg = if Some(fg) == dimmed { theme.accent_success } else { fg };
     }
 }
 
@@ -1109,6 +1121,58 @@ mod tests {
         assert_eq!(fg("I will patch"), theme.text_primary, "agent text is the brightest thing in the stream");
         let (x, y) = at("◆ Bash  run the tests");
         assert_eq!(buf[(x + 8, y)].fg, theme.gray, "a call's target is muted");
+    }
+
+    /// Every theme grok ships: the selected row is grok's selection band (reverse video when bandless) with
+    /// bright bold text, apart from the prompt band; a failed call's diamond stays red on it.
+    #[test]
+    fn the_selected_row_is_grok_selection_in_every_theme() {
+        let themes = [
+            Theme::groknight(),
+            Theme::grokday(),
+            Theme::tokyonight(),
+            Theme::rosepine_moon(),
+            Theme::oscura_midnight(),
+            Theme::kanso_mist(),
+            Theme::kanagawa_wave(),
+            Theme::kanagawa(),
+            Theme::jetbrains_islands_dark(),
+            Theme::night_owl(),
+            Theme::one_dark_pro(),
+            Theme::nstlgy_dark(),
+            Theme::severance_dark(),
+            Theme::quasi_monochrome_dark(),
+            Theme::jetbrains_islands_light(),
+            Theme::monosami_light(),
+            Theme::monosami_ink_light(),
+            Theme::terminal(),
+        ];
+        for theme in themes {
+            for (row, needle) in [(0, " › fix the parser"), (6, "◆ Read")] {
+                let mut f = Follow::bare(session());
+                f.apply(&stream(), 13_000);
+                f.cursor = Some(row);
+                let area = Rect::new(0, 0, 70, 18);
+                let mut buf = Buffer::empty(area);
+                f.render(&mut buf, area, None, &theme, 13_000);
+                let y = (0..18u16)
+                    .find(|&y| (0..70u16).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().contains(needle))
+                    .unwrap_or_else(|| panic!("{needle:?} not drawn"));
+                let cell = &buf[(10, y)];
+                match theme.selection_overlay().bg {
+                    Some(sel) => {
+                        assert_eq!(cell.bg, sel, "{needle:?} in {:?}", theme.bg_base);
+                        assert_ne!(sel, theme.bg_light, "selection must differ from the prompt band");
+                    }
+                    None => assert!(cell.modifier.contains(Modifier::REVERSED), "bandless selects in reverse video"),
+                }
+                assert!(cell.modifier.contains(Modifier::BOLD), "selected text is bold");
+                if needle == "◆ Read" {
+                    let x = (0..70u16).find(|&x| buf[(x, y)].symbol() == "◆").unwrap();
+                    assert_eq!(buf[(x, y)].fg, theme.accent_error, "the outcome survives the selection");
+                }
+            }
+        }
     }
 
     #[test]

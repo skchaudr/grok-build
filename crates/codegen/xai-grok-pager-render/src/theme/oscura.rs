@@ -106,7 +106,7 @@ impl Theme {
             diff_equal_fg: MUTED,
             diff_gutter_fg: MUTED,
 
-            bg_visual: HIGHLIGHT_MED,
+            bg_visual: rgb(44, 40, 59), // selection must stand apart from bg_light (the prompt band) and bg_base: >= 1.25:1, text >= 4.5:1 (visibility_tests)
 
             paste_bg: SURFACE,
             paste_fg: TEXT_DIM,
