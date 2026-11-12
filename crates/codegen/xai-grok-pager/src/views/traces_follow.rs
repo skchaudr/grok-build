@@ -372,6 +372,15 @@ impl Follow {
         self.call_at(self.cursor?)
     }
 
+    /// The highlighted row's prompt text and time, when it is one.
+    pub fn selected_prompt(&self) -> Option<(&str, Option<i64>)> {
+        let row = self.rows.get(self.cursor?)?;
+        match &row.body {
+            Body::User(t) => Some((t.as_str(), row.ts)),
+            _ => None,
+        }
+    }
+
     fn call_at(&self, i: usize) -> Option<(&str, &Call)> {
         let row = self.rows.get(i)?;
         match &row.body {
@@ -462,9 +471,9 @@ impl Follow {
         }
     }
 
-    /// `l` / `h`: open or close the highlighted call's body, message or reasoning inline. False when nothing changed.
+    /// `l` / `h`: open or close the highlighted call's body, prompt, message or reasoning inline. False when nothing changed.
     pub fn fold(&mut self, open: bool) -> bool {
-        let foldable = |i: usize| matches!(self.rows[i].body, Body::Call(_) | Body::Text(_) | Body::Reasoning(_));
+        let foldable = |i: usize| matches!(self.rows[i].body, Body::Call(_) | Body::Text(_) | Body::Reasoning(_) | Body::User(_));
         let Some(i) = self.cursor.filter(|&i| foldable(i)) else { return false };
         if open { self.open.insert(i) } else { self.open.remove(&i) }
     }
@@ -499,14 +508,41 @@ impl Follow {
         Some(traces_body::call_rows(&rest, traces_body::section(result), width))
     }
 
+    /// Subagent `at`'s name for its tag: `Agent::name` minus the leading words it shares with another subagent's.
+    fn tag_name(&self, at: usize) -> String {
+        let name = self.agents[at].name(false);
+        let words: Vec<&str> = name.split_whitespace().collect();
+        let shared = (1..self.agents.len())
+            .filter(|&j| j != at)
+            .map(|j| {
+                let other = self.agents[j].name(false);
+                words.iter().copied().zip(other.split_whitespace()).take_while(|&(a, b)| a == b).count()
+            })
+            .max()
+            .unwrap_or(0);
+        if shared == 0 || shared >= words.len() { name } else { words[shared..].join(" ") }
+    }
+
+    /// What starts every line of row `i`: its depth indent, or for a subagent's row a tag (`1 Check the l…`)
+    /// of `width / 5` columns (6 to 16) naming the agent, then the indent below its first level.
+    fn lead(&self, i: usize, width: usize) -> String {
+        let row = &self.rows[i];
+        let indent = |depth: usize| "  ".repeat(depth.min(MAX_INDENT));
+        let at = self.agents.iter().position(|a| a.id == row.agent).filter(|_| row.agent != self.root.id);
+        let Some(at) = at else { return indent(row.depth) };
+        let t = (width / 5).clamp(6, 16);
+        let tag = truncate_str(&format!("{at} {}", self.tag_name(at)), t - 1);
+        format!("{tag}{}{}", " ".repeat(t - tag.width()), indent(row.depth.saturating_sub(1)))
+    }
+
     fn row_lines(&self, i: usize, width: usize, now_ms: i64, theme: &Theme, body: Option<&[String]>) -> Vec<Line<'static>> {
         let row = &self.rows[i];
-        let ind = " ".repeat(2 * row.depth.min(MAX_INDENT));
+        let ind = self.lead(i, width);
         let w = width.saturating_sub(ind.width()).max(8);
         let gray = Style::default().fg(theme.gray);
         let faint = Style::default().fg(theme.gray_dim);
         let plain = |spans: Vec<Span<'static>>| {
-            let mut all = vec![Span::raw(ind.clone())];
+            let mut all = vec![Span::styled(ind.clone(), faint)];
             all.extend(spans);
             Line::from(all)
         };
@@ -528,17 +564,17 @@ impl Follow {
             // grok's prompt: a lifted band with the time on the right.
             Body::User(t) => {
                 let band = Style::default().bg(theme.bg_light);
-                let (lines, more) = wrap(t, w.saturating_sub(4 + beside), USER_LINES);
+                let (lines, more) = wrap(t, w.saturating_sub(4 + beside), if self.open.contains(&i) { INLINE_MAX_LINES } else { USER_LINES });
                 let mut out: Vec<Line<'static>> = lines
                     .into_iter()
                     .enumerate()
                     .map(|(n, l)| {
                         let lead = if n == 0 { Span::styled(" › ", band.fg(theme.gray)) } else { Span::styled("   ", band) };
-                        Line::from(vec![Span::raw(ind.clone()), lead, Span::styled(l, band.fg(theme.text_primary))])
+                        Line::from(vec![Span::styled(ind.clone(), faint), lead, Span::styled(l, band.fg(theme.text_primary))])
                     })
                     .collect();
                 if more > 0 {
-                    out.push(Line::from(vec![Span::raw(ind.clone()), Span::styled(format!("   … +{more} lines"), band.fg(theme.gray))]));
+                    out.push(Line::from(vec![Span::styled(ind.clone(), faint), Span::styled(format!("   … +{more} lines"), band.fg(theme.gray))]));
                 }
                 for line in &mut out {
                     let used = line.width();
@@ -696,8 +732,8 @@ impl Follow {
         let bodies: HashMap<usize, Vec<String>> = open
             .into_iter()
             .filter_map(|i| {
-                let depth = self.rows[i].depth.min(MAX_INDENT);
-                Some((i, self.body_rows(i, index, width.saturating_sub(2 * depth))?))
+                let lead = self.lead(i, width).width();
+                Some((i, self.body_rows(i, index, width.saturating_sub(lead))?))
             })
             .collect();
         // A row's lines, its leading gap (if any) as an empty first line.
@@ -926,14 +962,15 @@ mod tests {
             "I will patch",
             "◆ Bash  run the tests",
             "0.4s",
-            "  ↳ haiku-4-5 started  Check the lexer",
-            "  ◆ Read  src/lexer.rs",
             "✗ exit 1  no such file",
             "… 12s",
         ] {
             assert!(screen.contains(want), "missing {want:?}\n{screen}");
         }
-        assert!(screen.lines().any(|l| l.starts_with("  ◆ Read")), "the subagent's rows sit two columns in\n{screen}");
+        assert!(
+            screen.lines().any(|l| l.contains("◆ Read  src/lexer.rs") && l.starts_with("1 Check")),
+            "the subagent's rows start with its numbered name\n{screen}"
+        );
         let lines: Vec<&str> = screen.lines().collect();
         let text = lines.iter().position(|l| l.starts_with("I will patch")).unwrap();
         assert!(lines[text - 1].is_empty() && lines[text + 1].is_empty(), "agent text has air around it\n{screen}");
@@ -1078,6 +1115,54 @@ mod tests {
         assert_eq!(f.selected_call().map(|(a, c)| (a, c.line)), Some(("kid", 0)));
         f.key(KeyCode::Char('g'));
         assert!(f.selected_call().is_none(), "the first row is the prompt");
+    }
+
+    #[test]
+    fn subagent_rows_start_with_a_numbered_tag_without_the_words_they_share() {
+        let mut f = Follow::bare(session());
+        f.apply(
+            &[
+                item("agent_start", "a", 1, json!({"model": "claude-haiku-4-5", "label": "Audit traces: UI/UX lens"})),
+                item("agent_start", "b", 1, json!({"model": "claude-haiku-4-5", "label": "Audit traces: observability lens"})),
+                call("a", 1, 0, "c1", "Read", "x.rs"),
+                call("b", 1, 0, "c2", "Read", "y.rs"),
+                call("root", 0, 1, "t1", "Bash", "ls"),
+            ],
+            2_000,
+        );
+        let lines = draw(&mut f, 40, 16);
+        assert!(lines.iter().any(|l| l.starts_with("1 UI") && l.contains("◆ Read")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.starts_with("2 ob") && l.contains("◆ Read")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.starts_with("◆ Bash")), "root rows have no tag\n{lines:#?}");
+        assert!(!lines.iter().any(|l| l.starts_with("0 ")), "{lines:#?}");
+    }
+
+    #[test]
+    fn l_opens_a_long_prompt_in_full_and_h_folds_it_back() {
+        let mut f = Follow::bare(session());
+        let brief: Vec<String> = (0..10).map(|n| format!("brief line {n}")).collect();
+        f.apply(&[item("user", "root", 0, json!({ "text": brief.join("\n") }))], 0);
+        let shown = screen(&mut f, 60, 20);
+        assert!(shown.contains("brief line 2") && !shown.contains("brief line 3") && shown.contains("… +7 lines"), "{shown}");
+        assert!(f.key(KeyCode::Char('g')));
+        let all = brief.join("\n");
+        assert_eq!(f.selected_prompt(), Some((all.as_str(), Some(1_000))));
+        assert!(f.key(KeyCode::Char('l')));
+        let shown = screen(&mut f, 60, 20);
+        assert!(shown.contains("brief line 9") && !shown.contains("… +"), "{shown}");
+        assert!(f.key(KeyCode::Char('h')));
+        assert!(!screen(&mut f, 60, 20).contains("brief line 3"));
+    }
+
+    #[test]
+    fn selected_prompt_is_the_highlighted_prompt_only() {
+        let mut f = Follow::bare(session());
+        f.apply(&stream(), 13_000);
+        assert!(f.selected_prompt().is_none(), "pinned: nothing is highlighted");
+        f.key(KeyCode::Char('g'));
+        assert_eq!(f.selected_prompt().map(|(t, _)| t), Some("fix the parser\nthen run the tests"));
+        f.step(3);
+        assert!(f.selected_prompt().is_none(), "a call is not a prompt");
     }
 
     #[test]

@@ -1038,10 +1038,20 @@ impl TracesModalState {
         self.mode = Mode::List;
     }
 
-    /// Enter on the highlighted call: its full payload, back to the follow screen on Esc.
+    /// Enter on the highlighted call or prompt: its full payload, back to the follow screen on Esc.
     fn follow_inspect(&mut self) -> bool {
         let (Some(index), Some(f)) = (&self.index, &self.follow_view) else { return false };
-        let Some((agent, call)) = f.selected_call() else { return false };
+        let Some((agent, call)) = f.selected_call() else {
+            let Some((text, _)) = f.selected_prompt() else { return false };
+            let text = text.to_string();
+            self.raw = Some(text.clone());
+            self.raw_source = None;
+            self.payload.open(Some(Ok(text)), Shape::Prose);
+            self.raw_scroll = 0;
+            self.follow_return = true;
+            self.mode = Mode::Inspector;
+            return true;
+        };
         let (agent, call) = (agent.to_string(), call.clone());
         if call.line < 0 {
             self.set_status("waiting for the transcript to reach this call");
@@ -5346,6 +5356,7 @@ pub(super) fn continuation(header: &str, full: &str) -> String {
 /// The payload opened from the follow screen: the call under the whole pane, no trajectory behind it.
 fn render_follow_payload(buf: &mut Buffer, area: Rect, state: &mut TracesModalState, theme: &Theme) {
     let call = state.follow_view.as_ref().and_then(|f| f.selected_call()).map(|(_, c)| c.clone());
+    let prompt = state.follow_view.as_ref().and_then(|f| f.selected_prompt()).map(|(_, ts)| ts);
     if state.payload.meta {
         let Some(raw) = &state.raw else { return };
         let wrap = state.payload.wrap;
@@ -5357,10 +5368,10 @@ fn render_follow_payload(buf: &mut Buffer, area: Rect, state: &mut TracesModalSt
         }
     } else {
         let head = traces_payload::Head {
-            title: call.as_ref().map_or_else(String::new, |c| c.tool.clone()),
+            title: call.as_ref().map_or_else(|| if prompt.is_some() { "prompt".to_string() } else { String::new() }, |c| c.tool.clone()),
             running: state.follow_view.as_ref().is_some_and(|f| f.is_live()),
             duration: fmt_duration(call.as_ref().and_then(|c| c.result.as_ref()).and_then(|r| r.ms)),
-            time: fmt_time(call.as_ref().map(|c| c.started_ms), true),
+            time: fmt_time(call.as_ref().map(|c| c.started_ms).or(prompt.flatten()), true),
         };
         traces_payload::render(buf, area, &state.payload, &head, &mut state.raw_scroll, theme);
     }
@@ -7952,6 +7963,27 @@ mod tests {
         assert_eq!(state.mode, Mode::Follow);
         press(&mut state, KeyCode::Char('o'));
         assert_eq!((state.mode, state.follow_view.is_none()), (Mode::Trajectory, true));
+    }
+
+    #[test]
+    fn enter_on_a_followed_prompt_opens_the_whole_brief_and_esc_comes_back() {
+        let (_tmp, mut state) = claude_fixture();
+        let brief: String = (0..10).map(|n| format!("brief line {n}")).collect::<Vec<_>>().join("\n");
+        let mut f = Follow::bare(state.sessions[0].clone());
+        let root = f.root.id.clone();
+        f.apply(&[serde_json::json!({"v": 1, "kind": "user", "agent": root, "depth": 0, "line": 0, "ts": 1_000, "text": brief})], 2_000);
+        state.follow_view = Some(f);
+        state.mode = Mode::Follow;
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(state.mode, Mode::Follow, "nothing is highlighted while the tail is pinned");
+        press(&mut state, KeyCode::Char('g'));
+        press(&mut state, KeyCode::Enter);
+        assert_eq!((state.mode, state.follow_return), (Mode::Inspector, true));
+        assert_eq!(state.payload.body, Some(Ok(brief.clone())));
+        let screen = modal_screen(&mut state, 100, 20);
+        assert!(screen.contains("brief line 0") && screen.contains("brief line 9"), "the whole brief\n{screen}");
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.mode, Mode::Follow);
     }
 
     #[test]
