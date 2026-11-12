@@ -28,8 +28,7 @@ The `grok-traces` binary (`crates/codegen/xai-grok-traces/src/bin/grok-traces.rs
 ## Basic workflow
 
 ```
-cargo build --release -p xai-grok-traces --bin grok-traces
-cp target/release/grok-traces ~/.grok/bin/grok-traces.new && mv ~/.grok/bin/grok-traces.new ~/.grok/bin/grok-traces
+scripts/install-fork.sh
 grok-traces doctor
 grok-traces list --json --active --limit 20
 grok-traces live --json

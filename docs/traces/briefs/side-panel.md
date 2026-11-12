@@ -26,7 +26,7 @@ Repo: /Volumes/Mini-SSD/offload/repos/grok-build, branch main. Work in place, co
 ## Rules
 - Every panel state (closed, open-unfocused, focused, zoomed, each page, narrow terminal) gets a render snapshot test.
 - Tests run visibly in herdr pane w3E:p4: `herdr pane run w3E:p4 "clear; cd /Volumes/Mini-SSD/offload/repos/grok-build && nice -n 10 cargo test --release -p xai-grok-pager -- <filters> && echo TESTS-DONE || echo RUN-FAILED"`, wait with `herdr pane wait-output w3E:p4 --regex 'TESTS-DONE|RUN-FAILED' --timeout 3600000`. One cycle at a time, --release. Known unrelated: `insert_block_before_rejects_an_already_committed_anchor` fails only in release; `tests/remote.rs` fake-ssh can time out under load.
-- Verify on the real screen: `cargo build --release -p xai-grok-pager-bin` in w3E:p4, then run `target/release/xai-grok-pager` in your own herdr tab, open the panel on a session, read it with `herdr pane read`. Never type letters into the traces list (its keys resume sessions as paid turns). Never send a prompt to any agent. Close your tab when done.
+- Verify on the real screen: `scripts/install-fork.sh` in w3E:p4, then run `target/release/xai-grok-pager` in your own herdr tab, open the panel on a session, read it with `herdr pane read`. Never type letters into the traces list (its keys resume sessions as paid turns). Never send a prompt to any agent. Close your tab when done.
 - Do not install binaries or edit ~/.claude, ~/.pi, ~/.grok.
 - Commit on main and push as you go; every commit ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - Report tightly: what's on screen per state (pasted `herdr pane read`), tests read from the pane, commit hashes, anything unverified.

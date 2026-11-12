@@ -61,3 +61,16 @@ scripts/install-fork.sh                            # one cargo run, both bins, b
 ```
 
 Settings the loop needs: incremental on (default for release), no `CARGO_INCREMENTAL=0`, no deletion of `target/release/incremental`, one cargo at a time. The pager recompile in the install step is unavoidable under the current script (cause 2). Timing is not measured here (no cargo run allowed), so no time is claimed.
+
+## Applied (comment and doc edits only; no code, no cargo, no commits)
+
+- `scripts/install-fork.sh:6-11`: header comment lines with the test-first rule, the debug/release split, keep-incremental-on, the observed n=3 timing correlation, and the exit-if-cargo-running behaviour.
+- `docs/traces/TOOL-grok-traces-cli.md:31`: manual release build and `cp` replaced with `scripts/install-fork.sh`.
+- `docs/traces/SPEC-usable.md:431`: debug build line replaced with `scripts/install-fork.sh`.
+- `docs/traces/MAP.md:89`: "build `-p xai-grok-traces --bin grok-traces` first" replaced with "run `scripts/install-fork.sh` first".
+- `docs/traces/briefs/live-feed-followups.md:20`: build clause replaced with `scripts/install-fork.sh`.
+- `docs/traces/briefs/side-panel.md:29`: build clause replaced with `scripts/install-fork.sh`.
+
+Left alone on purpose: `docs/traces/PACKET-traces-opus-lead.md:163` (dated packet), `docs/traces/PROOF-2026-10-20.md:25` and `docs/picker-live-proof.md:148` (dated records), `OBSERVATIONS.md` and `.remember/*` (logs). Not recipes: `SPEC-usable.md:429-433` test commands, `scripts/upstream-sync.sh:368-397` check build.
+
+Not fixed, code outside this edit scope: `scripts/hub/gb-build:30` is a separate install path. It builds with `nice -n 19`, installs only `grok-fork` (no `grok-traces`), and runs on this Mac only. It needs its own fix.

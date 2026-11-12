@@ -428,7 +428,7 @@ Full verification (mini only):
 ```
 cargo test -p xai-grok-traces
 RUST_MIN_STACK=33554432 GROK_HOME= cargo test -p xai-grok-pager --lib
-cargo build -p xai-grok-pager-bin && cargo build -p xai-grok-traces --bin grok-traces
+scripts/install-fork.sh
 cargo test -p xai-grok-pager-pty-harness --test pty_e2e_config_ui
 bash crates/codegen/xai-grok-traces/hooks/test.sh
 cargo test -p pi-grok-adapter

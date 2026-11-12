@@ -3,6 +3,12 @@
 # grok-traces is the hook/indexer binary the harness hooks run; it shares the index with grok-fork, so it ships with it.
 #   scripts/install-fork.sh            build, then install
 #   scripts/install-fork.sh --no-build install what target/release already holds
+# Before installing, test with a release build: cargo test --release -p <crate> <filter>.
+#   Debug and release artifacts do not share, so install only what the release build produced.
+# Keep incremental on for release. Do not set CARGO_INCREMENTAL=0 or delete target/release/incremental.
+# Observed, n=3, not proven: the same pager-bin release build took 2m30s (OBSERVATIONS.md:199, env not
+#   recorded) and 11m01s with CARGO_INCREMENTAL=0 (OBSERVATIONS.md:235-239).
+# The script exits at once if any other cargo is running on this machine; rerun after it finishes.
 set -eu
 cd "${0:A:h}/.."
 REMOTE=${GROK_FORK_REMOTE:-sab-mini@sab-air}
