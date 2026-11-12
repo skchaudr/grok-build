@@ -112,6 +112,7 @@ ORDER=(normal prime prime-h2 claude cursor pi grok-pi codex dsh dsh-stock fork)
 #   claude  ~/.claude/projects/*/<id>.jsonl
 #   native  ~/.grok/sessions/*/<id>/   (directories only; prompt_history.jsonl is not a session)
 #   pi      ~/.pi/pi-acp/session-map.json, then ~/.pi/agent/sessions/**/*_<id>.jsonl (plain pi)
+#   prime   ~/.prime/agent/sessions/<id>.jsonl and <id>.info-cache.json
 #   prime-h2 ~/.prime/harness2/acp/session-map.json
 #   codex   ~/.codex/session_index.jsonl and ~/.codex/sessions/**/rollout-*-<id>.jsonl
 #   dsh     ~/.dsh/sessions/*/<id>/
@@ -212,6 +213,8 @@ if dsh.is_dir():
 
 prime = home / ".prime/agent/sessions"
 if prime.is_dir():
+    for path in prime.glob("*.jsonl"):
+        hit("prime", path.stem, path)
     for path in prime.glob("*.info-cache.json"):
         sid = path.name.replace(".info-cache.json", "")
         hit("prime", sid, path)
@@ -235,7 +238,7 @@ PY
 
 gb_unknown_session() {
   echo "gb: session '$1' not found in:" >&2
-  echo "  $HOME/.prime/agent/sessions/<id>.info-cache.json" >&2
+  echo "  $HOME/.prime/agent/sessions/<id>.jsonl or <id>.info-cache.json" >&2
   echo "  $HOME/.prime/harness2/acp/session-map.json" >&2
   echo "  $HOME/.cursor/acp-sessions/<id>" >&2
   echo "  $HOME/.claude/projects/*/<id>.jsonl" >&2
@@ -307,6 +310,8 @@ elif agent in ("pi", "prime-h2"):
     if isinstance(entry, dict) and isinstance(entry.get("cwd"), str):
         cwd = entry["cwd"]
 elif agent == "codex" and path.is_file() and path.suffix == ".jsonl" and path.name != "session_index.jsonl":
+    cwd = from_jsonl_cwd(path)
+elif agent == "prime" and path.suffix == ".jsonl":
     cwd = from_jsonl_cwd(path)
 elif agent == "prime":
     try:
