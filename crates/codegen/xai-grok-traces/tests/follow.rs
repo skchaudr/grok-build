@@ -400,6 +400,25 @@ fn follow_backlog_limits_the_first_rows() {
 }
 
 #[test]
+fn a_followed_subagent_keeps_its_brief_when_the_backlog_cuts_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, parent, kid) = setup(&tmp, true, 1);
+    append(&parent, T2);
+    append(&kid, CHILD);
+    append(&kid.with_extension("meta.json"), r#"{"agentType":"Explore","description":"Check the lexer","finished":false}"#);
+    scan(&tmp);
+    let projects = tmp.path().join("home/.claude/projects");
+    let root = Root { id: "claude-projects".into(), source: "claude".into(), path: projects, format: Format::Jsonl, file_name: None };
+    let idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
+    let child = idx.list_sessions(&SessionFilter::default()).unwrap().into_iter().find(|s| s.parent_id.is_some()).expect("the indexed subagent");
+    let mut f = Follower::new(idx, vec![root], child, true, None).with_json(true).with_backlog(1);
+    let items = f.tick_items(chrono::Utc::now().timestamp_millis()).unwrap();
+    assert_eq!(kind_list(&items)[..2].to_vec(), ["model", "user"], "{items:?}");
+    assert_eq!(items[1]["text"].as_str(), Some("look at the lexer"));
+    assert_eq!(kind_list(&items).iter().filter(|k| **k == "user").count(), 1, "the brief is printed once");
+}
+
+#[test]
 fn follow_backlog_zero_starts_after_the_last_row() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut f, _, _) = setup(&tmp, true, 0);

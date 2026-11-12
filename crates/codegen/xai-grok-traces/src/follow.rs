@@ -302,6 +302,8 @@ struct Followed {
     label: Option<String>,
     /// Printed before this session's first row, so a subagent's start follows its parent's rows.
     announce: Option<String>,
+    /// The session's first user row when the backlog cut it off: a subagent's brief is printed first, not lost.
+    brief: Option<EventRow>,
     /// Tool call id -> line of calls with no result yet; the index puts a call's duration on the call row.
     calls: HashMap<String, i64>,
 }
@@ -426,19 +428,22 @@ impl Follower {
     }
 
     /// Line to resume after so that `tail` rows are still to print; -1 (lines count from 0) prints everything.
-    fn resume_after(&self, id: &str, tail: Option<usize>) -> Result<i64> {
-        let Some(n) = tail else { return Ok(-1) };
+    /// Also the first user message when it is at or before that line (cut off, so the caller can print it).
+    fn resume_after(&self, id: &str, tail: Option<usize>) -> Result<(i64, Option<EventRow>)> {
+        let Some(n) = tail else { return Ok((-1, None)) };
         let rows = self.idx.list_events(id, &EventFilter { limit: MAX_EVENTS_PER_FILE, ..Default::default() })?;
         // Never start on a result whose call is out of view.
         let mut from = rows.len().saturating_sub(n);
         while from > 0 && from < rows.len() && rows[from].role.as_deref() == Some("tool_result") {
             from -= 1;
         }
-        Ok(from.checked_sub(1).map_or(-1, |i| rows[i].line))
+        let last_line = from.checked_sub(1).map_or(-1, |i| rows[i].line);
+        let brief = rows.into_iter().find(|r| r.kind == "message" && r.role.as_deref() == Some("user")).filter(|r| r.line <= last_line);
+        Ok((last_line, brief))
     }
 
     fn adopt(&mut self, s: &SessionRow, depth: usize, tail: Option<usize>, announce: Option<String>) -> Result<()> {
-        let last_line = self.resume_after(&s.id, tail)?;
+        let (last_line, brief) = self.resume_after(&s.id, tail)?;
         // A child found by its file is still known by the id its receipts carry, or they would adopt it twice.
         let agent_id = child_key(s).filter(|_| depth > 0);
         self.sessions.push(Followed {
@@ -454,6 +459,8 @@ impl Follower {
             model: s.model.clone(),
             label: s.label.clone(),
             announce,
+            // A root keeps today's backlog; a subagent (or any session with a parent) is read with its brief.
+            brief: brief.filter(|_| depth > 0 || s.parent_id.is_some()),
             calls: HashMap::new(),
         });
         Ok(())
@@ -483,6 +490,7 @@ impl Follower {
             model: None,
             label: None,
             announce: None,
+            brief: None,
             calls: HashMap::new(),
         });
         Some(self.sessions.len() - 1)
@@ -668,6 +676,20 @@ impl Follower {
         Ok(self.tick(now_ms)?.iter().filter_map(|s| serde_json::from_str(s).ok()).collect())
     }
 
+    /// A row's printed block: its `--json` item, or its text line. A child adopted from its receipt is named by
+    /// its agent id (`id`); its lines are read from its row (`rid`).
+    fn event_block(&self, ev: &EventRow, raw: Option<&str>, call_id: Option<&str>, id: &str, rid: &str, depth: usize) -> Option<String> {
+        if !self.json {
+            return format_event(ev, raw, depth);
+        }
+        json_event(ev, raw, call_id, id, depth).map(|mut v| {
+            if rid != id {
+                v["session"] = json!(rid);
+            }
+            v.to_string()
+        })
+    }
+
     /// One poll: index the followed files, find new subagents, return everything newly printable.
     pub fn tick(&mut self, now_ms: i64) -> Result<Vec<String>> {
         let mut out = Vec::new();
@@ -703,7 +725,7 @@ impl Follower {
                 self.attach(at, None)?;
                 // A child already running when the follow began shows its backlog, not its whole file.
                 if first && let Some(rid) = self.sessions[at].row.clone() {
-                    self.sessions[at].last_line = self.resume_after(&rid, Some(self.backlog))?;
+                    (self.sessions[at].last_line, self.sessions[at].brief) = self.resume_after(&rid, Some(self.backlog))?;
                 }
             }
             let Some(rid) = self.sessions[at].row.clone() else { at += 1; continue };
@@ -735,8 +757,8 @@ impl Follower {
                     // A child already adopted from its start receipt: bind it to this file instead of adopting twice.
                     let key = child_key(&kid);
                     if let Some(i) = self.sessions.iter().position(|f| f.row.is_none() && f.agent_id.is_some() && f.agent_id == key) {
-                        let last_line = self.resume_after(&kid.id, first.then_some(self.backlog))?;
-                        (self.sessions[i].row, self.sessions[i].last_line) = (Some(kid.id.clone()), last_line);
+                        let (last_line, brief) = self.resume_after(&kid.id, first.then_some(self.backlog))?;
+                        (self.sessions[i].row, self.sessions[i].last_line, self.sessions[i].brief) = (Some(kid.id.clone()), last_line, brief);
                         continue;
                     }
                     let start = self.start_block(&kid, depth + 1);
@@ -749,6 +771,14 @@ impl Follower {
                     out.push(agent_item("agent_resume", &id, depth, Some(now_ms), None, None).to_string());
                 } else if depth == 0 {
                     out.push("↻ resumed".into());
+                }
+            }
+            // The brief the backlog cut off goes out first, as any row would.
+            if let Some(ev) = self.sessions[at].brief.take() {
+                let raw = self.idx.raw_line(&rid, ev.line).ok().flatten();
+                if let Some(block) = self.event_block(&ev, raw.as_deref(), None, &id, &rid, depth) {
+                    out.push(block);
+                    printed = true;
                 }
             }
             let filter = EventFilter { since_line: Some(self.sessions[at].last_line), limit: MAX_EVENTS_PER_FILE, ..Default::default() };
@@ -802,16 +832,8 @@ impl Follower {
                     } else {
                         None
                     }
-                } else if self.json {
-                    json_event(&ev, raw.as_deref(), call_id.or(result_id).as_deref(), &id, depth).map(|mut v| {
-                        // A child adopted from its receipt is named by its agent id; its lines are read from its row.
-                        if rid != id {
-                            v["session"] = json!(rid);
-                        }
-                        v.to_string()
-                    })
                 } else {
-                    format_event(&ev, raw.as_deref(), depth)
+                    self.event_block(&ev, raw.as_deref(), call_id.or(result_id).as_deref(), &id, &rid, depth)
                 };
                 if let Some(block) = block {
                     out.push(block);
