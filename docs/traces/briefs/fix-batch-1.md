@@ -10,7 +10,7 @@ Source: docs/traces/AUDIT-2026-11-12-observe.md (Haiku audit, unreviewed). Locat
 ## Tasks
 1. **Root follow names each subagent.** Today root follow merges all subagent rows into one stream; the only cue is a 2-space indent (`traces_follow.rs:358-359`, `:504`). Every subagent row must show which agent it came from.
 2. **Subagent follow shows the brief it received, in full.** Today the band where the brief belongs is empty; the audit says the brief is indexed as line 0, cause not traced.
-3. **Trace views offer no dashboard.** The replay view hides the input (`role.rs:73-76`, `trace_return` set at `standalone_traces.rs:189`) but still renders `[Dashboard]` (`agent_view/render.rs:1420-1433`), and `Ctrl+\` or a click opens it with `+ New Agent`, `Worktree Ctrl+w`, `Dispatch a new agent`. The router guards only CancelTurn and Rewind in trace views (`router.rs:1097-1100`); `OpenDashboard` (`router.rs:1595`) is unguarded. Remove the button in trace views and make OpenDashboard a no-op there (`router.rs`, `agent_view/render.rs`, `mouse.rs`).
+3. **Dropped (Sab, 2026-11-12).** Blocking the dashboard and Ctrl+N in trace views contradicts `SPEC-traces-agent.md` rev 5: Ask uses the trace view's hidden prompt, keeps the Ask session as a dashboard row, and uses Ctrl+N. The dashboard is also the only route to settings today. Trace-view input and dashboard behaviour belong to the Ask work.
 
 ## Build policy, standing for the whole cleanup sweep (Sab, 2026-11-12)
 "we cannot have all three agents running tests and running builds and waiting on each other... we just have to do it all at once. They're gonna have to review their work from code first."
