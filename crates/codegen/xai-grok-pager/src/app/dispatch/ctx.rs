@@ -150,6 +150,10 @@ pub(super) fn sync_sleep_inhibitor(app: &AppView) {
 }
 
 pub(super) fn reseed_tip_for_new_session(app: &mut AppView) {
+    if app.external_agent {
+        app.tip = None;
+        return;
+    }
     if !matches!(app.active_view, ActiveView::Agent(_)) || app.tips.is_empty() {
         return;
     }

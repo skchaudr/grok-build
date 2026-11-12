@@ -60,6 +60,14 @@ pub fn is_pi_label(label: Option<&str>) -> bool {
     })
 }
 
+/// True when an external-agent label names Prime Agent: `prime`, `prime-agent`, or a path to `prime-acp`.
+pub fn is_prime_label(label: Option<&str>) -> bool {
+    label.is_some_and(|l| {
+        let name = l.rsplit('/').next().unwrap_or(l);
+        name.eq_ignore_ascii_case("prime") || name.eq_ignore_ascii_case("prime-agent")
+    })
+}
+
 /// Pager builtins that stay forwarded to a Claude session as typed text, so the Claude CLI answers instead.
 /// `/hooks`, `/plugin(s)`, `/marketplace` need grok-only ACP methods (`x.ai/hooks/list`, ...) and the CLI prints
 /// "isn't available in this environment"; `/effort` needs model effort metadata the adapter doesn't send

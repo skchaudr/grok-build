@@ -1894,12 +1894,13 @@ pub(crate) fn execute(
                 .spawn(async move {
                     let req = acp::SetSessionModeRequest::new(
                         session_id.clone(),
-                        mode_id,
+                        mode_id.clone(),
                     );
                     if let Err(e) = acp_send(req, &tx).await {
                         tracing::warn!("Failed to set session mode: {e}");
                         return TaskResult::SetSessionModeFailed {
                             session_id,
+                            mode_id,
                         };
                     }
                     TaskResult::CancelComplete
@@ -2122,7 +2123,7 @@ pub(crate) fn execute(
                     TaskResult::CancelComplete
                 });
         }
-        Effect::SwitchModel { agent_id, session_id, choice, prev_model_id, model_config_id } => {
+        Effect::SwitchModel { agent_id, session_id, choice, prev_model_id, model_config_id, thought_level_config_id } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -2133,6 +2134,7 @@ pub(crate) fn execute(
                         choice.effort,
                         choice.context_window_selection,
                         model_config_id.as_deref(),
+                        thought_level_config_id.as_deref(),
                     );
                     let sent = match wire {
                         crate::acp::model_state::ModelSwitchWire::SetConfigOption(req) => {

@@ -72,11 +72,18 @@ pub enum Action {
         custom_instructions: Option<String>,
     },
     /// Set or clear (`None`) a Pi tree entry's label.
-    LabelSessionTreeEntry { entry_id: String, label: Option<String> },
+    LabelSessionTreeEntry {
+        entry_id: String,
+        label: Option<String>,
+    },
     /// Preview restoring tracked files to a tree entry (pi-grok-rollback).
-    RollbackFilesPreview { entry_id: String },
+    RollbackFilesPreview {
+        entry_id: String,
+    },
     /// Restore tracked files to a tree entry; the conversation leaf does not move.
-    RollbackFilesExecute { entry_id: String },
+    RollbackFilesExecute {
+        entry_id: String,
+    },
     /// The `/tree` or `/tree-map` modal closed.
     SessionTreeClosed,
     /// Quit the application.
@@ -1707,6 +1714,8 @@ pub enum Effect {
         /// When set, the agent advertised a `model` config option and the switch is
         /// `session/set_config_option` with this id. `None` sends `session/set_model`.
         model_config_id: Option<String>,
+        /// When set alongside an effort, `/effort` uses the agent-level thought-level option.
+        thought_level_config_id: Option<String>,
     },
     /// Fetch changelog from CDN (both markdown and structured JSON).
     /// Runs off the render path via `spawn_blocking`.
@@ -1916,9 +1925,7 @@ pub enum Effect {
         session_id: acp::SessionId,
     },
     /// Discover and index local session traces for `/traces`.
-    ScanTraces {
-        agent_id: AgentId,
-    },
+    ScanTraces { agent_id: AgentId },
     /// Fetch the `/memory` modal contents (x.ai/memory/list).
     FetchMemoryList {
         agent_id: AgentId,
@@ -2777,8 +2784,10 @@ pub enum TaskResult {
     },
     /// `session/set_mode` failed. Clear optimistic `plan_mode_pending` and
     /// `pending_post_turn_commit` so abandon/leave can retry; keep and review stay mounted.
+    /// `mode_id` names the mode the pager optimistically announced so the failure can say so.
     SetSessionModeFailed {
         session_id: acp::SessionId,
+        mode_id: acp::SessionModeId,
     },
     /// The marker can stop advertising itself as unsent.
     ConsentRecorded {
@@ -3502,13 +3511,28 @@ pub enum PiSessionOp {
     Reload,
     Clone,
     ForkMessages,
-    Fork { entry_id: String },
+    Fork {
+        entry_id: String,
+    },
     /// The tree for `/tree` or `/tree-map` (`map` picks which modal the nodes fill).
-    Tree { map: bool },
-    NavigateTree { entry_id: String, summarize: bool, custom_instructions: Option<String> },
-    TreeLabel { entry_id: String, label: Option<String> },
-    RollbackPreview { entry_id: String },
-    RollbackExecute { entry_id: String },
+    Tree {
+        map: bool,
+    },
+    NavigateTree {
+        entry_id: String,
+        summarize: bool,
+        custom_instructions: Option<String>,
+    },
+    TreeLabel {
+        entry_id: String,
+        label: Option<String>,
+    },
+    RollbackPreview {
+        entry_id: String,
+    },
+    RollbackExecute {
+        entry_id: String,
+    },
 }
 
 impl PiSessionOp {
@@ -3529,20 +3553,32 @@ impl PiSessionOp {
     /// Request params; `sessionId` routes it through the leader to that session's Pi.
     pub fn params(&self, session_id: &acp::SessionId) -> serde_json::Value {
         let mut params = match self {
-            Self::Fork { entry_id } | Self::RollbackPreview { entry_id } | Self::RollbackExecute { entry_id } => {
+            Self::Fork { entry_id }
+            | Self::RollbackPreview { entry_id }
+            | Self::RollbackExecute { entry_id } => {
                 serde_json::json!({ "entryId": entry_id })
             }
-            Self::NavigateTree { entry_id, summarize, custom_instructions } => {
+            Self::NavigateTree {
+                entry_id,
+                summarize,
+                custom_instructions,
+            } => {
                 let mut params = serde_json::json!({ "entryId": entry_id, "summarize": summarize });
-                if let Some(text) = custom_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(text) = custom_instructions
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
                     params["customInstructions"] = text.into();
                 }
                 params
             }
-            Self::TreeLabel { entry_id, label } => match label.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                Some(text) => serde_json::json!({ "entryId": entry_id, "label": text }),
-                None => serde_json::json!({ "entryId": entry_id, "clear": true }),
-            },
+            Self::TreeLabel { entry_id, label } => {
+                match label.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    Some(text) => serde_json::json!({ "entryId": entry_id, "label": text }),
+                    None => serde_json::json!({ "entryId": entry_id, "clear": true }),
+                }
+            }
             _ => serde_json::json!({}),
         };
         params["sessionId"] = session_id.0.to_string().into();
@@ -3615,4 +3651,3 @@ impl SessionTreeFilter {
         }
     }
 }
-

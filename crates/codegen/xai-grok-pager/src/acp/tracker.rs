@@ -12,11 +12,10 @@ use crate::scrollback::blocks::tool::search::{
     SearchFileMatch, SearchInputMeta, SearchLineMatch, SearchOutputMode, SearchToolCallBlock,
 };
 use crate::scrollback::blocks::tool::{
-    CodemodeToolCallBlock, DiscoveredTool, EditHighlightPhase, EditToolCallBlock, EvalToolCallBlock,
-    ExecuteToolCallBlock,
-    IntegrationSearchToolCallBlock, LineRange, MemorySearchToolCallBlock, OtherToolCallBlock,
-    ReadMediaKind, ReadToolCallBlock, ToolCallBlock, UseToolCallBlock, WebFetchToolCallBlock,
-    WebSearchToolCallBlock,
+    CodemodeToolCallBlock, DiscoveredTool, EditHighlightPhase, EditToolCallBlock,
+    EvalToolCallBlock, ExecuteToolCallBlock, IntegrationSearchToolCallBlock, LineRange,
+    MemorySearchToolCallBlock, OtherToolCallBlock, ReadMediaKind, ReadToolCallBlock, ToolCallBlock,
+    UseToolCallBlock, WebFetchToolCallBlock, WebSearchToolCallBlock,
 };
 use crate::scrollback::entry::{EntryId, ScrollbackEntry};
 use crate::scrollback::state::ScrollbackState;
@@ -549,7 +548,10 @@ impl AcpUpdateTracker {
             let Some(entry_id) = pending.entry_id else {
                 continue;
             };
-            let Some(block) = scrollback.get_by_id(entry_id).map(|e| mark_cancelled(e.block.clone())) else {
+            let Some(block) = scrollback
+                .get_by_id(entry_id)
+                .map(|e| mark_cancelled(e.block.clone()))
+            else {
                 continue;
             };
             scrollback.replace_tool_block(entry_id, block, pending.started_at);
@@ -1258,7 +1260,11 @@ impl AcpUpdateTracker {
         let is_replay = meta.is_replay;
         // A thought that arrives whole with its duration (a transcript's, via the live traces feed) has no local timer to run.
         // `Some(None)`: whole but untimed (Pi and dpi record no thinking duration), so it reads "Thought", never 0.0s.
-        let whole_ms = thought.meta.as_ref().and_then(|m| m.get("durationMs")).map(serde_json::Value::as_i64);
+        let whole_ms = thought
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("durationMs"))
+            .map(serde_json::Value::as_i64);
         let is_new = self.current_thinking.is_none();
         let id = *self.current_thinking.get_or_insert_with(|| {
             let block = if is_replay || whole_ms.is_some() {
@@ -1275,7 +1281,9 @@ impl AcpUpdateTracker {
         }
         if let Some(ms) = whole_ms {
             // The block may be one a stream start pre-created with a wall-clock timer; finish() would freeze that at ~0.
-            if let Some(RenderBlock::Thinking(t)) = scrollback.get_by_id_mut(id).map(|e| &mut e.block) {
+            if let Some(RenderBlock::Thinking(t)) =
+                scrollback.get_by_id_mut(id).map(|e| &mut e.block)
+            {
                 t.set_whole(ms);
             }
             self.last_thinking_elapsed_ms = ms;
@@ -2048,7 +2056,9 @@ fn mark_cancelled(block: RenderBlock) -> RenderBlock {
         }
         RenderBlock::ToolCall(ToolCallBlock::Other(mut block)) => {
             if let Some(idx) = block.name.find(" failed ") {
-                block.name.replace_range(idx..idx + " failed ".len(), " cancelled ");
+                block
+                    .name
+                    .replace_range(idx..idx + " failed ".len(), " cancelled ");
             } else if !block.name.contains("cancelled") {
                 block.name = format!("{} cancelled", block.name.trim());
             }
@@ -2139,12 +2149,53 @@ fn tool_call_to_block(
     block
 }
 
+fn eval_tool_call_block(tc: &acp::ToolCall, success: bool) -> RenderBlock {
+    let language = extract_raw_field(tc, "language").unwrap_or_else(|| {
+        (tc.title == "Python cell")
+            .then(|| "python".to_owned())
+            .unwrap_or_default()
+    });
+    let code = extract_raw_field(tc, "code").unwrap_or_default();
+    let mut block = EvalToolCallBlock::new(language, code);
+    if let Some(version) = extract_eval_bridge_version(tc) {
+        block = block.with_bridge_version(version);
+    }
+    if let Some(count) = extract_eval_tool_calls(tc) {
+        block = block.with_tool_calls(count);
+    }
+    if let Some(title) =
+        extract_raw_field(tc, "command").or_else(|| extract_raw_field(tc, "title"))
+    {
+        block = block.with_title(title);
+    }
+    let text = content_text(tc);
+    if success {
+        if !text.is_empty() {
+            block = block.with_output(text);
+        }
+    } else {
+        block = block.with_error(if text.is_empty() {
+            "Eval failed".to_owned()
+        } else {
+            text
+        });
+    }
+    RenderBlock::ToolCall(ToolCallBlock::Eval(block))
+}
+
 fn tool_call_to_block_inner(
     tc: &acp::ToolCall,
     session_cwd: Option<&Path>,
     labels: &SubagentLabelRegistry,
 ) -> RenderBlock {
     let success = !matches!(tc.status, acp::ToolCallStatus::Failed);
+    // Prime's python_repl is an Execute call with rawInput.code. Handle eval-shaped
+    // calls before the Execute arm, which only understands rawInput.command.
+    if extract_raw_field(tc, "variant").as_deref() == Some("Eval")
+        || (tc.title == "Python cell" && extract_raw_field(tc, "code").is_some())
+    {
+        return eval_tool_call_block(tc, success);
+    }
     match tc.kind {
         acp::ToolKind::Execute => {
             let command = execute_command_from_tool_call(tc);
@@ -2497,7 +2548,8 @@ fn tool_call_to_block_inner(
         // shape); the script stays in raw_input.code. pi-acp's separate nested rows keep `apply_parent_nest`.
         _ if extract_variant(tc) == Some("Codemode") => {
             let code = extract_raw_field(tc, "code").unwrap_or_default();
-            let mut block = CodemodeToolCallBlock::new(code).with_raw_output(tc.raw_output.as_ref());
+            let mut block =
+                CodemodeToolCallBlock::new(code).with_raw_output(tc.raw_output.as_ref());
             if block.output.is_none() {
                 // Older payloads carry the script output only as ACP text content.
                 let text = content_text(tc);
@@ -2507,32 +2559,13 @@ fn tool_call_to_block_inner(
             }
             if !success {
                 let text = block.output.take().unwrap_or_default();
-                block = block.with_error(if text.is_empty() { "Codemode script failed".to_owned() } else { text });
+                block = block.with_error(if text.is_empty() {
+                    "Codemode script failed".to_owned()
+                } else {
+                    text
+                });
             }
             RenderBlock::ToolCall(ToolCallBlock::Codemode(block))
-        }
-        _ if extract_raw_field(tc, "variant").as_deref() == Some("Eval") => {
-            let language = extract_raw_field(tc, "language").unwrap_or_default();
-            let code = extract_raw_field(tc, "code").unwrap_or_default();
-            let mut block = EvalToolCallBlock::new(language, code);
-            if let Some(version) = extract_eval_bridge_version(tc) {
-                block = block.with_bridge_version(version);
-            }
-            if let Some(count) = extract_eval_tool_calls(tc) {
-                block = block.with_tool_calls(count);
-            }
-            if let Some(title) = extract_raw_field(tc, "title") {
-                block = block.with_title(title);
-            }
-            let text = content_text(tc);
-            if success {
-                if !text.is_empty() {
-                    block = block.with_output(text);
-                }
-            } else {
-                block = block.with_error(if text.is_empty() { "Eval failed".to_owned() } else { text });
-            }
-            RenderBlock::ToolCall(ToolCallBlock::Eval(block))
         }
         _ if matches!(
             extract_raw_field(tc, "variant").as_deref(),

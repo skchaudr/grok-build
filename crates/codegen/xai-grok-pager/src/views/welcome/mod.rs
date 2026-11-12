@@ -511,6 +511,8 @@ pub(super) fn render_version_badge(
     h_margin: u16,
     is_api_key_auth: bool,
     mode: VersionBadgeMode<'_>,
+    // `(title, version)` from `InitializeResponse.agentInfo`; replaces the Grok Build name/version for external agents.
+    identity: Option<(&str, &str)>,
 ) {
     let version_area = Rect {
         width: version_rect.width.saturating_sub(h_margin),
@@ -553,21 +555,27 @@ pub(super) fn render_version_badge(
     }
 
     let channel = xai_grok_update::channel_label();
+    // An external agent's identity replaces the Grok Build product name and version.
+    let product = identity.map_or("Grok Build", |(title, _)| title);
+    let product_span = Span::styled(
+        format!("{product}  "),
+        Style::default()
+            .fg(theme.text_primary)
+            .add_modifier(Modifier::BOLD),
+    );
     match &mode {
         VersionBadgeMode::Full { .. } => {
+            spans.push(product_span);
             spans.push(Span::styled(
-                "Grok Build  ",
-                Style::default()
-                    .fg(theme.text_primary)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::styled(
-                format!("{}{}", xai_grok_version::VERSION, channel),
+                identity.map_or_else(
+                    || format!("{}{}", xai_grok_version::VERSION, channel),
+                    |(_, version)| version.to_string(),
+                ),
                 Style::default().fg(theme.gray),
             ));
         }
         VersionBadgeMode::HeroFooter => {
-            if !channel.is_empty() {
+            if identity.is_none() && !channel.is_empty() {
                 spans.push(Span::styled(
                     channel.trim(),
                     Style::default().fg(theme.gray),
@@ -575,14 +583,9 @@ pub(super) fn render_version_badge(
             }
         }
         VersionBadgeMode::HeroInline => {
+            spans.push(product_span);
             spans.push(Span::styled(
-                "Grok Build  ",
-                Style::default()
-                    .fg(theme.text_primary)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::styled(
-                xai_grok_version::VERSION,
+                identity.map_or(xai_grok_version::VERSION, |(_, version)| version),
                 Style::default().fg(theme.gray),
             ));
         }
@@ -615,6 +618,7 @@ fn render_prompt_and_version(
     pending_hint: Option<crate::views::shortcuts_bar::PendingHint>,
     is_api_key_auth: bool,
     skip_version: bool,
+    identity: Option<(&str, &str)>,
 ) -> (
     Option<(u16, u16)>,
     Option<crate::terminal::overlay::PostFlush>,
@@ -661,6 +665,7 @@ fn render_prompt_and_version(
             VersionBadgeMode::Full {
                 subscription_tier: None,
             },
+            identity,
         );
     } else {
         render_version_badge(
@@ -671,6 +676,7 @@ fn render_prompt_and_version(
             h_margin,
             is_api_key_auth,
             VersionBadgeMode::HeroFooter,
+            identity,
         );
     }
 
@@ -699,6 +705,10 @@ pub struct WelcomeRenderParams<'a> {
     pub flags: &'a [PromptFlag<'a>],
     pub selected: Option<usize>,
     pub team_name: Option<&'a str>,
+    /// `InitializeResponse.agentInfo` display title (already title-else-name) for an external agent.
+    pub agent_title: Option<&'a str>,
+    /// `InitializeResponse.agentInfo` version for an external agent.
+    pub agent_version: Option<&'a str>,
     pub has_access: bool,
     pub has_claude_import: bool,
     pub mouse_pos: Option<(u16, u16)>,
@@ -754,6 +764,13 @@ pub struct WelcomeRenderParams<'a> {
     /// In-TUI ACK confirm pending for Local.
     #[cfg(feature = "local-workspace")]
     pub workspace_mode_ack_pending: bool,
+}
+
+impl WelcomeRenderParams<'_> {
+    /// `(title, version)` for the version badge when an external agent reports itself.
+    fn agent_identity(&self) -> Option<(&str, &str)> {
+        self.agent_title.zip(self.agent_version)
+    }
 }
 
 /// Render the welcome screen.
@@ -997,6 +1014,7 @@ fn render_welcome_blocked(
         VersionBadgeMode::Full {
             subscription_tier: None,
         },
+        None,
     );
     (menu_rects, post_flush_escapes)
 }
@@ -1067,6 +1085,7 @@ fn render_welcome_trust(
         VersionBadgeMode::Full {
             subscription_tier: None,
         },
+        None,
     );
 
     // Only `menu_rects` are meaningful here; the rest are absent (no prompt, picker, auth/gate links)
@@ -1940,6 +1959,7 @@ fn render_welcome_done(
             p.changelog_bullets,
             p.changelog_has_full_notes,
             p.upgrade_cta,
+            p.agent_identity(),
             #[cfg(feature = "local-workspace")]
             show_workspace_picker.then_some((
                 p.workspace_mode,
@@ -2143,6 +2163,7 @@ fn render_welcome_done(
             VersionBadgeMode::Full {
                 subscription_tier: p.subscription_tier,
             },
+            p.agent_identity(),
         );
         (None, None)
     } else {
@@ -2288,6 +2309,7 @@ fn render_welcome_done(
             p.pending_hint,
             p.is_api_key_auth,
             layout.has_hero_box(),
+            p.agent_identity(),
         )
     };
 
@@ -2717,7 +2739,7 @@ mod tests {
     fn badge_text(mode: VersionBadgeMode<'_>, team: Option<&str>) -> String {
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
-        render_version_badge(area, &mut buf, &Theme::current(), team, 0, false, mode);
+        render_version_badge(area, &mut buf, &Theme::current(), team, 0, false, mode, None);
         (0..area.width)
             .map(|x| buf.cell((x, 0)).map_or(" ", |c| c.symbol()).to_string())
             .collect::<String>()
@@ -2751,6 +2773,33 @@ mod tests {
             !footer.ends_with('\u{2502}'),
             "footer must not end on a separator: {footer:?}"
         );
+    }
+
+    /// An external agent's `agentInfo` replaces the Grok Build name and version in both badge shapes.
+    #[test]
+    fn version_badge_shows_external_agent_identity() {
+        fn render(area: Rect, mode: VersionBadgeMode<'_>, identity: Option<(&str, &str)>) -> String {
+            let mut buf = Buffer::empty(area);
+            render_version_badge(area, &mut buf, &Theme::current(), None, 0, false, mode, identity);
+            (0..area.width)
+                .map(|x| buf.cell((x, 0)).map_or(" ", |c| c.symbol()).to_string())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        }
+        let area = Rect::new(0, 0, 80, 1);
+        for mode in [
+            VersionBadgeMode::Full {
+                subscription_tier: None,
+            },
+            VersionBadgeMode::HeroInline,
+        ] {
+            let text = render(area, mode, Some(("Prime Agent", "0.10.2")));
+            assert!(text.contains("Prime Agent  0.10.2"), "{text:?}");
+            assert!(!text.contains("Grok Build"), "{text:?}");
+        }
+        let text = render(area, VersionBadgeMode::HeroInline, None);
+        assert!(text.contains("Grok Build"), "{text:?}");
     }
 
     #[test]
@@ -2896,6 +2945,8 @@ mod tests {
             tip: None,
             model_name: "test",
             model_notice: None,
+            agent_title: None,
+            agent_version: None,
             flags: &[],
             selected: None,
             team_name: None,

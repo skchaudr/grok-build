@@ -454,8 +454,14 @@ fn agent_acp_list_maps_id_title_cwd_and_updated_at() {
         .and_then(|s| s.as_array())
         .and_then(|a| a.first())
         .expect("one session row");
-    assert_eq!(row.get("sessionId").and_then(|v| v.as_str()), Some("pi-sess-1"));
-    assert_eq!(row.get("summary").and_then(|v| v.as_str()), Some("Fix session resume"));
+    assert_eq!(
+        row.get("sessionId").and_then(|v| v.as_str()),
+        Some("pi-sess-1")
+    );
+    assert_eq!(
+        row.get("summary").and_then(|v| v.as_str()),
+        Some("Fix session resume")
+    );
     assert_eq!(row.get("cwd").and_then(|v| v.as_str()), Some("/work/repo"));
     assert_eq!(
         row.get("updatedAt").and_then(|v| v.as_str()),

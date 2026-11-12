@@ -302,6 +302,7 @@ pub(crate) fn test_app() -> AppView {
         tier_restricted_commands: Vec::new(),
         external_agent: false,
         external_agent_label: None,
+        agent_info: None,
         leader_mode: true,
         credit_balance: None,
         auto_topup: None,

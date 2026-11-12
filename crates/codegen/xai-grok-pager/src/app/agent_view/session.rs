@@ -371,6 +371,7 @@ impl AgentView {
             plan_mode_active: false,
             plan_mode_pending: None,
             available_modes: Vec::new(),
+            capabilities: crate::app::agent_view::AgentCapabilities::default(),
             session_mode: xai_grok_tools::types::SessionMode::Default,
             session_mode_pending: None,
             deferred_session_mode: None,

@@ -1526,6 +1526,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
                 },
                 prev_model_id: switch.prev_model_id,
                 model_config_id,
+                thought_level_config_id: agent.session.models.thought_level_config_id.clone(),
             });
         }
         if std::mem::take(&mut agent.pending_extensions_fetch)
@@ -1668,6 +1669,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                 },
                 prev_model_id: switch.prev_model_id,
                 model_config_id,
+                thought_level_config_id: agent.session.models.thought_level_config_id.clone(),
             });
         }
         if std::mem::take(&mut agent.pending_extensions_fetch)

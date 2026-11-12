@@ -1815,6 +1815,10 @@ pub(in crate::app::dispatch) fn set_default_model(
             choice: ModelChoice::new(new_id),
             prev_model_id: prev_id.clone(),
             model_config_id,
+            thought_level_config_id: app
+                .agents
+                .get(&aid)
+                .and_then(|agent| agent.session.models.thought_level_config_id.clone()),
         });
     } else if let Some(agent) = app.agents.get_mut(&aid) {
         // No session id yet: stash for `EventLoop::on_session_created` to apply once the session id arrives

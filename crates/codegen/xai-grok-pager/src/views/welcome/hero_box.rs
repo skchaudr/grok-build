@@ -293,6 +293,7 @@ pub(super) fn render_hero_box(
     changelog_bullets: &[String],
     changelog_has_full_notes: bool,
     upgrade_cta: Option<&str>,
+    identity: Option<(&str, &str)>,
     #[cfg(feature = "local-workspace")] workspace_mode: Option<(
         super::WelcomeWorkspaceMode,
         bool,
@@ -318,10 +319,11 @@ pub(super) fn render_hero_box(
         0,
         false,
         super::VersionBadgeMode::HeroInline,
+        identity,
     );
 
-    // Subtitle line below the version.
-    if layout.hero_subtitle.height > 0 {
+    // Subtitle line below the version. The Grok promo only fits a Grok session.
+    if layout.hero_subtitle.height > 0 && identity.is_none() {
         let subtitle_style = Style::default().fg(theme.gray);
         buf.set_span(
             layout.hero_subtitle.x,

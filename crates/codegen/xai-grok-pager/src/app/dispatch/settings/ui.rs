@@ -988,6 +988,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                                 choice: ModelChoice::new(id),
                                 prev_model_id: None,
                                 model_config_id,
+                                thought_level_config_id: app.agents.get(&aid).and_then(|agent| {
+                                    agent.session.models.thought_level_config_id.clone()
+                                }),
                             });
                         }
                     }

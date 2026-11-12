@@ -68,10 +68,10 @@ use super::session::lifecycle::{
 };
 use super::session::load::{
     dispatch_cycle_session_source_filter, dispatch_load_session, dispatch_pick_content_session,
-    dispatch_pick_content_session_in_worktree, dispatch_pick_session, dispatch_traces_resume,
+    dispatch_pick_content_session_in_worktree, dispatch_pick_session,
     dispatch_pick_session_in_worktree, dispatch_session_picker_closed,
-    dispatch_show_session_picker, dispatch_trigger_deep_search, session_picker_entry_matches,
-    session_picker_external_filter_active,
+    dispatch_show_session_picker, dispatch_traces_resume, dispatch_trigger_deep_search,
+    session_picker_entry_matches, session_picker_external_filter_active,
 };
 use super::session::modal::{dispatch_rename_session, dispatch_reset_session_title};
 use super::settings::setters::{
@@ -1038,12 +1038,14 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             };
             agent.session.model_switch_pending = true;
             let model_config_id = agent.session.models.model_config_id.clone();
+            let thought_level_config_id = agent.session.models.thought_level_config_id.clone();
             vec![Effect::SwitchModel {
                 agent_id: id,
                 session_id,
                 choice,
                 prev_model_id: None,
                 model_config_id,
+                thought_level_config_id,
             }]
         }
         Action::AnnouncementsHide => {
@@ -1366,7 +1368,9 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowNotifications => {
             match super::ctx::get_active_agent_mut(app) {
                 Some(agent) => {
-                    let state = crate::views::modal::NotificationListState::new(agent.pi_notifications.clone());
+                    let state = crate::views::modal::NotificationListState::new(
+                        agent.pi_notifications.clone(),
+                    );
                     agent.active_modal = Some(crate::views::modal::ActiveModal::Notifications {
                         state,
                         window: crate::views::modal_window::ModalWindowState::new(),
@@ -1378,14 +1382,24 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::ShowSessionTree => super::session::pi_session::dispatch_show_tree(app, false),
         Action::ShowTreeMap => super::session::pi_session::dispatch_show_tree(app, true),
-        Action::NavigateSessionTree { entry_id, summarize, custom_instructions } => super::session::pi_session::dispatch_tree_op(
+        Action::NavigateSessionTree {
+            entry_id,
+            summarize,
+            custom_instructions,
+        } => super::session::pi_session::dispatch_tree_op(
             app,
-            crate::app::actions::PiSessionOp::NavigateTree { entry_id, summarize, custom_instructions },
+            crate::app::actions::PiSessionOp::NavigateTree {
+                entry_id,
+                summarize,
+                custom_instructions,
+            },
         ),
-        Action::LabelSessionTreeEntry { entry_id, label } => super::session::pi_session::dispatch_tree_op(
-            app,
-            crate::app::actions::PiSessionOp::TreeLabel { entry_id, label },
-        ),
+        Action::LabelSessionTreeEntry { entry_id, label } => {
+            super::session::pi_session::dispatch_tree_op(
+                app,
+                crate::app::actions::PiSessionOp::TreeLabel { entry_id, label },
+            )
+        }
         Action::RollbackFilesPreview { entry_id } => super::session::pi_session::dispatch_tree_op(
             app,
             crate::app::actions::PiSessionOp::RollbackPreview { entry_id },
@@ -1398,7 +1412,10 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             super::ctx::with_active_agent(app, |agent| {
                 if matches!(
                     agent.active_modal,
-                    Some(crate::views::modal::ActiveModal::SessionTree { .. } | crate::views::modal::ActiveModal::TreeMap { .. })
+                    Some(
+                        crate::views::modal::ActiveModal::SessionTree { .. }
+                            | crate::views::modal::ActiveModal::TreeMap { .. }
+                    )
                 ) {
                     agent.active_modal = None;
                 }
@@ -1490,8 +1507,12 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::OpenTraces => {
-            let ActiveView::Agent(id) = app.active_view else { return vec![] };
-            let Some(agent) = app.agents.get_mut(&id) else { return vec![] };
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get_mut(&id) else {
+                return vec![];
+            };
             let index = xai_grok_traces::TraceIndex::open(&xai_grok_traces::default_db_path())
                 .map_err(|e| tracing::warn!(%e, "traces: index open failed"))
                 .ok();
@@ -1519,7 +1540,9 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::TracesCopy { text } => {
             let delivery = crate::clipboard::copy_text_or_file(&text);
             with_active_agent(app, |agent| {
-                if let Some(crate::views::modal::ActiveModal::Traces { state }) = agent.active_modal.as_mut() {
+                if let Some(crate::views::modal::ActiveModal::Traces { state }) =
+                    agent.active_modal.as_mut()
+                {
                     state.report_copy(&delivery);
                 }
             });
@@ -1527,13 +1550,17 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::TracesNotice { text } => {
             with_active_agent(app, |agent| {
-                if let Some(crate::views::modal::ActiveModal::Traces { state }) = agent.active_modal.as_mut() {
+                if let Some(crate::views::modal::ActiveModal::Traces { state }) =
+                    agent.active_modal.as_mut()
+                {
                     state.status = Some(text);
                 }
             });
             vec![]
         }
-        Action::TracesResume { source, native_id } => dispatch_traces_resume(app, &source, native_id),
+        Action::TracesResume { source, native_id } => {
+            dispatch_traces_resume(app, &source, native_id)
+        }
         Action::OpenMemoryModal => {
             if let ActiveView::Agent(id) = app.active_view
                 && let Some(agent) = app.agents.get(&id)

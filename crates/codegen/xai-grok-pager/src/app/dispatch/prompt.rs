@@ -599,7 +599,8 @@ pub(in crate::app) fn show_ssh_wrap_tip(app: &mut AppView) {
 }
 
 pub(super) fn dispatch_show_plan_nudge(app: &mut AppView) -> Vec<Effect> {
-    if !app.contextual_hints.plan_mode {
+    // Prime Agent has no session modes, so Shift+Tab cannot enter plan mode.
+    if !app.contextual_hints.plan_mode || app.is_prime_session() {
         return vec![];
     }
     let ActiveView::Agent(id) = app.active_view else {
@@ -851,6 +852,7 @@ pub(super) fn dispatch_send_prompt_submission(
     let screen_mode_is_minimal = app.screen_mode.is_minimal();
     let external_claude = app.is_claude_agent(id);
     let external_pi = app.is_pi_agent(id);
+    let external_prime = app.is_prime_agent(id);
     if consume_input && !literal && external_claude {
         let refused = app
             .agents
@@ -1055,6 +1057,11 @@ pub(super) fn dispatch_send_prompt_submission(
                         .or_else(|| {
                             (is_builtin && external_pi)
                                 .then(|| crate::slash::pi_menu::typed_builtin_override(command.name(), invocation.token))
+                                .flatten()
+                        })
+                        .or_else(|| {
+                            external_prime
+                                .then(|| crate::slash::prime_menu::typed_builtin_override(command.name(), invocation.token))
                                 .flatten()
                         });
                     // Central screen-mode gate
@@ -1677,6 +1684,8 @@ pub(super) fn handle_prompt_response(
     let pending_adoption = app.pending_running_adoptions.remove(&agent_id);
     // Claude's `usage.totalTokens` is the turn's token tally, not occupancy; `usage_update` already set it
     let usage_is_tally = app.is_claude_agent(agent_id);
+    // Prime has no `x.ai/suggestPrompt`; skip the silent Method-not-found round trip.
+    let prime_session = app.is_prime_session();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         // Discard PromptResponses that don't belong to the currently active prompt
         // They belong to a turn the user rewound, or to a queued prompt that never became the running turn
@@ -2151,7 +2160,8 @@ pub(super) fn handle_prompt_response(
         // Predicted-next-prompt (tab autocomplete): fetch a fresh suggestion (the stale one was wiped above)
         // It fetches only after a clean, non-bash agent turn that leaves the session idle with an empty prompt and no queued work, local or server-side
         // A draft in progress or a draining queue means the user is already mid-thought
-        if crate::views::prompt_suggestion::resolve_enabled()
+        if !prime_session
+            && crate::views::prompt_suggestion::resolve_enabled()
             && result.is_ok()
             && !was_cancelling
             && !was_bash_turn

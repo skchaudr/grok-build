@@ -2705,3 +2705,62 @@ fn create_session_with_published_modes(app: &mut AppView) -> Vec<Effect> {
         app,
     )
 }
+
+/// Prime Agent publishes no session modes, so Shift+Tab and `/plan` must refuse with a visible notice
+/// instead of announcing an optimistic switch the ACP call cannot deliver.
+#[test]
+fn prime_session_without_modes_refuses_cycle_and_plan() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.external_agent = true;
+    app.external_agent_label = Some("prime-agent".into());
+
+    let effects = dispatch(Action::CycleMode, &mut app);
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(
+        agent_toast(&app).unwrap_or_default().contains("Prime Agent"),
+        "the refusal must be visible"
+    );
+    assert!(!test_agent(&app, id).plan_mode_pending.unwrap_or(false));
+    assert!(!test_agent(&app, id).session.is_yolo());
+
+    let _ = dispatch(
+        Action::SetPlanMode(crate::app::actions::PlanModeKind::On),
+        &mut app,
+    );
+    assert!(!test_agent(&app, id).plan_mode_pending.unwrap_or(false));
+
+    app.contextual_hints.plan_mode = true;
+    let _ = dispatch(Action::ShowPlanNudge, &mut app);
+    assert!(
+        !test_agent(&app, id).ephemeral_tip.is_active(),
+        "Prime gets no Shift+Tab plan nudge"
+    );
+}
+
+/// Once a Prime session publishes modes, the same cycle runs through `session/set_mode`.
+#[test]
+fn prime_session_with_published_modes_cycles_through_them() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.external_agent = true;
+    app.external_agent_label = Some("prime-agent".into());
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .apply_session_modes(Some(acp::SessionModeState::new(
+            "default",
+            vec![
+                acp::SessionMode::new("default", "Agent"),
+                acp::SessionMode::new("plan", "Plan"),
+            ],
+        )));
+
+    let effects = dispatch(Action::CycleMode, &mut app);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SetSessionMode { mode_id, .. } if mode_id.0.as_ref() == "plan")),
+        "{effects:?}"
+    );
+}

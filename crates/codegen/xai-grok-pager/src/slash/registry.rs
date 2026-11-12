@@ -455,16 +455,26 @@ impl CommandRegistry {
         self.external_agent && super::external_common::is_pi_label(Some(self.external_agent_label.as_str()))
     }
 
-    /// The session's menu profile hides builtin `name` (Claude's or Pi's table).
+    /// This registry serves Prime Agent (`prime-agent`); see [`super::prime_menu`].
+    pub fn is_prime_session(&self) -> bool {
+        self.external_agent && super::external_common::is_prime_label(Some(self.external_agent_label.as_str()))
+    }
+
+    /// The session's menu profile hides builtin `name` (Claude's, Pi's, or Prime's table).
     fn profile_hides(&self, name: &str, source: CommandSource) -> bool {
         (self.is_claude_session() && super::claude_menu::hides(name, source))
             || (self.is_pi_session() && super::pi_menu::hides(name, source))
+            || (self.is_prime_session() && super::prime_menu::hides(name, source))
             || (!self.is_pi_session() && super::pi_menu::pi_only(name, source))
     }
 
     /// Which hide table applies; a change re-applies the ACP catalog so freed names go to the adapter.
-    fn menu_profile(&self) -> (bool, bool) {
-        (self.is_claude_session(), self.is_pi_session())
+    fn menu_profile(&self) -> (bool, bool, bool) {
+        (
+            self.is_claude_session(),
+            self.is_pi_session(),
+            self.is_prime_session(),
+        )
     }
 
     /// Human-readable agent name for unsupported-command notices.
@@ -518,8 +528,8 @@ impl CommandRegistry {
         true
     }
 
-    /// Claude sessions release hidden builtin names to the adapter, decided in `apply_acp_commands`; redo it when the session turns (non-)Claude after a catalog arrived.
-    fn reapply_acp_if_profile_flipped(&mut self, was: (bool, bool)) {
+    /// Claude, Pi, and Prime sessions release hidden builtin names to the adapter, decided in `apply_acp_commands`; redo it when the session's profile changes after a catalog arrived.
+    fn reapply_acp_if_profile_flipped(&mut self, was: (bool, bool, bool)) {
         if was != self.menu_profile() && !self.acp_catalog.is_empty() {
             let catalog = std::mem::take(&mut self.acp_catalog);
             self.apply_acp_commands(&catalog);
@@ -569,10 +579,15 @@ impl CommandRegistry {
             if self.external_agent_advertises(name) {
                 continue;
             }
-            self.commands.push(Arc::new(UnsupportedExternalSlashCommand::new(
-                name,
-                &label,
-            )));
+            // Prime intercepts `/compact` as prompt text; its stub forwards instead of refusing.
+            let command: Arc<dyn SlashCommand> = if self.is_prime_session()
+                && super::prime_menu::forwards_command(name)
+            {
+                Arc::new(super::prime_menu::PrimeForwardedSlashCommand::new(name))
+            } else {
+                Arc::new(UnsupportedExternalSlashCommand::new(name, &label))
+            };
+            self.commands.push(command);
             self.sources.push(CommandSource::ExternalCommonStub);
         }
     }

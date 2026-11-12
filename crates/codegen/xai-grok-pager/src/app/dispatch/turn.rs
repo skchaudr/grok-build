@@ -786,6 +786,13 @@ pub(super) fn dispatch_demote_to_background(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    // Prime has no `x.ai/terminal/background` method; refuse visibly instead of losing the tool call locally.
+    if app.is_prime_agent(id) {
+        if let Some(agent) = app.agents.get_mut(&id) {
+            agent.show_toast("Background tasks aren't available in Prime Agent sessions");
+        }
+        return vec![];
+    }
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };

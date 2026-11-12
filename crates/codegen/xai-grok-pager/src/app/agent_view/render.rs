@@ -416,6 +416,7 @@ impl AgentView {
                 )
             };
         let can_demote = self.surface() == ViewSurface::Root
+            && self.capabilities.terminal_background
             && self
                 .session
                 .tracker
@@ -2401,8 +2402,13 @@ impl AgentView {
         } else {
             self.published_mode_label()
         };
-        let flags: Vec<PromptFlag> =
-            mode_flags(mode_label, self.session.permission_label(), &theme);
+        let mode_label = self.capabilities.session_modes.then_some(mode_label).flatten();
+        let permission = if self.capabilities.always_approve {
+            self.session.permission_label()
+        } else {
+            crate::app::actions::PermissionLabel::Ask
+        };
+        let flags: Vec<PromptFlag> = mode_flags(mode_label, permission, &theme);
         let multiline = self.multiline_mode;
         let warning = self.credit_balance.as_ref().and_then(|bal| {
             crate::views::credit_bar::usage_warning_for_session(

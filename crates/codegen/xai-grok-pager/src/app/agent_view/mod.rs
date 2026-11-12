@@ -734,6 +734,45 @@ pub(crate) enum AgentDeferredSend {
     /// Ctrl+S / Alt+S: set the draft aside once its image lands.
     Stash,
 }
+/// What the connected adapter actually supports, derived from its label and published modes.
+/// A Prime session (no `_x.ai/*` surface, no session modes, no request-permission flow) turns these off so the
+/// pager stops advertising affordances that only produce `Method not found`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AgentCapabilities {
+    /// `session/set_mode` reaches an agent that published modes.
+    pub session_modes: bool,
+    /// The agent can act on an always-approve (yolo) choice by asking for permission at all.
+    pub always_approve: bool,
+    /// `x.ai/terminal/background` exists.
+    pub terminal_background: bool,
+    /// `x.ai/suggestPrompt` exists.
+    pub prompt_suggestion: bool,
+}
+
+impl Default for AgentCapabilities {
+    fn default() -> Self {
+        Self {
+            session_modes: true,
+            always_approve: true,
+            terminal_background: true,
+            prompt_suggestion: true,
+        }
+    }
+}
+
+impl AgentCapabilities {
+    /// Prime supports mode switching only if it published modes, and asks for permission like any ACP agent;
+    /// it has no `_x.ai` surface for background tasks or prompt suggestions.
+    pub(crate) fn for_prime(published_modes: bool) -> Self {
+        Self {
+            session_modes: published_modes,
+            always_approve: true,
+            terminal_background: false,
+            prompt_suggestion: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BlockViewerResume {
     pub entry_id: crate::scrollback::EntryId,
@@ -1286,6 +1325,8 @@ pub struct AgentView {
     pub(crate) plan_mode_pending: Option<bool>,
     /// Modes from the session response, in ring order. Empty means Shift+Tab stays on the plan/permission cycle.
     pub(crate) available_modes: Vec<agent_client_protocol::SessionMode>,
+    /// What the connected adapter supports. Derived from the agent label and its published modes on every tick.
+    pub(crate) capabilities: AgentCapabilities,
     /// Last confirmed mode. Plan surfaces still read `plan_mode_active`; this covers the rest.
     pub(crate) session_mode: xai_grok_tools::types::SessionMode,
     /// Optimistic Shift+Tab pick over `available_modes`, cleared like `plan_mode_pending`.

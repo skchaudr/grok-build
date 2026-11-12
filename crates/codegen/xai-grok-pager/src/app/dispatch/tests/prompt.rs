@@ -3405,11 +3405,27 @@ fn set_session_mode_failed_clears_abandoned_intent() {
         .session_id
         .clone()
         .expect("session");
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .show_mode_switch_banner("Plan");
     let _ = dispatch(
-        Action::TaskComplete(TaskResult::SetSessionModeFailed { session_id }),
+        Action::TaskComplete(TaskResult::SetSessionModeFailed {
+            session_id,
+            mode_id: agent_client_protocol::SessionModeId::new("plan"),
+        }),
         &mut app,
     );
     let agent = agent_ref(&app, id);
+    assert!(
+        agent.mode_switch_banner.is_none(),
+        "the optimistic banner must not outlive the refusal"
+    );
+    assert!(
+        agent_toast(&app).unwrap_or_default().contains("Couldn't switch to plan mode"),
+        "the failure must be visible: {:?}",
+        agent_toast(&app)
+    );
     assert!(agent.plan_mode_pending.is_none());
     assert!(
         agent.pending_post_turn_commit.is_none(),

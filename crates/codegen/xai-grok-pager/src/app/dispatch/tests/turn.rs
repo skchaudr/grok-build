@@ -43,6 +43,24 @@ fn demote_dispatch_keeps_turn_session_and_execute_guards() {
 /// Regression (leader mode): a queued prompt's parked `session/prompt` RPC can resolve as an *error*.
 /// That surfaces as `Internal error: "session failed to respond"`.
 /// An `acp::Error` carries no `promptId`, so before the Err-arm gate this error was misattributed to the running turn.
+/// Prime has no `x.ai/terminal/background`: the shortcut must say so instead of demoting locally.
+#[test]
+fn prime_session_refuses_demote_to_background() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.external_agent = true;
+    app.external_agent_label = Some("prime-agent".into());
+    crate::app::agent_view::test_fixtures::add_running_execute(app.agents.get_mut(&id).unwrap());
+
+    let effects = dispatch(Action::DemoteToBackground, &mut app);
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(
+        agent_toast(&app)
+            .unwrap_or_default()
+            .contains("Background tasks aren't available")
+    );
+}
+
 #[test]
 fn queued_prompt_rpc_error_does_not_kill_running_turn() {
     let mut app = test_app_with_agent();

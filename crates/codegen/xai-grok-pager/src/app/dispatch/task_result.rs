@@ -1006,11 +1006,27 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 super::queue::maybe_drain_queue_and_note_peek(app, agent_id)
             }
         },
-        TaskResult::SetSessionModeFailed { session_id } => {
+        TaskResult::SetSessionModeFailed { session_id, mode_id } => {
+            let launch_label = app.agent_label(None).map(str::to_owned);
             if let Some(agent) = find_agent_by_session_id(&mut app.agents, session_id.0.as_ref()) {
                 agent.plan_mode_pending = None;
                 agent.session_mode_pending = None;
                 agent.pending_post_turn_commit = None;
+                // The optimistic "Switched to mode" banner must not outlive the refusal.
+                agent.mode_switch_banner = None;
+                let label = agent
+                    .available_modes
+                    .iter()
+                    .find(|mode| mode.id == mode_id)
+                    .map(|mode| mode.name.clone())
+                    .unwrap_or_else(|| mode_id.0.to_string());
+                let who = agent
+                    .agent_label(launch_label.as_deref())
+                    .unwrap_or("the agent")
+                    .to_string();
+                agent.show_toast(&format!(
+                    "\u{2717} Couldn't switch to {label} mode; {who} rejected the change"
+                ));
             }
             vec![]
         }

@@ -9,6 +9,28 @@ use agent_client_protocol as acp;
 use xai_grok_telemetry::session_ctx::log_event;
 use xai_grok_tools::types::SessionMode;
 
+/// Prime Agent answers `session/set_mode` with `Method not found` and never asks for permission.
+/// Its sessions publish no modes, so the pager refuses instead of showing an optimistic success banner.
+const PRIME_NO_MODES_NOTICE: &str = "Session mode switching isn't available in Prime Agent sessions";
+
+/// Whether `id` is a Prime session that publishes no session modes.
+fn prime_mode_unsupported(app: &AppView, id: crate::app::agent::AgentId) -> bool {
+    app.is_prime_agent(id)
+        && app
+            .agents
+            .get(&id)
+            .is_some_and(|agent| agent.available_modes.is_empty())
+}
+
+/// Refuse a mode change Prime cannot honour; returns whether it refused (and toasted).
+fn refuse_prime_mode(app: &mut AppView, id: crate::app::agent::AgentId) -> bool {
+    if !prime_mode_unsupported(app, id) {
+        return false;
+    }
+    app.show_toast(PRIME_NO_MODES_NOTICE);
+    true
+}
+
 /// Show the current plan: if a plan file exists, open it in the preview overlay popover.
 /// If no plan has been written yet, show a toast.
 /// Delegates to `AgentView::show_plan_preview()`, which reads the session's `plan.md` from its session artifacts directory.
@@ -33,6 +55,9 @@ pub(super) fn dispatch_enter_plan_mode(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    if refuse_prime_mode(app, id) {
+        return vec![];
+    }
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -117,6 +142,9 @@ pub(super) fn set_plan_mode(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    if kind.to_bool() && refuse_prime_mode(app, id) {
+        return vec![];
+    }
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -691,6 +719,9 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    if refuse_prime_mode(app, id) {
+        return vec![];
+    }
     // Capture the pin before borrowing `agent`: the arms that enter Always-Approve enable yolo
     // A `yolo_enable_blocked(app, _)` call would conflict with the live `&mut agent`
     // This is the same predicate (enabling = true here)

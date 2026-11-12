@@ -1068,6 +1068,7 @@ pub(crate) async fn run(
     app.last_known_terminal_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(0);
     app.leader_mode = connection.leader_status_rx.is_some();
     app.external_agent = args.launches_external_agent();
+    app.agent_info = connection.agent_info.clone();
     app.external_agent_label = args
         .effective_agent_cmd()
         .as_deref()
@@ -1438,30 +1439,38 @@ pub(crate) async fn run(
         let remote_announcements = remote_settings
             .as_ref()
             .and_then(|s| s.announcements.as_deref());
-        let announcements = resolve_announcements(
-            requirements.as_ref(),
-            user_config.as_ref(),
-            managed_config.as_ref(),
-            remote_announcements,
-        );
-        app.active_announcements = xai_grok_announcements::filter_expired(announcements);
-        if !app.active_announcements.is_empty() {
-            use rand::Rng;
-            let idx = rand::rng().random_range(0..app.active_announcements.len());
-            app.announcement = app.active_announcements.get(idx).cloned();
+        // Announcements and tips are Grok service content: an external agent's session shows neither.
+        if app.external_agent {
+            app.active_announcements.clear();
+            app.announcement = None;
+            app.tips.clear();
+            app.tip = None;
+        } else {
+            let announcements = resolve_announcements(
+                requirements.as_ref(),
+                user_config.as_ref(),
+                managed_config.as_ref(),
+                remote_announcements,
+            );
+            app.active_announcements = xai_grok_announcements::filter_expired(announcements);
+            if !app.active_announcements.is_empty() {
+                use rand::Rng;
+                let idx = rand::rng().random_range(0..app.active_announcements.len());
+                app.announcement = app.active_announcements.get(idx).cloned();
+            }
+            let remote_tips = remote_settings.as_ref().and_then(|s| s.tips.as_deref());
+            app.tips = resolve_tips(
+                requirements.as_ref(),
+                user_config.as_ref(),
+                managed_config.as_ref(),
+                remote_tips,
+            );
+            if !app.tips.is_empty() {
+                let grok_home = xai_grok_tools::util::grok_home::grok_home();
+                app.tip = xai_grok_shell::util::tips::pick_and_advance(&app.tips, &grok_home);
+            }
         }
         app.sync_session_announcement_slash_gate();
-        let remote_tips = remote_settings.as_ref().and_then(|s| s.tips.as_deref());
-        app.tips = resolve_tips(
-            requirements.as_ref(),
-            user_config.as_ref(),
-            managed_config.as_ref(),
-            remote_tips,
-        );
-        if !app.tips.is_empty() {
-            let grok_home = xai_grok_tools::util::grok_home::grok_home();
-            app.tip = xai_grok_shell::util::tips::pick_and_advance(&app.tips, &grok_home);
-        }
         let remote_slash_tags = remote_settings
             .as_ref()
             .and_then(|s| s.slash_command_tags.as_ref());

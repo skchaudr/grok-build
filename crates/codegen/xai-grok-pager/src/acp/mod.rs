@@ -129,6 +129,9 @@ pub struct AcpConnection {
     pub session_recap_available: bool,
     /// Shell-side feedback trace-offer eligibility (see `feedbackTraceOffer`).
     pub feedback_trace_offer: bool,
+    /// `InitializeResponse.agentInfo`: the agent's name, display title, and version. `None` when the agent omits it.
+    /// Shown in place of the Grok Build badge for external agents.
+    pub agent_info: Option<acp::Implementation>,
     /// `AuthManager` for pager-side authenticated channels (voice STT and TTS).
     /// In-process mode shares the agent's instance (single token cache); leader mode builds a dedicated one off the same local `auth.json`.
     /// Either way it resolves a fresh bearer per request via the refresh chain.
@@ -298,6 +301,7 @@ pub(in crate::acp) async fn initialize_connection(
         session_steering_supported: agent.session_steering_supported,
         session_recap_available: agent.session_recap_available,
         feedback_trace_offer: agent.feedback_trace_offer,
+        agent_info: agent.agent_info,
         auth_manager,
     })
 }
@@ -536,6 +540,7 @@ pub(crate) struct InitializedAgent {
     pub(crate) session_steering_supported: bool,
     pub(crate) session_recap_available: bool,
     pub(crate) feedback_trace_offer: bool,
+    pub(crate) agent_info: Option<acp::Implementation>,
 }
 /// Send InitializeRequest and parse the response.
 async fn initialize(tx: &AcpAgentTx, flags: &ConnectFlags) -> Result<InitializedAgent> {
@@ -580,6 +585,7 @@ async fn initialize(tx: &AcpAgentTx, flags: &ConnectFlags) -> Result<Initialized
     let feedback_trace_offer = parse_feedback_trace_offer(resp.meta.as_ref());
     let default_auth_method_id = parse_default_auth_method_id(resp.meta.as_ref());
     Ok(InitializedAgent {
+        agent_info: resp.agent_info,
         models,
         is_grok_shell,
         auth_methods: resp.auth_methods,

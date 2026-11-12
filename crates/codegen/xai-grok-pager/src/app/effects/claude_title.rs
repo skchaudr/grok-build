@@ -24,7 +24,11 @@ pub(super) fn custom_title_line(session_id: &str, title: &str) -> String {
 /// Blocking; run off the UI thread. Finds `<projects>/*/<session_id>.jsonl` (shared with `claude_rewind`).
 pub(super) fn find_transcript(session_id: &str) -> Result<PathBuf, String> {
     // The id becomes a file name: accept only UUID-style characters.
-    if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if session_id.is_empty()
+        || !session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         return Err("invalid session id".to_string());
     }
     let projects = std::env::var_os("CLAUDE_CONFIG_DIR")

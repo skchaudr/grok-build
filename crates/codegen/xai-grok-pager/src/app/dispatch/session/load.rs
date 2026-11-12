@@ -496,7 +496,9 @@ pub(in crate::app::dispatch) fn dispatch_traces_resume(
         return dispatch_foreign_resume(app, foreign_source, native_id);
     }
     match xai_grok_shell::session::resolve_local_session_any_cwd(&native_id) {
-        Some(cwd) => dispatch_load_session(app, native_id, Some(std::path::PathBuf::from(cwd)), false),
+        Some(cwd) => {
+            dispatch_load_session(app, native_id, Some(std::path::PathBuf::from(cwd)), false)
+        }
         None => {
             app.show_toast("Session not found locally");
             vec![]
@@ -1409,6 +1411,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
                 },
                 prev_model_id: switch.prev_model_id,
                 model_config_id,
+                thought_level_config_id: agent.session.models.thought_level_config_id.clone(),
             });
         }
         if std::mem::take(&mut agent.pending_extensions_fetch)

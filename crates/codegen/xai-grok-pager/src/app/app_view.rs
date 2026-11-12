@@ -609,6 +609,8 @@ pub struct AppView {
     pub external_agent: bool,
     /// Agent name derived from `--agent-cmd` (e.g. `claude`, `pi`), used in notices when the session reports none.
     pub external_agent_label: Option<String>,
+    /// `InitializeResponse.agentInfo`. Shown as the welcome badge identity for external agents.
+    pub agent_info: Option<agent_client_protocol::Implementation>,
     /// Whether the pager is connected via a leader (leader mode).
     /// The Agent Dashboard entry points (`/dashboard`, `Ctrl+\`, `grok dashboard`, the startup hook) are gated on this flag.
     /// They are only meaningful when a leader is coordinating a fleet of sessions.
@@ -1594,6 +1596,7 @@ impl AppView {
             tier_restricted_commands: Vec::new(),
             external_agent: false,
             external_agent_label: None,
+            agent_info: None,
             leader_mode: false,
             credit_balance: None,
             auto_topup: None,
@@ -1748,6 +1751,14 @@ impl AppView {
     /// The session on screen is hosted by Pi (`grok-pi-acp`, `pi-acp`).
     pub fn is_pi_session(&self) -> bool {
         crate::slash::external_common::is_pi_label(self.agent_label(self.active_view.agent_id()))
+    }
+    /// Session `id` is hosted by Prime Agent (`prime-agent`).
+    pub fn is_prime_agent(&self, id: AgentId) -> bool {
+        crate::slash::external_common::is_prime_label(self.agent_label(Some(id)))
+    }
+    /// The session on screen is hosted by Prime Agent.
+    pub fn is_prime_session(&self) -> bool {
+        crate::slash::external_common::is_prime_label(self.agent_label(self.active_view.agent_id()))
     }
     /// Draw-time expiry can flip the live-announcement predicate between pushes.
     /// Resync the slash gate only when it diverges from the stored flags (checked per frame, fan-out runs only on change).
@@ -4420,14 +4431,27 @@ impl AppView {
             );
         let agent_mouse_pos = self.last_mouse_pos;
         let status_line_frame = self.status_line_frame();
+        // Prime Agent publishes no session modes: the welcome prompt shows no plan or auto flags, but keeps always-approve.
+        let prime_session = self.is_prime_session();
         let welcome_mode = self.home_session().map(|home| {
             (
-                home.plan_mode_pending.unwrap_or(home.plan_mode_active),
+                !prime_session && home.plan_mode_pending.unwrap_or(home.plan_mode_active),
                 home.session.is_yolo(),
-                home.session.is_auto(),
+                !prime_session && home.session.is_auto(),
             )
         });
         let welcome_default_yolo = self.default_yolo;
+        // External agents identify themselves through `InitializeResponse.agentInfo`.
+        let agent_identity: Option<(String, String)> = self
+            .agent_info
+            .as_ref()
+            .filter(|_| self.external_agent)
+            .map(|info| {
+                (
+                    info.title.clone().unwrap_or_else(|| info.name.clone()),
+                    info.version.clone(),
+                )
+            });
         let welcome_auto_gate = self.auto_mode_gate;
         let machine_picker_open = self
             .machine_picker
@@ -4573,6 +4597,8 @@ impl AppView {
                                 flags: &flags_vec,
                                 selected: self.welcome_menu_index,
                                 team_name: self.team_name.as_deref(),
+                                agent_title: agent_identity.as_ref().map(|(title, _)| title.as_str()),
+                                agent_version: agent_identity.as_ref().map(|(_, version)| version.as_str()),
                                 has_access,
                                 has_claude_import: self.has_claude_import,
                                 mouse_pos: self.last_mouse_pos,
@@ -5492,6 +5518,15 @@ impl AppView {
                     })
                     .collect(),
             );
+            let prime_session = self.external_agent
+                && crate::slash::external_common::is_prime_label(
+                    agent.agent_label(self.external_agent_label.as_deref()),
+                );
+            agent.capabilities = if prime_session {
+                crate::app::agent_view::AgentCapabilities::for_prime(!agent.available_modes.is_empty())
+            } else {
+                crate::app::agent_view::AgentCapabilities::default()
+            };
             let label = self.external_agent.then(|| {
                 agent
                     .agent_label(self.external_agent_label.as_deref())

@@ -1,6 +1,29 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
+    /// Grok announcements are service content; an external agent's session never shows them.
+    #[test]
+    fn external_agent_shows_no_announcements() {
+        let mut app = make_app_with_agent("sess-prime");
+        app.external_agent = true;
+        app.external_agent_label = Some("prime-agent".into());
+        app.active_announcements = vec![critical_announcement("current")];
+        app.announcement = Some(critical_announcement("current"));
+
+        apply_announcements_update(
+            &mut app,
+            7,
+            &[critical_announcement("pushed")],
+            None,
+            None,
+            None,
+        );
+
+        assert!(app.active_announcements.is_empty());
+        assert!(app.announcement.is_none());
+        assert_eq!(app.announcements_last_gen, 7);
+    }
+
     /// Stale or duplicate gens short-circuit BEFORE the apply (and its config disk loads) runs; nothing observable may change.
     #[test]
     fn announcements_update_stale_gen_short_circuits_before_apply() {

@@ -813,7 +813,11 @@ fn replayed_running_call_is_timed_unless_its_clock_is_cleared() {
     sb.clear_running_clocks();
     tracker.finish_turn(&mut sb);
     assert!(!sb.get(0).unwrap().is_running);
-    assert_eq!(elapsed(&sb), None, "an unfinished past call has no duration");
+    assert_eq!(
+        elapsed(&sb),
+        None,
+        "an unfinished past call has no duration"
+    );
 }
 /// Helper: create a ToolCallUpdate with InProgress status and BashOutput raw_output.
 fn tool_update_in_progress(id: &str, output_bytes: &[u8]) -> acp::SessionUpdate {
@@ -5660,7 +5664,9 @@ fn grok_pi_codemode_and_eval_calls_render_as_their_cards() {
         acp::SessionUpdate::ToolCall(
             acp::ToolCall::new(acp::ToolCallId::new(Arc::from("cm")), "codemode")
                 .status(acp::ToolCallStatus::Completed)
-                .raw_input(Some(serde_json::json!({ "variant": "Codemode", "code": "await tools.read('a')" })))
+                .raw_input(Some(
+                    serde_json::json!({ "variant": "Codemode", "code": "await tools.read('a')" }),
+                ))
                 .raw_output(Some(serde_json::json!({
                     "type": "Codemode",
                     "calls": [{ "name": "read", "args": "a", "status": "ok", "durationMs": 1.5 }],
@@ -5674,7 +5680,9 @@ fn grok_pi_codemode_and_eval_calls_render_as_their_cards() {
         acp::SessionUpdate::ToolCall(
             acp::ToolCall::new(acp::ToolCallId::new(Arc::from("ev")), "eval")
                 .status(acp::ToolCallStatus::Completed)
-                .raw_input(Some(serde_json::json!({ "variant": "Eval", "language": "python", "code": "1 + 1" })))
+                .raw_input(Some(
+                    serde_json::json!({ "variant": "Eval", "language": "python", "code": "1 + 1" }),
+                ))
                 .content(tool_text("2")),
         ),
         &meta(),
@@ -5695,4 +5703,31 @@ fn grok_pi_codemode_and_eval_calls_render_as_their_cards() {
         )),
         "eval card missing: {blocks:?}"
     );
+}
+
+#[test]
+fn prime_python_execute_calls_render_code_and_output() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(acp::ToolCallId::new(Arc::from("prime-py")), "Python cell")
+                .kind(acp::ToolKind::Execute)
+                .status(acp::ToolCallStatus::Completed)
+                .raw_input(Some(serde_json::json!({
+                    "code": "print('hello from prime')"
+                })))
+                .content(tool_text("hello from prime")),
+        ),
+        &meta(),
+        &mut sb,
+    );
+    match &sb.get(0).unwrap().block {
+        RenderBlock::ToolCall(ToolCallBlock::Eval(eval)) => {
+            assert_eq!(eval.language, "python");
+            assert_eq!(eval.code, "print('hello from prime')");
+            assert_eq!(eval.output.as_deref(), Some("hello from prime"));
+        }
+        other => panic!("expected Python eval card, got {other:?}"),
+    }
 }

@@ -75,6 +75,8 @@ pub struct ModelState {
     /// `/model` then sends `session/set_config_option`. `None` keeps `session/set_model`
     /// (native Grok, pi-acp, claude-acp 0.16.2).
     pub model_config_id: Option<String>,
+    /// Config id of the standard agent-level thought-level select, when advertised.
+    pub thought_level_config_id: Option<String>,
 }
 
 impl ModelState {
@@ -103,6 +105,7 @@ impl ModelState {
     pub fn footer_label(&self) -> Option<String> {
         let name = self.footer_model_name()?;
         Some(match self.reasoning_effort {
+            Some(effort) if self.thought_level_config_id.is_some() => format!("{name}:{effort}"),
             Some(effort) => format!("{name} ({effort})"),
             None => name,
         })
@@ -235,10 +238,16 @@ impl ModelState {
             return false;
         }
         let same_selection = self.current == incoming.current;
+        let effort = if incoming.thought_level_config_id.is_some() {
+            incoming.reasoning_effort
+        } else {
+            self.reasoning_effort
+        };
         let changed = self.model_config_id != incoming.model_config_id
+            || self.thought_level_config_id != incoming.thought_level_config_id
+            || self.reasoning_effort != effort
             || !same_selection
             || catalog_names_differ(&self.available, &incoming.available);
-        let effort = self.reasoning_effort;
         let window_sel = self.context_window_selection;
         let window_over = self.context_window_override;
         let served = same_selection
@@ -431,6 +440,7 @@ impl ModelState {
 /// Stamped on a catalog synthesized from a `model` config option so the pager sends
 /// `session/set_config_option` instead of `session/set_model`.
 const MODEL_CONFIG_ID_META: &str = "x.ai/modelConfigId";
+const THOUGHT_LEVEL_CONFIG_ID_META: &str = "x.ai/thoughtLevelConfigId";
 
 /// Standard ACP agents may advertise models only as a `model`-category select config option (Codex, DSH, claude-agent-acp).
 /// Use the explicit `models` state when present; otherwise build one from the first model-category option (id may differ).
@@ -445,13 +455,7 @@ pub fn models_or_config_option(
     let acp::SessionConfigKind::Select(select) = &option.kind else {
         return None;
     };
-    let entries: Vec<&acp::SessionConfigSelectOption> = match &select.options {
-        acp::SessionConfigSelectOptions::Ungrouped(list) => list.iter().collect(),
-        acp::SessionConfigSelectOptions::Grouped(groups) => {
-            groups.iter().flat_map(|g| g.options.iter()).collect()
-        }
-        _ => return None,
-    };
+    let entries = config_select_entries(select)?;
     if entries.is_empty() {
         return None;
     }
@@ -470,6 +474,34 @@ pub fn models_or_config_option(
         MODEL_CONFIG_ID_META.to_string(),
         serde_json::Value::String(option.id.0.to_string()),
     );
+    if let Some(thought) = config_options.and_then(advertised_thought_level_option)
+        && let acp::SessionConfigKind::Select(select) = &thought.kind
+        && let Some(options) = thought_level_effort_options(select)
+    {
+        meta.insert(
+            THOUGHT_LEVEL_CONFIG_ID_META.to_string(),
+            serde_json::Value::String(thought.id.0.to_string()),
+        );
+        let current_effort = parse_canonical_effort_token(select.current_value.0.as_ref());
+        for model in &mut available {
+            let mut model_meta = acp::Meta::new();
+            model_meta.insert(
+                "supportsReasoningEffort".to_owned(),
+                serde_json::Value::Bool(true),
+            );
+            model_meta.insert(
+                "reasoningEfforts".to_owned(),
+                serde_json::to_value(&options).expect("reasoning effort options serialize"),
+            );
+            if let Some(effort) = current_effort {
+                model_meta.insert(
+                    REASONING_EFFORT_META_KEY.to_owned(),
+                    reasoning_effort_meta_value(effort),
+                );
+            }
+            model.meta = Some(model_meta);
+        }
+    }
     Some(acp::SessionModelState::new(current, available).meta(meta))
 }
 
@@ -484,6 +516,51 @@ fn advertised_model_option(
     })
 }
 
+fn advertised_thought_level_option(
+    options: &[acp::SessionConfigOption],
+) -> Option<&acp::SessionConfigOption> {
+    options.iter().find(|option| {
+        matches!(
+            option.category,
+            Some(acp::SessionConfigOptionCategory::ThoughtLevel)
+        )
+    })
+}
+
+fn config_select_entries(
+    select: &acp::SessionConfigSelect,
+) -> Option<Vec<&acp::SessionConfigSelectOption>> {
+    match &select.options {
+        acp::SessionConfigSelectOptions::Ungrouped(list) => Some(list.iter().collect()),
+        acp::SessionConfigSelectOptions::Grouped(groups) => Some(
+            groups
+                .iter()
+                .flat_map(|group| group.options.iter())
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn thought_level_effort_options(
+    select: &acp::SessionConfigSelect,
+) -> Option<Vec<ReasoningEffortOption>> {
+    let options: Vec<_> = config_select_entries(select)?
+        .into_iter()
+        .filter_map(|option| {
+            let value = parse_canonical_effort_token(option.value.0.as_ref())?;
+            Some(ReasoningEffortOption {
+                id: option.value.0.to_string(),
+                value,
+                label: option.name.clone(),
+                description: option.description.clone(),
+                default: false,
+            })
+        })
+        .collect();
+    (!options.is_empty()).then_some(options)
+}
+
 fn catalog_names_differ(
     left: &IndexMap<acp::ModelId, acp::ModelInfo>,
     right: &IndexMap<acp::ModelId, acp::ModelInfo>,
@@ -496,11 +573,8 @@ fn catalog_names_differ(
         .any(|((id_a, info_a), (id_b, info_b))| id_a != id_b || info_a.name != info_b.name)
 }
 
-fn model_config_id_from_meta(meta: Option<&acp::Meta>) -> Option<String> {
-    meta?
-        .get(MODEL_CONFIG_ID_META)
-        .and_then(|value| value.as_str())
-        .map(str::to_owned)
+fn config_id_from_meta(meta: Option<&acp::Meta>, key: &str) -> Option<String> {
+    meta?.get(key)?.as_str().map(str::to_owned)
 }
 
 /// Which ACP method a `/model` pick sends.
@@ -517,7 +591,15 @@ pub(crate) fn model_switch_wire(
     effort: Option<ReasoningEffort>,
     context_window: Option<std::num::NonZeroU64>,
     model_config_id: Option<&str>,
+    thought_level_config_id: Option<&str>,
 ) -> ModelSwitchWire {
+    if let (Some(config_id), Some(effort)) = (thought_level_config_id, effort) {
+        return ModelSwitchWire::SetConfigOption(acp::SetSessionConfigOptionRequest::new(
+            session_id,
+            config_id.to_owned(),
+            acp::SessionConfigValueId::new(effort.as_ref().to_owned()),
+        ));
+    }
     if let Some(config_id) = model_config_id {
         return ModelSwitchWire::SetConfigOption(acp::SetSessionConfigOptionRequest::new(
             session_id,
@@ -564,7 +646,10 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     .and_then(|id| models.get(id))
                     .and_then(|info| parse_context_window_meta(info.meta.as_ref()))
                     .map(std::num::NonZeroU64::get);
-                let model_config_id = model_config_id_from_meta(state.meta.as_ref());
+                let model_config_id =
+                    config_id_from_meta(state.meta.as_ref(), MODEL_CONFIG_ID_META);
+                let thought_level_config_id =
+                    config_id_from_meta(state.meta.as_ref(), THOUGHT_LEVEL_CONFIG_ID_META);
                 Self {
                     available: models,
                     current: current_model,
@@ -575,6 +660,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     served_model_name: None,
                     agent_prompt_images: false,
                     model_config_id,
+                    thought_level_config_id,
                 }
             })
             .unwrap_or_default()
@@ -680,6 +766,7 @@ mod tests {
             None,
             None,
             model_state.model_config_id.as_deref(),
+            model_state.thought_level_config_id.as_deref(),
         );
         let ModelSwitchWire::SetConfigOption(req) = wire else {
             panic!("expected set_config_option");
@@ -688,10 +775,58 @@ mod tests {
     }
 
     #[test]
+    fn thought_level_option_drives_effort_footer_and_wire() {
+        let model = acp::SessionConfigOption::select(
+            "model",
+            "Model",
+            "deepseek-v4-flash",
+            vec![acp::SessionConfigSelectOption::new(
+                "deepseek-v4-flash",
+                "DeepSeek V4 Flash",
+            )],
+        )
+        .category(acp::SessionConfigOptionCategory::Model);
+        let thought = acp::SessionConfigOption::select(
+            "thought_level",
+            "Thought level",
+            "xhigh",
+            vec![
+                acp::SessionConfigSelectOption::new("high", "High"),
+                acp::SessionConfigSelectOption::new("xhigh", "Extra high"),
+            ],
+        )
+        .category(acp::SessionConfigOptionCategory::ThoughtLevel);
+        let state = models_or_config_option(None, Some(&[model, thought])).unwrap();
+        let model_state: ModelState = Some(state).into();
+        assert_eq!(
+            model_state.thought_level_config_id.as_deref(),
+            Some("thought_level")
+        );
+        assert_eq!(model_state.reasoning_effort, Some(ReasoningEffort::Xhigh));
+        assert_eq!(
+            model_state.footer_label().as_deref(),
+            Some("DeepSeek V4 Flash:xhigh")
+        );
+        let wire = model_switch_wire(
+            acp::SessionId::new("sess-1"),
+            model_state.current.as_ref().unwrap(),
+            Some(ReasoningEffort::High),
+            None,
+            model_state.model_config_id.as_deref(),
+            model_state.thought_level_config_id.as_deref(),
+        );
+        let ModelSwitchWire::SetConfigOption(req) = wire else {
+            panic!("expected thought-level set_config_option");
+        };
+        assert_eq!(req.config_id.0.as_ref(), "thought_level");
+        assert_eq!(req.value.as_value_id().unwrap().0.as_ref(), "high");
+    }
+
+    #[test]
     fn advertised_model_option_serializes_set_config_option() {
         let session_id = acp::SessionId::new("sess-1");
         let model_id = acp::ModelId::new(Arc::from("sonnet"));
-        let wire = model_switch_wire(session_id, &model_id, None, None, Some("model"));
+        let wire = model_switch_wire(session_id, &model_id, None, None, Some("model"), None);
         let ModelSwitchWire::SetConfigOption(req) = wire else {
             panic!("expected set_config_option");
         };
@@ -710,7 +845,7 @@ mod tests {
     fn absent_model_option_serializes_set_model() {
         let session_id = acp::SessionId::new("sess-1");
         let model_id = acp::ModelId::new(Arc::from("grok-4"));
-        let wire = model_switch_wire(session_id, &model_id, None, None, None);
+        let wire = model_switch_wire(session_id, &model_id, None, None, None, None);
         let ModelSwitchWire::SetModel(req) = wire else {
             panic!("expected set_model");
         };
@@ -747,6 +882,37 @@ mod tests {
         assert!(state.apply_config_options(&[updated]));
         assert_eq!(state.footer_label().as_deref(), Some("Sonnet 5.5"));
         assert_eq!(state.model_config_id.as_deref(), Some("model"));
+    }
+
+    #[test]
+    fn config_option_update_moves_thought_level_without_changing_model() {
+        let make_options = |level: &str| {
+            vec![
+                acp::SessionConfigOption::select(
+                    "model",
+                    "Model",
+                    "m1",
+                    vec![acp::SessionConfigSelectOption::new("m1", "Model One")],
+                )
+                .category(acp::SessionConfigOptionCategory::Model),
+                acp::SessionConfigOption::select(
+                    "thought_level",
+                    "Thought level",
+                    level.to_owned(),
+                    vec![
+                        acp::SessionConfigSelectOption::new("high", "High"),
+                        acp::SessionConfigSelectOption::new("xhigh", "Extra high"),
+                    ],
+                )
+                .category(acp::SessionConfigOptionCategory::ThoughtLevel),
+            ]
+        };
+        let mut state: ModelState =
+            models_or_config_option(None, Some(&make_options("xhigh"))).into();
+        assert_eq!(state.footer_label().as_deref(), Some("Model One:xhigh"));
+        assert!(state.apply_config_options(&make_options("high")));
+        assert_eq!(state.current_model_id_str(), Some("m1"));
+        assert_eq!(state.footer_label().as_deref(), Some("Model One:high"));
     }
 
     #[test]

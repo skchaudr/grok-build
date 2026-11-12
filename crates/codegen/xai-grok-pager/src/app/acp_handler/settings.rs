@@ -327,8 +327,11 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
     // A live session's scheduled fires keep the mode the shell pinned when the session's actor spawned
     // Applying a pushed flip here would make `/loop` promise a runtime those fires never get
 
-    // Re-resolve tips from config layers and the updated remote tips
-    if let Some(remote_tips) = update.tips {
+    // Re-resolve tips from config layers and the updated remote tips. External agents show no Grok tips.
+    if app.external_agent {
+        app.tips.clear();
+        app.tip = None;
+    } else if let Some(remote_tips) = update.tips {
         use xai_grok_shell::util::config::resolve_tips;
 
         app.tips = resolve_tips(
@@ -474,6 +477,13 @@ pub(super) fn apply_announcements_update(
     user_config: Option<&toml::Value>,
     managed_config: Option<&toml::Value>,
 ) {
+    // Announcements are Grok service content; an external agent's session shows none.
+    if app.external_agent {
+        app.active_announcements.clear();
+        app.announcement = None;
+        app.announcements_last_gen = next_gen;
+        return;
+    }
     let merged = xai_grok_shell::util::config::resolve_announcements(
         requirements,
         user_config,
