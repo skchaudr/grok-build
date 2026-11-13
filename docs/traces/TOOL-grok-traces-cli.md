@@ -6,7 +6,7 @@ Written 2026-10-28 by Sonnet 5.5 from `git log`, `gh pr view` and the code. Deci
 
 ## What it is
 
-The `grok-traces` binary (`crates/codegen/xai-grok-traces/src/bin/grok-traces.rs`). Subcommands: `hook <source>`, `scan`, `list`, `events <id> --json`, `raw`, `live --json [--watch]`, `follow`, `doctor`, `version`. It is the data source for `trace-deck` (`~/repos/trace-deck`) and for `/traces`. Installed `97fc76fe` (2026-11-11) at `~/.grok/bin/grok-traces` on sab-mini and sab-air; `scripts/install-fork.sh` installs it with grok-fork every time. Since then a Codex code-mode `exec` call's `follow --json` `what` is its first shell command (`+N` for more), not the JS's first line.
+The `grok-traces` binary (`crates/codegen/xai-grok-traces/src/bin/grok-traces.rs`). Subcommands: `hook <source>`, `scan`, `list`, `events <id> --json`, `raw`, `live --json [--watch]`, `follow`, `search`, `doctor`, `version`. It is the data source for `trace-deck` (`~/repos/trace-deck`) and for `/traces`. Installed `97fc76fe` (2026-11-11) at `~/.grok/bin/grok-traces` on sab-mini and sab-air; `scripts/install-fork.sh` installs it with grok-fork every time. Since then a Codex code-mode `exec` call's `follow --json` `what` is its first shell command (`+N` for more), not the JS's first line.
 
 ## How it works
 
@@ -37,6 +37,16 @@ grok-traces follow <id> --json
 ```
 
 Hooks are installed with `crates/codegen/xai-grok-traces/hooks/install.sh`. `doctor` exits 1 unless the index is healthy.
+
+## search (cass over ssh)
+
+`grok-traces search <query words...> [--json] [--limit N] [--mode lexical|semantic|hybrid] [--host <ssh target>]` asks the `cass` index on another machine and joins each hit to the matching local trace session. Code: `src/cass.rs`; tests: `tests/cass.rs`.
+
+- Host: `--host`, else the first valid line of `~/.grok/traces/cass` (same rules as `hosts`: `#` comments, no leading `-`, no whitespace). Neither: exit 2, `no cass host: put an ssh target in ~/.grok/traces/cass`.
+- Transport: `ssh -o BatchMode=yes -o ConnectTimeout=2 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 <target> 'sh -s'`, with one line on stdin: `exec env CASS_AUTO_REFRESH=0 CASS_DAEMON_AUTO_SPAWN=0 cass search '<query>' --limit N --json [--mode M]`. The query is POSIX single-quoted and never on the ssh command line (the remote login shell is fish). Limit default 20, max 200; wall clock 15 s, child killed at the deadline.
+- Join: a local session matches when its file path and cass `source_path` share at least the last two path components (a trailing `.zst` is ignored); the most shared wins, a tie is no match. The trace `line` is the event whose `timestamp` equals the hit's `created_at` exactly, else null. cass `line_number` is a message index and is never used as a trace line.
+- Output: `--json` prints one object per hit, in cass order: `id line source session_title agent origin score created_at snippet cass_path` (null where there is no local match). Without it: `<id|-> TAB <line|-> TAB <origin> TAB <snippet, 120 chars>`. Stderr ends with `<n> hits, <m> on this machine, <total> total`.
+- Errors print to stderr and exit 1: `<host> unreachable (...)` (ssh failure, timeout), `<host>: exit N: ...` (cass failed; 127 = cass not installed there), `<host>: bad response (...)`. If the local index cannot be opened the hits are printed unjoined.
 
 ## Wake signal
 

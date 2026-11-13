@@ -1,4 +1,4 @@
-//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--watch] [--recent N] | live-json <id> | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]`.
+//! `grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--watch] [--recent N] | live-json <id> | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | search <query...> [--json] [--limit N] [--mode lexical|semantic|hybrid] [--host T] | version | doctor [--reset]`.
 //!
 //! `hook` runs once per harness event: it must be fast, silent and always
 //! exit 0 so it can never block an agent.
@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use xai_grok_traces::cass;
 use xai_grok_traces::follow::{Follower, find_live_root, recent_table};
 use xai_grok_traces::live;
 use xai_grok_traces::wake::{self, Waker};
@@ -36,12 +37,13 @@ fn main() -> ExitCode {
         Some("live-json") => live_json(&args[1..]),
         Some("raw") => raw(&args[1..]),
         Some("follow") => finish(follow(&args[1..])),
+        Some("search") => search(&args[1..]),
         Some("version") => {
             println!("grok-traces {} remote=1", env!("VERSION_WITH_COMMIT"));
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--watch] [--recent N] | live-json <id> | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | version | doctor [--reset]");
+            eprintln!("usage: grok-traces hook <source> | scan | list [--json] [--limit N] [--since MS] [--active] [--roots] | live --json [--watch] [--recent N] | live-json <id> | events <id> --json [--noise] [--limit N] [--since-line N] | raw <id> <line> | follow [<id>] [--no-children] [--json] [--once] [--backlog N] | search <query...> [--json] [--limit N] [--mode lexical|semantic|hybrid] [--host T] | version | doctor [--reset]");
             ExitCode::from(2)
         }
     }
@@ -389,6 +391,76 @@ fn follow(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
         }
         id = None;
     }
+}
+
+/// Asks the cass index on another machine (ssh) and joins each hit to a local session.
+/// Exit 2 = usage or no cass host, 1 = ssh/cass failure. Hits go to stdout, the count line to stderr.
+fn search(args: &[String]) -> ExitCode {
+    let usage = || {
+        eprintln!("usage: grok-traces search <query words...> [--json] [--limit N] [--mode lexical|semantic|hybrid] [--host <ssh target>]");
+        ExitCode::from(2)
+    };
+    let (mut words, mut json, mut limit, mut mode, mut host) = (Vec::new(), false, cass::DEFAULT_LIMIT, None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--json" => json = true,
+            "--limit" => match it.next().and_then(|v| v.parse().ok()) {
+                Some(n) => limit = n,
+                None => return usage(),
+            },
+            "--mode" => match it.next().and_then(|v| cass::Mode::parse(v)) {
+                Some(m) => mode = Some(m),
+                None => return usage(),
+            },
+            "--host" => match it.next() {
+                Some(h) => host = Some(h.as_str()),
+                None => return usage(),
+            },
+            // Everything after `--` is the query, even words that start with `-`.
+            "--" => words.extend(it.by_ref().cloned()),
+            other if other.starts_with('-') => return usage(),
+            other => words.push(other.to_string()),
+        }
+    }
+    if words.is_empty() {
+        return usage();
+    }
+    let file = std::fs::read_to_string(cass::cass_path()).ok();
+    let target = match cass::resolve_host(host, file.as_deref()) {
+        Ok(t) => t,
+        Err(m) => {
+            eprintln!("{m}");
+            return ExitCode::from(2);
+        }
+    };
+    let q = cass::Query { limit, mode, ..cass::Query::new(&words) };
+    let reply = match cass::search(&target, &q) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(1);
+        }
+    };
+    let total = reply.total_matches;
+    let joined = match TraceIndex::open_with(&default_db_path(), Some(Duration::from_secs(2))) {
+        Ok(idx) => cass::join(&idx, reply.hits),
+        Err(e) => {
+            // The remote answer is still worth showing.
+            eprintln!("grok-traces: local index unavailable ({e}); hits are not joined");
+            reply.hits.into_iter().map(cass::Joined::bare).collect()
+        }
+    };
+    let mut out = io::stdout().lock();
+    for j in &joined {
+        let line = if json { cass::joined_json(j).to_string() } else { cass::joined_line(j) };
+        if writeln!(out, "{line}").is_err() {
+            return ExitCode::SUCCESS;
+        }
+    }
+    let _ = out.flush();
+    eprintln!("{}", cass::summary(&joined, total));
+    ExitCode::SUCCESS
 }
 
 /// Prints the raw source line. Exit 3 = no such line.

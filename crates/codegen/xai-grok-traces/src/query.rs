@@ -561,6 +561,30 @@ impl TraceIndex {
         Ok(lines::read_line(path.as_ref(), format, line, from_line, from_byte)?)
     }
 
+    /// Sessions whose transcript path ends in `/<suffix>` or `/<suffix>.zst` (`suffix` = `parent-dir/file-name`).
+    /// The join key for `cass` hits: a bare file name such as `chat_history.jsonl` would match thousands.
+    pub fn sessions_by_path_suffix(&self, suffix: &str) -> Result<Vec<SessionRow>> {
+        let now = now_ms();
+        let esc = suffix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let sql = format!(
+            "SELECT {} FROM trace_sessions s LEFT JOIN trace_files f ON f.path = s.file_path
+             WHERE s.file_path LIKE ?1 ESCAPE '\\' OR s.file_path LIKE ?2 ESCAPE '\\' LIMIT 200",
+            session_cols()
+        );
+        let mut stmt = self.conn().prepare(&sql)?;
+        let rows = stmt.query_map([format!("%/{esc}"), format!("%/{esc}.zst")], |r| session_row(r, now))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Line of the first event of `session_id` whose timestamp is exactly `timestamp_ms` (noise included).
+    pub fn line_at(&self, session_id: &str, timestamp_ms: i64) -> Result<Option<i64>> {
+        Ok(self.conn().query_row(
+            "SELECT MIN(line_number) FROM trace_events WHERE sk = (SELECT sk FROM trace_sessions WHERE id = ?1) AND timestamp = ?2",
+            params![session_id, timestamp_ms],
+            |r| r.get::<_, Option<i64>>(0),
+        )?)
+    }
+
     /// Sources that have at least one session, for the ledger tabs.
     pub fn sources(&self) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn().prepare("SELECT source_id, COUNT(*) FROM trace_sessions GROUP BY source_id")?;
