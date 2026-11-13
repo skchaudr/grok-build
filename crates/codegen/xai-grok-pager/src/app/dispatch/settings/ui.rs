@@ -1242,6 +1242,17 @@ pub(in crate::app::dispatch) fn action_for_reset(
             }
         }
 
+        // Pi side-call slots reset by clearing the slot (their default is the empty string).
+        ("recap_model_2", SettingValue::String(s)) if s.is_empty() => {
+            Some(Action::ClearRecapModel2)
+        }
+        ("recap_model_3", SettingValue::String(s)) if s.is_empty() => {
+            Some(Action::ClearRecapModel3)
+        }
+        ("btw_model", SettingValue::String(s)) if s.is_empty() => Some(Action::ClearBtwModel),
+        ("btw_model_2", SettingValue::String(s)) if s.is_empty() => Some(Action::ClearBtwModel2),
+        ("btw_model_3", SettingValue::String(s)) if s.is_empty() => Some(Action::ClearBtwModel3),
+
         _ => None,
     }
 }

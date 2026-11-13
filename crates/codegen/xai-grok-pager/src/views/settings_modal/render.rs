@@ -2913,6 +2913,12 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     id: 0,
                 });
             }
+            // Kept on locked rows too: expanding is how the lock reason is read.
+            shortcuts.push(Shortcut {
+                label: "\u{2192} expand",
+                clickable: false,
+                id: 0,
+            });
             shortcuts.push(Shortcut {
                 label: "\u{2190}/\u{2192} tabs",
                 clickable: false,

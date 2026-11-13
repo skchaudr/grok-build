@@ -1996,8 +1996,18 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 }
                 SettingKind::Group { .. } => no_arm(other),
             };
-            let action = action_for_reset(other, &away).unwrap_or_else(|| no_arm(other));
-            let _ = dispatch(action, app);
+            // String slots reset only by clearing, so there is no "away" mapping to drive; they stay at their default.
+            let string_slot = matches!(
+                meta.kind,
+                SettingKind::String { .. } | SettingKind::DynamicEnum { .. }
+            );
+            match action_for_reset(other, &away) {
+                Some(action) => {
+                    let _ = dispatch(action, app);
+                }
+                None if string_slot => {}
+                None => no_arm(other),
+            }
         }
     }
 }
