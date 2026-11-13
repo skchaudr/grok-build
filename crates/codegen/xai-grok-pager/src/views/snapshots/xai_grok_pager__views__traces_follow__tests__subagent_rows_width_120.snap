@@ -6,15 +6,15 @@ expression: "screen(&mut f, 120, 20)"
 
 ◆ Agent  Audit traces: UI/UX lens                                                           haiku-4-5 · 1 call · ✓ 2m14s
 ◆ Agent  Audit traces: observability lens                                                     haiku-4-5 · 1 call · ● 12s
-↳ 1 UI/UX lens · haiku-4-5    ↳ haiku-4-5 started  Audit traces: UI/UX lens
+↳ 1 UI/UX lens · haiku-4-5          started  Audit traces: UI/UX lens
 
-↳ 1 UI/UX lens · haiku-4-5    › You are one of two auditors. Your lens: Audit traces: UI/UX lens
+↳ 1 UI/UX lens · haiku-4-5          › You are one of two auditors. Your lens: Audit traces: UI/UX lens
 
-↳ 1 UI/UX lens · haiku-4-5    ◆ Read  src/views/traces_follow.rs                                                    0.1s
-↳ 2 observability lens        ↳ haiku-4-5 started  Audit traces: observability lens
+↳ 1 UI/UX lens · haiku-4-5          ◆ Read  src/views/traces_follow.rs                                              0.1s
+↳ 2 observability lens · haiku-4-5  started  Audit traces: observability lens
 
-↳ 2 observability lens        › You are one of two auditors. Your lens: Audit traces: observability lens
+↳ 2 observability lens · haiku-4-5  › You are one of two auditors. Your lens: Audit traces: observability lens
 
-↳ 2 observability lens        ◆ Read  src/views/traces_follow.rs                                                    0.1s
-↳ 1 UI/UX lens · haiku-4-5    ↳ ended
+↳ 2 observability lens · haiku-4-5  ◆ Read  src/views/traces_follow.rs                                              0.1s
+↳ 1 UI/UX lens · haiku-4-5          ↳ ended
 ◆ Bash  cargo test                                                                                                  0.4s

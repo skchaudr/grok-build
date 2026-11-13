@@ -5,8 +5,8 @@ expression: "screen(&mut f, 60, 12)"
  › look into it
 
 ◆ Agent  Check the lexer                      1 call · ● 12s
-↳ 1 Check the… ↳ started  Check the lexer
+↳ 1 Check the lex…  started  Check the lexer
 
-↳ 1 Check the… › You are the auditor.
+↳ 1 Check the lex…  › You are the auditor.
 
-↳ 1 Check the… ◆ Read  src/views/traces_follow.rs       0.1s
+↳ 1 Check the lex…  ◆ Read  src/views/traces_follow.rs  0.1s

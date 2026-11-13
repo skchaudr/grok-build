@@ -623,7 +623,7 @@ impl Follow {
     }
 
     /// The tag column: the widest full tag of any subagent (not only the visible ones, so it holds still while Tab
-    /// filters) plus 2, at most a quarter of the screen.
+    /// filters) plus 2, at most a third of the screen.
     fn tag_w(&self, width: usize) -> usize {
         let widest = (1..self.agents.len())
             .map(|at| {
@@ -632,18 +632,22 @@ impl Follow {
             })
             .max()
             .unwrap_or(0);
-        (widest + 2).clamp(6, (width / 4).max(6))
+        (widest + 2).clamp(6, (width / 3).max(6))
     }
 
-    /// Subagent `at`'s tag fitted to the column: `head · model`, else `head`, else `head` cut with `…`.
+    /// Subagent `at`'s tag fitted to the column, leaving 2 spaces before the row: `(head, tail)` as `↳ 2 name` and
+    /// ` · model`; else the name dropped (`↳ 2` and ` model`); else all of it cut with `…` and no tail.
     fn tag_fit(&self, at: usize, width: usize) -> (String, String) {
-        let t = self.tag_w(width);
+        let avail = self.tag_w(width).saturating_sub(2);
         let (head, model) = self.tag_text(at);
-        if model.is_empty() || head.width() + 3 + model.width() > t - 1 {
-            (truncate_str(&head, t - 1), String::new())
-        } else {
-            (head, model)
+        if model.is_empty() {
+            return (truncate_str(&head, avail), String::new());
         }
+        if head.width() + 3 + model.width() <= avail {
+            return (head, format!(" · {model}"));
+        }
+        let short = format!("↳ {at} {model}");
+        if short.width() <= avail { (format!("↳ {at}"), format!(" {model}")) } else { (truncate_str(&short, avail), String::new()) }
     }
 
     /// What starts every line of row `i`: its depth indent, or for a subagent's row its tag (`↳ 1 UI/UX lens ·
@@ -653,8 +657,8 @@ impl Follow {
         let indent = |depth: usize| "  ".repeat(depth.min(MAX_INDENT));
         let at = self.agents.iter().position(|a| a.id == row.agent).filter(|_| row.agent != self.root.id);
         let Some(at) = at else { return indent(row.depth) };
-        let (head, model) = self.tag_fit(at, width);
-        let tag = if model.is_empty() { head } else { format!("{head} · {model}") };
+        let (head, tail) = self.tag_fit(at, width);
+        let tag = format!("{head}{tail}");
         format!("{tag}{}{}", " ".repeat(self.tag_w(width).saturating_sub(tag.width())), indent(row.depth.saturating_sub(1)))
     }
 
@@ -663,15 +667,15 @@ impl Follow {
         let row = &self.rows[i];
         let at = self.agents.iter().position(|a| a.id == row.agent).filter(|_| row.agent != self.root.id);
         let Some(at) = at else { return vec![Span::styled(self.lead(i, width), Style::default().fg(theme.gray_dim))] };
-        let (head, model) = self.tag_fit(at, width);
+        let (head, tail) = self.tag_fit(at, width);
         let accent = Style::default().fg(theme.accent_model);
         // A tag cut below its number is all accent.
         let cut = if head.starts_with(&format!("↳ {at}")) { format!("↳ {at}").len() } else { head.len() };
         let (num, name) = (head[..cut].to_string(), head[cut..].to_string());
-        let tag = if model.is_empty() { format!("{num}{name}") } else { format!("{num}{name} · {model}") };
+        let tag = format!("{num}{name}{tail}");
         let mut out = vec![Span::styled(num, accent.add_modifier(Modifier::BOLD)), Span::styled(name, Style::default().fg(theme.gray))];
-        if !model.is_empty() {
-            out.push(Span::styled(format!(" · {model}"), accent));
+        if !tail.is_empty() {
+            out.push(Span::styled(tail, accent));
         }
         // The padding and the indent below the first level.
         let lead = self.lead(i, width);
@@ -858,8 +862,10 @@ impl Follow {
                 lines
             }
             Body::Start { model, label } => {
-                let mut spans = vec![Span::styled("↳ ", faint)];
-                if let Some(m) = model {
+                // Under a subagent's tag the tag already names the agent and its model.
+                let tagged = row.agent != self.root.id && self.agents.iter().any(|a| a.id == row.agent);
+                let mut spans = if tagged { vec![] } else { vec![Span::styled("↳ ", faint)] };
+                if let Some(m) = model.as_ref().filter(|_| !tagged) {
                     spans.push(Span::styled(format!("{} ", short_model(m)), Style::default().fg(theme.accent_model)));
                 }
                 spans.push(Span::styled("started", gray));
@@ -1311,7 +1317,7 @@ mod tests {
             ],
             2_000,
         );
-        let lines = draw(&mut f, 40, 16);
+        let lines = draw(&mut f, 120, 16);
         assert!(lines.iter().any(|l| l.starts_with("↳ 1 U") && l.contains("◆ Read")), "{lines:#?}");
         assert!(lines.iter().any(|l| l.starts_with("↳ 2 o") && l.contains("◆ Read")), "{lines:#?}");
         assert!(lines.iter().any(|l| l.starts_with("◆ Bash")), "root rows have no tag\n{lines:#?}");
