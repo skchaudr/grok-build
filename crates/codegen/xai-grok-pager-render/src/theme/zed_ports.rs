@@ -906,7 +906,7 @@ impl Theme {
             diff_insert_fg: rgb(115, 251, 149),       // #73fb95
             diff_equal_fg: rgb(98, 114, 164),         // #6272a4
             diff_gutter_fg: rgb(105, 107, 113),       // #696b71
-            bg_visual: rgb(70, 63, 93),               // #463f5d
+            bg_visual: rgb(95, 84, 120),              // #5f5478
             paste_bg: rgb(30, 25, 37),                // #1e1925
             paste_fg: rgb(161, 134, 199),             // #a186c7
             paste_dim: rgb(121, 105, 152),            // #796998
@@ -1474,7 +1474,7 @@ impl Theme {
             diff_insert_fg: rgb(110, 145, 95),      // #6e915f
             diff_equal_fg: rgb(138, 137, 128),      // #8a8980
             diff_gutter_fg: rgb(118, 107, 144),     // #766b90
-            bg_visual: rgb(190, 186, 158),          // #beba9e
+            bg_visual: rgb(192, 208, 156),          // #c0d09c
             paste_bg: rgb(220, 213, 172),           // #dcd5ac
             paste_fg: rgb(138, 137, 128),           // #8a8980
             paste_dim: rgb(138, 137, 128),          // #8a8980

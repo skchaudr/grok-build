@@ -300,7 +300,9 @@ MD_QUOTE = {
 
 # Hand-tuned selection fills that shipped before the port was generated. Zed's own value fails
 # visibility_tests (selection must stand >= 1.25:1 off bg_light and bg_base); edit here, not in zed_ports.rs.
-BG_VISUAL_OVERRIDE = {"kanso_mist": (24, 25, 30), "one_dark_pro": (60, 67, 80)}
+BG_VISUAL_OVERRIDE = {"kanso_mist": (24, 25, 30), "one_dark_pro": (60, 67, 80), "dracula": (95, 84, 120),
+    # Zed's fill is 1.6:1 low on text contrast; no warm fill clears 4.5:1 text and 1.25:1 bands, so this is the closest that does.
+    "kanagawa_lotus": (192, 208, 156)}
 
 
 def rust_fn(fn, name, port):
