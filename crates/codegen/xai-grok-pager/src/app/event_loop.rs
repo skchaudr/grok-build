@@ -1146,7 +1146,8 @@ pub(crate) async fn run(
         );
         app.external_ui.host_palette = features.palette().to_vec();
     }
-    crate::app::set_external_agent_active(external_agent || launch_profile.is_some());
+    // Pi-only rows and rendering switch on when Pi is on offer in this window.
+    crate::app::set_external_agent_active(host_features.is_some());
 
     app.pending_startup = Some(pending_startup);
     app.tracing_rx = Some(tracing_handle.rx);

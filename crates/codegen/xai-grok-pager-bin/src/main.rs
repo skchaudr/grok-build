@@ -1760,9 +1760,10 @@ fn flag_dashboard_at_startup_if_requested(args: &mut PagerArgs) -> Result<()> {
 fn schedule_startup_prewarm() {
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
 }
-/// Pi host UI in grok-fork: the bundled host features (F2 Pi rows) and Pi theme discovery for every
-/// session, plus grok-pi's welcome brand and tour when `grok-pi-acp` is the only agent on offer.
-/// A picker that also offers a non-Pi agent keeps the Grok welcome.
+/// Pi host UI in grok-fork: Pi theme discovery always; the bundled host features (F2 Pi rows) when
+/// Pi is on offer (launch agent or a picker choice); grok-pi's welcome brand and tour when
+/// `grok-pi-acp` is the only agent on offer. A picker that also offers a non-Pi agent keeps the
+/// Grok welcome.
 #[cfg(feature = "pi-grok")]
 fn install_pi_host_ui(args: &PagerArgs) {
     use xai_grok_pager::slash::external_common::{agent_label_from_cmd, is_pi_label};
@@ -1775,15 +1776,17 @@ fn install_pi_host_ui(args: &PagerArgs) {
             return;
         }
     };
-    xai_grok_pager::acp::set_launch_host_features(manifest.clone());
     if let Ok(cwd) = std::env::current_dir() {
         let _ = xai_grok_pager::theme::pi::init_discovery(&cwd);
     }
     let is_pi = |cmd: &str| is_pi_label(agent_label_from_cmd(cmd).as_deref());
-    let mixed_picker = args
-        .agent_choices()
-        .is_ok_and(|choices| choices.iter().any(|choice| !is_pi(&choice.cmd)));
-    if mixed_picker || !args.effective_agent_cmd().is_some_and(|cmd| is_pi(&cmd)) {
+    let choices = args.agent_choices().unwrap_or_default();
+    let launch_is_pi = args.effective_agent_cmd().is_some_and(|cmd| is_pi(&cmd));
+    if !launch_is_pi && !choices.iter().any(|choice| is_pi(&choice.cmd)) {
+        return;
+    }
+    xai_grok_pager::acp::set_launch_host_features(manifest.clone());
+    if !launch_is_pi || choices.iter().any(|choice| !is_pi(&choice.cmd)) {
         return;
     }
     xai_grok_pager::acp::set_launch_ui_profile(xai_grok_pager::acp::ExternalUiProfile {
