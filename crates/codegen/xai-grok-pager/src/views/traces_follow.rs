@@ -515,7 +515,7 @@ impl Follow {
 
     /// The `Agent`/`Task` call row that dispatched a subagent called `label` and started at `started`: its label
     /// matches the call's target (equal or a prefix either way), the call is no later than 5 s after the start,
-    /// and the latest such call wins. The label match is the same the trajectory screen uses; no item carries an id.
+    /// and an exact match, then the latest, wins. The label match is the same the trajectory screen uses; no item carries an id.
     fn spawn_row(&self, label: &str, started: Option<i64>) -> Option<usize> {
         let want = norm(label);
         if want.is_empty() {
@@ -532,7 +532,7 @@ impl Follow {
                 let what = norm(&c.what);
                 !what.is_empty() && (what == want || what.starts_with(&want) || want.starts_with(&what)) && started.is_none_or(|s| c.started_ms <= s + 5_000)
             })
-            .max_by_key(|(_, c)| c.started_ms)
+            .max_by_key(|(_, c)| (norm(&c.what) == want, c.started_ms))
             .map(|(i, _)| i)
     }
 
@@ -1458,6 +1458,14 @@ mod tests {
             f.cursor = Some(cursor);
             assert_eq!(f.cursor_agent(), want, "row {cursor}");
         }
+    }
+
+    #[test]
+    fn an_exact_label_beats_a_prefix_match() {
+        let mut f = Follow::bare(session());
+        f.apply(&[call("root", 0, 1, "t1", "Agent", "Explore"), call("root", 0, 2, "t2", "Agent", "Explore the cache")], 13_000);
+        assert_eq!(f.spawn_row("Explore", Some(1_000)), Some(0), "not the later, longer call that merely starts with it");
+        assert_eq!(f.spawn_row("Explore the cache", Some(1_000)), Some(1));
     }
 
     #[test]
