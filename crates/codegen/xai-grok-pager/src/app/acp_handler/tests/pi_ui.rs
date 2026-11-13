@@ -136,7 +136,12 @@ fn pi_session_catalog_fills_the_open_resume_picker() {
     let mut app = make_app_with_agent("sess-pi");
     app.external_agent = true;
     app.external_agent_label = Some("pi".into());
-    app.agents.get_mut(&AgentId(0)).unwrap().active_modal = Some(crate::views::modal::session_picker_modal(None));
+    let mut modal = crate::views::modal::session_picker_modal(None);
+    // `/resume` under Pi opens the picker on the External source filter (see dispatch_show_session_picker).
+    if let crate::views::modal::ActiveModal::SessionPicker { source_filter, .. } = &mut modal {
+        *source_filter = crate::views::session_picker::SourceFilter::External;
+    }
+    app.agents.get_mut(&AgentId(0)).unwrap().active_modal = Some(modal);
     assert!(handle_ext_notification(
         &pi(
             "pi/ui/session_catalog",

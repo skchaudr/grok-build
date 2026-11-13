@@ -1993,7 +1993,7 @@ async fn fetch_session_list_external_agent_uses_acp_session_list() {
                             std::path::PathBuf::from("/tmp/wt"),
                         )
                         .title("Pi session")
-                        .updated_at("2026-10-12T10:00:00Z"),
+                        .updated_at(chrono::Utc::now().to_rfc3339()), // the list drops rows older than 30 days
                     ]);
                     let _ = args.response_tx.send(Ok(body));
                 }

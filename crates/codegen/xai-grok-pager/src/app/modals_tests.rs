@@ -26,7 +26,7 @@ fn arg_picker_effort_phase_opens_on_default_row() {
 
     let registry = ActionRegistry::defaults();
     agent.handle_input(
-        &Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL)),
+        &Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
         &registry,
     );
     assert!(
@@ -81,7 +81,7 @@ fn arg_picker_chains_through_the_window_phase_to_effort() {
     let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
     agent.handle_input(
-        &Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL)),
+        &Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
         &registry,
     );
     agent.handle_input(&enter, &registry);

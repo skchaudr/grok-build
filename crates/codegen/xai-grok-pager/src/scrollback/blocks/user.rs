@@ -259,12 +259,16 @@ impl UserPromptBlock {
     /// - RGB themes: `bg_light` (matches the fullscreen prompt band).
     fn prompt_band_color_for(
         theme: &Theme,
-        _is_selected: bool,
+        is_selected: bool,
         terminal_native: bool,
     ) -> Option<ratatui::style::Color> {
         use ratatui::style::Color;
         if terminal_native {
-            None
+            Some(if is_selected {
+                Color::Gray
+            } else {
+                Color::DarkGray
+            })
         } else {
             match theme.bg_light {
                 Color::Reset => None,
@@ -277,7 +281,7 @@ impl UserPromptBlock {
     /// Cyan pointer when `accent_user` is Reset so OSC 12 leaves the host cursor alone.
     fn prompt_styles(theme: &Theme, terminal_native: bool) -> (Style, Style, Style) {
         let prefix_color = match theme.accent_user {
-            ratatui::style::Color::Reset if terminal_native => ratatui::style::Color::Cyan,
+            ratatui::style::Color::Reset => ratatui::style::Color::Cyan,
             c => c,
         };
         let mut prefix_style = theme.fg(prefix_color);

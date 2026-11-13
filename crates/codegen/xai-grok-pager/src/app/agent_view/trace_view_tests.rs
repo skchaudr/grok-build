@@ -223,7 +223,8 @@ fn draw(agent: &mut AgentView, width: u16) -> String {
         },
     );
     // Entry times are local-time clock strings; the snapshot must not depend on the machine's zone.
-    let clock = regex::Regex::new(r"\d{1,2}:\d{2} [AP]M").unwrap();
+    // Short stamps are `HH:MM`, prefixed `MM-DD ` for earlier days (the AM/PM form is gone).
+    let clock = regex::Regex::new(r"(\d{2}-\d{2} )?\d{1,2}:\d{2}( [AP]M)?").unwrap();
     (0..area.height)
         .map(|y| {
             let row: String = (0..area.width)

@@ -1107,6 +1107,10 @@ fn session_picker_entry_source<'a>(app: &'a AppView, session_id: &str) -> Option
 }
 pub(in crate::app::dispatch) fn session_picker_external_filter_active(app: &AppView) -> bool {
     use crate::views::modal::ActiveModal;
+    // Only under an external host (Pi) is the External filter its own session catalog; natively it lists foreign tools' sessions.
+    if !app.external_agent {
+        return false;
+    }
     if let Some(agent) = get_active_agent(app)
         && let Some(ActiveModal::SessionPicker { source_filter, .. }) = agent.active_modal.as_ref()
     {
