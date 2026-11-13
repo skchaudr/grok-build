@@ -66,6 +66,7 @@ pub fn section_for(key: SettingKey) -> &'static str {
         | "show_other_tool_args"
         | "respect_manual_folds" => "Tool output",
         "prompt_cursor" | "simple_mode" | "vim_mode" => "Prompt",
+        "dashboard_preview" => "Display",
 
         // -- Popups ----------------------------------------------------------
         "write_edit_hover_popups" => "Tool details",
@@ -77,6 +78,8 @@ pub fn section_for(key: SettingKey) -> &'static str {
         // -- Editor ----------------------------------------------------------
         "combine_queued_prompts"
         | "cancel_turn_key"
+        | "follow_up_behavior"
+        | "confirm_before_rewind"
         | "multiline_mode"
         | "prompt_suggestions"
         | "pi_at_search_hidden" => "Input",
@@ -122,7 +125,7 @@ pub fn section_for(key: SettingKey) -> &'static str {
         "coding_data_sharing" => "Data sharing",
 
         // -- Models ----------------------------------------------------------
-        "default_model" | "fork_secondary_model" => "Defaults",
+        "default_model" | "fork_secondary_model" | "subagent_model_inheritance" => "Defaults",
         "recap_models" | "recap_model" | "recap_model_2" | "recap_model_3" => "Recap",
         "btw_models" | "btw_model" | "btw_model_2" | "btw_model_3" => "Side questions",
 
@@ -135,6 +138,7 @@ pub fn section_for(key: SettingKey) -> &'static str {
         | "contextual_hints.send_now"
         | "contextual_hints.small_screen"
         | "contextual_hints.word_select"
+        | "contextual_hints.export_copy"
         | "contextual_hints.ssh_wrap" => "Contextual hints",
         "hunk_tracker_mode" => "Diffs",
 

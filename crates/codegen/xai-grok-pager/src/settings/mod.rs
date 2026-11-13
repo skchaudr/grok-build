@@ -28,3 +28,22 @@ pub use registry::{
     canonical_screen_mode, canonical_voice_capture_mode, canonical_voice_stt_language,
     current_value_for, default_value_for, dynamic_enum_choices, is_consent_chooser,
 };
+
+/// Registers the real `pi_todo` and `pi_subagents` host-feature descriptors in the process registry, so tests of the generic host-feature path see them.
+#[cfg(test)]
+pub(crate) fn register_pi_host_features_for_test() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        xai_grok_shell::host_features::HostFeatureManifest::from_json_sources(&[
+            (
+                "extensions/pi-grok-todo/grok-pi.json",
+                include_str!("../../../../../extensions/pi-grok-todo/grok-pi.json"),
+            ),
+            (
+                "extensions/pi-grok-subagents/grok-pi.json",
+                include_str!("../../../../../extensions/pi-grok-subagents/grok-pi.json"),
+            ),
+        ])
+        .expect("bundled host-feature descriptors parse");
+    });
+}

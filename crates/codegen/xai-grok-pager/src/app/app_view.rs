@@ -4372,7 +4372,15 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         if matches!(ctx.auth_state, AuthState::Done) && key!('n', CONTROL).matches(key) {
             return InputOutcome::Action(Action::NewSession);
         }
-        if matches!(ctx.auth_state, AuthState::Done) && crate::input::key::is_shift_tab(key) {
+        // The plan-mode chord (Shift+Tab cycles thinking now) leaves home and forwards, so the pre-session toggle reaches `CycleMode`.
+        let plan_chord = if cfg!(windows) {
+            key!('t', CONTROL | ALT)
+        } else {
+            key!('t', CONTROL | SHIFT)
+        };
+        if matches!(ctx.auth_state, AuthState::Done)
+            && (crate::input::key::is_shift_tab(key) || plan_chord.matches(key))
+        {
             return InputOutcome::ActionThenForward(Action::LeaveHome);
         }
         if matches!(ctx.auth_state, AuthState::Done) && crate::input::key::is_text_input_key(key) {

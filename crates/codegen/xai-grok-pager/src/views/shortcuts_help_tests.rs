@@ -684,7 +684,8 @@ fn build_entries_lists_undo_and_redo() {
 
     let (redo_keys, redo_help) = pseudo_hint(&entries, "redo").expect("redo row");
     assert!(redo_keys.contains(&key!('z', CONTROL | SHIFT)));
-    assert!(redo_keys.contains(&key!('r', CONTROL)));
+    // Some terminals collapse Ctrl+Shift+Z into plain Ctrl+Z, so redo needs a fallback key (Ctrl+R opens the session picker).
+    assert!(redo_keys.contains(&key!('z', ALT)));
     assert_eq!(redo_help, Some(REDO_LONG_HELP));
 }
 

@@ -2791,6 +2791,11 @@ fn render_footer(
         enter
     };
     let stop = resolve(crate::actions::ActionId::DashboardStop, key!('x', CONTROL));
+    // Shift+Tab cycles thinking level; the dispatch mode rides the platform plan chord.
+    let mode_key = resolve(
+        crate::actions::ActionId::DashboardCycleMode,
+        key!('t', CONTROL | SHIFT),
+    );
     let help = resolve(
         crate::actions::ActionId::DashboardShortcutsHelp,
         key!('.', CONTROL),
@@ -2921,11 +2926,11 @@ fn render_footer(
         } else {
             // Typed text dispatches a NEW agent (a section header is never a reply target)
             // Show the same chips as the `+ New Agent` button with a draft
-            // send_key sends (stays on the dashboard), Ctrl+S sends and opens detail, Shift+Tab cycles the dispatch mode
+            // send_key sends (stays on the dashboard), Ctrl+S sends and opens detail, the plan chord cycles the dispatch mode
             vec![
                 HintItem::new(send_key, "send"),
                 HintItem::new(send_open, "send+open"),
-                HintItem::new(key!(BackTab), "mode"),
+                HintItem::new(mode_key, "mode"),
             ]
         }
     } else if state.selected_idle_overflow {
@@ -2944,7 +2949,7 @@ fn render_footer(
             vec![
                 HintItem::new(send_key, "send"),
                 HintItem::new(send_open, "send+open"),
-                HintItem::new(key!(BackTab), "mode"),
+                HintItem::new(mode_key, "mode"),
             ]
         }
     } else if let Some(enter_label) = state.focused_action_label() {
@@ -2957,7 +2962,7 @@ fn render_footer(
             h.push(HintItem::new(send_key, "send"));
             h.push(HintItem::new(send_open, "send+open"));
         }
-        h.push(HintItem::new(key!(BackTab), "mode"));
+        h.push(HintItem::new(mode_key, "mode"));
         h
     } else if row_selected {
         let mut h: Vec<HintItem> = vec![];

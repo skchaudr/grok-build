@@ -539,7 +539,7 @@ pub(super) fn default_actions(
             hint_key_display: Some("Shift+Tab"),
             requires_confirmation: false,
             long_help: Some(
-                "Cycles the current model's supported thinking levels. It does not switch the model or change the session mode.",
+                "Cycles the current model's supported thinking levels.\nIt does not switch the model or change the session mode.",
             ),
         },
         ActionDef {
@@ -1032,11 +1032,7 @@ pub(super) fn default_actions(
             category: Category::Dashboard,
             context: When::DashboardFocused,
             hint_priority: None,
-            hint_key_display: Some(if cfg!(windows) {
-                "Ctrl+Alt+T"
-            } else {
-                "Ctrl+Shift+T"
-            }),
+            hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(if cfg!(windows) {
                 "Cycles the dispatch mode for agents you launch from the dashboard.\nPi uses Normal and Plan; stock Grok may also expose permission modes.\nCtrl+Alt+T avoids the Ctrl+Shift+T chord commonly consumed by Windows terminals."

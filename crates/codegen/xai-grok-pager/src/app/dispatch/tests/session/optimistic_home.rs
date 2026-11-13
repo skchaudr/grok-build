@@ -198,7 +198,7 @@ fn welcome_shift_tab_reveals_home_session_in_plan_mode() {
     let mut app = test_app();
     maybe_create_home_session(&mut app);
     let home = app.home_session_agent.expect("home session");
-    let effects = leave_home_with(&mut app, &key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+    let effects = leave_home_with(&mut app, &key_event(KeyCode::Char('t'), KeyModifiers::CONTROL | KeyModifiers::SHIFT));
     assert!(!creates_session(&effects));
     assert!(matches!(app.active_view, ActiveView::Agent(id) if id == home));
     let Some(agent) = app.agents.get(&home) else {
@@ -230,7 +230,7 @@ fn welcome_shift_tab_on_bound_home_session_sets_mode_over_acp() {
     maybe_create_home_session(&mut app);
     bind_home_session(&mut app);
     let home = app.home_session_agent.expect("home session");
-    let effects = leave_home_with(&mut app, &key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+    let effects = leave_home_with(&mut app, &key_event(KeyCode::Char('t'), KeyModifiers::CONTROL | KeyModifiers::SHIFT));
     assert!(matches!(app.active_view, ActiveView::Agent(id) if id == home));
     assert!(
         effects.iter().any(|e| matches!(
@@ -245,7 +245,7 @@ fn welcome_shift_tab_honors_always_worktree() {
     let mut app = test_app_git();
     app.new_session_worktree_mode = crate::app::app_view::WorktreeMode::Always;
     assert!(maybe_create_home_session(&mut app).is_empty());
-    let effects = leave_home_with(&mut app, &key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+    let effects = leave_home_with(&mut app, &key_event(KeyCode::Char('t'), KeyModifiers::CONTROL | KeyModifiers::SHIFT));
     assert!(
         effects
             .iter()
@@ -1346,7 +1346,7 @@ fn welcome_shift_tab_off_yolo_notifies_after_session_created() {
             .get(&home_id)
             .is_some_and(|a| a.session.is_yolo())
     );
-    let persist = leave_home_with(&mut app, &key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+    let persist = leave_home_with(&mut app, &key_event(KeyCode::Char('t'), KeyModifiers::CONTROL | KeyModifiers::SHIFT));
     assert!(
         persist.iter().any(|e| matches!(
             e,

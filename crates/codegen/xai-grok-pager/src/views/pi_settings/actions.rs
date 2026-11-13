@@ -106,6 +106,9 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "respect_manual_folds" => Action::SetRespectManualFolds(new),
         "page_flip_on_send" => Action::SetPageFlipOnSend(new),
         "confirm_before_rewind" => Action::SetConfirmBeforeRewind(new),
+        "dashboard_preview" => Action::SetDashboardPreview(new),
+        "subagent_model_inheritance" => Action::SetSubagentModelInheritance(new),
+        "contextual_hints.export_copy" => Action::SetContextualHintExportCopy(new),
         "combine_queued_prompts" => Action::SetCombineQueuedPrompts(new),
         "invert_scroll" => Action::SetInvertScroll(new),
         "show_tips" => Action::SetShowTips(new),
@@ -183,6 +186,8 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &str) -> Option<Ac
         "scroll_mode" => {
             crate::appearance::ScrollMode::from_canonical(choice).map(Action::SetScrollMode)
         }
+        "follow_up_behavior" => crate::appearance::FollowUpBehavior::from_canonical(choice)
+            .map(Action::SetFollowUpBehavior),
         "cancel_turn_key" => match choice {
             "esc" | "ctrl_c" => Some(Action::SetCancelTurnKey(choice.to_string())),
             _ => None,

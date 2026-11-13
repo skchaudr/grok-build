@@ -96,24 +96,6 @@ impl SlashCommand for ThemeCommand {
             description: format!("auto (follow system){auto_active}"),
         }];
 
-        // Transparent Pi themes right after auto for quick access.
-        let transparent_names = ["transparent", "transparent-light"];
-        for meta in pi_theme::list_themes() {
-            if transparent_names.contains(&meta.name.as_str()) {
-                let active = if !is_auto && current_id == meta.id {
-                    " (active)"
-                } else {
-                    ""
-                };
-                items.push(ArgItem {
-                    display: meta.id.clone(),
-                    match_text: format!("{} {}", meta.id, meta.name),
-                    insert_text: meta.id.clone(),
-                    description: format!("Pi builtin{active}"),
-                });
-            }
-        }
-
         // Concrete Grok themes — only show "(active)" when not in auto/custom.
 
         items.extend(available.iter().map(|kind| {
@@ -130,11 +112,8 @@ impl SlashCommand for ThemeCommand {
             }
         }));
 
-        // Remaining Pi themes (embedded + discovered), excluding transparents.
+        // Pi themes (embedded + discovered) after the Grok rows, so the `terminal` row keeps ranking first for its `transparent` alias.
         for meta in pi_theme::list_themes() {
-            if transparent_names.contains(&meta.name.as_str()) {
-                continue;
-            }
             let active = if !is_auto && current_id == meta.id {
                 " (active)"
             } else {
@@ -194,13 +173,22 @@ impl SlashCommand for ThemeCommand {
             }
             return CommandResult::Error(format!("Unknown Pi theme: {trimmed}"));
         }
-        if pi_theme::list_themes().iter().any(|t| t.name == trimmed) {
+        // A gated Grok name or alias (`terminal`, `transparent`) must not fall through to a same-named Pi theme.
+        let lower = trimmed.to_lowercase();
+        let grok_claims = ThemeKind::ALL
+            .iter()
+            .any(|k| k.display_name() == lower || k.aliases().contains(&lower.as_str()));
+        if !grok_claims && pi_theme::list_themes().iter().any(|t| t.name == trimmed) {
             let id = pi_theme::theme_id(trimmed);
             return CommandResult::Action(Action::SetTheme(id));
         }
 
         let mut all_names: Vec<String> = vec!["auto".into()];
-        all_names.extend(ThemeKind::ALL.iter().map(|k| k.display_name().to_string()));
+        all_names.extend(
+            ThemeKind::selectable()
+                .iter()
+                .map(|k| k.display_name().to_string()),
+        );
         all_names.extend(pi_theme::list_themes().into_iter().map(|t| t.id));
         CommandResult::Error(format!(
             "Unknown theme: {}. Available: {}",

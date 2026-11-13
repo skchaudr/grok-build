@@ -967,6 +967,7 @@ async fn persist_setting_unknown_key_returns_err() {
 /// Type-mismatch returns Err, not panic: the parser runs inside spawned tasks.
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_pi_todo() {
+    crate::settings::register_pi_host_features_for_test();
     use crate::settings::SettingValue;
     let r = persist_setting("pi_todo", SettingValue::String("nope".into())).await;
     let err = r.expect_err("pi_todo with String payload must return Err");
@@ -978,6 +979,7 @@ async fn persist_setting_type_mismatch_errors_pi_todo() {
 
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_pi_subagents() {
+    crate::settings::register_pi_host_features_for_test();
     use crate::settings::SettingValue;
     let r = persist_setting("pi_subagents", SettingValue::String("nope".into())).await;
     let err = r.expect_err("pi_subagents with String payload must return Err");

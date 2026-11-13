@@ -1939,6 +1939,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 app,
             );
         }
+        "prompt_cursor" => {
+            let _ = dispatch(Action::SetPromptCursor("bar".to_string()), app);
+        }
         "thinking_border_colors" => {
             let _ = dispatch(Action::SetThinkingBorderColors(false), app);
         }
@@ -1970,6 +1973,7 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
 }
 #[test]
 fn set_pi_todo_persists_restart_required_toggle() {
+    crate::settings::register_pi_host_features_for_test();
     let mut app = test_app_with_agent();
     app.current_ui.pi_todo = true;
 
@@ -1996,6 +2000,7 @@ fn set_pi_todo_persists_restart_required_toggle() {
 
 #[test]
 fn set_pi_subagents_persists_restart_required_toggle() {
+    crate::settings::register_pi_host_features_for_test();
     let mut app = test_app_with_agent();
     app.current_ui.pi_subagents = true;
 

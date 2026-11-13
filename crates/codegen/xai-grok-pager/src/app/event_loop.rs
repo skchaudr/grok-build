@@ -4769,7 +4769,7 @@ mod tests {
             let mut app = crate::app::app_view::tests::test_app();
             app.default_yolo = initial_yolo;
             app.current_ui.permission_mode = Some(initial_mode.into());
-            let event = Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+            let event = Event::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL | KeyModifiers::SHIFT));
             let effects = dispatch_then_forward(
                 Action::LeaveHome,
                 &event,

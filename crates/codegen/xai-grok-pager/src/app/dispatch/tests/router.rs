@@ -2495,6 +2495,14 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
                          truth.",
                 );
             }
+            ("prompt_cursor", SettingKind::String { default, .. }) => {
+                assert_eq!(
+                    *default,
+                    app.appearance.prompt.cursor.to_config_value(),
+                    "registry default for `prompt_cursor` drifts from the app's default \
+                     prompt appearance initializer",
+                );
+            }
             ("side_by_side_edit", SettingKind::Bool { default }) => {
                 assert_eq!(
                     *default,

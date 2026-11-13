@@ -37,6 +37,20 @@ fn make_state() -> SettingsModalState {
     )
 }
 
+fn row_of(s: &SettingsModalState, key: &str) -> usize {
+    s.rows
+        .iter()
+        .position(|r| matches!(r, RowEntry::Setting { key: k, .. } if *k == key))
+        .unwrap_or_else(|| panic!("no row for key `{key}`"))
+}
+
+/// Default-registry state focused on `compact_mode` (the Appearance tab leads with the Theme rows now).
+fn make_state_on_compact_mode() -> SettingsModalState {
+    let mut s = make_state();
+    assert!(s.focus_key("compact_mode"));
+    s
+}
+
 /// The contextual-hints group renders as a single top-level row (children hidden).
 /// Enter opens the sub-sheet, Space there toggles the focused child via the typed action, and Esc returns to Browse.
 #[test]
@@ -688,6 +702,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
         headers,
         vec![
             &SettingCategory::Appearance,
+            &SettingCategory::Popups,
             &SettingCategory::Mouse,
             &SettingCategory::Editor,
             &SettingCategory::Agent,
@@ -813,7 +828,7 @@ fn initial_selection_skips_header() {
         panic!("selected row {} missing", s.selected);
     };
     match row {
-        RowEntry::Setting { key, .. } => assert_eq!(*key, "compact_mode"),
+        RowEntry::Setting { key, .. } => assert_eq!(*key, "theme"),
         RowEntry::Header { .. } | RowEntry::Section { .. } => {
             panic!("selection landed on a non-setting row")
         }
@@ -828,11 +843,12 @@ fn j_advances_past_setting_rows() {
     let mut s = make_state();
     let key1 = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
     // The initial selection is the first selectable row.
+    // `j` walks the active tab only.
     let setting_keys: Vec<SettingKey> = s
-        .rows
+        .filtered_indices()
         .iter()
-        .filter_map(|r| {
-            if let RowEntry::Setting { key, .. } = r {
+        .filter_map(|&i| {
+            if let RowEntry::Setting { key, .. } = &s.rows[i] {
                 Some(*key)
             } else {
                 None
@@ -863,7 +879,7 @@ fn j_advances_past_setting_rows() {
 
 #[test]
 fn space_on_compact_mode_dispatches_set_compact_mode_true() {
-    let mut s = make_state();
+    let mut s = make_state_on_compact_mode();
     // Default compact_mode is false, so Space dispatches Set(true)
     let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
     let outcome = handle_settings_key(&mut s, &space);
@@ -875,7 +891,7 @@ fn space_on_compact_mode_dispatches_set_compact_mode_true() {
 
 #[test]
 fn enter_on_compact_mode_also_toggles() {
-    let mut s = make_state();
+    let mut s = make_state_on_compact_mode();
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
     let outcome = handle_settings_key(&mut s, &enter);
     match outcome {
@@ -991,7 +1007,8 @@ fn browse_footer_advertises_i_search_under_vim() {
 #[test]
 fn mouse_click_on_bool_row_dispatches_toggle() {
     // We can't render to a real Buffer here without a real terminal, but we can hand-set the row_rects to simulate the post-render state
-    let mut s = make_state();
+    let mut s = make_state_on_compact_mode();
+    let compact = row_of(&s, "compact_mode");
     s.list_area = Rect {
         x: 0,
         y: 0,
@@ -999,19 +1016,8 @@ fn mouse_click_on_bool_row_dispatches_toggle() {
         height: 10,
     };
     s.row_rects.resize(s.rows.len(), Rect::default());
-    // Row 0 is the Appearance header.
-    let Some(slot) = s.row_rects.get_mut(0) else {
-        panic!("row_rects[0] missing");
-    };
-    *slot = Rect {
-        x: 0,
-        y: 0,
-        width: 80,
-        height: 1,
-    };
-    // Row 1 is compact_mode.
-    let Some(slot) = s.row_rects.get_mut(1) else {
-        panic!("row_rects[1] missing");
+    let Some(slot) = s.row_rects.get_mut(compact) else {
+        panic!("row_rects[compact] missing");
     };
     *slot = Rect {
         x: 0,
@@ -1122,7 +1128,8 @@ fn settings_list_row_bg_reset_palette_is_bandless_with_reverse_overlay() {
 /// Mirrors how the scrollback tracks `hovered_entry`.
 #[test]
 fn mouse_moved_over_row_sets_hover_row() {
-    let mut s = make_state();
+    let mut s = make_state_on_compact_mode();
+    let compact = row_of(&s, "compact_mode");
     s.list_area = Rect {
         x: 0,
         y: 0,
@@ -1130,18 +1137,9 @@ fn mouse_moved_over_row_sets_hover_row() {
         height: 10,
     };
     s.row_rects.resize(s.rows.len(), Rect::default());
-    // Row 0 is a header (Appearance); row 1 is the first setting (compact_mode). Place row 1 at y=1 so the hover-row position math is unambiguous.
-    let Some(slot) = s.row_rects.get_mut(0) else {
-        panic!("row_rects[0] missing");
-    };
-    *slot = Rect {
-        x: 0,
-        y: 0,
-        width: 80,
-        height: 1,
-    };
-    let Some(slot) = s.row_rects.get_mut(1) else {
-        panic!("row_rects[1] missing");
+    // Place compact_mode at y=1 so the hover-row position math is unambiguous.
+    let Some(slot) = s.row_rects.get_mut(compact) else {
+        panic!("row_rects[compact] missing");
     };
     *slot = Rect {
         x: 0,
@@ -1159,8 +1157,8 @@ fn mouse_moved_over_row_sets_hover_row() {
     );
     assert_eq!(
         s.hover_row,
-        Some(1),
-        "Moved at (5,1) must land on row 1 (compact_mode)",
+        Some(compact),
+        "Moved at (5,1) must land on the compact_mode row",
     );
 
     // A second Moved event at the same coordinates is a no-op (hover_row already matches, so no Changed)
@@ -1175,7 +1173,8 @@ fn mouse_moved_over_row_sets_hover_row() {
 /// Mirrors the scrollback's behaviour when the mouse drifts off the entry list.
 #[test]
 fn mouse_moved_outside_modal_clears_hover() {
-    let mut s = make_state();
+    let mut s = make_state_on_compact_mode();
+    let compact = row_of(&s, "compact_mode");
     s.list_area = Rect {
         x: 0,
         y: 0,
@@ -1183,8 +1182,8 @@ fn mouse_moved_outside_modal_clears_hover() {
         height: 10,
     };
     s.row_rects.resize(s.rows.len(), Rect::default());
-    let Some(slot) = s.row_rects.get_mut(1) else {
-        panic!("row_rects[1] missing");
+    let Some(slot) = s.row_rects.get_mut(compact) else {
+        panic!("row_rects[compact] missing");
     };
     *slot = Rect {
         x: 0,
@@ -1195,7 +1194,7 @@ fn mouse_moved_outside_modal_clears_hover() {
 
     // Seed hover at row 1.
     let _ = handle_settings_mouse(&mut s, MouseEventKind::Moved, 5, 1);
-    assert_eq!(s.hover_row, Some(1));
+    assert_eq!(s.hover_row, Some(compact));
 
     // Move far outside any row's rect.
     let outcome = handle_settings_mouse(&mut s, MouseEventKind::Moved, 5, 50);
@@ -3018,7 +3017,7 @@ fn browse_enter_on_enum_row_transitions_to_picking_enum() {
 /// `try_enter_picking_enum` returns false and the fallthrough Bool-toggle path takes over.
 #[test]
 fn browse_enter_on_bool_row_does_not_enter_picking_enum() {
-    let mut s = make_state(); // default registry, all Bool.
+    let mut s = make_state_on_compact_mode(); // default registry, all Bool.
     // compact_mode is the initial selection.
     let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     // Bool toggle dispatches an Action (not Changed).
@@ -3066,7 +3065,7 @@ fn try_enter_picking_enum_seeds_choices_idx_from_current_value() {
 /// The Bool case in `make_state()` is the canonical non-Enum scenario.
 #[test]
 fn try_enter_picking_enum_returns_false_for_non_enum_row() {
-    let mut s = make_state();
+    let mut s = make_state_on_compact_mode();
     assert!(matches!(s.mode(), SettingsModalMode::Browse));
     assert!(
         !s.try_enter_picking_enum(),
@@ -6027,12 +6026,8 @@ fn tip_line_has_blank_row_above() {
 /// Panics if the key isn't found or isn't an enum.
 fn enter_picker_for(key: &'static str) -> SettingsModalState {
     let mut s = make_state();
-    let row_idx = s
-        .rows
-        .iter()
-        .position(|r| matches!(r, RowEntry::Setting { key: k, .. } if *k == key))
-        .unwrap_or_else(|| panic!("no row for key `{key}` in default registry"));
-    assert!(s.select_at(row_idx), "select_at({row_idx})");
+    // `focus_key` brings the key's tab forward; `select_at` is a no-op when the row is already selected.
+    assert!(s.focus_key(key), "no row for key `{key}` in default registry");
     assert!(
         s.try_enter_picking_enum(),
         "try_enter_picking_enum failed for {key} — non-enum?",
