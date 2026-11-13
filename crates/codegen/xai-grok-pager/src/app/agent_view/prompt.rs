@@ -823,29 +823,23 @@ impl AgentView {
             return Some(InputOutcome::Changed);
         }
 
-        // Mid-turn running with the F2 cancellation policy set to Ctrl+C:
-        // swallow Esc (do not cancel or arm clear/rewind). A streaming wake
-        // turn follows the same policy as a running turn (the pane state is
-        // Idle only because wake turns are not adopted); once its cancel was
-        // sent it follows the cancelling retry below.
-        if (self.session.state.is_turn_running()
-            || (self.wake_turn_active() && !self.wake_turn_cancelling()))
-            && !crate::app::esc_cancels_turn()
-        {
-            return Some(InputOutcome::Changed);
-        }
-        // Mid-turn with Esc cancellation enabled: cancel immediately from prompt or
-        // scrollback, even with a draft. Also — in every mode — while already
-        // cancelling, so a lost cancel notification is re-sent (Ctrl+C
-        // escalates to Quit instead). Push the grace deadline out so an Esc
-        // mash past the cancel cannot silently arm the rewind picker below.
-        if self.session.state.is_turn_running()
-            || self.wake_turn_active()
-            || self.any_cancel_pending()
-        {
-            self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
+        // Mid-turn (running or already cancelling), Esc cancels only when the F2 policy says so
+        // A streaming wake turn follows the same policy as a running turn (the pane state is Idle only because wake turns are not adopted)
+        // Push the grace deadline out so an Esc mash past the turn's end cannot silently arm the rewind picker below
+        if self.stoppable_activity_running() || self.any_cancel_pending() {
+            if self.stoppable_activity_running() {
+                if crate::app::esc_cancels_turn() {
+                    self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
+                    self.suppress_rewind_arm(std::time::Instant::now());
+                    return Some(InputOutcome::Action(Action::CancelTurn));
+                }
+                if let Some(cancel_key) = registry.key_for(ActionId::CancelTurn) {
+                    let cancel_key = cancel_key.display();
+                    self.show_cancel_key_hint(&format!("Press {cancel_key} to cancel the turn"));
+                }
+            }
             self.suppress_rewind_arm(std::time::Instant::now());
-            return Some(InputOutcome::Action(Action::CancelTurn));
+            return Some(InputOutcome::Changed);
         }
 
         // CLEAR mutates the composer (drops text/image chips), so it fires only while the PROMPT pane owns keys

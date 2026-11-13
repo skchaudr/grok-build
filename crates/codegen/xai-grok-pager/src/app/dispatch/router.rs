@@ -458,7 +458,8 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             images,
             image_notice,
         } => {
-            if app.external_agent {
+            // Pi implements native interjects; other external agents (`grok claude`) cancel-and-send.
+            if app.is_pi_session() {
                 app.pending_image_notices.extend(image_notice);
                 super::queue::with_held_queue_flush(app, |app| {
                     dispatch_interject(app, text, images)

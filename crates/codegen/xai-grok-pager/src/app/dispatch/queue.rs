@@ -3074,6 +3074,7 @@ mod tests {
     fn external_send_prompt_now_uses_steering_interject() {
         let mut app = test_app_with_agent();
         app.external_agent = true;
+        app.external_agent_label = Some("pi".into());
         let id = AgentId(0);
         app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
         let effects = dispatch(

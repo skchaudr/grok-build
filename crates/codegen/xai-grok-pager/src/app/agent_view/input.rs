@@ -2564,6 +2564,7 @@ mod mid_turn_esc_hint_tests {
     }
     #[test]
     fn standalone_subagent_view_uses_normal_turn_cancel_policy() {
+        crate::app::set_esc_cancels_turn_for_test(true);
         let mut agent = running_agent(false);
         agent.is_subagent_view = true;
         agent.active_pane = AgentPane::Scrollback;

@@ -206,9 +206,23 @@ pub(crate) fn set_minimal_mode_active_for_test(on: bool) {
 }
 /// Live mirror for `[ui].cancel_turn_key`.
 /// `true` = bare Esc may cancel a running turn; `false` = Ctrl+C is required.
-/// Default is Esc. F2 updates this atomically so input routing and shortcut
+/// Default is Ctrl+C (the fork swallows mid-turn Esc). F2 updates this atomically so input routing and shortcut
 /// hints change on the next keypress/frame without rebuilding agents.
-pub(crate) static ESC_CANCELS_TURN: AtomicBool = AtomicBool::new(true);
+pub(crate) static ESC_CANCELS_TURN: AtomicBool = AtomicBool::new(false);
+// Tests run one per thread; a thread-local keeps policy overrides from racing other tests.
+#[cfg(test)]
+thread_local! {
+    static ESC_CANCELS_TURN_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(test)]
+pub(crate) fn set_esc_cancels_turn_for_test(on: bool) {
+    ESC_CANCELS_TURN_TEST.set(on);
+}
+#[cfg(test)]
+pub(crate) fn esc_cancels_turn() -> bool {
+    ESC_CANCELS_TURN_TEST.get()
+}
+#[cfg(not(test))]
 pub(crate) fn esc_cancels_turn() -> bool {
     ESC_CANCELS_TURN.load(Ordering::Acquire)
 }

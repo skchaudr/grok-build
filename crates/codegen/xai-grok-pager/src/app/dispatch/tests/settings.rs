@@ -1735,7 +1735,7 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             let _ = dispatch(Action::SetFollowUpBehavior(away), app);
         }
         "cancel_turn_key" => {
-            let _ = dispatch(Action::SetCancelTurnKey("ctrl_c".to_string()), app);
+            let _ = dispatch(Action::SetCancelTurnKey("esc".to_string()), app);
         }
         "simple_mode" => {
             let _ = dispatch(Action::SetSimpleMode(false), app);
@@ -1938,6 +1938,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 },
                 app,
             );
+        }
+        "thinking_border_colors" => {
+            let _ = dispatch(Action::SetThinkingBorderColors(false), app);
         }
         "pi_subagents" => {
             let _ = dispatch(

@@ -1711,7 +1711,7 @@ pub(crate) async fn run(
         std::sync::atomic::Ordering::Release,
     );
     // Seed the F2-configurable running-turn cancellation gesture. Unset and
-    // unknown values resolve to Esc in UiConfig.
+    // unknown values resolve to Ctrl+C in UiConfig.
     crate::app::ESC_CANCELS_TURN.store(
         app.current_ui.cancel_turn_key() == "esc",
         std::sync::atomic::Ordering::Release,

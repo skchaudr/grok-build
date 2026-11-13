@@ -653,12 +653,12 @@ impl UiConfig {
         self.follow_up_behavior() == "steer"
     }
 
-    pub const CANCEL_TURN_KEY_DEFAULT: &'static str = "esc";
+    pub const CANCEL_TURN_KEY_DEFAULT: &'static str = "ctrl_c";
 
-    /// Resolved running-turn cancellation key. Unknown values fall back to Esc.
+    /// Resolved running-turn cancellation key. Unknown values fall back to Ctrl+C.
     pub fn cancel_turn_key(&self) -> &'static str {
         match self.cancel_turn_key.as_deref() {
-            Some("ctrl_c") => "ctrl_c",
+            Some("esc") => "esc",
             _ => Self::CANCEL_TURN_KEY_DEFAULT,
         }
     }
@@ -746,21 +746,21 @@ mod tests {
     }
 
     #[test]
-    fn cancel_turn_key_defaults_to_esc_and_accepts_ctrl_c() {
+    fn cancel_turn_key_defaults_to_ctrl_c_and_accepts_esc() {
         let default = UiConfig::default();
-        assert_eq!(default.cancel_turn_key(), "esc");
+        assert_eq!(default.cancel_turn_key(), "ctrl_c");
 
-        let ctrl_c = UiConfig {
-            cancel_turn_key: Some("ctrl_c".into()),
+        let esc = UiConfig {
+            cancel_turn_key: Some("esc".into()),
             ..Default::default()
         };
-        assert_eq!(ctrl_c.cancel_turn_key(), "ctrl_c");
+        assert_eq!(esc.cancel_turn_key(), "esc");
 
         let unknown = UiConfig {
             cancel_turn_key: Some("other".into()),
             ..Default::default()
         };
-        assert_eq!(unknown.cancel_turn_key(), "esc");
+        assert_eq!(unknown.cancel_turn_key(), "ctrl_c");
     }
 
     #[test]
