@@ -1,0 +1,27 @@
+---
+source: crates/codegen/xai-grok-pager/src/app/agent_view/side_panel_tests.rs
+assertion_line: 101
+expression: "draw(&mut agent, 110, 24)"
+---
+  /work/grok-build                                                                  84K / 200K │ [Dashboard]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                      │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────── Grok 4.5 ─╯
+
+  Shift+Tab:mode  │  Ctrl+x:shortcuts

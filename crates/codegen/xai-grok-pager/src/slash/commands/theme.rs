@@ -128,7 +128,8 @@ impl SlashCommand for ThemeCommand {
             };
             items.push(ArgItem {
                 display: meta.id.clone(),
-                match_text: format!("{} {}", meta.id, meta.name),
+                // Id only: a bare-name copy ties the whole-word score of a Grok alias row (`transparent`) and sorts ahead of it.
+                match_text: meta.id.clone(),
                 insert_text: meta.id.clone(),
                 description: format!("{source}{active}"),
             });
@@ -478,7 +479,11 @@ mod tests {
                     CommandResult::Error(msg) => {
                         assert!(msg.contains("Unknown theme"), "got: {msg}");
                         let listing = msg.split("Available:").nth(1).expect("listing");
-                        assert!(!listing.contains("terminal"), "gated name listed: {msg}");
+                        // Pi ids such as `pi:dark-terminal` legitimately contain the word.
+                        assert!(
+                            !listing.split(',').any(|n| n.trim() == "terminal"),
+                            "gated name listed: {msg}"
+                        );
                     }
                     other => panic!("expected CommandResult::Error, got {other:?}"),
                 }

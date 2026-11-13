@@ -789,7 +789,7 @@ mod tests {
         assert_eq!(
             split_model_rest(&state, "Grok 4.7 Extra High")
                 .map(|(model, token)| { (model.0.to_string(), token.to_string()) }),
-            Some(("grok-4.7".to_string(), "Extra High".to_string()))
+            Some(("test::grok-4.7".to_string(), "Extra High".to_string()))
         );
         assert_eq!(
             split_model_rest(&state, "Grok 4.7 high").map(|(_, token)| token),
@@ -797,9 +797,9 @@ mod tests {
         );
         assert!(split_model_rest(&state, "Grok 4.7").is_none());
         assert_eq!(
-            split_model_rest(&state, "grok-4.7 Extra High")
+            split_model_rest(&state, "test/grok-4.7 Extra High")
                 .map(|(model, token)| (model.0.to_string(), token.to_string())),
-            Some(("grok-4.7".to_string(), "Extra High".to_string()))
+            Some(("test::grok-4.7".to_string(), "Extra High".to_string()))
         );
     }
 
@@ -879,7 +879,7 @@ mod tests {
             .expect("model rows while the partial can't start a window");
 
         assert!(
-            items.iter().any(|item| item.insert_text == "Foo Bar"),
+            items.iter().any(|item| item.insert_text == "test/foo-bar"),
             "items={items:?}"
         );
     }
@@ -1058,7 +1058,7 @@ mod tests {
             .find(|i| i.insert_text == "test/grok-4.5")
             .unwrap();
         assert_eq!(plain.insert_text, "test/grok-4.5");
-        assert!(plain.display.contains("grok-4.5"));
+        assert!(plain.display.contains("Grok 4.5"));
         assert!(plain.display.contains("(current)"));
         assert_eq!(plain.description, "test");
     }

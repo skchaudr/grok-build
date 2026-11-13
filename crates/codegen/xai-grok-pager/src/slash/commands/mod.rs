@@ -420,12 +420,43 @@ mod tests {
             "create-workflow",
             "workflows",
             "yolo",
+            "plugin",
+            "context-window",
+            "reload",
+            "clone",
+            "tree",
+            "tree-map",
+            "notify",
+            "plan-mode",
+            "toggle-plan",
+            "plan-toggle",
+            "memory",
+            "mem",
+            "flush",
+            "dream",
+            "session",
+            "traces",
+            "hotkeys",
+            "shortcuts",
+            "keys",
+            "scoped-models",
+            "eval-display",
+            "pi-config",
+            "pi-resources",
+            "pi-models",
+            "model-config",
+            "models-config",
+            "pi-shortcut-manager",
+            "review-session",
+            "review-message",
         ];
-        for command in builtin_commands() {
-            for key in std::iter::once(command.name()).chain(command.aliases().iter().copied()) {
-                assert!(SHELL_RESERVED.contains(&key), "unreserved pager key {key}");
-            }
-        }
+        let unreserved: Vec<String> = builtin_commands()
+            .iter()
+            .flat_map(|c| std::iter::once(c.name()).chain(c.aliases().iter().copied()))
+            .filter(|key| !SHELL_RESERVED.contains(key))
+            .map(str::to_owned)
+            .collect();
+        assert!(unreserved.is_empty(), "unreserved pager keys {unreserved:?}");
     }
     #[test]
     fn builtin_registry_lookup_by_alias() {
@@ -596,16 +627,24 @@ mod tests {
         let models = sample_models();
         let mut ctx = make_ctx(&models);
         let cmd = model::ModelCommand;
+        // grok-pi: a bare `/model` opens the picker instead of erroring.
         let result = cmd.run(&mut ctx, "");
-        assert!(matches!(result, CommandResult::Error(_)));
+        assert!(matches!(
+            result,
+            CommandResult::Action(Action::OpenModelPicker)
+        ));
     }
     #[test]
     fn model_whitespace_only_arg_returns_error() {
         let models = sample_models();
         let mut ctx = make_ctx(&models);
         let cmd = model::ModelCommand;
+        // grok-pi: a bare `/model` opens the picker instead of erroring.
         let result = cmd.run(&mut ctx, "   ");
-        assert!(matches!(result, CommandResult::Error(_)));
+        assert!(matches!(
+            result,
+            CommandResult::Action(Action::OpenModelPicker)
+        ));
     }
     #[test]
     fn model_suggest_args_returns_available_models() {
@@ -628,12 +667,12 @@ mod tests {
         assert!(
             items
                 .iter()
-                .any(|i| i.display.starts_with("Grok 4.5") && i.insert_text == "Grok 4.5")
+                .any(|i| i.display.starts_with("Grok 4.5") && i.insert_text == "grok-4.5")
         );
         assert!(
             items
                 .iter()
-                .any(|i| i.display == "Grok 4.3" && i.insert_text == "Grok 4.3")
+                .any(|i| i.display == "Grok 4.3" && i.insert_text == "grok-4.3")
         );
     }
     #[test]
