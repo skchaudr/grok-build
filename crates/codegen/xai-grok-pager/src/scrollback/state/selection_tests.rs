@@ -633,6 +633,10 @@ fn toggle_tool_output_expansion_only_changes_tool_calls() {
         "tool output",
         None::<String>,
     ));
+    h.state
+        .get_by_id_mut(tool_id)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
     h.frame();
 
     h.state

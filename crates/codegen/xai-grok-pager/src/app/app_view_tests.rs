@@ -2730,6 +2730,12 @@ fn external_ctrl_o_defaults_to_write_edit() {
                 None::<String>,
             ));
 
+    let execute_before = app.agents[&id]
+        .scrollback
+        .get_by_id(execute_id)
+        .unwrap()
+        .display_mode;
+
     let out = app.handle_input(&key_event(KeyCode::Char('o'), KeyModifiers::CONTROL));
 
     assert!(matches!(out, InputOutcome::Changed));
@@ -2740,7 +2746,8 @@ fn external_ctrl_o_defaults_to_write_edit() {
     );
     assert_eq!(
         scrollback.get_by_id(execute_id).unwrap().display_mode,
-        crate::scrollback::DisplayMode::Expanded
+        execute_before,
+        "write_edit scope leaves other tools alone"
     );
 }
 

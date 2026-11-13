@@ -199,7 +199,7 @@ fn render_diff_hunks_core(
             };
             let sep_line = Line::from(vec![
                 Span::raw(indent),
-                Span::styled(config.hunk_separator.clone(), theme.muted()),
+                Span::styled(sep_text, theme.muted()),
             ]);
             lines.push(DiffLineOutput {
                 line: sep_line,

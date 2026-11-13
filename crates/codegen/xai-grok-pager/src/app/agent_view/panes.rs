@@ -1592,9 +1592,13 @@ mod scroll_granularity_tests {
         /// Fresh scrollback with one collapsed Edit entry at index 0.
         fn agent_with_collapsed_edit() -> AgentView {
             let mut agent = make_agent();
-            agent
+            let id = agent
                 .scrollback
                 .push_block(crate::scrollback::RenderBlock::edit_with_sample_hunk("src/main.rs"));
+            // Edits open expanded by default; the popup only backs a collapsed row.
+            if let Some(entry) = agent.scrollback.get_by_id_mut(id) {
+                entry.set_display_mode(crate::scrollback::DisplayMode::Collapsed);
+            }
             agent
         }
 

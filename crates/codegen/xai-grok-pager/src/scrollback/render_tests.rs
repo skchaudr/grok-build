@@ -1290,8 +1290,8 @@ fn message_block_content_width_subtracts_timestamp_reservation() {
     let block = &at(&result.selection_model.visible_blocks, 0);
     assert_eq!(
         block.content_width,
-        pane_content_width.saturating_sub(10),
-        "AgentMessage should reserve 10 cols for the timestamp"
+        pane_content_width.saturating_sub(crate::scrollback::TIMESTAMP_RESERVE),
+        "AgentMessage should reserve the timestamp columns"
     );
 
     // The lines registered in the resolved model came from the cached output computed at `block.content_width`
@@ -3063,7 +3063,8 @@ fn overlay_pretty_link_url_wraps_across_rows() {
     let entries = vec![make_markdown_entry(&markdown)];
 
     // Picked so the rendered link `text (url)` wraps multiple times.
-    let viewport = Rect::new(0, 0, 50, 20);
+    // (50 cols at the old 10-col timestamp reserve; the reserve is TIMESTAMP_RESERVE now)
+    let viewport = Rect::new(0, 0, 40 + crate::scrollback::TIMESTAMP_RESERVE, 20);
     let result = render_with_scratch(&entries, viewport, 0, None);
 
     // This is a plain paragraph (no `subsequent_indent`), so the combined fragment widths must equal the URL's display

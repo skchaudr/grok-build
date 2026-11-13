@@ -259,16 +259,12 @@ impl UserPromptBlock {
     /// - RGB themes: `bg_light` (matches the fullscreen prompt band).
     fn prompt_band_color_for(
         theme: &Theme,
-        is_selected: bool,
+        _is_selected: bool,
         terminal_native: bool,
     ) -> Option<ratatui::style::Color> {
         use ratatui::style::Color;
         if terminal_native {
-            Some(if is_selected {
-                Color::Gray
-            } else {
-                Color::DarkGray
-            })
+            None
         } else {
             match theme.bg_light {
                 Color::Reset => None,
@@ -281,7 +277,7 @@ impl UserPromptBlock {
     /// Cyan pointer when `accent_user` is Reset so OSC 12 leaves the host cursor alone.
     fn prompt_styles(theme: &Theme, terminal_native: bool) -> (Style, Style, Style) {
         let prefix_color = match theme.accent_user {
-            ratatui::style::Color::Reset => ratatui::style::Color::Cyan,
+            ratatui::style::Color::Reset if terminal_native => ratatui::style::Color::Cyan,
             c => c,
         };
         let mut prefix_style = theme.fg(prefix_color);
@@ -308,7 +304,17 @@ impl UserPromptBlock {
         let theme = Theme::current();
         // Minimal mode engages this lock; read it here instead of app state.
         let terminal_native = crate::theme::cache::terminal_native_locked();
-        let (prefix_style, text_style, skill_style) = Self::prompt_styles(&theme, terminal_native);
+        // The terminal theme (fullscreen) renders prompts bandless: bold
+        // primary text instead of a bright-black band, which can sit too
+        // close to the default fg on some profiles. Minimal keeps its band.
+        let attribute_emphasis = !terminal_native && crate::theme::cache::terminal_native_active();
+        let (mut prefix_style, mut text_style, mut skill_style) =
+            Self::prompt_styles(&theme, terminal_native);
+        if attribute_emphasis {
+            prefix_style = prefix_style.add_modifier(Modifier::BOLD);
+            text_style = text_style.add_modifier(Modifier::BOLD);
+            skill_style = skill_style.add_modifier(Modifier::BOLD);
+        }
         let band = Self::prompt_band_color_for(&theme, is_selected, terminal_native);
         // Semantic line bg (not a "panel") so it survives minimal's flat_background.
         let with_band = |line: BlockLine| -> BlockLine {

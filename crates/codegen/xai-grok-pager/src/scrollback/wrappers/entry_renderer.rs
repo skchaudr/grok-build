@@ -970,13 +970,13 @@ mod tests {
         };
 
         let words = ScrollbackEntry::new(RenderBlock::user_prompt("hello world foo bar baz"));
-        let (empty, sep) = assert_joiners(&words, 24);
+        let (empty, sep) = assert_joiners(&words, 14 + crate::scrollback::TIMESTAMP_RESERVE);
         assert!(sep, "precondition: word wrap must produce a space joiner");
         assert!(!empty, "word wrap must not use empty joiners at this width");
 
         let path = "falcon_missions_nrol97_trajectory_nrol97.mat_unbreakable";
         let midword = ScrollbackEntry::new(RenderBlock::agent_message(path));
-        let (empty, _) = assert_joiners(&midword, 20);
+        let (empty, _) = assert_joiners(&midword, 10 + crate::scrollback::TIMESTAMP_RESERVE);
         assert!(
             empty,
             "unbreakable path must produce empty mid-word joiners"
