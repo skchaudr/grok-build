@@ -228,7 +228,7 @@ pub(super) fn dispatch_open_dashboard(app: &mut AppView) -> Vec<Effect> {
     }
     // External hosts own their session store. Pi projects its catalog through
     // the existing ACP extension seam rather than using Grok's local scanner.
-    if app.external_agent {
+    if app.external_agent && crate::slash::external_common::is_pi_label(app.agent_label(None)) {
         return vec![Effect::FetchExternalSessionCatalog {
             cwd: app.cwd.clone(),
             all: false,

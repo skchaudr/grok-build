@@ -1892,7 +1892,9 @@ pub(in crate::app::dispatch) fn dispatch_show_session_picker(app: &mut AppView) 
         } = &mut modal
         {
             *state = crate::views::picker::PickerState::input_active();
-            *loading = external_agent;
+            if external_agent {
+                *loading = true;
+            }
             *source_filter = if external_agent {
                 crate::views::session_picker::SourceFilter::External
             } else {

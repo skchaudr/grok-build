@@ -1011,9 +1011,9 @@ fn settings_slash_from_home_opens_settings() {
     assert!(
         app.agents.get(&id).is_some_and(|a| matches!(
             a.active_modal,
-            Some(crate::views::modal::ActiveModal::Settings { .. })
+            Some(crate::views::modal::ActiveModal::PiSettings { .. })
         )),
-        "/settings must open the modal"
+        "/settings must open the settings panel (the grok-pi F2 panel is the settings UI)"
     );
 }
 #[test]
