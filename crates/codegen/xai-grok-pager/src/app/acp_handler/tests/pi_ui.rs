@@ -134,6 +134,8 @@ fn pi_info_notify_goes_to_scrollback() {
 #[test]
 fn pi_session_catalog_fills_the_open_resume_picker() {
     let mut app = make_app_with_agent("sess-pi");
+    app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
     app.agents.get_mut(&AgentId(0)).unwrap().active_modal = Some(crate::views::modal::session_picker_modal(None));
     assert!(handle_ext_notification(
         &pi(

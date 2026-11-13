@@ -911,9 +911,11 @@ mod tests {
             registry.lookup(&ctrl_r, When::ScrollbackFocused),
             Some(ActionId::ToggleMouseCapture)
         );
-        // Not on agent/prompt contexts (Ctrl+R is deliberately unbound there;
-        // agent keeps the model picker on Ctrl+L).
-        assert_eq!(registry.lookup(&ctrl_r, When::AgentScreen), None);
+        // On the agent screen Ctrl+R stays the session picker (the model picker is on Ctrl+L).
+        assert_eq!(
+            registry.lookup(&ctrl_r, When::AgentScreen),
+            Some(ActionId::OpenSessions)
+        );
         assert_eq!(registry.lookup(&ctrl_r, When::PromptFocused), None);
         let ctrl_l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
         assert_eq!(

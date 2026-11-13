@@ -765,6 +765,22 @@ impl AgentView {
                 _ => InputOutcome::Changed,
             };
         }
+        // In-place prompt edit owns keys, mouse and paste while it is open; paste goes in raw (never touches the composer).
+        if self.inline_edit.is_some() {
+            return match ev {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    self.handle_inline_edit_key(key)
+                }
+                Event::Mouse(mouse) => self.handle_inline_edit_mouse(mouse),
+                Event::Paste(text) => {
+                    if let Some(edit) = self.inline_edit.as_mut() {
+                        edit.textarea.insert_str(text);
+                    }
+                    InputOutcome::Changed
+                }
+                _ => InputOutcome::Unchanged,
+            };
+        }
         if self.review_state.is_some() {
             return match ev {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {

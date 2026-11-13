@@ -4146,6 +4146,7 @@ fn dashboard_dispatch_prompt_creates_session() {
 fn external_dashboard_dispatch_replaces_idle_local_agent() {
     let mut app = test_app_with_agent();
     app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
     let old_id = AgentId(0);
     open_dashboard(&mut app);
 
@@ -4189,7 +4190,7 @@ fn external_dashboard_dispatch_blocks_while_turn_is_running() {
     assert!(app.agents.contains_key(&AgentId(0)));
     assert_eq!(
         app.dashboard.as_ref().unwrap().error_toast.as_deref(),
-        Some("Finish the current Pi turn before dispatching a new session")
+        Some("\u{2717} Finish the current Pi turn before dispatching a new session")
     );
 }
 

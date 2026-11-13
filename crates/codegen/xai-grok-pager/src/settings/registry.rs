@@ -932,8 +932,8 @@ pub fn current_value_for(
         "session_recap" => Some(SettingValue::Bool(ui.session_recap.unwrap_or(true))),
         // recap_mermaid: None → off (default).
         "recap_mermaid" => Some(SettingValue::Bool(ui.recap_mermaid.unwrap_or(false))),
-        // progress_bar: None → off (default).
-        "progress_bar" => Some(SettingValue::Bool(ui.progress_bar.unwrap_or(false))),
+        // progress_bar: None → on (default).
+        "progress_bar" => Some(SettingValue::Bool(ui.progress_bar.unwrap_or(true))),
         // remote_tui_footer: None → off (default).
         "remote_tui_footer" => Some(SettingValue::Bool(ui.remote_tui_footer.unwrap_or(false))),
         // recap_model: empty = recap generation disabled.
@@ -1514,10 +1514,10 @@ mod tests {
                     );
                 }
                 ("progress_bar", SettingKind::Bool { default }) => {
-                    assert!(!default, "progress_bar registry default must be off");
+                    assert!(default, "progress_bar registry default must be on");
                     assert_eq!(
                         *default,
-                        ui.progress_bar.unwrap_or(false),
+                        ui.progress_bar.unwrap_or(true),
                         "progress_bar default drifts from UiConfig::default()",
                     );
                 }
