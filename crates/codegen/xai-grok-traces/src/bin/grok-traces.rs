@@ -394,7 +394,8 @@ fn follow(args: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
 }
 
 /// Asks the cass index on another machine (ssh) and joins each hit to a local session.
-/// Exit 2 = usage or no cass host, 1 = ssh/cass failure. Hits go to stdout, the count line to stderr.
+/// Exit 2 = usage or no cass host, 1 = ssh/cass failure or the local index could not join (hits still printed,
+/// unjoined). Hits go to stdout, the count line to stderr.
 fn search(args: &[String]) -> ExitCode {
     let usage = || {
         eprintln!("usage: grok-traces search <query words...> [--json] [--limit N] [--mode lexical|semantic|hybrid] [--host <ssh target>]");
@@ -443,24 +444,25 @@ fn search(args: &[String]) -> ExitCode {
         }
     };
     let total = reply.total_matches;
-    let joined = match TraceIndex::open_with(&default_db_path(), Some(Duration::from_secs(2))) {
-        Ok(idx) => cass::join(&idx, reply.hits),
+    let joined = TraceIndex::open_with(&default_db_path(), Some(Duration::from_secs(2))).and_then(|idx| cass::join(&idx, &reply.hits));
+    let (joined, code) = match joined {
+        Ok(j) => (j, ExitCode::SUCCESS),
         Err(e) => {
-            // The remote answer is still worth showing.
+            // The remote answer is still worth showing, but the join is unknown, not empty: exit 1.
             eprintln!("grok-traces: local index unavailable ({e}); hits are not joined");
-            reply.hits.into_iter().map(cass::Joined::bare).collect()
+            (reply.hits.into_iter().map(cass::Joined::bare).collect::<Vec<_>>(), ExitCode::from(1))
         }
     };
     let mut out = io::stdout().lock();
     for j in &joined {
         let line = if json { cass::joined_json(j).to_string() } else { cass::joined_line(j) };
         if writeln!(out, "{line}").is_err() {
-            return ExitCode::SUCCESS;
+            return code;
         }
     }
     let _ = out.flush();
     eprintln!("{}", cass::summary(&joined, total));
-    ExitCode::SUCCESS
+    code
 }
 
 /// Prints the raw source line. Exit 3 = no such line.

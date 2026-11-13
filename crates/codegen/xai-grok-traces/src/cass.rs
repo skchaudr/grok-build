@@ -269,10 +269,12 @@ fn str_of(v: &Value, k: &str) -> Option<String> {
     v.get(k).and_then(Value::as_str).map(str::to_string)
 }
 
-/// Integers, or a float that is one (`1794393480780.0`).
+/// Integers, or a float that is exactly one (`1794393480780.0`): no fraction, within +-2^53 where f64 is exact.
+/// `1794393480780.9` is not a millisecond we can name, so it is `None` rather than a truncated near-miss.
 fn i64_of(v: &Value, k: &str) -> Option<i64> {
+    const EXACT: f64 = 9_007_199_254_740_992.0; // 2^53
     let n = v.get(k)?;
-    n.as_i64().or_else(|| n.as_f64().filter(|f| f.is_finite()).map(|f| f as i64))
+    n.as_i64().or_else(|| n.as_f64().filter(|f| f.fract() == 0.0 && f.abs() <= EXACT).map(|f| f as i64))
 }
 
 fn hit_from_json(v: &Value) -> Hit {
@@ -345,27 +347,33 @@ pub fn best_match<'a>(hit_path: &str, cands: &'a [SessionRow]) -> Option<&'a Ses
     if tie { None } else { best.map(|(c, _)| c) }
 }
 
-fn local_session(index: &TraceIndex, hit_path: &str) -> Option<SessionRow> {
+/// `Ok(None)` = this machine does not have that session; `Err` = the index could not answer.
+fn local_session(index: &TraceIndex, hit_path: &str) -> crate::Result<Option<SessionRow>> {
     let p = parts(hit_path);
     if p.len() < MIN_SHARED {
-        return None;
+        return Ok(None);
     }
     // Candidates by the last two components in SQL: a bare file name like chat_history.jsonl matches thousands.
     let suffix = p[p.len() - MIN_SHARED..].join("/");
-    // An index error means "not on this machine" here: the hit is still worth showing.
-    let cands = index.sessions_by_path_suffix(&suffix).ok()?;
-    best_match(hit_path, &cands).cloned()
+    let cands = index.sessions_by_path_suffix(&suffix)?;
+    Ok(best_match(hit_path, &cands).cloned())
 }
 
-/// Joins each hit to the local session it came from, keeping cass order.
-pub fn join(index: &TraceIndex, hits: Vec<Hit>) -> Vec<Joined> {
-    hits.into_iter()
-        .map(|hit| {
-            let Some(row) = hit.source_path.as_deref().and_then(|p| local_session(index, p)) else {
-                return Joined::bare(hit);
+/// Joins each hit to the local session it came from, keeping cass order. A session that is simply not here
+/// is `Ok` with a bare hit; an index that cannot answer is `Err` (the caller still has `hits` to show).
+pub fn join(index: &TraceIndex, hits: &[Hit]) -> crate::Result<Vec<Joined>> {
+    hits.iter()
+        .map(|hit| -> crate::Result<Joined> {
+            let local = match hit.source_path.as_deref() {
+                Some(p) => local_session(index, p)?,
+                None => None,
             };
-            let line = hit.created_at.and_then(|ts| index.line_at(&row.id, ts).ok().flatten());
-            Joined { id: Some(row.id), line, source: Some(row.source), session_title: Some(row.title), hit }
+            let Some(row) = local else { return Ok(Joined::bare(hit.clone())) };
+            let line = match hit.created_at {
+                Some(ts) => index.line_at(&row.id, ts)?,
+                None => None,
+            };
+            Ok(Joined { id: Some(row.id), line, source: Some(row.source), session_title: Some(row.title), hit: hit.clone() })
         })
         .collect()
 }

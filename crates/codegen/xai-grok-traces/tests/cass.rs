@@ -4,10 +4,11 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-use serde_json::json;
+use rusqlite::Connection;
+use serde_json::{Value, json};
 use xai_grok_traces::cass::*;
 use xai_grok_traces::remote::Ssh;
 use xai_grok_traces::{EventFilter, SessionFilter, SessionRow, TraceIndex, default_roots};
@@ -73,6 +74,11 @@ fn last_stamped(idx: &TraceIndex, id: &str) -> (i64, i64) {
     let ts = e.timestamp.unwrap();
     // Expected line is the first event with that stamp, which is what the join must pick.
     (evs.iter().find(|x| x.timestamp == Some(ts)).unwrap().line, ts)
+}
+
+/// `join` that must succeed, taking hits by value as the tests build them.
+fn joined(idx: &TraceIndex, hits: Vec<Hit>) -> Vec<Joined> {
+    join(idx, &hits).unwrap()
 }
 
 fn hit(path: &str, created_at: Option<i64>) -> Hit {
@@ -185,7 +191,7 @@ fn reply_errors_are_parse_values() {
 fn join_resolves_each_path_shape() {
     let (_tmp, idx) = indexed();
     let hits = vec![hit(HIT_CLAUDE, None), hit(HIT_CODEX_ZST, None), hit(HIT_PI, None), hit(HIT_GROK, None)];
-    let j = join(&idx, hits);
+    let j = joined(&idx, hits);
     for (got, source) in j.iter().zip(["claude", "codex", "pi", "grok"]) {
         let s = session(&idx, source);
         assert_eq!(got.id.as_deref(), Some(s.id.as_str()), "{source}");
@@ -198,7 +204,7 @@ fn join_resolves_each_path_shape() {
 #[test]
 fn join_keeps_order_and_leaves_unknown_hits_bare() {
     let (_tmp, idx) = indexed();
-    let j = join(
+    let j = joined(
         &idx,
         vec![
             hit(HIT_GROK, None),
@@ -218,14 +224,14 @@ fn join_keeps_order_and_leaves_unknown_hits_bare() {
 fn join_needs_two_components_not_just_the_file_name() {
     let (_tmp, idx) = indexed();
     // Same file name as the local grok session, different parent: shares one component.
-    assert_eq!(join(&idx, vec![hit("/home/sab/other-dir/chat_history.jsonl", None)])[0].id, None);
+    assert_eq!(joined(&idx, vec![hit("/home/sab/other-dir/chat_history.jsonl", None)])[0].id, None);
     // Bare name, and a one-component path.
-    assert_eq!(join(&idx, vec![hit("chat_history.jsonl", None)])[0].id, None);
-    assert_eq!(join(&idx, vec![hit("/chat_history.jsonl", None)])[0].id, None);
+    assert_eq!(joined(&idx, vec![hit("chat_history.jsonl", None)])[0].id, None);
+    assert_eq!(joined(&idx, vec![hit("/chat_history.jsonl", None)])[0].id, None);
     // Right parent, wrong file name.
-    assert_eq!(join(&idx, vec![hit("/x/019fa941-3fed-71e0-9175-af925e0de274/updates.jsonl", None)])[0].id, None);
+    assert_eq!(joined(&idx, vec![hit("/x/019fa941-3fed-71e0-9175-af925e0de274/updates.jsonl", None)])[0].id, None);
     // Parent + name alone is enough, whatever lies above.
-    assert!(join(&idx, vec![hit("019fa941-3fed-71e0-9175-af925e0de274/chat_history.jsonl", None)])[0].id.is_some());
+    assert!(joined(&idx, vec![hit("019fa941-3fed-71e0-9175-af925e0de274/chat_history.jsonl", None)])[0].id.is_some());
 }
 
 #[test]
@@ -234,19 +240,19 @@ fn join_line_is_the_event_with_equal_timestamp() {
     for (source, path) in [("claude", HIT_CLAUDE), ("pi", HIT_PI), ("codex", HIT_CODEX_ZST)] {
         let s = session(&idx, source);
         let (line, ts) = last_stamped(&idx, &s.id);
-        let got = &join(&idx, vec![hit(path, Some(ts))])[0];
+        let got = &joined(&idx, vec![hit(path, Some(ts))])[0];
         assert_eq!((got.id.as_deref(), got.line), (Some(s.id.as_str()), Some(line)), "{source}");
         // One ms off is no event: null, but the session still joins.
-        let off = &join(&idx, vec![hit(path, Some(ts + 1))])[0];
+        let off = &joined(&idx, vec![hit(path, Some(ts + 1))])[0];
         assert_eq!((off.id.as_deref(), off.line), (Some(s.id.as_str()), None), "{source} ts+1");
     }
     // cass line_number is a message index and never becomes the trace line.
     let s = session(&idx, "claude");
     let (line, ts) = last_stamped(&idx, &s.id);
     let h = Hit { line_number: Some(line + 1000), ..hit(HIT_CLAUDE, Some(ts)) };
-    assert_eq!(join(&idx, vec![h])[0].line, Some(line));
+    assert_eq!(joined(&idx, vec![h])[0].line, Some(line));
     // A hit that matches no session has no line even with a timestamp.
-    assert_eq!(join(&idx, vec![hit("/a/b/c.jsonl", Some(ts))])[0].line, None);
+    assert_eq!(joined(&idx, vec![hit("/a/b/c.jsonl", Some(ts))])[0].line, None);
 }
 
 #[test]
@@ -282,7 +288,7 @@ fn output_json_and_text_shapes() {
     let (_tmp, idx) = indexed();
     let s = session(&idx, "claude");
     let (line, ts) = last_stamped(&idx, &s.id);
-    let j = join(&idx, vec![hit(HIT_CLAUDE, Some(ts)), hit("/nowhere/x/y.jsonl", None)]);
+    let j = joined(&idx, vec![hit(HIT_CLAUDE, Some(ts)), hit("/nowhere/x/y.jsonl", None)]);
 
     let v = joined_json(&j[0]);
     assert_eq!(
@@ -400,8 +406,172 @@ fn search_then_join_end_to_end() {
     let ssh = fake(&d, &format!("cat >/dev/null\ncat '{}/reply.json'", d.path().display()), WALL_TIMEOUT);
     let r = search_with(&ssh, "sab@sabibp", &q("first")).unwrap();
     let total = r.total_matches;
-    let j = join(&idx, r.hits);
+    let j = joined(&idx, r.hits);
     assert_eq!(joined_line(&j[0]), format!("{}\t{line}\tsab-air\tfirst", s.id));
     assert_eq!(joined_line(&j[1]), "-\t-\tsab-dev\tsecond");
     assert_eq!(summary(&j, total), "2 hits, 1 on this machine, 42 total");
+}
+
+// ---- review fixes: candidates past 200, fractional timestamps, index errors ----
+
+#[test]
+fn join_sees_every_candidate_even_past_200() {
+    const N: usize = 205;
+    const UUID: &str = "0198a000-0000-7000-8000-000000000001";
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    for i in 0..N {
+        write(&home.join(format!(".grok/sessions/%2Fw{i}/{UUID}/chat_history.jsonl")), GROK);
+    }
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
+    let report = idx.scan(&default_roots(&home, &home.join(".grok"))).unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let rows = idx.list_sessions(&SessionFilter { limit: 1000, ..Default::default() }).unwrap();
+    assert_eq!(rows.len(), N, "the index holds every one of the {N} sessions sharing the last two components");
+
+    // Hits sharing three components with exactly one session join to that one, whichever order SQLite scans in.
+    for row in &rows {
+        let enc = row.file_path.parent().and_then(Path::parent).and_then(Path::file_name).unwrap().to_string_lossy().into_owned();
+        let path = format!("/srv/x/{enc}/{UUID}/chat_history.jsonl");
+        let got = &joined(&idx, vec![hit(&path, None)])[0];
+        assert_eq!(got.id.as_deref(), Some(row.id.as_str()), "{enc}");
+    }
+    // Sharing only two with all of them is a tie across all of them: no match.
+    let tie = format!("/srv/x/%2Fnowhere/{UUID}/chat_history.jsonl");
+    assert_eq!(joined(&idx, vec![hit(&tie, None)])[0].id, None);
+}
+
+#[test]
+fn timestamps_must_be_exact_integers() {
+    let created = |ts: &str| parse_reply("u@h", &format!(r#"{{"hits":[{{"created_at":{ts}}}]}}"#)).unwrap().hits[0].created_at;
+    assert_eq!(created("1794393480780"), Some(1794393480780));
+    assert_eq!(created("1794393480780.0"), Some(1794393480780));
+    assert_eq!(created("1794393480780.9"), None, "no truncation to a neighbouring millisecond");
+    assert_eq!(created("-1794393480780.5"), None);
+    assert_eq!(created("1e300"), None);
+    assert_eq!(created("1e19"), None);
+    assert_eq!(created("18446744073709551615"), None);
+    assert_eq!(created("null"), None);
+    assert_eq!(created(r#""1794393480780""#), None);
+}
+
+#[test]
+fn fractional_created_at_joins_the_session_but_not_a_line() {
+    let (_tmp, idx) = indexed();
+    let s = session(&idx, "claude");
+    let (line, ts) = last_stamped(&idx, &s.id);
+    let reply = |frac: &str| {
+        parse_reply("u@h", &format!(r#"{{"hits":[{{"source_path":"{HIT_CLAUDE}","created_at":{ts}.{frac}}}]}}"#)).unwrap()
+    };
+    let got = &joined(&idx, reply("9").hits)[0];
+    assert_eq!((got.id.as_deref(), got.line), (Some(s.id.as_str()), None), "{ts}.9 is not the event at {ts}");
+    let got = &joined(&idx, reply("0").hits)[0];
+    assert_eq!((got.id.as_deref(), got.line), (Some(s.id.as_str()), Some(line)), "{ts}.0 is");
+}
+
+/// Drops a table through a second connection: the open `TraceIndex` still holds its handle but can no longer answer.
+fn drop_table(idx: &TraceIndex, table: &str) {
+    Connection::open(idx.db_path()).unwrap().execute_batch(&format!("DROP TABLE {table};")).unwrap();
+}
+
+#[test]
+fn join_reports_a_broken_index_not_an_unmatched_hit() {
+    let (_tmp, idx) = indexed();
+    let hits = [hit(HIT_CLAUDE, None)];
+    assert!(join(&idx, &hits).unwrap()[0].id.is_some());
+    drop_table(&idx, "trace_sessions");
+    let e = join(&idx, &hits).unwrap_err();
+    assert!(e.to_string().contains("trace_sessions"), "{e}");
+    // A hit with no path, or a path too short to name a session, never asks the index.
+    assert_eq!(join(&idx, &[Hit::default(), hit("chat_history.jsonl", None)]).unwrap().len(), 2);
+}
+
+#[test]
+fn join_reports_a_failed_line_lookup() {
+    let (_tmp, idx) = indexed();
+    let s = session(&idx, "claude");
+    let (_, ts) = last_stamped(&idx, &s.id);
+    drop_table(&idx, "trace_events");
+    let e = join(&idx, &[hit(HIT_CLAUDE, Some(ts))]).unwrap_err();
+    assert!(e.to_string().contains("trace_events"), "{e}");
+    // No created_at: no line lookup, so the session still joins.
+    assert_eq!(join(&idx, &[hit(HIT_CLAUDE, None)]).unwrap()[0].id.as_deref(), Some(s.id.as_str()));
+}
+
+// ---- the binary ----
+
+/// `tmp/home` is GROK_HOME; `tmp/bin/ssh` prints one hit that no local session can match.
+fn bin_fixture() -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let ssh = bin.join("ssh");
+    fs::write(
+        &ssh,
+        "#!/bin/sh\ncat >/dev/null\necho '{\"hits\":[{\"agent\":\"claude_code\",\"created_at\":null,\"score\":1.5,\"snippet\":\"a hit\",\"source_id\":\"sab-air\",\"source_path\":\"/x/y/z.jsonl\"}],\"total_matches\":1}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    (tmp, home)
+}
+
+fn run_search(tmp: &tempfile::TempDir, home: &Path) -> Output {
+    let path = format!("{}:{}", tmp.path().join("bin").display(), std::env::var("PATH").unwrap_or_default());
+    Command::new(env!("CARGO_BIN_EXE_grok-traces"))
+        .args(["search", "x", "--host", "u@h", "--json"])
+        .env("GROK_HOME", home)
+        .env("PATH", path)
+        .output()
+        .unwrap()
+}
+
+fn assert_one_unjoined_hit(out: &Output) {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "{stdout}");
+    let v: Value = serde_json::from_str(lines[0]).unwrap();
+    assert!(v["id"].is_null() && v["line"].is_null(), "{v}");
+    assert_eq!(v["snippet"], json!("a hit"));
+    assert_eq!(v["cass_path"], json!("/x/y/z.jsonl"));
+}
+
+#[test]
+fn bin_prints_unjoined_hits_and_exits_1_when_the_index_cannot_open() {
+    let (tmp, home) = bin_fixture();
+    // `traces` is a file, so the index directory cannot be created.
+    fs::write(home.join("traces"), "not a directory").unwrap();
+    let out = run_search(&tmp, &home);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_one_unjoined_hit(&out);
+    assert!(err.contains("grok-traces: local index unavailable (") && err.contains("); hits are not joined"), "{err}");
+}
+
+#[test]
+fn bin_prints_unjoined_hits_and_exits_1_when_the_join_fails() {
+    let (tmp, home) = bin_fixture();
+    {
+        // A valid index that opens, then loses its sessions table.
+        let idx = TraceIndex::open(&home.join("traces/traces.sqlite")).unwrap();
+        drop_table(&idx, "trace_sessions");
+    }
+    let out = run_search(&tmp, &home);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_one_unjoined_hit(&out);
+    assert!(err.contains("grok-traces: local index unavailable (") && err.contains("trace_sessions"), "{err}");
+    assert!(err.contains("); hits are not joined"), "{err}");
+}
+
+#[test]
+fn bin_exits_0_when_the_index_answers_even_with_no_match() {
+    let (tmp, home) = bin_fixture();
+    drop(TraceIndex::open(&home.join("traces/traces.sqlite")).unwrap());
+    let out = run_search(&tmp, &home);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_one_unjoined_hit(&out);
+    assert!(err.contains("1 hits, 0 on this machine, 1 total") && !err.contains("not joined"), "{err}");
 }

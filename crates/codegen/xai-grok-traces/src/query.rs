@@ -562,13 +562,16 @@ impl TraceIndex {
     }
 
     /// Sessions whose transcript path ends in `/<suffix>` or `/<suffix>.zst` (`suffix` = `parent-dir/file-name`).
-    /// The join key for `cass` hits: a bare file name such as `chat_history.jsonl` would match thousands.
+    /// The join key for `cass` hits. It loses nothing: `cass::best_match` rejects any session sharing fewer than
+    /// `MIN_SHARED` (2) trailing components, so every row it could accept ends in this suffix. No `LIMIT`: a cut
+    /// could drop the best match, or one side of a tie, and a bare file name such as `chat_history.jsonl` is why
+    /// the filter is two components and not one.
     pub fn sessions_by_path_suffix(&self, suffix: &str) -> Result<Vec<SessionRow>> {
         let now = now_ms();
         let esc = suffix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let sql = format!(
             "SELECT {} FROM trace_sessions s LEFT JOIN trace_files f ON f.path = s.file_path
-             WHERE s.file_path LIKE ?1 ESCAPE '\\' OR s.file_path LIKE ?2 ESCAPE '\\' LIMIT 200",
+             WHERE s.file_path LIKE ?1 ESCAPE '\\' OR s.file_path LIKE ?2 ESCAPE '\\'",
             session_cols()
         );
         let mut stmt = self.conn().prepare(&sql)?;
