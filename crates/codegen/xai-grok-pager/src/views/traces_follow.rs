@@ -24,7 +24,7 @@ use crate::scrollback::blocks::markdown_content::MarkdownContent;
 use crate::theme::Theme;
 use crate::views::modal_window;
 use crate::views::traces_body::{self, INLINE_MAX_LINES};
-use crate::views::traces_modal::{compose_body, continuation, continuation_source, split_result};
+use crate::views::traces_modal::{compose_body, continuation, continuation_source, norm, split_result};
 
 /// Rows replayed when the screen opens (lookout's respawn replays the same).
 const BACKLOG: usize = 200;
@@ -88,6 +88,11 @@ pub(super) struct Agent {
     pub id: String,
     pub model: Option<String>,
     pub label: Option<String>,
+    /// The `agent_start` item's time, ms.
+    pub started: Option<i64>,
+    pub ended: bool,
+    /// The `agent_end` item's time, ms.
+    pub end_ms: Option<i64>,
 }
 
 impl Agent {
@@ -128,6 +133,11 @@ pub(super) struct Follow {
     open: HashSet<usize>,
     /// Text and reasoning rows rendered as markdown by grok's own renderer, wrap cached per width.
     md: HashMap<usize, MarkdownContent>,
+    /// A line for the status row (`no transcript yet`, `spawn row not loaded`); cleared by the next key.
+    pub(super) note: Option<String>,
+    /// (label, start time) of the subagent this follow is of, to put the cursor on the `Agent` row that spawned it
+    /// once the first rows arrive.
+    pub(super) want: Option<(String, Option<i64>)>,
 }
 
 /// `0.4s`, `12s`, `2m05s`.
@@ -183,7 +193,7 @@ impl Follow {
         let (tx, _) = mpsc::channel();
         let (_, rx) = mpsc::channel();
         Self {
-            agents: vec![Agent { id: root.id.clone(), model: root.model.clone(), label: None }],
+            agents: vec![Agent { id: root.id.clone(), model: root.model.clone(), label: None, started: None, ended: false, end_ms: None }],
             root,
             rows: Vec::new(),
             filter: 0,
@@ -199,6 +209,8 @@ impl Follow {
             bodies: HashMap::new(),
             open: HashSet::new(),
             md: HashMap::new(),
+            note: None,
+            want: None,
         }
     }
 
@@ -214,6 +226,8 @@ impl Follow {
                 Ok(items) => {
                     redraw |= self.err.take().is_some() || !items.is_empty();
                     self.apply(&items, now_ms);
+                    redraw |= self.want.is_some();
+                    self.resolve_want();
                 }
                 // A busy index is transient; the next tick retries.
                 Err(e) => redraw |= self.err.replace(e.clone()).as_deref() != Some(e.as_str()),
@@ -226,13 +240,16 @@ impl Follow {
         redraw || self.has_open_call()
     }
 
+    /// A call with no result, or a subagent still running (its `Agent` row counts up).
     fn has_open_call(&self) -> bool {
-        !self.ended && self.rows.iter().rev().take(64).any(|r| matches!(&r.body, Body::Call(c) if c.result.is_none() && !c.no_result))
+        !self.ended
+            && (self.rows.iter().rev().take(64).any(|r| matches!(&r.body, Body::Call(c) if c.result.is_none() && !c.no_result))
+                || self.agents.iter().skip(1).any(|a| !a.ended))
     }
 
     fn agent_mut(&mut self, id: &str) -> &mut Agent {
         let at = self.agents.iter().position(|a| a.id == id).unwrap_or_else(|| {
-            self.agents.push(Agent { id: id.to_string(), model: None, label: None });
+            self.agents.push(Agent { id: id.to_string(), model: None, label: None, started: None, ended: false, end_ms: None });
             self.agents.len() - 1
         });
         &mut self.agents[at]
@@ -306,9 +323,12 @@ impl Follow {
                     let a = self.agent_mut(&agent);
                     a.model = v["model"].as_str().map(str::to_string);
                     a.label = v["label"].as_str().map(str::to_string);
+                    a.started = v["ts"].as_i64();
                     Body::Start { model: a.model.clone(), label: a.label.clone() }
                 }
                 "agent_end" => {
+                    let a = self.agent_mut(&agent);
+                    (a.ended, a.end_ms) = (true, v["ts"].as_i64());
                     for r in self.rows.iter_mut().filter(|r| r.agent == agent) {
                         if let Body::Call(c) = &mut r.body {
                             c.no_result |= c.result.is_none();
@@ -318,6 +338,7 @@ impl Follow {
                     Body::End
                 }
                 "agent_resume" => {
+                    self.agent_mut(&agent).ended = false;
                     self.ended &= !is_root;
                     Body::Resume
                 }
@@ -453,9 +474,10 @@ impl Follow {
         Some(self.agents.get(i)?.name(i == 0))
     }
 
-    /// Basic key handling; Enter, Esc and `o` are the modal's.
+    /// Basic key handling; Enter, Esc, `o`, `f` and `p` are the modal's.
     pub fn key(&mut self, code: KeyCode) -> bool {
-        match code {
+        let cleared = self.note.take().is_some();
+        let changed = match code {
             KeyCode::Char('j') | KeyCode::Down => self.step(1),
             KeyCode::Char('k') | KeyCode::Up => self.step(-1),
             KeyCode::PageDown => self.step(10),
@@ -468,6 +490,74 @@ impl Follow {
             KeyCode::Char('l') | KeyCode::Right => self.fold(true),
             KeyCode::Char('h') | KeyCode::Left => self.fold(false),
             _ => false,
+        };
+        changed || cleared
+    }
+
+    /// The subagent `f` opens: the highlighted row's agent when it is not the root, else the child a highlighted
+    /// `Agent` call dispatched. `None` while the tail is pinned (nothing is highlighted) and on a root row.
+    pub fn cursor_agent(&self) -> Option<&str> {
+        let i = self.cursor?;
+        let row = self.rows.get(i)?;
+        if row.agent != self.root.id {
+            return Some(row.agent.as_str());
+        }
+        Some(self.agents[*self.links().get(&i)?].id.as_str())
+    }
+
+    /// The session whose file holds one of agent `id`'s calls, for a child born from a receipt (no row under its own id).
+    pub fn session_of(&self, id: &str) -> Option<String> {
+        self.rows.iter().filter(|r| r.agent == id).find_map(|r| match &r.body {
+            Body::Call(c) => c.session.clone(),
+            _ => None,
+        })
+    }
+
+    /// The `Agent`/`Task` call row that dispatched a subagent called `label` and started at `started`: its label
+    /// matches the call's target (equal or a prefix either way), the call is no later than 5 s after the start,
+    /// and the latest such call wins. The label match is the same the trajectory screen uses; no item carries an id.
+    fn spawn_row(&self, label: &str, started: Option<i64>) -> Option<usize> {
+        let want = norm(label);
+        if want.is_empty() {
+            return None;
+        }
+        self.rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| match &r.body {
+                Body::Call(c) if matches!(c.tool.to_ascii_lowercase().as_str(), "agent" | "task") => Some((i, c)),
+                _ => None,
+            })
+            .filter(|(_, c)| {
+                let what = norm(&c.what);
+                !what.is_empty() && (what == want || what.starts_with(&want) || want.starts_with(&what)) && started.is_none_or(|s| c.started_ms <= s + 5_000)
+            })
+            .max_by_key(|(_, c)| c.started_ms)
+            .map(|(i, _)| i)
+    }
+
+    /// Row index to agent index for every dispatch call a labelled subagent matches. A later agent wins a shared call.
+    fn links(&self) -> HashMap<usize, usize> {
+        let mut out = HashMap::new();
+        for (at, a) in self.agents.iter().enumerate().skip(1) {
+            if let Some(i) = a.label.as_deref().and_then(|l| self.spawn_row(l, a.started)) {
+                out.insert(i, at);
+            }
+        }
+        out
+    }
+
+    /// After `p`: put the cursor on the `Agent` row that spawned the subagent this screen replaced, or say it is not loaded.
+    fn resolve_want(&mut self) {
+        let Some((label, started)) = self.want.take() else { return };
+        match self.spawn_row(&label, started) {
+            Some(i) => {
+                let vis = self.visible();
+                if let Some(pos) = vis.iter().position(|&v| v == i) {
+                    self.pause_at(&vis, pos);
+                }
+            }
+            None => self.note = Some("spawn row not loaded".to_string()),
         }
     }
 
@@ -523,26 +613,82 @@ impl Follow {
         if shared == 0 || shared >= words.len() { name } else { words[shared..].join(" ") }
     }
 
-    /// What starts every line of row `i`: its depth indent, or for a subagent's row a tag (`1 Check the l…`)
-    /// of `width / 5` columns (6 to 16) naming the agent, then the indent below its first level.
+    /// Subagent `at`'s tag as `(head, model)`: `↳ 1 UI/UX lens` and its short model id. An unlabelled agent's name
+    /// already is its model, and an agent with no model yet has none, so `model` is then empty.
+    fn tag_text(&self, at: usize) -> (String, String) {
+        let a = &self.agents[at];
+        let labelled = a.label.as_deref().is_some_and(|l| !l.is_empty());
+        let model = a.model.as_deref().filter(|_| labelled).map(short_model).unwrap_or_default();
+        (format!("↳ {at} {}", self.tag_name(at)), model)
+    }
+
+    /// The tag column: the widest full tag of any subagent (not only the visible ones, so it holds still while Tab
+    /// filters) plus 2, at most a quarter of the screen.
+    fn tag_w(&self, width: usize) -> usize {
+        let widest = (1..self.agents.len())
+            .map(|at| {
+                let (head, model) = self.tag_text(at);
+                head.width() + if model.is_empty() { 0 } else { 3 + model.width() }
+            })
+            .max()
+            .unwrap_or(0);
+        (widest + 2).clamp(6, (width / 4).max(6))
+    }
+
+    /// Subagent `at`'s tag fitted to the column: `head · model`, else `head`, else `head` cut with `…`.
+    fn tag_fit(&self, at: usize, width: usize) -> (String, String) {
+        let t = self.tag_w(width);
+        let (head, model) = self.tag_text(at);
+        if model.is_empty() || head.width() + 3 + model.width() > t - 1 {
+            (truncate_str(&head, t - 1), String::new())
+        } else {
+            (head, model)
+        }
+    }
+
+    /// What starts every line of row `i`: its depth indent, or for a subagent's row its tag (`↳ 1 UI/UX lens ·
+    /// haiku-4-5`) padded to the tag column, then the indent below its first level.
     fn lead(&self, i: usize, width: usize) -> String {
         let row = &self.rows[i];
         let indent = |depth: usize| "  ".repeat(depth.min(MAX_INDENT));
         let at = self.agents.iter().position(|a| a.id == row.agent).filter(|_| row.agent != self.root.id);
         let Some(at) = at else { return indent(row.depth) };
-        let t = (width / 5).clamp(6, 16);
-        let tag = truncate_str(&format!("{at} {}", self.tag_name(at)), t - 1);
-        format!("{tag}{}{}", " ".repeat(t - tag.width()), indent(row.depth.saturating_sub(1)))
+        let (head, model) = self.tag_fit(at, width);
+        let tag = if model.is_empty() { head } else { format!("{head} · {model}") };
+        format!("{tag}{}{}", " ".repeat(self.tag_w(width).saturating_sub(tag.width())), indent(row.depth.saturating_sub(1)))
     }
 
-    fn row_lines(&self, i: usize, width: usize, now_ms: i64, theme: &Theme, body: Option<&[String]>) -> Vec<Line<'static>> {
+    /// `lead` in colour: `↳ n` bold in the model accent, the name gray, ` · model` in the accent, the rest dim.
+    fn lead_spans(&self, i: usize, width: usize, theme: &Theme) -> Vec<Span<'static>> {
+        let row = &self.rows[i];
+        let at = self.agents.iter().position(|a| a.id == row.agent).filter(|_| row.agent != self.root.id);
+        let Some(at) = at else { return vec![Span::styled(self.lead(i, width), Style::default().fg(theme.gray_dim))] };
+        let (head, model) = self.tag_fit(at, width);
+        let accent = Style::default().fg(theme.accent_model);
+        // A tag cut below its number is all accent.
+        let cut = if head.starts_with(&format!("↳ {at}")) { format!("↳ {at}").len() } else { head.len() };
+        let (num, name) = (head[..cut].to_string(), head[cut..].to_string());
+        let tag = if model.is_empty() { format!("{num}{name}") } else { format!("{num}{name} · {model}") };
+        let mut out = vec![Span::styled(num, accent.add_modifier(Modifier::BOLD)), Span::styled(name, Style::default().fg(theme.gray))];
+        if !model.is_empty() {
+            out.push(Span::styled(format!(" · {model}"), accent));
+        }
+        // The padding and the indent below the first level.
+        let lead = self.lead(i, width);
+        out.push(Span::styled(lead.strip_prefix(tag.as_str()).unwrap_or_default().to_string(), Style::default().fg(theme.gray_dim)));
+        out
+    }
+
+    /// `links` is [`Self::links`], computed once per frame.
+    fn row_lines(&self, i: usize, width: usize, now_ms: i64, theme: &Theme, body: Option<&[String]>, links: &HashMap<usize, usize>) -> Vec<Line<'static>> {
         let row = &self.rows[i];
         let ind = self.lead(i, width);
+        let lead = self.lead_spans(i, width, theme);
         let w = width.saturating_sub(ind.width()).max(8);
         let gray = Style::default().fg(theme.gray);
         let faint = Style::default().fg(theme.gray_dim);
         let plain = |spans: Vec<Span<'static>>| {
-            let mut all = vec![Span::styled(ind.clone(), faint)];
+            let mut all = lead.clone();
             all.extend(spans);
             Line::from(all)
         };
@@ -564,17 +710,23 @@ impl Follow {
             // grok's prompt: a lifted band with the time on the right.
             Body::User(t) => {
                 let band = Style::default().bg(theme.bg_light);
-                let (lines, more) = wrap(t, w.saturating_sub(4 + beside), if self.open.contains(&i) { INLINE_MAX_LINES } else { USER_LINES });
+                // Under a tag the `›` takes the tag column, as `◆` does; the root's keeps grok's leading space.
+                let (first, rest, cut, pad) = if row.agent == self.root.id { (" › ", "   ", "   … +", 4) } else { ("› ", "  ", "  … +", 3) };
+                let (lines, more) = wrap(t, w.saturating_sub(pad + beside), if self.open.contains(&i) { INLINE_MAX_LINES } else { USER_LINES });
                 let mut out: Vec<Line<'static>> = lines
                     .into_iter()
                     .enumerate()
                     .map(|(n, l)| {
-                        let lead = if n == 0 { Span::styled(" › ", band.fg(theme.gray)) } else { Span::styled("   ", band) };
-                        Line::from(vec![Span::styled(ind.clone(), faint), lead, Span::styled(l, band.fg(theme.text_primary))])
+                        let mark = if n == 0 { Span::styled(first, band.fg(theme.gray)) } else { Span::styled(rest, band) };
+                        let mut spans = lead.clone();
+                        spans.extend([mark, Span::styled(l, band.fg(theme.text_primary))]);
+                        Line::from(spans)
                     })
                     .collect();
                 if more > 0 {
-                    out.push(Line::from(vec![Span::styled(ind.clone(), faint), Span::styled(format!("   … +{more} lines"), band.fg(theme.gray))]));
+                    let mut spans = lead.clone();
+                    spans.push(Span::styled(format!("{cut}{more} lines"), band.fg(theme.gray)));
+                    out.push(Line::from(spans));
                 }
                 for line in &mut out {
                     let used = line.width();
@@ -653,18 +805,46 @@ impl Follow {
             // grok's tool row: the diamond carries the outcome, the name and target stay quiet.
             Body::Call(c) => {
                 let failed = c.result.as_ref().is_some_and(|r| !r.ok);
-                let (diamond, status, status_style) = match (&c.result, c.no_result) {
-                    (Some(r), _) if r.ok => (
+                let name = format!("{}  ", c.tool);
+                let kid = links.get(&i).map(|&at| &self.agents[at]).filter(|_| !failed);
+                let (diamond, status, status_style) = match (kid, &c.result, c.no_result) {
+                    // A dispatch call: the child's model, calls and state. A background agent's call has its result
+                    // at launch, so only the child's end makes it `✓`.
+                    (Some(a), _, _) => {
+                        let calls = self.rows.iter().filter(|r| r.agent == a.id && matches!(r.body, Body::Call(_))).count();
+                        let state = if a.ended {
+                            a.end_ms.map_or_else(|| "✓".to_string(), |e| format!("✓ {}", took((e - c.started_ms).max(0))))
+                        } else {
+                            format!("● {}", span_text((now_ms - c.started_ms) / 1000))
+                        };
+                        let model = a.model.as_deref().map(short_model);
+                        let calls = format!("{calls} call{}", if calls == 1 { "" } else { "s" });
+                        let join = |parts: Vec<Option<String>>| parts.into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                        let options = [
+                            join(vec![model.clone(), Some(calls), Some(state.clone())]),
+                            join(vec![model, Some(state.clone())]),
+                            state,
+                        ];
+                        // The label keeps at least 12 columns: drop `N calls`, then the model.
+                        let fits = |s: &str| w.saturating_sub(2 + name.width() + s.width() + 2) >= 12;
+                        let pick = options.iter().find(|s| fits(s.as_str())).unwrap_or(&options[2]).clone();
+                        let diamond = if a.ended {
+                            blend_color(theme.bg_base, theme.accent_success, DIM_ACCENT).unwrap_or(theme.accent_success)
+                        } else {
+                            theme.accent_running
+                        };
+                        (diamond, pick, if a.ended { faint } else { gray })
+                    }
+                    (None, Some(r), _) if r.ok => (
                         blend_color(theme.bg_base, theme.accent_success, DIM_ACCENT).unwrap_or(theme.accent_success),
                         r.ms.map_or_else(String::new, took),
                         faint,
                     ),
-                    (Some(r), _) => (theme.accent_error, format!("✗ {}", first_line(&r.error)).trim_end().to_string(), Style::default().fg(theme.accent_error)),
-                    (None, true) => (theme.gray_dim, "no result".to_string(), faint),
-                    (None, false) => (theme.accent_running, format!("… {}", span_text((now_ms - c.started_ms) / 1000)), gray),
+                    (None, Some(r), _) => (theme.accent_error, format!("✗ {}", first_line(&r.error)).trim_end().to_string(), Style::default().fg(theme.accent_error)),
+                    (None, None, true) => (theme.gray_dim, "no result".to_string(), faint),
+                    (None, None, false) => (theme.accent_running, format!("… {}", span_text((now_ms - c.started_ms) / 1000)), gray),
                 };
                 let status = truncate_str(&status, w / 2);
-                let name = format!("{}  ", c.tool);
                 let name_style = if failed { Style::default().fg(theme.accent_error) } else { gray }.add_modifier(Modifier::BOLD);
                 let room = w.saturating_sub(2 + name.width() + status.width() + 2);
                 let what = truncate_str(first_line(&c.what), room);
@@ -710,7 +890,7 @@ impl Follow {
         }
         let width = area.width as usize;
         let paused = self.paused().then(|| format!("paused · {} new · G live", self.rows.len().saturating_sub(self.paused_len)));
-        let status = [paused, self.filter_name().map(|n| format!("agent: {n}")), self.err.as_ref().map(|e| format!("index: {e}"))]
+        let status = [paused, self.filter_name().map(|n| format!("agent: {n}")), self.note.clone(), self.err.as_ref().map(|e| format!("index: {e}"))]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
@@ -728,6 +908,7 @@ impl Follow {
             buf.set_span(body.x, body.y, &Span::styled(msg, Style::default().fg(theme.gray)), body.width);
             return;
         }
+        let links = self.links();
         let open: Vec<usize> = vis.iter().copied().filter(|i| self.open.contains(i)).collect();
         let bodies: HashMap<usize, Vec<String>> = open
             .into_iter()
@@ -739,7 +920,7 @@ impl Follow {
         // A row's lines, its leading gap (if any) as an empty first line.
         let lines_at = |me: &Self, pos: usize| {
             let i = vis[pos];
-            let mut lines = me.row_lines(i, width, now_ms, theme, bodies.get(&i).map(Vec::as_slice));
+            let mut lines = me.row_lines(i, width, now_ms, theme, bodies.get(&i).map(Vec::as_slice), &links);
             if me.gap_before(&vis, pos) {
                 lines.insert(0, Line::default());
             }
@@ -968,7 +1149,7 @@ mod tests {
             assert!(screen.contains(want), "missing {want:?}\n{screen}");
         }
         assert!(
-            screen.lines().any(|l| l.contains("◆ Read  src/lexer.rs") && l.starts_with("1 Check")),
+            screen.lines().any(|l| l.contains("◆ Read  src/lexer.rs") && l.starts_with("↳ 1 Check")),
             "the subagent's rows start with its numbered name\n{screen}"
         );
         let lines: Vec<&str> = screen.lines().collect();
@@ -1131,39 +1312,167 @@ mod tests {
             2_000,
         );
         let lines = draw(&mut f, 40, 16);
-        assert!(lines.iter().any(|l| l.starts_with("1 UI") && l.contains("◆ Read")), "{lines:#?}");
-        assert!(lines.iter().any(|l| l.starts_with("2 ob") && l.contains("◆ Read")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.starts_with("↳ 1 U") && l.contains("◆ Read")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.starts_with("↳ 2 o") && l.contains("◆ Read")), "{lines:#?}");
         assert!(lines.iter().any(|l| l.starts_with("◆ Bash")), "root rows have no tag\n{lines:#?}");
         assert!(!lines.iter().any(|l| l.starts_with("0 ")), "{lines:#?}");
     }
 
-    /// The tag look, for Sab to see before install. No item times (the clock column is local time) and every call
-    /// is finished (no running timer), so the screen does not depend on the machine.
-    #[test]
-    fn the_subagent_tags_at_two_widths() {
+    /// Two labelled subagents of the root: `a` finished (its `agent_end` at 135 s), `b` live. Both `Agent` calls have
+    /// their result at launch, as a background agent's do. Prompt times are nulled (the clock column is local time);
+    /// everything else keeps its item time, and `draw`'s `now` is 12 s after it.
+    fn two_lenses() -> Follow {
         let mut f = Follow::bare(session());
-        let plain = |mut v: Value| {
-            v["ts"] = Value::Null;
-            v
-        };
         let mut items = vec![
-            item("user", "root", 0, json!({"text": "audit the traces screens with two lenses"})),
+            item("user", "root", 0, json!({"text": "audit the traces screens with two lenses", "ts": null})),
             call("root", 0, 1, "t1", "Agent", "Audit traces: UI/UX lens"),
-            call("root", 0, 2, "t2", "Agent", "Audit traces: observability lens"),
+            done("root", 0, 2, "t1", true, "", 340),
+            call("root", 0, 3, "t2", "Agent", "Audit traces: observability lens"),
+            done("root", 0, 4, "t2", true, "", 340),
         ];
-        for (agent, label, line) in [("a", "Audit traces: UI/UX lens", 3), ("b", "Audit traces: observability lens", 5)] {
+        for (agent, label, line) in [("a", "Audit traces: UI/UX lens", 5), ("b", "Audit traces: observability lens", 7)] {
             items.extend([
                 item("agent_start", agent, 1, json!({"model": "claude-haiku-4-5", "label": label})),
-                item("user", agent, 1, json!({"text": format!("You are one of two auditors. Your lens: {label}")})),
+                item("user", agent, 1, json!({"text": format!("You are one of two auditors. Your lens: {label}"), "ts": null})),
                 call(agent, 1, line, &format!("r{line}"), "Read", "src/views/traces_follow.rs"),
                 done(agent, 1, line + 1, &format!("r{line}"), true, "", 100),
             ]);
         }
-        items.push(call("root", 0, 7, "t3", "Bash", "cargo test"));
-        items.push(done("root", 0, 8, "t3", true, "", 400));
-        f.apply(&items.into_iter().map(plain).collect::<Vec<_>>(), 13_000);
-        insta::assert_snapshot!("subagent_tags_width_120", screen(&mut f, 120, 20));
-        insta::assert_snapshot!("subagent_tags_width_60", screen(&mut f, 60, 24));
+        items.push(item("agent_end", "a", 1, json!({"ts": 135_000})));
+        items.push(call("root", 0, 9, "t3", "Bash", "cargo test"));
+        items.push(done("root", 0, 10, "t3", true, "", 400));
+        f.apply(&items, 13_000);
+        f
+    }
+
+    /// One subagent under one `Agent` call, as a single line of setup for the odd tag states.
+    fn one_kid(label: Option<&str>, model: Option<&str>, dispatch: &str) -> Follow {
+        let mut f = Follow::bare(session());
+        f.apply(
+            &[
+                item("user", "root", 0, json!({"text": "look into it", "ts": null})),
+                call("root", 0, 1, "t1", "Agent", dispatch),
+                done("root", 0, 2, "t1", true, "", 340),
+                item("agent_start", "k", 1, json!({"model": model, "label": label})),
+                item("user", "k", 1, json!({"text": "You are the auditor.", "ts": null})),
+                call("k", 1, 3, "r3", "Read", "src/views/traces_follow.rs"),
+                done("k", 1, 4, "r3", true, "", 100),
+            ],
+            13_000,
+        );
+        f
+    }
+
+    /// The subagent look, for Sab to see before install: tag, aligned prompt band, the `Agent` call's summary.
+    #[test]
+    fn the_subagent_rows_at_two_widths() {
+        let mut f = two_lenses();
+        insta::assert_snapshot!("subagent_rows_width_120", screen(&mut f, 120, 20));
+        insta::assert_snapshot!("subagent_rows_width_60", screen(&mut f, 60, 24));
+    }
+
+    #[test]
+    fn an_unlabelled_subagent_shows_its_model_once() {
+        let mut f = one_kid(None, Some("claude-haiku-4-5"), "Explore the index");
+        insta::assert_snapshot!("subagent_unlabelled_width_60", screen(&mut f, 60, 12));
+    }
+
+    #[test]
+    fn a_subagent_with_no_model_yet_has_a_tag_without_one() {
+        let mut f = one_kid(Some("Check the lexer"), None, "Check the lexer");
+        insta::assert_snapshot!("subagent_no_model_width_60", screen(&mut f, 60, 12));
+    }
+
+    #[test]
+    fn a_subagent_name_over_the_cap_is_cut_with_an_ellipsis() {
+        let label = "Audit the observability of the traces follow screen end to end";
+        let mut f = one_kid(Some(label), Some("claude-haiku-4-5"), label);
+        insta::assert_snapshot!("subagent_long_name_width_60", screen(&mut f, 60, 12));
+    }
+
+    #[test]
+    fn links_pair_each_labelled_subagent_with_its_dispatch_call() {
+        let f = two_lenses();
+        let links = f.links();
+        assert_eq!(links.len(), 2, "{links:?}");
+        for (row, at) in links {
+            let Body::Call(c) = &f.rows[row].body else { panic!("row {row} is not a call") };
+            assert_eq!(Some(c.what.as_str()), f.agents[at].label.as_deref());
+        }
+        let unlabelled = one_kid(None, Some("claude-haiku-4-5"), "Explore the index");
+        assert!(unlabelled.links().is_empty(), "an unlabelled child links nothing");
+    }
+
+    #[test]
+    fn a_finished_agent_call_shows_a_tick_and_a_live_one_a_dot_whatever_its_own_result() {
+        let mut f = two_lenses();
+        let lines = draw(&mut f, 120, 20);
+        let row = |label: &str| lines.iter().find(|l| l.contains(&format!("◆ Agent  {label}"))).unwrap_or_else(|| panic!("{label}\n{lines:#?}")).clone();
+        let done = row("Audit traces: UI/UX lens");
+        assert!(done.ends_with("haiku-4-5 · 1 call · ✓ 2m14s"), "{done}");
+        assert!(!done.contains('…'), "no running timer on a finished call\n{done}");
+        let live = row("Audit traces: observability lens");
+        assert!(live.ends_with("haiku-4-5 · 1 call · ● 12s"), "its call has a result, the child has not ended\n{live}");
+        f.apply(&[item("agent_resume", "a", 1, json!({}))], 14_000);
+        assert!(draw(&mut f, 120, 20).iter().any(|l| l.contains("◆ Agent  Audit traces: UI/UX lens") && l.contains('●')), "a resumed child is live again");
+    }
+
+    #[test]
+    fn an_agent_call_drops_its_calls_then_its_model_before_its_label_gets_narrow() {
+        let mut f = two_lenses();
+        let tight = |f: &mut Follow, w: u16| draw(f, w, 24).into_iter().find(|l| l.contains("◆ Agent  Audit")).unwrap();
+        let wide = tight(&mut f, 120);
+        assert!(wide.contains("1 call") && wide.contains("haiku-4-5"), "{wide}");
+        let mid = tight(&mut f, 46);
+        assert!(!mid.contains("call") && mid.contains("haiku-4-5") && mid.contains("✓ 2m14s"), "{mid}");
+        let narrow = tight(&mut f, 36);
+        assert!(!narrow.contains("haiku") && narrow.contains("✓ 2m14s"), "{narrow}");
+    }
+
+    #[test]
+    fn a_prompt_band_on_a_tagged_row_starts_at_the_tag_column() {
+        let mut f = one_kid(Some("Check the lexer"), Some("claude-haiku-4-5"), "Check the lexer");
+        f.apply(&[item("user", "k", 1, json!({"text": "word ".repeat(40), "ts": null}))], 13_000);
+        let lines = draw(&mut f, 60, 20);
+        let col = |l: &str, c: char| l.chars().position(|x| x == c).unwrap();
+        let read = lines.iter().find(|l| l.contains("◆ Read")).unwrap();
+        let prompt = lines.iter().find(|l| l.contains("› You are the auditor.")).unwrap();
+        assert_eq!(col(prompt, '›'), col(read, '◆'), "{lines:#?}");
+        let at = lines.iter().position(|l| l.contains("› word word")).unwrap();
+        let (first, second) = (&lines[at], &lines[at + 1]);
+        assert_eq!(col(first, '›'), col(read, '◆'));
+        assert!(second.starts_with("↳ 1") && second.chars().skip(col(read, '◆')).take(2).all(|c| c == ' '), "wrapped lines keep the tag and start at the column\n{second:?}");
+        assert!(lines.iter().any(|l| l.starts_with(" › look into it")), "a root prompt keeps grok's leading space\n{lines:#?}");
+    }
+
+    #[test]
+    fn f_targets_the_highlighted_subagent_row_or_its_agent_call_and_nothing_on_a_root_row() {
+        let mut f = two_lenses();
+        assert_eq!(f.cursor_agent(), None, "pinned: nothing is highlighted");
+        let row = |f: &Follow, pred: &dyn Fn(&Row) -> bool| f.rows.iter().position(|r| pred(r)).unwrap();
+        let is_agent_call = |r: &Row, what: &str| matches!(&r.body, Body::Call(c) if c.tool == "Agent" && c.what == what);
+        let read_a = row(&f, &|r| r.agent == "a" && matches!(&r.body, Body::Call(_)));
+        let dispatch_b = row(&f, &|r| is_agent_call(r, "Audit traces: observability lens"));
+        let root_bash = row(&f, &|r| matches!(&r.body, Body::Call(c) if c.tool == "Bash"));
+        for (cursor, want) in [(read_a, Some("a")), (dispatch_b, Some("b")), (root_bash, None), (0, None)] {
+            f.cursor = Some(cursor);
+            assert_eq!(f.cursor_agent(), want, "row {cursor}");
+        }
+    }
+
+    #[test]
+    fn the_spawn_row_is_found_by_label_and_a_missing_one_is_said() {
+        let mut f = Follow::bare(session());
+        f.apply(&[call("root", 0, 1, "t1", "Bash", "ls"), call("root", 0, 2, "t2", "Agent", "Check the lexer"), call("root", 0, 3, "t3", "Bash", "pwd")], 13_000);
+        f.want = Some(("Check the lexer".into(), Some(1_000)));
+        f.resolve_want();
+        assert_eq!((f.cursor, f.note.as_deref(), f.want.is_none()), (Some(1), None, true));
+        f.resume();
+        f.want = Some(("Something never dispatched".into(), Some(1_000)));
+        f.resolve_want();
+        assert_eq!((f.cursor, f.note.as_deref(), f.want.is_none()), (None, Some("spawn row not loaded"), true), "the tail stays pinned");
+        assert!(screen(&mut f, 70, 8).contains("spawn row not loaded"));
+        assert!(f.key(KeyCode::Char('k')) && f.note.is_none(), "the next key clears it");
     }
 
     #[test]

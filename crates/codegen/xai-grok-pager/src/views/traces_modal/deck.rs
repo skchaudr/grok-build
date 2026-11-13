@@ -105,6 +105,8 @@ pub(super) fn handle_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
             InputOutcome::Changed
         }
         KeyCode::Char('v') => open_grok(state),
+        KeyCode::Char('f') => changed(state.follow_into()),
+        KeyCode::Char('p') => changed(state.follow_parent()),
         KeyCode::Tab => jump(state, false),
         KeyCode::BackTab => jump(state, true),
         code => {
@@ -115,6 +117,10 @@ pub(super) fn handle_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
             }
         }
     }
+}
+
+fn changed(did: bool) -> InputOutcome {
+    if did { InputOutcome::Changed } else { InputOutcome::Unchanged }
 }
 
 pub(super) fn handle_mouse(state: &mut TracesModalState, mouse: &MouseEvent) -> InputOutcome {
@@ -301,6 +307,8 @@ fn render_footer(buf: &mut Buffer, area: Rect, theme: &Theme) {
     let hints = vec![
         HintItem::new(key!(Tab), "next live"),
         HintItem::new(key!('v'), "grok view"),
+        HintItem::new(key!('f'), "subagent"),
+        HintItem::new(key!('p'), "parent"),
         HintItem::new(key!('l'), "open call"),
         HintItem::new(key!('e'), "error"),
         HintItem::new(key!('G'), "tail"),

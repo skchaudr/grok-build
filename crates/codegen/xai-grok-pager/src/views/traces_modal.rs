@@ -1068,6 +1068,45 @@ impl TracesModalState {
         true
     }
 
+    /// `f` on a subagent's row (or the `Agent` row that dispatched it): follow that subagent alone. False when the
+    /// highlighted row is a root row or nothing is highlighted.
+    pub(super) fn follow_into(&mut self) -> bool {
+        let Some(f) = self.follow_view.as_mut() else { return false };
+        f.note = None;
+        let Some(agent) = f.cursor_agent().map(str::to_string) else { return false };
+        let session = f.session_of(&agent);
+        let find = |id: &str| self.index.as_ref().and_then(|i| i.session(id).ok().flatten());
+        match find(&agent).or_else(|| session.and_then(|s| find(&s))) {
+            Some(row) => self.open_follow_row(row),
+            None => {
+                if let Some(f) = self.follow_view.as_mut() {
+                    f.note = Some("no transcript yet".to_string());
+                }
+                true
+            }
+        }
+    }
+
+    /// `p` in a subagent's follow: the parent's follow, the cursor on the `Agent` row that spawned it. False in a root session.
+    pub(super) fn follow_parent(&mut self) -> bool {
+        let Some(f) = self.follow_view.as_mut() else { return false };
+        f.note = None;
+        let Some(pid) = f.root.parent_id.clone() else { return false };
+        let want = (f.root.label.clone().unwrap_or_default(), f.root.started_at);
+        let Some(parent) = self.index.as_ref().and_then(|i| i.session(&pid).ok().flatten()) else {
+            if let Some(f) = self.follow_view.as_mut() {
+                f.note = Some("parent not indexed".to_string());
+            }
+            return true;
+        };
+        if self.open_follow_row(parent)
+            && let Some(f) = self.follow_view.as_mut().filter(|f| f.root.id == pid)
+        {
+            f.want = Some(want);
+        }
+        true
+    }
+
     /// `o` on the follow screen: the session's trajectory.
     fn follow_trajectory(&mut self) {
         let Some(row) = self.follow_view.take().map(|f| f.root) else { return };
@@ -3551,7 +3590,7 @@ fn is_dispatch(e: &EventRow) -> bool {
     is_call(e) && matches!(e.title.to_ascii_lowercase().as_str(), "agent" | "task")
 }
 
-fn norm(s: &str) -> String {
+pub(super) fn norm(s: &str) -> String {
     one_line(s).to_lowercase()
 }
 
@@ -3994,6 +4033,16 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
                 }
             }
             KeyCode::Char('o') => state.follow_trajectory(),
+            KeyCode::Char('f') => {
+                if !state.follow_into() {
+                    return InputOutcome::Unchanged;
+                }
+            }
+            KeyCode::Char('p') => {
+                if !state.follow_parent() {
+                    return InputOutcome::Unchanged;
+                }
+            }
             code => {
                 if !state.follow_view.as_mut().is_some_and(|f| f.key(code)) {
                     return InputOutcome::Unchanged;
@@ -4338,6 +4387,8 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
             plain("h/l fold"),
             plain("Enter open call"),
             plain("o trajectory"),
+            plain("f subagent"),
+            plain("p parent"),
             plain("Esc back"),
         ],
         Mode::Live => vec![
@@ -7963,6 +8014,33 @@ mod tests {
         assert_eq!(state.mode, Mode::Follow);
         press(&mut state, KeyCode::Char('o'));
         assert_eq!((state.mode, state.follow_view.is_none()), (Mode::Trajectory, true));
+    }
+
+    #[test]
+    fn f_follows_a_subagent_alone_and_p_returns_to_the_agent_row_that_spawned_it() {
+        let (_tmp, mut state) = claude_fixture();
+        press(&mut state, KeyCode::Char('f'));
+        follow_settled(&mut state);
+        let root = state.follow_view.as_ref().unwrap().root.id.clone();
+        press(&mut state, KeyCode::Char('f'));
+        assert_eq!(state.follow_view.as_ref().unwrap().root.id, root, "nothing is highlighted while the tail is pinned");
+        press(&mut state, KeyCode::Char('g'));
+        press(&mut state, KeyCode::Char('f'));
+        assert_eq!(state.follow_view.as_ref().unwrap().root.id, root, "f on a root row does nothing");
+        press(&mut state, KeyCode::Char('p'));
+        assert_eq!(state.follow_view.as_ref().unwrap().root.id, root, "p in a root session does nothing");
+        // Up from the tail (the subagent's reply) is its Bash call.
+        press(&mut state, KeyCode::Char('G'));
+        press(&mut state, KeyCode::Char('k'));
+        press(&mut state, KeyCode::Char('f'));
+        let kid = state.follow_view.as_ref().unwrap().root.clone();
+        assert_eq!((state.mode, kid.parent_id.as_deref()), (Mode::Follow, Some(root.as_str())), "f follows the subagent alone");
+        assert_ne!(kid.id, root);
+        press(&mut state, KeyCode::Char('p'));
+        follow_settled(&mut state);
+        let f = state.follow_view.as_ref().unwrap();
+        assert_eq!(f.root.id, root, "p follows the parent");
+        assert_eq!(f.selected_call().map(|(_, c)| c.tool.as_str()), Some("Agent"), "the cursor is on the Agent row that spawned it");
     }
 
     #[test]
