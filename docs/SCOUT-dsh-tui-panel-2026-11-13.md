@@ -90,3 +90,11 @@ Not fetched by dsh-tui. The Claude CLI stream sends `rate_limit_event`; dsh tran
 ## Data source
 
 Usage % and reset times: `rate_limit_event` from the Claude CLI (claude-code v2.1.323) stream, translated in `backends/claude/translate/core.js:300` and `system.js:113`.
+
+## Focus model and panels (second capture run, from its report; source `useSidePanel.js` + user guide)
+- Chat focus: keys go to the chat input. Ctrl+B cycles closed → open+focused → closed. The panel splits only in fullscreen at 93+ columns.
+- Panel focus: `1`-`9` jump to the Nth enabled panel; `←`/`→` or `[`/`]` switch; `z` or Alt+Z zoom; `+`/`-` resize; Esc back to chat. Unused plain keys are swallowed; Ctrl combos fall through to chat.
+- Enter in the panel doesn't send to chat, except the btw panel's composer (Enter sends) and `s` in Jobs (sends a turn).
+- Help is `?` with an empty chat input; `h` opens the Sessions picker from the launchpad.
+- v0.19.0 built-in panels: todo, jobs, agents, info, trajectory, workspace, btw, companion. Panels 1-4 seen: Todo, Jobs, Agents, Info (Info has a Session section).
+- Sab's pasted layout (`[1 Usage][2 Session][3 Runtime][4 Tools][5 AI-DLC]`, 5h/7d/context bars) is not in this package; no AI-DLC string exists in it. It likely comes from another profile under `~/.dsh/profiles`. Sab's paste of the Usage tab is the reference for the F3 panel.
