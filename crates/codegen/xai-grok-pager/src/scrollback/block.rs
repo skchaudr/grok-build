@@ -657,7 +657,8 @@ impl RenderBlock {
     /// An Edit with one real hunk, so it is foldable (an empty-hunk Edit is not).
     #[cfg(test)]
     pub(crate) fn edit_with_sample_hunk(path: impl Into<String>) -> Self {
-        use xai_grok_pager_diff::{ChangeTag, DiffLine};
+        use similar::ChangeTag;
+        use xai_grok_pager_diff::DiffLine;
         let line = |text: &str, lo, ln, tag| DiffLine {
             text: text.into(),
             lo,
