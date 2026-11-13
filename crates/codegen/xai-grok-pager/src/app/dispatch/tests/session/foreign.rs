@@ -989,7 +989,8 @@ fn active_modal_owns_stale_and_external_deep_search_results() {
         else {
             panic!("modal picker missing");
         };
-        assert!(content_results.is_none());
+        // Fork seam (load.rs handle_deep_search_results): External holds Pi PSM hits, so they land in the modal.
+        assert_eq!(content_results.is_some(), external);
     }
 }
 
