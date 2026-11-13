@@ -1137,6 +1137,35 @@ mod tests {
         assert!(!lines.iter().any(|l| l.starts_with("0 ")), "{lines:#?}");
     }
 
+    /// The tag look, for Sab to see before install. No item times (the clock column is local time) and every call
+    /// is finished (no running timer), so the screen does not depend on the machine.
+    #[test]
+    fn the_subagent_tags_at_two_widths() {
+        let mut f = Follow::bare(session());
+        let plain = |mut v: Value| {
+            v["ts"] = Value::Null;
+            v
+        };
+        let mut items = vec![
+            item("user", "root", 0, json!({"text": "audit the traces screens with two lenses"})),
+            call("root", 0, 1, "t1", "Agent", "Audit traces: UI/UX lens"),
+            call("root", 0, 2, "t2", "Agent", "Audit traces: observability lens"),
+        ];
+        for (agent, label, line) in [("a", "Audit traces: UI/UX lens", 3), ("b", "Audit traces: observability lens", 5)] {
+            items.extend([
+                item("agent_start", agent, 1, json!({"model": "claude-haiku-4-5", "label": label})),
+                item("user", agent, 1, json!({"text": format!("You are one of two auditors. Your lens: {label}")})),
+                call(agent, 1, line, &format!("r{line}"), "Read", "src/views/traces_follow.rs"),
+                done(agent, 1, line + 1, &format!("r{line}"), true, "", 100),
+            ]);
+        }
+        items.push(call("root", 0, 7, "t3", "Bash", "cargo test"));
+        items.push(done("root", 0, 8, "t3", true, "", 400));
+        f.apply(&items.into_iter().map(plain).collect::<Vec<_>>(), 13_000);
+        insta::assert_snapshot!("subagent_tags_width_120", screen(&mut f, 120, 20));
+        insta::assert_snapshot!("subagent_tags_width_60", screen(&mut f, 60, 24));
+    }
+
     #[test]
     fn l_opens_a_long_prompt_in_full_and_h_folds_it_back() {
         let mut f = Follow::bare(session());
