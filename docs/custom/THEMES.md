@@ -1,8 +1,8 @@
 # Zed theme ports
 
-Twelve Zed themes ported faithfully: `kanso-mist` (Kanso Mist, Borderless + No italics), `kanagawa-wave`, `kanagawa`, `jetbrains-islands-dark`, `night-owl` (No Italics), `one-dark-pro`, `nstlgy-dark`, `severance-dark`, `quasi-monochrome-dark`, and light `jetbrains-islands-light`, `monosami-light`, `monosami-ink-light`. Select with `/theme kanso-mist` or `[ui] theme = "kanso-mist"`. All need truecolor.
+Twenty-two Zed themes ported faithfully. Batch 1 (12): `kanso-mist` (Kanso Mist, Borderless + No italics), `kanagawa-wave`, `kanagawa`, `jetbrains-islands-dark`, `night-owl` (No Italics), `one-dark-pro`, `nstlgy-dark`, `severance-dark`, `quasi-monochrome-dark`, and light `jetbrains-islands-light`, `monosami-light`, `monosami-ink-light`. Batch 2 (10): dark `dracula`, `ayu-darker`, `fleet-dark`, `carbonfox`, `kanagawa-dragon`, `kanso-ink`; light `fleet-light`, `dayfox`, `kanagawa-lotus`, `kanso-pearl`. Select with `/theme kanso-mist` or `[ui] theme = "kanso-mist"`. All need truecolor.
 
-Generated, not hand-written: `scripts/themes/zed_port.py <zed-themes-dir> <repo-root>` writes `crates/codegen/xai-grok-pager-render/src/theme/zed_ports.rs` and `assets/<slug>.tmTheme`. Source JSON is not vendored; copy it read-only from `~/Library/Application Support/Zed/extensions/installed/{kanso,kanagawa-themes,jetbrains-themes,night-owlz,one-dark-pro,nstlgy-dark,severance-theme,quasi-monochrome,monosami}/themes/`. Sparse themes missing a UI or syntax key fall back through `UI_FALLBACKS` / `SYNTAX_FALLBACKS` in the script. Translucent Zed colors are composited over `editor.background`; alpha-0 colors are skipped in fallback chains.
+Generated, not hand-written: `scripts/themes/zed_port.py <zed-extensions-installed-dir> <repo-root>` writes `crates/codegen/xai-grok-pager-render/src/theme/zed_ports.rs` and `assets/<slug>.tmTheme`. Source JSON is not vendored; the `PORTS` paths are relative to `~/Library/Application Support/Zed/extensions/installed/`. Hand-picked values live in the script (`MD_QUOTE`, `BG_VISUAL_OVERRIDE`), never in the generated file. Sparse themes missing a UI or syntax key fall back through `UI_FALLBACKS` / `SYNTAX_FALLBACKS` in the script. Translucent Zed colors are composited over `editor.background`; alpha-0 colors are skipped in fallback chains.
 
 ## UI mapping (Grok field ← Zed key, first visible wins)
 
@@ -43,4 +43,4 @@ Limits: Zed highlights via tree-sitter captures; syntect uses TextMate scopes, s
 
 ## Sources
 
-Colour values come from these Zed extensions (the Zed extension registry requires an OSI licence): Kanso, webhooked/kanso-zed; Kanagawa, ethangilmore/zed-kanagawa; JetBrains, artemevsevev/zed-theme-jetbrains.
+Colour values come from these Zed extensions (the Zed extension registry requires an OSI licence): Kanso, webhooked/kanso-zed; Kanagawa, ethangilmore/zed-kanagawa; JetBrains, artemevsevev/zed-theme-jetbrains. Batch 2 comes from the installed extensions `dracula`, `ayu-darker`, `fleet-themes`, `nvim-nightfox`, `kanso`, `kanagawa-themes`. Those extension dirs ship no LICENSE file, so their licences are unchecked.

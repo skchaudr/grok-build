@@ -34,6 +34,16 @@ static SYNTECT_QUASI_MONOCHROME_DARK: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_JETBRAINS_ISLANDS_LIGHT: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_MONOSAMI_LIGHT: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_MONOSAMI_INK_LIGHT: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_DRACULA: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_AYU_DARKER: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_FLEET_DARK: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_CARBONFOX: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_KANAGAWA_DRAGON: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_KANSO_INK: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_FLEET_LIGHT: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_DAYFOX: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_KANAGAWA_LOTUS: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_KANSO_PEARL: OnceLock<Syntect> = OnceLock::new();
 
 /// Convert syntect style to ratatui foreground-only style, quantized for terminal color support (or polarity-safe under the terminal-native lock).
 pub fn syntect_to_ratatui_fg(style: syntect::highlighting::Style) -> Style {
@@ -167,6 +177,26 @@ pub fn get_syntect() -> &'static Syntect {
             .get_or_init(|| Syntect::new(include_bytes!("../assets/monosami-light.tmTheme"))),
         ThemeKind::MonosamiInkLight => SYNTECT_MONOSAMI_INK_LIGHT
             .get_or_init(|| Syntect::new(include_bytes!("../assets/monosami-ink-light.tmTheme"))),
+        ThemeKind::Dracula => SYNTECT_DRACULA
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/dracula.tmTheme"))),
+        ThemeKind::AyuDarker => SYNTECT_AYU_DARKER
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/ayu-darker.tmTheme"))),
+        ThemeKind::FleetDark => SYNTECT_FLEET_DARK
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/fleet-dark.tmTheme"))),
+        ThemeKind::Carbonfox => SYNTECT_CARBONFOX
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/carbonfox.tmTheme"))),
+        ThemeKind::KanagawaDragon => SYNTECT_KANAGAWA_DRAGON
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/kanagawa-dragon.tmTheme"))),
+        ThemeKind::KansoInk => SYNTECT_KANSO_INK
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/kanso-ink.tmTheme"))),
+        ThemeKind::FleetLight => SYNTECT_FLEET_LIGHT
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/fleet-light.tmTheme"))),
+        ThemeKind::Dayfox => SYNTECT_DAYFOX
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/dayfox.tmTheme"))),
+        ThemeKind::KanagawaLotus => SYNTECT_KANAGAWA_LOTUS
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/kanagawa-lotus.tmTheme"))),
+        ThemeKind::KansoPearl => SYNTECT_KANSO_PEARL
+            .get_or_init(|| Syntect::new(include_bytes!("../assets/kanso-pearl.tmTheme"))),
     }
 }
 

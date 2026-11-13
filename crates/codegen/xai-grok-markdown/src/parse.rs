@@ -577,6 +577,7 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                         .checked_sub(1)
                         .and_then(|i| self.ms.heading_inner.get(i).copied())
                         .map(Some),
+                    Tag::BlockQuote(_) => Some(Some(strip_fg_in_link(self.ms.blockquote_inner))),
                     Tag::Emphasis => Some(Some(strip_fg_in_link(self.ms.emphasis_inner))),
                     Tag::Strong => Some(Some(strip_fg_in_link(self.ms.strong_inner))),
                     Tag::Strikethrough => Some(Some(strip_fg_in_link(self.ms.strikethrough_inner))),

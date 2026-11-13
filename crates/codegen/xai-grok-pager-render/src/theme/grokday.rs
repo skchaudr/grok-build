@@ -128,6 +128,7 @@ impl Theme {
             md_task_checked: GREEN,
             md_task_unchecked: FG_DARK,
             md_muted: COMMENT,
+            md_quote: rgb(158, 84, 8), // #9e5408
             md_code_bg: rgb(228, 228, 228),
             md_text: FG_DARK,
             link_fg: BLUE, // #2F64D2 -- deep blue for light bg

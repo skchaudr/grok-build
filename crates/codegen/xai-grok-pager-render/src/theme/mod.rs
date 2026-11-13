@@ -85,6 +85,16 @@ pub enum ThemeKind {
     JetBrainsIslandsLight = 16,
     MonosamiLight = 17,
     MonosamiInkLight = 18,
+    Dracula = 19,
+    AyuDarker = 20,
+    FleetDark = 21,
+    Carbonfox = 22,
+    KanagawaDragon = 23,
+    KansoInk = 24,
+    FleetLight = 25,
+    Dayfox = 26,
+    KanagawaLotus = 27,
+    KansoPearl = 28,
     /// Follow system appearance. Disk stores `"auto"`; `cache::CURRENT` holds only the resolved concrete kind. Excluded from [`ALL`].
     Auto = 4,
 }
@@ -109,6 +119,16 @@ impl ThemeKind {
         ThemeKind::JetBrainsIslandsLight,
         ThemeKind::MonosamiLight,
         ThemeKind::MonosamiInkLight,
+        ThemeKind::Dracula,
+        ThemeKind::AyuDarker,
+        ThemeKind::FleetDark,
+        ThemeKind::Carbonfox,
+        ThemeKind::KanagawaDragon,
+        ThemeKind::KansoInk,
+        ThemeKind::FleetLight,
+        ThemeKind::Dayfox,
+        ThemeKind::KanagawaLotus,
+        ThemeKind::KansoPearl,
         ThemeKind::Terminal,
     ];
 
@@ -175,6 +195,16 @@ impl ThemeKind {
             Self::JetBrainsIslandsLight => "jetbrains-islands-light",
             Self::MonosamiLight => "monosami-light",
             Self::MonosamiInkLight => "monosami-ink-light",
+            Self::Dracula => "dracula",
+            Self::AyuDarker => "ayu-darker",
+            Self::FleetDark => "fleet-dark",
+            Self::Carbonfox => "carbonfox",
+            Self::KanagawaDragon => "kanagawa-dragon",
+            Self::KansoInk => "kanso-ink",
+            Self::FleetLight => "fleet-light",
+            Self::Dayfox => "dayfox",
+            Self::KanagawaLotus => "kanagawa-lotus",
+            Self::KansoPearl => "kanso-pearl",
             Self::Terminal => "terminal",
             Self::Auto => "auto",
         }
@@ -199,7 +229,17 @@ impl ThemeKind {
             | Self::QuasiMonochromeDark
             | Self::JetBrainsIslandsLight
             | Self::MonosamiLight
-            | Self::MonosamiInkLight => true,
+            | Self::MonosamiInkLight
+            | Self::Dracula
+            | Self::AyuDarker
+            | Self::FleetDark
+            | Self::Carbonfox
+            | Self::KanagawaDragon
+            | Self::KansoInk
+            | Self::FleetLight
+            | Self::Dayfox
+            | Self::KanagawaLotus
+            | Self::KansoPearl => true,
             // Reset plus named ANSI-16 entries only — nothing to quantize.
             Self::Terminal => false,
             // Auto is resolved to a concrete theme before rendering.
@@ -233,6 +273,16 @@ impl ThemeKind {
             Self::JetBrainsIslandsLight => &["islands-light", "jetbrains-light"],
             Self::MonosamiLight => &["monosami"],
             Self::MonosamiInkLight => &["monosami-ink", "inklight", "ink-light"],
+            Self::Dracula => &[],
+            Self::AyuDarker => &[],
+            Self::FleetDark => &[],
+            Self::Carbonfox => &[],
+            Self::KanagawaDragon => &[],
+            Self::KansoInk => &[],
+            Self::FleetLight => &[],
+            Self::Dayfox => &[],
+            Self::KanagawaLotus => &[],
+            Self::KansoPearl => &[],
             Self::Terminal => &["terminal-default", "transparent", "native"],
             Self::Auto => &["system"],
         }
@@ -300,6 +350,16 @@ pub fn display_name_for_canonical(value: &str) -> &str {
         "jetbrains-islands-light" => "JetBrains Islands Light",
         "monosami-light" => "Monosami Light",
         "monosami-ink-light" => "Monosami Ink Light",
+        "dracula" => "Dracula",
+        "ayu-darker" => "Ayu Darker",
+        "fleet-dark" => "Fleet Dark",
+        "carbonfox" => "Carbonfox",
+        "kanagawa-dragon" => "Kanagawa Dragon",
+        "kanso-ink" => "Kanso Ink",
+        "fleet-light" => "Fleet Light",
+        "dayfox" => "Dayfox",
+        "kanagawa-lotus" => "Kanagawa Lotus",
+        "kanso-pearl" => "Kanso Pearl",
         "terminal" => "Terminal",
         other => other,
     }
@@ -393,6 +453,7 @@ impl Theme {
             md_task_checked: q(self.md_task_checked),
             md_task_unchecked: q(self.md_task_unchecked),
             md_muted: q(self.md_muted),
+            md_quote: q(self.md_quote),
             md_code_bg: q(self.md_code_bg),
             md_text: q(self.md_text),
             link_fg: q(self.link_fg),
@@ -432,6 +493,16 @@ impl Theme {
                 ThemeKind::JetBrainsIslandsLight => Self::jetbrains_islands_light(),
                 ThemeKind::MonosamiLight => Self::monosami_light(),
                 ThemeKind::MonosamiInkLight => Self::monosami_ink_light(),
+                ThemeKind::Dracula => Self::dracula(),
+                ThemeKind::AyuDarker => Self::ayu_darker(),
+                ThemeKind::FleetDark => Self::fleet_dark(),
+                ThemeKind::Carbonfox => Self::carbonfox(),
+                ThemeKind::KanagawaDragon => Self::kanagawa_dragon(),
+                ThemeKind::KansoInk => Self::kanso_ink(),
+                ThemeKind::FleetLight => Self::fleet_light(),
+                ThemeKind::Dayfox => Self::dayfox(),
+                ThemeKind::KanagawaLotus => Self::kanagawa_lotus(),
+                ThemeKind::KansoPearl => Self::kanso_pearl(),
                 // Handled by the early return above.
                 ThemeKind::Terminal => Self::terminal(),
                 // Auto is resolved to a concrete theme before being stored; if reached, fall back to GrokNight
@@ -714,6 +785,7 @@ impl Theme {
             md_heading_h6: muted_fg,
             md_code: cyan,
             md_muted: muted_fg,
+            md_quote: yellow,
             md_task_checked: green,
             md_task_unchecked: muted_fg,
             link_fg: blue,
@@ -964,6 +1036,16 @@ mod tests {
         assert!(!Theme::jetbrains_islands_light().is_dark());
         assert!(!Theme::monosami_light().is_dark());
         assert!(!Theme::monosami_ink_light().is_dark());
+        assert!(Theme::dracula().is_dark());
+        assert!(Theme::ayu_darker().is_dark());
+        assert!(Theme::fleet_dark().is_dark());
+        assert!(Theme::carbonfox().is_dark());
+        assert!(Theme::kanagawa_dragon().is_dark());
+        assert!(Theme::kanso_ink().is_dark());
+        assert!(!Theme::fleet_light().is_dark());
+        assert!(!Theme::dayfox().is_dark());
+        assert!(!Theme::kanagawa_lotus().is_dark());
+        assert!(!Theme::kanso_pearl().is_dark());
         assert!(!Theme::grokday().is_dark());
     }
 
@@ -1129,6 +1211,7 @@ mod tests {
             ("md_heading_h6", t.md_heading_h6),
             ("md_code", t.md_code),
             ("md_muted", t.md_muted),
+            ("md_quote", t.md_quote),
             ("md_task_checked", t.md_task_checked),
             ("md_task_unchecked", t.md_task_unchecked),
             ("link_fg", t.link_fg),
@@ -1358,6 +1441,16 @@ mod tests {
                 ThemeKind::JetBrainsIslandsLight => Theme::jetbrains_islands_light(),
                 ThemeKind::MonosamiLight => Theme::monosami_light(),
                 ThemeKind::MonosamiInkLight => Theme::monosami_ink_light(),
+                ThemeKind::Dracula => Theme::dracula(),
+                ThemeKind::AyuDarker => Theme::ayu_darker(),
+                ThemeKind::FleetDark => Theme::fleet_dark(),
+                ThemeKind::Carbonfox => Theme::carbonfox(),
+                ThemeKind::KanagawaDragon => Theme::kanagawa_dragon(),
+                ThemeKind::KansoInk => Theme::kanso_ink(),
+                ThemeKind::FleetLight => Theme::fleet_light(),
+                ThemeKind::Dayfox => Theme::dayfox(),
+                ThemeKind::KanagawaLotus => Theme::kanagawa_lotus(),
+                ThemeKind::KansoPearl => Theme::kanso_pearl(),
                 // Reset plus named ANSI entries: the scrollbar rides the
                 // terminal's own fg/bg contrast, so there is no RGB delta.
                 ThemeKind::Terminal => continue,
@@ -1610,6 +1703,16 @@ mod tests {
             ("jetbrains-islands-light", ThemeKind::JetBrainsIslandsLight),
             ("monosami-light", ThemeKind::MonosamiLight),
             ("monosami-ink-light", ThemeKind::MonosamiInkLight),
+            ("dracula", ThemeKind::Dracula),
+            ("ayu-darker", ThemeKind::AyuDarker),
+            ("fleet-dark", ThemeKind::FleetDark),
+            ("carbonfox", ThemeKind::Carbonfox),
+            ("kanagawa-dragon", ThemeKind::KanagawaDragon),
+            ("kanso-ink", ThemeKind::KansoInk),
+            ("fleet-light", ThemeKind::FleetLight),
+            ("dayfox", ThemeKind::Dayfox),
+            ("kanagawa-lotus", ThemeKind::KanagawaLotus),
+            ("kanso-pearl", ThemeKind::KansoPearl),
         ] {
             assert_eq!(ThemeKind::from_name(name), Some(kind), "{name}");
             assert_eq!(canonical_name(name), Some(kind.display_name()));
@@ -1619,7 +1722,7 @@ mod tests {
     #[test]
     fn zed_port_tmthemes_load_with_matching_background() {
         use syntect::highlighting::{Color, ThemeSet};
-        let assets: [(&[u8], Theme); 12] = [
+        let assets: [(&[u8], Theme); 22] = [
             (
                 include_bytes!("../../assets/kanso-mist.tmTheme"),
                 Theme::kanso_mist(),
@@ -1667,6 +1770,46 @@ mod tests {
             (
                 include_bytes!("../../assets/monosami-ink-light.tmTheme"),
                 Theme::monosami_ink_light(),
+            ),
+            (
+                include_bytes!("../../assets/dracula.tmTheme"),
+                Theme::dracula(),
+            ),
+            (
+                include_bytes!("../../assets/ayu-darker.tmTheme"),
+                Theme::ayu_darker(),
+            ),
+            (
+                include_bytes!("../../assets/fleet-dark.tmTheme"),
+                Theme::fleet_dark(),
+            ),
+            (
+                include_bytes!("../../assets/carbonfox.tmTheme"),
+                Theme::carbonfox(),
+            ),
+            (
+                include_bytes!("../../assets/kanagawa-dragon.tmTheme"),
+                Theme::kanagawa_dragon(),
+            ),
+            (
+                include_bytes!("../../assets/kanso-ink.tmTheme"),
+                Theme::kanso_ink(),
+            ),
+            (
+                include_bytes!("../../assets/fleet-light.tmTheme"),
+                Theme::fleet_light(),
+            ),
+            (
+                include_bytes!("../../assets/dayfox.tmTheme"),
+                Theme::dayfox(),
+            ),
+            (
+                include_bytes!("../../assets/kanagawa-lotus.tmTheme"),
+                Theme::kanagawa_lotus(),
+            ),
+            (
+                include_bytes!("../../assets/kanso-pearl.tmTheme"),
+                Theme::kanso_pearl(),
             ),
         ];
         for (bytes, theme) in assets {

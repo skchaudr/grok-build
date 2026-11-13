@@ -128,6 +128,7 @@ impl Theme {
             md_task_checked: TEAL,
             md_task_unchecked: TEXT_DIM,
             md_muted: MUTED,
+            md_quote: GOLD,
             md_code_bg: CODE_BG,
             md_text: TEXT,
             link_fg: CYAN,

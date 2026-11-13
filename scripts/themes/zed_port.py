@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Port Zed themes to Grok Build: emits theme/zed_ports.rs and assets/<slug>.tmTheme.
 
-Usage: zed_port.py <zed-themes-dir> <repo-root>
-The Zed JSON is not vendored; fetch it read-only from an install
-(~/Library/Application Support/Zed/extensions/installed/<ext>/themes/*.json).
+Usage: zed_port.py <zed-extensions-installed-dir> <repo-root>
+The Zed JSON is not vendored; read it from an install, e.g.
+~/Library/Application Support/Zed/extensions/installed (paths in PORTS are relative to it).
 Mapping is documented in docs/custom/THEMES.md; keep the two in sync.
 """
 import json
@@ -12,22 +12,33 @@ import re
 import subprocess
 import sys
 
-# (slug, rust fn, Zed file, Zed theme name)
+# (slug, rust fn, Zed file relative to the extensions dir, Zed theme name)
 PORTS = [
-    ("kanso-mist", "kanso_mist", "kanso_themes_kanso.json", "Kanso Mist (Borderless + No italics)"),
-    ("kanagawa-wave", "kanagawa_wave", "kanagawa-themes_themes_Kanagawa.json", "Kanagawa Wave"),
-    ("kanagawa", "kanagawa", "kanagawa-themes_themes_Kanagawa.json", "Kanagawa"),
+    ("kanso-mist", "kanso_mist", "kanso/themes/kanso.json", "Kanso Mist (Borderless + No italics)"),
+    ("kanagawa-wave", "kanagawa_wave", "kanagawa-themes/themes/Kanagawa.json", "Kanagawa Wave"),
+    ("kanagawa", "kanagawa", "kanagawa-themes/themes/Kanagawa.json", "Kanagawa"),
     ("jetbrains-islands-dark", "jetbrains_islands_dark",
-     "jetbrains-themes_themes_jetbrains-islands-dark.json", "JetBrains Islands Dark"),
-    ("night-owl", "night_owl", "night-owlz_themes_NightOwl.json", "Night Owl No Italics"),
-    ("one-dark-pro", "one_dark_pro", "one-dark.json", "One Dark Pro"),
-    ("nstlgy-dark", "nstlgy_dark", "nstlgy-dark.json", "Nstlgy Dark"),
-    ("severance-dark", "severance_dark", "severance.json", "Severance Dark"),
-    ("quasi-monochrome-dark", "quasi_monochrome_dark", "quasi-monochrome.json", "Quasi Monochrome Dark"),
+     "jetbrains-themes/themes/jetbrains-islands-dark.json", "JetBrains Islands Dark"),
+    ("night-owl", "night_owl", "night-owlz/themes/NightOwl.json", "Night Owl No Italics"),
+    ("one-dark-pro", "one_dark_pro", "one-dark-pro/themes/one-dark.json", "One Dark Pro"),
+    ("nstlgy-dark", "nstlgy_dark", "nstlgy-dark/themes/nstlgy-dark.json", "Nstlgy Dark"),
+    ("severance-dark", "severance_dark", "severance-theme/themes/severance.json", "Severance Dark"),
+    ("quasi-monochrome-dark", "quasi_monochrome_dark", "quasi-monochrome/themes/quasi-monochrome.json", "Quasi Monochrome Dark"),
     ("jetbrains-islands-light", "jetbrains_islands_light",
-     "jetbrains-themes_themes_jetbrains-islands-light.json", "JetBrains Islands Light"),
-    ("monosami-light", "monosami_light", "monosami_themes_monosami.json", "Monosami Light"),
-    ("monosami-ink-light", "monosami_ink_light", "monosami_themes_monosami.json", "Monosami Ink Light"),
+     "jetbrains-themes/themes/jetbrains-islands-light.json", "JetBrains Islands Light"),
+    ("monosami-light", "monosami_light", "monosami/themes/monosami.json", "Monosami Light"),
+    ("monosami-ink-light", "monosami_ink_light", "monosami/themes/monosami.json", "Monosami Ink Light"),
+    # Batch 2 (2026-11-13): more Zed themes from the installed extensions.
+    ("dracula", "dracula", "dracula/themes/dracula.json", "Dracula"),
+    ("ayu-darker", "ayu_darker", "ayu-darker/themes/ayu-darker.json", "Ayu Darker"),
+    ("fleet-dark", "fleet_dark", "fleet-themes/themes/fleet.json", "Fleet Dark"),
+    ("carbonfox", "carbonfox", "nvim-nightfox/themes/nvim-nightfox.json", "Carbonfox - opaque"),
+    ("kanagawa-dragon", "kanagawa_dragon", "kanagawa-themes/themes/Kanagawa.json", "Kanagawa Dragon"),
+    ("kanso-ink", "kanso_ink", "kanso/themes/kanso.json", "Kanso Ink (Borderless + No italics)"),
+    ("fleet-light", "fleet_light", "fleet-themes/themes/fleet.json", "Fleet Light"),
+    ("dayfox", "dayfox", "nvim-nightfox/themes/nvim-nightfox.json", "Dayfox - opaque"),
+    ("kanagawa-lotus", "kanagawa_lotus", "kanagawa-themes/themes/Kanagawa.json", "Kanagawa Lotus"),
+    ("kanso-pearl", "kanso_pearl", "kanso/themes/kanso.json", "Kanso Pearl (Borderless + No italics)"),
 ]
 
 # Zed syntax key -> TextMate scopes. Later rows win ties (syntect: more specific selector wins).
@@ -269,12 +280,36 @@ FIELD_ORDER = [
     "md_heading_h1", "md_heading_h1_mod", "md_heading_h2", "md_heading_h2_mod",
     "md_heading_h3", "md_heading_h3_mod", "md_heading_h4", "md_heading_h4_mod",
     "md_heading_h5", "md_heading_h5_mod", "md_heading_h6", "md_heading_h6_mod",
-    "md_code", "md_task_checked", "md_task_unchecked", "md_muted", "md_code_bg", "md_text", "link_fg",
+    "md_code", "md_task_checked", "md_task_unchecked", "md_muted", "md_quote", "md_code_bg", "md_text", "link_fg",
 ]
+
+
+# Hand-picked blockquote colours (md_quote), one per ported theme: distinct from body, code, link and muted text.
+MD_QUOTE = {
+    "kanso_mist": (220, 165, 97), "kanagawa_wave": (210, 126, 153), "kanagawa": (220, 165, 97),
+    "jetbrains_islands_dark": (207, 142, 109), "night_owl": (199, 146, 234), "one_dark_pro": (198, 120, 221),
+    "nstlgy_dark": (203, 166, 247), "severance_dark": (255, 204, 128), "quasi_monochrome_dark": (255, 215, 0),
+    "jetbrains_islands_light": (168, 92, 0), "monosami_light": (130, 70, 30), "monosami_ink_light": (30, 100, 105),
+    # Batch 2: picked from each theme's own syntax/UI tokens (contrast >= 4.5 and >= 60 from body, code, link, muted);
+    # the light ones are darkened versions of their accent because Zed's own light accents fail 4.5:1.
+    "dracula": (139, 233, 253), "ayu_darker": (90, 193, 254), "fleet_dark": (235, 200, 141),
+    "carbonfox": (61, 219, 217), "kanagawa_dragon": (255, 158, 59), "kanso_ink": (220, 165, 97),
+    "fleet_light": (163, 29, 141), "dayfox": (172, 84, 2), "kanagawa_lotus": (143, 76, 0),
+    "kanso_pearl": (194, 64, 68),
+}
+
+# Hand-tuned selection fills that shipped before the port was generated. Zed's own value fails
+# visibility_tests (selection must stand >= 1.25:1 off bg_light and bg_base); edit here, not in zed_ports.rs.
+BG_VISUAL_OVERRIDE = {"kanso_mist": (24, 25, 30), "one_dark_pro": (60, 67, 80), "dracula": (95, 84, 120),
+    # Zed's fill is 1.6:1 low on text contrast; no warm fill clears 4.5:1 text and 1.25:1 bands, so this is the closest that does.
+    "kanagawa_lotus": (192, 208, 156)}
 
 
 def rust_fn(fn, name, port):
     colors, mods = port.colors(), port.heading_mods()
+    colors["md_quote"] = MD_QUOTE[fn]
+    if fn in BG_VISUAL_OVERRIDE:
+        colors["bg_visual"] = BG_VISUAL_OVERRIDE[fn]
     lines = [f"    /// {name} (Zed), ported by scripts/themes/zed_port.py.",
              f"    pub const fn {fn}() -> Self {{", "        Self {"]
     for f in FIELD_ORDER:

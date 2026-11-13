@@ -130,7 +130,8 @@ fn build_style() -> MarkdownStyle {
         inline_code_outer: fg(theme.md_code).dimmed().hidden(),
         // The selection-side bar detection in xai-grok-pager (scrollback/blocks/quote_bar.rs, `quote_bar_style`) mirrors this exact style
         // Its end-to-end tests fail if this line changes
-        blockquote_outer: fg(theme.md_muted).dimmed(),
+        blockquote_inner: fg(theme.md_quote),
+        blockquote_outer: fg(theme.md_quote).dimmed(),
         task_checked: fg(theme.md_task_checked),
         task_unchecked: fg(theme.md_task_unchecked).dimmed(),
         list_item: fg(theme.md_muted),
