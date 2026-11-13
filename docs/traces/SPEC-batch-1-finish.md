@@ -4,7 +4,7 @@ Status: draft 2026-11-12, unreviewed. Build policy: standing for the whole clean
 
 ## Departures from Sab's words (until he rules)
 1. The subagent tag format (`1 UI/U…`, dim) is the Opus reviewer's design, not Sab's. The builder repeats the tag on every wrapped prompt line and every line of an opened call body.
-2. The build gets past the broken Homebrew protoc with a library path set in one shell (`DYLD_FALLBACK_LIBRARY_PATH` → abseil 20260107.1), not by `brew upgrade protobuf`. The upgrade is still Sab's call.
+2. (Resolved) Homebrew protobuf is 36.2 and `protoc` runs; the build needs no library-path workaround.
 3. With the P2 fix, a real Shift+Up/Down while the slash menu is open still goes to Pi's workflow scroll shortcut (its intended binding). A named-key shortcut bound without Shift (`up`) no longer fires on Shift+Up.
 
 ## Sab's words
@@ -16,7 +16,7 @@ Status: draft 2026-11-12, unreviewed. Build policy: standing for the whole clean
 - P1 is done. Tasks 1 and 2 of `briefs/fix-batch-1.md` (Opus review text) are committed: `e6d0d124` (pager: tags, brief expand and inspect) and `8f1c3e99` (traces crate: brief kept past the backlog cut).
 - `cargo test --release -p xai-grok-traces`: 283 passed, 0 failed.
 - Pager tests have not run. The first pager compile reached 1444/1454 under the shell workaround before it was stopped.
-- Rex session `batch1-cycle` is open with the workaround exported.
+- Rex session `batch1-cycle` is open. Unset `DYLD_FALLBACK_LIBRARY_PATH` there before P3.
 
 ## Packets
 
@@ -77,4 +77,4 @@ Runs after P3 installs. The binary is `grok-fork`; the TUI is `grok-fork traces`
 - Output: `docs/traces/CHECK-batch-1.md` with captures per point, committed by path. Sab sees the tag look before anyone calls it done.
 
 ## Out of this batch (`SWEEP-backlog.md`)
-`/model` picker ignores Esc. sab-air plain Up not firing. sab-air runs Homebrew pi 1.4.0. Status-line spam from shortcuts and daily-memory. Subagent chat in grok claude. Resumed subagents invisible in grok claude. `brew upgrade protobuf`.
+`/model` picker ignores Esc. sab-air plain Up not firing. Status-line spam from shortcuts and daily-memory. Subagent chat in grok claude. Resumed subagents invisible in grok claude.
