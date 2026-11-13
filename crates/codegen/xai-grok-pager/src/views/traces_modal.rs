@@ -4439,7 +4439,8 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
             v
         }
     };
-    for label in ["⇅ in/out", "E all", "</> more/less", "n noise", "x errors"] {
+    // The cass search hint goes first: the bar was sized without it, so the older hints keep their widths.
+    for label in ["⇅ in/out", "S cass search", "E all", "</> more/less", "n noise", "x errors"] {
         if modal_window::shortcuts_rows_needed(&hints, width) <= 2 {
             break;
         }
@@ -5748,10 +5749,12 @@ mod tests {
         state.hosts = vec!["user@synthetic".into()];
         let wide = hint_labels(&state, 400);
         assert!(wide.contains(&"E all") && wide.contains(&"</> more/less") && wide.contains(&"x errors"));
+        assert!(wide.contains(&"S cass search"));
         assert!(modal_window::shortcuts_rows_needed(&shortcuts(&state, 400), 400) <= 2);
 
         let mid = hint_labels(&state, 110);
-        assert!(!mid.contains(&"E all"), "E drops first");
+        assert!(!mid.contains(&"S cass search"), "the cass search hint drops before any older one");
+        assert!(!mid.contains(&"E all"), "E drops next");
         assert!(mid.contains(&"</> more/less"));
         assert!(mid.contains(&"x errors"));
         assert!(mid.contains(&"H host") && mid.contains(&"r resume") && mid.contains(&"g/G ends"));
