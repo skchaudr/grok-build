@@ -1014,17 +1014,6 @@ impl AgentView {
                 _ => InputOutcome::Unchanged,
             };
         }
-        if self.fork_state.is_some() {
-            return match ev {
-                Event::Key(key) if key.kind != crossterm::event::KeyEventKind::Release => {
-                    if key!('q', CONTROL).matches(key) {
-                        return InputOutcome::Unchanged;
-                    }
-                    self.handle_fork_picker_key(key)
-                }
-                _ => InputOutcome::Unchanged,
-            };
-        }
         if self.jump_state.is_some() {
             return match ev {
                 Event::Key(key) if key.kind != crossterm::event::KeyEventKind::Release => {

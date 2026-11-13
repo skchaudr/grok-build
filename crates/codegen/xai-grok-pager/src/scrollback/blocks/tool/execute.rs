@@ -670,7 +670,12 @@ impl BlockContent for ExecuteToolCallBlock {
                     content_width,
                     0,
                     true,
-                    header_content,
+                    // Collapsed shows the task name alone; `CommandOnly` still wins.
+                    if header_content.shows_task_name() {
+                        crate::appearance::ExecuteHeaderContent::TaskName
+                    } else {
+                        header_content
+                    },
                 );
                 BlockOutput { lines }
             }
