@@ -1,0 +1,12 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/traces_follow.rs
+expression: "screen(&mut f, 60, 12)"
+---
+ › look into it
+
+◆ Agent  Audit the observabilit…  haiku-4-5 · 1 call · ● 12s
+↳ 1 Audit the… ↳ haiku-4-5 started  Audit the observabil…
+
+↳ 1 Audit the… › You are the auditor.
+
+↳ 1 Audit the… ◆ Read  src/views/traces_follow.rs       0.1s

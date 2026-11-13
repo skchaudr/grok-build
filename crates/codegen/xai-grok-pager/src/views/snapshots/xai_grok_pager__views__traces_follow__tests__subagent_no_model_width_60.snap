@@ -1,0 +1,12 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/traces_follow.rs
+expression: "screen(&mut f, 60, 12)"
+---
+ › look into it
+
+◆ Agent  Check the lexer                      1 call · ● 12s
+↳ 1 Check the… ↳ started  Check the lexer
+
+↳ 1 Check the… › You are the auditor.
+
+↳ 1 Check the… ◆ Read  src/views/traces_follow.rs       0.1s

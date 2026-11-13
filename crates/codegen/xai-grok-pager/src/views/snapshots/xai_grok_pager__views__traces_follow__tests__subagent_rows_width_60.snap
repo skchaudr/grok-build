@@ -1,0 +1,22 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/traces_follow.rs
+expression: "screen(&mut f, 60, 24)"
+---
+ › audit the traces screens with two lenses
+
+◆ Agent  Audit traces: UI/UX …  haiku-4-5 · 1 call · ✓ 2m14s
+◆ Agent  Audit traces: observab…  haiku-4-5 · 1 call · ● 12s
+↳ 1 UI/UX lens ↳ haiku-4-5 started  Audit traces: UI/UX …
+
+↳ 1 UI/UX lens › You are one of two auditors. Your lens:
+↳ 1 UI/UX lens   Audit traces: UI/UX lens
+
+↳ 1 UI/UX lens ◆ Read  src/views/traces_follow.rs       0.1s
+↳ 2 observabi… ↳ haiku-4-5 started  Audit traces: observ…
+
+↳ 2 observabi… › You are one of two auditors. Your lens:
+↳ 2 observabi…   Audit traces: observability lens
+
+↳ 2 observabi… ◆ Read  src/views/traces_follow.rs       0.1s
+↳ 1 UI/UX lens ↳ ended
+◆ Bash  cargo test                                      0.4s
