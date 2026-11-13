@@ -191,6 +191,7 @@ pub fn blend_channel(base: u8, original: u8, opacity: f32) -> u8 {
 /// lerp target; a near-black stand-in keeps the pulse visible without
 /// forcing an opaque surface paint. Light transparent themes accept the
 /// same stand-in — chroma modulation still reads as motion.
+#[allow(dead_code)]
 const RESET_BLEND_CANVAS: (u8, u8, u8) = (0x12, 0x12, 0x18);
 
 /// RGB for animation lerps. `Reset` maps to [`RESET_BLEND_CANVAS`] so
@@ -199,7 +200,7 @@ const RESET_BLEND_CANVAS: (u8, u8, u8) = (0x12, 0x12, 0x18);
 /// [`color_to_rgb`].
 fn blendable_rgb(color: Color) -> Option<(u8, u8, u8)> {
     match color {
-        Color::Reset => Some(RESET_BLEND_CANVAS),
+        // `Reset` has no RGB: callers fall back (DIM, no accent wave) instead of blending against a made-up canvas.
         other => color_to_rgb(other),
     }
 }
@@ -380,16 +381,23 @@ pub fn force_area_fg(buf: &mut Buffer, area: Rect, fg: Color) {
 pub fn dim_area(buf: &mut Buffer, area: Rect, blend_bg: ratatui::style::Color, blend_factor: f32) {
     use ratatui::style::Modifier;
 
+    // An inexpressible `blend_bg` (Reset / named ANSI) becomes DIM so previously-DIM text does not pop brighter.
+    let blendable = color_to_rgb(blend_bg).is_some();
+    let replacement = if blendable {
+        Modifier::empty()
+    } else {
+        Modifier::DIM
+    };
     for y in area.y..area.y + area.height {
         for x in area.x..area.x + area.width {
             if let Some(cell) = buf.cell_mut((x, y)) {
-                // Strip all modifiers (BOLD, ITALIC, UNDERLINE, etc.).
-                cell.modifier = Modifier::empty();
+                cell.modifier = replacement;
             }
         }
     }
-    // Then blend colors.
-    crate::render::color::blend_area(buf, area, Some((blend_bg, blend_factor)), None);
+    if blendable {
+        crate::render::color::blend_area(buf, area, Some((blend_bg, blend_factor)), None);
+    }
 }
 
 #[cfg(test)]
