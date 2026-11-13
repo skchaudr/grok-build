@@ -8,6 +8,8 @@
 mod ask_user_extension;
 #[path = "grok_pi/auth_extension.rs"]
 mod auth_extension;
+#[path = "grok_pi/brand.rs"]
+mod brand;
 #[path = "grok_pi/bash_extension.rs"]
 mod bash_extension;
 #[path = "grok_pi/btw_extension.rs"]
@@ -95,6 +97,7 @@ mod bundled_host_ui {
 }
 
 use ask_user_extension::write_ask_user_extension;
+use brand::{PI_CHANGELOG_URL, PI_LOGO, PI_WELCOME_SUBTITLE};
 use auth_extension::write_auth_extension;
 use bash_extension::write_bash_extension;
 use btw_extension::write_btw_extension;
@@ -215,21 +218,9 @@ const PI_GROK_NATIVE_COMMANDS: &[&str] = &[
 ];
 
 /// Block-character π mark for the native Grok welcome / minimal logo surface.
-/// Matches Pi's static logo (`print_static_logo`): two-space indent + block art.
-/// Kept as plain full-block art so it remains legible on terminals that cannot
-/// render Grok's default braille logo. The welcome logo renderer pads rows to a
-/// common visual width so per-line centering does not drift the glyph.
-const PI_LOGO: &str = "\
-  ██████\n\
-  ██  ██\n\
-  ████  ██\n\
-  ██    ██\n\
-";
-
 /// Product version for `grok-pi --version` (release tag / git describe).
 /// Not the upstream workspace crate version (`0.1.220-alpha.*`).
 const GROK_PI_VERSION: &str = env!("GROK_PI_VERSION");
-const PI_WELCOME_SUBTITLE: &str = "Pi agent core in Grok Build's native terminal UI";
 
 fn main() -> Result<()> {
     // Isolate grok-pi state from stock Grok (`~/.grok`) before any library
@@ -1325,7 +1316,7 @@ async fn run(mut args: Args) -> Result<()> {
                 }),
                 // Grok worktree product flow is not wired for Pi yet.
                 hide_new_worktree: true,
-                changelog_url: Some("https://github.com/Dwsy/grok-pi/blob/main/CHANGELOG.MD"),
+                changelog_url: Some(PI_CHANGELOG_URL),
                 enable_voice_dictation: true,
                 host_features: host_feature_manifest.clone(),
             },

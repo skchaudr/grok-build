@@ -134,16 +134,28 @@ pub struct ExternalUiProfile {
 }
 
 static LAUNCH_UI_PROFILE: std::sync::OnceLock<ExternalUiProfile> = std::sync::OnceLock::new();
+static LAUNCH_HOST_FEATURES: std::sync::OnceLock<xai_grok_shell::host_features::HostFeatureManifest> =
+    std::sync::OnceLock::new();
 
 /// Brand a stdio-hosted launch agent (grok-fork started on `grok-pi-acp` alone) the way an
-/// in-process host's `UiProfile::External` does: welcome logo/brand/menu and the settings
-/// host features. Call before the pager starts; the first call wins.
+/// in-process host's `UiProfile::External` does: welcome logo, brand and menu.
+/// Call before the pager starts; the first call wins.
 pub fn set_launch_ui_profile(profile: ExternalUiProfile) {
     let _ = LAUNCH_UI_PROFILE.set(profile);
 }
 
 pub(crate) fn launch_ui_profile() -> Option<ExternalUiProfile> {
     LAUNCH_UI_PROFILE.get().cloned()
+}
+
+/// Host features (Pi extension toggles) the composing binary ships, for the settings
+/// registry of every session. Call before the pager starts; the first call wins.
+pub fn set_launch_host_features(manifest: xai_grok_shell::host_features::HostFeatureManifest) {
+    let _ = LAUNCH_HOST_FEATURES.set(manifest);
+}
+
+pub(crate) fn launch_host_features() -> Option<&'static xai_grok_shell::host_features::HostFeatureManifest> {
+    LAUNCH_HOST_FEATURES.get()
 }
 
 impl Default for ExternalUiProfile {
@@ -277,9 +289,11 @@ impl AcpConnection {
             auth_meta: None,
             leader_status_rx: None,
             cancel_rewind_enabled: false,
+            session_steering_supported: false,
             session_recap_available: false,
             feedback_trace_offer: false,
             auth_manager,
+            agent_info: None,
         }
     }
 }

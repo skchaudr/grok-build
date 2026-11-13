@@ -1135,19 +1135,18 @@ pub(crate) async fn run(
         )
     };
     app.cwd = args.session_cwd()?;
-    // grok-pi passes its profile on the in-process connection; grok-fork launching
-    // `grok-pi-acp` alone sets one at startup (`crate::acp::set_launch_ui_profile`).
-    let host_profile = match &ui_profile {
-        crate::acp::UiProfile::External(profile) => Some(profile),
-        crate::acp::UiProfile::Grok => launch_profile.as_ref(),
+    // grok-fork also registers its bundled host features so F2 shows Pi rows in any session.
+    let host_features = match &ui_profile {
+        crate::acp::UiProfile::External(profile) => Some(&profile.host_features),
+        crate::acp::UiProfile::Grok => crate::acp::launch_host_features(),
     };
-    if let Some(profile) = host_profile {
+    if let Some(features) = host_features {
         app.settings_registry = std::sync::Arc::new(
-            crate::settings::SettingsRegistry::defaults_with_host_features(&profile.host_features),
+            crate::settings::SettingsRegistry::defaults_with_host_features(features),
         );
-        app.external_ui.host_palette = profile.host_features.palette().to_vec();
+        app.external_ui.host_palette = features.palette().to_vec();
     }
-    crate::app::set_external_agent_active(host_profile.is_some());
+    crate::app::set_external_agent_active(external_agent || launch_profile.is_some());
 
     app.pending_startup = Some(pending_startup);
     app.tracing_rx = Some(tracing_handle.rx);

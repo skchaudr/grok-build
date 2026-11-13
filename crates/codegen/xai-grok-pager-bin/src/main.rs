@@ -25,6 +25,16 @@ mod jemalloc_malloc_conf {
     #[unsafe(export_name = "_rjem_malloc_conf")]
     static MALLOC_CONF: MallocConfPtr = MallocConfPtr(CONF.as_ptr());
 }
+#[cfg(feature = "pi-grok")]
+#[path = "bin/grok_pi/brand.rs"]
+mod pi_brand;
+#[cfg(feature = "pi-grok")]
+#[path = "bin/grok_pi/tutorial_profile.rs"]
+mod pi_tutorial_profile;
+#[cfg(feature = "pi-grok")]
+mod bundled_host_ui {
+    include!(concat!(env!("OUT_DIR"), "/host_ui_catalog.rs"));
+}
 use anyhow::Result;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -1750,6 +1760,50 @@ fn flag_dashboard_at_startup_if_requested(args: &mut PagerArgs) -> Result<()> {
 fn schedule_startup_prewarm() {
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
 }
+/// Pi host UI in grok-fork: the bundled host features (F2 Pi rows) and Pi theme discovery for every
+/// session, plus grok-pi's welcome brand and tour when `grok-pi-acp` is the only agent on offer.
+/// A picker that also offers a non-Pi agent keeps the Grok welcome.
+#[cfg(feature = "pi-grok")]
+fn install_pi_host_ui(args: &PagerArgs) {
+    use xai_grok_pager::slash::external_common::{agent_label_from_cmd, is_pi_label};
+    let manifest = match xai_grok_shell::host_features::HostFeatureManifest::from_json_sources(
+        bundled_host_ui::BUNDLED_HOST_UI_SOURCES,
+    ) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            tracing::warn!(%err, "invalid bundled grok-pi host feature manifest");
+            return;
+        }
+    };
+    xai_grok_pager::acp::set_launch_host_features(manifest.clone());
+    if let Ok(cwd) = std::env::current_dir() {
+        let _ = xai_grok_pager::theme::pi::init_discovery(&cwd);
+    }
+    let is_pi = |cmd: &str| is_pi_label(agent_label_from_cmd(cmd).as_deref());
+    let mixed_picker = args
+        .agent_choices()
+        .is_ok_and(|choices| choices.iter().any(|choice| !is_pi(&choice.cmd)));
+    if mixed_picker || !args.effective_agent_cmd().is_some_and(|cmd| is_pi(&cmd)) {
+        return;
+    }
+    xai_grok_pager::acp::set_launch_ui_profile(xai_grok_pager::acp::ExternalUiProfile {
+        agent_name: "Pi".to_string(),
+        logo: Some(xai_grok_pager::acp::ExternalLogoArt {
+            full: pi_brand::PI_LOGO,
+            small: pi_brand::PI_LOGO,
+        }),
+        welcome_brand: Some(xai_grok_pager::acp::ExternalWelcomeBrand {
+            title: "grok-pi",
+            subtitle: pi_brand::PI_WELCOME_SUBTITLE,
+            version: env!("GROK_PI_VERSION"),
+        }),
+        hide_new_worktree: true,
+        changelog_url: Some(pi_brand::PI_CHANGELOG_URL),
+        host_features: manifest,
+        ..Default::default()
+    });
+    pi_tutorial_profile::install();
+}
 fn configure_process_env(mut args: PagerArgs) -> Result<PagerArgs> {
     flag_dashboard_at_startup_if_requested(&mut args)?;
     let args = args.with_config_agent_choices()?.apply_cwd()?;
@@ -2548,6 +2602,8 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
         } else {
             None
         };
+    #[cfg(feature = "pi-grok")]
+    install_pi_host_ui(&args);
     let result = xai_grok_pager::app::run(args, bg_update_rx).await;
     xai_grok_sandbox::flush();
     match result {
