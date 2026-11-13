@@ -79,13 +79,17 @@ pub fn parse_rate_limit(
     let v = meta.get("_claude/rateLimit")?;
     let kind = v["rateLimitType"].as_str()?.to_string();
     let pct = (v["utilization"].as_f64()? * 100.0).clamp(0.0, 100.0).round() as u8;
-    let resets_at = v["resetsAt"].as_f64().map(|t| t as i64);
+    // Epoch seconds only: a millisecond value would read as a reset ~50,000 years out.
+    let resets_at = v["resetsAt"]
+        .as_f64()
+        .filter(|t| t.is_finite() && (0.0..1e11).contains(t))
+        .map(|t| t as i64);
     Some((kind, RateWindow { pct, resets_at }))
 }
 
 /// `2h32m`; hours are not capped, so a 7-day window reads `130h42m`.
 fn reset_in(resets_at: i64, now_secs: i64) -> String {
-    let mins = (resets_at - now_secs).max(0) / 60;
+    let mins = resets_at.saturating_sub(now_secs).max(0) / 60;
     format!("{}h{:02}m", mins / 60, mins % 60)
 }
 
@@ -507,7 +511,12 @@ fn info_lines(info: &Info, width: usize, theme: &Theme, now_secs: i64) -> Vec<Li
         ("5h usage", "five_hour", info.five_hour_pct),
         ("7d usage", "seven_day", None),
     ] {
-        out.push(match (info.rate_limits.get(key), file_pct) {
+        // A window past its reset is stale: show nothing for it rather than `resets 0h00m` beside an old percent.
+        let live = info
+            .rate_limits
+            .get(key)
+            .filter(|w| w.resets_at.is_none_or(|r| r > now_secs));
+        out.push(match (live, file_pct) {
             (Some(w), _) => {
                 let resets = w
                     .resets_at
@@ -588,6 +597,24 @@ mod tests {
             "130h42m"
         );
         assert_eq!(reset_in(5, 1_000_000), "0h00m", "a past reset clamps to zero");
+        assert_eq!(
+            reset_in(i64::MIN, i64::MAX),
+            "0h00m",
+            "saturating subtraction, no overflow"
+        );
+    }
+
+    #[test]
+    fn rate_limit_rejects_milliseconds_and_non_finite_resets() {
+        let with = |t: serde_json::Value| {
+            let m = serde_json::json!({"_claude/rateLimit": {
+                "rateLimitType": "five_hour", "utilization": 0.5, "resetsAt": t
+            }});
+            parse_rate_limit(m.as_object().unwrap()).unwrap().1.resets_at
+        };
+        assert_eq!(with(serde_json::json!(1.8e12)), None, "ms value dropped");
+        assert_eq!(with(serde_json::json!(-1e30)), None, "negative dropped");
+        assert_eq!(with(serde_json::json!(1_000_000)), Some(1_000_000));
     }
 
     #[test]
