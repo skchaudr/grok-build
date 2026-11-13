@@ -18,7 +18,7 @@ Already in the spec: (1) do both navigation features, (2) `f`/`p` keys, (3) the 
 
 - Claim wrong: "`↳` and `{n}` use the theme's accent the band already uses for `↳ … started`". The `↳ ` in that row is `gray_dim` (`P:681`). The only accent on it is `theme.accent_model` on the model name (`P:683`). The band is not accented.
 - `lead()` (`P:528-536`) returns a `String` used as one `gray_dim` span (`P:541`, `plain` at `P:545`, the prompt arms). Colour needs spans.
-- Column width counts visible subagents: `lead()` is called several times per row per frame (`render` at `P:760-790`, `bodies` at `P:~737`). Use all subagents (`self.agents[1..]`), so the column does not jump when Tab filters.
+- Column width counts visible subagents: `lead()` is called several times per row per frame (`render` at `P:760-790`, `bodies` at `P:735`). Use all subagents (`self.agents[1..]`), so the column does not jump when Tab filters.
 - Batch 1 repeats the tag on every wrapped line and every inline-body line. Keep that.
 - `T = (width/5).clamp(6,16)` at `P:533` is what the cap replaces.
 
@@ -28,12 +28,12 @@ Replace Row 1 with:
 > - `fn tag_text(&self, at: usize) -> (String, String)` returns `(head, model)`: `head = format!("↳ {at} {}", self.tag_name(at))`. `model = short_model(m)` when the agent has a model and its label is non-empty, else `""` (an unlabelled agent's name already is the model, so it shows once).
 > - `fn tag_w(&self, width: usize) -> usize` = (widest `head + " · " + model` over `agents[1..]`) + 2, clamped to `6..=(width / 4).max(6)`.
 > - `fn lead(&self, i, width) -> String` keeps its signature. For a subagent row it returns the tag fitted to `T - 1` columns and padded to `T`, then `"  ".repeat(depth - 1)` capped by `MAX_INDENT`. Fit: the full `head · model` if it fits, else `head` alone, else `truncate_str(head, T - 1)`. Root rows are unchanged.
-> - Add `fn lead_spans(&self, i, width, theme) -> Vec<Span<'static>>` with the same text: `↳ {n}` in `theme.accent_model` bold, the name in `theme.gray`, ` · {model}` in `theme.accent_model`, padding and indent in `gray_dim`. `row_lines` uses it for `plain` (`:545`) and for the three `ind.clone()` spans in the prompt arm (`:567-580`). `body_lines` (inline call bodies) keeps the plain `lead()` string in `gray_dim`.
+> - Add `fn lead_spans(&self, i, width, theme) -> Vec<Span<'static>>` with the same text: `↳ {n}` in `theme.accent_model` bold, the name in `theme.gray`, ` · {model}` in `theme.accent_model`, padding and indent in `gray_dim`. `row_lines` uses it for `plain` (`:545`) and for the `ind.clone()` spans in the prompt arm (`:565-585`). `body_lines` (inline call bodies) keeps the plain `lead()` string in `gray_dim`.
 > - No new theme field. The look is checked on screen in every shipped theme at full and half width.
 
 ## Row 2: alignment. Verdict: cause confirmed, fix is narrower than the spec says
 
-- Cause: the prompt arm builds `" › "` for the first line and `"   "` for the others (`P:~570`). `◆` and `↳` sit at the tag column, `›` one past it. The snapshot shows it: `◆ Read` at col 16, `›` at col 17.
+- Cause: the prompt arm builds `" › "` for the first line and `"   "` for the others (`P:572`). `◆` and `↳` sit at the tag column, `›` one past it. The snapshot shows it: `◆ Read` at col 16, `›` at col 17.
 - On root rows the same space is the grok look and `l_opens_a_long_prompt…` and `the_selected_row_is_grok_selection_in_every_theme` assert `" › fix the parser"`. Do not touch root.
 
 Replace Row 2 with:
@@ -45,8 +45,8 @@ Replace Row 2 with:
 - The claim "the link is the receipt that makes a receipt-born child (`T:706`)" is wrong. No item carries a call-to-child id. `agent_item` (`T:221`) has agent, model, label only; the `ChildStart` receipt (`T:568`) has an `agent_id` and no `tool_use_id`. The pager gets a `call` item (`call_id`) and an `agent_start` item, and nothing ties them.
 - Precedent in the code: the trajectory screen already pairs a dispatch row with its child by label, then by position (`M:1793-1815`, `is_dispatch` at `M:3550`: tool `agent` or `task`, any case). Claude's `.meta.json` has the exact `toolUseId` (`links.rs claude_children`, used by `acp/claude_feed.rs:66`), but nothing in the follow items carries it. Exact linking is a later upgrade.
 - Wrong assumption: "✓ once the call has a result". A background agent's `Agent` call gets its result at launch. Live data, session `claude:243c71321e1bb59f55eeba07` (`grok-traces follow --json --backlog 400`): five `Agent` calls, each with a result of 338-350 ms, text "Async agent launched successfully". So call result is not child done. Child done comes from `agent_end` only.
-- "`■ ended`": a child's end row is `↳ ended` (`P:~700`). `■ ended` is root.
-- A child that is not Active when the follow starts is never adopted (`T:~758`, `kid.status != Active`). Its Agent call has no agent to link to. That state keeps today's right side.
+- "`■ ended`": a child's end row is `↳ ended` (`P:692`). `■ ended` is root.
+- A child that is not Active when the follow starts is never adopted (`T:754`, `kid.status != Active`). Its Agent call has no agent to link to. That state keeps today's right side.
 - Counts come from rows the pager holds. A child followed mid-run holds at most the 200-row backlog, so `N` can undercount. Accept; the spec's wording "the pager holds" is right.
 - Redraw: `has_open_call` (`P:229`) is what makes the 1 s poll redraw a running timer. A linked Agent call with a result and a live child has no open call, so its `● 1m50s` would freeze. Add the live-child case.
 
@@ -63,7 +63,7 @@ Replace Row 3 with:
 ## Row 4: timer bug. Verdict: cause found for the snapshot; the live one is not proven
 
 - The `… 0s` in Sab's snapshot is the fixture. `the_subagent_tags_at_two_widths` (`P:1143-1165`) opens two `Agent` calls (`:1151-1152`) and never gives them a `done`, and `plain` (`:1145`) nulls every `ts`, so `started_ms` = `now` (`:263`, `last_ts` starts at `now_ms`) and the running arm prints `… 0s` (`:664`). The code is right for that input.
-- The prior review's `… 8m43s` on a finished call in the real deck is not reproduced. Possible cause, not confirmed: a call that opened from a `Pre` receipt (`T:~600`) whose `Post` receipt never came and whose file result never matched, in a live parent, where `agent_end` marking `no_result` (`P:311`) never runs. A live-session run is needed.
+- The prior review's `… 8m43s` on a finished call in the real deck is not reproduced. Possible cause, not confirmed: a call that opened from a `Pre` receipt (`T:586`) whose `Post` receipt never came and whose file result never matched, in a live parent, where `agent_end` marking `no_result` (`P:311`) never runs. A live-session run is needed.
 - Row 3 fixes the `Agent` case for linked calls (the child's end overrides).
 
 Replace Row 4 with:
@@ -73,16 +73,16 @@ Replace Row 4 with:
 ## Navigation. Verdict: needs change
 
 Keys, from code:
-- `f` and `p` are free in follow. Deck `handle_key` (`D:90-127`) takes Esc/q, Enter, `o`, `v` (`D:107`), Tab/BackTab, then `Follow::key` (`P:457`: j k PgDn PgUp g Home G End Tab BackTab e l Right h Left). The non-deck arm (`M:3989-4003`) takes Esc/q, Enter, `o`, then `Follow::key`. `traces_key` ignores Ctrl/Alt chords first (`M:3868`). `f` at `M:3899` is List and `f`/`p` at `M:4047`/`M:4119` are Trajectory, not Follow.
+- `f` and `p` are free in follow. Deck `handle_key` (`D:90-127`) takes Esc/q, Enter, `o`, `v` (`D:107`), Tab/BackTab, then `Follow::key` (`P:457`: j k PgDn PgUp g Home G End Tab BackTab e l Right h Left). The non-deck arm (`M:3989-4003`) takes Esc/q, Enter, `o`, then `Follow::key`. `traces_key` ignores Ctrl/Alt chords first (`M:3875`). `f` at `M:3899` is List and `f`/`p` at `M:4047`/`M:4119` are Trajectory, not Follow.
 - Tab in the real UI is `jump` (`D:129`): `roster` (`D:50`) is each Active root followed by its Active children, so Tab already opens a running subagent as its own follow and cycles through them. `Follow::cycle_agent`/`filter` is reachable only without the board (tests), so `f` cannot use `filter`; the spec wants the brief at the top, which only a follow of the child's own row gives.
 - `p`, `f` do not conflict with `SPEC-traces-agent.md` rev 5. Ask keys (F3, Ctrl+N, Enter in the block viewer) live in the trace view; `v` (rev 5 cites `deck.rs:107`, still right) is the only way from follow to it.
-- `state.status` (`set_status`) is not drawn on the deck (`D:190-300` never reads it). Spec text "the status line says `spawn row not loaded`" would be invisible. The follow screen's own status row (`P:~745`) is the place.
+- `state.status` (`set_status`) is not drawn on the deck (`D:190-300` never reads it). Spec text "the status line says `spawn row not loaded`" would be invisible. The follow screen's own status row (`P:713`) is the place.
 
 Smallest path: reuse `open_follow_row` (`M:1019`), which Tab and the strip click already call.
 
 Replace Navigation with:
 
-> - **State.** `Follow.note: Option<String>` joins the status line in `render` (`:~745`, with paused/agent/index) and is cleared at the start of `Follow::key`. `Follow.want: Option<(String, Option<i64>)>`.
+> - **State.** `Follow.note: Option<String>` joins the status line in `render` (`:713`, with paused/agent/index) and is cleared at the start of `Follow::key`. `Follow.want: Option<(String, Option<i64>)>`.
 > - **`f`.** `Follow::cursor_agent(&self) -> Option<&str>`: the highlighted row's agent when it is not the root; else, for a highlighted Agent call in `links()`, that child. Nothing is highlighted while the tail is pinned (as for Enter); `f` then does nothing, as on a root row. `TracesModalState::follow_into` (next to `follow_inspect`, `M:1042`): `index.session(&id)`, else `index.session(call.session)` from any of that agent's calls (`Follow::session_of(&id)`); on a row call `open_follow_row(row)`; with none set `f.note = "no transcript yet"` and return true.
 > - **`p`.** `follow_parent`: `pid = root.parent_id` (none: do nothing); `parent = index.session(pid)` (none: `note = "parent not indexed"`). Take `(root.label, root.started_at)`, `open_follow_row(parent)`, then `follow_view.want = Some(..)`.
 > - `Follow::resolve_want`, called in `poll` after `apply` on the first `Ok` tick (and by tests directly): find the Agent-or-Task call row by Row 3's rule (label match, `started_ms <= started_at + 5000`, largest `started_ms`); found: `cursor` = that row, `paused_len` set as `pause_at` does; not found: `note = "spawn row not loaded"`, tail stays pinned. `want` is cleared either way.
