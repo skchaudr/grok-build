@@ -77,14 +77,14 @@ impl View {
 /// A search for the worker thread.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Job {
-    pub gen: u64,
+    pub seq: u64,
     pub target: String,
     pub query: Query,
 }
 
 /// A worker's answer: the joined hits and cass's total, or the message to show.
 pub(super) struct Msg {
-    pub gen: u64,
+    pub seq: u64,
     pub result: Result<(Vec<Joined>, Option<i64>), String>,
 }
 
@@ -124,7 +124,7 @@ impl TracesModalState {
             return None;
         }
         self.cass_gen += 1;
-        let gen = self.cass_gen;
+        let seq = self.cass_gen;
         let view = self.cass.as_mut()?;
         view.query = text.clone();
         view.rows.clear();
@@ -139,7 +139,7 @@ impl TracesModalState {
             Ok(target) => {
                 view.host = remote::label(&target).to_string();
                 view.phase = Phase::Loading;
-                Some(Job { gen, target, query: Query { text, limit: cass::DEFAULT_LIMIT, mode: None } })
+                Some(Job { seq, target, query: Query { text, limit: cass::DEFAULT_LIMIT, mode: None } })
             }
         }
     }
@@ -158,7 +158,7 @@ impl TracesModalState {
         let tx = self.cass_tx.clone();
         let db = self.index.as_ref().map(|i| i.db_path().to_path_buf());
         std::thread::spawn(move || {
-            let Job { gen, target, query } = job;
+            let Job { seq, target, query } = job;
             let result = cass::search(&target, &query).map_err(|e| e.to_string()).map(|reply| {
                 let total = reply.total_matches;
                 let rows = match db.and_then(|p| TraceIndex::open(&p).ok()) {
@@ -167,13 +167,13 @@ impl TracesModalState {
                 };
                 (rows, total)
             });
-            let _ = tx.send(Msg { gen, result });
+            let _ = tx.send(Msg { seq, result });
         });
     }
 
     /// Installs a worker's answer unless a newer search (or leaving the screen) made it stale. True to redraw.
     pub(super) fn apply_cass(&mut self, msg: Msg) -> bool {
-        if msg.gen != self.cass_gen {
+        if msg.seq != self.cass_gen {
             return false;
         }
         let Some(view) = self.cass.as_mut() else { return false };
@@ -264,10 +264,10 @@ pub(super) fn prompt_key(state: &mut TracesModalState, key: &KeyEvent) -> InputO
             InputOutcome::Changed
         }
         KeyCode::Enter => state.cass_submit(),
-        _ => match state.cass.as_mut() {
-            Some(view) if edit_line(&mut view.text, key) => InputOutcome::Changed,
-            _ => InputOutcome::Unchanged,
-        },
+        _ => {
+            let Some(view) = state.cass.as_mut() else { return InputOutcome::Unchanged };
+            if edit_line(&mut view.text, key) { InputOutcome::Changed } else { InputOutcome::Unchanged }
+        }
     }
 }
 
@@ -485,9 +485,9 @@ mod tests {
         state.cass_begin(Ok("sab@sabibp".into()))
     }
 
-    fn answer(gen: u64, rows: Vec<Joined>) -> Msg {
+    fn answer(seq: u64, rows: Vec<Joined>) -> Msg {
         let total = Some(rows.len() as i64 + 10);
-        Msg { gen, result: Ok((rows, total)) }
+        Msg { seq, result: Ok((rows, total)) }
     }
 
     fn draw(state: &mut TracesModalState) -> Vec<String> {
@@ -519,7 +519,7 @@ mod tests {
     fn submit_runs_one_job_with_the_text_and_shows_loading() {
         let mut state = board_state();
         let job = ask(&mut state, "  auth bug ").expect("a job");
-        assert_eq!(job.gen, 1);
+        assert_eq!(job.seq, 1);
         assert_eq!(job.target, "sab@sabibp");
         assert_eq!(job.query.text, "auth bug");
         assert_eq!(job.query.mode, None, "cass's own default mode");
@@ -543,12 +543,12 @@ mod tests {
         let mut state = board_state();
         let first = ask(&mut state, "one").unwrap();
         let second = ask(&mut state, "two").unwrap();
-        assert_eq!((first.gen, second.gen), (1, 2));
-        let stale = answer(first.gen, vec![joined(hit("sabibp", "claude", "old", 1000), None, None, None)]);
+        assert_eq!((first.seq, second.seq), (1, 2));
+        let stale = answer(first.seq, vec![joined(hit("sabibp", "claude", "old", 1000), None, None, None)]);
         assert!(!state.apply_cass(stale));
         assert_eq!(state.cass.as_ref().unwrap().phase, Phase::Loading, "still waiting for the second");
         assert!(state.cass.as_ref().unwrap().rows.is_empty());
-        assert!(state.apply_cass(answer(second.gen, vec![joined(hit("sabibp", "claude", "new", 1000), None, None, None)])));
+        assert!(state.apply_cass(answer(second.seq, vec![joined(hit("sabibp", "claude", "new", 1000), None, None, None)])));
         assert_eq!(state.cass.as_ref().unwrap().rows.len(), 1);
         assert_eq!(state.cass.as_ref().unwrap().phase, Phase::Ready);
     }
@@ -557,13 +557,13 @@ mod tests {
     fn answers_arrive_through_the_poll_and_leaving_cancels_them() {
         let mut state = board_state();
         let job = ask(&mut state, "q").unwrap();
-        state.cass_tx.send(answer(job.gen, vec![])).unwrap();
+        state.cass_tx.send(answer(job.seq, vec![])).unwrap();
         assert!(state.poll_cass());
         assert_eq!(state.cass.as_ref().unwrap().phase, Phase::Ready);
         let job = ask(&mut state, "q2").unwrap();
         press(&mut state, KeyCode::Esc);
         assert!(state.cass.is_none());
-        state.cass_tx.send(answer(job.gen, vec![])).unwrap();
+        state.cass_tx.send(answer(job.seq, vec![])).unwrap();
         assert!(!state.poll_cass(), "the cancelled search's answer is dropped");
         assert!(state.cass.is_none());
     }
@@ -577,7 +577,7 @@ mod tests {
             joined(hit("sabibp", "codex", "second snippet", 2 * 86_400_000), None, None, None),
             joined(hit("local", "pi", "third", 60_000), None, None, None),
         ];
-        state.apply_cass(answer(job.gen, rows));
+        state.apply_cass(answer(job.seq, rows));
         assert_eq!(state.cass.as_ref().unwrap().summary(), "3 hits, 1 on this machine");
         let screen = draw(&mut state);
         let at = |needle: &str| screen.iter().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("{needle} in {screen:#?}"));
@@ -596,7 +596,7 @@ mod tests {
         let mut state = board_state();
         let job = ask(&mut state, "q").unwrap();
         state.apply_cass(answer(
-            job.gen,
+            job.seq,
             vec![
                 joined(hit("sab-air", "claude", "joined snippet", 1000), Some("s1"), None, Some("T")),
                 joined(hit("sab-air", "claude", "orphan snippet", 1000), None, None, None),
@@ -609,7 +609,7 @@ mod tests {
         let fg_at = |needle: &str| {
             let y = (0..area.height).find(|&y| (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().contains(needle)).expect(needle);
             let line: String = (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
-            let x = line.find(needle).unwrap() as u16;
+            let x = line[..line.find(needle).unwrap()].chars().count() as u16;
             buf[(x, y)].fg
         };
         assert_eq!(fg_at("orphan snippet"), theme.dim().fg.unwrap_or(ratatui::style::Color::Reset));
@@ -620,7 +620,7 @@ mod tests {
     fn enter_on_an_unjoined_hit_says_where_it_is() {
         let mut state = board_state();
         let job = ask(&mut state, "q").unwrap();
-        state.apply_cass(answer(job.gen, vec![joined(hit("sab-air", "claude", "x", 1000), None, None, None)]));
+        state.apply_cass(answer(job.seq, vec![joined(hit("sab-air", "claude", "x", 1000), None, None, None)]));
         let before = state.mode;
         press(&mut state, KeyCode::Enter);
         assert_eq!(state.status.as_deref(), Some("not on this machine: sab-air"));
@@ -632,7 +632,7 @@ mod tests {
     fn enter_on_a_hit_missing_from_the_index_says_so() {
         let mut state = board_state();
         let job = ask(&mut state, "q").unwrap();
-        state.apply_cass(answer(job.gen, vec![joined(hit("sabibp", "claude", "x", 1000), Some("gone"), Some(3), Some("T"))]));
+        state.apply_cass(answer(job.seq, vec![joined(hit("sabibp", "claude", "x", 1000), Some("gone"), Some(3), Some("T"))]));
         press(&mut state, KeyCode::Enter);
         assert!(state.status.as_deref().is_some_and(|s| s.contains("no longer in the local index")), "{:?}", state.status);
         assert_eq!(state.mode, Mode::List);
@@ -729,7 +729,7 @@ mod tests {
         let before = (state.query.clone(), state.selected);
 
         let job = ask(&mut state, "prompt").unwrap();
-        state.apply_cass(answer(job.gen, vec![joined(hit("sab-mini", "pi", "prompt number 3", 1000), Some(&id), Some(3), Some("a"))]));
+        state.apply_cass(answer(job.seq, vec![joined(hit("sab-mini", "pi", "prompt number 3", 1000), Some(&id), Some(3), Some("a"))]));
         press(&mut state, KeyCode::Enter);
         assert_eq!(state.mode, Mode::Trajectory);
         assert_eq!(state.session.as_ref().map(|s| s.id.clone()), Some(id.clone()));
@@ -745,7 +745,7 @@ mod tests {
 
         // No line: the trajectory opens at the top.
         let job = ask(&mut state, "prompt").unwrap();
-        state.apply_cass(answer(job.gen, vec![joined(hit("sab-mini", "pi", "x", 1000), Some(&id), None, Some("a"))]));
+        state.apply_cass(answer(job.seq, vec![joined(hit("sab-mini", "pi", "x", 1000), Some(&id), None, Some("a"))]));
         press(&mut state, KeyCode::Enter);
         assert_eq!(state.mode, Mode::Trajectory);
         assert_eq!(state.sel_pos(), 0, "no line: the top");
@@ -761,7 +761,7 @@ mod tests {
         state.selected = 3;
         state.scroll = 2;
         let job = ask(&mut state, "needle").unwrap();
-        state.apply_cass(answer(job.gen, vec![joined(hit("sab-air", "claude", "x", 1), None, None, None)]));
+        state.apply_cass(answer(job.seq, vec![joined(hit("sab-air", "claude", "x", 1), None, None, None)]));
         press(&mut state, KeyCode::Char('j'));
         press(&mut state, KeyCode::Esc);
         assert!(state.cass.is_none());
@@ -782,7 +782,7 @@ mod tests {
 
         press(&mut state, KeyCode::Char('S'));
         let job = state.cass_begin(Ok("sab@sabibp".into())).expect("the last query is back in the prompt");
-        state.apply_cass(Msg { gen: job.gen, result: Err("sabibp unreachable (timed out after 15s)".into()) });
+        state.apply_cass(Msg { seq: job.seq, result: Err("sabibp unreachable (timed out after 15s)".into()) });
         let screen = draw(&mut state);
         assert!(screen.iter().any(|l| l.contains("sabibp unreachable (timed out after 15s)")), "{screen:#?}");
         assert!(state.cass.as_ref().unwrap().rows.is_empty());
@@ -795,7 +795,7 @@ mod tests {
     fn s_on_the_results_edits_the_last_query_and_ctrl_s_does_nothing() {
         let mut state = board_state();
         let job = ask(&mut state, "first").unwrap();
-        state.apply_cass(answer(job.gen, vec![]));
+        state.apply_cass(answer(job.seq, vec![]));
         let ctrl = KeyEvent::new_with_kind(KeyCode::Char('S'), KeyModifiers::CONTROL, KeyEventKind::Press);
         assert!(!is_open_key(&ctrl));
         press(&mut state, KeyCode::Char('S'));

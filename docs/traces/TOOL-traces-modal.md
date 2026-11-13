@@ -62,6 +62,19 @@ The standalone command opens the Traces list directly. Alternatively, run `grok-
 - `y` copies the harness's own resume command (`cd <folder> && claude --resume <id>`, `codex resume <id>`, `grok --resume <id>`, the Pi/omp/Cursor commands). Nothing runs.
 - Follow's selected row uses grok's selection (`selection_overlay`: the theme's `bg_visual` band, reverse video in the bandless terminal theme) with bright bold text; `visibility_tests` checks selection against the page and the prompt band in every shipped theme.
 
+## Cass search (`S`, 2026-11-13)
+
+Searches the `cass` index on another machine from the list and opens a hit as the local trace session. Code: `views/traces_modal/cass_search.rs`; the ssh search and the join to local sessions are `xai-grok-traces/src/cass.rs`.
+
+- `S` (list, board or ledger) opens a one-line prompt (`cass: ...`); Enter runs it, Esc cancels. `S` was free in both lists; capitals are the cross-machine / heavier keys (`H` host, `L` live, `R` rescan), and `/` already filters this list.
+- Host: first valid line of `~/.grok/traces/cass` (`cass::resolve_host`). The search runs on a worker thread (`cass::search`, up to 15 s, then `cass::join` against the local index); the 1 s poll installs the answer. The list says `Searching <host> for "<q>"... up to 15 s` meanwhile. A new search replaces a running one; an answer from an older search (or after Esc) is dropped by generation (`cass_gen`).
+- Results replace the list, one row per hit in cass order: origin machine, agent, age, session title (when the hit joined a local session), snippet on one line. The line under the header reads `"<q>" . <n> hits, <m> on this machine`. cass calls its own machine `local`; that is shown as the cass host.
+- Enter on a joined hit opens that session's trajectory (not grok's session view: only the trajectory can select a line) with the selection on the hit's line, or the nearest shown event before it when that line is a folded tool result or noise; no line, top. Esc in that trajectory returns to the results. Enter on a hit with no local session shows `not on this machine: <origin>`.
+- Esc leaves the results; the board or ledger underneath is never touched, so its filter, selection and scroll are as they were.
+- Errors (`no cass host: ...`, `<host> unreachable (...)`, remote failure) replace the list in the error colour and stay until Esc or a new search.
+- The lexical / semantic / hybrid mode is not exposed: cass's own default.
+- Tests: `cass_search.rs` (`tests`), injected answers only, no ssh. Not run against a live index.
+
 ## Who decided what
 
 **Sab said**
