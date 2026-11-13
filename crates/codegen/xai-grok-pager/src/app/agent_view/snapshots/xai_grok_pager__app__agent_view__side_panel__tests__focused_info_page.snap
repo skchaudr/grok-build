@@ -15,14 +15,14 @@ expression: "draw(&mut agent, 110, 30)"
                                                                 │   mode      agent
                                                                 │
                                                                 │ Context
-                                                                │   context   ███████░░░░░░░░░ 42% 84k/200k
-                                                                │   5h usage  ████░░░░░░░░░░░░ 22%
+                                                                │   context   ████░░░░░░ 42% 84k/200k
+                                                                │   5h usage  ██░░░░░░░░ 22%
+                                                                │   7d usage  not reported
                                                                 │
                                                                 │ Runtime
                                                                 │   status    idle
                                                                 │   bg jobs   0
                                                                 │   subagents 0
-                                                                │
                                                                 │
                                                                 │
                                                                 │

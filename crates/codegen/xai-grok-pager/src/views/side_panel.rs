@@ -2,6 +2,7 @@
 //! tail of this session and an Info page. Esc hands the keyboard back to the chat, ←/→ switch pages, `z` swaps the
 //! panel and chat widths, `+`/`-` resize. The full-screen `/traces` modal is separate and unchanged.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
@@ -53,11 +54,39 @@ pub struct Info {
     pub mode: String,
     /// (used, window) tokens, when the harness has reported them.
     pub context: Option<(u64, u64)>,
+    /// Claude's `_claude/rateLimit` windows by `rateLimitType`, as the ACP adapter reported them.
+    pub rate_limits: BTreeMap<String, RateWindow>,
+    /// The statusline-file 5h figure, shown only while `rate_limits` has no `five_hour`.
     pub five_hour_pct: Option<u8>,
     pub status: String,
     /// (description, meta) per running background command.
     pub jobs: Vec<(String, String)>,
     pub subagents: Vec<(String, String)>,
+}
+
+/// One Claude rate-limit window: percent used and when it resets (epoch seconds).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RateWindow {
+    pub pct: u8,
+    pub resets_at: Option<i64>,
+}
+
+/// Reads the adapter's `usage_update` `_meta["_claude/rateLimit"]` (`{rateLimitType, utilization 0..1, resetsAt}`).
+/// Each event carries one window, so callers merge by the returned type.
+pub fn parse_rate_limit(
+    meta: &serde_json::Map<String, serde_json::Value>,
+) -> Option<(String, RateWindow)> {
+    let v = meta.get("_claude/rateLimit")?;
+    let kind = v["rateLimitType"].as_str()?.to_string();
+    let pct = (v["utilization"].as_f64()? * 100.0).clamp(0.0, 100.0).round() as u8;
+    let resets_at = v["resetsAt"].as_f64().map(|t| t as i64);
+    Some((kind, RateWindow { pct, resets_at }))
+}
+
+/// `2h32m`; hours are not capped, so a 7-day window reads `130h42m`.
+fn reset_in(resets_at: i64, now_secs: i64) -> String {
+    let mins = (resets_at - now_secs).max(0) / 60;
+    format!("{}h{:02}m", mins / 60, mins % 60)
 }
 
 enum Traces {
@@ -302,7 +331,7 @@ impl SidePanel {
         };
         match self.page {
             Page::Info => {
-                for (i, line) in info_lines(info, w, theme)
+                for (i, line) in info_lines(info, w, theme, now_ms / 1000)
                     .into_iter()
                     .take(body.height as usize)
                     .enumerate()
@@ -420,7 +449,7 @@ fn tokens(n: u64) -> String {
     }
 }
 
-fn info_lines(info: &Info, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn info_lines(info: &Info, width: usize, theme: &Theme, now_secs: i64) -> Vec<Line<'static>> {
     let head = |s: &str| {
         Line::from(Span::styled(
             s.to_string(),
@@ -437,8 +466,8 @@ fn info_lines(info: &Info, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         ])
     };
     let meter = |label: &str, pct: u8, tail: String| {
-        // One bar width for every meter, leaving room for the longest tail (`100% 999k/999k`).
-        let bar_w = width.saturating_sub(12 + 15).clamp(4, 24);
+        // One bar width for every meter, leaving room for the longest tail (`100% resets 130h42m`).
+        let bar_w = width.saturating_sub(12 + 21).clamp(4, 24);
         let color = match pct {
             90.. => theme.accent_error,
             70.. => theme.accent_plan,
@@ -474,8 +503,21 @@ fn info_lines(info: &Info, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         }
         _ => out.push(row("context", "not reported")),
     }
-    if let Some(pct) = info.five_hour_pct {
-        out.push(meter("5h usage", pct, format!("{pct}%")));
+    for (label, key, file_pct) in [
+        ("5h usage", "five_hour", info.five_hour_pct),
+        ("7d usage", "seven_day", None),
+    ] {
+        out.push(match (info.rate_limits.get(key), file_pct) {
+            (Some(w), _) => {
+                let resets = w
+                    .resets_at
+                    .map(|r| format!(" resets {}", reset_in(r, now_secs)))
+                    .unwrap_or_default();
+                meter(label, w.pct, format!("{}%{resets}", w.pct))
+            }
+            (None, Some(pct)) => meter(label, pct, format!("{pct}%")),
+            (None, None) => row(label, "not reported"),
+        });
     }
     out.push(Line::default());
     out.push(head("Runtime"));
@@ -521,6 +563,31 @@ mod tests {
         );
         let (chat, side) = panel(true, true, true).split(area);
         assert_eq!((chat.width, side.unwrap().width), (46, 74));
+    }
+
+    #[test]
+    fn rate_limit_meta_parses_one_window_and_reset_time_formats_hours_uncapped() {
+        let meta = |v: serde_json::Value| v.as_object().unwrap().clone();
+        let m = meta(serde_json::json!({"_claude/rateLimit": {
+            "status": "allowed", "rateLimitType": "seven_day", "utilization": 0.426, "resetsAt": 1_000_000
+        }}));
+        assert_eq!(
+            parse_rate_limit(&m),
+            Some((
+                "seven_day".into(),
+                RateWindow {
+                    pct: 43,
+                    resets_at: Some(1_000_000)
+                }
+            ))
+        );
+        assert_eq!(parse_rate_limit(&meta(serde_json::json!({"other": 1}))), None);
+        assert_eq!(reset_in(1_000_000 + 2 * 3600 + 32 * 60, 1_000_000), "2h32m");
+        assert_eq!(
+            reset_in(1_000_000 + 130 * 3600 + 42 * 60, 1_000_000),
+            "130h42m"
+        );
+        assert_eq!(reset_in(5, 1_000_000), "0h00m", "a past reset clamps to zero");
     }
 
     #[test]
