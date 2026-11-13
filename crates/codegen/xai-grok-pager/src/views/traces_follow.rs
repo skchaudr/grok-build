@@ -757,7 +757,15 @@ impl Follow {
                     .into_iter()
                     .map(|l| {
                         let style = l.style;
-                        let mut line = plain(l.spans);
+                        // Prose is the brightest thing in the stream: markdown body text (`md_text`, secondary in
+                        // some themes) is lifted to `text_primary`; headings, code and links keep their colours.
+                        let spans = l.spans.into_iter().map(|mut s| {
+                            if s.style.fg == Some(theme.md_text) {
+                                s.style.fg = Some(theme.text_primary);
+                            }
+                            s
+                        });
+                        let mut line = plain(spans.collect());
                         line.style = style;
                         line
                     })
