@@ -1,6 +1,7 @@
 //! `grok-pi-acp`: grok-pi's Pi agent as a stdio ACP agent, so the grok-fork leader can offer it as
 //! one `[[agent_choice]]` beside Claude. Bootstrap is Dwsy's `grok-pi.rs` (719ba57f) minus the
-//! pager, theme, tutorial, updater and F2 resource policy; Pi's own `~/.pi` stays authoritative.
+//! pager, theme, tutorial and updater (grok-fork owns the pager side); Pi's own `~/.pi` stays
+//! authoritative.
 //!
 //! stdout carries ACP; errors go to stderr.
 
@@ -14,6 +15,8 @@ mod bash_extension;
 mod btw_extension;
 #[path = "grok_pi/cli.rs"]
 mod cli;
+#[path = "grok_pi/config_skill.rs"]
+mod config_skill;
 #[path = "grok_pi/context_extension.rs"]
 mod context_extension;
 #[path = "grok_pi/export_extension.rs"]
@@ -56,6 +59,12 @@ mod todo_extension;
 mod tools_extension;
 #[path = "grok_pi/tree_bridge.rs"]
 mod tree_bridge;
+#[path = "grok_pi/web_config_extension.rs"]
+mod web_config_extension;
+
+mod bundled_host_ui {
+    include!(concat!(env!("OUT_DIR"), "/host_ui_catalog.rs"));
+}
 
 use agent_client_protocol as acp;
 use anyhow::{Context, Result};
@@ -65,6 +74,8 @@ use std::rc::Rc;
 use tokio::task::LocalSet;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use xai_acp_lib::{AcpAgentGatewayReceiver, LineBufferedRead};
+use xai_grok_pager::{pi_resource_config::PiResourceCatalog, pi_resource_policy::ResourcePolicy};
+use xai_grok_shell::host_features::HostFeatureManifest;
 
 use cli::{Args, normalize_compound_short_flags, pi_args_with_startup_flags};
 use runtime_config::{
@@ -214,6 +225,19 @@ async fn run(mut args: Args) -> Result<()> {
         .then(plan_mode_extension::write_plan_mode_extension)
         .transpose()
         .context("failed to create Pi plan-mode extension")?;
+    // Pi-owned web config surface behind `/pi-config web` / `/pi-models web`.
+    let web_config_extension = bridge
+        .then(web_config_extension::write_web_config_extension)
+        .transpose()
+        .context("failed to create Pi web config extension")?;
+    let config_skill_path =
+        match config_skill::sync_config_skill_cache(config_skill::config_skill_enabled()) {
+            Ok(path) => path,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to sync grok-pi config skill; continuing without it");
+                None
+            }
+        };
 
     let mut pi_args = pi_args_with_startup_flags(
         std::mem::take(&mut args.pi_args),
@@ -222,8 +246,63 @@ async fn run(mut args: Args) -> Result<()> {
     );
     let pi_session_dir = session_paths::pi_session_dir(&pi_args, &cwd);
 
-    // Host bridges load before any user resource, in Dwsy's order. Pi keeps its own
-    // auto-discovery of user extensions, prompts and themes (no F2 admission policy here).
+    // The embedded config skill lives outside Pi's auto-discovery tree, so load it explicitly
+    // unless skills are disabled (F2 `pi_config_skill` stays the default-on source of truth).
+    let skills_disabled = args.no_skills || pi_args.iter().any(|arg| arg == "--no-skills");
+    if !skills_disabled && let Some(path) = config_skill_path.as_ref() {
+        pi_args.extend(["--skill".to_string(), path.to_string_lossy().into_owned()]);
+    }
+
+    // F2 resource admission policy, as grok-pi.rs: Pi's auto-discovery is off for extensions,
+    // prompts and themes, and only policy-approved resources load. Host bridges always load.
+    let mut resource_policy = ResourcePolicy::load_from_config();
+    let host_feature_manifest =
+        HostFeatureManifest::from_json_sources(bundled_host_ui::BUNDLED_HOST_UI_SOURCES)
+            .map_err(anyhow::Error::msg)
+            .context("invalid bundled extension grok-pi UI manifest")?;
+    for spec in host_feature_manifest.iter() {
+        if bridge
+            && spec.resolve_enabled(config.as_ref())
+            && let Some(feature_key) = spec.native_feature_key
+        {
+            resource_policy.enabled_native_features.push(feature_key.to_owned());
+        }
+    }
+    if todo_extension.is_some() {
+        resource_policy.forced_native_features.push("pi_todo".to_owned());
+    }
+    let trust_override = if args.approve {
+        Some(true)
+    } else if args.no_approve {
+        Some(false)
+    } else {
+        None
+    };
+    let resource_catalog = PiResourceCatalog::load_with_trust(cwd.clone(), trust_override)
+        .context("failed to load Pi resource catalog for admission policy")?;
+    let launch_plan = resource_policy.evaluate(&resource_catalog);
+    if let Some(summary) = launch_plan.blocked_summary() {
+        tracing::warn!("{summary}");
+    }
+    // Explicit --extension paths the policy blocks are dropped with their value.
+    let mut filtered_args = Vec::with_capacity(pi_args.len());
+    let mut explicit = std::mem::take(&mut pi_args).into_iter();
+    while let Some(arg) = explicit.next() {
+        if arg == "--extension"
+            && let Some(path) = explicit.next()
+        {
+            if let Some(reason) = resource_policy.check_explicit_path(&path) {
+                tracing::warn!("grok-pi resource policy blocked explicit extension {path}: {reason}");
+            } else {
+                filtered_args.extend([arg, path]);
+            }
+            continue;
+        }
+        filtered_args.push(arg);
+    }
+    pi_args = filtered_args;
+
+    // Host bridges load before any user resource, in Dwsy's order.
     let mut startup_extensions = Vec::new();
     for path in [
         rpc_compat_extension.as_ref().map(|e| e.path()),
@@ -238,6 +317,30 @@ async fn run(mut args: Args) -> Result<()> {
         startup_extensions.extend(["--extension".to_string(), path.to_string_lossy().into_owned()]);
     }
     pi_args.splice(0..0, startup_extensions);
+
+    // The user's own --no-* flags win: a category they disabled gets no approved resources.
+    if !(args.no_extensions || pi_args.iter().any(|a| a == "--no-extensions")) {
+        pi_args.push("--no-extensions".to_string());
+        for path in &launch_plan.extensions {
+            // The Herdr bridge owns Herdr's `herdr:pi` source; skip only its auto-discovered copy.
+            if herdr_extension.is_some() && herdr_extension::is_managed_pi_integration(path) {
+                continue;
+            }
+            pi_args.extend(["--extension".to_string(), path.to_string_lossy().into_owned()]);
+        }
+    }
+    if !pi_args.iter().any(|a| a == "--no-prompt-templates") {
+        pi_args.push("--no-prompt-templates".to_string());
+        for path in &launch_plan.prompts {
+            pi_args.extend(["--prompt-template".to_string(), path.to_string_lossy().into_owned()]);
+        }
+    }
+    if !pi_args.iter().any(|a| a == "--no-themes") {
+        pi_args.push("--no-themes".to_string());
+        for path in &launch_plan.themes {
+            pi_args.extend(["--theme".to_string(), path.to_string_lossy().into_owned()]);
+        }
+    }
 
     let eval_v2_only_tool_policy_applied =
         eval_v2_only_tool_policy_applies(&pi_args, bridge, eval_v2_only);
@@ -288,6 +391,7 @@ async fn run(mut args: Args) -> Result<()> {
         ("grok-pi: auth", auth_extension.as_ref().map(|e| e.source_path())),
         ("grok-pi: export", export_extension.as_ref().map(|e| e.path())),
         ("grok-pi: native commands", native_commands_extension.as_ref().map(|e| e.path())),
+        ("grok-pi: web config", web_config_extension.as_ref().map(|e| e.source_path())),
         ("grok-pi: Bash/Eval", bash_extension.as_ref().map(|e| e.source_path())),
         ("grok-pi: tools", tools_extension.as_ref().map(|e| e.path())),
         ("grok-pi: rollback", rollback_ext.as_ref().map(|e| e.source_path())),
@@ -314,6 +418,7 @@ async fn run(mut args: Args) -> Result<()> {
         auth_extension.as_ref().map(|e| e.source_path()),
         export_extension.as_ref().map(|e| e.path()),
         native_commands_extension.as_ref().map(|e| e.path()),
+        web_config_extension.as_ref().map(|e| e.source_path()),
         bash_extension.as_ref().map(|e| e.source_path()),
         codemode_extension_requested.then(|| std::path::Path::new("builtin:codemode")),
         tools_extension.as_ref().map(|e| e.path()),
@@ -400,6 +505,13 @@ async fn run(mut args: Args) -> Result<()> {
         unsafe { std::env::remove_var("PI_GROK_ASK_USER_DIR") };
     }
     set_process_flag("PI_GROK_ASK_USER", ask_user_extension.is_some());
+    if let Some(extension) = web_config_extension.as_ref() {
+        env.push(("PI_GROK_WEB_CONFIG_UI".into(), extension.ui_path().to_string_lossy().into_owned()));
+        env.push((
+            "PI_GROK_WEB_CONFIG_CATALOG".into(),
+            extension.catalog_path().to_string_lossy().into_owned(),
+        ));
+    }
     if let Some(extension) = context_extension.as_ref() {
         env.push((
             "PI_GROK_CONTEXT_BREAKDOWN".into(),
@@ -533,7 +645,7 @@ async fn run(mut args: Args) -> Result<()> {
         export_extension,
         (native_commands_extension, remote_tui_extension, rpc_compat_extension),
         (shortcut_manager_extension, rust_tui_bridge_extension, plan_mode_extension),
-        (tools_extension, rollback_ext),
+        (tools_extension, rollback_ext, web_config_extension),
     );
     handle_io.await.context("ACP stdio connection failed")
 }
