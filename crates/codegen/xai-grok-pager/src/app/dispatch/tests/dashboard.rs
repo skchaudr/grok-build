@@ -4179,6 +4179,7 @@ fn external_dashboard_dispatch_replaces_idle_local_agent() {
 fn external_dashboard_dispatch_blocks_while_turn_is_running() {
     let mut app = test_app_with_agent();
     app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
     app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
     open_dashboard(&mut app);
 

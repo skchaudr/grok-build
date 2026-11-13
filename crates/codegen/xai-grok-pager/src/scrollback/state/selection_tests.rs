@@ -627,7 +627,12 @@ fn test_expand_while_streaming_keeps_viewport_until_follow_resumed() {
 fn toggle_tool_output_expansion_only_changes_tool_calls() {
     let mut h = ScrollTestHarness::new(80, 40);
     let thinking_id = h.push_thinking("thought");
-    let tool_id = h.push_tool("tool");
+    // A real tool call with output: the stub `push_tool` block is not foldable, so a toggle never touches it.
+    let tool_id = h.state.push_block(RenderBlock::execute_with_output(
+        "echo tool",
+        "tool output",
+        None::<String>,
+    ));
     h.frame();
 
     h.state

@@ -1594,10 +1594,7 @@ mod scroll_granularity_tests {
             let mut agent = make_agent();
             agent
                 .scrollback
-                .push_block(crate::scrollback::RenderBlock::edit_with_hunks(
-                    "src/main.rs",
-                    vec![],
-                ));
+                .push_block(crate::scrollback::RenderBlock::edit_with_sample_hunk("src/main.rs"));
             agent
         }
 

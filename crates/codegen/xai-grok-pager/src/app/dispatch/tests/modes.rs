@@ -1116,6 +1116,7 @@ fn external_cycle_mode_toggles_only_normal_and_plan() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
     app.default_yolo = true;
     app.current_ui.permission_mode = Some("always-approve".into());
     {

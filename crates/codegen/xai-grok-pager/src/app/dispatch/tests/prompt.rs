@@ -4196,13 +4196,13 @@ fn interject_before_paste_probe_keeps_image() {
     let sent_image = effects.iter().any(|e| {
         matches!(
             e,
-            Effect::SendInterject { blocks: Some(blocks), .. }
+            Effect::SendPromptNow { blocks, .. }
                 if blocks.iter().any(|b| matches!(b, acp::ContentBlock::Image(_)))
         )
     });
     assert!(
         sent_image,
-        "the re-issued interject must carry the pasted image; effects = {effects:?}"
+        "the re-issued send-now must carry the pasted image; effects = {effects:?}"
     );
     assert_eq!(
         agent_ref(&app, id).prompt.text(),
@@ -5195,6 +5195,65 @@ fn send_prompt_now_during_reconnect_requeues_locally() {
     assert!(agent.toast.is_some(), "the outage must explain itself");
 }
 
+/// A failed send-now RPC requeues its payload (front) instead of silently dropping the message, and retires the optimistic queue echo.
+#[test]
+fn failed_send_now_requeues_payload_and_retires_echo() {
+    use agent_client_protocol as acp;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    dispatch(Action::SendPrompt("first".into()), &mut app);
+
+    let effects = dispatch(
+        Action::SendPromptNow {
+            text: "gets lost on the wire".into(),
+            images: vec![],
+            image_notice: None,
+        },
+        &mut app,
+    );
+    let prompt_id = match effects.as_slice() {
+        [Effect::SendPromptNow { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("expected SendPromptNow effect, got {other:?}"),
+    };
+    assert!(
+        agent_ref(&app, id)
+            .shared_queue
+            .iter()
+            .any(|e| e.id == prompt_id),
+        "the optimistic echo must be visible before the failure"
+    );
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SendPromptNowFailed {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            prompt_id: prompt_id.clone(),
+            error: "transport closed".into(),
+            blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                "gets lost on the wire".to_string(),
+            ))],
+        }),
+        &mut app,
+    );
+
+    let agent = agent_ref(&app, id);
+    assert_eq!(
+        agent
+            .session
+            .pending_prompts
+            .front()
+            .map(|p| p.text.as_str()),
+        Some("gets lost on the wire"),
+        "the failed payload must be requeued at the front"
+    );
+    assert!(
+        !agent.shared_queue.iter().any(|e| e.id == prompt_id),
+        "the optimistic echo must be retired"
+    );
+    assert!(agent.toast.is_some(), "the failure must explain itself");
+}
+
 /// Regression (queue-architecture-redesign): Send Now now takes the steering
 /// (interject) path, which never pushes an optimistic shared-queue echo. That
 /// echo — paired with the text-based reconcile that failed to retire it — was
@@ -5205,6 +5264,7 @@ fn send_prompt_now_during_reconnect_requeues_locally() {
 fn send_now_steers_without_optimistic_echo() {
     let mut app = test_app_with_agent();
     app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
     let id = AgentId(0);
     dispatch(Action::SendPrompt("first".into()), &mut app);
 
@@ -5280,6 +5340,7 @@ fn external_image_prompt_during_sendable_wait_routes_to_interject() {
 
     let mut app = test_app_with_agent();
     app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
     let id = AgentId(0);
     dispatch(Action::SendPrompt("first".into()), &mut app);
     simulate_task_output_wait(app.agents.get_mut(&id).unwrap(), "bg-1");

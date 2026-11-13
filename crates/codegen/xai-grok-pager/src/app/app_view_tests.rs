@@ -2720,10 +2720,7 @@ fn external_ctrl_o_defaults_to_write_edit() {
     let agent = app.agents.get_mut(&id).unwrap();
     let edit_id = agent
         .scrollback
-        .push_block(crate::scrollback::RenderBlock::edit_with_hunks(
-            "x.rs",
-            vec![],
-        ));
+        .push_block(crate::scrollback::RenderBlock::edit_with_sample_hunk("x.rs"));
     let execute_id =
         agent
             .scrollback
@@ -2756,10 +2753,7 @@ fn external_ctrl_o_all_tools_expands_every_tool() {
     let agent = app.agents.get_mut(&id).unwrap();
     let edit_id = agent
         .scrollback
-        .push_block(crate::scrollback::RenderBlock::edit_with_hunks(
-            "x.rs",
-            vec![],
-        ));
+        .push_block(crate::scrollback::RenderBlock::edit_with_sample_hunk("x.rs"));
     let execute_id =
         agent
             .scrollback

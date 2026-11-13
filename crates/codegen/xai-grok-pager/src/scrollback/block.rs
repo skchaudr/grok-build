@@ -654,6 +654,25 @@ impl RenderBlock {
         RenderBlock::ToolCall(ToolCallBlock::Edit(EditToolCallBlock::new(path, hunks)))
     }
 
+    /// An Edit with one real hunk, so it is foldable (an empty-hunk Edit is not).
+    #[cfg(test)]
+    pub(crate) fn edit_with_sample_hunk(path: impl Into<String>) -> Self {
+        use xai_grok_pager_diff::{ChangeTag, DiffLine};
+        let line = |text: &str, lo, ln, tag| DiffLine {
+            text: text.into(),
+            lo,
+            ln,
+            tag,
+        };
+        Self::edit_with_hunks(
+            path,
+            vec![vec![
+                line("let y = 2;\n", 1, 0, ChangeTag::Delete),
+                line("let y = 3;\n", 0, 1, ChangeTag::Insert),
+            ]],
+        )
+    }
+
     /// Create a simple Edit block (no hunks, for legacy compatibility).
     pub fn edit(path: impl Into<String>, edit_info: Option<String>) -> Self {
         let mut block = EditToolCallBlock::new(path, vec![]);

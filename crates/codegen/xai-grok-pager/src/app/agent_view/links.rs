@@ -2784,7 +2784,7 @@ mod link_click_tests {
         );
     }
     #[test]
-    fn subagent_esc_never_closes_view_and_q_does() {
+    fn subagent_esc_cancels_open_search_before_closing_view() {
         let reg = ActionRegistry::defaults();
         let mut parent = make_agent();
         let (mut child, _) = make_search_agent();
@@ -2811,14 +2811,8 @@ mod link_click_tests {
         );
         parent.handle_input(&esc, &reg);
         assert!(
-            parent.active_subagent.is_some(),
-            "Esc must not close the subagent view"
-        );
-        let q = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        parent.handle_input(&q, &reg);
-        assert!(
             parent.active_subagent.is_none(),
-            "q closes the subagent view"
+            "Esc closes the subagent view once no search is open"
         );
     }
     #[test]
