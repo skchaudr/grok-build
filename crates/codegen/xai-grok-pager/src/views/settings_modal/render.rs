@@ -2914,6 +2914,11 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                 });
             }
             shortcuts.push(Shortcut {
+                label: "\u{2192} expand",
+                clickable: false,
+                id: 0,
+            });
+            shortcuts.push(Shortcut {
                 label: "\u{2190}/\u{2192} tabs",
                 clickable: false,
                 id: 0,

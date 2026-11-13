@@ -562,9 +562,9 @@ pub(super) fn default_actions(
             }),
             requires_confirmation: false,
             long_help: Some(if cfg!(windows) {
-                "Toggles plan mode on/off. In plan mode the agent plans before implementing: write tools are gated to the plan file only. Ctrl+Alt+T avoids the Ctrl+Shift+T chord commonly consumed by Windows terminals; /plan-mode is always available."
+                "Toggles plan mode on/off. In plan mode the agent plans before implementing: write tools are gated to the plan file only.\nCtrl+Alt+T avoids the Ctrl+Shift+T chord commonly consumed by Windows terminals; /plan-mode is always available."
             } else {
-                "Toggles plan mode on/off. In plan mode the agent plans before implementing: write tools are gated to the plan file only. Ctrl+Shift+T because Shift+Tab is used for thinking level cycling."
+                "Toggles plan mode on/off. In plan mode the agent plans before implementing: write tools are gated to the plan file only.\nCtrl+Shift+T because Shift+Tab is used for thinking level cycling."
             }),
         },
         ActionDef {
@@ -579,7 +579,7 @@ pub(super) fn default_actions(
             hint_key_display: Some("Opt/Alt+Shift+R"),
             requires_confirmation: false,
             long_help: Some(
-                "Opens the session code-review modal (same as /review-session): left file list, right edit preview for write/edit tool changes in this session.",
+                "Opens the session code-review modal (same as /review-session).\nLeft file list, right edit preview for write/edit tool changes in this session.",
             ),
         },
         // ── Panes (agent-level: toggle side panes) ─────────────────

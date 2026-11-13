@@ -5296,8 +5296,8 @@ fn footer_total_height_grows_when_hints_wrap() {
     let narrow_area = Rect {
         x: 0,
         y: 0,
-        // The modal takes 86% of the terminal width (sidebar + pane), so 82 cols is what the old 100 was at 70%.
-        width: 82,
+        // The modal takes 86% of the terminal width and the tab bar needs ~70 interior columns to stay on one row; below that the tabs wrap and cost a second row.
+        width: 86,
         height: 30,
     };
     let mut s_narrow = make_state();
@@ -7829,8 +7829,12 @@ fn expanded_description_newlines_start_new_lines() {
     s.expanded_keys.insert("subagent_model_inheritance");
     let mut buf = Buffer::empty(area);
     render_rows(&mut buf, area, &mut s, &Theme::current());
+    // The section sidebar paints left of a `│` divider; the pane starts after it.
     let rows: Vec<String> = (0..area.height)
-        .map(|y| buf_row_text(&buf, y, area.x, area.width).trim().to_owned())
+        .map(|y| {
+            let row = buf_row_text(&buf, y, area.x, area.width);
+            row.split_once('│').map_or(row.as_str(), |(_, pane)| pane).trim().to_owned()
+        })
         .collect();
     for head in &paragraph_heads {
         assert!(
@@ -7862,8 +7866,8 @@ fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
     };
 
     let mut s = make_locked_state(CodingDataSharingLock::TeamManaged);
-    let idx = coding_data_sharing_row_idx(&s);
     assert!(s.focus_key("coding_data_sharing"));
+    s.expanded_keys.insert("coding_data_sharing");
     let mut buf = Buffer::empty(area);
     render_rows(&mut buf, area, &mut s, &theme);
     let text = flatten(&buf);
@@ -7890,6 +7894,7 @@ fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
     // Control arm: unlocked expansion shows the description only.
     let mut s = make_state();
     assert!(s.focus_key("coding_data_sharing"));
+    s.expanded_keys.insert("coding_data_sharing");
     let mut buf = Buffer::empty(area);
     render_rows(&mut buf, area, &mut s, &theme);
     let text = flatten(&buf);

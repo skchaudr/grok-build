@@ -1725,11 +1725,11 @@
         assert!(snap.open, "arg suggestions should be open");
         assert!(snap.args_range.is_some());
 
-        // Accepting the arg completion should replace "gr" with "Grok 4.5"
+        // Accepting the arg completion should replace "gr" with the model token ("grok-4.5")
         pw.accept_slash_completion(&models);
         let text = pw.textarea.text().to_string();
         assert!(
-            text.contains("Grok 4.5"),
+            text.contains("grok-4.5"),
             "arg should be replaced, got: {:?}",
             text
         );

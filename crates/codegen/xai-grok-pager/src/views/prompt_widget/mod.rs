@@ -3522,7 +3522,11 @@ impl PromptWidget {
     /// Dimmed secondary text over the prompt bg, fading further when unfocused, so both borders read as one chrome.
     fn chrome_caption_style(bg: ratatui::style::Color, theme: &Theme, focused: bool) -> Style {
         let opacity = if focused { 0.6 } else { 0.4 };
-        match crate::render::color::blend_color(bg, theme.text_secondary, opacity) {
+        // `blend_color` lerps against a synthetic canvas for a `Reset` bg (wave animations); a caption must stay dim over the chrome instead.
+        let blended = (bg != ratatui::style::Color::Reset)
+            .then(|| crate::render::color::blend_color(bg, theme.text_secondary, opacity))
+            .flatten();
+        match blended {
             Some(fg) => Style::default().fg(fg).bg(bg),
             // Profile palettes can't blend: the caption stays dim instead of
             // dropping to gray, with the fg pinned over the border cells

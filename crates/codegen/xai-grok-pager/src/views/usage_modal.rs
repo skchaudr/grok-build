@@ -1378,8 +1378,14 @@ mod tests {
                 hit.rect.x,
                 hit.rect.y,
             ),
-            UsageModalOutcome::CopyText("Model Hash: fp-abc".to_string())
+            UsageModalOutcome::CopyText("Turn: 3".to_string())
         );
+    }
+
+    /// Display column of `needle` in `line`; cards draw multi-byte borders, so a byte offset overshoots.
+    fn column_of(line: &str, needle: &str) -> u16 {
+        let byte = line.find(needle).expect("needle in line");
+        line[..byte].chars().count() as u16
     }
 
     #[test]
@@ -1400,7 +1406,7 @@ mod tests {
         let Some(line) = state.plain_lines.get(line_idx) else {
             panic!("plain line {line_idx} missing");
         };
-        let hash_col = line.find("fp-abc").expect("hash") as u16;
+        let hash_col = column_of(line, "fp-abc");
         let rect = state.content_rect;
         let y = rect.y + (line_idx as u16).saturating_sub(state.scroll);
         let x0 = rect.x + hash_col;
@@ -1456,8 +1462,9 @@ mod tests {
         let title = state
             .plain_lines
             .iter()
-            .position(|l| l == "Title:")
+            .position(|l| l.contains("Title"))
             .expect("title");
+        let title_head: String = state.plain_lines[title].chars().take(7).collect(); // the drag end column is inclusive
         let rect = state.content_rect;
         let y0 = rect.y + blank as u16;
         let y1 = rect.y + title as u16;
@@ -1480,7 +1487,7 @@ mod tests {
                 rect.x + 6,
                 y1,
             ),
-            UsageModalOutcome::CopyText("\nTitle:".to_string())
+            UsageModalOutcome::CopyText(format!("\n{title_head}"))
         );
     }
 
@@ -1531,7 +1538,7 @@ mod tests {
             .find(|l| l.contains("fp-abc"))
             .expect("hash line")
             .clone();
-        let x0 = hit.rect.x + line.find("fp-abc").expect("hash") as u16;
+        let x0 = hit.rect.x + column_of(&line, "fp-abc");
         handle_usage_modal_mouse(
             &mut state,
             MouseEventKind::Down(MouseButton::Left),
