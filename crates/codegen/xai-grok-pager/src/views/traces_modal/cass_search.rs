@@ -11,7 +11,9 @@
 //! * The lexical / semantic / hybrid mode is left at cass's default: no key for it.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
@@ -20,7 +22,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
-use xai_grok_traces::cass::{self, Joined, Query};
+use xai_grok_traces::cass::{self, Hit, Joined, Query};
 use xai_grok_traces::{TraceIndex, remote};
 
 use super::board::split_at_width;
@@ -58,13 +60,15 @@ pub(super) struct View {
     pub phase: Phase,
     pub rows: Vec<Joined>,
     pub total: Option<i64>,
+    /// Shown under the tally while it holds, e.g. the hits are unjoined because the local index failed.
+    pub note: Option<String>,
     pub sel: usize,
     scroll: usize,
 }
 
 impl View {
     fn new() -> Self {
-        Self { text: String::new(), query: String::new(), host: String::new(), phase: Phase::Idle, rows: Vec::new(), total: None, sel: 0, scroll: 0 }
+        Self { text: String::new(), query: String::new(), host: String::new(), phase: Phase::Idle, rows: Vec::new(), total: None, note: None, sel: 0, scroll: 0 }
     }
 
     /// `<n> hits, <m> on this machine`.
@@ -85,6 +89,8 @@ pub(super) struct Job {
 /// A worker's answer: the joined hits and cass's total, or the message to show.
 pub(super) struct Msg {
     pub seq: u64,
+    /// Set when the hits could not be joined to the local index.
+    pub note: Option<String>,
     pub result: Result<(Vec<Joined>, Option<i64>), String>,
 }
 
@@ -156,18 +162,18 @@ impl TracesModalState {
     /// The search and the join run off the UI thread; the answer comes back through `cass_rx`.
     fn cass_spawn(&self, job: Job) {
         let tx = self.cass_tx.clone();
-        let db = self.index.as_ref().map(|i| i.db_path().to_path_buf());
+        let db: Option<PathBuf> = self.index.as_ref().map(|i| i.db_path().to_path_buf());
         std::thread::spawn(move || {
             let Job { seq, target, query } = job;
-            let result = cass::search(&target, &query).map_err(|e| e.to_string()).map(|reply| {
-                let total = reply.total_matches;
-                let rows = match db.and_then(|p| TraceIndex::open(&p).ok()) {
-                    Some(index) => cass::join(&index, reply.hits),
-                    None => reply.hits.into_iter().map(Joined::bare).collect(),
-                };
-                (rows, total)
-            });
-            let _ = tx.send(Msg { seq, result });
+            let (result, note) = match cass::search(&target, &query) {
+                Ok(reply) => {
+                    let total = reply.total_matches;
+                    let (rows, note) = join_hits(db.as_deref(), reply.hits);
+                    (Ok((rows, total)), note)
+                }
+                Err(e) => (Err(e.to_string()), None),
+            };
+            let _ = tx.send(Msg { seq, note, result });
         });
     }
 
@@ -181,12 +187,14 @@ impl TracesModalState {
             Ok((rows, total)) => {
                 view.rows = rows;
                 view.total = total;
+                view.note = msg.note;
                 view.sel = 0;
                 view.scroll = 0;
                 view.phase = Phase::Ready;
             }
             Err(e) => {
                 view.rows.clear();
+                view.note = None;
                 view.phase = Phase::Failed(e);
             }
         }
@@ -249,6 +257,21 @@ impl TracesModalState {
         let Some(node) = self.outline.nodes.iter().position(|n| n.key == key) else { return };
         self.reveal(&key);
         self.reshow(node);
+    }
+}
+
+/// Joins `hits` to the local index at `db`. An index that cannot be opened or answered gives the hits unjoined
+/// plus the note to show, so the rows are not mistaken for sessions that are simply not on this machine.
+fn join_hits(db: Option<&std::path::Path>, hits: Vec<Hit>) -> (Vec<Joined>, Option<String>) {
+    let bare = |hits: Vec<Hit>| hits.into_iter().map(Joined::bare).collect::<Vec<_>>();
+    let Some(db) = db else { return (bare(hits), Some("local index unavailable: not open".to_string())) };
+    let index = match TraceIndex::open_with(db, Some(Duration::from_secs(2))) {
+        Ok(index) => index,
+        Err(e) => return (bare(hits), Some(format!("local index unavailable: {e}"))),
+    };
+    match cass::join(&index, &hits) {
+        Ok(rows) => (rows, None),
+        Err(e) => (bare(hits), Some(format!("local index unavailable: {e}"))),
     }
 }
 
@@ -360,8 +383,9 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, state: &mut TracesModalState)
         return;
     }
     let typing = state.typing == Typing::Cass;
-    let status = state.status.clone();
     let Some(view) = state.cass.as_mut() else { return };
+    // A transient status wins; else the standing note about the results.
+    let status = state.status.clone().map(|m| (m, false)).or_else(|| view.note.clone().map(|m| (m, true)));
     let x = area.x + 2;
     let w = area.width.saturating_sub(4);
 
@@ -392,13 +416,14 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, state: &mut TracesModalState)
     let footer_y = area.y + area.height - 1;
     let status_h = u16::from(status.is_some());
     let list = Rect::new(x, area.y + 2, w, area.height.saturating_sub(3 + status_h));
-    if let Some(msg) = status {
-        buf.set_line(x, footer_y - 1, &Line::from(Span::styled(msg, theme.dim().bg(bg))), w);
+    if let Some((msg, warn)) = status {
+        let style = if warn { Style::default().fg(theme.accent_error) } else { theme.dim() };
+        buf.set_line(x, footer_y - 1, &Line::from(Span::styled(truncate_str(&msg, w as usize), style.bg(bg))), w);
     }
     let hints = if typing {
         vec![HintItem::new(key!(Enter), "search"), HintItem::new(key!(Esc), "cancel")]
     } else {
-        vec![HintItem::new(key!('S'), "new search")]
+        vec![HintItem::new(key!(Enter), "open"), HintItem::new(key!('S'), "new search"), HintItem::new(key!(Esc), "back")]
     };
     let footer = Rect::new(area.x, footer_y, area.width, 1);
     ShortcutsBar::new(&hints).render(Rect { x: footer.x + 2, width: footer.width.saturating_sub(2), ..footer }, buf);
@@ -487,7 +512,7 @@ mod tests {
 
     fn answer(seq: u64, rows: Vec<Joined>) -> Msg {
         let total = Some(rows.len() as i64 + 10);
-        Msg { seq, result: Ok((rows, total)) }
+        Msg { seq, note: None, result: Ok((rows, total)) }
     }
 
     fn draw(state: &mut TracesModalState) -> Vec<String> {
@@ -782,7 +807,7 @@ mod tests {
 
         press(&mut state, KeyCode::Char('S'));
         let job = state.cass_begin(Ok("sab@sabibp".into())).expect("the last query is back in the prompt");
-        state.apply_cass(Msg { seq: job.seq, result: Err("sabibp unreachable (timed out after 15s)".into()) });
+        state.apply_cass(Msg { seq: job.seq, note: None, result: Err("sabibp unreachable (timed out after 15s)".into()) });
         let screen = draw(&mut state);
         assert!(screen.iter().any(|l| l.contains("sabibp unreachable (timed out after 15s)")), "{screen:#?}");
         assert!(state.cass.as_ref().unwrap().rows.is_empty());
@@ -805,5 +830,53 @@ mod tests {
         assert_eq!(state.typing, Typing::No);
         assert!(state.cass.is_some(), "cancelling keeps the results");
         assert!(super::super::wants_esc(&state), "Esc must reach the results, not quit the process");
+    }
+
+    #[test]
+    fn an_unavailable_local_index_is_said_so_and_the_hits_stay_unjoined() {
+        let mut state = board_state();
+        let job = ask(&mut state, "needle").unwrap();
+        let note = "local index unavailable: database is locked".to_string();
+        let rows = vec![joined(hit("sabibp", "claude", "first hit", 1000), None, None, None), joined(hit("sabibp", "pi", "second hit", 2000), None, None, None)];
+        let mut msg = answer(job.seq, rows);
+        msg.note = Some(note.clone());
+        assert!(state.apply_cass(msg));
+        assert_eq!(state.cass.as_ref().unwrap().rows.len(), 2, "the hits are still shown");
+        let screen = draw(&mut state);
+        assert!(screen.iter().any(|l| l.contains(&note)), "{screen:#?}");
+        assert!(screen.iter().any(|l| l.contains("first hit")), "{screen:#?}");
+        // The footer offers the keys of the results screen.
+        assert!(screen.last().is_some_and(|l| l.contains("open") && l.contains("new search") && l.contains("back")), "{screen:#?}");
+
+        // A later search that joins fine drops the note.
+        let job = ask(&mut state, "again").unwrap();
+        state.apply_cass(answer(job.seq, vec![]));
+        let screen = draw(&mut state);
+        assert!(!screen.iter().any(|l| l.contains("local index unavailable")), "{screen:#?}");
+    }
+
+    #[test]
+    fn join_hits_gives_bare_hits_and_a_note_when_the_index_cannot_open() {
+        let hits = || vec![hit("sabibp", "claude", "one", 1000), hit("sabibp", "pi", "two", 2000)];
+        // No index at all.
+        let (rows, note) = join_hits(None, hits());
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|j| j.id.is_none()));
+        assert!(note.is_some_and(|n| n.starts_with("local index unavailable:")));
+        // A path under a regular file cannot be opened.
+        let dir = std::env::temp_dir().join(format!("cass-join-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        let (rows, note) = join_hits(Some(&file.join("index.db")), hits());
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|j| j.id.is_none()));
+        assert!(note.is_some_and(|n| n.starts_with("local index unavailable:")));
+        // An index that opens joins without a note.
+        let db = dir.join("ok.db");
+        TraceIndex::open(&db).unwrap();
+        let (rows, note) = join_hits(Some(&db), hits());
+        assert_eq!((rows.len(), note), (2, None));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
