@@ -196,6 +196,7 @@ pub fn map_pi_theme(doc: &PiThemeJson) -> Result<Theme, MapError> {
         md_task_checked: success,
         md_task_unchecked: border,
         md_muted: or_fallback(md_quote, gray),
+        md_quote: or_fallback(md_quote, gray),
         md_code_bg,
         md_text: text_primary,
         link_fg: md_link,
