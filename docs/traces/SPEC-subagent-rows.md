@@ -30,7 +30,7 @@ Status: draft 2026-11-12, for a Sonnet 5.5 task review. Replaces the tag look fr
    - `model` is the short model id, the same text `Body::Start` prints (`↳ haiku-4-5 started`). If the model is unknown, the tag omits ` · {model}`.
    - If the name already is the model (an unlabelled child), the tag shows `↳ {n} {model}` once.
    - Column width is the widest tag among visible subagents plus 2, capped at `width / 3`, and at least 2 spaces always separate the tag from the row's text. The tag column is the same for every subagent row on screen.
-   - Over the cap, drop the name first (`↳ {n} {model}`), then truncate with `…`.
+   - Over the cap, drop ` · {model}` first (`↳ {n} {name}`), then truncate the name with `…`. An unlabelled child's name is its model, so it keeps the model.
    - `↳` and `{n}` use the theme's accent the band already uses for `↳ … started`. The rest of the tag is `gray_dim`. No new colour.
 2. **Alignment:** every row under a tag starts in the same column. That includes the prompt band (`› …`, currently one column right) and its wrapped lines.
 3. **Agent call row** (`◆ Agent  {label}`): when the call is linked to a child agent, the right side shows `{model} · {N} calls · {status} {duration}`.

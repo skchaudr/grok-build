@@ -636,18 +636,14 @@ impl Follow {
     }
 
     /// Subagent `at`'s tag fitted to the column, leaving 2 spaces before the row: `(head, tail)` as `↳ 2 name` and
-    /// ` · model`; else the name dropped (`↳ 2` and ` model`); else all of it cut with `…` and no tail.
+    /// ` · model`; else the model dropped (`↳ 2 name`), the name cut with `…` if it is still too long.
     fn tag_fit(&self, at: usize, width: usize) -> (String, String) {
         let avail = self.tag_w(width).saturating_sub(2);
         let (head, model) = self.tag_text(at);
-        if model.is_empty() {
-            return (truncate_str(&head, avail), String::new());
-        }
-        if head.width() + 3 + model.width() <= avail {
+        if !model.is_empty() && head.width() + 3 + model.width() <= avail {
             return (head, format!(" · {model}"));
         }
-        let short = format!("↳ {at} {model}");
-        if short.width() <= avail { (format!("↳ {at}"), format!(" {model}")) } else { (truncate_str(&short, avail), String::new()) }
+        (truncate_str(&head, avail), String::new())
     }
 
     /// What starts every line of row `i`: its depth indent, or for a subagent's row its tag (`↳ 1 UI/UX lens ·
