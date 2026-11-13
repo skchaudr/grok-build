@@ -17,7 +17,7 @@ use super::ctx::{find_agent_by_session_id, get_active_agent_mut};
 use super::notes::{handle_btw_response, handle_memory_note_saved};
 use super::prompt::{
     defer_to_open_reload_window, handle_compact_complete, handle_memory_command_complete,
-    handle_prompt_response, handle_subagent_prompt_response, handle_suggestion_debounce_expired,
+    handle_prompt_response, handle_suggestion_debounce_expired,
 };
 use super::queue::push_and_page_flip;
 use super::rewind::{

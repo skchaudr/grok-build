@@ -186,7 +186,7 @@ impl OtherToolCallBlock {
     }
 
     fn compact_input_json(&self) -> Option<String> {
-        let input = self.input_json.as_deref()?;
+        let input = self.input.as_deref()?;
         serde_json::from_str::<serde_json::Value>(input)
             .ok()
             .and_then(|value| serde_json::to_string(&value).ok())
@@ -194,7 +194,7 @@ impl OtherToolCallBlock {
     }
 
     fn push_input_lines(&self, lines: &mut Vec<BlockLine>, theme: &Theme, width: usize) {
-        let Some(input) = self.input_json.as_deref() else {
+        let Some(input) = self.input.as_deref() else {
             return;
         };
         lines.push(Line::from("").into());
@@ -410,7 +410,7 @@ impl BlockContent for OtherToolCallBlock {
     }
 
     fn is_foldable(&self) -> bool {
-        self.output.is_some() || self.error.is_some() || self.input_json.is_some()
+        self.output.is_some() || self.error.is_some() || self.input.is_some()
     }
 
     fn default_display_mode(&self) -> DisplayMode {

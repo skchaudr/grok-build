@@ -1245,7 +1245,6 @@ impl ScrollbackState {
                 RenderBlock::ToolCall(ToolCallBlock::Eval(b)) => b.finish(),
                 RenderBlock::ToolCall(ToolCallBlock::Codemode(b)) => b.finish(),
                 RenderBlock::ToolCall(ToolCallBlock::Read(b)) => b.finish(),
-                RenderBlock::ToolCall(ToolCallBlock::Codemode(b)) => b.finish(),
                 RenderBlock::ToolCall(ToolCallBlock::Edit(b)) => b.finish(),
                 RenderBlock::ToolCall(ToolCallBlock::Search(b)) => b.finish(),
                 RenderBlock::ToolCall(ToolCallBlock::ListDir(b)) => b.finish(),

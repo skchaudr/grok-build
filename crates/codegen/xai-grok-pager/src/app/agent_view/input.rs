@@ -2729,8 +2729,8 @@ mod fork_picker_key_tests {
         open_fork(&mut agent);
         let outcome = agent.handle_input(&key(KeyCode::Enter), &ActionRegistry::defaults());
         match outcome {
-            InputOutcome::Action(Action::Fork(args)) => assert_eq!(
-                args.directive.as_deref(),
+            InputOutcome::Action(Action::PiFork(entry)) => assert_eq!(
+                entry.as_deref(),
                 Some("entry-2"),
                 "Enter forks from the selected entry"
             ),
@@ -2744,7 +2744,7 @@ mod fork_picker_key_tests {
         open_fork(&mut agent);
         let outcome = agent.handle_input(&key(KeyCode::Esc), &ActionRegistry::defaults());
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::PiForkDismiss)),
+            matches!(outcome, InputOutcome::Changed) && agent.fork_state.is_none(),
             "Esc must dismiss the fork picker, got {outcome:?}"
         );
     }

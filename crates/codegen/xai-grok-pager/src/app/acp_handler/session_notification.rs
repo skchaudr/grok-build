@@ -1839,6 +1839,8 @@ fn handle_nested_subagent_lifecycle(
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
+                forwarded_slash: None,
+                turn_saw_agent_text: false,
             };
             let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();
             child_scrollback.set_appearance(parent.scrollback.appearance().clone());

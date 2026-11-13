@@ -21,7 +21,6 @@ mod interject;
 mod jump;
 mod modes;
 pub(crate) mod notes;
-mod notifications;
 mod permissions;
 mod prompt;
 mod prompt_ack;

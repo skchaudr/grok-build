@@ -1500,7 +1500,7 @@ impl AcpUpdateTracker {
                 .raw_input(tc.raw_input)
                 .raw_output(tc.raw_output);
             let update = acp::ToolCallUpdate::new(tc.tool_call_id, fields);
-            return self.handle_tool_call_update(update, scrollback, is_replay);
+            return self.handle_tool_call_update(update, scrollback, meta);
         }
         if let Some(orphan) = self.orphan_updates.remove(&tc_id) {
             let merged = merge_tool_call_update(tc, orphan);

@@ -221,6 +221,10 @@ pub(super) fn handle(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
             set_shortcuts(agent, &params)
         }
         "pi/ui/session_catalog" => {
+            // A scoped catalog answers `Effect::FetchExternalSessionCatalog` (welcome/dashboard picker).
+            if params.get("scope").is_some() {
+                return super::handle_pi_ui_session_catalog(notif, app);
+            }
             let Some(sessions) = params.get("sessions").and_then(serde_json::Value::as_array) else {
                 return false;
             };
@@ -276,6 +280,12 @@ fn catalog_row(session: &serde_json::Value) -> Option<crate::app::app_view::Sess
         last_recap: text("lastRecap"),
         session_kind: text("sessionKind"),
         card_detail: None,
+        name: text("name"),
+        first_message: text("firstMessage"),
+        session_path: text("sessionPath"),
+        parent_session_path: text("parentSessionPath"),
+        total_tokens: session.get("totalTokens").and_then(serde_json::Value::as_u64),
+        total_cost: session.get("totalCost").and_then(serde_json::Value::as_f64),
     })
 }
 

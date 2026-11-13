@@ -39,7 +39,6 @@ use super::notes::{
     dispatch_save_remember_note_from_modal, dispatch_send_btw, dispatch_send_feedback,
     dispatch_send_recap, dispatch_send_remember_note, dispatch_submit_feedback_modal,
 };
-use super::notifications::dispatch_show_notifications;
 use super::permissions::{
     dispatch_permission_cancel, dispatch_permission_followup, dispatch_permission_select,
 };
@@ -331,21 +330,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                 dispatch_show_session_picker(app)
             }
         }
-        Action::ShowSessionTree => dispatch_show_session_tree(app),
-        Action::ShowTreeMap => dispatch_show_tree_map(app),
-        Action::ShowNotifications => dispatch_show_notifications(app),
-        Action::NavigateSessionTree {
-            entry_id,
-            summarize,
-            custom_instructions,
-        } => dispatch_navigate_session_tree(app, entry_id, summarize, custom_instructions),
-        Action::LabelSessionTreeEntry { entry_id, label } => {
-            dispatch_label_session_tree_entry(app, entry_id, label)
-        }
-        Action::RollbackFilesPreview { entry_id } => dispatch_rollback_files_preview(app, entry_id),
-        Action::RollbackFilesExecute { entry_id } => dispatch_rollback_files_execute(app, entry_id),
-        Action::SessionTreeClosed => dispatch_session_tree_closed(app),
-
         Action::SessionPickerClosed => dispatch_session_picker_closed(app),
         Action::PickSession(index) => dispatch_pick_session(app, index),
         Action::PickSessionInWorktree(index) => dispatch_pick_session_in_worktree(app, index),
@@ -1110,6 +1094,8 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                     ..ModelChoice::new(model_id)
                 },
                 prev_model_id: None,
+                model_config_id: agent.session.models.model_config_id.clone(),
+                thought_level_config_id: agent.session.models.thought_level_config_id.clone(),
             }]
         }
         Action::SetScopedModels(entries) => {
@@ -1153,6 +1139,8 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                     ..ModelChoice::new(model_id)
                 },
                 prev_model_id: None,
+                model_config_id: agent.session.models.model_config_id.clone(),
+                thought_level_config_id: agent.session.models.thought_level_config_id.clone(),
             }]
         }
         Action::SwitchModel(mut choice) => {

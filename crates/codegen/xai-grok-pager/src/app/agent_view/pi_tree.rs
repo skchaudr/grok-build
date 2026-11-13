@@ -664,6 +664,7 @@ pub(crate) fn draw_notifications(
                 summary_lines: &[],
                 dimmed: false,
                 indent: 0,
+                label_color: None,
                 badge: "",
                 badge_color: None,
                 collapsible: true,

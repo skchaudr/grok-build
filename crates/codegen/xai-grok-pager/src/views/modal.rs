@@ -12,7 +12,6 @@
 //!
 //! `ModalConfirmation<R>` is a small dialog that blocks all input until
 //! the user presses one of the listed keys.
-use crate::app::app_view::ExternalNotification;
 
 use crate::docs::{DocEntry, default_howto_entries};
 use crate::theme::Theme;
@@ -192,41 +191,6 @@ pub fn session_picker_modal(previous_palette: Option<PaletteSnapshot>) -> Active
 ///
 /// Each variant wraps a `ModalConfirmation<R>` with its concrete result
 /// type plus any context needed for resolution (e.g., pending focus target).
-pub struct NotificationListState {
-    pub notifications: Vec<ExternalNotification>,
-    pub picker: crate::views::picker::PickerState,
-}
-
-impl NotificationListState {
-    pub fn new(notifications: Vec<ExternalNotification>) -> Self {
-        // Nav-first: e/y/←/→ expand+copy must work before type-to-search.
-        // input_active() left search_active=true while show_search_hint was false,
-        // so printable keys (including e/y) only typed into the query.
-        Self {
-            notifications,
-            picker: crate::views::picker::PickerState::default(),
-        }
-    }
-
-    pub fn filtered_notifications(&self) -> Vec<&ExternalNotification> {
-        let query = self.picker.query().to_lowercase();
-        self.notifications
-            .iter()
-            .rev()
-            .filter(|notification| {
-                query.is_empty()
-                    || notification.message.to_lowercase().contains(&query)
-                    || notification
-                        .kind
-                        .as_deref()
-                        .unwrap_or("info")
-                        .to_lowercase()
-                        .contains(&query)
-            })
-            .collect()
-    }
-}
-
 pub struct SubagentHistoryEntry {
     pub id: String,
     pub description: String,
@@ -304,8 +268,8 @@ impl SubagentHistoryPickerState {
 mod notification_list_tests {
     use super::*;
 
-    fn notification(message: &str, kind: Option<&str>) -> ExternalNotification {
-        ExternalNotification {
+    fn notification(message: &str, kind: Option<&str>) -> PiNotification {
+        PiNotification {
             message: message.into(),
             kind: kind.map(str::to_owned),
         }
@@ -320,7 +284,7 @@ mod notification_list_tests {
         ]);
         assert_eq!(
             state
-                .filtered_notifications()
+                .filtered()
                 .iter()
                 .map(|notification| notification.message.as_str())
                 .collect::<Vec<_>>(),
@@ -329,12 +293,12 @@ mod notification_list_tests {
 
         state.picker.set_query("error");
         assert_eq!(
-            state.filtered_notifications()[0].message,
+            state.filtered()[0].message,
             "permission denied"
         );
 
         state.picker.set_query("limit");
-        assert_eq!(state.filtered_notifications()[0].message, "rate limit");
+        assert_eq!(state.filtered()[0].message, "rate limit");
     }
 
     #[test]
@@ -1147,10 +1111,7 @@ impl ActiveModal {
             | ActiveModal::PiConfig { .. }
             | ActiveModal::PiModels { .. }
             | ActiveModal::UsageInfo { .. }
-            | ActiveModal::RememberNoteReview { .. }
-            | ActiveModal::SessionTree { .. }
-            | ActiveModal::TreeMap { .. }
-            | ActiveModal::Notifications { .. } => vec![],
+            | ActiveModal::RememberNoteReview { .. } => vec![],
         }
     }
     pub fn message(&self, drain_blocked: bool) -> &str {
@@ -1168,9 +1129,6 @@ impl ActiveModal {
             ActiveModal::Notifications { .. } => "Notifications",
             ActiveModal::SubagentHistory { state, .. } => state.title.as_str(),
             ActiveModal::SessionPicker { .. } => "Resume session",
-            ActiveModal::SessionTree { .. } => "Session tree",
-            ActiveModal::TreeMap { .. } => "Branch map",
-            ActiveModal::Notifications { .. } => "Notifications",
             ActiveModal::ArgPicker {
                 command,
                 args_query,

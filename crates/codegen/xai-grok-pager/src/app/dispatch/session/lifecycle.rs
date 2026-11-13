@@ -1579,6 +1579,7 @@ pub(in crate::app::dispatch) fn skip_picker_and_create_session(
         permission_mode_override: None,
         preferred_session_id,
         chat_kind,
+        agent_choice: app.pending_session_agent.take(),
     }]
 }
 

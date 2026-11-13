@@ -13,79 +13,6 @@ use std::num::NonZeroU64;
 use xai_grok_shell::sampling::types::ReasoningEffort;
 use xai_grok_shell::session::unified_list::SessionKind;
 
-/// Flattened Pi session-tree node for the `/tree` surface.
-#[derive(Debug, Clone)]
-pub struct SessionTreeNode {
-    pub id: String,
-    pub parent_id: Option<String>,
-    /// Structural depth from root (parent-chain length). Visual indent is
-    /// recomputed after filter using Pi TreeSelector branch-compression rules.
-    pub depth: usize,
-    pub is_leaf: bool,
-    pub is_current: bool,
-    pub on_active_path: bool,
-    pub role: String,
-    pub preview: String,
-    pub detail: String,
-    pub label: Option<String>,
-    pub label_timestamp: Option<String>,
-    pub entry_type: String,
-    pub timestamp: Option<String>,
-    pub child_ids: Vec<String>,
-    /// Assistant messages without text are hidden in default filter (Pi parity).
-    pub has_text: bool,
-}
-
-/// One user message available for Pi message-level `/fork`.
-#[derive(Debug, Clone)]
-pub struct PiForkMessage {
-    pub entry_id: String,
-    pub text: String,
-}
-
-/// Filter modes aligned with Pi `TreeSelector` / settings `treeFilterMode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SessionTreeFilter {
-    #[default]
-    Default,
-    NoTools,
-    UserOnly,
-    LabeledOnly,
-    All,
-}
-
-impl SessionTreeFilter {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::NoTools => "no-tools",
-            Self::UserOnly => "user",
-            Self::LabeledOnly => "labeled",
-            Self::All => "all",
-        }
-    }
-
-    pub fn cycle_forward(self) -> Self {
-        match self {
-            Self::Default => Self::NoTools,
-            Self::NoTools => Self::UserOnly,
-            Self::UserOnly => Self::LabeledOnly,
-            Self::LabeledOnly => Self::All,
-            Self::All => Self::Default,
-        }
-    }
-
-    pub fn cycle_backward(self) -> Self {
-        match self {
-            Self::Default => Self::All,
-            Self::NoTools => Self::Default,
-            Self::UserOnly => Self::NoTools,
-            Self::LabeledOnly => Self::UserOnly,
-            Self::All => Self::LabeledOnly,
-        }
-    }
-}
-
 /// Typed error for model switch failures. Replaces the raw `String` in
 /// `TaskResult::SwitchModelComplete` so dispatch can match on the variant
 /// instead of parsing strings.
@@ -242,33 +169,6 @@ pub enum Action {
     },
     /// Open the session picker overlay (from within an active session via /resume).
     ShowSessionPicker,
-    /// Open the Pi session entry tree picker (`/tree`).
-    ShowSessionTree,
-    /// Open the branch map: user-messages-only fork view (`/tree-map`).
-    ShowTreeMap,
-    /// Open the process-local Pi notification list for the active session (`/notify`).
-    ShowNotifications,
-    /// Navigate the active Pi session leaf to `entry_id` (`ctx.navigateTree`).
-    NavigateSessionTree {
-        entry_id: String,
-        summarize: bool,
-        custom_instructions: Option<String>,
-    },
-    /// Set or clear a Pi session-tree label (`ctx.setLabel`).
-    LabelSessionTreeEntry {
-        entry_id: String,
-        label: Option<String>,
-    },
-    /// Preview file rollback to a Pi session-tree ancestor entry.
-    RollbackFilesPreview {
-        entry_id: String,
-    },
-    /// Execute file rollback to a Pi session-tree ancestor entry (file-only, leaf unchanged).
-    RollbackFilesExecute {
-        entry_id: String,
-    },
-    /// Close the session tree modal without navigating.
-    SessionTreeClosed,
     /// The session picker overlay was dismissed without a pick: invalidate any
     /// in-flight list/search/foreign scan so a late response can't fall
     /// through to the welcome picker fields.
@@ -1314,12 +1214,6 @@ pub enum Action {
     /// Submit a QA question from the review modal's Right Ask bar.
     /// Fires a /btw side question scoped to the reviewed files.
     ReviewAsk(String),
-    /// Close the Pi `/fork` prompt-area message list overlay.
-    PiForkDismiss,
-    /// Pi `/clone`: duplicate current session at the current leaf.
-    PiClone,
-    /// Pi `/reload`: reload settings/extensions/skills/prompts/themes/context.
-    PiReload,
 }
 /// A server-authoritative queue row plus the version its removal is checked against.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1865,59 +1759,6 @@ pub enum Effect {
         cwd: std::path::PathBuf,
         all: bool,
         use_psm_index: bool,
-    },
-    /// Fetch Pi `get_tree` for the active agent and open ArgPicker.
-    FetchSessionTree {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
-    },
-    /// Navigate Pi leaf then reload scrollback for the same session id.
-    NavigateSessionTree {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
-        entry_id: String,
-        summarize: bool,
-        custom_instructions: Option<String>,
-    },
-    /// Set/clear a Pi tree label then refresh the open tree modal.
-    LabelSessionTreeEntry {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
-        entry_id: String,
-        label: Option<String>,
-    },
-    /// Preview file rollback to a Pi tree entry (read-only plan).
-    RollbackFilesPreview {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
-        entry_id: String,
-    },
-    /// Execute file rollback to a Pi tree entry (restores files).
-    RollbackFilesExecute {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
-        entry_id: String,
-    },
-    /// Fetch Pi `get_fork_messages` for the external `/fork` ArgPicker.
-    FetchPiForkMessages {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
-    },
-    /// Execute Pi RPC `fork` from a user-message entry id.
-    ForkPiSession {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
-        entry_id: String,
-    },
-    /// Execute Pi RPC `clone` (duplicate current leaf into a new session file).
-    ClonePiSession {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
-    },
-    /// Execute Pi resource reload via injected `ctx.reload()` bridge.
-    ReloadPiSession {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
     },
     /// Fetch session list for the welcome screen session picker.
     FetchSessionList {
@@ -2611,12 +2452,6 @@ pub enum Effect {
     },
     /// Unregister a session from the active-sessions registry (clean exit).
     UnregisterActiveSession { session_id: acp::SessionId },
-    /// Experimental Remote TUI: forward a key sequence to the Pi process host.
-    RemoteTuiInput { id: String, data: String },
-    /// Experimental Remote TUI: cancel the active remote component session.
-    RemoteTuiCancel { id: String },
-    /// Extension shortcut matched: dispatch to Pi extension handler via RPC.
-    ShortcutDispatch { key: String },
     /// Quit the application.
     Quit,
     /// Toggle coding data sharing via ACP.
@@ -3043,94 +2878,6 @@ pub enum TaskResult {
     /// The external-agent session catalog request failed before any catalog
     /// notification could arrive — clear loading flags on dashboard/picker.
     ExternalSessionCatalogFailed,
-    /// Pi session tree loaded for `/tree` ArgPicker.
-    SessionTreeLoaded {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
-        leaf_id: Option<String>,
-        nodes: Vec<SessionTreeNode>,
-    },
-    /// Pi session tree fetch failed.
-    SessionTreeFailed {
-        agent_id: crate::app::agent::AgentId,
-        error: String,
-    },
-    /// Pi tree navigation completed; reload scrollback for the same session.
-    SessionTreeNavigated {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
-        leaf_id: Option<String>,
-        editor_text: Option<String>,
-    },
-    /// Pi tree navigation failed; keep current view.
-    SessionTreeNavigateFailed {
-        agent_id: crate::app::agent::AgentId,
-        error: String,
-    },
-    /// Pi tree label set/cleared; refresh nodes if modal still open.
-    SessionTreeLabeled {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
-        entry_id: String,
-        label: Option<String>,
-        leaf_id: Option<String>,
-        nodes: Vec<SessionTreeNode>,
-    },
-    SessionTreeLabelFailed {
-        agent_id: crate::app::agent::AgentId,
-        error: String,
-    },
-    /// Pi `/fork` message catalog loaded for ArgPicker.
-    PiForkMessagesLoaded {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
-        messages: Vec<PiForkMessage>,
-    },
-    PiForkMessagesFailed {
-        agent_id: crate::app::agent::AgentId,
-        error: String,
-    },
-    /// Pi message-level fork completed; reload with the new session id.
-    PiSessionForked {
-        agent_id: crate::app::agent::AgentId,
-        /// Session id before fork (for diagnostics only).
-        previous_session_id: String,
-        session_id: String,
-        editor_text: Option<String>,
-    },
-    PiSessionForkFailed {
-        agent_id: crate::app::agent::AgentId,
-        error: String,
-    },
-    /// Pi `/clone` completed; reload with the new session id (empty prompt).
-    PiSessionCloned {
-        agent_id: crate::app::agent::AgentId,
-        previous_session_id: String,
-        session_id: String,
-    },
-    PiSessionCloneFailed {
-        agent_id: crate::app::agent::AgentId,
-        error: String,
-    },
-    /// Pi `/reload` completed (resources refreshed; session file unchanged).
-    PiSessionReloaded {
-        agent_id: crate::app::agent::AgentId,
-        session_id: String,
-    },
-    PiSessionReloadFailed {
-        agent_id: crate::app::agent::AgentId,
-        error: String,
-    },
-    /// File rollback preview/execute completed (toast-only; no modal state change).
-    RollbackFilesCompleted {
-        agent_id: crate::app::agent::AgentId,
-        message: String,
-    },
-    /// File rollback failed.
-    RollbackFilesFailed {
-        agent_id: crate::app::agent::AgentId,
-        error: String,
-    },
     /// Session list fetched for the welcome screen picker.
     SessionListLoaded {
         /// Echo of [`Effect::FetchSessionList::host`]; results apply only to the requesting host's picker storage.

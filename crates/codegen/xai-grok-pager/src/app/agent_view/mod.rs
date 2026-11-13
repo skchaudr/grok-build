@@ -1582,12 +1582,8 @@ pub struct AgentView {
     pub pi_widgets: std::collections::BTreeMap<String, Vec<String>>,
     /// Pi extension `ctx.ui.custom()` screen streamed by grok-pi's remote-tui host; owns keys while open.
     pub pi_remote_tui: crate::app::pi_remote_tui::PiRemoteTui,
-    /// Pi session's plan sidecar (`pi/ui/plan_file`); `/view-plan` reads it instead of `~/.grok/sessions/...`.
-    pub pi_plan_file_path: Option<std::path::PathBuf>,
     /// Keys Pi extensions registered (`pi.registerShortcut`), dispatched back to Pi; created when the first list arrives.
     pub pi_shortcuts: Option<crate::app::extension_shortcuts::ExtensionShortcutRegistry>,
-    /// Pi `/fork` message picker, in the prompt slot like `/jump`.
-    pub(crate) fork_state: Option<crate::views::fork_picker::ForkPickerState>,
     /// Pi extension notifications this session received, for `/notify`.
     pub pi_notifications: Vec<crate::views::modal::PiNotification>,
     /// Agent label from the `--agent-choice` command (`claude-agent`, `grok-pi`), so each session keeps its own profile.

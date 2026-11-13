@@ -64,8 +64,8 @@ pub(crate) enum ViewSurface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ComposerRoute {
     RootSession,
-    /// Pi persistent subagent session; root dispatch routes submission to
-    /// `Effect::SendSubagentPrompt` for the child's ACP session.
+    /// Pi persistent subagent session; root dispatch steers a running child with
+    /// `Effect::SendChildPrompt` on the child's ACP session.
     ChildSession,
     /// No route exists, so the composer gets zero rows and can't take focus.
     Hidden,

@@ -3,12 +3,10 @@
 use super::AgentView;
 use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
-use crate::slash::commands::fork::ForkArgs;
 use crate::views::fork_picker::{
-    ForkPickerInput, fork_picker_activate, fork_picker_row_at, handle_fork_picker_key, move_cursor,
-    set_fork_picker_cursor,
+    ForkPickerInput, fork_picker_activate, fork_picker_row_at, set_fork_picker_cursor,
 };
-use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
 impl AgentView {
     pub(crate) fn dismiss_fork_picker(&mut self) {
@@ -31,34 +29,17 @@ impl AgentView {
         false
     }
 
-    pub(super) fn handle_fork_picker_key(&mut self, key: &KeyEvent) -> InputOutcome {
-        let Some(state) = self.fork_state.as_ref() else {
-            return InputOutcome::Unchanged;
-        };
-        match handle_fork_picker_key(state, key) {
-            ForkPickerInput::MoveUp => {
-                if let Some(state) = self.fork_state.as_mut() {
-                    move_cursor(state, -1);
-                }
-                InputOutcome::Changed
-            }
-            ForkPickerInput::MoveDown => {
-                if let Some(state) = self.fork_state.as_mut() {
-                    move_cursor(state, 1);
-                }
-                InputOutcome::Changed
-            }
-            input => Self::fork_picker_input_to_outcome(input),
-        }
-    }
-
-    fn fork_picker_input_to_outcome(input: ForkPickerInput) -> InputOutcome {
+    /// A picked or dismissed row closes the picker; a pick forks through `pi/session/fork` (`pi_session.rs`).
+    fn fork_picker_input_to_outcome(&mut self, input: ForkPickerInput) -> InputOutcome {
         match input {
-            ForkPickerInput::Select(entry_id) => InputOutcome::Action(Action::Fork(ForkArgs {
-                worktree_override: None,
-                directive: Some(entry_id),
-            })),
-            ForkPickerInput::Dismissed => InputOutcome::Action(Action::PiForkDismiss),
+            ForkPickerInput::Select(entry_id) => {
+                self.fork_state = None;
+                InputOutcome::Action(Action::PiFork(Some(entry_id)))
+            }
+            ForkPickerInput::Dismissed => {
+                self.fork_state = None;
+                InputOutcome::Changed
+            }
             ForkPickerInput::MoveUp | ForkPickerInput::MoveDown | ForkPickerInput::Consumed => {
                 InputOutcome::Changed
             }
@@ -84,7 +65,8 @@ impl AgentView {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 set_fork_picker_cursor(state, index);
-                Self::fork_picker_input_to_outcome(fork_picker_activate(state))
+                let input = fork_picker_activate(state);
+                self.fork_picker_input_to_outcome(input)
             }
             _ => InputOutcome::Unchanged,
         }

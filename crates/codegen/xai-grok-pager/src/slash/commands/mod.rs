@@ -85,12 +85,6 @@ pub mod tree_map;
 pub mod tutorial;
 pub mod usage;
 pub mod view_plan;
-pub mod reload;
-pub mod clone_cmd;
-pub mod tree;
-pub mod tree_map;
-pub mod notify;
-pub mod plan_mode;
 pub mod vim_mode;
 pub mod voice;
 pub mod workflow;
@@ -186,14 +180,8 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(import_claude::ImportClaudeCommand),
         // grok-pi profile commands retained across upstream menu reordering.
         Arc::new(hotkeys::HotkeysCommand),
-        Arc::new(clone_cmd::CloneCommand),
-        Arc::new(reload::ReloadCommand),
         Arc::new(scoped_models::ScopedModelsCommand),
         Arc::new(eval_display::EvalDisplayCommand),
-        Arc::new(plan_mode::PlanModeCommand),
-        Arc::new(tree::TreeCommand),
-        Arc::new(tree_map::TreeMapCommand),
-        Arc::new(notify::NotifyCommand),
         Arc::new(create_workflow::CreateWorkflowCommand),
         Arc::new(pi_config::PiConfigCommand),
         Arc::new(pi_models::PiModelsCommand),

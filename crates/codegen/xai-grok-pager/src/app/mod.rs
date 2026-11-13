@@ -43,7 +43,7 @@ mod dispatch;
 pub use dispatch::standalone_traces;
 pub mod roster;
 pub(crate) mod pi_remote_tui;
-pub(crate) mod extension_shortcuts;
+pub mod extension_shortcuts;
 pub mod session_startup;
 pub(crate) mod session_title_resolve;
 pub mod status_blocks;
@@ -64,7 +64,6 @@ pub(crate) use effects::{CancelMeta, cancel_notification_meta, sanitize_user_err
 mod event_loop;
 mod event_loop_stall;
 mod exit_timeout;
-pub mod extension_shortcuts;
 pub(crate) mod external_editor;
 mod inline_edit;
 mod foreign_sessions;
@@ -886,6 +885,7 @@ pub async fn run_external_deferred(
         relaunched_into_fullscreen,
         initial_theme: crate::theme::cache::current_kind(),
         startup_typeahead,
+        embedded_fallback_notice: None,
     };
     // Background update check for grok-pi. The external product supplies its
     // own release version so Grok's workspace version cannot affect it.
