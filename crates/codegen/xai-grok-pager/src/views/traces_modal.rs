@@ -31,6 +31,7 @@ use crate::views::traces_payload::{self, Payload, Shape};
 pub(super) use super::traces_body::{pretty, INPUT_KEYS, TEXT_KEYS};
 
 mod board;
+mod cass_search;
 mod deck;
 mod standalone;
 mod summaries;
@@ -85,6 +86,8 @@ enum Typing {
     Ledger,
     Events,
     Live,
+    /// The cass search prompt (`S`).
+    Cass,
 }
 
 /// A parent trajectory parked while its dispatch child is open: the session, the selected row and the outline folds.
@@ -268,6 +271,12 @@ pub struct TracesModalState {
     local_host: String,
     /// The sessions list drawn in `Mode::List` in place of the ledger. `open` sets it; the ledger's own tests leave it off.
     board: Option<board::Board>,
+    /// `S`: the cass search screen, drawn in `Mode::List` in place of the board or ledger while it is `Some`.
+    cass: Option<cass_search::View>,
+    /// Bumped by every search and by leaving the screen; an answer carrying an older one is dropped.
+    cass_gen: u64,
+    cass_tx: mpsc::Sender<cass_search::Msg>,
+    cass_rx: mpsc::Receiver<cass_search::Msg>,
 }
 
 #[derive(Clone, Debug)]
@@ -459,6 +468,7 @@ impl TracesModalState {
 
     pub fn open_with_hosts(index: Option<TraceIndex>, hosts: Vec<String>) -> Self {
         let (body_tx, body_rx) = mpsc::channel();
+        let (cass_tx, cass_rx) = mpsc::channel();
         let mut s = Self {
             window: ModalWindowState::new(),
             mode: Mode::List,
@@ -570,6 +580,10 @@ impl TracesModalState {
             live_at: None,
             local_host: short_hostname(),
             board: None,
+            cass: None,
+            cass_gen: 0,
+            cass_tx,
+            cass_rx,
         };
         s.watermark = s.index.as_ref().and_then(|i| i.receipts_watermark().ok()).unwrap_or(0);
         s.refresh();
@@ -622,6 +636,7 @@ impl TracesModalState {
             }
         }
         redraw |= self.poll_remote();
+        redraw |= self.poll_cass();
         if self.peek.is_some() {
             redraw |= self.refresh_peek();
         }
@@ -3806,13 +3821,16 @@ impl TracesModalState {
 /// Esc in a sub-view or an editor is handled here; only the ledger's Esc closes the modal.
 pub fn wants_esc(state: &TracesModalState) -> bool {
     // A kept search is cleared by Esc before Esc leaves the list.
-    state.typing != Typing::No || state.mode != Mode::List || !state.query.is_empty()
+    state.typing != Typing::No || state.mode != Mode::List || !state.query.is_empty() || state.cass.is_some()
 }
 
 /// Mouse in the list and the trajectory. A click selects; a click on the selected row (a double-click)
 /// is Enter; the wheel moves by [`WHEEL`] rows; a click on a fold glyph toggles that fold.
 /// The inspector ignores the mouse.
 pub fn handle_traces_mouse(state: &mut TracesModalState, mouse: &MouseEvent) -> InputOutcome {
+    if cass_search::shown(state) {
+        return cass_search::handle_mouse(state, mouse);
+    }
     match state.mode {
         Mode::Inspector => InputOutcome::Unchanged,
         Mode::Follow if state.board.is_some() => deck::handle_mouse(state, mouse),
@@ -3857,10 +3875,21 @@ fn traces_key(state: &mut TracesModalState, key: &KeyEvent) -> InputOutcome {
     if key.code != KeyCode::Char('r') {
         state.resume_armed = None;
     }
+    // `S` opens the cass search; while its results are up they own the list's keys.
+    if state.mode == Mode::List && state.typing == Typing::No {
+        if state.cass.is_some() {
+            return cass_search::handle_key(state, key);
+        }
+        if cass_search::is_open_key(key) {
+            state.cass_prompt();
+            return InputOutcome::Changed;
+        }
+    }
     if state.mode == Mode::List && state.typing == Typing::No && state.board.is_some() {
         return board::handle_key(state, key);
     }
     match state.typing {
+        Typing::Cass => return cass_search::prompt_key(state, key),
         Typing::Ledger => {
             match key.code {
                 KeyCode::Esc => {
@@ -4329,6 +4358,7 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
                 plain("g/G ends"),
                 plain("Tab source"),
                 plain("/ search"),
+                plain("S cass search"),
                 plain("a all"),
                 plain("A active"),
                 plain("x errors"),
@@ -4420,6 +4450,9 @@ fn shortcuts(state: &TracesModalState, width: u16) -> Vec<Shortcut<'static>> {
 
 pub fn render_traces_modal(buf: &mut Buffer, full_area: Rect, state: &mut TracesModalState, compact: bool) {
     state.hit_list = None;
+    if cass_search::shown(state) {
+        return cass_search::render(buf, full_area, state);
+    }
     if state.mode == Mode::List && state.board.is_some() {
         return board::render(buf, full_area, state);
     }

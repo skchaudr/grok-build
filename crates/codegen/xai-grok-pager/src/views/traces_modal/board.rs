@@ -752,7 +752,7 @@ fn row_lines(
 }
 
 /// The first `w` columns of `s` on one line (`…` when cut), and whether it was cut.
-fn split_at_width(s: &str, w: usize) -> (String, bool) {
+pub(super) fn split_at_width(s: &str, w: usize) -> (String, bool) {
     let s = s.replace(['\n', '\r', '\t'], " ");
     if s.width() <= w {
         return (s, false);
@@ -823,6 +823,7 @@ fn render_footer(buf: &mut Buffer, area: Rect, theme: &Theme) {
         HintItem::new(key!('r'), "resume"),
         HintItem::new(key!('y'), "copy resume"),
         HintItem::new(key!('/'), "search"),
+        HintItem::new(key!('S'), "cass search"),
     ];
     let inner = Rect { x: area.x + 2, width: area.width.saturating_sub(2), ..area };
     ShortcutsBar::new(&hints).render(inner, buf);
