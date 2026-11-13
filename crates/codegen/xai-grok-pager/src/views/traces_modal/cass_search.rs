@@ -835,6 +835,8 @@ mod tests {
     #[test]
     fn an_unavailable_local_index_is_said_so_and_the_hits_stay_unjoined() {
         let mut state = board_state();
+        // The board's own index opened (no standing status); only the join failed.
+        state.status = None;
         let job = ask(&mut state, "needle").unwrap();
         let note = "local index unavailable: database is locked".to_string();
         let rows = vec![joined(hit("sabibp", "claude", "first hit", 1000), None, None, None), joined(hit("sabibp", "pi", "second hit", 2000), None, None, None)];
