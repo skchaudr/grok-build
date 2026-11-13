@@ -302,6 +302,14 @@ pub fn key_id_matches_event(key_id: &str, event: &KeyEvent) -> bool {
         return false;
     }
 
+    // Named keys (arrows, Enter, F-keys) have no shifted glyph, so SHIFT must match exactly.
+    if !matches!(event.code, KeyCode::Char(_))
+        && event.modifiers.contains(KeyModifiers::SHIFT)
+            != required_mods.contains(KeyModifiers::SHIFT)
+    {
+        return false;
+    }
+
     // Check the key itself
     match *key_part {
         "enter" | "return" => event.code == KeyCode::Enter,
@@ -439,6 +447,16 @@ mod tests {
         );
         assert!(key_id_matches_event("ctrl+shift+x", &event));
         assert!(!key_id_matches_event("ctrl+x", &event));
+    }
+
+    #[test]
+    fn named_keys_match_shift_exactly() {
+        let up = key(KeyCode::Up, KeyModifiers::NONE);
+        let shift_up = key(KeyCode::Up, KeyModifiers::SHIFT);
+        assert!(!key_id_matches_event("shift+up", &up));
+        assert!(key_id_matches_event("shift+up", &shift_up));
+        assert!(key_id_matches_event("up", &up));
+        assert!(!key_id_matches_event("up", &shift_up));
     }
 
     #[test]
