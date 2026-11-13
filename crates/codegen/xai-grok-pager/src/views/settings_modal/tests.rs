@@ -725,96 +725,65 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             }
         })
         .collect();
+    // Rows are grouped by sidebar section within each category tab (`settings::layout`), so this is section order, not registration order.
+    // Stock profile: `external_only` (grok-pi) rows are not listed.
     assert_eq!(
         settings,
         vec![
-            // Booleans.
+            "theme",
+            "auto_dark_theme",
+            "auto_light_theme",
             "compact_mode",
             "screen_mode",
             "show_timestamps",
             "show_timeline",
             "dashboard_preview",
-            // PAGER-owned page_flip_on_send (Appearance).
             "page_flip_on_send",
-            "simple_mode",
-            // PAGER-owned vim_mode (Appearance, paired with simple_mode)
-            "vim_mode",
-            // Theme enums.
-            "theme",
-            "auto_dark_theme",
-            "auto_light_theme",
-            // SHELL-owned render_mermaid (Appearance, declared after the theme enums)
             "render_mermaid",
-            // Int in Appearance category.
-            "max_thoughts_width",
-            // SHELL-owned show_thinking_blocks (Appearance; live cache).
-            "show_thinking_blocks",
-            // PAGER-owned respect_manual_folds (Appearance, persisted to pager.toml)
-            "respect_manual_folds",
-            // SHELL-owned group_tool_verbs (Appearance; live cache).
-            "group_tool_verbs",
-            // SHELL-owned collapsed_edit_blocks (Appearance; live cache, default OFF rollout flag)
-            "collapsed_edit_blocks",
-            // Pi-Grok tool rendering controls retained across upstream syncs.
-            "ctrl_o_tool_expansion",
-            // SHELL-owned display_refresh_auto_cadence (Appearance).
             "display_refresh_auto_cadence",
-            "show_other_tool_args",
             "progress_bar",
             "remote_tui_footer",
-            // Mouse — scroll + drag selection. The scroll
-            // classification/lines/direction knobs follow scroll_speed.
+            "max_thoughts_width",
+            "show_thinking_blocks",
+            "thinking_border_colors",
+            "respect_manual_folds",
+            "group_tool_verbs",
+            "collapsed_edit_blocks",
+            "ctrl_o_tool_expansion",
+            "show_other_tool_args",
+            "simple_mode",
+            "vim_mode",
+            "prompt_cursor",
+            "write_edit_hover_popups",
             "scroll_speed",
             "scroll_mode",
             "scroll_lines",
             "invert_scroll",
             "keep_text_selection",
-            // SHARED-owned combine_queued_prompts (Editor category; read by both the pager drain and the shell promote)
-            // Registered before multiline_mode, so it renders first
             "combine_queued_prompts",
             "follow_up_behavior",
             "cancel_turn_key",
             "confirm_before_rewind",
-            // PAGER-owned multiline (Editor category).
             "multiline_mode",
-            // SHELL-owned prompt_suggestions (Editor; tab autocomplete ghost text, live cache)
             "prompt_suggestions",
-            // voice_keybind_enabled, voice_capture_mode, and voice_stt_language hidden when the voice gate is off
-            // SHELL-owned permission_mode (Agent category).
             "permission_mode",
-            // SHELL-owned remember_tool_approvals (Agent category, registered right after permission_mode)
             "remember_tool_approvals",
-            // SHELL-owned default_selected_permission (Agent category, colocated with permission_mode / plan_mode)
             "default_selected_permission",
-            // SHELL-owned ask_user_question timeout (Agent category, registered directly above plan_mode)
-            "toolset.ask_user_question.timeout_enabled",
-            // PAGER-owned plan_mode (Agent category).
             "plan_mode",
-            // Pi-Grok session and F2 configuration controls.
-            "psm_resume_index",
+            "toolset.ask_user_question.timeout_enabled",
+            "pi_config_skill",
             "pi_config",
+            "psm_resume_index",
             "session_recap",
             "recap_mermaid",
-            // SHELL-owned coding_data_sharing (Privacy category).
             "coding_data_sharing",
-            // SHELL-owned default_model (Models category).
             "default_model",
-            // SHELL-owned `[features]` row (Models category, registered right after default_model)
             "subagent_model_inheritance",
-            // Models category. `default_reasoning_effort`, `web_search_model`, and `session_summary_model` are not exposed in the modal.
             "fork_secondary_model",
-            // Pi-Grok grouped recap/BtW model slots.
             "recap_models",
-            // `auto_compact_threshold_percent` (Session category) is
-            // not exposed in the modal.
-
-            // Advanced category.
             "show_tips",
-            // Per-tip contextual-hints GROUP row, placed right after `show_tips`
-            // Its 3 child toggles (`contextual_hints.{undo,plan_mode,image_input}`) are hidden from the top-level list and reached via the sub-sheet
-            "contextual_hints",
             "auto_update",
-            // SHELL-owned hunk_tracker_mode (Advanced; `off` disables it).
+            "contextual_hints",
             "hunk_tracker_mode",
         ]
     );
@@ -4616,6 +4585,8 @@ fn find_text_col(buf: &Buffer, y: u16, needle: &str) -> Option<u16> {
 #[test]
 fn section_headers_have_blank_line_above_except_first() {
     let mut s = make_state();
+    // Category headings only draw in cross-tab search; the tabbed Browse view has none.
+    s.set_query("mode");
     // Allocate a generous viewport so every category fits
     // The default registry contains 6 categories with 16 settings; the blank lines push us to ~23 lines, fits in 60
     let area = Rect {
@@ -4680,6 +4651,8 @@ fn section_headers_have_blank_line_above_except_first() {
 #[test]
 fn first_section_header_has_no_leading_gap() {
     let mut s = make_state();
+    // Category headings only draw in cross-tab search; the tabbed Browse view has none.
+    s.set_query("mode");
     let area = Rect {
         x: 0,
         y: 0,
@@ -4705,6 +4678,8 @@ fn first_section_header_has_no_leading_gap() {
 #[test]
 fn row_rects_shift_down_for_blank_lines_above_headers() {
     let mut s = make_state();
+    // Category headings only draw in cross-tab search; the tabbed Browse view has none.
+    s.set_query("mode");
     let area = Rect {
         x: 0,
         y: 0,
@@ -4978,6 +4953,8 @@ fn two_line_row_hit_rect_spans_both_lines() {
         .iter()
         .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "coding_data_sharing"))
         .expect("coding_data_sharing must be registered");
+    // Bring the key's tab forward; rows outside the active tab are filtered out of the render.
+    assert!(s.focus_key("coding_data_sharing"));
     // Render at a narrow width so coding_data_sharing forces a two-line layout
     let area = Rect {
         x: 0,
@@ -5038,6 +5015,8 @@ fn two_line_row_with_expansion_renders_three_segments() {
         .iter()
         .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "coding_data_sharing"))
         .expect("coding_data_sharing must be registered");
+    // Bring the key's tab forward; rows outside the active tab are filtered out of the render.
+    assert!(s.focus_key("coding_data_sharing"));
     s.selected = row_idx;
     s.expanded_keys.insert("coding_data_sharing");
 
@@ -5102,6 +5081,8 @@ fn group_row_renders_expanded_description() {
         .iter()
         .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "contextual_hints"))
         .expect("contextual_hints group must be registered");
+    // Bring the key's tab forward; rows outside the active tab are filtered out of the render.
+    assert!(s.focus_key("contextual_hints"));
     s.selected = row_idx;
     s.expanded_keys.insert("contextual_hints");
 
@@ -5315,7 +5296,8 @@ fn footer_total_height_grows_when_hints_wrap() {
     let narrow_area = Rect {
         x: 0,
         y: 0,
-        width: 100,
+        // The modal takes 86% of the terminal width (sidebar + pane), so 82 cols is what the old 100 was at 70%.
+        width: 82,
         height: 30,
     };
     let mut s_narrow = make_state();
@@ -5360,6 +5342,8 @@ fn footer_total_height_grows_when_hints_wrap() {
 #[test]
 fn section_header_style_matches_palette() {
     let mut s = make_state();
+    // Category headings only draw in cross-tab search; the tabbed Browse view has none.
+    s.set_query("mode");
     let area = Rect {
         x: 0,
         y: 0,
@@ -6644,6 +6628,8 @@ fn consent_chooser_drops_tip_and_reset() {
 #[test]
 fn search_bar_renders_divider_below() {
     let mut s = make_state();
+    // The search bar only shows while the filter is focused or holds a query.
+    s.focus_filter();
     let area = Rect {
         x: 0,
         y: 0,
@@ -7638,7 +7624,7 @@ fn locked_coding_data_sharing_row_does_not_open_picker() {
         CodingDataSharingLock::TeamManaged,
     ] {
         let mut s = make_locked_state(lock);
-        s.selected = coding_data_sharing_row_idx(&s);
+        assert!(s.focus_key("coding_data_sharing"));
         assert!(
             !s.try_enter_picking_enum(),
             "try_enter_picking_enum must return false for a locked row ({lock:?})"
@@ -7658,7 +7644,7 @@ fn locked_coding_data_sharing_row_does_not_open_picker() {
 
     // Control arm: no lock, so the picker opens (existing behavior)
     let mut s = make_state();
-    s.selected = coding_data_sharing_row_idx(&s);
+    assert!(s.focus_key("coding_data_sharing"));
     assert!(s.try_enter_picking_enum());
     assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
 }
@@ -7672,7 +7658,7 @@ fn locked_coding_data_sharing_row_refuses_reset() {
         CodingDataSharingLock::TeamManaged,
     ] {
         let mut s = make_locked_state(lock);
-        s.selected = coding_data_sharing_row_idx(&s);
+        assert!(s.focus_key("coding_data_sharing"));
         let out = handle_settings_key(
             &mut s,
             &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
@@ -7685,7 +7671,7 @@ fn locked_coding_data_sharing_row_refuses_reset() {
 
     // Control arm: no lock, so `d` still opens the confirm dialog
     let mut s = make_state();
-    s.selected = coding_data_sharing_row_idx(&s);
+    assert!(s.focus_key("coding_data_sharing"));
     let out = handle_settings_key(
         &mut s,
         &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
@@ -7720,7 +7706,7 @@ fn locked_row_footer_drops_the_keys_it_refuses() {
     };
 
     let mut locked = make_locked_state(CodingDataSharingLock::Zdr);
-    locked.selected = coding_data_sharing_row_idx(&locked);
+    assert!(locked.focus_key("coding_data_sharing"));
     let text = screen(&mut locked);
     for hint in ["d reset", "Enter edit", "Space toggle"] {
         assert!(
@@ -7734,7 +7720,7 @@ fn locked_row_footer_drops_the_keys_it_refuses() {
     );
 
     let mut unlocked = make_state();
-    unlocked.selected = coding_data_sharing_row_idx(&unlocked);
+    assert!(unlocked.focus_key("coding_data_sharing"));
     let text = screen(&mut unlocked);
     assert!(
         text.contains("d reset") && text.contains("Enter edit"),
@@ -7758,7 +7744,7 @@ fn locked_coding_data_sharing_row_renders_locked_value_without_chevron() {
 
     let mut s = make_locked_state(CodingDataSharingLock::Zdr);
     let idx = coding_data_sharing_row_idx(&s);
-    s.selected = idx;
+    assert!(s.focus_key("coding_data_sharing"));
     let mut buf = Buffer::empty(area);
     render_rows(&mut buf, area, &mut s, &theme);
     let Some(&rect) = s.row_rects.get(idx) else {
@@ -7775,7 +7761,7 @@ fn locked_coding_data_sharing_row_renders_locked_value_without_chevron() {
     );
 
     let mut s = make_locked_state(CodingDataSharingLock::TeamManaged);
-    s.selected = idx;
+    assert!(s.focus_key("coding_data_sharing"));
     let mut buf = Buffer::empty(area);
     render_rows(&mut buf, area, &mut s, &theme);
     let Some(&rect) = s.row_rects.get(idx) else {
@@ -7793,7 +7779,7 @@ fn locked_coding_data_sharing_row_renders_locked_value_without_chevron() {
 
     // Control arm: unlocked row shows the plain value and chevron
     let mut s = make_state();
-    s.selected = idx;
+    assert!(s.focus_key("coding_data_sharing"));
     let mut buf = Buffer::empty(area);
     render_rows(&mut buf, area, &mut s, &theme);
     let Some(&rect) = s.row_rects.get(idx) else {
@@ -7839,13 +7825,7 @@ fn expanded_description_newlines_start_new_lines() {
         paragraph_heads.len() > 1,
         "the row's description is multi-line"
     );
-    s.selected = s
-        .rows
-        .iter()
-        .position(
-            |r| matches!(r, RowEntry::Setting { key, .. } if *key == "subagent_model_inheritance"),
-        )
-        .expect("row present");
+    assert!(s.focus_key("subagent_model_inheritance"));
     s.expanded_keys.insert("subagent_model_inheritance");
     let mut buf = Buffer::empty(area);
     render_rows(&mut buf, area, &mut s, &Theme::current());
@@ -7883,7 +7863,7 @@ fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
 
     let mut s = make_locked_state(CodingDataSharingLock::TeamManaged);
     let idx = coding_data_sharing_row_idx(&s);
-    s.selected = idx;
+    assert!(s.focus_key("coding_data_sharing"));
     let mut buf = Buffer::empty(area);
     render_rows(&mut buf, area, &mut s, &theme);
     let text = flatten(&buf);
@@ -7909,7 +7889,7 @@ fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
 
     // Control arm: unlocked expansion shows the description only.
     let mut s = make_state();
-    s.selected = idx;
+    assert!(s.focus_key("coding_data_sharing"));
     let mut buf = Buffer::empty(area);
     render_rows(&mut buf, area, &mut s, &theme);
     let text = flatten(&buf);

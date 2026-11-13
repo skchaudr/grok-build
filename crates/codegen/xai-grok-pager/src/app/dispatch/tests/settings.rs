@@ -1939,6 +1939,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 app,
             );
         }
+        "side_by_side_edit" => {
+            let _ = dispatch(Action::SetSideBySideEdit(true), app);
+        }
         "prompt_cursor" => {
             let _ = dispatch(Action::SetPromptCursor("bar".to_string()), app);
         }
@@ -1964,10 +1967,37 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             );
         }
         other => {
-            panic!(
-                "move_setting_away_from_default: no arm for `{other}`. \
-                 Add one when registering a new setting."
-            )
+            // No hand-written arm: derive a non-default value from the registry kind and apply it through the reset mapping.
+            use crate::settings::{SettingKind, SettingValue};
+            let reg = crate::settings::SettingsRegistry::defaults();
+            fn no_arm(other: &str) -> ! {
+                panic!(
+                    "move_setting_away_from_default: no arm for `{other}`. \
+                     Add one when registering a new setting."
+                )
+            }
+            let meta = reg.find(other).unwrap_or_else(|| no_arm(other));
+            let away = match &meta.kind {
+                SettingKind::Bool { default } => SettingValue::Bool(!default),
+                SettingKind::Enum {
+                    default, choices, ..
+                } => SettingValue::Enum(
+                    choices
+                        .iter()
+                        .map(|c| c.canonical)
+                        .find(|c| c != default)
+                        .unwrap_or_else(|| no_arm(other)),
+                ),
+                SettingKind::Int { default, max, .. } => {
+                    SettingValue::Int(if default < max { default + 1 } else { default - 1 })
+                }
+                SettingKind::String { .. } | SettingKind::DynamicEnum { .. } => {
+                    SettingValue::String("away-from-default".to_string())
+                }
+                SettingKind::Group { .. } => no_arm(other),
+            };
+            let action = action_for_reset(other, &away).unwrap_or_else(|| no_arm(other));
+            let _ = dispatch(action, app);
         }
     }
 }

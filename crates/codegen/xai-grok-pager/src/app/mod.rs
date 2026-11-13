@@ -189,14 +189,30 @@ pub(crate) fn minimal_mode_active() -> bool {
 /// Whether this process runs the external-agent (grok-pi) UI profile.
 /// Set once at startup from `ui_profile.is_external()`. Gates Pi-specific
 /// settings visibility in the F2 modal.
+#[cfg_attr(test, allow(dead_code))]
 static EXTERNAL_AGENT_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Read the cached external-agent profile flag (see [`EXTERNAL_AGENT_ACTIVE`]).
+// Tests run one per thread; a thread-local keeps one test's profile from leaking into the others.
+#[cfg(test)]
+thread_local! {
+    static EXTERNAL_AGENT_ACTIVE_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(not(test))]
 pub(crate) fn external_agent_active() -> bool {
     EXTERNAL_AGENT_ACTIVE.load(Ordering::Acquire)
 }
+#[cfg(test)]
+pub(crate) fn external_agent_active() -> bool {
+    EXTERNAL_AGENT_ACTIVE_TEST.get()
+}
 /// Set the external-agent profile flag. Called once at startup.
+#[cfg(not(test))]
 pub(crate) fn set_external_agent_active(on: bool) {
     EXTERNAL_AGENT_ACTIVE.store(on, Ordering::Release);
+}
+#[cfg(test)]
+pub(crate) fn set_external_agent_active(on: bool) {
+    EXTERNAL_AGENT_ACTIVE_TEST.set(on);
 }
 /// Test-only override for [`minimal_mode_active`] (unit tests exercising minimal-gated input paths without a terminal).
 /// Save/restore around use: this is process-global state.

@@ -1160,6 +1160,25 @@ fn build_rows(registry: &SettingsRegistry, visibility: RowVisibility) -> Vec<Row
                 });
             }
         }
+        // A key whose section the layout table does not declare for this tab must still show up, not vanish from the panel.
+        let declared = crate::settings::sections_for(*cat);
+        let mut emitted_other = false;
+        for (meta_index, meta) in &visible {
+            if declared.contains(&crate::settings::section_for(meta.key)) {
+                continue;
+            }
+            if !emitted_other {
+                rows.push(RowEntry::Section {
+                    category: *cat,
+                    name: crate::settings::OTHER_SECTION,
+                });
+                emitted_other = true;
+            }
+            rows.push(RowEntry::Setting {
+                key: meta.key,
+                meta_index: *meta_index,
+            });
+        }
     }
     rows
 }

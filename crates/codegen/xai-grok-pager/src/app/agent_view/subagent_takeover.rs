@@ -40,6 +40,8 @@ impl AgentView {
             // takeover is the final ownership boundary, so stamp the child
             // surface before its input/hints are consulted.
             child.mark_as_subagent_view();
+            // Open on scrollback so q/Esc/arrows act on the transcript; a persistent child's composer is one Tab away.
+            child.set_active_pane(crate::app::agent_view::AgentPane::Scrollback, true);
             child
                 .child_link()
                 .map(|link| link.parent_session_id().clone())
@@ -405,13 +407,18 @@ impl AgentView {
         if key.is_some_and(|key| key!('q', CONTROL).matches(key)) {
             return Some(InputOutcome::Unchanged);
         }
-        // The parent takeover owns its close keys. They must never become a
-        // child cancel or mutate a child's draft, regardless of which child
-        // pane currently has focus.
-        if key.is_some_and(|key| {
-            key.modifiers.is_empty()
-                && (key.code == KeyCode::Esc || key.code == KeyCode::Char('q'))
-        }) {
+        // The takeover owns q/Esc only while the child sits in bare scrollback; an active search or the
+        // child's composer keeps them (cancel the search, edit the draft).
+        let child_in_scrollback = self
+            .subagent_views
+            .get(&child_sid)
+            .is_some_and(|c| c.is_bare_scrollback());
+        if child_in_scrollback
+            && key.is_some_and(|key| {
+                key.modifiers.is_empty()
+                    && (key.code == KeyCode::Esc || key.code == KeyCode::Char('q'))
+            })
+        {
             self.close_subagent_fullscreen();
             return Some(InputOutcome::Changed);
         }

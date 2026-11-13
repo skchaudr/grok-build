@@ -1886,7 +1886,7 @@ pub(super) fn render_editing_value(
     if buffer.is_empty() {
         let placeholder = match &meta.kind {
             SettingKind::String { validator, .. } => match validator {
-                StringValidator::KnownModel => "<empty — use shell default>",
+                StringValidator::KnownModel => "<empty: uses shell default>",
                 StringValidator::PromptCursor => {
                     "<native, block, underline, bar, or one character>"
                 }

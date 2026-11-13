@@ -943,7 +943,7 @@
         assert!(changed, "first delta must request a redraw");
         let agent = app.agents.get(&AgentId(0)).unwrap();
         let info = agent.subagent_sessions.get(child_sid).unwrap();
-        assert_eq!(info.attempt.activity_label.as_deref(), Some("Preparing write…"));
+        assert_eq!(info.attempt.activity_label.as_deref(), Some("Writing file…"));
     }
 
     #[test]

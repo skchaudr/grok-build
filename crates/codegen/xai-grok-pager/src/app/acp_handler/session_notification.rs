@@ -767,26 +767,6 @@ pub(super) fn handle_session_notification_with_origin(
                     Box::new(child_view),
                     link,
                 );
-                // Pi bridge (fork): seed a fresh child view with the recorded
-                // task prompt as its first user row. Retained views (upstream
-                // reuse path above) are skipped so a re-spawn cannot duplicate
-                // the row, and the tracker must learn the user echo before any
-                // child-side blocks stream in.
-                let prompt_to_inject = agent
-                    .subagent_sessions
-                    .get(&child_session_id)
-                    .and_then(|info| info.prompt.as_deref())
-                    .filter(|p| !p.trim().is_empty())
-                    .map(str::to_owned);
-                if let (Some(prompt), Some(child_view)) = (
-                    prompt_to_inject,
-                    agent.subagent_views.get_mut(&child_session_id),
-                ) {
-                    child_view
-                        .scrollback
-                        .push_block(RenderBlock::user_prompt(prompt));
-                    child_view.session.tracker.expect_user_echo();
-                }
             }
             if workflow_run_id.is_none() {
                 let block = crate::scrollback::blocks::SubagentBlock::started(
@@ -1592,6 +1572,18 @@ pub(super) fn handle_child_session_notification(
     is_api_key_auth: bool,
     meta: Option<&serde_json::Value>,
 ) -> bool {
+    // A child's own subagent lifecycle builds descendants inside the child's view (Pi V2 team tree).
+    if matches!(
+        update,
+        XaiSessionUpdate::SubagentSpawned { .. }
+            | XaiSessionUpdate::SubagentProgress { .. }
+            | XaiSessionUpdate::SubagentFinished { .. }
+    ) {
+        let Some(owner) = agent.descendant_view_for_live_update_mut(child_sid) else {
+            return false;
+        };
+        return handle_nested_subagent_lifecycle(update, owner, meta);
+    }
     match update {
         XaiSessionUpdate::AutoCompactStarted { .. }
         | XaiSessionUpdate::AutoCompactCompleted { .. }
