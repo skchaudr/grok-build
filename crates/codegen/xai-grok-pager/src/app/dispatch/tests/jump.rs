@@ -44,9 +44,9 @@ fn show_picker_snapshots_viewport_and_opens_on_active_turn() {
 
     let agent = test_agent(&app, id);
     let js = agent.jump_state.as_ref().expect("picker open");
-    assert_eq!(js.entries.len(), 3);
+    assert_eq!(js.all_entries.len(), 3);
     assert_eq!(
-        js.entries.first().map(|e| e.preview.as_str()),
+        js.all_entries.first().map(|e| e.preview.as_str()),
         Some("question 0")
     );
     assert_eq!(js.selected, 2, "opens on the turn at the viewport top");
@@ -219,7 +219,7 @@ fn picker_select_jumps_and_closes() {
     let Some(target_id) = test_agent(&app, id)
         .jump_state
         .as_ref()
-        .and_then(|js| js.entries.first())
+        .and_then(|js| js.all_entries.first())
         .map(|e| e.prompt_entry_id)
     else {
         panic!("expected jump entry");
@@ -248,7 +248,7 @@ fn picker_select_uses_stable_id_across_removal() {
     dispatch(Action::JumpShowPicker, &mut app);
 
     let (first_id, target_id) = {
-        let entries = &test_agent(&app, id).jump_state.as_ref().unwrap().entries;
+        let entries = &test_agent(&app, id).jump_state.as_ref().unwrap().all_entries;
         let Some(first) = entries.first() else {
             panic!("expected first jump entry");
         };
@@ -296,7 +296,7 @@ fn picker_select_restores_viewport_on_out_of_range_turn() {
         let Some(first_id) = agent
             .jump_state
             .as_ref()
-            .and_then(|js| js.entries.first())
+            .and_then(|js| js.all_entries.first())
             .map(|e| e.prompt_entry_id)
         else {
             panic!("expected jump entry");
@@ -338,7 +338,7 @@ fn rewind_dismisses_open_jump_picker() {
         let Some(first_id) = agent
             .jump_state
             .as_ref()
-            .and_then(|js| js.entries.first())
+            .and_then(|js| js.all_entries.first())
             .map(|e| e.prompt_entry_id)
         else {
             panic!("expected jump entry");
@@ -386,7 +386,7 @@ fn dismiss_restores_viewport() {
         let Some(first_id) = agent
             .jump_state
             .as_ref()
-            .and_then(|js| js.entries.first())
+            .and_then(|js| js.all_entries.first())
             .map(|e| e.prompt_entry_id)
         else {
             panic!("expected jump entry");

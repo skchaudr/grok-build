@@ -32,7 +32,7 @@ fn external_session_created_clears_starting_session_indicator() {
             agent_id: id,
             session_id: "pi-session-ready".into(),
             models: None,
-            scheduler_background_loops: None,
+            modes: None,
         }),
         &mut app,
     );
@@ -63,7 +63,7 @@ fn successful_model_switch_refreshes_context_window() {
         agent.apply_context_used(12_345, 32_000);
     }
 
-    handle_switch_model_complete(&mut app, id, model_id, None, Ok(()), None);
+    handle_switch_model_complete(&mut app, id, crate::app::actions::ModelChoice::new(model_id), Ok(()), None);
 
     let context = app.agents[&id]
         .context_state

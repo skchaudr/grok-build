@@ -21,7 +21,7 @@ fn root_surface_reproduces_legacy_sites() {
     add_running_execute(&mut agent);
     assert!(
         agent
-            .current_shortcut_hints(&registry)
+            .current_shortcut_hints(&registry, false)
             .iter()
             .any(|hint| hint.label == "send to bg")
     );
@@ -104,7 +104,7 @@ fn child_surface_never_advertises_kill() {
         );
         assert!(agent.tasks.selected_task_id().is_some());
         agent
-            .current_shortcut_hints(&registry)
+            .current_shortcut_hints(&registry, false)
             .iter()
             .any(|hint| hint.label == "kill")
     };

@@ -790,6 +790,7 @@ mod tests {
             selection_text: None,
             joiner: None,
             link_target: None,
+            indent_width: 0,
         };
     }
 

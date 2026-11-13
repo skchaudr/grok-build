@@ -2686,6 +2686,8 @@ mod tests {
             &std::collections::BTreeMap::new(),
             &subagents,
             &HashMap::new(),
+            None,
+            &std::collections::HashSet::new(),
             &[],
         );
         let types: Vec<&str> = pane

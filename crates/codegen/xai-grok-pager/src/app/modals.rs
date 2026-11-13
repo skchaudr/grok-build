@@ -5877,7 +5877,6 @@ mod settings_memory_paste_routing_tests {
 #[cfg(test)]
 mod notifications_modal_input_tests {
     use crate::app::agent_view::test_fixtures::make_agent;
-    use crate::app::app_view::ExternalNotification;
     use crate::views::modal::{ActiveModal, NotificationListState};
     use crate::views::modal_window::ModalWindowState;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -5889,11 +5888,11 @@ mod notifications_modal_input_tests {
     fn open_notifications(agent: &mut crate::app::agent_view::AgentView) {
         agent.active_modal = Some(ActiveModal::Notifications {
             state: NotificationListState::new(vec![
-                ExternalNotification {
+                crate::views::modal::PiNotification {
                     message: "short toast".into(),
                     kind: Some("info".into()),
                 },
-                ExternalNotification {
+                crate::views::modal::PiNotification {
                     message: "line one\nline two full body".into(),
                     kind: Some("warning".into()),
                 },

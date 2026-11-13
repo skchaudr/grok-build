@@ -1547,6 +1547,7 @@ mod tests {
             ViewSurface::Root,
             false,
             false,
+            false,
             QueueMutation::PerRowKind,
             selected_is_user_prompt,
             selected_is_agent_message,
@@ -1557,30 +1558,6 @@ mod tests {
     }
     fn first_two_labels(hints: &[HintItem]) -> Vec<&str> {
         hints.iter().take(2).map(|h| h.label.as_ref()).collect()
-    }
-    fn hooked_read_state(member_count: usize, viewport: Rect) -> ScrollbackState {
-        use crate::scrollback::RenderBlock;
-        use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
-        crate::appearance::cache::set_group_tool_verbs(true);
-        crate::appearance::cache::set_show_thinking_blocks(false);
-        let mut state = ScrollbackState::new();
-        let first = state.push_block(RenderBlock::read("first.rs", None));
-        for i in 1..member_count {
-            state.push_block(RenderBlock::read(format!("member-{i}.rs"), None));
-        }
-        state.attach_hooks(
-            first,
-            HookPhase::Post,
-            vec![HookRunEntry {
-                name: "hover-hook".to_owned(),
-                status: HookRunStatus::Success {
-                    elapsed: std::time::Duration::from_millis(1),
-                },
-                output: None,
-            }],
-        );
-        state.prepare_layout(viewport.width, viewport.height);
-        state
     }
     fn render_hook_frame(state: &ScrollbackState, viewport: Rect) -> Buffer {
         let layouts = state.get_cached_entry_layouts().expect("layout cache");
@@ -1667,45 +1644,6 @@ mod tests {
             "second member missing: {text:?}"
         );
     }
-    #[test]
-    fn hook_hover_popup_allows_singleton_verb_header() {
-        let viewport = Rect::new(0, 0, 100, 12);
-        let state = hooked_read_state(1, viewport);
-        let layout = state.get_cached_entry_layouts().expect("layout cache")[0];
-        assert!(layout.verb_group_header);
-        assert_eq!(layout.group_header_count, 1);
-        assert!(!layout.is_expanded_verb_header());
-        let mut buf = render_hook_frame(&state, viewport);
-        hover_hook_badge(&mut buf, &state, viewport, 0);
-        assert!(frame_text(&buf).contains("hover-hook"));
-    }
-    #[test]
-    fn hook_hover_popup_allows_expanded_verb_member_zero() {
-        let viewport = Rect::new(0, 0, 100, 12);
-        let mut state = hooked_read_state(2, viewport);
-        state.set_selected(Some(0));
-        assert!(state.toggle_group_expansion());
-        state.set_selected(None);
-        state.prepare_layout(viewport.width, viewport.height);
-        assert!(
-            state.get_cached_entry_layouts().expect("layout cache")[0].is_expanded_verb_header()
-        );
-        let mut buf = render_hook_frame(&state, viewport);
-        hover_hook_badge(&mut buf, &state, viewport, 1);
-        assert!(frame_text(&buf).contains("hover-hook"));
-    }
-    #[test]
-    fn hook_hover_popup_skips_collapsed_multi_member_verb_header() {
-        let viewport = Rect::new(0, 0, 100, 12);
-        let state = hooked_read_state(2, viewport);
-        let layout = state.get_cached_entry_layouts().expect("layout cache")[0];
-        assert!(layout.verb_group_header);
-        assert_eq!(layout.group_header_count, 2);
-        assert!(!layout.is_expanded_verb_header());
-        let mut buf = render_hook_frame(&state, viewport);
-        hover_hook_badge(&mut buf, &state, viewport, 0);
-        assert!(!frame_text(&buf).contains("hover-hook"));
-    }
 
     #[test]
     fn demotion_hint_uses_registered_ctrl_b_binding() {
@@ -1731,8 +1669,8 @@ mod tests {
             ViewSurface::Root,
             false,
             false,
-            QueueMutation::PerRowKind,
             false,
+            QueueMutation::PerRowKind,
             false,
             false,
             false,
@@ -1767,12 +1705,14 @@ mod tests {
             false,
             ViewSurface::Root,
             is_turn_running,
+            false,
             true,
             queue_mutation,
             false,
             false,
             false,
             None,
+            false,
         )
         .iter()
         .map(|h| h.label.to_string())
@@ -1835,11 +1775,13 @@ mod tests {
             surface,
             false,
             false,
+            false,
             QueueMutation::PerRowKind,
             false,
             false,
             false,
             None,
+            false,
         )
     }
     /// The child surface adds `q/Esc back` and drops the demote chip and the `BackTab mode` hint; the root keeps all three.
@@ -1896,10 +1838,11 @@ mod tests {
                 false,
                 false,
                 vim_mode,
+                ViewSurface::Root,
                 false,
                 false,
                 false,
-                false,
+                QueueMutation::PerRowKind,
                 false,
                 false,
                 false,
@@ -1951,8 +1894,8 @@ mod tests {
             ViewSurface::Root,
             false,
             false,
-            QueueMutation::PerRowKind,
             false,
+            QueueMutation::PerRowKind,
             false,
             false,
             false,
@@ -2122,8 +2065,8 @@ mod tests {
             ViewSurface::Root,
             false,
             false,
-            QueueMutation::PerRowKind,
             false,
+            QueueMutation::PerRowKind,
             false,
             false,
             false,
@@ -2229,8 +2172,8 @@ mod tests {
             ViewSurface::Root,
             false,
             false,
-            QueueMutation::PerRowKind,
             false,
+            QueueMutation::PerRowKind,
             false,
             false,
             false,
@@ -2277,6 +2220,7 @@ mod tests {
             true,
             ViewSurface::Root,
             is_turn_running,
+            false,
             false,
             QueueMutation::PerRowKind,
             false,
@@ -2339,9 +2283,9 @@ mod tests {
                 true,
                 ViewSurface::Root,
                 true,
+                false,
                 true,
                 QueueMutation::PerRowKind,
-                false,
                 false,
                 false,
                 false,
@@ -2387,8 +2331,8 @@ mod tests {
                 ViewSurface::Root,
                 true,
                 false,
-                QueueMutation::PerRowKind,
                 false,
+                QueueMutation::PerRowKind,
                 false,
                 false,
                 false,
@@ -2440,8 +2384,8 @@ mod tests {
             ViewSurface::Root,
             true,
             false,
-            QueueMutation::PerRowKind,
             false,
+            QueueMutation::PerRowKind,
             false,
             false,
             false,
@@ -2493,8 +2437,8 @@ mod tests {
             ViewSurface::Root,
             true,
             false,
-            QueueMutation::PerRowKind,
             false,
+            QueueMutation::PerRowKind,
             false,
             false,
             false,

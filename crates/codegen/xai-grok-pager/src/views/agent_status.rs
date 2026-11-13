@@ -1016,8 +1016,7 @@ mod tests {
         // total > 0 renders the compact `MCP (connected/total)` chip.
         let progress = McpInitProgress {
             total: 4,
-            connected: 1,
-        };
+            connected: 1, started_at: std::time::Instant::now() };
         let t = Theme::current();
         let line = mcp_status_line(&progress, 0, &t).expect("total > 0 must render a line");
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1033,8 +1032,7 @@ mod tests {
         let t = Theme::groknight();
         let progress = McpInitProgress {
             total: 2,
-            connected: 0,
-        };
+            connected: 0, started_at: std::time::Instant::now() };
         let line = mcp_status_line(&progress, 0, &t).expect("total > 0 must render a line");
         for span in &line.spans {
             assert_eq!(
@@ -1050,8 +1048,7 @@ mod tests {
         // A 0-server report renders no chip
         let progress = McpInitProgress {
             total: 0,
-            connected: 0,
-        };
+            connected: 0, started_at: std::time::Instant::now() };
         let t = Theme::current();
         assert!(mcp_status_line(&progress, 0, &t).is_none());
     }

@@ -134,6 +134,8 @@ fn test_app() -> AppView {
         yolo_policy_block: None,
         yolo_launch_block_notice: None,
         embedded_fallback_notice: None,
+        screen_mode_switch_hint: None,
+        session_picker_detail_generation: 0,
         require_plan_approval: false,
         plan_mode: false,
         chat_mode: false,
@@ -352,7 +354,6 @@ fn test_app() -> AppView {
         voice_cmd_tx: None,
         voice_state: VoiceState::Idle,
         external_ui: crate::app::app_view::ExternalUiState::default(),
-        external_agent: false,
         welcome_prewarm_agent: None,
     }
 }

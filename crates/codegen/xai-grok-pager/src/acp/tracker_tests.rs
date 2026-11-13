@@ -1516,7 +1516,7 @@ fn pi_find_and_ls_select_native_render_blocks() {
             "glob_pattern": "*.rs",
             "output_mode": "files_with_matches"
         })));
-    let find_block = tool_call_to_block(&find, None);
+    let find_block = tool_call_to_block(&find, None, &SubagentLabelRegistry::default());
     let RenderBlock::ToolCall(ToolCallBlock::Search(search)) = find_block else {
         panic!("Pi find must use the native Search block");
     };
@@ -1530,7 +1530,7 @@ fn pi_find_and_ls_select_native_render_blocks() {
         .content(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
             acp::TextContent::new("main.rs"),
         ))]);
-    let ls_block = tool_call_to_block(&ls, None);
+    let ls_block = tool_call_to_block(&ls, None, &SubagentLabelRegistry::default());
     let RenderBlock::ToolCall(ToolCallBlock::ListDir(list_dir)) = ls_block else {
         panic!("Pi ls must use the native ListDir block");
     };

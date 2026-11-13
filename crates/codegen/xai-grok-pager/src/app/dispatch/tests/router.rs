@@ -1008,11 +1008,8 @@ fn scoped_models_drive_next_model_order_and_effort() {
     let effects = dispatch(Action::NextModel, &mut app);
     assert!(matches!(
         effects.as_slice(),
-        [Effect::SwitchModel {
-            model_id,
-            effort: Some(actual_effort),
-            ..
-        }] if model_id == &model_b && actual_effort == &effort
+        [Effect::SwitchModel { choice, .. }]
+            if choice.model_id == model_b && choice.effort == Some(effort)
     ));
     assert!(app.agents[&id].session.model_switch_pending);
 }
@@ -1044,7 +1041,7 @@ fn clearing_scoped_models_restores_all_model_cycle() {
     let effects = dispatch(Action::NextModel, &mut app);
     assert!(matches!(
         effects.as_slice(),
-        [Effect::SwitchModel { model_id, effort: None, .. }] if model_id == &model_b
+        [Effect::SwitchModel { choice, .. }] if choice.model_id == model_b && choice.effort.is_none()
     ));
 }
 

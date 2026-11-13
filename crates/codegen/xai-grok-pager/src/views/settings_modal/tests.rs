@@ -639,12 +639,14 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
         &mut buf,
         area,
         &meta,
-        &SettingValue::Bool(false),
-        15, // max_label_w, kept for API compatibility, no longer used.
-        false,
-        &theme,
-        false, // is_expanded
-        false, // is_hovered
+        Some(&SettingValue::Bool(false)),
+        15,
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
         &theme,
     );
@@ -1527,14 +1529,15 @@ fn render_setting_row_emits_restart_pill_when_required() {
         &mut buf,
         area,
         &meta,
-        &SettingValue::Bool(false),
-        10,    // max_label_w
-        false, // is_selected
-        &theme,
-        true,  // is_expanded, gate on
-        false, // is_hovered
+        Some(&SettingValue::Bool(false)),
+        10, // max_label_w
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: true, // gate on
+        },
         None,
-        // is_selected
         &theme,
     );
     let mut rendered = String::new();
@@ -1554,13 +1557,14 @@ fn render_setting_row_emits_restart_pill_when_required() {
         &mut buf,
         area,
         &meta,
-        Some(&SettingValue::Bool(true)),
-        // edited from default `false`
+        Some(&SettingValue::Bool(true)), // edited from default `false`
         10,
-        false,
-        &theme,
-        false, // is_expanded, off
-        false, // is_hovered
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false, // off
+        },
         None,
         &theme,
     );
@@ -4836,12 +4840,14 @@ fn narrow_terminal_drops_value_to_second_line() {
         &mut buf,
         area,
         &meta,
-        &SettingValue::Bool(false),
+        Some(&SettingValue::Bool(false)),
         24, // max_label_w, ignored for layout.
-        false,
-        &theme,
-        false,
-        false, // is_hovered
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
         &theme,
     );

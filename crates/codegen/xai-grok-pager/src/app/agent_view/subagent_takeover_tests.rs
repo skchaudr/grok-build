@@ -215,7 +215,7 @@ fn fullscreen_child_ctrl_b_never_demotes_child_or_parent() {
     assert_eq!(ViewSurface::ChildTakeover, child.surface());
     assert!(
         !child
-            .current_shortcut_hints(&registry)
+            .current_shortcut_hints(&registry, false)
             .iter()
             .any(|hint| hint.label == "send to bg")
     );

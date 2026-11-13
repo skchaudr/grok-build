@@ -337,7 +337,6 @@ pub(crate) fn test_app() -> AppView {
         voice_cmd_tx: None,
         voice_state: VoiceState::Idle,
         external_ui: ExternalUiState::default(),
-        external_agent: false,
         welcome_prewarm_agent: None,
     }
 }
@@ -785,8 +784,7 @@ fn tick_demand_follows_the_mcp_chip() {
     let agent = app.agents.get_mut(&id).unwrap();
     agent.mcp_init_progress = Some(McpInitProgress {
         total: 0,
-        connected: 0,
-    });
+        connected: 0, started_at: std::time::Instant::now() });
     assert_eq!(
         app.tick_demand(),
         TickDemand::None,
@@ -794,8 +792,7 @@ fn tick_demand_follows_the_mcp_chip() {
     );
     app.agents.get_mut(&id).unwrap().mcp_init_progress = Some(McpInitProgress {
         total: 3,
-        connected: 1,
-    });
+        connected: 1, started_at: std::time::Instant::now() });
     assert_eq!(
         app.tick_demand(),
         TickDemand::Fast,

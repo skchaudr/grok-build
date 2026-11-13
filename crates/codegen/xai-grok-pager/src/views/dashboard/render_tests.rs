@@ -507,6 +507,12 @@ fn dashboard_session_picker_renders_simple_open_surface() {
     surface.source_filter = crate::views::session_picker::SourceFilter::Local;
     surface.entries = Some(vec![crate::app::app_view::SessionPickerEntry {
         id: "local-session".to_owned(),
+        name: None,
+        first_message: None,
+        session_path: None,
+        total_tokens: None,
+        total_cost: None,
+        parent_session_path: None,
         summary: "Resume this local session".to_owned(),
         updated_at: chrono::Utc::now(),
         created_at: chrono::Utc::now(),
@@ -589,6 +595,12 @@ fn dashboard_session_picker_search_focus_keeps_the_selected_row() {
     surface.source_filter = crate::views::session_picker::SourceFilter::Local;
     surface.entries = Some(vec![crate::app::app_view::SessionPickerEntry {
         id: "local-session".to_owned(),
+        name: None,
+        first_message: None,
+        session_path: None,
+        total_tokens: None,
+        total_cost: None,
+        parent_session_path: None,
         summary: "Resume this local session".to_owned(),
         updated_at: chrono::Utc::now(),
         created_at: chrono::Utc::now(),

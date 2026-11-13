@@ -41,6 +41,7 @@ fn draw(agent: &mut AgentView, width: u16, height: u16) -> String {
         None,
         false,
         BannerSlotParams::none(),
+        &crate::app::bundle::BundleState::default(),
         false,
         &mut Vec::new(),
         AppRenderParams::default(),

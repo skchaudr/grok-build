@@ -404,6 +404,12 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     let updated = chrono::Utc::now();
     let entry = SessionPickerEntry {
         id: "sess-1".to_string(),
+        name: None,
+        first_message: None,
+        session_path: None,
+        total_tokens: None,
+        total_cost: None,
+        parent_session_path: None,
         summary: "Wire up dashboard".to_string(),
         updated_at: updated,
         created_at: updated,

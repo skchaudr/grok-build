@@ -1536,7 +1536,7 @@ mod background_and_tasks_shortcut_tests {
     use crate::app::app_view::InputOutcome;
     use crate::views::history_search::HistoryEntry;
     use crate::views::list_pane::InputBarMode;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     fn assert_demotes(outcome: InputOutcome) {
         assert!(matches!(
             outcome,
@@ -1971,6 +1971,7 @@ mod btw_focus_tests {
                     chat_kind: false,
                     billing_redirect_url: None,
                     subscription_tier: None,
+                    session_file: None,
                 },
             )),
         }

@@ -552,7 +552,7 @@ mod tests {
         let mut st = TutorialState::new();
         st.open_topic(0);
         assert!(
-            TUTORIAL_TOPICS
+            crate::tutorial_docs::TUTORIAL_TOPICS
                 .first()
                 .is_some_and(|t| t.go_deeper.is_some()),
             "topic 0 has a guide"
@@ -570,7 +570,7 @@ mod tests {
     fn d_is_a_noop_on_a_topic_without_a_guide() {
         let last = tutorial_topics().len() - 1;
         assert!(
-            TUTORIAL_TOPICS
+            crate::tutorial_docs::TUTORIAL_TOPICS
                 .last()
                 .is_some_and(|t| t.go_deeper.is_none()),
             "the closing topic intentionally has no single guide"
