@@ -1095,6 +1095,21 @@ pub(super) fn dispatch_dashboard_dispatch(
         }
         return vec![];
     }
+    // One Pi RPC host owns one mutable active session. Starting another while a
+    // local turn is running would retarget later events/prompts to the new Pi
+    // context, so fail closed until the current turn settles.
+    let pi_host = app.external_agent && crate::slash::external_common::is_pi_label(app.agent_label(None));
+    if pi_host
+        && app
+            .agents
+            .values()
+            .any(|agent| agent.session.state.is_busy())
+    {
+        if let Some(d) = app.dashboard.as_mut() {
+            d.set_error_toast("Finish the current Pi turn before dispatching a new session");
+        }
+        return vec![];
+    }
     if super::session::lifecycle::machine_pick_blocks(
         app,
         crate::app::agent_choice::MachinePickIntent::DashboardPrompt {
@@ -1127,7 +1142,7 @@ pub(super) fn dispatch_dashboard_dispatch(
     // local AgentView before issuing `new_session`; completed sessions remain in
     // Pi's persisted catalog and return as dormant roster rows. This prevents an
     // old dashboard row from sending user text into the newly active Pi context.
-    let mut effects = if app.external_agent {
+    let mut effects = if pi_host {
         let effects = unregister_all_active_sessions(app);
         let had_agents = !app.agents.is_empty();
         app.agents.clear();

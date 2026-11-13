@@ -2707,7 +2707,7 @@ Manual /recap still works when the agent advertises sessionRecap.",
             description: "Show OSC 9;4 progress indicators in the terminal tab bar.",
             keywords: &["progress", "terminal", "tab", "osc", "9;4", "indicator"],
             kind: SettingKind::Bool {
-                default: ui_default.progress_bar.unwrap_or(false),
+                default: ui_default.progress_bar.unwrap_or(true),
             },
             restart_required: false,
             hidden_in_minimal: false,

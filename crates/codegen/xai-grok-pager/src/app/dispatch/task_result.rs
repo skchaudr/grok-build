@@ -2230,7 +2230,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             remaining,
         } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
-                for (text, interjection_id, blocks) in remaining.into_iter().rev() {
+                for (text, interjection_id, _blocks) in remaining.into_iter().rev() {
                     agent.self_interjection_ids.remove(&interjection_id);
                     if let Some(entry_id) =
                         agent.interjection_painted_blocks.remove(&interjection_id)
@@ -2250,7 +2250,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                             id,
                             text,
                             kind: crate::app::agent::QueueEntryKind::Prompt,
-                            wire_blocks: blocks,
+                            wire_blocks: None,
                             images,
                             display_as_skill: false,
                             task_id: None,

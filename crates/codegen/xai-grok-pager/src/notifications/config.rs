@@ -33,7 +33,7 @@ impl Default for NotificationConfig {
                 NotificationEventKind::ApprovalRequired,
             ],
             sleep_prevention: true,
-            progress_bar: false,
+            progress_bar: true,
             session_recap: true,
             session_recap_threshold_secs: 0,
             title: TitleConfig::default(),
@@ -174,7 +174,7 @@ events = [\"turn_complete\", \"approval_required\"]
 # Prevent display sleep during agent turns (macOS/Linux).
 sleep_prevention = true
 # Show a progress indicator in the terminal tab (OSC 9;4).
-progress_bar = false
+progress_bar = true
 # Show an automatic \"where was I\" session recap when you return after being away.
 # Shell session_recap is on by default; disable via [features] session_recap or
 # GROK_SESSION_RECAP=0. Manual /recap uses only the shell flag.
@@ -252,7 +252,7 @@ mod tests {
             ]
         );
         assert!(parsed.sleep_prevention);
-        assert!(!parsed.progress_bar);
+        assert!(parsed.progress_bar);
         assert!(parsed.session_recap);
         assert_eq!(parsed.session_recap_threshold_secs, 0);
         assert!(parsed.title.enabled);
@@ -272,7 +272,7 @@ mod tests {
         // Rest should be defaults
         assert_eq!(parsed.condition, NotificationCondition::Unfocused);
         assert!(parsed.sleep_prevention);
-        assert!(!parsed.progress_bar);
+        assert!(parsed.progress_bar);
     }
 
     #[test]

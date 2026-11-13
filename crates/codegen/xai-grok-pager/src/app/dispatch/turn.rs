@@ -346,12 +346,6 @@ fn cancel_agent_turn(
     agent.cancel_turn_view = None;
     agent.cancel_turn_buttons.clear();
     drain_permission_queue(agent);
-    if let Some(mut pav) = agent.plan_approval_view.take() {
-        pav.send_stale_cancel();
-        agent.plan_next_comment_id = pav.next_comment_id;
-        agent.prompt.restore(pav.stashed_prompt);
-        agent.line_viewer = None;
-    }
     // An ask_user_question card raised by the turn being cancelled can never
     // receive its answer once the turn is gone: leaving it drawn keeps it
     // blocking the composer forever (Esc on the parked card fires CancelTurn).
