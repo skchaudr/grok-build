@@ -1069,11 +1069,11 @@ impl TracesModalState {
     }
 
     /// `f` on a subagent's row (or the `Agent` row that dispatched it): follow that subagent alone. False when the
-    /// highlighted row is a root row or nothing is highlighted.
+    /// highlighted row is a root row or nothing is highlighted (true when that cleared a stale note, so it is redrawn).
     pub(super) fn follow_into(&mut self) -> bool {
         let Some(f) = self.follow_view.as_mut() else { return false };
-        f.note = None;
-        let Some(agent) = f.cursor_agent().map(str::to_string) else { return false };
+        let stale = f.note.take().is_some();
+        let Some(agent) = f.cursor_agent().map(str::to_string) else { return stale };
         let session = f.session_of(&agent);
         let find = |id: &str| self.index.as_ref().and_then(|i| i.session(id).ok().flatten());
         match find(&agent).or_else(|| session.and_then(|s| find(&s))) {
@@ -1090,8 +1090,8 @@ impl TracesModalState {
     /// `p` in a subagent's follow: the parent's follow, the cursor on the `Agent` row that spawned it. False in a root session.
     pub(super) fn follow_parent(&mut self) -> bool {
         let Some(f) = self.follow_view.as_mut() else { return false };
-        f.note = None;
-        let Some(pid) = f.root.parent_id.clone() else { return false };
+        let stale = f.note.take().is_some();
+        let Some(pid) = f.root.parent_id.clone() else { return stale };
         let want = (f.root.label.clone().unwrap_or_default(), f.root.started_at);
         let Some(parent) = self.index.as_ref().and_then(|i| i.session(&pid).ok().flatten()) else {
             if let Some(f) = self.follow_view.as_mut() {
