@@ -288,7 +288,7 @@ fn hit_from_json(v: &Value) -> Hit {
         origin_host: str_of(v, "origin_host"),
         origin_kind: str_of(v, "origin_kind"),
         score: v.get("score").and_then(Value::as_f64),
-        snippet: str_of(v, "snippet"),
+        snippet: str_of(v, "snippet").map(|s| plain_snippet(&s)),
         source_id: str_of(v, "source_id"),
         source_path: str_of(v, "source_path"),
         title: str_of(v, "title"),
@@ -376,6 +376,17 @@ pub fn join(index: &TraceIndex, hits: &[Hit]) -> crate::Result<Vec<Joined>> {
             Ok(Joined { id: Some(row.id), line, source: Some(row.source), session_title: Some(row.title), hit: hit.clone() })
         })
         .collect()
+}
+
+/// A cass snippet as the text was written: cass HTML-escapes it and wraps the matched words in `**`, and
+/// `content` carries neither.
+fn plain_snippet(snippet: &str) -> String {
+    let mut text = snippet.replace("**", "");
+    // `&amp;` last, so `&amp;lt;` stays the `&lt;` that was written.
+    for (from, to) in [("&#x27;", "'"), ("&#39;", "'"), ("&quot;", "\""), ("&lt;", "<"), ("&gt;", ">"), ("&amp;", "&")] {
+        text = text.replace(from, to);
+    }
+    text
 }
 
 /// The line among `lines` (the events of one session that share the hit's timestamp) that holds the hit's text.

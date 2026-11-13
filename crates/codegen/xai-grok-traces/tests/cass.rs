@@ -177,6 +177,17 @@ fn reply_tolerates_missing_and_null_fields() {
 }
 
 #[test]
+fn reply_snippet_loses_cass_highlights_and_html_escapes() {
+    let r = parse_reply(
+        "u@h",
+        r#"{"hits":[{"snippet":"Oh **shit**, it&#x27;s &quot;a &amp;&amp; b&quot; &lt;tag&gt; &amp;lt;", "content":"kept **as is** &amp;"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(r.hits[0].snippet.as_deref(), Some(r#"Oh shit, it's "a && b" <tag> &lt;"#));
+    assert_eq!(r.hits[0].content.as_deref(), Some("kept **as is** &amp;"));
+}
+
+#[test]
 fn reply_errors_are_parse_values() {
     for bad in ["", "not json", "[]", r#"{"total_matches":1}"#, r#"{"hits":3}"#, r#"{"hits":[1]}"#, r#"{"hits":[{}"#] {
         let e = parse_reply("u@sabibp", bad).unwrap_err();
