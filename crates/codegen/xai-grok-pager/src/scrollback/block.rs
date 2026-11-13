@@ -10,11 +10,11 @@ use xai_grok_pager_diff::DiffHunk;
 
 use super::blocks::mermaid_content::DiagramAffordance;
 use super::blocks::{
-    AgentMessageBlock, BgTaskBlock, BtwBlock, ContextInfoBlock, EditToolCallBlock,
-    ExecuteToolCallBlock, LineRange, ListDirToolCallBlock, MemoryCaptureBlock, OtherToolCallBlock,
-    ReadToolCallBlock, SearchFileMatch, SearchToolCallBlock, SessionEvent, SessionEventBlock,
-    SubagentBlock, SubagentBlockKind, SystemMessageBlock, ThinkingBlock, ToolCallBlock,
-    UserPromptBlock, WorkflowBlock,
+    AgentMessageBlock, BgTaskBlock, BtwBlock, ContextInfoBlock, CreditLimitBlock,
+    EditToolCallBlock, ExecuteToolCallBlock, LineRange, ListDirToolCallBlock, MemoryCaptureBlock,
+    OtherToolCallBlock, ReadToolCallBlock, SearchFileMatch, SearchToolCallBlock, SessionEvent,
+    SessionEventBlock, SubagentBlock, SubagentBlockKind, SystemMessageBlock, ThinkingBlock,
+    ToolCallBlock, UserPromptBlock, WorkflowBlock,
 };
 use super::types::{
     AccentStyle, BlockBackground, BlockContext, BlockOutput, DisplayMode, RenderedBlockOutput,
@@ -188,6 +188,17 @@ pub trait BlockContent {
         0
     }
 
+    /// Columns the block's renderer reserves to the LEFT of wrapped source
+    /// text — the diff gutter (indent + line numbers + content gap) — that the
+    /// source-text height *estimate* cannot see. The estimate wraps at
+    /// `content_width - estimate_reserved_cols()` so gutter-bearing blocks
+    /// (expanded Edit diffs) don't systematically under-estimate their wrapped
+    /// height, which triggers repeated estimate→exact re-measurement cascades
+    /// in `settle_visible_measurements`. Default: `0`.
+    fn estimate_reserved_cols(&self) -> u16 {
+        0
+    }
+
     /// For media blocks on terminals without inline-graphics support, returns `(path, is_video)`.
     /// The block uses it to render a clickable text `[Open]` line.
     /// `None` on graphics terminals (the overlay hosts its own buttons).
@@ -319,6 +330,8 @@ pub enum RenderBlock {
     Btw(BtwBlock),
     /// `/context` snapshot with categorical bar and breakdown.
     ContextInfo(ContextInfoBlock),
+    /// Credit-limit card for max-tier users (red accent, single action).
+    CreditLimit(CreditLimitBlock),
     /// Debug-only generated memory details.
     MemoryCapture(MemoryCaptureBlock),
 }
@@ -339,6 +352,7 @@ macro_rules! delegate_block {
             RenderBlock::Workflow(b) => b.$method($($arg),*),
             RenderBlock::Btw(b) => b.$method($($arg),*),
             RenderBlock::ContextInfo(b) => b.$method($($arg),*),
+            RenderBlock::CreditLimit(b) => b.$method($($arg),*),
             RenderBlock::MemoryCapture(b) => b.$method($($arg),*),
         }
     };
@@ -492,6 +506,10 @@ impl BlockContent for RenderBlock {
 
     fn estimate_extra_rows(&self) -> u16 {
         delegate_block!(self, estimate_extra_rows())
+    }
+
+    fn estimate_reserved_cols(&self) -> u16 {
+        delegate_block!(self, estimate_reserved_cols())
     }
 
     fn inline_open_button(&self) -> Option<(std::path::PathBuf, bool)> {
@@ -691,6 +709,15 @@ impl RenderBlock {
         RenderBlock::SessionEvent(SessionEventBlock::new(event))
     }
 
+    /// Create a credit-limit card (inline scrollback block for max-tier users).
+    pub fn credit_limit_card(
+        heading: impl Into<String>,
+        action: crate::scrollback::blocks::CreditLimitCardAction,
+        url: impl Into<String>,
+    ) -> Self {
+        RenderBlock::CreditLimit(CreditLimitBlock::new(heading, action, url))
+    }
+
     /// Create a "Task started" background task block.
     pub fn bg_task(command: impl Into<String>, task_id: impl Into<String>) -> Self {
         RenderBlock::BgTask(BgTaskBlock::started(command, task_id))
@@ -784,6 +811,23 @@ impl RenderBlock {
 
     pub fn is_agent_message(&self) -> bool {
         matches!(self, RenderBlock::AgentMessage(_))
+    }
+
+    /// Whether a running entry should animate its left accent.
+    ///
+    /// User and agent message bodies stream/update through their own content
+    /// paths, but their chrome stays static. Activity blocks (thinking, tools,
+    /// tasks, workflows, and similar) retain the native running wave.
+    pub fn animates_running_accent(&self) -> bool {
+        !matches!(
+            self,
+            RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_)
+        )
+    }
+
+    /// Check if this block is a CreditLimit card.
+    pub fn is_credit_limit(&self) -> bool {
+        matches!(self, RenderBlock::CreditLimit(_))
     }
 
     /// A session event that closes a turn (`Worked for …`, cancelled, failed); see [`SessionEvent::is_turn_terminal`].
@@ -893,6 +937,7 @@ impl RenderBlock {
             RenderBlock::System(_)
             | RenderBlock::SessionEvent(_)
             | RenderBlock::ContextInfo(_)
+            | RenderBlock::CreditLimit(_) => None,
             | RenderBlock::MemoryCapture(_) => None,
             RenderBlock::Btw(_) => Some(theme.accent_plan),
             RenderBlock::Stub(block) => Some(block.accent_color),
@@ -928,6 +973,7 @@ impl RenderBlock {
             RenderBlock::ToolCall(ToolCallBlock::ListDir(b)) => {
                 b.error.is_none() && !b.output.is_empty()
             }
+            RenderBlock::SessionEvent(block) => block.has_fullscreen_summary(),
             _ => false,
         }
     }
@@ -1047,6 +1093,9 @@ impl RenderBlock {
                 Some(b.content().rendered_plain_text()),
             ]),
             RenderBlock::ContextInfo(b) => join_searchable([Some(b.model.clone())]),
+            RenderBlock::CreditLimit(b) => {
+                join_searchable([Some(b.heading.clone()), Some(b.url.clone())])
+            }
             RenderBlock::MemoryCapture(b) => join_searchable([Some(b.searchable_text())]),
             RenderBlock::ToolCall(tc) => tc.searchable_text(),
         }
@@ -1118,6 +1167,7 @@ impl RenderBlock {
         match self {
             RenderBlock::AgentMessage(block) => block.set_raw_mode(raw),
             RenderBlock::Thinking(block) => block.set_raw_mode(raw),
+            RenderBlock::UserPrompt(block) if block.has_raw_mode() => block.set_raw_mode(raw),
             _ => {} // Other blocks don't support raw mode
         }
     }
@@ -1242,6 +1292,16 @@ mod tests {
     }
 
     #[test]
+    fn message_blocks_do_not_animate_running_accent() {
+        assert!(!RenderBlock::user_prompt("hello").animates_running_accent());
+        assert!(!RenderBlock::agent_message("hello").animates_running_accent());
+        assert!(
+            RenderBlock::stub("working", ratatui::style::Color::Blue).animates_running_accent(),
+            "activity blocks keep the running wave"
+        );
+    }
+
+    #[test]
     fn test_tool_call_block() {
         let block = RenderBlock::tool_call("Read", "src/main.rs (50 lines)", true);
         let c = ctx(DisplayMode::Collapsed, false);
@@ -1254,6 +1314,43 @@ mod tests {
     fn test_tool_call_with_output_is_foldable() {
         let block = RenderBlock::execute_with_output("cargo test", "test output", None::<String>);
         assert!(block.is_foldable());
+    }
+
+    #[test]
+    fn test_generic_tool_has_fullscreen_viewer() {
+        use crate::scrollback::blocks::tool::OtherToolCallBlock;
+        let block = RenderBlock::ToolCall(ToolCallBlock::Other(
+            OtherToolCallBlock::new("custom_tool", "")
+                .with_input_json("{\n  \"query\": \"needle\"\n}"),
+        ));
+        assert!(block.has_normal_fullscreen_viewer());
+        assert!(block.supports_fullscreen());
+    }
+
+    #[test]
+    fn eval_v2_effects_first_has_no_normal_fullscreen_viewer() {
+        crate::appearance::cache::set_pi_eval_v2_effects_first(true);
+        let block = RenderBlock::ToolCall(ToolCallBlock::Eval(
+            crate::scrollback::blocks::tool::EvalToolCallBlock::new("js", "secret()")
+                .with_bridge_version("v2")
+                .with_output("done"),
+        ));
+        assert!(!block.has_normal_fullscreen_viewer());
+        assert!(!block.supports_fullscreen());
+
+        crate::appearance::cache::set_pi_eval_v2_effects_first(false);
+        assert!(block.has_normal_fullscreen_viewer());
+        crate::appearance::cache::set_pi_eval_v2_effects_first(true);
+    }
+
+    #[test]
+    fn codemode_block_has_fullscreen_viewer() {
+        let block = RenderBlock::ToolCall(ToolCallBlock::Codemode(
+            crate::scrollback::blocks::tool::CodemodeToolCallBlock::new("return 1;")
+                .with_output("done"),
+        ));
+        assert!(block.has_normal_fullscreen_viewer());
+        assert!(block.supports_fullscreen());
     }
 
     #[test]
@@ -1488,6 +1585,18 @@ mod searchable_text_tests {
         let block = RenderBlock::context_info(snapshot, "grok-4.5");
         // Only the model name is source text; the rest is a numeric breakdown.
         assert_eq!(block.searchable_text().as_deref(), Some("grok-4.5"));
+    }
+
+    #[test]
+    fn credit_limit_indexes_heading_and_url() {
+        let block = RenderBlock::credit_limit_card(
+            "credit limit reached",
+            crate::scrollback::blocks::CreditLimitCardAction::EnablePayg,
+            "https://grok.com?_s=usage",
+        );
+        let text = block.searchable_text().expect("credit limit text");
+        assert!(text.contains("credit limit reached"), "got: {text:?}");
+        assert!(text.contains("https://grok.com?_s=usage"), "got: {text:?}");
     }
 
     #[test]

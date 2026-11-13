@@ -4,6 +4,39 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 use crate::terminal::ModifierDelivery;
 
+/// macOS US Option+letter → base letter (Terminal often drops ALT bit).
+pub fn mac_option_glyph_to_letter(ch: char) -> Option<char> {
+    Some(match ch {
+        'å' => 'a',
+        '∫' => 'b',
+        'ç' => 'c',
+        '∂' => 'd',
+        '´' => 'e',
+        'ƒ' => 'f',
+        '©' => 'g',
+        '˙' => 'h',
+        'ˆ' => 'i',
+        '∆' => 'j',
+        '˚' => 'k',
+        '¬' => 'l',
+        'µ' => 'm',
+        '˜' => 'n',
+        'ø' => 'o',
+        'π' => 'p',
+        'œ' => 'q',
+        '®' => 'r',
+        'ß' => 's',
+        '†' => 't',
+        '¨' => 'u',
+        '√' => 'v',
+        '∑' => 'w',
+        '≈' => 'x',
+        '¥' => 'y',
+        'Ω' => 'z',
+        _ => return None,
+    })
+}
+
 /// Snapshot of physically-held modifier keys at a single point in time.
 /// Future probes can populate more bits; consumers should only read what they need.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -67,9 +100,6 @@ impl<P: ModifierProbe> KeyboardNormalizer<P> {
         if !key.modifiers.is_empty() {
             return None;
         }
-        if !matches!(key.code, KeyCode::Backspace | KeyCode::Delete) {
-            return None;
-        }
         let state = self.probe.snapshot();
         // Cmd wins per macOS convention: Cmd+Backspace (line-kill) is the stronger action; almost no one holds Cmd+Opt simultaneously
         let added = match (
@@ -80,12 +110,32 @@ impl<P: ModifierProbe> KeyboardNormalizer<P> {
             (false, true) => KeyModifiers::ALT,
             _ => return None,
         };
+
+        // Existing: Opt/Cmd + Backspace/Delete.
+        // Extended: Opt + printable (macOS often drops ALT bit and may emit a
+        // special glyph). Normalize glyph → base letter so extension shortcuts
+        // like alt+t match Option+T.
+        let mut out = key;
+        match key.code {
+            KeyCode::Backspace | KeyCode::Delete => {}
+            KeyCode::Char(ch) if added == KeyModifiers::ALT => {
+                if let Some(base) = mac_option_glyph_to_letter(ch) {
+                    out.code = KeyCode::Char(base);
+                } else if ch.is_ascii_alphabetic() {
+                    // Some terminals deliver the base letter without ALT.
+                    out.code = KeyCode::Char(ch.to_ascii_lowercase());
+                }
+                // Unknown option glyph: still stamp ALT below.
+            }
+            _ => return None,
+        }
+
         tracing::debug!(
             key.code = ?key.code,
+            rescued.code = ?out.code,
             added.modifier = ?added,
             "key event rescued via OS modifier probe"
         );
-        let mut out = key;
         out.modifiers |= added;
         Some(out)
     }

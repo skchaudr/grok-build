@@ -5,6 +5,7 @@
 
 use super::registry::{
     DynamicEnumSource, EnumChoice, SettingCategory, SettingKind, SettingMeta, SettingOwner,
+    StringValidator,
 };
 use crate::appearance::ScrollMode;
 use crate::appearance::TextSelection;
@@ -22,9 +23,58 @@ pub(crate) const MAX_THOUGHTS_WIDTH_MAX: i64 = 500;
 /// Registry key for `max_thoughts_width`; it is shared between the registry definition and the live-wrap-preview gate in the int stepper.
 pub(crate) const MAX_THOUGHTS_WIDTH_KEY: &str = "max_thoughts_width";
 
-// Theme choice catalogs. Canonical names MUST match `ThemeKind::display_name()`. The catalogs are shared by
-// `theme`, `auto_dark_theme`, and `auto_light_theme`; the auto-* sub-pickers drop "auto" to avoid a circular
-// reference.
+const PI_EVAL_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "v1",
+        display: "v1",
+        description: "Legacy Eval: persistent Python and JavaScript kernels.",
+    },
+    EnumChoice {
+        canonical: "v2",
+        display: "v2",
+        description: "Eval Bridge v2: host-RPC runtime with selectable Python/JavaScript support.",
+    },
+];
+
+const PI_EVAL_V2_LANGUAGE_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "js",
+        display: "js",
+        description: "Expose JavaScript only in Eval Bridge v2.",
+    },
+    EnumChoice {
+        canonical: "py",
+        display: "py",
+        description: "Expose Python only in Eval Bridge v2.",
+    },
+    EnumChoice {
+        canonical: "all",
+        display: "all",
+        description: "Expose both Python and JavaScript in Eval Bridge v2.",
+    },
+];
+
+const PI_EVAL_V2_DISPLAY_MODE_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "effects",
+        display: "effects",
+        description: "Hide Eval v2 orchestration source and foreground nested effects/results.",
+    },
+    EnumChoice {
+        canonical: "legacy",
+        display: "legacy",
+        description: "Show the Eval v2 source/result card using the legacy presentation.",
+    },
+];
+
+// ---------------------------------------------------------------------------
+// Theme choice catalogs.
+//
+// Canonical names MUST match `ThemeKind::display_name()`.
+// Shared by `theme`, `auto_dark_theme`, and `auto_light_theme`;
+// auto-* sub-pickers drop "auto" to avoid circular reference.
+// Bounded by `MAX_PICKER_CHOICES`.
+// ---------------------------------------------------------------------------
 
 /// Full theme catalog including the "auto" meta-variant; only `theme` uses it.
 const THEME_CHOICES: &[EnumChoice] = &[
@@ -32,6 +82,16 @@ const THEME_CHOICES: &[EnumChoice] = &[
         canonical: "auto",
         display: "Auto",
         description: "Follow system dark/light appearance.",
+    },
+    EnumChoice {
+        canonical: "pi:transparent",
+        display: "Transparent",
+        description: "Dark transparent; terminal bg shows through.",
+    },
+    EnumChoice {
+        canonical: "pi:transparent-light",
+        display: "Transparent Light",
+        description: "Light transparent; terminal bg shows through.",
     },
     EnumChoice {
         canonical: "groknight",
@@ -159,6 +219,19 @@ const PERMISSION_MODE_CHOICES: &[EnumChoice] = &[
 // Coding-data-sharing catalog. Two choices only: the pager has no `Option`/`Unset` representation for this field.
 // `supports_preview: false` because toggling fires an async ACP call that can fail. Commit on Enter only.
 
+const CTRL_O_TOOL_EXPANSION_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "write_edit",
+        display: "Write and edit",
+        description: "Expand write and edit diffs (default).",
+    },
+    EnumChoice {
+        canonical: "all_tools",
+        display: "All tool output",
+        description: "Expand every tool output block.",
+    },
+];
+
 // The setting's own description carries the full explanation, so the choices are bare labels; an empty description collapses each to a single line
 const CODING_DATA_SHARING_CHOICES: &[EnumChoice] = &[
     EnumChoice {
@@ -234,9 +307,40 @@ const FOLLOW_UP_BEHAVIOR_CHOICES: &[EnumChoice] = &[
     },
 ];
 
+const CANCEL_TURN_KEY_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "esc",
+        display: "Esc",
+        description: "Esc cancels a running turn (default). Ctrl+C still works.",
+    },
+    EnumChoice {
+        canonical: "ctrl_c",
+        display: "Ctrl+C",
+        description: "Esc is swallowed while a turn runs; Ctrl+C is required to cancel.",
+    },
+];
+
 // Mermaid-rendering catalog. SHELL-owned: persisted to `[ui].render_mermaid`. A pager-side process-wide cache
 // mirror (`appearance::cache::*_render_mermaid`) serves the render hot path. Canonicals match
 // `RenderMermaid::as_canonical`.
+
+const PI_BASH_RUN_DISPLAY_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "command_only",
+        display: "Command only",
+        description: "Hide Task Name and show the syntax-highlighted command.",
+    },
+    EnumChoice {
+        canonical: "task_name",
+        display: "Task Name only",
+        description: "Show Task Name and hide the command (default).",
+    },
+    EnumChoice {
+        canonical: "task_name_and_command",
+        display: "Task Name + command",
+        description: "Show Task Name, then the syntax-highlighted command line.",
+    },
+];
 
 const RENDER_MERMAID_CHOICES: &[EnumChoice] = &[
     EnumChoice {
@@ -482,6 +586,16 @@ const VOICE_STT_LANGUAGE_CHOICES: &[EnumChoice] = &[
 /// There is no dark/light filtering: the user can pair any theme with any system-appearance bucket.
 const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
     EnumChoice {
+        canonical: "pi:transparent",
+        display: "Transparent",
+        description: "Dark transparent; terminal bg shows through.",
+    },
+    EnumChoice {
+        canonical: "pi:transparent-light",
+        display: "Transparent Light",
+        description: "Light transparent; terminal bg shows through.",
+    },
+    EnumChoice {
         canonical: "groknight",
         display: "Grok Night",
         description: "Neutral dark with magenta accent.",
@@ -586,6 +700,24 @@ const CONTEXTUAL_HINTS_CHILDREN: &[&str] = &[
     "contextual_hints.ssh_wrap",
 ];
 
+const RECAP_MODELS_CHILDREN: &[&str] = &["recap_model", "recap_model_2", "recap_model_3"];
+
+const BTW_MODELS_CHILDREN: &[&str] = &["btw_model", "btw_model_2", "btw_model_3"];
+
+const PI_BUILTIN_TOOLS_CHILDREN: &[&str] = &[
+    "pi_builtin_tools.read",
+    "pi_builtin_tools.bash",
+    #[cfg(windows)]
+    "pi_builtin_tools.powershell",
+    "pi_builtin_tools.edit",
+    "pi_builtin_tools.write",
+    "pi_builtin_tools.grep",
+    "pi_builtin_tools.find",
+    "pi_builtin_tools.ls",
+    "pi_builtin_tools.eval",
+    "pi_builtin_tools.codemode",
+];
+
 /// Build the catalog; called once at process start via `SettingsRegistry::defaults()`.
 pub fn default_settings() -> Vec<SettingMeta> {
     // The shell schema defaults are the registry's source of truth
@@ -607,6 +739,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "screen_mode",
@@ -635,6 +768,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: true,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "show_timestamps",
@@ -649,6 +783,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "show_timeline",
@@ -664,6 +799,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             // Minimal mode has no interactive scrollback pane for the rail.
             hidden_in_minimal: true,
+            external_only: false,
         },
         SettingMeta {
             key: "dashboard_preview",
@@ -679,6 +815,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: true,
+            external_only: false,
         },
         SettingMeta {
             key: "page_flip_on_send",
@@ -696,6 +833,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: true,
+            external_only: false,
         },
         SettingMeta {
             key: "combine_queued_prompts",
@@ -712,6 +850,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "follow_up_behavior",
@@ -738,6 +877,32 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
+        },
+        SettingMeta {
+            key: "cancel_turn_key",
+            category: SettingCategory::Editor,
+            owner: SettingOwner::Shared,
+            label: "Cancel running turn",
+            description: "Choose whether Esc cancels a running turn or Ctrl+C is required. \
+                          Default: Esc.",
+            keywords: &[
+                "cancel",
+                "stop",
+                "interrupt",
+                "esc",
+                "escape",
+                "ctrl+c",
+                "key",
+            ],
+            kind: SettingKind::Enum {
+                default: ui_default.cancel_turn_key(),
+                choices: CANCEL_TURN_KEY_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "confirm_before_rewind",
@@ -752,6 +917,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             // The persisted key stays `simple_mode`
@@ -779,6 +945,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned, persisted to `[ui].vim_mode` in config.toml.
         // Defaults to the same value main's `appearance::persist::VIM_MODE_DEFAULT` shipped with
@@ -803,6 +970,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "theme",
@@ -827,6 +995,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: true,
+            external_only: false,
         },
         SettingMeta {
             key: "auto_dark_theme",
@@ -843,6 +1012,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: true,
+            external_only: false,
         },
         SettingMeta {
             key: "auto_light_theme",
@@ -859,6 +1029,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: true,
+            external_only: false,
         },
         // SHELL-owned: persisted to `[ui].render_mermaid`, with a pager-side process-wide cache mirror (like `vim_mode`)
         // The default is pinned to "auto" by `defaults_match_ui_config_default`
@@ -885,6 +1056,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // Security-relevant: "always-approve" bypasses all permission prompts.
         // The modal reads live state from `PagerLocalSnapshot.yolo_mode` (not `ui.permission_mode`) to reflect Ctrl+O toggles immediately
@@ -917,6 +1089,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned `[ui].remember_tool_approvals`. It gates the per-tool "Always allow …" prompt options.
         // `restart_required` because the value is resolved at permission-manager spawn (also fed by env/requirements/managed/remote settings)
@@ -948,6 +1121,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: true,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // PAGER-owned; default pinned by `defaults_match_pager_state`.
         SettingMeta {
@@ -960,6 +1134,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             kind: SettingKind::Bool { default: false },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned. It reads from `pager.current_model_name` (not `cfg.models.default`) so the modal reflects `/model` switches.
         // The empty-string default means "no opinion": the shell's resolution applies
@@ -977,6 +1152,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned `[features].subagent_model_inheritance`, a registry feature row rather than a `[ui]` key
         // `restart_required` because each agent latches the mode when it is built; the row's value is the next-start resolution
@@ -1012,6 +1188,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: true,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHARED. `u16` in UiConfig, widened to `i64` for registry.
         // Width changes apply on the next render frame.
@@ -1037,6 +1214,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned: `[ui].show_thinking_blocks` with a process-wide cache. Default ON.
         SettingMeta {
@@ -1058,6 +1236,31 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
+        },
+        // SHELL-owned: `[ui].thinking_border_colors` + process-wide cache.
+        // Default ON; applies to the next render frame.
+        SettingMeta {
+            key: "thinking_border_colors",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shell,
+            label: "Thinking border colors",
+            description: "Color the normal prompt border based on the selected thinking/reasoning level.",
+            keywords: &[
+                "thinking",
+                "reasoning",
+                "effort",
+                "prompt",
+                "border",
+                "color",
+                "level",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.thinking_border_colors.unwrap_or(true),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned: `[ui].prompt_suggestions` with a process-wide cache. Default ON.
         // The `GROK_PROMPT_SUGGESTIONS` env var overrides at runtime.
@@ -1084,6 +1287,26 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
+        },
+        // PAGER-owned, persisted to `[prompt].cursor` in pager.toml.
+        // Live-applied to every agent through `AppView::set_appearance`.
+        SettingMeta {
+            key: "prompt_cursor",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Pager,
+            label: "Prompt cursor",
+            description: "Cursor in the input box: native, block, underline, bar, or one single-column character.",
+            keywords: &[
+                "prompt", "input", "cursor", "caret", "symbol", "glyph", "block", "bar",
+            ],
+            kind: SettingKind::String {
+                default: "native",
+                validator: StringValidator::PromptCursor,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
         },
         // PAGER-owned, persisted to `[scrollback.scroll].respect_manual_folds` in pager.toml (NOT config.toml)
         // The live value is the appearance config (`AppView::set_appearance` fans changes out to every agent)
@@ -1103,6 +1326,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned: `[ui].group_tool_verbs` with a process-wide cache. Default ON.
         SettingMeta {
@@ -1121,6 +1345,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned: `[ui].collapsed_edit_blocks` with a process-wide cache
         // Default OFF (rollout flag; remote settings / managed config can enable).
@@ -1150,6 +1375,119 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
+        },
+        // PAGER-owned, grok-pi-only renderer preference. Kept process-local so
+        // enabling the experimental layout does not expand the shared shell
+        // config schema. Default OFF; narrow terminals still render unified.
+        SettingMeta {
+            key: "side_by_side_edit",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Pager,
+            label: "Side-by-side edit diffs",
+            description: "Show old and new edit content in parallel columns when the terminal is wide enough; narrow layouts stay unified.",
+            keywords: &[
+                "edit",
+                "diff",
+                "side-by-side",
+                "split",
+                "parallel",
+                "old",
+                "new",
+                "columns",
+                "pi",
+            ],
+            kind: SettingKind::Bool {
+                default: crate::appearance::cache::SIDE_BY_SIDE_EDIT_DEFAULT,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        // SHELL-owned: `[ui].ctrl_o_tool_expansion`. Only grok-pi consumes this
+        // setting; normal Grok retains its existing Ctrl+O behavior.
+        SettingMeta {
+            key: "ctrl_o_tool_expansion",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shell,
+            label: "Ctrl+O tool expansion",
+            description: "Choose whether Ctrl+O expands write/edit diffs or all tool output in grok-pi.",
+            keywords: &[
+                "ctrl+o", "tool", "expand", "collapse", "write", "edit", "all",
+            ],
+            kind: SettingKind::Enum {
+                default: "write_edit",
+                choices: CTRL_O_TOOL_EXPANSION_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
+        },
+        // SHELL-owned: `[ui].pi_bash_run_display`; only grok-pi supplies
+        // `task_name`, and the Execute renderer reads the live cache.
+        SettingMeta {
+            key: "pi_bash_run_display",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shell,
+            label: "Bash run display",
+            description: "Choose whether Bash/run cards show Task Name, command, or both.",
+            keywords: &[
+                "bash", "run", "command", "task", "name", "header", "batch", "pi",
+            ],
+            kind: SettingKind::Enum {
+                default: "task_name",
+                choices: PI_BASH_RUN_DISPLAY_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        // SHELL-owned: `[ui].pi_bash_command_format`; display-only.
+        SettingMeta {
+            key: "pi_bash_command_format",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shell,
+            label: "Format Bash/Eval display",
+            description: "Display Bash commands and Eval code with readable line breaks in permission, run-detail, and Eval popup views. Executed inputs are unchanged. Default off.",
+            keywords: &[
+                "bash",
+                "eval",
+                "command",
+                "code",
+                "format",
+                "pretty",
+                "operator",
+                "line",
+                "break",
+                "permission",
+                "popup",
+                "pi",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_bash_command_format,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        // SHELL-owned: `[ui].write_edit_hover_popups`; display-only.
+        SettingMeta {
+            key: "write_edit_hover_popups",
+            category: SettingCategory::Popups,
+            owner: SettingOwner::Shell,
+            label: "Write/Edit hover popups",
+            description: "Show a bounded hover popup with expanded Write and Edit details from collapsed tool rows. Default on.",
+            keywords: &[
+                "write", "edit", "popup", "hover", "tool", "diff", "preview", "details",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.write_edit_hover_popups,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned: `[ui.display_refresh].auto_cadence_enabled`. Restart-required (cadence pinned at startup); hidden in minimal.
         SettingMeta {
@@ -1173,6 +1511,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: true,
             hidden_in_minimal: true,
+            external_only: false,
         },
         // SHELL-owned, persisted to `[ui].scroll_speed` in config.toml.
         SettingMeta {
@@ -1191,6 +1530,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned `auto` | `wheel` | `trackpad` on `[ui].scroll_mode`.
         SettingMeta {
@@ -1215,6 +1555,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned, persisted to `[ui].scroll_lines`. One knob covers BOTH wheel and trackpad lines-per-tick.
         // The registered default 3 matches most terminal profiles
@@ -1236,6 +1577,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned: `[ui].invert_scroll` with a process-wide cache. Default OFF.
         SettingMeta {
@@ -1258,6 +1600,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned `flash` | `hold` | `word_select` on `[ui].keep_text_selection`. The compile-time default is `flash`.
         // The default can be set remotely via the `keep_text_selection_default` soft-default
@@ -1290,6 +1633,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned. Do not put "telemetry" in keywords: that word is the config-file analytics toggle (Monitoring /
         // Configuration docs).
@@ -1319,6 +1663,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned, persisted to `[ui].default_selected_permission` in config.toml. Canonical
         // `always_allow_all_sessions` (the effective default) lands the first prompt's cursor on the enable-always-approve
@@ -1350,6 +1695,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned `[toolset.ask_user_question].timeout_enabled`. `restart_required` because the value is resolved when
         // an agent is built, like `remember_tool_approvals`.
@@ -1376,6 +1722,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: true,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // PAGER-owned, set over ACP. Reads from `PagerLocalSnapshot.plan_mode_active`.
         // The default "off" matches `AgentView::new`'s `plan_mode_active = false`
@@ -1395,6 +1742,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned startup-time settings (restart_required: true).
         // The running pager doesn't re-read these mid-session.
@@ -1410,6 +1758,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             kind: SettingKind::Bool { default: true },
             restart_required: true,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // Contextual hints: one Advanced row that opens a sub-sheet of per-tip toggles
         // It applies live (restart_required: false); the group carries no value and its children are hidden from the top-level list
@@ -1457,6 +1806,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "auto_update",
@@ -1471,6 +1821,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             kind: SettingKind::Bool { default: true },
             restart_required: true,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned, persisted to `[ui].hunk_tracker_mode`. Restart-required: the mode is read once when the session connects.
         SettingMeta {
@@ -1491,6 +1842,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: true,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned, persisted to `[ui].voice_keybind_enabled`. Default ON: `None` (inherit) reads as `true`.
         // Off disables only the Ctrl+Space / F8 chord; `/voice` (and Esc / the recording-row `[stop]`) keep working
@@ -1520,6 +1872,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned, persisted to `[ui].voice_capture_mode`
         // The `hold` choice is hidden on terminals without key-release reporting (see `effective_enum_choices`)
@@ -1553,6 +1906,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // SHELL-owned, persisted to `[ui].voice_stt_language`. Applied live to the next voice capture (no restart).
         // Default English; System (`auto`) follows the process locale when it maps to a Grok STT language
@@ -1573,6 +1927,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // Contextual-hint children (hidden from the top-level list; reached via the group sub-sheet)
         // Default ON: `None` (inherit) reads as `true`
@@ -1588,20 +1943,33 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "contextual_hints.plan_mode",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
             label: "Plan mode",
-            description: "Suggest plan mode (Shift+Tab) when your prompt looks like a \
-                          planning request.",
-            keywords: &["plan", "mode", "nudge", "shift+tab", "hint"],
+            description: if cfg!(windows) {
+                "Suggest plan mode (Ctrl+Alt+T or /plan-mode) when your prompt looks like a planning request."
+            } else {
+                "Suggest plan mode (Ctrl+Shift+T or /plan-mode) when your prompt looks like a planning request."
+            },
+            keywords: &[
+                "plan",
+                "mode",
+                "nudge",
+                "ctrl+shift+t",
+                "ctrl+alt+t",
+                "plan-mode",
+                "hint",
+            ],
             kind: SettingKind::Bool {
                 default: ui_default.contextual_hints.plan_mode.unwrap_or(true),
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "contextual_hints.image_input",
@@ -1616,6 +1984,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "contextual_hints.send_now",
@@ -1639,6 +2008,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "contextual_hints.small_screen",
@@ -1653,6 +2023,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "contextual_hints.word_select",
@@ -1677,6 +2048,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "contextual_hints.export_copy",
@@ -1691,6 +2063,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         SettingMeta {
             key: "contextual_hints.ssh_wrap",
@@ -1712,6 +2085,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         },
         // Only the CLI flag (`--todo-gate`) is wired. Those arms don't yet have a place to land. `restart_required: false`
         // because the config-reloader rebroadcasts UI changes.
@@ -1737,6 +2111,745 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
+        },
+        SettingMeta {
+            key: "pi_bash",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Pi Bash bridge",
+            description: "Enable grok-pi's enhanced Bash bridge for the next session. Off restores stock Pi Bash; Eval remains independent.",
+            keywords: &["pi", "bash", "bridge", "extension", "runtime"],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_bash,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_eval",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Eval bridge version",
+            description: "Choose the Eval runtime for the next grok-pi session. v1 is the legacy Python + JavaScript runtime; v2 uses the host-RPC runtime and the separate language selector.",
+            keywords: &[
+                "pi",
+                "eval",
+                "v1",
+                "v2",
+                "javascript",
+                "python",
+                "runtime",
+                "bridge",
+            ],
+            kind: SettingKind::Enum {
+                default: "v1",
+                choices: PI_EVAL_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_eval_v2_language",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Eval v2 language",
+            description: "Choose which language(s) Eval Bridge v2 exposes next session: js, py, or all.",
+            keywords: &[
+                "pi",
+                "eval",
+                "v2",
+                "language",
+                "javascript",
+                "python",
+                "all",
+            ],
+            kind: SettingKind::Enum {
+                default: "js",
+                choices: PI_EVAL_V2_LANGUAGE_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_eval_v2_display_mode",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Eval v2 display",
+            description: "Choose the live Eval v2 presentation: effects hides orchestration source; legacy shows source and results. Under Eval v2 only, legacy is what keeps the top-level eval card visible.",
+            keywords: &["pi", "eval", "v2", "display", "effects", "legacy", "source"],
+            kind: SettingKind::Enum {
+                default: "effects",
+                choices: PI_EVAL_V2_DISPLAY_MODE_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_eval_v2_only",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Eval v2 only",
+            description: "Force Eval Bridge v2 and hide every other Pi tool for the next grok-pi session. Explicit CLI --tools/--no-tools still takes precedence.",
+            keywords: &[
+                "pi", "eval", "v2", "only", "isolate", "tools", "hide", "sandbox",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_eval_v2_only,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_eval_mcp",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Eval MCP (local)",
+            description: "Expose this Eval v2-only Pi session via authenticated loopback MCP. Requires Eval v2 only and restarting grok-pi. The URL permits Eval execution: share only with trusted agents.",
+            keywords: &["pi", "eval", "mcp", "binding", "local", "tokenizers"],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_eval_mcp,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        // External Pi profile resource manager. This is a Pager navigation row,
+        // not a Grok-shell setting, so its Group form only supplies the native
+        // chevron presentation; settings-modal input maps it to OpenPiConfig.
+        SettingMeta {
+            key: "pi_builtin_tools",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Pi built-in tools",
+            description: "Choose the Pi built-in tools for the next grok-pi session. Existing extension and custom tools stay enabled.",
+            keywords: &[
+                "pi",
+                "tools",
+                "read",
+                "bash",
+                "powershell",
+                "pwsh",
+                "edit",
+                "write",
+                "grep",
+                "find",
+                "ls",
+                "eval",
+                "python",
+                "javascript",
+                "search",
+            ],
+            kind: SettingKind::Group {
+                children: PI_BUILTIN_TOOLS_CHILDREN,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_builtin_tools.read",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Read",
+            description: "Allow Pi to read files.",
+            keywords: &["pi", "tool", "read"],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_builtin_tools.read,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_builtin_tools.bash",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Bash",
+            description: "Allow Pi to run shell commands.",
+            keywords: &["pi", "tool", "bash", "shell"],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_builtin_tools.bash,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        #[cfg(windows)]
+        SettingMeta {
+            key: "pi_builtin_tools.powershell",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "PowerShell",
+            description: "Allow Pi to run PowerShell commands. PowerShell 7 (pwsh) is preferred, with Windows PowerShell as fallback.",
+            keywords: &["pi", "tool", "powershell", "pwsh", "windows", "shell"],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_builtin_tools.powershell,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_builtin_tools.edit",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Edit",
+            description: "Allow Pi to patch existing files.",
+            keywords: &["pi", "tool", "edit"],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_builtin_tools.edit,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_builtin_tools.write",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Write",
+            description: "Allow Pi to create or overwrite files.",
+            keywords: &["pi", "tool", "write"],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_builtin_tools.write,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_builtin_tools.grep",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Grep",
+            description: "Allow Pi to search file contents with ripgrep.",
+            keywords: &["pi", "tool", "grep", "search", "ripgrep"],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_builtin_tools.grep,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_builtin_tools.find",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Find",
+            description: "Allow Pi to locate files by glob.",
+            keywords: &["pi", "tool", "find", "files", "glob"],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_builtin_tools.find,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_builtin_tools.ls",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Ls",
+            description: "Allow Pi to list directory contents.",
+            keywords: &["pi", "tool", "ls", "list", "directory"],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_builtin_tools.ls,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_builtin_tools.eval",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Eval",
+            description: "Expose Pi's Eval tool. The grok-pi Eval bridge version is configured separately by Eval bridge version.",
+            keywords: &[
+                "pi",
+                "tool",
+                "eval",
+                "python",
+                "javascript",
+                "kernel",
+                "repl",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_builtin_tools.eval,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_builtin_tools.codemode",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Codemode",
+            description: "Run model-written JavaScript in a QuickJS sandbox whose only capability is calling tools. Off by default: enabling it also registers Pi's codemode extension for the next grok-pi session.",
+            keywords: &[
+                "pi",
+                "tool",
+                "codemode",
+                "quickjs",
+                "javascript",
+                "script",
+                "sandbox",
+                "mcp",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_builtin_tools.codemode,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "psm_resume_index",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "PSM resume index",
+            description: "Use Pi Session Manager (must be running) for Pi /resume: SQLite catalog, Ctrl+F full-text search, and message preview. Off = Pi JSONL list only.",
+            keywords: &["pi", "psm", "resume", "session", "sqlite", "index"],
+            kind: SettingKind::Bool {
+                default: ui_default.psm_resume_index,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
+        },
+        SettingMeta {
+            key: "pi_tree_file_rollback",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Pi tree file rollback",
+            description: "Track write/edit preimages and allow file-only rollback from SessionTree. Takes effect for new grok-pi sessions.",
+            keywords: &[
+                "pi",
+                "tree",
+                "rollback",
+                "rewind",
+                "checkpoint",
+                "file",
+                "undo",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_tree_file_rollback,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_tree_skip_summary_prompt",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Pi tree skip summary prompt",
+            description: "Skip the \"Summarize branch?\" prompt when navigating the session tree. When on, Enter navigates immediately without summarization.",
+            keywords: &[
+                "pi",
+                "tree",
+                "summary",
+                "summarize",
+                "branch",
+                "prompt",
+                "navigate",
+                "skip",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_tree_skip_summary_prompt,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_ask_user_question_notifications",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Q&A desktop notifications",
+            description: "Notify you when a native Q&A question arrives while grok-pi is unfocused. Applies immediately; default on.",
+            keywords: &[
+                "pi",
+                "qa",
+                "q&a",
+                "ask",
+                "question",
+                "notification",
+                "desktop",
+                "focus",
+                "unfocused",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_ask_user_question_notifications,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_cache_graph",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Pi cache graph in Context",
+            description: "Show cache hit graph/stats (keys 1/2/3/s/e) inside the Context modal. Matches pi-cache-graph; default on.",
+            keywords: &["pi", "cache", "graph", "context", "stats", "hit"],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_cache_graph,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_config_skill",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Pi config skill",
+            description: "Load grok-pi's embedded configuration skill by default so the agent can explain F2 settings, config.toml, skills, themes, and feature flags. Restart required.",
+            keywords: &[
+                "pi",
+                "grok-pi",
+                "config",
+                "configuration",
+                "skill",
+                "skills",
+                "f2",
+                "settings",
+                "docs",
+                "guide",
+                "default",
+                "disable",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_config_skill,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+            external_only: false,
+        },
+        SettingMeta {
+            key: "pi_user_markdown",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Markdown user messages",
+            description: "Render grok-pi user prompts with the agent markdown renderer (expanded, user chrome preserved). Off restores classic collapsible plain-text prompts. Default on.",
+            keywords: &["pi", "user", "markdown", "prompt", "message"],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_user_markdown,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_at_search_hidden",
+            category: SettingCategory::Editor,
+            owner: SettingOwner::Shell,
+            label: "Hidden files in @ search",
+            description: "Include hidden/dotfile entries in plain `@` file search while still respecting ignore rules, matching pi-main's fd `--hidden` behavior. `@!` additionally reveals gitignored project files while `.git`, `node_modules`, and common dependency/package stores remain excluded. Default on.",
+            keywords: &[
+                "pi",
+                "at",
+                "file",
+                "search",
+                "hidden",
+                "dotfile",
+                "gitignore",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_at_search_hidden,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_keep_multi_agent",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Keep multi-agent on /new",
+            description: "When on, `/new` keeps the current agent tab alive so the dashboard can switch back to it (Pi re-loads its session on demand). Default off: `/new` drops the current agent tab and starts fresh — other idle agent tabs in the dashboard are left untouched.",
+            keywords: &[
+                "pi",
+                "new",
+                "session",
+                "multi",
+                "agent",
+                "dashboard",
+                "replace",
+                "keep",
+                "preserve",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.pi_keep_multi_agent,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "show_other_tool_args",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shell,
+            label: "Other tool args",
+            description: "Show raw_input JSON on Other/generic tool cards: compact one-line JSON after the collapsed tool name, plus the full JSON when expanded. Default on.",
+            keywords: &[
+                "tool",
+                "args",
+                "arguments",
+                "raw_input",
+                "other",
+                "fabric",
+                "fabric_exec",
+                "json",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.show_other_tool_args,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
+        },
+        SettingMeta {
+            key: "review_file_tree",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Review file tree",
+            description: "Default /review-* left pane to a cwd-relative tree (compacts Java package chains). Off = flat basenames. Press t in the modal to toggle; persists here.",
+            keywords: &["review", "tree", "files", "code review", "package", "java"],
+            kind: SettingKind::Bool {
+                default: ui_default.review_file_tree,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "review_include_reads",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Review include reads",
+            description: "Include session read tool ops in /review-* file list (right pane reuses read viewer, not diff). Off = edit/write only. Press r in the modal to toggle; persists here.",
+            keywords: &["review", "read", "files", "code review", "filter"],
+            kind: SettingKind::Bool {
+                default: ui_default.review_include_reads,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "pi_config",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Pi resources",
+            description: "Review and enable Pi extensions, skills, prompts, and themes. Project resources require Pi project trust.",
+            keywords: &[
+                "pi",
+                "config",
+                "extensions",
+                "skills",
+                "prompts",
+                "themes",
+                "resources",
+            ],
+            kind: SettingKind::Group { children: &[] },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
+        },
+        // Session recap (auto away-recap + /recap model override).
+        // Auto toggle lives on `[ui].session_recap` (mirrors notification opt-in).
+        SettingMeta {
+            key: "session_recap",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Session recap",
+            description: "Show an automatic \"where was I\" recap when you return after being away. \
+Manual /recap still works when the agent advertises sessionRecap.",
+            keywords: &["recap", "session", "summary", "away", "return", "auto"],
+            kind: SettingKind::Bool {
+                default: ui_default.session_recap.unwrap_or(true),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
+        },
+        SettingMeta {
+            key: "recap_mermaid",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Recap Mermaid diagrams",
+            description: "Allow Recap to include an optional Markdown Mermaid diagram. The diagram is rendered when the recap is expanded.",
+            keywords: &["recap", "mermaid", "diagram", "summary", "graph"],
+            kind: SettingKind::Bool {
+                default: ui_default.recap_mermaid.unwrap_or(false),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
+        },
+        SettingMeta {
+            key: "progress_bar",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shell,
+            label: "Terminal tab progress",
+            description: "Show OSC 9;4 progress indicators in the terminal tab bar.",
+            keywords: &["progress", "terminal", "tab", "osc", "9;4", "indicator"],
+            kind: SettingKind::Bool {
+                default: ui_default.progress_bar.unwrap_or(false),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
+        },
+        SettingMeta {
+            key: "remote_tui_footer",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shell,
+            label: "Remote TUI footer",
+            description: "Show keyboard hints below experimental Remote TUI frames.",
+            keywords: &["remote", "tui", "footer", "keyboard", "hints"],
+            kind: SettingKind::Bool {
+                default: ui_default.remote_tui_footer.unwrap_or(false),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
+        },
+        SettingMeta {
+            key: "recap_models",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Recap models",
+            description: "Primary + fallback models for session recap (/recap and auto away-recap). Empty slots use the active session model or skip.",
+            keywords: &["recap", "model", "summary", "session", "models", "fallback"],
+            kind: SettingKind::Group {
+                children: RECAP_MODELS_CHILDREN,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
+        },
+        SettingMeta {
+            key: "btw_models",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Btw models",
+            description: "Primary + fallback models for /btw side questions. Empty slots use the active session model or skip.",
+            keywords: &["btw", "model", "side", "question", "fallback"],
+            kind: SettingKind::Group {
+                children: BTW_MODELS_CHILDREN,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "recap_model",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Primary",
+            description: "Primary recap model. Empty = active session model.",
+            keywords: &["recap", "model", "summary", "session", "models"],
+            kind: SettingKind::DynamicEnum {
+                default: "",
+                source: DynamicEnumSource::ActiveModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
+        },
+        SettingMeta {
+            key: "recap_model_2",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Fallback 2",
+            description: "Tried if primary fails. Empty = skip.",
+            keywords: &["recap", "model", "fallback", "summary"],
+            kind: SettingKind::DynamicEnum {
+                default: "",
+                source: DynamicEnumSource::ActiveModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
+        },
+        SettingMeta {
+            key: "recap_model_3",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Fallback 3",
+            description: "Tried if primary and fallback 2 fail. Empty = skip.",
+            keywords: &["recap", "model", "fallback", "summary"],
+            kind: SettingKind::DynamicEnum {
+                default: "",
+                source: DynamicEnumSource::ActiveModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: false,
+        },
+        SettingMeta {
+            key: "btw_model",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Primary",
+            description: "Primary /btw model. Empty = active session model.",
+            keywords: &["btw", "model", "side", "question"],
+            kind: SettingKind::DynamicEnum {
+                default: "",
+                source: DynamicEnumSource::ActiveModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "btw_model_2",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Fallback 2",
+            description: "Tried if primary fails. Empty = skip.",
+            keywords: &["btw", "model", "fallback"],
+            kind: SettingKind::DynamicEnum {
+                default: "",
+                source: DynamicEnumSource::ActiveModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
+        },
+        SettingMeta {
+            key: "btw_model_3",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Fallback 3",
+            description: "Tried if primary and fallback 2 fail. Empty = skip.",
+            keywords: &["btw", "model", "fallback"],
+            kind: SettingKind::DynamicEnum {
+                default: "",
+                source: DynamicEnumSource::ActiveModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+            external_only: true,
         },
     ]
 }

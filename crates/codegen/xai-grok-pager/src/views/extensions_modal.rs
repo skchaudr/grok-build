@@ -3853,6 +3853,7 @@ pub fn render_extensions_modal(
                         .unwrap_or(&[]),
                     dimmed: entry_dimmed.get(i).copied().unwrap_or(false),
                     indent: entry_indent.get(i).copied().unwrap_or(0),
+                    label_color: None,
                     badge: entry_badge_text.get(i).map(|s| s.as_str()).unwrap_or(""),
                     badge_color: entry_badge_color.get(i).copied().flatten(),
                     collapsible: is_collapsible,

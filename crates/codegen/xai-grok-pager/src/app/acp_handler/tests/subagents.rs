@@ -3,6 +3,34 @@
     use crate::app::agent_view::ChildLink;
 
     #[test]
+    fn nested_subagent_spawn_builds_descendant_agent_view() {
+        let mut app = make_app_with_agent("sess-parent");
+        assert!(handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", "child-parent"),
+            ),
+            &mut app,
+        ));
+        assert!(handle(
+            make_ext_session_notification(
+                "child-parent",
+                test_subagent_spawned("child-parent", "grandchild"),
+            ),
+            &mut app,
+        ));
+
+        let root = app.agents.get(&AgentId(0)).unwrap();
+        let child = root.subagent_views.get("child-parent").expect("direct child view");
+        assert!(child.subagent_views.contains_key("grandchild"));
+        assert!(child.subagent_sessions.contains_key("grandchild"));
+        assert!(matches!(
+            find_session_match(&app, &acp::SessionId::new("grandchild".to_owned())),
+            Some(SessionMatch::Child(AgentId(0)))
+        ));
+    }
+
+    #[test]
     fn replayed_subagent_finished_marks_orphan_terminal() {
         let mut app = make_app_with_agent("sess-1");
         app.agents
@@ -517,6 +545,40 @@
         );
     }
 
+    /// Regression: Pi bridge task metadata and lifecycle use different ACP
+    /// message types, so lifecycle can arrive first. Its explicit meta must be
+    /// sufficient to render the child as a background SubagentBlock.
+    #[test]
+    fn subagent_spawned_meta_marks_background_without_task_metadata() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-background-meta";
+
+        let affected = handle(
+            make_ext_session_notification_with_method_and_meta(
+                "sess-parent",
+                "x.ai/session/update",
+                test_subagent_spawned("sess-parent", child_sid),
+                Some(serde_json::json!({ "subagentBackground": true })),
+            ),
+            &mut app,
+        );
+        assert!(affected);
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        assert!(info.is_background);
+        let entry_id = info.scrollback_entry_id.unwrap();
+        let entry = agent.scrollback.get_by_id(entry_id).unwrap();
+        let RenderBlock::Subagent(block) = &entry.block else {
+            panic!("expected background SubagentBlock");
+        };
+        assert!(block.is_background);
+    }
+
+    /// The live activity label fans out to `SubagentInfo` (tasks pane /
+    /// dashboard rows) alongside the scrollback block — from both the child
+    /// session/update path and the `SubagentProgress` path — and
+    /// `SubagentFinished` clears both surfaces.
     #[test]
     fn late_unique_subagent_lifecycle_event_is_not_dropped() {
         let mut app = make_app_with_agent("sess-parent");
@@ -782,6 +844,274 @@
         assert!(
             sb.activity_label.is_none(),
             "finish must clear the block label"
+        );
+    }
+
+    #[test]
+    fn child_generic_tool_update_preserves_raw_input_for_fullscreen_details() {
+        let child_sid = "child-tool-details";
+        let mut app = make_app_with_parent_and_child("sess-parent", child_sid);
+        app.appearance.show_other_tool_args = true;
+        let appearance = app.appearance.clone();
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap()
+            .scrollback
+            .set_appearance(appearance);
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = acp::SessionNotification::new(
+            acp::SessionId::new(child_sid),
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(acp::ToolCallId::new("call-child"), "custom_tool")
+                    .kind(acp::ToolKind::Other)
+                    .status(acp::ToolCallStatus::Pending),
+            ),
+        );
+        assert!(handle(
+            AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+                request,
+                response_tx: tx,
+            }),
+            &mut app,
+        ));
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = acp::SessionNotification::new(
+            acp::SessionId::new(child_sid),
+            acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                acp::ToolCallId::new("call-child"),
+                acp::ToolCallUpdateFields::new()
+                    .status(Some(acp::ToolCallStatus::InProgress))
+                    .raw_input(Some(serde_json::json!({
+                        "query": "needle",
+                        "limit": 7
+                    }))),
+            )),
+        );
+        assert!(handle(
+            AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+                request,
+                response_tx: tx,
+            }),
+            &mut app,
+        ));
+
+        let child = &app.agents[&AgentId(0)].subagent_views[child_sid];
+        let entry = child.scrollback.entry(0).expect("child tool block");
+        let RenderBlock::ToolCall(crate::scrollback::blocks::tool::ToolCallBlock::Other(block)) =
+            &entry.block
+        else {
+            panic!("expected generic child tool block, got {:?}", entry.block);
+        };
+        let input = block.input.as_deref().expect("raw input retained");
+        assert!(input.contains("needle"));
+        assert!(input.contains("limit"));
+        assert!(
+            entry.block.supports_fullscreen(),
+            "child generic tool must expose the same detail viewer as root tools"
+        );
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_stamps_writing_activity_label() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(changed, "first delta must request a redraw");
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        assert_eq!(info.activity_label.as_deref(), Some("Preparing write…"));
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_ignored_while_child_loading_replay() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-replay";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap()
+            .session
+            .loading_replay = true;
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(!changed);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .activity_label
+                .is_none()
+        );
+        assert_eq!(
+            agent
+                .subagent_views
+                .get(child_sid)
+                .unwrap()
+                .session
+                .tracker
+                .activity(),
+            None,
+            "reloading child tracker must not pick up the delta"
+        );
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_without_registry_row_reports_no_redraw() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-orphan";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_sessions
+            .remove(child_sid);
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(!changed, "no registry row → nothing visible → no redraw");
+    }
+
+    #[test]
+    fn subagent_acp_chunk_after_finish_does_not_restamp_label() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-acp-finished";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        );
+        // Simulate the racing child rail still looking live.
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap()
+            .session
+            .state = AgentState::TurnRunning;
+
+        let _ = handle(
+            make_agent_chunk_with_event(child_sid, "late text", "p-child", None),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .activity_label
+                .is_none(),
+            "finished row must not be re-stamped by the child ACP fan-out"
+        );
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_after_finish_does_not_restamp_label() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-finished";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        );
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(!changed);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .activity_label
+                .is_none(),
+            "finished row must keep its cleared label"
         );
     }
 

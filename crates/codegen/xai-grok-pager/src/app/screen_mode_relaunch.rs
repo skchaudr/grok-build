@@ -150,7 +150,10 @@ pub(crate) fn build_screen_mode_relaunch_args(
 
     out.push(OsString::from("--resume"));
     out.push(OsString::from(session_id));
-    // Keep a CLI mode flag for hand-pasted resume hints that omit GROK_SCREEN_MODE.
+    // Explicit mode flag: the env override (set by the exec caller) already
+    // forces this relaunch's mode, but the flag is what makes the choice
+    // sticky — startup persists `[ui] screen_mode` when it sees an explicit
+    // `--minimal`/`--fullscreen`.
     if want_minimal {
         out.push(OsString::from("--minimal"));
     } else {
@@ -205,12 +208,7 @@ pub(crate) fn exec_screen_mode_relaunch(session_id: &str, want_minimal: bool) ->
     cmd.env(GROK_SCREEN_MODE_ENV, screen_mode_env_value(want_minimal));
 
     let mode_label = screen_mode_env_value(want_minimal);
-    let reverse = if want_minimal {
-        "/fullscreen"
-    } else {
-        "/minimal"
-    };
-    eprintln!("Reopening session in {mode_label} mode… (switch back with {reverse})");
+    eprintln!("Reopening session in {mode_label} mode…");
     let _ = io::stdout().flush();
     let _ = io::stderr().flush();
 
@@ -254,20 +252,18 @@ pub(crate) fn exec_screen_mode_relaunch(session_id: &str, want_minimal: bool) ->
     }
 }
 
-/// Parse a [`GROK_SCREEN_MODE_ENV`] or config `[ui] screen_mode` value (pure; unit-tested directly).
-/// Case- and whitespace-insensitive for the known tokens, matching [`crate::settings::canonical_screen_mode`].
-/// Unlike the settings canonicalizer, unknown / absent / legacy values (`default`, `auto`, empty) return `None`.
+/// Parse a [`GROK_SCREEN_MODE_ENV`] value (pure; unit-tested directly).
+///
+/// | Value | Mode |
+/// |---|---|
+/// | `minimal` | [`super::ScreenMode::Minimal`] |
+/// | `fullscreen` / `full` | [`super::ScreenMode::Fullscreen`] |
+/// | anything else / absent | `None` — normal resolution continues |
 pub(crate) fn parse_screen_mode(value: Option<&str>) -> Option<super::ScreenMode> {
-    let raw = value?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    if raw.eq_ignore_ascii_case("minimal") {
-        Some(super::ScreenMode::Minimal)
-    } else if raw.eq_ignore_ascii_case("fullscreen") || raw.eq_ignore_ascii_case("full") {
-        Some(super::ScreenMode::Fullscreen)
-    } else {
-        None
+    match value {
+        Some("minimal") => Some(super::ScreenMode::Minimal),
+        Some("fullscreen") | Some("full") => Some(super::ScreenMode::Fullscreen),
+        _ => None,
     }
 }
 
@@ -283,9 +279,21 @@ pub(crate) fn take_screen_mode_env_override() -> Option<super::ScreenMode> {
     parse_screen_mode(raw.as_deref().and_then(OsStr::to_str))
 }
 
-/// CLI > `[ui] screen_mode` > pager.toml `[terminal] minimal` > no preference.
-/// `Some(true)` means minimal, `Some(false)` means not minimal (explicit fullscreen).
-/// Choosing Fullscreen writes an explicit value so that soft default no longer applies.
+/// The user's *explicit* minimal-vs-fullscreen preference (unit-tested), or
+/// `None` when none was expressed so the caller can apply a default (e.g. the
+/// JediTerm/Windows mouse-leak auto-minimal). `Some(true)` = minimal.
+///
+/// Priority: CLI flag > config.toml `[ui] screen_mode` (the sticky value
+/// written by `--minimal`/`--fullscreen` and the `/minimal`//`/fullscreen`
+/// relaunches) > legacy pager.toml `[terminal] minimal`.
+///
+/// `config_screen_mode` reuses [`parse_screen_mode`]'s vocabulary
+/// (`minimal` / `fullscreen` / `full`); an unset or unparseable value falls
+/// through to the legacy pager.toml bool. A `fullscreen` preference means
+/// "not minimal" — whether the run lands in alt-screen Fullscreen or Inline
+/// stays with the alt-screen policy in [`resolve_screen_mode`], so a sticky
+/// preference never permanently overrides the auto-inline environment
+/// heuristics (Zellij, tmux control mode, `alt_screen = never`).
 pub(crate) fn effective_minimal_preference(
     cli_minimal: bool,
     cli_fullscreen: bool,
@@ -306,7 +314,9 @@ pub(crate) fn effective_minimal_preference(
     }
 }
 
-/// Env override > minimal flag/config > alt-screen policy.
+/// Pure screen-mode resolution used at startup (and unit-tested).
+///
+/// Priority: one-shot env override > `--minimal`/config minimal > alt-screen policy.
 pub(crate) fn resolve_screen_mode(
     env_override: Option<super::ScreenMode>,
     minimal_cli_or_config: bool,
@@ -373,7 +383,9 @@ mod tests {
         );
     }
 
-    /// The fullscreen direction appends an explicit `--fullscreen` so mode resolution still works without the env override.
+    /// The fullscreen direction appends an explicit `--fullscreen` so the
+    /// relaunched process persists the sticky preference (the env override
+    /// alone would switch the mode without recording it).
     #[test]
     fn adds_fullscreen_and_resume() {
         let out = build_screen_mode_relaunch_args(args(&["grok", "--no-leader"]), "abc", false);
@@ -661,29 +673,8 @@ mod tests {
             parse_screen_mode(Some("full")),
             Some(ScreenMode::Fullscreen)
         );
-        // Case / whitespace must match settings' case-insensitive path so a hand-edited config.toml is not treated as unset at startup
-        assert_eq!(
-            parse_screen_mode(Some("Minimal")),
-            Some(ScreenMode::Minimal)
-        );
-        assert_eq!(
-            parse_screen_mode(Some("  MINIMAL ")),
-            Some(ScreenMode::Minimal)
-        );
-        assert_eq!(
-            parse_screen_mode(Some("FULLSCREEN")),
-            Some(ScreenMode::Fullscreen)
-        );
-        assert_eq!(
-            parse_screen_mode(Some("Full")),
-            Some(ScreenMode::Fullscreen)
-        );
         assert_eq!(parse_screen_mode(Some("nope")), None);
         assert_eq!(parse_screen_mode(Some("inline")), None);
-        assert_eq!(parse_screen_mode(Some("default")), None);
-        assert_eq!(parse_screen_mode(Some("auto")), None);
-        assert_eq!(parse_screen_mode(Some("")), None);
-        assert_eq!(parse_screen_mode(Some("   ")), None);
         assert_eq!(parse_screen_mode(None), None);
     }
 
@@ -743,8 +734,10 @@ mod tests {
 
     #[test]
     fn failed_relaunch_hint_includes_screen_mode_env() {
-        // Recovery command must carry GROK_SCREEN_MODE so following the hint after a failed `/fullscreen` does not reopen minimal/inline
-        // The explicit flag keeps the resume in the right mode if the env is dropped
+        // Recovery command must carry GROK_SCREEN_MODE so following the
+        // hint after a failed `/fullscreen` does not reopen minimal/inline. The
+        // explicit flag makes the manual resume persist the sticky preference
+        // like a successful exec would.
         assert_eq!(
             screen_mode_relaunch_resume_hint("abc-sid", false, None),
             "GROK_SCREEN_MODE=fullscreen grok --fullscreen --resume abc-sid"
@@ -767,7 +760,7 @@ mod tests {
 
     #[test]
     fn preference_cli_flag_beats_config_and_legacy() {
-        // `--minimal` wins over a config fullscreen and vice versa.
+        // `--minimal` wins over a sticky fullscreen and vice versa.
         assert_eq!(
             effective_minimal_preference(true, false, Some("fullscreen"), false),
             Some(true)
@@ -785,52 +778,38 @@ mod tests {
 
     #[test]
     fn preference_config_screen_mode_beats_legacy_pager_toml() {
+        // Sticky config value applies without flags…
         assert_eq!(
             effective_minimal_preference(false, false, Some("minimal"), false),
             Some(true)
         );
+        // …and a sticky "fullscreen" overrides a legacy pager.toml minimal.
         assert_eq!(
             effective_minimal_preference(false, false, Some("fullscreen"), true),
             Some(false)
         );
+        // "full" alias accepted (same vocabulary as GROK_SCREEN_MODE).
         assert_eq!(
             effective_minimal_preference(false, false, Some("full"), true),
-            Some(false)
-        );
-        // Case must match settings display/canonical path.
-        assert_eq!(
-            effective_minimal_preference(false, false, Some("Minimal"), false),
-            Some(true)
-        );
-        assert_eq!(
-            effective_minimal_preference(false, false, Some("FULLSCREEN"), true),
             Some(false)
         );
     }
 
     #[test]
-    fn preference_unset_or_invalid_config_falls_back_to_legacy_or_none() {
+    fn preference_unset_or_invalid_config_falls_back_to_legacy() {
         assert_eq!(
             effective_minimal_preference(false, false, None, true),
             Some(true)
         );
-        // No sticky preference; caller may apply soft defaults (mouse-leak)
+        // No flag, no config, no legacy bool = no preference (caller defaults).
         assert_eq!(
             effective_minimal_preference(false, false, None, false),
             None
         );
+        // Unparseable values are ignored, not treated as fullscreen.
         assert_eq!(
             effective_minimal_preference(false, false, Some("banana"), true),
             Some(true)
-        );
-        assert_eq!(
-            effective_minimal_preference(false, false, Some("banana"), false),
-            None
-        );
-        // Explicit fullscreen blocks soft defaults.
-        assert_eq!(
-            effective_minimal_preference(false, false, Some("fullscreen"), false),
-            Some(false)
         );
     }
 }

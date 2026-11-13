@@ -353,7 +353,7 @@ fn watch_cwd_dirs(debouncer: &mut Debouncer<AccessFilteredWatcher>, cwd: &Path) 
     if let Err(e) = debouncer.watcher().watch(cwd, RecursiveMode::NonRecursive) {
         log_watch_error(&e, "failed to watch project cwd (non-recursive)");
     }
-    let grok_dir = cwd.join(".grok");
+    let grok_dir = xai_grok_config::project_config_dir(cwd);
     if let Err(e) = debouncer
         .watcher()
         .watch(&grok_dir, RecursiveMode::NonRecursive)
@@ -371,7 +371,7 @@ fn unwatch_cwd_dirs(debouncer: &mut Debouncer<AccessFilteredWatcher>, cwd: &Path
     if let Err(e) = debouncer.watcher().unwatch(cwd) {
         tracing::debug!(error = %e, "failed to unwatch project cwd");
     }
-    let grok_dir = cwd.join(".grok");
+    let grok_dir = xai_grok_config::project_config_dir(cwd);
     if let Err(e) = debouncer.watcher().unwatch(&grok_dir) {
         tracing::debug!(error = %e, "failed to unwatch project .grok directory");
     }
@@ -400,7 +400,10 @@ pub enum DiscoveryChange {
 
 fn discovery_change_for_path(path: &Path) -> Option<DiscoveryChange> {
     let file_name = path.file_name().and_then(|name| name.to_str());
-    if file_name.is_some_and(|name| VENDOR_CONFIG_ROOT_NAMES.contains(&name)) {
+    if file_name.is_some_and(|name| {
+        name == xai_grok_config::project_config_dirname()
+            || VENDOR_CONFIG_ROOT_NAMES.contains(&name)
+    }) {
         return Some(DiscoveryChange::Skills);
     }
     if file_name.is_some_and(|name| name == "workflows")
@@ -435,9 +438,9 @@ fn is_vendor_config_root(dir: &Path, grok_home: &Path) -> bool {
     if paths_equal(dir, grok_home) {
         return true;
     }
-    dir.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| VENDOR_CONFIG_ROOT_NAMES.contains(&n))
+    dir.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+        n == xai_grok_config::project_config_dirname() || VENDOR_CONFIG_ROOT_NAMES.contains(&n)
+    })
 }
 
 fn paths_equal(a: &Path, b: &Path) -> bool {
@@ -465,7 +468,7 @@ fn vendor_skill_refresh_dirs(config_dir: &Path) -> [(PathBuf, RecursiveMode); 3]
 }
 
 fn project_grok_refresh_dirs(project_root: &Path) -> Vec<(PathBuf, RecursiveMode)> {
-    let project_grok = project_root.join(".grok");
+    let project_grok = xai_grok_config::project_config_dir(project_root);
     let mut dirs = vec![(project_grok.clone(), RecursiveMode::NonRecursive)];
     dirs.extend(vendor_skill_refresh_dirs(&project_grok));
     dirs
@@ -553,8 +556,13 @@ fn plan_skills_watch_targets(
     let mut project_parent_watch = None;
     if let Some(project_root) = project_root {
         let mut missing_project_vendor = false;
-        for name in VENDOR_CONFIG_ROOT_NAMES {
-            let vendor_root = project_root.join(name);
+        let mut project_vendor_roots = vec![xai_grok_config::project_config_dir(project_root)];
+        project_vendor_roots.extend(
+            [".agents", ".claude", ".cursor"]
+                .into_iter()
+                .map(|name| project_root.join(name)),
+        );
+        for vendor_root in project_vendor_roots {
             if !dirs_contain(dirs_to_watch, &vendor_root) {
                 missing_project_vendor = true;
                 refresh_dirs.push((vendor_root.clone(), RecursiveMode::NonRecursive));
@@ -589,12 +597,12 @@ impl ProjectDiscoveryWatcher {
         grok_home: &Path,
     ) -> Option<(Self, mpsc::UnboundedReceiver<DiscoveryChange>)> {
         let project_root = crate::session::workflow::registry::project_root(cwd);
-        let project_grok = project_root.join(".grok");
+        let project_grok = xai_grok_config::project_config_dir(&project_root);
         // Grok home's root sees constant unrelated writes from every grok process
         if paths_equal(&project_grok, grok_home) {
             tracing::debug!(
                 project_grok = %project_grok.display(),
-                "project .grok is grok home; skills watcher owns it"
+                "project config dir is grok home; skills watcher owns it"
             );
             return None;
         }

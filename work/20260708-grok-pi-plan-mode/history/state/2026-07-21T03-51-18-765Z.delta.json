@@ -1,0 +1,9 @@
+{
+  "ts": "2026-07-21T03:51:18.765Z",
+  "kind": "delta",
+  "delta": {
+    "updated_at": "2026-07-21T03:51:18.765Z",
+    "notes": "PDCA folder relocated to /Users/dengwenyu/Dev/AI/pi-grok-build/work/20260708-grok-pi-plan-mode; state.project_root is a stale generator value and implementation SSOT is docs/issues/adapter/20260721-grok-pi-plan-mode.md."
+  },
+  "event": "PDCA folder relocated to repository work root; canonical implementation SSOT recorded"
+}

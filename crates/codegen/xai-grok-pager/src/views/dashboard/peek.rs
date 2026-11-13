@@ -385,8 +385,41 @@ fn paint_peek_config_badge(
     reply.render_info_line(buf, info_rect, &info, theme.bg_base, theme, panel.focused);
 }
 
-/// On a too-narrow / too-short area, paints nothing and returns an empty result; the caller can
-/// fall back to the regular dispatch rendering.
+/// Render the peek panel inline in place of the dispatch input.
+///
+/// The panel is a single rounded box that REPLACES the dispatch input
+/// (same screen position): one box containing the recent activity
+/// summary above and a `❯ reply` input at the bottom. Bottom footer
+/// hints flip accordingly (handled in `render_footer`).
+///
+/// Layout (rounded box, 5 rows when full-height):
+///
+/// ```text
+/// ╭───────────────────────────────────────────────────────────╮
+/// │ 2m Running: cargo test · ❯ hello? · working on the fix     │
+/// │                                                            │
+/// │ ❯ reply                                                    │
+/// ╰────────────────────────────────────────────────────────────╯
+/// ```
+///
+/// When a permission is pending, the top line switches to the
+/// question text + numbered options.
+///
+/// On a too-narrow / too-short area, paints nothing and returns an
+/// empty result — the caller can fall back to the regular dispatch
+/// rendering.
+///
+/// `reply` is the dashboard-owned `peek_reply` [`PromptWidget`] backing
+/// the `❯ reply` line (and the reject-feedback slot in question mode);
+/// rendering through the shared widget is what gives the reply paste
+/// chips, selection highlighting, and caret-following scroll for free.
+///
+/// `overlay_area` is the rect above the box for paste-chip text
+/// previews (`None` suppresses them).
+///
+/// Returns the reply caret position (so the caller can park the
+/// terminal cursor) plus the reply input's screen rect (recorded for
+/// mouse routing — click-to-focus and drag selection).
 #[allow(clippy::too_many_arguments)]
 pub fn render_peek_panel(
     buf: &mut Buffer,
@@ -756,6 +789,7 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
             RenderBlock::Workflow(_) => return "Workflow".to_string(),
             RenderBlock::BgTask(_) => return "Task".to_string(),
             RenderBlock::Btw(_) => return "Btw".to_string(),
+            RenderBlock::CreditLimit(_) => return "Credit limit".to_string(),
             RenderBlock::ContextInfo(_) => return "Context".to_string(),
             // The user's latest input marks the turn boundary; there's no agent response after it yet
             RenderBlock::UserPrompt(_) => break,
@@ -852,6 +886,7 @@ fn block_short_text(block: &crate::scrollback::block::RenderBlock) -> Option<Str
         RenderBlock::Workflow(_) => Some("(workflow)".to_string()),
         RenderBlock::Btw(_) => Some("(btw)".to_string()),
         RenderBlock::ContextInfo(_) => Some("(context info)".to_string()),
+        RenderBlock::CreditLimit(_) => Some("(credit limit)".to_string()),
         RenderBlock::MemoryCapture(_) => Some("(memory capture)".to_string()),
         RenderBlock::Stub(_) => None,
     }

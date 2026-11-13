@@ -23,6 +23,8 @@ pub struct ContextInfoBlock {
     pub snapshot: ContextInfo,
     /// Active model name at the time of capture (display-only).
     pub model: String,
+    /// Session-wide cost reported alongside the context snapshot.
+    pub cost_usd: Option<f64>,
 }
 
 /// Shape of the categorical bar: how the 100 cells are laid out. Both shapes hold the same 100 cells, so the visual
@@ -205,12 +207,25 @@ impl ContextInfoBlock {
         Self {
             snapshot,
             model: model.into(),
+            cost_usd: None,
         }
+    }
+
+    /// Attach the session-wide cost returned by `x.ai/session/info`.
+    pub fn with_cost(mut self, cost_usd: Option<f64>) -> Self {
+        self.cost_usd = cost_usd.filter(|cost| cost.is_finite() && *cost >= 0.0);
+        self
     }
 
     /// Build the styled lines for an arbitrary content width.
     /// The usage modal's "Context usage" tab reuses it, so the modal and the minimal-mode scrollback block render the same breakdown.
     pub(crate) fn lines_for_width(&self, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+        self.build_lines(theme, BarLayout::for_width(width))
+    }
+
+    /// Build the native graphical context rows for both scrollback and the
+    /// transient Context modal. Keeping this shared avoids a second renderer.
+    pub(crate) fn modal_lines(&self, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         self.build_lines(theme, BarLayout::for_width(width))
     }
 
@@ -433,6 +448,12 @@ impl ContextInfoBlock {
             ),
             muted,
         )));
+        if let Some(cost_usd) = self.cost_usd {
+            lines.push(Line::from(Span::styled(
+                format!("Cost: ${cost_usd:.3}"),
+                muted,
+            )));
+        }
 
         // The tip about approaching auto-compact only shows in the gap between the "getting close" mark (80%) and the
         // actual auto-compact threshold. A second warning-styled tip suggesting a manual `/compact` would just stack
@@ -634,6 +655,17 @@ mod tests {
     }
 
     #[test]
+    fn build_lines_shows_session_cost_when_reported() {
+        let block = ContextInfoBlock::new(snapshot(), "grok-4").with_cost(Some(0.053));
+        let lines = block.build_lines(&test_theme(), BarLayout::WIDE);
+        assert!(all_text(&lines).contains("Cost: $0.053"));
+
+        let zero_cost = ContextInfoBlock::new(snapshot(), "grok-4").with_cost(Some(0.0));
+        let lines = zero_cost.build_lines(&test_theme(), BarLayout::WIDE);
+        assert!(all_text(&lines).contains("Cost: $0.000"));
+    }
+
+    #[test]
     fn build_lines_contains_header_tokens_and_model() {
         let block = ContextInfoBlock::new(snapshot(), "grok-4");
         let theme = test_theme();
@@ -646,6 +678,26 @@ mod tests {
         // Percent shows 2 decimal places (36.7k / 1m = 3.67%)
         assert!(l2.contains("(3.67%)"), "got: {l2:?}");
         assert_eq!(line_text(&lines, 3), "grok-4");
+    }
+
+    #[test]
+    fn modal_lines_reuse_the_native_graphical_breakdown() {
+        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let lines = block.modal_lines(&test_theme(), 120);
+        let text = all_text(&lines);
+        assert!(text.contains("◆ System prompt"));
+        assert!(text.contains("◇ Free"));
+        assert!(text.contains("◈ Tool definitions"));
+    }
+
+    #[test]
+    fn build_lines_contains_tokens_summary() {
+        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let theme = test_theme();
+        let lines = block.build_lines(&theme, BarLayout::WIDE);
+        let l2 = line_text(&lines, 2);
+        assert!(l2.contains("tokens"));
+        assert!(l2.contains("(3.67%)"));
     }
 
     #[test]

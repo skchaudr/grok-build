@@ -39,6 +39,7 @@ use super::notes::{
     dispatch_save_remember_note_from_modal, dispatch_send_btw, dispatch_send_feedback,
     dispatch_send_recap, dispatch_send_remember_note, dispatch_submit_feedback_modal,
 };
+use super::notifications::dispatch_show_notifications;
 use super::permissions::{
     dispatch_permission_cancel, dispatch_permission_followup, dispatch_permission_select,
 };
@@ -50,7 +51,7 @@ use super::prompt::{
 use super::queue;
 use super::queue::dispatch_drain_queue;
 use super::rewind::{
-    dispatch_rewind, dispatch_rewind_cancel_offer, dispatch_rewind_confirm,
+    dispatch_inline_edit_submit, dispatch_rewind, dispatch_rewind_cancel_offer, dispatch_rewind_confirm,
     dispatch_rewind_confirm_never_ask, dispatch_rewind_dismiss, dispatch_rewind_dismiss_error,
     dispatch_rewind_picker_select, dispatch_rewind_show_picker,
 };
@@ -69,39 +70,55 @@ use super::session::lifecycle::{
 use super::session::load::{
     dispatch_cycle_session_source_filter, dispatch_load_session, dispatch_pick_content_session,
     dispatch_pick_content_session_in_worktree, dispatch_pick_session,
-    dispatch_pick_session_in_worktree, dispatch_session_picker_closed,
-    dispatch_show_session_picker, dispatch_traces_resume, dispatch_trigger_deep_search,
+    dispatch_pick_session_in_worktree, dispatch_refresh_external_session_catalog,
+    dispatch_session_picker_closed, dispatch_show_session_picker, dispatch_traces_resume,
+    dispatch_trigger_deep_search,
     session_picker_entry_matches, session_picker_external_filter_active,
 };
 use super::session::modal::{dispatch_rename_session, dispatch_reset_session_title};
 use super::settings::setters::{
-    clear_default_model, clear_fork_secondary_model, clear_subagent_model_inheritance,
-    preview_auto_dark_theme, preview_auto_light_theme, preview_theme,
-    set_ask_user_question_timeout_enabled, set_auto_dark_theme, set_auto_light_theme,
-    set_auto_update, set_collapsed_edit_blocks, set_combine_queued_prompts, set_compact_mode,
-    set_confirm_before_rewind, set_contextual_hint_export_copy, set_contextual_hint_image_input,
-    set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
-    set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
-    set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
-    set_follow_up_behavior, set_fork_secondary_model, set_group_tool_verbs, set_hunk_tracker_mode,
-    set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
-    set_page_flip_on_send, set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
-    set_respect_manual_folds, set_screen_mode, set_scroll_lines, set_scroll_mode, set_scroll_speed,
-    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_subagent_model_inheritance,
-    set_theme, set_timeline, set_timestamps, set_vim_mode, set_voice_capture_mode,
-    set_voice_keybind_enabled, set_voice_stt_language,
+    clear_default_model, clear_fork_secondary_model, clear_recap_model,
+    clear_subagent_model_inheritance, preview_auto_dark_theme, preview_auto_light_theme,
+    preview_theme, set_ask_user_question_timeout_enabled, set_auto_dark_theme,
+    set_auto_light_theme, set_auto_update, set_cancel_turn_key, set_collapsed_edit_blocks,
+    set_combine_queued_prompts, set_compact_mode, set_confirm_before_rewind,
+    set_contextual_hint_export_copy, set_contextual_hint_image_input,
+    set_contextual_hint_plan_mode, set_contextual_hint_send_now,
+    set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap, set_contextual_hint_undo,
+    set_contextual_hint_word_select, set_ctrl_o_tool_expansion, set_default_model,
+    set_default_selected_permission, set_display_refresh_auto_cadence, set_follow_up_behavior,
+    set_fork_secondary_model, set_group_tool_verbs, set_host_feature_bool,
+    set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection, set_max_thoughts_width,
+    set_model_slot, set_multiline_mode, set_page_flip_on_send,
+    set_pi_ask_user_question_notifications, set_pi_at_search_hidden, set_pi_bash,
+    set_pi_bash_command_format, set_pi_bash_run_display, set_pi_builtin_tool,
+    set_pi_cache_graph, set_pi_config_skill, set_pi_eval, set_pi_eval_mcp,
+    set_pi_eval_v2_display_mode, set_pi_eval_v2_language, set_pi_eval_v2_only,
+    set_pi_keep_multi_agent, set_pi_tree_file_rollback, set_pi_tree_skip_summary_prompt,
+    set_pi_user_markdown, set_progress_bar, set_prompt_cursor, set_prompt_suggestions,
+    set_psm_resume_index, set_recap_mermaid, set_recap_model, set_remember_tool_approvals,
+    set_remote_tui_footer, set_render_mermaid, set_respect_manual_folds,
+    set_review_file_tree, set_review_include_reads, set_screen_mode, set_scroll_lines,
+    set_scroll_mode, set_scroll_speed, set_session_recap, set_show_other_tool_args,
+    set_show_thinking_blocks, set_show_tips, set_side_by_side_edit, set_simple_mode,
+    set_subagent_model_inheritance, set_theme, set_thinking_border_colors, set_timeline,
+    set_timestamps, set_vim_mode, set_voice_capture_mode, set_voice_keybind_enabled,
+    set_voice_stt_language, set_write_edit_hover_popups,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
-    dispatch_open_reset_confirm, dispatch_open_settings, dispatch_toggle_compact_mode,
-    dispatch_toggle_mouse_capture, dispatch_toggle_multiline, dispatch_toggle_timestamps,
-    dispatch_toggle_vim_mode,
+    dispatch_open_model_picker, dispatch_open_pi_config, dispatch_open_pi_models,
+    dispatch_open_pi_settings, dispatch_open_pi_shortcut_manager, dispatch_open_recap_model_picker,
+    dispatch_open_reset_confirm, dispatch_open_scoped_models_picker, dispatch_open_settings,
+    dispatch_open_shortcuts_help, dispatch_toggle_compact_mode, dispatch_toggle_mouse_capture,
+    dispatch_toggle_multiline, dispatch_toggle_timestamps, dispatch_toggle_vim_mode,
 };
 use super::status::{
     dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom, dispatch_open_tutorial,
     dispatch_privacy_banner_opt_in, dispatch_privacy_banner_opt_out, dispatch_share_session,
-    dispatch_show_context_info, dispatch_show_queue, dispatch_show_release_notes,
-    dispatch_show_session_info, dispatch_show_tasks, dispatch_show_usage, set_coding_data_sharing,
+    dispatch_show_context_info, dispatch_show_privacy_info, dispatch_show_queue,
+    dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
+    dispatch_show_usage, set_coding_data_sharing,
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
@@ -304,6 +321,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         } => dispatch_startup_fork_session(app, parent_session_id, parent_cwd, new_session_id),
         Action::FetchSessionList => dispatch_fetch_session_list(app),
         Action::CycleSessionSourceFilter => dispatch_cycle_session_source_filter(app),
+        Action::RefreshExternalSessionCatalog => dispatch_refresh_external_session_catalog(app),
         Action::ShowSessionPicker => {
             if app.workspace_dashboard_enabled
                 && matches!(app.active_view, ActiveView::AgentDashboard)
@@ -313,6 +331,21 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                 dispatch_show_session_picker(app)
             }
         }
+        Action::ShowSessionTree => dispatch_show_session_tree(app),
+        Action::ShowTreeMap => dispatch_show_tree_map(app),
+        Action::ShowNotifications => dispatch_show_notifications(app),
+        Action::NavigateSessionTree {
+            entry_id,
+            summarize,
+            custom_instructions,
+        } => dispatch_navigate_session_tree(app, entry_id, summarize, custom_instructions),
+        Action::LabelSessionTreeEntry { entry_id, label } => {
+            dispatch_label_session_tree_entry(app, entry_id, label)
+        }
+        Action::RollbackFilesPreview { entry_id } => dispatch_rollback_files_preview(app, entry_id),
+        Action::RollbackFilesExecute { entry_id } => dispatch_rollback_files_execute(app, entry_id),
+        Action::SessionTreeClosed => dispatch_session_tree_closed(app),
+
         Action::SessionPickerClosed => dispatch_session_picker_closed(app),
         Action::PickSession(index) => dispatch_pick_session(app, index),
         Action::PickSessionInWorktree(index) => dispatch_pick_session_in_worktree(app, index),
@@ -320,9 +353,8 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ExpandSessionCard { source, session_id } => {
             let native_source = matches!(source.as_str(), "local" | "remote" | "both");
             let conversation_source = source == "conversation";
-            if session_picker_external_filter_active(app)
-                || crate::app::foreign_sessions::is_foreign_picker_source(&source)
-                || (!native_source && !conversation_source)
+            if crate::app::foreign_sessions::is_foreign_picker_source(&source)
+                || (!native_source && !conversation_source && source != "pi")
             {
                 return vec![];
             }
@@ -441,7 +473,16 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             text,
             images,
             image_notice,
-        } => super::interject::dispatch_send_prompt_now(app, text, images, image_notice),
+        } => {
+            if app.external_agent {
+                app.pending_image_notices.extend(image_notice);
+                super::queue::with_held_queue_flush(app, |app| {
+                    dispatch_interject(app, text, images)
+                })
+            } else {
+                super::interject::dispatch_send_prompt_now(app, text, images, image_notice)
+            }
+        }
         Action::EnableVoiceMode => dispatch_enable_voice_mode(app, true),
         Action::VoiceToggle => dispatch_voice_toggle(app),
         Action::VoiceStop => dispatch_voice_stop(app),
@@ -617,6 +658,42 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::Collapse => {
+            if let Some(agent) = get_active_agent_mut(app) {
+                let trace_modal = agent
+                    .scrollback
+                    .selected()
+                    .and_then(|index| agent.scrollback.entry(index))
+                    .filter(|entry| {
+                        entry.display_mode == DisplayMode::Collapsed
+                            && !entry.tool_traces.is_empty()
+                    })
+                    .map(|entry| {
+                        let title = if entry.tool_traces.len() == 1 {
+                            format!("Tool trace · {}", entry.tool_traces[0].title)
+                        } else {
+                            format!("Tool trace · {} calls", entry.tool_traces.len())
+                        };
+                        let content =
+                            crate::scrollback::entry::format_tool_traces_split(&entry.tool_traces);
+                        (title, content)
+                    });
+                if let Some((title, content)) = trace_modal {
+                    agent.active_modal = Some(crate::views::modal::ActiveModal::ToolTraceViewer {
+                        title,
+                        input: content.input,
+                        output: content.output,
+                        input_scroll: 0,
+                        output_scroll: 0,
+                        focus: crate::views::modal::ToolTracePane::Input,
+                        input_area: ratatui::layout::Rect::default(),
+                        output_area: ratatui::layout::Rect::default(),
+                        window: crate::views::modal_window::ModalWindowState::new(),
+                        input_cached_lines: None,
+                        output_cached_lines: None,
+                    });
+                    return vec![];
+                }
+            }
             with_scrollback(app, |s| {
                 let at_minimum = s
                     .selected()
@@ -645,6 +722,36 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::ToggleExpandAll => {
+            use crate::views::modal::ActiveModal;
+            if let Some(agent) = get_active_agent_mut(app)
+                && let Some(ActiveModal::SessionPicker {
+                    state,
+                    entries: Some(entries),
+                    ..
+                }) = agent.active_modal.as_mut()
+            {
+                let all_expanded = (0..entries.len()).all(|index| state.expanded.contains(&index));
+                if all_expanded {
+                    state.expanded.clear();
+                } else {
+                    state.expanded.extend(0..entries.len());
+                }
+                state.scroll_offset = None;
+                return vec![];
+            }
+            if matches!(app.active_view, crate::app::app_view::ActiveView::Welcome)
+                && let Some(entries) = app.session_picker_entries.as_ref()
+            {
+                let all_expanded = (0..entries.len())
+                    .all(|index| app.session_picker_state.expanded.contains(&index));
+                if all_expanded {
+                    app.session_picker_state.expanded.clear();
+                } else {
+                    app.session_picker_state.expanded.extend(0..entries.len());
+                }
+                app.session_picker_state.scroll_offset = None;
+                return vec![];
+            }
             with_scrollback(app, |s| s.toggle_expand_all());
             vec![]
         }
@@ -975,7 +1082,79 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                 enabled,
             }]
         }
-        Action::NextModel => vec![],
+        Action::NextModel => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get_mut(&id) else {
+                return vec![];
+            };
+            let Some((model_id, effort)) = agent.session.models.next_model_selection() else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                agent.session.deferred_model_switch =
+                    Some(crate::app::agent::DeferredModelSwitch {
+                        prev_model_id: agent.session.models.current.clone(),
+                        model_id,
+                        effort,
+                    });
+                return vec![];
+            };
+            agent.session.model_switch_pending = true;
+            vec![Effect::SwitchModel {
+                agent_id: id,
+                session_id,
+                choice: ModelChoice {
+                    effort,
+                    ..ModelChoice::new(model_id)
+                },
+                prev_model_id: None,
+            }]
+        }
+        Action::SetScopedModels(entries) => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get_mut(&id) else {
+                return vec![];
+            };
+            agent.session.models.set_scoped_models(entries);
+            let count = agent.session.models.scoped_models().len();
+            if count == 0 {
+                app.show_toast("Scoped models: all available models");
+            } else {
+                app.show_toast(&format!("Scoped models: {count} selected for this session"));
+            }
+            vec![]
+        }
+        Action::CycleThinkingLevel => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get_mut(&id) else {
+                return vec![];
+            };
+            let Some(model_id) = agent.session.models.current.clone() else {
+                return vec![];
+            };
+            let Some(effort) = agent.session.models.next_reasoning_effort() else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            agent.session.model_switch_pending = true;
+            vec![Effect::SwitchModel {
+                agent_id: id,
+                session_id,
+                choice: ModelChoice {
+                    effort: Some(effort),
+                    ..ModelChoice::new(model_id)
+                },
+                prev_model_id: None,
+            }]
+        }
         Action::SwitchModel(mut choice) => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];
@@ -1153,7 +1332,11 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SendRememberNote(text) => dispatch_send_remember_note(app, text),
         Action::SaveRememberNoteFromModal => dispatch_save_remember_note_from_modal(app),
         Action::SendBtw { question, images } => dispatch_send_btw(app, question, images),
-        Action::SendRecap { auto } => dispatch_send_recap(app, auto),
+        Action::SendRecap {
+            auto,
+            custom_instructions,
+        } => dispatch_send_recap(app, auto, custom_instructions),
+        Action::ShowPrivacyInfo => dispatch_show_privacy_info(app),
         Action::SetCodingDataSharing { opted_in } => set_coding_data_sharing(
             app,
             opted_in,
@@ -1176,9 +1359,16 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetInvertScroll(v) => set_invert_scroll(app, v),
         Action::SetScrollLines(v) => set_scroll_lines(app, v),
         Action::SetShowThinkingBlocks(v) => set_show_thinking_blocks(app, v),
+        Action::SetThinkingBorderColors(v) => set_thinking_border_colors(app, v),
         Action::SetGroupToolVerbs(v) => set_group_tool_verbs(app, v),
         Action::SetCollapsedEditBlocks(v) => set_collapsed_edit_blocks(app, v),
+        Action::SetSideBySideEdit(v) => set_side_by_side_edit(app, v),
+        Action::SetCtrlOToolExpansion(v) => set_ctrl_o_tool_expansion(app, v),
+        Action::SetPiBashRunDisplay(v) => set_pi_bash_run_display(app, v),
+        Action::SetPiBashCommandFormat(v) => set_pi_bash_command_format(app, v),
+        Action::SetWriteEditHoverPopups(v) => set_write_edit_hover_popups(app, v),
         Action::SetPromptSuggestions(v) => set_prompt_suggestions(app, v),
+        Action::SetPromptCursor(v) => set_prompt_cursor(app, v),
         Action::SetRespectManualFolds(v) => set_respect_manual_folds(app, v),
         Action::SetDefaultSelectedPermission(s) => set_default_selected_permission(app, s),
         Action::SetHunkTrackerMode(s) => set_hunk_tracker_mode(app, s),
@@ -1201,6 +1391,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetConfirmBeforeRewind(v) => set_confirm_before_rewind(app, v),
         Action::SetCombineQueuedPrompts(v) => set_combine_queued_prompts(app, v),
         Action::SetFollowUpBehavior(v) => set_follow_up_behavior(app, v),
+        Action::SetCancelTurnKey(v) => set_cancel_turn_key(app, v),
         Action::SetSimpleMode(v) => set_simple_mode(app, v),
         Action::SetContextualHintUndo(v) => set_contextual_hint_undo(app, v),
         Action::SetContextualHintPlanMode(v) => set_contextual_hint_plan_mode(app, v),
@@ -1217,6 +1408,52 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ClearDefaultModel => clear_default_model(app),
         Action::SetForkSecondaryModel(v) => set_fork_secondary_model(app, v),
         Action::ClearForkSecondaryModel => clear_fork_secondary_model(app),
+        Action::SetRecapModel(v) => set_recap_model(app, v),
+        Action::ClearRecapModel => clear_recap_model(app),
+        Action::SetRecapModel2(v) => set_model_slot(app, "recap_model_2", v),
+        Action::ClearRecapModel2 => set_model_slot(app, "recap_model_2", String::new()),
+        Action::SetRecapModel3(v) => set_model_slot(app, "recap_model_3", v),
+        Action::ClearRecapModel3 => set_model_slot(app, "recap_model_3", String::new()),
+        Action::SetBtwModel(v) => set_model_slot(app, "btw_model", v),
+        Action::ClearBtwModel => set_model_slot(app, "btw_model", String::new()),
+        Action::SetBtwModel2(v) => set_model_slot(app, "btw_model_2", v),
+        Action::ClearBtwModel2 => set_model_slot(app, "btw_model_2", String::new()),
+        Action::SetBtwModel3(v) => set_model_slot(app, "btw_model_3", v),
+        Action::ClearBtwModel3 => set_model_slot(app, "btw_model_3", String::new()),
+        Action::OpenModelPicker => dispatch_open_model_picker(app),
+        Action::OpenScopedModelsPicker => dispatch_open_scoped_models_picker(app),
+        Action::OpenRecapModelPicker => dispatch_open_recap_model_picker(app),
+        Action::OpenSideModelPicker { slot_key } => {
+            crate::app::dispatch::settings::ui::dispatch_open_side_model_picker(app, slot_key)
+        }
+        Action::SetSessionRecap(v) => set_session_recap(app, v),
+        Action::SetRecapMermaid(v) => set_recap_mermaid(app, v),
+        Action::SetProgressBar(v) => set_progress_bar(app, v),
+        Action::SetRemoteTuiFooter(v) => set_remote_tui_footer(app, v),
+        Action::SetPiBuiltinTool { tool, enabled } => set_pi_builtin_tool(app, tool, enabled),
+        Action::SetPiBash(enabled) => set_pi_bash(app, enabled),
+        Action::SetPiEval(version) => set_pi_eval(app, version),
+        Action::SetPiEvalV2Language(language) => set_pi_eval_v2_language(app, language),
+        Action::SetPiEvalV2DisplayMode(mode) => set_pi_eval_v2_display_mode(app, mode),
+        Action::SetPiEvalV2Only(enabled) => set_pi_eval_v2_only(app, enabled),
+        Action::SetPiEvalMcp(enabled) => set_pi_eval_mcp(app, enabled),
+        Action::SetPsmResumeIndex(enabled) => set_psm_resume_index(app, enabled),
+        Action::SetPiTreeFileRollback(enabled) => set_pi_tree_file_rollback(app, enabled),
+        Action::SetPiTreeSkipSummaryPrompt(enabled) => {
+            set_pi_tree_skip_summary_prompt(app, enabled)
+        }
+        Action::SetHostFeatureBool { key, enabled } => set_host_feature_bool(app, key, enabled),
+        Action::SetPiAskUserQuestionNotifications(enabled) => {
+            set_pi_ask_user_question_notifications(app, enabled)
+        }
+        Action::SetPiCacheGraph(enabled) => set_pi_cache_graph(app, enabled),
+        Action::SetPiConfigSkill(enabled) => set_pi_config_skill(app, enabled),
+        Action::SetPiUserMarkdown(enabled) => set_pi_user_markdown(app, enabled),
+        Action::SetPiAtSearchHidden(enabled) => set_pi_at_search_hidden(app, enabled),
+        Action::SetPiKeepMultiAgent(enabled) => set_pi_keep_multi_agent(app, enabled),
+        Action::SetShowOtherToolArgs(enabled) => set_show_other_tool_args(app, enabled),
+        Action::SetReviewFileTree(enabled) => set_review_file_tree(app, enabled),
+        Action::SetReviewIncludeReads(enabled) => set_review_include_reads(app, enabled),
         Action::SetMaxThoughtsWidth(v) => set_max_thoughts_width(app, v),
         Action::SetShowTips(v) => set_show_tips(app, v),
         Action::SetAutoUpdate(v) => set_auto_update(app, v),
@@ -1226,9 +1463,15 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PreviewAutoLightTheme(v) => preview_auto_light_theme(app, v),
         Action::OpenSettings => dispatch_open_settings(app, None),
         Action::OpenSettingsFocus { key } => dispatch_open_settings(app, Some(key)),
+        Action::OpenPiSettings => dispatch_open_pi_settings(app, None),
+        Action::OpenPiSettingsFocus { key } => dispatch_open_pi_settings(app, Some(key)),
         Action::PrivacyBannerOptIn => dispatch_privacy_banner_opt_in(app),
         Action::PrivacyBannerOptOut => dispatch_privacy_banner_opt_out(app),
+        Action::OpenPiConfig => dispatch_open_pi_config(app),
+        Action::OpenPiModels => dispatch_open_pi_models(app),
         Action::OpenCommandPalette => dispatch_open_command_palette(app),
+        Action::OpenShortcutsHelp => dispatch_open_shortcuts_help(app),
+        Action::OpenPiShortcutManager => dispatch_open_pi_shortcut_manager(app),
         Action::OpenHowtoGuides => dispatch_open_howto_guides(app),
         Action::OpenResetConfirm { key } => dispatch_open_reset_confirm(app, key),
         Action::ConfirmResetSetting { choice } => dispatch_confirm_reset_setting(app, choice),
@@ -1322,6 +1565,34 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::TriggerDeepSearch => dispatch_trigger_deep_search(app, false),
         Action::ForceDeepSearch => dispatch_trigger_deep_search(app, true),
+        Action::LoadSessionPreview {
+            session_id,
+            session_path,
+        } => {
+            if !app.current_ui.psm_resume_index {
+                return vec![];
+            }
+            app.session_picker_detail_generation =
+                app.session_picker_detail_generation.wrapping_add(1);
+            let generation = app.session_picker_detail_generation;
+            if let Some(agent) = get_active_agent_mut(app)
+                && let Some(crate::views::modal::ActiveModal::SessionPicker {
+                    preview_mode,
+                    preview_messages,
+                    preview_scroll,
+                    ..
+                }) = agent.active_modal.as_mut()
+            {
+                *preview_mode = true;
+                *preview_messages = None; // loading
+                *preview_scroll = 0;
+            }
+            vec![Effect::PiSessionPreview {
+                session_id,
+                session_path,
+                generation,
+            }]
+        }
         Action::PickContentSession { session_id, cwd } => {
             dispatch_pick_content_session(app, session_id, cwd)
         }
@@ -1645,8 +1916,18 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::DashboardCycleMode => {
             let policy_block = app.yolo_policy_block;
             let auto_mode_gate = app.auto_mode_gate;
+            let external_agent = app.external_agent;
             if let Some(d) = app.dashboard.as_mut() {
-                d.pending_mode = d.pending_mode.cycle(auto_mode_gate);
+                d.pending_mode = if external_agent {
+                    match d.pending_mode {
+                        crate::views::dashboard::DashboardDispatchMode::Plan => {
+                            crate::views::dashboard::DashboardDispatchMode::Normal
+                        }
+                        _ => crate::views::dashboard::DashboardDispatchMode::Plan,
+                    }
+                } else {
+                    d.pending_mode.cycle(auto_mode_gate)
+                };
                 if d.pending_mode == crate::views::dashboard::DashboardDispatchMode::AlwaysApprove
                     && let Some(warning) = policy_block
                 {
@@ -1757,8 +2038,53 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             });
             vec![]
         }
+        Action::WorkflowLaunch { name, args } => {
+            let ActiveView::Agent(agent_id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                agent.show_toast("Session is still starting");
+                return vec![];
+            };
+            vec![Effect::WorkflowLaunch {
+                agent_id,
+                session_id,
+                name,
+                args,
+            }]
+        }
+        Action::WorkflowManage { op, target } => {
+            let ActiveView::Agent(agent_id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                agent.show_toast("Session is still starting");
+                return vec![];
+            };
+            vec![Effect::WorkflowManage {
+                agent_id,
+                session_id,
+                op,
+                target,
+            }]
+        }
+
         Action::Rewind => dispatch_rewind(app),
         Action::RewindShowPicker => dispatch_rewind_show_picker(app),
+        Action::JumpShowPicker => dispatch_jump_show_picker(app),
+        Action::JumpPickerSelect(id) => dispatch_jump_picker_select(app, id),
+        Action::JumpDismiss => dispatch_jump_dismiss(app),
+        Action::ReviewShowSession => super::review::dispatch_review_show_session(app),
+        Action::ReviewShowMessagePicker => super::review::dispatch_review_show_message_picker(app),
+        Action::ReviewOpenForTurn(id) => super::review::dispatch_review_open_for_turn(app, id),
+        Action::ReviewDismiss => super::review::dispatch_review_dismiss(app),
+        Action::ReviewAsk(question) => super::review::dispatch_review_ask(app, question),
         Action::RewindPickerSelect(prompt_index) => {
             dispatch_rewind_picker_select(app, prompt_index)
         }
@@ -1767,9 +2093,10 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::RewindCancelOffer => dispatch_rewind_cancel_offer(app),
         Action::RewindDismiss => dispatch_rewind_dismiss(app),
         Action::RewindDismissError => dispatch_rewind_dismiss_error(app),
-        Action::JumpShowPicker => dispatch_jump_show_picker(app),
-        Action::JumpPickerSelect(turn_idx) => dispatch_jump_picker_select(app, turn_idx),
-        Action::JumpDismiss => dispatch_jump_dismiss(app),
+        Action::ViewCatalogEntry { kind, name } => {
+            vec![Effect::FetchCatalogEntry { kind, name }]
+        }
+        Action::InlineEditSubmit => dispatch_inline_edit_submit(app),
     };
     restore_stash_where_the_draft_was_consumed(app);
     app.reconcile_foreign_resume_launch();

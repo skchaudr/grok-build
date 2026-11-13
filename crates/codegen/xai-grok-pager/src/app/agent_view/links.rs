@@ -670,6 +670,7 @@ mod link_click_tests {
                 mouse_pos: None,
                 tip: None,
             },
+            &crate::app::bundle::BundleState::default(),
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -985,7 +986,7 @@ mod link_click_tests {
         draw_banner_frame(child, &reg, &[], 0);
         assert!(
             child.hit_bg_button.rect.is_none(),
-            "read-only child view must not advertise a background button"
+            "child view must not advertise a nested background button"
         );
     }
     /// Header twin: the top-header upgrade CTA rect must drop under an open dropdown too (the occluder variant of this test lives below).
@@ -2432,6 +2433,7 @@ mod link_click_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
+            &crate::app::bundle::BundleState::default(),
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -2539,6 +2541,7 @@ mod link_click_tests {
                 tip: Some("ZZSESSIONTIPZZ never shown in agent view"),
                 ..crate::app::agent_view::BannerSlotParams::none()
             },
+            &crate::app::bundle::BundleState::default(),
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -2612,6 +2615,7 @@ mod link_click_tests {
                 mouse_pos: None,
                 tip: Some(long_tip.as_str()),
             },
+            &crate::app::bundle::BundleState::default(),
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -2780,7 +2784,7 @@ mod link_click_tests {
         );
     }
     #[test]
-    fn subagent_esc_cancels_open_search_before_closing_view() {
+    fn subagent_esc_never_closes_view_and_q_does() {
         let reg = ActionRegistry::defaults();
         let mut parent = make_agent();
         let (mut child, _) = make_search_agent();
@@ -2807,8 +2811,14 @@ mod link_click_tests {
         );
         parent.handle_input(&esc, &reg);
         assert!(
+            parent.active_subagent.is_some(),
+            "Esc must not close the subagent view"
+        );
+        let q = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        parent.handle_input(&q, &reg);
+        assert!(
             parent.active_subagent.is_none(),
-            "Esc closes the subagent view once no search is open"
+            "q closes the subagent view"
         );
     }
     #[test]

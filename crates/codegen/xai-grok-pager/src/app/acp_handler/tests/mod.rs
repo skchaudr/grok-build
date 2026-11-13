@@ -1413,11 +1413,20 @@ pub(super) fn make_ext_session_notification_with_method(
     method: &str,
     update: XaiSessionUpdate,
 ) -> AcpClientMessage {
+    make_ext_session_notification_with_method_and_meta(session_id, method, update, None)
+}
+
+pub(super) fn make_ext_session_notification_with_method_and_meta(
+    session_id: &str,
+    method: &str,
+    update: XaiSessionUpdate,
+    meta: Option<serde_json::Value>,
+) -> AcpClientMessage {
     let (tx, _rx) = tokio::sync::oneshot::channel();
     let payload = SessionNotification {
         session_id: acp_fixtures::session_id(session_id),
         update,
-        meta: None,
+        meta,
     };
     let request = acp_fixtures::ext_notification(method, &payload);
     AcpClientMessage::ExtNotification(xai_acp_lib::AcpArgs {

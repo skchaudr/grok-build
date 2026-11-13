@@ -129,9 +129,15 @@ pub(super) fn dispatch_permission_select(
     let enable_always_approve =
         option_id.0.as_ref() == xai_grok_workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID;
 
-    // Remember the user's choice (by option kind) so the next prompt's cursor sticks to it
-    // Allow-flavored choices only: a rejection must not steer a later prompt's cursor onto a reject row
-    // Letting it stick would steer an unrelated later prompt onto its "always allow this command" row, escalating scope
+    // Remember the user's choice (by option kind) so the next prompt's cursor
+    // sticks to it. Skip the two options that aren't per-prompt choices:
+    //  - the global always-approve (YOLO) option flips global auto-approve, so
+    //    there will be no subsequent prompt to land on;
+    //  - "allow all edits during this session" is edit-scoped (kind
+    //    `AllowAlways`) — letting it stick would steer an unrelated later
+    //    prompt onto its "always allow this command" row, escalating scope.
+    // Allow-flavored choices only: a rejection must not steer a later prompt's
+    // cursor onto a reject row (enforced by the kind filter below).
     let steers_next_cursor = !enable_always_approve
         && option_id.0.as_ref() != xai_grok_workspace::permission::ALLOW_EDITS_SESSION_OPTION_ID;
     if steers_next_cursor
@@ -140,10 +146,12 @@ pub(super) fn dispatch_permission_select(
             .iter()
             .find(|o| o.option_id == option_id)
             .map(|o| o.kind)
-        && matches!(
-            kind,
-            acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways
-        )
+            .filter(|kind| {
+                matches!(
+                    kind,
+                    acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways
+                )
+            })
     {
         crate::appearance::permission_cursor::set_last_used_permission(
             crate::appearance::permission_cursor::DefaultSelectedPermission::from_kind(&kind),

@@ -966,6 +966,50 @@ async fn persist_setting_unknown_key_returns_err() {
 }
 /// Type-mismatch returns Err, not panic: the parser runs inside spawned tasks.
 #[tokio::test]
+async fn persist_setting_type_mismatch_errors_pi_todo() {
+    use crate::settings::SettingValue;
+    let r = persist_setting("pi_todo", SettingValue::String("nope".into())).await;
+    let err = r.expect_err("pi_todo with String payload must return Err");
+    assert!(
+        err.contains("persist_setting(pi_todo) expected Bool"),
+        "Pi todo setting must reach its typed persist arm, got: {err}",
+    );
+}
+
+#[tokio::test]
+async fn persist_setting_type_mismatch_errors_pi_subagents() {
+    use crate::settings::SettingValue;
+    let r = persist_setting("pi_subagents", SettingValue::String("nope".into())).await;
+    let err = r.expect_err("pi_subagents with String payload must return Err");
+    assert!(
+        err.contains("persist_setting(pi_subagents) expected Bool"),
+        "Pi setting must reach its typed persist arm, got: {err}",
+    );
+}
+
+#[tokio::test]
+async fn persist_setting_type_mismatch_errors_pi_config_skill() {
+    use crate::settings::SettingValue;
+    let r = persist_setting("pi_config_skill", SettingValue::String("nope".into())).await;
+    let err = r.expect_err("pi_config_skill with String payload must return Err");
+    assert!(
+        err.contains("persist_setting(pi_config_skill) expected Bool"),
+        "Pi config skill setting must reach its typed persist arm, got: {err}",
+    );
+}
+
+#[tokio::test]
+async fn persist_setting_theme_keeps_pi_string_variant() {
+    use crate::settings::SettingValue;
+    let r = persist_setting("theme", SettingValue::Bool(true)).await;
+    let err = r.expect_err("theme with Bool payload must return Err");
+    assert!(
+        err.contains("persist_setting(theme) expected Enum|String"),
+        "Pi themes require String persistence support, got: {err}",
+    );
+}
+
+#[tokio::test]
 async fn persist_setting_type_mismatch_errors_compact_mode() {
     use crate::settings::SettingValue;
     let r = persist_setting("compact_mode", SettingValue::String("nope".into())).await;
@@ -2893,6 +2937,10 @@ fn make_session_info(
     xai_grok_shell::session::SessionInfoResponse {
         session_id: "test-session-id".into(),
         cwd: "/tmp/test".into(),
+        session_name: None,
+        session_file: None,
+        session_stats: None,
+        cache_metrics: None,
         data: SessionInfoData {
             agent_name: None,
             model: Some(model.into()),
@@ -2912,6 +2960,20 @@ fn make_session_info(
             },
         },
     }
+}
+#[test]
+fn session_info_context_uses_k_units() {
+    let info = make_session_info("auto", None, 12_345, 200_000);
+    let fields = session_info_fields(&info, None, false);
+    let context = fields
+        .iter()
+        .find(|field| field.label == "Context")
+        .expect("context row");
+    assert!(
+        context.value.starts_with("12.3k / 200k tokens"),
+        "{}",
+        context.value
+    );
 }
 #[test]
 fn format_session_info_session_auth_ignores_api_key_env() {
@@ -3178,6 +3240,54 @@ fn worktree_resume_failure_sanitizes_detail_before_hint() {
     let id_msg = worktree_resume_failure_message(None, &sanitize_user_error(raw));
     assert_eq!(id_msg, "couldn't resume worktree session: No space left on device");
 }
+/// A resume-picker entry converts to a **dormant** dashboard roster row
+/// (the non-leader idle source) preserving title, cwd, model, worktree
+/// flag, origin, and last-change time.
+#[test]
+fn session_picker_entry_maps_to_dormant_roster_row() {
+    use crate::app::app_view::SessionPickerEntry;
+    use crate::app::roster::RosterActivity;
+    let updated = chrono::Utc::now();
+    let entry = SessionPickerEntry {
+        id: "sess-1".to_string(),
+        summary: "Wire up dashboard".to_string(),
+        name: None,
+        first_message: None,
+        session_path: None,
+        total_tokens: None,
+        total_cost: None,
+        updated_at: updated,
+        created_at: updated,
+        cwd: "/repo/app".to_string(),
+        hostname: Some("box".to_string()),
+        source: "local".to_string(),
+        model_id: Some("grok-4".to_string()),
+        num_messages: 3,
+        last_active_at: Some(updated),
+        branch: None,
+        repo_name: "repo-app".to_string(),
+        worktree_label: Some("wt".to_string()),
+        parent_session_path: None,
+        last_turn_summary: Some("Fixed the parser".to_string()),
+        last_recap: None,
+        card_detail: None,
+    };
+    let roster = session_picker_entry_to_roster(&entry);
+    assert_eq!(roster.session_id, "sess-1");
+    assert_eq!(roster.title.as_deref(), Some("Wire up dashboard"));
+    assert_eq!(roster.cwd, "/repo/app");
+    assert!(roster.is_worktree, "worktree_label present → is_worktree");
+    assert_eq!(roster.model_id.as_deref(), Some("grok-4"));
+    assert_eq!(roster.activity, RosterActivity::Dormant);
+    assert_eq!(
+            roster.last_turn_summary.as_deref(),
+            Some("Fixed the parser")
+        );
+    assert!(!roster.resident);
+    assert_eq!(roster.last_change_unix_ms, updated.timestamp_millis());
+    assert_eq!(roster.origin.kind, "local");
+    assert_eq!(roster.origin.host.as_deref(), Some("box"));
+}
 #[test]
 fn rewind_execute_params_sends_conversation_only_with_force() {
     let params = rewind_execute_params("sess-1", 3);
@@ -3269,6 +3379,24 @@ fn upload_trace_request_without_intent_keeps_legacy_wire_shape() {
             r#"{"sessionId":"sess-1"}"#
         );
 }
+#[test]
+fn remote_tui_enqueues_rapid_keys_in_order_before_tasks_run() {
+    let (client, mut agent) = xai_acp_lib::acp_channels();
+    for key in "deepseek".chars() {
+        super::enqueue_remote_tui(&client.tx, "pi/ui/remote_tui/input",
+            serde_json::json!({"id": "picker", "data": key.to_string()}));
+    }
+    let mut received = String::new();
+    while let Ok(message) = agent.rx.try_recv() {
+        let xai_acp_lib::AcpAgentMessage::ExtNotification(args) = message else {
+            panic!("expected keyboard notification");
+        };
+        let value: serde_json::Value = serde_json::from_str(args.request.params.get()).unwrap();
+        received.push_str(value["data"].as_str().unwrap());
+    }
+    assert_eq!(received, "deepseek");
+}
+
 /// Every answer the shell can give, plus a dead channel and a broken peer, comes back as `TeamCapabilityHydrated` for the identity that asked.
 /// The serialization arm is not in the table: `HydrateTeamCapabilityRequest` is two `Option<String>`s, whose `Serialize` cannot fail, so no input reaches it.
 #[tokio::test]

@@ -56,8 +56,39 @@ pub enum SettingsKeyOutcome {
 /// One row in the visible flat list: either a category header (non-selectable) or a setting row (selectable, dispatchable).
 #[derive(Debug, Clone)]
 pub enum RowEntry {
-    Header { category: SettingCategory },
-    Setting { key: SettingKey, meta_index: usize },
+    /// Tab heading. Hidden while browsing a tab (the tab bar names it) and
+    /// rendered only in global-search results, where matches from several
+    /// tabs share one list.
+    Header {
+        category: SettingCategory,
+    },
+    /// Sidebar section heading, also drawn inline above the section's first
+    /// row in the settings pane. Hidden in global-search results.
+    Section {
+        category: SettingCategory,
+        name: &'static str,
+    },
+    Setting {
+        key: SettingKey,
+        meta_index: usize,
+    },
+}
+
+impl RowEntry {
+    /// The tab this row belongs to.
+    pub fn category(&self, registry: &SettingsRegistry) -> Option<SettingCategory> {
+        match self {
+            Self::Header { category } | Self::Section { category, .. } => Some(*category),
+            Self::Setting { meta_index, .. } => {
+                registry.all().get(*meta_index).map(|meta| meta.category)
+            }
+        }
+    }
+
+    /// Whether the cursor can land on this row.
+    pub fn is_selectable(&self) -> bool {
+        matches!(self, Self::Setting { .. })
+    }
 }
 
 /// Read-only projection of the modal's private discriminated state.
@@ -165,8 +196,17 @@ pub struct SettingsModalState {
     /// `UiConfig` snapshot, refreshed by the dispatcher on mutations.
     pub ui_snapshot: UiConfig,
     pub pager_snapshot: PagerLocalSnapshot,
-    /// Computed row layout (headers and settings, in render order).
+    /// Every tab's rows (tab heading + section headings + settings), in
+    /// render order. Which subset is on screen is `filtered_cache`.
     pub rows: Vec<RowEntry>,
+    /// Tabs with at least one visible row, in `SettingCategory::ALL` order.
+    /// Parallel to the modal chrome's tab bar.
+    pub tabs: Vec<SettingCategory>,
+    /// Index into `tabs` of the tab being browsed.
+    pub active_tab: usize,
+    /// True while the keyboard drives the section sidebar instead of the
+    /// setting rows: Up/Down then jump whole sections.
+    pub section_focus: bool,
     /// Index into `rows` of the focused row.
     pub selected: usize,
     /// Vertical scroll offset (line-granular).
@@ -194,11 +234,13 @@ pub struct SettingsModalState {
     pub settings_breadcrumb_rect: Option<Rect>,
     /// Hover flag for the breadcrumb; hovering adds an underline.
     pub breadcrumb_hovered: bool,
-    /// Keys whose description is expanded (Right/l to expand, Left/h to collapse).
-    /// Multiple rows can be expanded simultaneously.
+    /// Click-hit rect per sidebar section, parallel to [`Self::sections`].
+    /// Clicking one jumps to that section's first row.
+    pub sidebar_rects: Vec<Rect>,
+    /// Keys whose description is expanded inline. Multiple rows may remain expanded.
     pub expanded_keys: std::collections::HashSet<&'static str>,
-    /// Row under the mouse cursor for hover highlighting.
-    /// Indexes `rows` in Browse, `picker_choice_rects` in PickingEnum, always `None` in EditingValue.
+    /// Row under the mouse cursor for hover highlighting. Indexes `rows` in Browse,
+    /// `picker_choice_rects` in PickingEnum, always `None` in EditingValue.
     pub hover_row: Option<usize>,
     /// When true, Esc/Enter from `PickingEnum` close the modal instead of returning to Browse.
     /// Set by deep-link open (`OpenSettingsFocus` / `/privacy`); cleared on leave from the picker.
@@ -235,18 +277,22 @@ impl SettingsModalState {
         visibility: RowVisibility,
     ) -> Self {
         let rows = build_rows(&registry, visibility);
+        let tabs = build_tabs(&rows);
         // Start on the first selectable (non-header) row.
         let selected = rows
             .iter()
             .position(|r| matches!(r, RowEntry::Setting { .. }))
             .unwrap_or(0);
-        let filtered_cache = compute_filtered(&rows, &registry, "");
+        let filtered_cache = compute_filtered(&rows, &registry, "", tabs.first().copied());
         Self {
-            window: ModalWindowState::new(),
+            window: ModalWindowState::with_tabs(tabs.len()),
             registry,
             ui_snapshot,
             pager_snapshot,
             rows,
+            tabs,
+            active_tab: 0,
+            section_focus: false,
             selected,
             scroll_offset: 0,
             state: SettingsState {
@@ -261,6 +307,7 @@ impl SettingsModalState {
             picker_choice_rects: Vec::new(),
             settings_breadcrumb_rect: None,
             breadcrumb_hovered: false,
+            sidebar_rects: Vec::new(),
             expanded_keys: std::collections::HashSet::new(),
             hover_row: None,
             close_on_picker_exit: false,
@@ -292,23 +339,36 @@ impl SettingsModalState {
                 let meta = self.registry.all().get(*meta_index)?;
                 Some((*key, meta))
             }
-            RowEntry::Header { .. } => None,
+            RowEntry::Header { .. } | RowEntry::Section { .. } => None,
         }
     }
 
-    /// Focus a setting by registry key (Browse mode).
-    /// Returns whether the key was found; no-op if missing.
+    /// Focus a setting by registry key (Browse mode), switching to the tab
+    /// that owns it. Returns whether the key was found; no-op if missing.
+
     pub fn focus_key(&mut self, key: &str) -> bool {
-        if let Some(idx) = self
+        let Some(idx) = self
             .rows
             .iter()
             .position(|r| matches!(r, RowEntry::Setting { key: k, .. } if *k == key))
+        else {
+            return false;
+        };
+        self.selected = idx;
+        // Deep links can target any tab; bring it forward before clamping,
+        // otherwise the row is filtered out and the clamp snaps away from it.
+        if let Some(category) = self.rows[idx].category(&self.registry)
+            && let Some(tab) = self.tabs.iter().position(|t| *t == category)
+            && tab != self.active_tab
         {
-            self.selected = idx;
-            self.clamp_selected_to_visible();
-            return true;
+            self.active_tab = tab;
+            self.window.active_tab = tab;
+            self.section_focus = false;
+            self.scroll_offset = 0;
+            self.invalidate_filter();
         }
-        false
+        self.clamp_selected_to_visible();
+        true
     }
 
     /// Filtered row indices in render order.
@@ -316,7 +376,143 @@ impl SettingsModalState {
         &self.filtered_cache
     }
 
-    /// Rebuild rows from current process gates (voice / kitty) and the open-time visibility snapshot.
+    // -- Tabs ---------------------------------------------------------------
+
+    /// The category being browsed, or `None` when the registry is empty.
+    pub fn active_tab_category(&self) -> Option<SettingCategory> {
+        self.tabs.get(self.active_tab).copied()
+    }
+
+    /// Tab-bar labels, parallel to [`Self::tabs`].
+    pub fn tab_labels(&self) -> Vec<&'static str> {
+        self.tabs.iter().map(|cat| cat.tab_label()).collect()
+    }
+
+    /// Focus tab `idx`, snapping the selection to its first setting row.
+    /// A no-op (returning `false`) when already there or out of range.
+    pub fn set_active_tab(&mut self, idx: usize) -> bool {
+        if idx >= self.tabs.len() || idx == self.active_tab {
+            return false;
+        }
+        self.active_tab = idx;
+        self.window.active_tab = idx;
+        self.section_focus = false;
+        self.scroll_offset = 0;
+        self.hover_row = None;
+        // Leaving search behind: tab switching is a browse-mode gesture.
+        if !self.query().is_empty() {
+            self.state.filter.reset();
+        }
+        self.invalidate_filter();
+        self.select_first_visible();
+        true
+    }
+
+    /// Step the active tab by `delta`, wrapping at both ends.
+    pub fn cycle_tab(&mut self, delta: isize) -> bool {
+        if self.tabs.len() < 2 {
+            return false;
+        }
+        let len = self.tabs.len() as isize;
+        let next = (self.active_tab as isize + delta).rem_euclid(len) as usize;
+        self.set_active_tab(next)
+    }
+
+    /// Point the active tab at whichever tab owns the focused row. Used in
+    /// search mode, where results from several tabs share one list.
+    pub fn sync_tab_to_selection(&mut self) -> bool {
+        let Some(category) = self
+            .rows
+            .get(self.selected)
+            .and_then(|row| row.category(&self.registry))
+        else {
+            return false;
+        };
+        let Some(idx) = self.tabs.iter().position(|tab| *tab == category) else {
+            return false;
+        };
+        if idx == self.active_tab {
+            return false;
+        }
+        self.active_tab = idx;
+        self.window.active_tab = idx;
+        true
+    }
+
+    // -- Sections -----------------------------------------------------------
+
+    /// Sidebar sections of the current view as `(name, first row index)`,
+    /// in render order. Empty while searching (results are tab-grouped).
+    pub fn sections(&self) -> Vec<(&'static str, usize)> {
+        if !self.query().is_empty() {
+            return Vec::new();
+        }
+        let mut sections: Vec<(&'static str, usize)> = Vec::new();
+        let mut pending: Option<&'static str> = None;
+        for &row_idx in &self.filtered_cache {
+            match self.rows.get(row_idx) {
+                Some(RowEntry::Section { name, .. }) => pending = Some(name),
+                Some(RowEntry::Setting { .. }) => {
+                    if let Some(name) = pending.take() {
+                        sections.push((name, row_idx));
+                    }
+                }
+                _ => {}
+            }
+        }
+        sections
+    }
+
+    /// Index into [`Self::sections`] of the section containing the focused
+    /// row. Falls back to the first section when the selection precedes all
+    /// of them.
+    pub fn active_section_index(&self) -> usize {
+        let sections = self.sections();
+        sections
+            .iter()
+            .rposition(|(_, first)| *first <= self.selected)
+            .unwrap_or(0)
+    }
+
+    /// Move the selection to the first row of the section `delta` steps away,
+    /// wrapping at both ends.
+    pub fn jump_section(&mut self, delta: isize) -> bool {
+        let sections = self.sections();
+        if sections.len() < 2 {
+            return false;
+        }
+        let len = sections.len() as isize;
+        let next = (self.active_section_index() as isize + delta).rem_euclid(len) as usize;
+        let target = sections[next].1;
+        if target == self.selected {
+            return false;
+        }
+        self.selected = target;
+        true
+    }
+
+    /// Toggle keyboard focus between the section sidebar and the setting
+    /// rows. Engages only when there are ≥2 sections to jump between.
+    pub fn toggle_section_focus(&mut self) -> bool {
+        let engage = !self.section_focus && self.sections().len() >= 2;
+        if engage == self.section_focus {
+            return false;
+        }
+        self.section_focus = engage;
+        true
+    }
+
+    /// Snap the selection to the first selectable row currently visible.
+    pub(super) fn select_first_visible(&mut self) {
+        for &row_idx in &self.filtered_cache {
+            if self.rows[row_idx].is_selectable() {
+                self.selected = row_idx;
+                return;
+            }
+        }
+    }
+
+    /// Rebuild rows from current process gates (voice / kitty / minimal).
     /// Keeps focus on the same key when possible; exits sub-panes if the key vanished.
     pub fn rebuild_rows(&mut self) {
         let prev_key = self.focused_setting().map(|(k, _)| k);
@@ -328,7 +524,18 @@ impl SettingsModalState {
             SettingsMode::Browse | SettingsMode::FilterFocused => None,
         };
 
+        // Gates can retire a tab wholesale (e.g. voice rows in the Editor
+        // tab); keep the same category focused when it survives.
+        let prev_tab = self.active_tab_category();
         self.rows = build_rows(&self.registry, self.visibility);
+        self.tabs = build_tabs(&self.rows);
+        self.window.tab_count = self.tabs.len();
+        self.window.tab_rects = vec![None; self.tabs.len()];
+        self.active_tab = prev_tab
+            .and_then(|cat| self.tabs.iter().position(|t| *t == cat))
+            .unwrap_or(0)
+            .min(self.tabs.len().saturating_sub(1));
+        self.window.active_tab = self.active_tab;
         self.invalidate_filter();
 
         if let Some(key) = subpane_key {
@@ -341,22 +548,19 @@ impl SettingsModalState {
             }
         }
 
-        if let Some(key) = prev_key {
-            if let Some(idx) = self
+        if let Some(key) = prev_key
+            && let Some(idx) = self
                 .rows
                 .iter()
                 .position(|r| matches!(r, RowEntry::Setting { key: k, .. } if *k == key))
-            {
-                self.selected = idx;
-            } else {
-                self.selected = self
-                    .rows
-                    .iter()
-                    .position(|r| matches!(r, RowEntry::Setting { .. }))
-                    .unwrap_or(0);
-            }
+        {
+            self.selected = idx;
         } else {
-            self.clamp_selected_to_visible();
+            self.select_first_visible();
+        }
+        self.clamp_selected_to_visible();
+        if self.section_focus && self.sections().len() < 2 {
+            self.section_focus = false;
         }
     }
 
@@ -423,10 +627,14 @@ impl SettingsModalState {
         }
     }
 
-    /// Recompute `filtered_cache` from the current `query`.
+    /// Recompute `filtered_cache` from the current query and active tab.
     pub(super) fn invalidate_filter(&mut self) {
-        self.filtered_cache =
-            compute_filtered(&self.rows, &self.registry, self.state.filter.text());
+        self.filtered_cache = compute_filtered(
+            &self.rows,
+            &self.registry,
+            self.state.filter.text(),
+            self.tabs.get(self.active_tab).copied(),
+        );
     }
 
     /// Snap `selected` to the first visible setting if filtered out.
@@ -437,17 +645,7 @@ impl SettingsModalState {
         if self.filtered_cache.contains(&self.selected) {
             return;
         }
-        // Snap to first selectable row in the visible filter.
-        for &row_idx in &self.filtered_cache {
-            if self
-                .rows
-                .get(row_idx)
-                .is_some_and(|r| matches!(r, RowEntry::Setting { .. }))
-            {
-                self.selected = row_idx;
-                return;
-            }
-        }
+        self.select_first_visible();
     }
 
     /// Read the current value for a setting key.
@@ -541,6 +739,7 @@ impl SettingsModalState {
         self.picker_choice_rects.clear();
         self.settings_breadcrumb_rect = None;
         self.breadcrumb_hovered = false;
+        self.sidebar_rects.clear();
     }
 
     /// Transition to Browse, clearing sub-pane hover/breadcrumb state to prevent stale hit-rects across mode changes.
@@ -614,6 +813,18 @@ impl SettingsModalState {
                 return false;
             };
             if self.row_lock(key).is_some() {
+                return false;
+            }
+            // Side-model slots use OpenSideModelPicker (searchable ArgPicker), not this list.
+            if matches!(
+                key,
+                "recap_model"
+                    | "recap_model_2"
+                    | "recap_model_3"
+                    | "btw_model"
+                    | "btw_model_2"
+                    | "btw_model_3"
+            ) {
                 return false;
             }
             // Handles both static `Enum` and `DynamicEnum` catalogs.
@@ -809,26 +1020,40 @@ impl SettingsModalState {
     }
 }
 
-/// Compute filtered row indices for a query.
-/// Headers are emitted only when at least one setting in their section matches.
-/// Returns all indices when `query` is empty.
+/// Compute the visible row indices.
+///
+/// Empty query = browsing: the active tab's section headings and settings,
+/// tab headings suppressed (the tab bar already names the tab). Non-empty
+/// query = global search across every tab: matching settings only, each
+/// tab's block introduced by its heading, section headings suppressed.
+
 pub(super) fn compute_filtered(
     rows: &[RowEntry],
     registry: &SettingsRegistry,
     query: &str,
+    active_tab: Option<SettingCategory>,
 ) -> Vec<usize> {
     if query.is_empty() {
-        return (0..rows.len()).collect();
+        let Some(tab) = active_tab else {
+            return Vec::new();
+        };
+        return rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                !matches!(row, RowEntry::Header { .. }) && row.category(registry) == Some(tab)
+            })
+            .map(|(i, _)| i)
+            .collect();
     }
     let matched_keys: Vec<SettingKey> = registry.search(query).iter().map(|m| m.key).collect();
     let mut result = Vec::new();
     let mut pending_header: Option<usize> = None;
     for (i, row) in rows.iter().enumerate() {
         match row {
-            RowEntry::Header { .. } => {
-                // Emit header only when section has a match.
-                pending_header = Some(i);
-            }
+            // Emit the tab heading lazily — only once its tab has a match.
+            RowEntry::Header { .. } => pending_header = Some(i),
+            RowEntry::Section { .. } => {}
             RowEntry::Setting { key, .. } => {
                 if matched_keys.contains(key) {
                     if let Some(h) = pending_header.take() {
@@ -843,6 +1068,9 @@ pub(super) fn compute_filtered(
 }
 
 /// Row visibility: voice rows need the voice gate; capture needs key releases;
+/// `hidden_in_minimal` rows are dropped in minimal mode; `external_only` rows
+/// are hidden unless the process runs the external-agent (grok-pi) profile.
+
 /// `hidden_in_minimal` rows drop when `hide_appearance` is set.
 /// Pure for unit tests.
 pub(super) fn setting_row_visible(
@@ -850,6 +1078,7 @@ pub(super) fn setting_row_visible(
     kitty_releases: bool,
     hide_appearance: bool,
     voice_mode: bool,
+    external_agent: bool,
 ) -> bool {
     if !voice_mode
         && matches!(
@@ -865,13 +1094,19 @@ pub(super) fn setting_row_visible(
     if hide_appearance && meta.hidden_in_minimal {
         return false;
     }
+    if meta.external_only && !external_agent {
+        return false;
+    }
     true
 }
 
 fn build_rows(registry: &SettingsRegistry, visibility: RowVisibility) -> Vec<RowEntry> {
     let kitty_releases = crate::app::kitty_releases_reported();
     let voice_mode = crate::app::voice_mode_enabled();
-    // Keys that belong to a group sub-sheet are rendered only inside that sheet, never as their own top-level rows
+    let external_agent = crate::app::external_agent_active();
+    // Keys that belong to a group sub-sheet are rendered only inside that
+    // sheet, never as their own top-level rows.
+
     let group_children: std::collections::HashSet<SettingKey> = registry
         .all()
         .iter()
@@ -884,36 +1119,132 @@ fn build_rows(registry: &SettingsRegistry, visibility: RowVisibility) -> Vec<Row
         .collect();
     let mut rows = Vec::new();
     for cat in SettingCategory::ALL {
-        let mut emitted_header = false;
-        for (meta_index, meta) in registry.all().iter().enumerate() {
-            if meta.category != *cat {
-                continue;
+        let visible: Vec<(usize, &SettingMeta)> = registry
+            .all()
+            .iter()
+            .enumerate()
+            .filter(|(_, meta)| meta.category == *cat)
+            .filter(|(_, meta)| {
+                setting_row_visible(
+                    meta,
+                    kitty_releases,
+                    visibility.hide_appearance,
+                    voice_mode,
+                    external_agent,
+                )
+            })
+            .filter(|(_, meta)| !group_children.contains(meta.key))
+            .collect();
+        if visible.is_empty() {
+            continue;
+        }
+        rows.push(RowEntry::Header { category: *cat });
+        // Sidebar order comes from the layout table; within a section the
+        // registry's declaration order is preserved.
+        for section in crate::settings::sections_for(*cat) {
+            let mut emitted_section = false;
+            for (meta_index, meta) in &visible {
+                if crate::settings::section_for(meta.key) != *section {
+                    continue;
+                }
+                if !emitted_section {
+                    rows.push(RowEntry::Section {
+                        category: *cat,
+                        name: section,
+                    });
+                    emitted_section = true;
+                }
+                rows.push(RowEntry::Setting {
+                    key: meta.key,
+                    meta_index: *meta_index,
+                });
             }
-            if !setting_row_visible(meta, kitty_releases, visibility.hide_appearance, voice_mode) {
-                continue;
-            }
-            if group_children.contains(meta.key) {
-                continue;
-            }
-            if !emitted_header {
-                rows.push(RowEntry::Header { category: *cat });
-                emitted_header = true;
-            }
-            rows.push(RowEntry::Setting {
-                key: meta.key,
-                meta_index,
-            });
         }
     }
     rows
 }
 
+/// Tabs with at least one visible row, in `SettingCategory::ALL` order.
+fn build_tabs(rows: &[RowEntry]) -> Vec<SettingCategory> {
+    rows.iter()
+        .filter_map(|row| match row {
+            RowEntry::Header { category } => Some(*category),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Construct the typed `Action::Set*` for a Bool setting.
 pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
+    if let Some(spec) = xai_grok_shell::host_features::feature_spec_by_setting_key(key) {
+        return Some(Action::SetHostFeatureBool {
+            key: spec.key,
+            enabled: new,
+        });
+    }
     match key {
         "compact_mode" => Some(Action::SetCompactMode(new)),
         "show_timestamps" => Some(Action::SetTimestamps(new)),
         "show_timeline" => Some(Action::SetTimeline(new)),
+        "pi_builtin_tools.read" => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Read,
+            enabled: new,
+        }),
+        "pi_builtin_tools.bash" => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Bash,
+            enabled: new,
+        }),
+        "pi_builtin_tools.powershell" => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::PowerShell,
+            enabled: new,
+        }),
+        "pi_builtin_tools.edit" => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Edit,
+            enabled: new,
+        }),
+        "pi_builtin_tools.write" => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Write,
+            enabled: new,
+        }),
+        "pi_builtin_tools.grep" => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Grep,
+            enabled: new,
+        }),
+        "pi_builtin_tools.find" => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Find,
+            enabled: new,
+        }),
+        "pi_builtin_tools.ls" => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Ls,
+            enabled: new,
+        }),
+        "pi_builtin_tools.eval" => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Eval,
+            enabled: new,
+        }),
+        "pi_builtin_tools.codemode" => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Codemode,
+            enabled: new,
+        }),
+        "pi_bash" => Some(Action::SetPiBash(new)),
+        "pi_eval_v2_only" => Some(Action::SetPiEvalV2Only(new)),
+        "pi_eval_mcp" => Some(Action::SetPiEvalMcp(new)),
+        "psm_resume_index" => Some(Action::SetPsmResumeIndex(new)),
+        "pi_tree_file_rollback" => Some(Action::SetPiTreeFileRollback(new)),
+        "pi_tree_skip_summary_prompt" => Some(Action::SetPiTreeSkipSummaryPrompt(new)),
+        "pi_ask_user_question_notifications" => {
+            Some(Action::SetPiAskUserQuestionNotifications(new))
+        }
+        "pi_cache_graph" => Some(Action::SetPiCacheGraph(new)),
+        "pi_config_skill" => Some(Action::SetPiConfigSkill(new)),
+        "pi_user_markdown" => Some(Action::SetPiUserMarkdown(new)),
+        "pi_at_search_hidden" => Some(Action::SetPiAtSearchHidden(new)),
+        "pi_keep_multi_agent" => Some(Action::SetPiKeepMultiAgent(new)),
+        "pi_bash_command_format" => Some(Action::SetPiBashCommandFormat(new)),
+        "write_edit_hover_popups" => Some(Action::SetWriteEditHoverPopups(new)),
+        "show_other_tool_args" => Some(Action::SetShowOtherToolArgs(new)),
+        "review_file_tree" => Some(Action::SetReviewFileTree(new)),
+        "review_include_reads" => Some(Action::SetReviewIncludeReads(new)),
         "simple_mode" => Some(Action::SetSimpleMode(new)),
         "contextual_hints.undo" => Some(Action::SetContextualHintUndo(new)),
         "contextual_hints.plan_mode" => Some(Action::SetContextualHintPlanMode(new)),
@@ -925,6 +1256,10 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "contextual_hints.ssh_wrap" => Some(Action::SetContextualHintSshWrap(new)),
         "multiline_mode" => Some(Action::SetMultilineMode(new)),
         "vim_mode" => Some(Action::SetVimMode(new)),
+        "session_recap" => Some(Action::SetSessionRecap(new)),
+        "recap_mermaid" => Some(Action::SetRecapMermaid(new)),
+        "progress_bar" => Some(Action::SetProgressBar(new)),
+        "remote_tui_footer" => Some(Action::SetRemoteTuiFooter(new)),
         "voice_keybind_enabled" => Some(Action::SetVoiceKeybindEnabled(new)),
         "remember_tool_approvals" => Some(Action::SetRememberToolApprovals(new)),
         "toolset.ask_user_question.timeout_enabled" => {
@@ -932,8 +1267,10 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         }
         "subagent_model_inheritance" => Some(Action::SetSubagentModelInheritance(new)),
         "show_thinking_blocks" => Some(Action::SetShowThinkingBlocks(new)),
+        "thinking_border_colors" => Some(Action::SetThinkingBorderColors(new)),
         "group_tool_verbs" => Some(Action::SetGroupToolVerbs(new)),
         "collapsed_edit_blocks" => Some(Action::SetCollapsedEditBlocks(new)),
+        "side_by_side_edit" => Some(Action::SetSideBySideEdit(new)),
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),
         "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
         "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
@@ -1002,6 +1339,21 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
             "off" => Some(Action::SetPlanMode(crate::app::actions::PlanModeKind::Off)),
             _ => None,
         },
+        "ctrl_o_tool_expansion" => Some(Action::SetCtrlOToolExpansion(choice.to_string())),
+        "pi_eval" => match choice {
+            "v1" | "v2" => Some(Action::SetPiEval(choice.to_string())),
+            _ => None,
+        },
+        "pi_eval_v2_language" => match choice {
+            "js" | "py" | "all" => Some(Action::SetPiEvalV2Language(choice.to_string())),
+            _ => None,
+        },
+        "pi_eval_v2_display_mode" => match choice {
+            "effects" | "legacy" => Some(Action::SetPiEvalV2DisplayMode(choice.to_string())),
+            _ => None,
+        },
+        "pi_bash_run_display" => crate::appearance::ExecuteHeaderContent::from_canonical(choice)
+            .map(Action::SetPiBashRunDisplay),
         "hunk_tracker_mode" => Some(Action::SetHunkTrackerMode(choice.to_string())),
         "screen_mode" => Some(Action::SetScreenMode(choice.to_string())),
         "voice_capture_mode" => Some(Action::SetVoiceCaptureMode(choice.to_string())),
@@ -1017,6 +1369,10 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         }
         "follow_up_behavior" => crate::appearance::FollowUpBehavior::from_canonical(choice)
             .map(Action::SetFollowUpBehavior),
+        "cancel_turn_key" => match choice {
+            "esc" | "ctrl_c" => Some(Action::SetCancelTurnKey(choice.to_string())),
+            _ => None,
+        },
         "default_selected_permission" => {
             Some(Action::SetDefaultSelectedPermission(choice.to_string()))
         }
@@ -1033,6 +1389,7 @@ pub(super) fn action_for_string(
     snapshot: &PagerLocalSnapshot,
 ) -> Option<Action> {
     match key {
+        "prompt_cursor" => Some(Action::SetPromptCursor(value)),
         "default_model" => {
             if value.is_empty() {
                 Some(Action::ClearDefaultModel)
@@ -1049,6 +1406,50 @@ pub(super) fn action_for_string(
                 snapshot
                     .resolve_model_name(&value)
                     .map(Action::SetForkSecondaryModel)
+            }
+        }
+        "recap_model" => {
+            if value.is_empty() {
+                Some(Action::ClearRecapModel)
+            } else {
+                snapshot
+                    .resolve_model_name(&value)
+                    .map(Action::SetRecapModel)
+            }
+        }
+        "recap_model_2" => {
+            if value.is_empty() {
+                Some(Action::ClearRecapModel2)
+            } else {
+                Some(Action::SetRecapModel2(value))
+            }
+        }
+        "recap_model_3" => {
+            if value.is_empty() {
+                Some(Action::ClearRecapModel3)
+            } else {
+                Some(Action::SetRecapModel3(value))
+            }
+        }
+        "btw_model" => {
+            if value.is_empty() {
+                Some(Action::ClearBtwModel)
+            } else {
+                Some(Action::SetBtwModel(value))
+            }
+        }
+        "btw_model_2" => {
+            if value.is_empty() {
+                Some(Action::ClearBtwModel2)
+            } else {
+                Some(Action::SetBtwModel2(value))
+            }
+        }
+        "btw_model_3" => {
+            if value.is_empty() {
+                Some(Action::ClearBtwModel3)
+            } else {
+                Some(Action::SetBtwModel3(value))
             }
         }
 
@@ -1079,6 +1480,15 @@ pub(super) fn validate_string(
 ) -> Option<String> {
     match validator {
         StringValidator::Any => None,
+        StringValidator::PromptCursor => {
+            if crate::appearance::PromptCursor::parse_config(buffer).is_some() {
+                None
+            } else {
+                Some(
+                    "Use native, block, underline, bar, or one single-column character".to_string(),
+                )
+            }
+        }
         StringValidator::NonEmptyToken => {
             if buffer.is_empty() {
                 Some("Value cannot be empty".to_string())

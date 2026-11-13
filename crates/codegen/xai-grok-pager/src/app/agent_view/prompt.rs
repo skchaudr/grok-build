@@ -203,6 +203,30 @@ impl AgentView {
                     self.prompt.accept_slash_completion(&self.session.models);
                     return InputOutcome::Changed;
                 }
+                // Ctrl-L: preview the selected skill's SKILL.md in a read-only
+                // popup (mirrors the agents-modal ViewAgent path). The line
+                // viewer has higher input priority than the prompt, so it takes
+                // focus until Esc closes it; the slash dropdown stays open
+                // underneath. Non-skill rows are a no-op.
+                KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(path) = self.prompt.selected_skill_path() {
+                        let title = self
+                            .prompt
+                            .slash_snapshot()
+                            .selection()
+                            .map(|r| r.display.clone());
+                        if let Some(mut v) =
+                            crate::views::file_search::line_viewer::LineViewerState::open_markdown(
+                                std::path::Path::new(&path),
+                                None,
+                            )
+                        {
+                            v.title_override = title;
+                            self.line_viewer = Some(v);
+                        }
+                    }
+                    return InputOutcome::Changed;
+                }
                 // Esc: close dropdown, revert any live preview.
                 KeyCode::Esc => {
                     self.prompt.slash_cancel_preview();
@@ -486,8 +510,8 @@ impl AgentView {
             }
         }
 
-        // Shift+Tab (cycle session mode) is not special-cased here: the `CycleMode` ActionDef carries all encodings
-        // The registry lookup below resolves it (same as `DashboardCycleMode`)
+        // Shift+Tab is not special-cased here — the `CycleThinkingLevel`
+        // ActionDef carries all encodings and the registry lookup below resolves it.
 
         // 2. Multiline mode: Shift+Enter (or Alt+Enter) sends.
         //    This must come BEFORE the action registry lookup so that Shift+Enter triggers send instead of inserting a newline
@@ -624,9 +648,17 @@ impl AgentView {
             }
         }
 
-        // 2c. Ctrl+V / Cmd+V: read the pbpaste text once and route through the deferred paste pipeline.
-        //     A file path wins synchronously; the clipboard image/file-url probe defers off the event loop
-        //     Reading once (vs the widget re-reading for text insertion) avoids the old double `pbpaste` subprocess on macOS
+        // 2c. Opt+Shift+V forces clipboard text into a temporary attachment,
+        //     bypassing the large-paste size threshold and selector.
+        if crate::input::key::is_force_attachment_paste_key(key) {
+            return self.handle_force_attachment_paste_key();
+        }
+
+        // 2d. Ctrl+V / Cmd+V: read the pbpaste text once and route through the
+        //     deferred paste pipeline. A file path wins synchronously; the
+        //     clipboard image/file-url probe defers off the event loop. Reading
+        //     once (vs the widget re-reading for text insertion) avoids the old
+        //     double `pbpaste` subprocess on macOS.
         if crate::input::key::is_paste_key(key) {
             let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
                 crate::clipboard::system_clipboard_read_text(),
@@ -634,9 +666,24 @@ impl AgentView {
             return self.handle_paste_key_deferred(clipboard_text);
         }
 
-        // Otherwise keys like Ctrl+\ / Ctrl+/ (or, historically, Alt-Left / Alt-Right as word-jump cursor moves) would be eaten by the textarea
-        // The promotion is for non-text bindings only (Ctrl/Alt arrows, Ctrl+P, function keys, etc.)
-        // We must explicitly skip `KeyCode::Char(_)` events whose modifiers are NONE or SHIFT-only
+        // 2e. Promote agent-screen actions past the textarea.
+        //
+        // Without this, keys like Ctrl+\ / Ctrl+/ (or, historically,
+        // Alt-Left / Alt-Right as word-jump cursor moves) would be
+        // eaten by the textarea and the When::AgentScreen bindings
+        // (NavBack, NavForward, ExitSession, ...) would silently
+        // no-op when the prompt is focused. PromptFocused-bound
+        // actions still win above (see `When::PromptFocused` lookup).
+        //
+        // The promotion is for non-text bindings only (Ctrl/Alt
+        // arrows, Ctrl+P, function keys, etc.). We must explicitly
+        // skip `KeyCode::Char(_)` events whose modifiers are NONE or
+        // SHIFT-only -- those are user text input under the Kitty
+        // enhanced keyboard protocol (e.g. `?+SHIFT` for `?`,
+        // `1+SHIFT` for `!`), and the `When::AgentScreen` registry
+        // currently binds `?+SHIFT` as the alt key for CommandPalette.
+        // See the parallel guard at the top-of-file `?` handler in
+        // `handle_input` (`active_pane != Prompt`).
         let is_text_char = crate::input::key::is_text_input_key(key);
         // Ctrl+R is consumed here for the session picker, so the textarea never sees it.
         if !is_text_char && let Some(action_id) = registry.lookup(key, When::AgentScreen) {
@@ -776,18 +823,29 @@ impl AgentView {
             return Some(InputOutcome::Changed);
         }
 
-        // Mid-turn (running or already cancelling), every mode: Esc never cancels; point at the registry cancel binding instead
-        // A streaming wake turn follows the same policy as a running turn (the pane state is Idle only because wake turns are not adopted)
-        // Push the grace deadline out so an Esc mash past the turn's end cannot silently arm the rewind picker below
-        if self.stoppable_activity_running() || self.any_cancel_pending() {
-            if self.stoppable_activity_running()
-                && let Some(cancel_key) = registry.key_for(ActionId::CancelTurn)
-            {
-                let cancel_key = cancel_key.display();
-                self.show_cancel_key_hint(&format!("Press {cancel_key} to cancel the turn"));
-            }
-            self.suppress_rewind_arm(std::time::Instant::now());
+        // Mid-turn running with the F2 cancellation policy set to Ctrl+C:
+        // swallow Esc (do not cancel or arm clear/rewind). A streaming wake
+        // turn follows the same policy as a running turn (the pane state is
+        // Idle only because wake turns are not adopted); once its cancel was
+        // sent it follows the cancelling retry below.
+        if (self.session.state.is_turn_running()
+            || (self.wake_turn_active() && !self.wake_turn_cancelling()))
+            && !crate::app::esc_cancels_turn()
+        {
             return Some(InputOutcome::Changed);
+        }
+        // Mid-turn with Esc cancellation enabled: cancel immediately from prompt or
+        // scrollback, even with a draft. Also — in every mode — while already
+        // cancelling, so a lost cancel notification is re-sent (Ctrl+C
+        // escalates to Quit instead). Push the grace deadline out so an Esc
+        // mash past the cancel cannot silently arm the rewind picker below.
+        if self.session.state.is_turn_running()
+            || self.wake_turn_active()
+            || self.any_cancel_pending()
+        {
+            self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
+            self.suppress_rewind_arm(std::time::Instant::now());
+            return Some(InputOutcome::Action(Action::CancelTurn));
         }
 
         // CLEAR mutates the composer (drops text/image chips), so it fires only while the PROMPT pane owns keys
@@ -1017,7 +1075,7 @@ impl AgentView {
 }
 
 #[cfg(test)]
-mod shift_tab_cycle_mode_tests {
+mod shift_tab_cycle_thinking_tests {
     use super::*;
     use crate::app::app_view::InputOutcome;
     use crate::input::key::shift_tab_keys;
@@ -1025,28 +1083,28 @@ mod shift_tab_cycle_mode_tests {
 
     /// Guards the full routed path, not just registry resolution.
     #[test]
-    fn shift_tab_emits_cycle_mode_through_prompt_key_routing() {
+    fn shift_tab_emits_cycle_thinking_through_prompt_key_routing() {
         for shortcut in shift_tab_keys() {
             let mut agent = super::test_fixtures::make_agent();
             let outcome = agent.handle_prompt_key_for_test(&shortcut.to_key_event());
             assert!(
-                matches!(outcome, InputOutcome::Action(Action::CycleMode)),
-                "{shortcut:?} must resolve to Action::CycleMode, got {outcome:?}",
+                matches!(outcome, InputOutcome::Action(Action::CycleThinkingLevel)),
+                "{shortcut:?} must resolve to Action::CycleThinkingLevel, got {outcome:?}",
             );
         }
     }
 
     /// `is_mod_enter` must not treat Shift+Tab as send when multiline is on.
     #[test]
-    fn multiline_shift_tab_still_cycles_mode_with_non_empty_draft() {
+    fn multiline_shift_tab_still_cycles_thinking_with_non_empty_draft() {
         for shortcut in shift_tab_keys() {
             let mut agent = super::test_fixtures::make_agent();
             agent.multiline_mode = true;
             agent.prompt.set_text("draft text");
             let outcome = agent.handle_prompt_key_for_test(&shortcut.to_key_event());
             assert!(
-                matches!(outcome, InputOutcome::Action(Action::CycleMode)),
-                "multiline + {shortcut:?} must CycleMode, not send, got {outcome:?}",
+                matches!(outcome, InputOutcome::Action(Action::CycleThinkingLevel)),
+                "multiline + {shortcut:?} must CycleThinkingLevel, not send, got {outcome:?}",
             );
             assert_eq!(
                 agent.prompt.text(),

@@ -330,6 +330,9 @@ fn cancel_agent_turn(
         && agent.session.in_flight_prompt.is_some()
         && !queue_held_behind_turn
         && !in_flight_committed
+        // A blocking ask_user_question card owns the composer, so rewind must not
+        // fight its prompt-stash restore.
+        && agent.question_view.is_none()
         && !composer_has_draft
         && rewind_prompt_id.is_some();
     if rewinding
@@ -343,6 +346,24 @@ fn cancel_agent_turn(
     agent.cancel_turn_view = None;
     agent.cancel_turn_buttons.clear();
     drain_permission_queue(agent);
+    if let Some(mut pav) = agent.plan_approval_view.take() {
+        pav.send_stale_cancel();
+        agent.plan_next_comment_id = pav.next_comment_id;
+        agent.prompt.restore(pav.stashed_prompt);
+        agent.line_viewer = None;
+    }
+    // An ask_user_question card raised by the turn being cancelled can never
+    // receive its answer once the turn is gone: leaving it drawn keeps it
+    // blocking the composer forever (Esc on the parked card fires CancelTurn).
+    // Resolve it as `Cancelled` — the same payload the next-question replace
+    // path sends — and hand the stashed composer back.
+    if let Some(mut qv) = agent.question_view.take() {
+        agent.record_question_pause(&qv);
+        qv.send_ext_response(
+            xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse::Cancelled,
+        );
+        agent.restore_card_prompt(qv.stashed_prompt);
+    }
     agent.dismiss_in_turn_plan_review();
 
     let Some(session_id) = agent.session.session_id.clone() else {
@@ -758,11 +779,16 @@ pub(super) fn dispatch_kill_subagent(app: &mut AppView, subagent_id: String) -> 
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    let Some(session_id) = agent.session.session_id.clone() else {
+    let Some(owner) = agent.descendant_subagent_owner_mut(&subagent_id) else {
+        return vec![];
+    };
+    let Some(session_id) = owner.session.session_id.clone() else {
         return vec![];
     };
 
-    let attempt_id = agent
+    // Mark as pending_kill for UI feedback on the row owned by the same
+    // session that will receive the cancel RPC.
+    let attempt_id = owner
         .subagent_sessions
         .values_mut()
         .find(|info| info.subagent_id.as_ref() == subagent_id)

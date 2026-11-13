@@ -1318,8 +1318,13 @@ impl AgentDefinition {
                 return scope;
             }
         }
-        if path_str.contains(".grok/agents/") || path_str.contains(".grok\\agents\\") {
-            return AgentScope::Project;
+        {
+            let project = xai_grok_config::project_config_dirname();
+            let unix = format!("{project}/agents/");
+            let win = format!("{project}\\agents\\");
+            if path_str.contains(&unix) || path_str.contains(&win) {
+                return AgentScope::Project;
+            }
         }
         if path_str.contains(".grok/bundled/agents/")
             || path_str.contains(".grok\\bundled\\agents\\")

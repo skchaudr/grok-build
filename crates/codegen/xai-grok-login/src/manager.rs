@@ -316,28 +316,58 @@ impl AuthManager {
             crate::CLI_CHAT_PROXY_BASE_URL_DEFAULT.to_owned(),
         )
     }
+    /// Public default cli-chat-proxy base URL, always available: the fork seam
+    /// [`Self::new_without_startup_diagnostics`] serves external ACP hosts that
+    /// cannot reach the shell's effective `[endpoints]` config (crate cycle).
+    const PUBLIC_PROXY_BASE_URL: &str = "https://cli-chat-proxy.grok.com/v1";
+    /// Construct an auth manager without writing Grok product startup diagnostics.
+    ///
+    /// External ACP hosts still need the manager for Pager-owned voice auth, but
+    /// their state directory is not a Grok login home and a missing `auth.json`
+    /// is expected rather than diagnostic-worthy.
+    pub fn new_without_startup_diagnostics(
+        grok_home: &Path,
+        grok_com_config: GrokComConfig,
+    ) -> Self {
+        Self::new_with_proxy_base_url_diagnostics(
+            grok_home,
+            grok_com_config,
+            Self::PUBLIC_PROXY_BASE_URL.to_string(),
+            false,
+        )
+    }
     pub fn new_with_proxy_base_url(
         grok_home: &Path,
         grok_com_config: GrokComConfig,
         proxy_base_url: String,
     ) -> Self {
+        Self::new_with_proxy_base_url_diagnostics(grok_home, grok_com_config, proxy_base_url, true)
+    }
+    fn new_with_proxy_base_url_diagnostics(
+        grok_home: &Path,
+        grok_com_config: GrokComConfig,
+        proxy_base_url: String,
+        emit_startup_diagnostics: bool,
+    ) -> Self {
         let scope = ActiveAuthBackend::default().scope_key(&grok_com_config);
-        xai_grok_telemetry::unified_log::info(
-            "AuthManager::new",
-            None,
-            Some(serde_json::json!({
-                "scope": &scope,
-                "grok_home": grok_home.display().to_string(),
-                "HOME": std::env::var("HOME").unwrap_or_else(|_| "(unset)".into()),
-                "GROK_HOME": std::env::var("GROK_HOME").unwrap_or_else(|_| "(unset)".into()),
-                "GROK_AUTH_PATH": std::env::var("GROK_AUTH_PATH").unwrap_or_else(|_| "(unset)".into()),
-                "GROK_AUTH": match std::env::var("GROK_AUTH") {
-                    Err(_) => "(unset)",
-                    Ok(_) if !Distribution::current().allows(Capability::AccountLogin) => "(ignored)",
-                    Ok(_) => "(set)",
-                },
-            })),
-        );
+        if emit_startup_diagnostics {
+            xai_grok_telemetry::unified_log::info(
+                "AuthManager::new",
+                None,
+                Some(serde_json::json!({
+                    "scope": &scope,
+                    "grok_home": grok_home.display().to_string(),
+                    "HOME": std::env::var("HOME").unwrap_or_else(|_| "(unset)".into()),
+                    "GROK_HOME": std::env::var("GROK_HOME").unwrap_or_else(|_| "(unset)".into()),
+                    "GROK_AUTH_PATH": std::env::var("GROK_AUTH_PATH").unwrap_or_else(|_| "(unset)".into()),
+                    "GROK_AUTH": match std::env::var("GROK_AUTH") {
+                        Err(_) => "(unset)",
+                        Ok(_) if !Distribution::current().allows(Capability::AccountLogin) => "(ignored)",
+                        Ok(_) => "(set)",
+                    },
+                })),
+            );
+        }
         let path = auth_json_path(grok_home);
         let inline_auth = Distribution::current()
             .allows(Capability::AccountLogin)
@@ -392,11 +422,14 @@ impl AuthManager {
                 (None, detail, state)
             }
         };
-        xai_grok_telemetry::unified_log::info(
-            "AuthManager::new auth.json load result",
-            None,
-            Some(auth_read_detail),
-        );
+        if emit_startup_diagnostics {
+            xai_grok_telemetry::unified_log::info(
+                "AuthManager::new auth.json load result",
+                None,
+                Some(auth_read_detail),
+            );
+        }
+
         let manager = Self::assemble(
             auth,
             path,

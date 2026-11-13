@@ -1,3 +1,5 @@
+//! Model state — tracks available models and current selection.
+
 use agent_client_protocol as acp;
 use indexmap::IndexMap;
 use xai_grok_shell::sampling::types::{
@@ -24,8 +26,10 @@ fn canonical_effort_if_offered(
 pub(crate) enum EffortTokenError {
     /// The target model does not advertise `supportsReasoningEffort`.
     Unsupported,
-    /// The token is neither a menu id nor a canonical value offered by this model's menu.
-    /// `offered` lists only the option ids this model's menu accepts, so `none`/`minimal` are not advertised when the model does not offer them.
+    /// The token is neither a menu id nor a canonical value offered by this
+    /// model's menu. `offered` is the model-specific list of option ids the
+    /// user can type (never a hardcoded global set — so we do not advertise
+    /// `none`/`minimal` when the model does not offer them).
     UnknownToken { token: String, offered: Vec<String> },
     /// No active model to resolve the effort against.
     NoActiveModel,
@@ -52,15 +56,34 @@ impl EffortTokenError {
     }
 }
 
+/// One entry in the current session's Pi-style model scope.
+///
+/// Scope order defines Ctrl/action cycling order. An optional effort mirrors
+/// Pi's `provider/model:effort` pattern and is applied when that row is selected.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopedModel {
+    pub model_id: acp::ModelId,
+    pub effort: Option<ReasoningEffort>,
+}
+
+impl ScopedModel {
+    pub fn new(model_id: acp::ModelId, effort: Option<ReasoningEffort>) -> Self {
+        Self { model_id, effort }
+    }
+}
+
 /// Per-agent model state.
 #[derive(Debug, Clone, Default)]
 pub struct ModelState {
     pub available: IndexMap<acp::ModelId, acp::ModelInfo>,
     pub current: Option<acp::ModelId>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Session-only Pi scoped-model list. Empty means every available model.
+    scoped_models: Vec<ScopedModel>,
     /// External override for the context window size (tokens).
-    /// When set, `get_context_window()` returns this instead of reading from the current model's metadata.
-    /// Used for subagent views where SubagentProgress reports the actual window size.
+    /// When set, `get_context_window()` returns this instead of
+    /// reading from the current model's metadata. Used for subagent
+    /// views where SubagentProgress reports the actual window size.
     context_window_override: Option<u64>,
     pub(crate) context_window_selection: Option<u64>,
     /// Set when a `ModelChanged` arrives while a local switch is in flight, so its completion keeps the broadcast selection.
@@ -211,15 +234,86 @@ impl ModelState {
             .unwrap_or_default()
     }
 
-    /// Used for subagent views where SubagentProgress reports an actual window that may differ from the inherited model's metadata.
+    /// Override the context window size.
+    ///
+    /// Used for subagent views where the actual context window is reported
+    /// via SubagentProgress and may differ from the inherited model's metadata.
     pub fn override_context_window(&mut self, tokens: u64) {
         self.context_window_override = Some(tokens);
     }
 
-    /// Replace the available-model list.
-    /// Leaves `current` and `reasoning_effort` alone; those change only via `/model`, create, or load.
+    /// Replace the available-model list. Leaves `current` and
+    /// `reasoning_effort` alone — those change only via `/model` / create / load.
     pub fn update_catalog(&mut self, new_available: IndexMap<acp::ModelId, acp::ModelInfo>) {
         self.available = new_available;
+        // Pi owns the session scope, but it can only contain models this
+        // session actually has.
+        self.scoped_models
+            .retain(|entry| self.available.contains_key(&entry.model_id));
+    }
+
+    /// Replace the session-only scope, preserving first occurrence order and
+    /// ignoring catalog ids that are unavailable in this session.
+    pub fn set_scoped_models(&mut self, entries: Vec<ScopedModel>) {
+        let mut seen = std::collections::HashSet::new();
+        self.scoped_models = entries
+            .into_iter()
+            .filter(|entry| self.available.contains_key(&entry.model_id))
+            .filter(|entry| seen.insert(entry.model_id.clone()))
+            .collect();
+    }
+
+    /// Clear the scope. Pi defines an empty scope as "all available models".
+    pub fn clear_scoped_models(&mut self) {
+        self.scoped_models.clear();
+    }
+
+    pub fn scoped_models(&self) -> &[ScopedModel] {
+        &self.scoped_models
+    }
+
+    pub fn has_scoped_models(&self) -> bool {
+        !self.scoped_models.is_empty()
+    }
+
+    pub fn is_model_scoped(&self, model_id: &acp::ModelId) -> bool {
+        self.scoped_models
+            .iter()
+            .any(|entry| &entry.model_id == model_id)
+    }
+
+    /// Toggle one catalog model in the session scope. An empty scope means all
+    /// models until the first row is selected, matching Pi's scoped selector.
+    pub fn toggle_scoped_model(&mut self, model_id: acp::ModelId) {
+        if let Some(index) = self
+            .scoped_models
+            .iter()
+            .position(|entry| entry.model_id == model_id)
+        {
+            self.scoped_models.remove(index);
+        } else if self.available.contains_key(&model_id) {
+            self.scoped_models.push(ScopedModel::new(model_id, None));
+        }
+    }
+
+    /// Next model and optional per-scope effort. Empty scope cycles the full
+    /// catalog; a current model outside a non-empty scope jumps to its first row.
+    pub fn next_model_selection(&self) -> Option<(acp::ModelId, Option<ReasoningEffort>)> {
+        if self.scoped_models.is_empty() {
+            return self.next_model().map(|model_id| (model_id, None));
+        }
+        let next_index = self
+            .current
+            .as_ref()
+            .and_then(|current| {
+                self.scoped_models
+                    .iter()
+                    .position(|entry| &entry.model_id == current)
+            })
+            .map_or(0, |index| (index + 1) % self.scoped_models.len());
+        self.scoped_models
+            .get(next_index)
+            .map(|entry| (entry.model_id.clone(), entry.effort.clone()))
     }
 
     /// Apply a `config_option_update` (or the options from `session/set_config_option`).
@@ -282,8 +376,9 @@ impl ModelState {
         });
     }
 
-    /// The reasoning-effort menu for the current model. An unset or unsupported model yields no menu.
-    /// A supported model uses the server list when present, else the built-in fallback.
+    /// The reasoning-effort menu for the current model. Gate-first: an unset or
+    /// unsupported model yields no menu; a supported model uses the server list
+    /// when present, else the built-in fallback.
     pub fn reasoning_effort_options(&self) -> Vec<ReasoningEffortOption> {
         match self.current.as_ref() {
             Some(id) => self.reasoning_effort_options_for(id),
@@ -291,9 +386,20 @@ impl ModelState {
         }
     }
 
+    /// Cycle through the current model's advertised thinking levels.
+    pub fn next_reasoning_effort(&self) -> Option<ReasoningEffort> {
+        let options = self.reasoning_effort_options();
+        let next_index = self
+            .reasoning_effort
+            .and_then(|current| options.iter().position(|option| option.value == current))
+            .map_or(0, |index| (index + 1) % options.len());
+        options.get(next_index).map(|option| option.value)
+    }
+
     /// Menu for a specific catalog model id (used by `/model`'s effort phase).
-    /// `parse_reasoning_efforts_meta` returns `None` when the list is absent, not an array, or present but unusable.
-    /// All of those fall back to the built-in menu, exactly as the shell's session picker does.
+    /// `parse_reasoning_efforts_meta` returns `None` for absent, non-array, or
+    /// present-but-unusable lists, so all of those fall back to the built-in menu
+    /// exactly as the shell's session picker does.
     pub(crate) fn reasoning_effort_options_for(
         &self,
         id: &acp::ModelId,
@@ -405,17 +511,100 @@ impl ModelState {
         self.reject_unknown_effort(id, token, self.resolve_cli_effort_token_for(id, token))
     }
 
-    /// Resolve a user-supplied name to a `ModelId` via case-insensitive ASCII match against the catalog.
+    /// Resolve a user-supplied name to a `ModelId` via case-insensitive
+    /// ASCII match against the catalog.
+    ///
+    /// Accepts display name, full `provider::id`, `provider/id`, bare model id,
+    /// or the Pi-style `id [provider]` row text (without a trailing `(current)`).
     pub fn resolve_by_name_or_id(&self, query: &str) -> Option<acp::ModelId> {
-        self.available.iter().find_map(|(id, info)| {
-            if info.name.eq_ignore_ascii_case(query) || id.0.as_ref().eq_ignore_ascii_case(query) {
-                Some(id.clone())
-            } else {
-                None
+        let query = query
+            .trim()
+            .trim_end_matches("(current)")
+            .trim()
+            .trim_end_matches('✓')
+            .trim();
+        if query.is_empty() {
+            return None;
+        }
+
+        // Exact full-key hit first (unique by construction).
+        if let Some((id, _)) = self
+            .available
+            .iter()
+            .find(|(id, _)| id.0.as_ref().eq_ignore_ascii_case(query))
+        {
+            return Some(id.clone());
+        }
+
+        // Display name: only when unique across the catalog.
+        let mut name_match: Option<acp::ModelId> = None;
+        for (id, info) in &self.available {
+            if info.name.eq_ignore_ascii_case(query) {
+                if name_match.is_some() {
+                    name_match = None;
+                    break;
+                }
+                name_match = Some(id.clone());
             }
-        })
+        }
+        if let Some(id) = name_match {
+            return Some(id);
+        }
+
+        // Pi-style `model-id [provider]` from the picker row.
+        if let Some((model_part, provider_part)) = query.rsplit_once('[')
+            && let Some(provider) = provider_part.strip_suffix(']')
+        {
+            let model_part = model_part.trim();
+            let provider = provider.trim();
+            if !model_part.is_empty() && !provider.is_empty() {
+                let key = format!("{provider}::{model_part}");
+                if let Some((id, _)) = self
+                    .available
+                    .iter()
+                    .find(|(id, _)| id.0.as_ref().eq_ignore_ascii_case(&key))
+                {
+                    return Some(id.clone());
+                }
+            }
+        }
+
+        // `provider/id` (slash form used in search / CLI). The model id may
+        // itself contain slashes (e.g. Pi `openrouter/stealth/ox-alpha high`),
+        // so only the first `/` separates provider from id.
+        if let Some((provider, model_id)) = query.split_once('/')
+            && !provider.is_empty()
+            && !model_id.is_empty()
+        {
+            let key = format!("{provider}::{model_id}");
+            if let Some((id, _)) = self
+                .available
+                .iter()
+                .find(|(id, _)| id.0.as_ref().eq_ignore_ascii_case(&key))
+            {
+                return Some(id.clone());
+            }
+        }
+
+        // Bare model id after `::` — only when unique.
+        let mut bare_match: Option<acp::ModelId> = None;
+        for (id, _) in &self.available {
+            let bare =
+                id.0.as_ref()
+                    .split_once("::")
+                    .map(|(_, m)| m)
+                    .unwrap_or(id.0.as_ref());
+            if bare.eq_ignore_ascii_case(query) {
+                if bare_match.is_some() {
+                    return None;
+                }
+                bare_match = Some(id.clone());
+            }
+        }
+        bare_match
     }
 
+    /// Look up the display name for a `ModelId` in the catalog.
     pub fn display_name_for(&self, id: &acp::ModelId) -> String {
         self.available
             .get(id)
@@ -654,6 +843,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     available: models,
                     current: current_model,
                     reasoning_effort,
+                    scoped_models: Vec::new(),
                     context_window_override: None,
                     context_window_selection,
                     model_changed_during_switch: false,
@@ -948,6 +1138,78 @@ mod tests {
     }
 
     #[test]
+    fn scoped_cycle_uses_scope_order_and_starts_first_when_current_is_outside() {
+        let mut state = sample_models();
+        let id_a = acp::ModelId::new(Arc::from("model-a"));
+        let id_b = acp::ModelId::new(Arc::from("model-b"));
+        state.current = Some(acp::ModelId::new(Arc::from("outside")));
+        state.set_scoped_models(vec![
+            ScopedModel::new(id_b.clone(), None),
+            ScopedModel::new(id_a.clone(), None),
+        ]);
+        assert_eq!(state.next_model_selection(), Some((id_b.clone(), None)));
+        state.current = Some(id_b);
+        assert_eq!(state.next_model_selection(), Some((id_a, None)));
+    }
+
+    #[test]
+    fn scoped_toggle_adds_and_removes_catalog_model() {
+        let mut state = sample_models();
+        let id_a = acp::ModelId::new(Arc::from("model-a"));
+        state.toggle_scoped_model(id_a.clone());
+        assert!(state.is_model_scoped(&id_a));
+        state.toggle_scoped_model(id_a.clone());
+        assert!(!state.is_model_scoped(&id_a));
+        state.toggle_scoped_model(acp::ModelId::new(Arc::from("missing")));
+        assert!(!state.has_scoped_models());
+    }
+
+    #[test]
+    fn scoped_cycle_carries_per_model_effort() {
+        let mut state = sample_models();
+        let id_b = acp::ModelId::new(Arc::from("model-b"));
+        let effort: ReasoningEffort = "high".parse().unwrap();
+        state.set_scoped_models(vec![ScopedModel::new(id_b.clone(), Some(effort.clone()))]);
+        assert_eq!(state.next_model_selection(), Some((id_b, Some(effort))));
+    }
+
+    #[test]
+    fn scoped_models_dedupe_unknown_ids_and_clear_to_all() {
+        let mut state = sample_models();
+        let id_a = acp::ModelId::new(Arc::from("model-a"));
+        state.set_scoped_models(vec![
+            ScopedModel::new(id_a.clone(), None),
+            ScopedModel::new(acp::ModelId::new(Arc::from("missing")), None),
+            ScopedModel::new(id_a.clone(), Some("low".parse().unwrap())),
+        ]);
+        assert_eq!(state.scoped_models().len(), 1);
+        assert_eq!(state.scoped_models()[0].model_id, id_a.clone());
+        state.clear_scoped_models();
+        assert!(!state.has_scoped_models());
+        state.current = None;
+        assert_eq!(state.next_model_selection(), Some((id_a, None)));
+    }
+
+    #[test]
+    fn catalog_update_prunes_missing_scoped_models() {
+        let mut state = sample_models();
+        let id_a = acp::ModelId::new(Arc::from("model-a"));
+        let id_b = acp::ModelId::new(Arc::from("model-b"));
+        state.set_scoped_models(vec![
+            ScopedModel::new(id_a, None),
+            ScopedModel::new(id_b.clone(), None),
+        ]);
+        let mut refreshed = IndexMap::new();
+        refreshed.insert(
+            id_b.clone(),
+            acp::ModelInfo::new(id_b.clone(), "Model B".to_string()),
+        );
+        state.update_catalog(refreshed);
+        assert_eq!(state.scoped_models().len(), 1);
+        assert_eq!(state.scoped_models()[0].model_id, id_b);
+    }
+
+    #[test]
     fn test_current_model_name() {
         let state = sample_models();
         assert_eq!(state.current_model_name(), Some("Model A".to_string()));
@@ -1013,7 +1275,8 @@ mod tests {
 
     #[test]
     fn accepts_images_defaults_true_when_meta_absent() {
-        // No current model, empty meta, and a meta without the key all default to `true`; a no-op until the server populates the key
+        // No current model, empty meta, and a meta without the key all default
+        // permissive — correct today and a no-op until the server populates it.
         assert!(ModelState::default().current_model_accepts_images());
         assert!(state_with_meta(None).current_model_accepts_images());
         assert!(
@@ -1042,10 +1305,28 @@ mod tests {
     }
 
     #[test]
+    fn next_reasoning_effort_cycles_current_model_options() {
+        let mut state = state_with_meta(Some(serde_json::json!({
+            "supportsReasoningEffort": true,
+            "reasoningEfforts": [
+                { "id": "off", "value": "none", "label": "Off" },
+                { "id": "low", "value": "low", "label": "Low" },
+                { "id": "high", "value": "high", "label": "High" },
+            ],
+        })));
+
+        assert_eq!(state.next_reasoning_effort(), Some(ReasoningEffort::None));
+        state.reasoning_effort = Some(ReasoningEffort::Low);
+        assert_eq!(state.next_reasoning_effort(), Some(ReasoningEffort::High));
+        state.reasoning_effort = Some(ReasoningEffort::High);
+        assert_eq!(state.next_reasoning_effort(), Some(ReasoningEffort::None));
+    }
+
+    #[test]
     fn reasoning_effort_options_gate_first_empty_when_unsupported() {
-        // A default state has no current model, so no menu
+        // No current model → empty.
         assert!(ModelState::default().reasoning_effort_options().is_empty());
-        // A model that does not support effort gets no menu, even with a list present
+        // Current model that does not support effort → empty (even with a list).
         let state = state_with_meta(Some(serde_json::json!({
             "reasoningEfforts": [{ "value": "high" }],
         })));
@@ -1054,7 +1335,7 @@ mod tests {
 
     #[test]
     fn reasoning_effort_options_falls_back_to_builtin_menu() {
-        // Supported but no server list falls back to today's four-row built-in menu
+        // Supported but no server list → today's four-row built-in menu.
         let state = state_with_meta(Some(serde_json::json!({
             "supportsReasoningEffort": true,
         })));
@@ -1068,8 +1349,9 @@ mod tests {
 
     #[test]
     fn reasoning_effort_options_falls_back_when_list_present_but_unusable() {
-        // An explicit empty list, and a list whose every entry was skipped as invalid under version skew, both fall back to the built-in menu
-        // Falling back rather than silently vanishing matches the shell picker
+        // Matches the shell picker: an explicit empty list, and a list where every
+        // entry skip-invalidated under version skew, both fall back to the built-in
+        // menu rather than silently vanishing.
         for meta in [
             serde_json::json!({ "supportsReasoningEffort": true, "reasoningEfforts": [] }),
             serde_json::json!({
@@ -1095,7 +1377,7 @@ mod tests {
                 { "id": "high", "value": "high", "label": "High" },
             ],
         })));
-        // The typed id resolves to its canonical wire value
+        // Design-2 remap: the typed id resolves to its canonical wire value.
         assert_eq!(
             state.resolve_effort_token("deep"),
             Some(ReasoningEffort::Xhigh)
@@ -1109,7 +1391,8 @@ mod tests {
             state.resolve_effort_token("high"),
             Some(ReasoningEffort::High)
         );
-        // Levels the model does not offer (none/minimal on 4.5-style menus) are rejected; better than a server-side 400
+        // Levels the model does not offer (none/minimal on 4.5-style menus)
+        // are rejected — better than a server-side 400.
         assert!(state.resolve_effort_token("minimal").is_none());
         assert!(state.resolve_effort_token("none").is_none());
         assert!(state.resolve_effort_token("bogus").is_none());
@@ -1169,8 +1452,9 @@ mod tests {
                 offered: vec!["high".to_string(), "low".to_string()],
             }
         );
-        // The error copy must list only this model's options, never a hardcoded none/minimal/…
-        // The rejected token may still appear quoted in "unknown effort level '…'"
+        // Error copy must list only this model's options — never hardcode
+        // none/minimal/… as offered values (the rejected token may still appear
+        // quoted in "unknown effort level '…'").
         let msg = err.message();
         assert!(msg.contains("use one of: high, low"), "msg={msg}");
         let offered_half = msg
@@ -1241,7 +1525,7 @@ mod tests {
 
     #[test]
     fn resolve_effort_token_legacy_menu_rejects_none() {
-        // supportsReasoningEffort without a server list means the built-in low..xhigh menu
+        // supportsReasoningEffort without a server list → built-in low..xhigh.
         let state = state_with_meta(Some(serde_json::json!({
             "supportsReasoningEffort": true,
         })));
@@ -1301,6 +1585,103 @@ mod tests {
         assert!(
             !state_with_meta(Some(serde_json::json!({ "inputModalities": ["text"] })))
                 .current_model_accepts_images()
+        );
+    }
+
+    #[test]
+    fn resolve_by_name_or_id_accepts_provider_forms() {
+        let mut state = ModelState::default();
+        let id = acp::ModelId::new(Arc::from("anthropic::claude-haiku-4-5"));
+        state.available.insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "Claude Haiku 4.5".to_string()),
+        );
+
+        assert_eq!(
+            state.resolve_by_name_or_id("Claude Haiku 4.5").as_ref(),
+            Some(&id)
+        );
+        assert_eq!(
+            state
+                .resolve_by_name_or_id("anthropic::claude-haiku-4-5")
+                .as_ref(),
+            Some(&id)
+        );
+        assert_eq!(
+            state
+                .resolve_by_name_or_id("anthropic/claude-haiku-4-5")
+                .as_ref(),
+            Some(&id)
+        );
+        assert_eq!(
+            state
+                .resolve_by_name_or_id("claude-haiku-4-5 [anthropic]")
+                .as_ref(),
+            Some(&id)
+        );
+        assert_eq!(
+            state
+                .resolve_by_name_or_id("claude-haiku-4-5 [anthropic] (current)")
+                .as_ref(),
+            Some(&id)
+        );
+        assert_eq!(
+            state.resolve_by_name_or_id("claude-haiku-4-5").as_ref(),
+            Some(&id)
+        );
+    }
+
+    #[test]
+    fn resolve_by_name_or_id_accepts_multi_slash_provider_id() {
+        // Pi model ids may themselves contain slashes
+        // (e.g. `openrouter/stealth/ox-alpha high` → catalog key
+        // `openrouter::stealth/ox-alpha high`). Only the first `/` splits.
+        let mut state = ModelState::default();
+        let id = acp::ModelId::new(Arc::from("openrouter::stealth/ox-alpha high"));
+        state.available.insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "OX Alpha High".to_string()),
+        );
+
+        assert_eq!(
+            state
+                .resolve_by_name_or_id("openrouter/stealth/ox-alpha high")
+                .as_ref(),
+            Some(&id)
+        );
+        assert_eq!(
+            state
+                .resolve_by_name_or_id("openrouter::stealth/ox-alpha high")
+                .as_ref(),
+            Some(&id)
+        );
+    }
+
+    #[test]
+    fn resolve_by_name_or_id_rejects_ambiguous_bare_id() {
+        let mut state = ModelState::default();
+        let a = acp::ModelId::new(Arc::from("anthropic::claude-haiku-4-5"));
+        let b = acp::ModelId::new(Arc::from("openrouter::claude-haiku-4-5"));
+        state.available.insert(
+            a.clone(),
+            acp::ModelInfo::new(a.clone(), "Claude Haiku 4.5".to_string()),
+        );
+        state.available.insert(
+            b.clone(),
+            acp::ModelInfo::new(b.clone(), "Claude Haiku 4.5".to_string()),
+        );
+
+        assert!(state.resolve_by_name_or_id("claude-haiku-4-5").is_none());
+        assert!(
+            state.resolve_by_name_or_id("Claude Haiku 4.5").is_none(),
+            "duplicate display names must not resolve ambiguously"
+        );
+        assert_eq!(
+            state
+                .resolve_by_name_or_id("openrouter/claude-haiku-4-5")
+                .map(|id| id.0.to_string())
+                .as_deref(),
+            Some("openrouter::claude-haiku-4-5")
         );
     }
 

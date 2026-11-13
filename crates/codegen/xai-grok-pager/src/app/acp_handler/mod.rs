@@ -475,8 +475,11 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     record_child_usage_update(parent, child_key, &notif.request.update);
                     let activity_label = {
                         let child_view = parent
-                            .child_view_for_live_update_mut(child_key)
-                            .expect("find_session_match returned an existing subagent_views key");
+                            .descendant_view_for_live_update_mut(child_key)
+                            .expect(
+                                "find_session_match returned an existing descendant subagent view",
+                            );
+                        // An overlay prompt arms the watch on this child, so the child's own updates must disarm it
                         ack_prompt_from_update(child_view, &meta, external_agent);
                         apply_reported_context(child_view, &meta, notif.request.meta.as_ref());
                         if let acp::SessionUpdate::UsageUpdate(ref usage) = notif.request.update {
@@ -516,11 +519,41 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                                     }
                                     backdate_child_turn_clock(child_view);
                                 }
-                                child_view.session.handle_update(
-                                    notif.request.update,
-                                    &meta,
-                                    &mut child_view.scrollback,
-                                );
+
+                                let had_activity_before =
+                                    child_view.session.tracker.activity().is_some();
+                                let bg_stdout_routed =
+                                    if let acp::SessionUpdate::ToolCallUpdate(ref tcu) =
+                                        notif.request.update
+                                    {
+                                        route_bg_task_stdout(tcu, &mut child_view.session)
+                                    } else {
+                                        false
+                                    };
+                                if !bg_stdout_routed {
+                                    child_view.session.handle_update(
+                                        notif.request.update,
+                                        &meta,
+                                        &mut child_view.scrollback,
+                                    );
+                                }
+                                if !had_activity_before
+                                    && child_view.session.tracker.activity().is_some()
+                                {
+                                    note_first_turn_activity(child_view);
+                                }
+                                if let Some(commands) =
+                                    child_view.session.tracker.take_pending_acp_commands()
+                                {
+                                    child_view.session.available_commands = commands;
+                                    child_view.session.available_commands_generation += 1;
+                                }
+                                if let Some(tools) =
+                                    child_view.session.tracker.take_pending_acp_tools()
+                                {
+                                    child_view.session.available_tools =
+                                        Some(tools.into_iter().collect());
+                                }
                                 for entry_id in child_view.session.tracker.take_pending_edit_hl() {
                                     child_view.submit_edit_highlight(entry_id);
                                 }
@@ -528,7 +561,11 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         }
                         subagent_activity_label(child_view)
                     };
-                    sync_subagent_activity(parent, child_key, activity_label);
+
+                    if let Some(owner) = parent.descendant_parent_view_mut(child_key) {
+                        sync_subagent_activity(owner, child_key, activity_label);
+                    }
+
                     is_active
                 }
                 None => {
@@ -680,6 +717,7 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
     }
     match method {
         "x.ai/follow_ups" => handle_follow_ups(notif, app),
+        "x.ai/review_ask_delta" => handle_review_ask_delta(notif, app),
         "x.ai/task_backgrounded" => handle_task_backgrounded(notif, app),
         "x.ai/task_completed" => handle_task_completed(notif, app),
         "x.ai/models/update" => handle_models_update(notif, app),
@@ -706,6 +744,496 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         _ => pi_ui::handle(notif, app),
     }
 }
+
+fn handle_review_ask_delta(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(delta) = serde_json::from_str::<serde_json::Value>(notif.params.get())
+        .ok()
+        .and_then(|params| {
+            params
+                .get("delta")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|delta| !delta.is_empty())
+    else {
+        return false;
+    };
+    for agent in app.agents.values_mut() {
+        if let Some(review) = agent.review_state.as_mut()
+            && review.ask.is_loading()
+        {
+            review.ask.append_delta(&delta);
+            return true;
+        }
+    }
+    false
+}
+
+fn handle_pi_ui_shortcuts(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(params) = pi_ui_params(notif) else {
+        return false;
+    };
+    let Some(shortcuts_arr) = params
+        .get("shortcuts")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    let shortcuts: Vec<crate::app::extension_shortcuts::ExtensionShortcut> = shortcuts_arr
+        .iter()
+        .filter_map(|v| {
+            Some(crate::app::extension_shortcuts::ExtensionShortcut {
+                key: v.get("key")?.as_str()?.to_string(),
+                description: v
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                extension: v
+                    .get("extension")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                enabled: v.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true),
+                remapped_to: v
+                    .get("remappedTo")
+                    .and_then(|r| r.as_str())
+                    .map(|s| s.to_string()),
+            })
+        })
+        .collect();
+    app.external_ui.extension_shortcuts.set_shortcuts(shortcuts);
+    true
+}
+
+fn pi_ui_params(notif: &acp::ExtNotification) -> Option<serde_json::Value> {
+    serde_json::from_str(notif.params.get())
+        .map_err(|error| {
+            tracing::warn!(method = %notif.method, %error, "invalid Pi UI notification payload");
+        })
+        .ok()
+}
+
+fn handle_pi_ui_notify(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(params) = pi_ui_params(notif) else {
+        return false;
+    };
+    let Some(message) = params.get("message").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let kind = params
+        .get("notifyType")
+        .or_else(|| params.get("kind"))
+        .and_then(serde_json::Value::as_str);
+    app.show_external_notification(message, kind);
+    true
+}
+
+fn handle_pi_ui_compaction_summary(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(params) = pi_ui_params(notif) else {
+        return false;
+    };
+    let Some(summary) = params
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .filter(|summary| !summary.trim().is_empty())
+    else {
+        return false;
+    };
+    let target_id = params
+        .get("sessionId")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|session_id| {
+            app.agents.iter().find_map(|(id, agent)| {
+                agent
+                    .session
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|current| current.0.as_ref() == session_id)
+                    .then_some(*id)
+            })
+        })
+        .or_else(|| match app.active_view {
+            ActiveView::Agent(id) => Some(id),
+            _ => None,
+        });
+    let Some(agent) = target_id.and_then(|id| app.agents.get_mut(&id)) else {
+        return false;
+    };
+    agent.scrollback.push_block(RenderBlock::session_event(
+        SessionEvent::CompactionSummary {
+            summary: summary.to_string(),
+        },
+    ));
+    true
+}
+
+fn handle_pi_ui_btw_history(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(params) = pi_ui_params(notif) else {
+        return false;
+    };
+    if params.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return false;
+    }
+    let source = params
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("replay");
+    let entries = params
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let question = entry.get("question")?.as_str()?.to_owned();
+                    let answer = entry.get("answer")?.as_str()?.to_owned();
+                    if question.trim().is_empty() || answer.trim().is_empty() {
+                        return None;
+                    }
+                    Some((question, answer))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+
+    let agent = if let Some(session_id) = session_id.as_deref() {
+        let session_id = acp::SessionId::new(session_id);
+        let Some((matched, _is_active, agent)) = resolve_notif_agent(app, &session_id) else {
+            return false;
+        };
+        // BTW is a root-session surface; never project a root history into a
+        // child/subagent transcript that happens to share the Pager process.
+        if matches!(matched, SessionMatch::Child(_)) {
+            return false;
+        }
+        agent
+    } else {
+        let ActiveView::Agent(id) = app.active_view else {
+            return false;
+        };
+        let Some(agent) = app.agents.get_mut(&id) else {
+            return false;
+        };
+        agent
+    };
+
+    let mut added = 0;
+    for (question, answer) in &entries {
+        let already_visible = (0..agent.scrollback.len()).any(|index| {
+            let Some(entry) = agent.scrollback.entry(index) else {
+                return false;
+            };
+            let RenderBlock::Btw(block) = &entry.block else {
+                return false;
+            };
+            block.question.as_str() == question.as_str()
+                && block.content().text().as_str() == answer.as_str()
+        });
+        if already_visible {
+            continue;
+        }
+        agent
+            .scrollback
+            .push_block(RenderBlock::Btw(crate::scrollback::blocks::BtwBlock::new(
+                question.clone(),
+                answer.clone(),
+            )));
+        added += 1;
+    }
+
+    if source == "command" && added == 0 {
+        let message = if entries.is_empty() {
+            "No saved BTW history."
+        } else {
+            "BTW history is already visible."
+        };
+        agent.scrollback.push_block(RenderBlock::system(message));
+    }
+    true
+}
+
+fn handle_pi_ui_status(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(params) = pi_ui_params(notif) else {
+        return false;
+    };
+    let Some(key) = params
+        .get("statusKey")
+        .or_else(|| params.get("key"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+    let text = params
+        .get("statusText")
+        .or_else(|| params.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    app.set_external_status(key, text)
+}
+
+fn handle_pi_ui_widget(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(params) = pi_ui_params(notif) else {
+        return false;
+    };
+    let Some(key) = params
+        .get("widgetKey")
+        .or_else(|| params.get("key"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+    if key == "__pi_grok_remote_tui_layout__" {
+        let layout = params
+            .get("widgetLines")
+            .or_else(|| params.get("lines"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|lines| lines.first())
+            .and_then(serde_json::Value::as_str)
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| crate::app::app_view::RemoteTuiLayout::from_json(&value));
+        app.set_remote_tui_layout(layout);
+        return true;
+    }
+    let lines = match params.get("widgetLines").or_else(|| params.get("lines")) {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Array(values)) => Some(
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+        ),
+        Some(_) => return false,
+    };
+    let placement = match params
+        .get("widgetPlacement")
+        .or_else(|| params.get("placement"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("belowEditor") => crate::app::app_view::ExternalWidgetPlacement::BelowEditor,
+        _ => crate::app::app_view::ExternalWidgetPlacement::AboveEditor,
+    };
+    app.set_external_widget(key, lines, placement)
+}
+
+fn handle_pi_ui_remote_tui(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(params) = pi_ui_params(notif) else {
+        return false;
+    };
+    let op = params
+        .get("op")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let id = params
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let title = params
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let lines = match params.get("lines") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Array(values)) => Some(
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+        ),
+        Some(_) => None,
+    };
+    app.apply_remote_tui(op, id, lines, title)
+}
+
+fn handle_pi_ui_title(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(params) = pi_ui_params(notif) else {
+        return false;
+    };
+    let Some(title) = params.get("title").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    super::set_terminal_title(title);
+    // Bootstrap/rename session metadata is durable and owns the prompt-border
+    // title. An extension's `ctx.ui.setTitle()` is temporary terminal UI and
+    // must be undone by Pi's reload reset without renaming the session.
+    if params.get("source").and_then(serde_json::Value::as_str) != Some("extension") {
+        app.set_external_session_title(title);
+    }
+    true
+}
+
+/// Pi interactive invokes `resetExtensionUI()` just before replacing its
+/// extension runner during reload. The adapter emits this only after Pi's
+/// streaming/compaction gates pass; clear the equivalent Pager projections
+/// and restore the durable Pi session title.
+fn handle_pi_ui_reset_extension_ui(app: &mut AppView) -> bool {
+    let Some(session_title) = app.reset_external_extension_ui() else {
+        return false;
+    };
+    super::set_terminal_title(&session_title);
+    true
+}
+
+/// `pi/ui/plan_file` — adapter publishes the session plan sidecar path so
+/// `/view-plan` and the plan preview can locate the Pi-owned plan file.
+fn handle_pi_ui_plan_file(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(params) = pi_ui_params(notif) else {
+        return false;
+    };
+    let Some(plan_path) = params
+        .get("planFilePath")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    // Route to the active agent (same pattern as other pi/ui/* handlers).
+    let ActiveView::Agent(id) = app.active_view else {
+        return false;
+    };
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.pi_plan_file_path = Some(std::path::PathBuf::from(plan_path));
+    }
+    true
+}
+
+fn handle_pi_ui_session_catalog(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(params) = pi_ui_params(notif) else {
+        return false;
+    };
+    let Some(sessions) = params.get("sessions").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    let Some(scope) = params.get("scope").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let timestamp = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(|value| {
+                value
+                    .as_i64()
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+            })
+            .or_else(|| {
+                value
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.with_timezone(&chrono::Utc))
+            })
+            .unwrap_or_else(chrono::Utc::now)
+    };
+    let entries = sessions
+        .iter()
+        .filter_map(|session| {
+            let id = session.get("id")?.as_str()?.to_owned();
+            let summary = session
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(no messages)")
+                .to_owned();
+            let cwd = session
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            Some(crate::app::app_view::SessionPickerEntry {
+                id,
+                summary,
+                name: session
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
+                first_message: session
+                    .get("firstMessage")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
+                session_path: session
+                    .get("sessionPath")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
+                total_tokens: session
+                    .get("totalTokens")
+                    .and_then(serde_json::Value::as_u64),
+                total_cost: session.get("totalCost").and_then(serde_json::Value::as_f64),
+                updated_at: timestamp(session.get("updatedAt")),
+                created_at: timestamp(session.get("createdAt")),
+                cwd: cwd.clone(),
+                hostname: None,
+                source: "pi".to_owned(),
+                model_id: session
+                    .get("modelId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
+                num_messages: session
+                    .get("messageCount")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as usize,
+                last_active_at: None,
+                branch: None,
+                repo_name: crate::views::session_picker::repo_name_from_cwd(&cwd),
+                worktree_label: None,
+                parent_session_path: session
+                    .get("parentSessionPath")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
+                last_turn_summary: session
+                    .get("lastTurnSummary")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
+                last_recap: session
+                    .get("lastRecap")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
+                session_kind: session
+                    .get("sessionKind")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
+                card_detail: None,
+            })
+        })
+        .collect();
+    app.set_external_session_catalog(entries, scope)
+}
+
+fn handle_pi_ui_editor_text(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(params) = pi_ui_params(notif) else {
+        return false;
+    };
+    let Some(text) = params
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+    app.set_external_editor_text(text)
+}
+
+/// Retract a native QuestionView after Pi's dialog timeout resolves.
+/// Pi includes the timeout on the original request but emits no later cancel
+/// event, so the adapter sends this narrow lifecycle notification.
+fn handle_pi_ui_cancel_interaction(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(params) = pi_ui_params(notif) else {
+        return false;
+    };
+    let Some(tool_call_id) = params
+        .get("toolCallId")
+        .or_else(|| params.get("tool_call_id"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    app.dismiss_external_interaction(tool_call_id)
+}
+
 /// Record the shell's latest `session/new` setup step so a create timeout can name where it stalled.
 fn handle_session_setup_phase(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     #[derive(serde::Deserialize)]

@@ -624,6 +624,36 @@ fn test_expand_while_streaming_keeps_viewport_until_follow_resumed() {
 }
 
 #[test]
+fn toggle_tool_output_expansion_only_changes_tool_calls() {
+    let mut h = ScrollTestHarness::new(80, 40);
+    let thinking_id = h.push_thinking("thought");
+    let tool_id = h.push_tool("tool");
+    h.frame();
+
+    h.state
+        .toggle_tool_output_expansion(ToolOutputExpansionScope::AllTools);
+
+    assert_eq!(
+        h.state.get_by_id(tool_id).unwrap().display_mode,
+        DisplayMode::Collapsed,
+        "first Ctrl+O-style toggle collapses expanded tool output"
+    );
+    assert_eq!(
+        h.state.get_by_id(thinking_id).unwrap().display_mode,
+        DisplayMode::Truncated,
+        "Ctrl+O-style toggle must not alter thinking visibility"
+    );
+
+    h.state
+        .toggle_tool_output_expansion(ToolOutputExpansionScope::AllTools);
+    assert_eq!(
+        h.state.get_by_id(tool_id).unwrap().display_mode,
+        DisplayMode::Expanded,
+        "second toggle restores tool output"
+    );
+}
+
+#[test]
 fn test_global_fold_ops_clear_pins_scoped() {
     let mut h = ScrollTestHarness::new(80, 40);
     h.state.appearance.scrollback.scroll.respect_manual_folds = true;

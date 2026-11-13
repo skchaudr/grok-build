@@ -1,0 +1,109 @@
+@import "tailwindcss";
+
+@theme inline {
+  /* Surfaces — warm-neutral dark */
+  --color-void: #09090b;
+  --color-abyss: #0e0e11;
+  --color-surface: #141417;
+  --color-surface-raised: #1a1a1e;
+  --color-surface-hover: #212125;
+  --color-border: #26262b;
+  --color-border-subtle: #1e1e22;
+  --color-border-accent: rgba(217, 164, 65, 0.35);
+
+  /* Text */
+  --color-text-primary: #ececee;
+  --color-text-secondary: #9d9da6;
+  --color-text-tertiary: #63636b;
+  --color-text-accent: #d9a441;
+
+  /* Accent — warm amber/gold, not violet */
+  --color-accent: #d9a441;
+  --color-accent-bright: #e8b94f;
+  --color-accent-dim: #a67c2e;
+  --color-accent-glow: rgba(217, 164, 65, 0.08);
+  --color-accent-glow-strong: rgba(217, 164, 65, 0.15);
+
+  /* Semantic */
+  --color-success: #4ade80;
+  --color-warning: #facc15;
+  --color-error: #f87171;
+  --color-info: #7dd3fc;
+
+  /* Grok brand */
+  --color-grok: #5b9bd5;
+  --color-grok-dim: rgba(91, 155, 213, 0.1);
+
+  /* Fonts */
+  --font-sans: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+  --font-mono: var(--font-geist-mono), "SF Mono", "Fira Code", monospace;
+
+  /* Spacing */
+  --spacing-section: 6rem;
+  --spacing-section-sm: 4rem;
+
+  /* Radius — conservative */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+
+  /* Shadows — subtle, no glow */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-elevated: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a2a2f transparent;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 5rem;
+}
+
+body {
+  background: var(--color-void);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+::selection {
+  background: rgba(217, 164, 65, 0.25);
+  color: #ececee;
+}
+
+/* Subtle grid — barely visible */
+.bg-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.012) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.012) 1px, transparent 1px);
+  background-size: 80px 80px;
+}
+
+/* Fade-in for scroll reveals — no bounce */
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in-up {
+  animation: fade-in-up 0.4s ease-out both;
+}
+
+/* Stagger — subtle delays */
+.stagger-children > * {
+  opacity: 0;
+  animation: fade-in-up 0.35s ease-out both;
+}
+.stagger-children > *:nth-child(1) { animation-delay: 0.03s; }
+.stagger-children > *:nth-child(2) { animation-delay: 0.06s; }
+.stagger-children > *:nth-child(3) { animation-delay: 0.09s; }
+.stagger-children > *:nth-child(4) { animation-delay: 0.12s; }
+.stagger-children > *:nth-child(5) { animation-delay: 0.15s; }
+.stagger-children > *:nth-child(6) { animation-delay: 0.18s; }
+.stagger-children > *:nth-child(7) { animation-delay: 0.21s; }
+.stagger-children > *:nth-child(8) { animation-delay: 0.24s; }

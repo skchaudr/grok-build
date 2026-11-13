@@ -2,19 +2,24 @@
 
 use super::setters::{
     pr13_effective_default, set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
-    set_auto_light_theme_inner, set_auto_update_inner, set_collapsed_edit_blocks_inner,
-    set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
-    set_confirm_before_rewind_inner, set_contextual_hint_inner, set_default_model_inner,
-    set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
-    set_follow_up_behavior_inner, set_fork_secondary_model_inner, set_group_tool_verbs_inner,
-    set_hunk_tracker_mode_inner, set_invert_scroll_inner, set_keep_text_selection_inner,
-    set_max_thoughts_width_inner, set_multiline_mode, set_page_flip_on_send_inner,
-    set_prompt_suggestions_inner, set_remember_tool_approvals_inner, set_render_mermaid_inner,
-    set_respect_manual_folds_inner, set_screen_mode_inner, set_scroll_lines_inner,
-    set_scroll_mode_inner, set_scroll_speed_inner, set_show_thinking_blocks_inner,
-    set_show_tips_inner, set_simple_mode_inner, set_theme_inner, set_timeline_inner,
-    set_timestamps, set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
-    set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
+    set_auto_light_theme_inner, set_auto_update_inner, set_cancel_turn_key_inner,
+    set_collapsed_edit_blocks_inner, set_combine_queued_prompts_inner, set_compact_mode,
+    set_compact_mode_inner, set_confirm_before_rewind_inner, set_contextual_hint_inner,
+    set_default_model_inner, set_default_selected_permission_inner,
+    set_display_refresh_auto_cadence_inner, set_follow_up_behavior_inner,
+    set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
+    set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
+    set_multiline_mode, set_page_flip_on_send_inner, set_pi_at_search_hidden_inner,
+    set_pi_bash_command_format_inner, set_pi_bash_run_display_inner,
+    set_pi_eval_v2_display_mode_inner, set_progress_bar_inner, set_prompt_cursor_inner,
+    set_prompt_suggestions_inner, set_recap_mermaid_inner, set_recap_model_inner,
+    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
+    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
+    set_session_recap_inner, set_show_thinking_blocks_inner, set_show_tips_inner,
+    set_side_by_side_edit_inner, set_simple_mode_inner, set_theme_inner,
+    set_thinking_border_colors_inner, set_timeline_inner, set_timestamps, set_timestamps_inner,
+    set_vim_mode_inner, set_voice_capture_mode_inner, set_voice_keybind_enabled_inner,
+    set_voice_stt_language_inner, set_write_edit_hover_popups_inner,
 };
 use crate::app::actions::{Action, Effect, ModelChoice};
 use crate::app::app_view::{ActiveView, AppView};
@@ -36,6 +41,9 @@ pub(in crate::app::dispatch) fn save_success_toast(label: &str, on: bool) -> Str
 pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     use crate::views::modal::ActiveModal;
     use crate::views::settings_modal::SettingsModalMode;
+    // The grok-pi panel is a separate surface with the same freshness
+    // contract; keep both in step from this one entry point.
+    refresh_open_pi_settings(app);
     // Early exit when no settings modal is open (common case).
     if !app.agents.values().any(|a| {
         matches!(
@@ -52,6 +60,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
+    let prompt_cursor_from_app = app.appearance.prompt.cursor.to_config_value();
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
@@ -90,6 +99,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 vim_mode: crate::appearance::cache::load_vim_mode(),
                 scroll_speed: crate::appearance::cache::load_scroll_speed(),
                 respect_manual_folds: respect_manual_folds_from_app,
+                prompt_cursor: prompt_cursor_from_app.clone(),
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                 voice_stt_language: voice_stt_language_from_app.clone(),
@@ -107,9 +117,99 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     }
 }
 
-/// Open the command palette (the `/help` slash command path).
-/// Mirrors the keybinding handler (`ActionId::CommandPalette`); toggles closed if already open.
-/// In minimal mode the overlay app-modal host renders it inline.
+/// Open the command palette (the `/help` slash command path). Mirrors the
+/// keybinding handler (`ActionId::CommandPalette`); toggles closed if already
+/// open. Hosted inline in minimal mode by the overlay app-modal host.
+pub(in crate::app::dispatch) fn dispatch_open_model_picker(app: &mut AppView) -> Vec<Effect> {
+    open_command_arg_picker(
+        app,
+        "model",
+        crate::views::modal::ArgPickerSelection::RunCommand,
+    )
+}
+
+pub(in crate::app::dispatch) fn dispatch_open_scoped_models_picker(
+    app: &mut AppView,
+) -> Vec<Effect> {
+    open_command_arg_picker(
+        app,
+        "scoped-models",
+        crate::views::modal::ArgPickerSelection::ToggleScopedModel,
+    )
+}
+
+/// Open the native searchable model selector for a recap/btw settings slot.
+pub(in crate::app::dispatch) fn dispatch_open_recap_model_picker(app: &mut AppView) -> Vec<Effect> {
+    dispatch_open_side_model_picker(app, "recap_model")
+}
+
+pub(in crate::app::dispatch) fn dispatch_open_side_model_picker(
+    app: &mut AppView,
+    slot_key: &'static str,
+) -> Vec<Effect> {
+    open_command_arg_picker(
+        app,
+        "model",
+        crate::views::modal::ArgPickerSelection::SetModelSlot(slot_key),
+    )
+}
+
+fn open_command_arg_picker(
+    app: &mut AppView,
+    command: &str,
+    selection: crate::views::modal::ArgPickerSelection,
+) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let Some(cmd) = agent.prompt.slash_controller.registry().get(command) else {
+        return vec![];
+    };
+    let ctx = agent.prompt.slash_controller.app_ctx(&agent.session.models);
+    let Some(mut items) = cmd.suggest_args(&ctx, "").filter(|items| !items.is_empty()) else {
+        return vec![];
+    };
+    if matches!(
+        selection,
+        crate::views::modal::ArgPickerSelection::SetModelSlot(_)
+    ) {
+        items.insert(
+            0,
+            crate::slash::command::ArgItem {
+                display: "(no override)".to_string(),
+                match_text: "no override disable use session model".to_string(),
+                insert_text: String::new(),
+                description: String::new(),
+            },
+        );
+    }
+    // If F2 settings is open (side-model slot), stash it so Esc/commit returns
+    // to the same group sheet instead of closing settings entirely.
+    let previous_settings = match agent.active_modal.take() {
+        Some(ActiveModal::Settings { state }) => Some(state),
+        other => {
+            agent.active_modal = other;
+            None
+        }
+    };
+    agent.active_modal = Some(ActiveModal::ArgPicker {
+        command: command.to_string(),
+        args_query: String::new(),
+        original_items: items.clone(),
+        items,
+        state: crate::views::picker::PickerState::input_active(),
+        previous_palette: None,
+        previous_settings,
+        selection,
+        window: crate::views::modal_window::ModalWindowState::new(),
+    });
+    vec![]
+}
+
 pub(in crate::app::dispatch) fn dispatch_open_command_palette(app: &mut AppView) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;
     let ActiveView::Agent(id) = app.active_view else {
@@ -126,14 +226,86 @@ pub(in crate::app::dispatch) fn dispatch_open_command_palette(app: &mut AppView)
         return vec![];
     }
     agent.active_modal = Some(ActiveModal::CommandPalette {
-        entries: crate::views::modal::default_palette_entries(
+        entries: crate::views::modal::palette_entries_with_acp_commands(
             agent.sharing_enabled,
             &agent.prompt.slash_controller,
+            &agent.session.available_commands,
+            &app.external_ui.host_palette,
         ),
         // Type-to-find: open in input mode (matches Ctrl+P).
         state: crate::views::picker::PickerState::input_active(),
         window: crate::views::modal_window::ModalWindowState::new(),
     });
+    vec![]
+}
+
+/// Open the keyboard shortcuts cheatsheet (`/hotkeys`). Toggles closed if open.
+///
+/// Mirrors `ActionId::ShortcutsHelp` in the agent-view keybinding path so the
+/// slash command and Ctrl+. share one modal surface.
+pub(in crate::app::dispatch) fn dispatch_open_shortcuts_help(app: &mut AppView) -> Vec<Effect> {
+    use crate::actions::When;
+    use crate::app::agent_view::ActivePane;
+    use crate::views::modal::ActiveModal;
+    use crate::views::shortcuts_help;
+
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    if matches!(&agent.active_modal, Some(ActiveModal::ShortcutsHelp { .. })) {
+        agent.active_modal = None;
+        return vec![];
+    }
+
+    let reg = crate::actions::ActionRegistry::defaults();
+    // Slash is typed from the prompt; still respect current pane so the
+    // listed bindings match what Ctrl+. would show right now.
+    let mut contexts = match agent.active_pane {
+        ActivePane::Prompt => vec![When::PromptFocused, When::AgentScreen, When::Always],
+        ActivePane::Scrollback => {
+            vec![When::ScrollbackFocused, When::AgentScreen, When::Always]
+        }
+        _ => vec![When::AgentScreen, When::Always],
+    };
+    if agent.in_dashboard_overlay {
+        contexts.push(When::DashboardOverlay);
+    }
+    let entries = shortcuts_help::build_entries(&contexts, &reg, agent.vim_mode);
+    let state = shortcuts_help::build_initial_picker_state(&entries);
+    agent.active_modal = Some(ActiveModal::ShortcutsHelp {
+        entries,
+        state,
+        window: Default::default(),
+        filter_active: false,
+        collapsed_sections: shortcuts_help::default_collapsed(),
+        expanded_ids: std::collections::HashSet::new(),
+        mode: shortcuts_help::ShortcutsHelpMode::Browse,
+    });
+    vec![]
+}
+
+/// Open native Pi extension-shortcut manager (`/pi-shortcut-manager`).
+///
+/// Does not touch remote-tui. Toggle-closes if already open.
+pub(in crate::app::dispatch) fn dispatch_open_pi_shortcut_manager(
+    app: &mut AppView,
+) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    if agent.pi_shortcut_manager.is_some() {
+        agent.pi_shortcut_manager = None;
+        return vec![];
+    }
+    let registry = agent.pi_shortcuts.get_or_insert_with(Default::default);
+    agent.pi_shortcut_manager =
+        Some(crate::views::shortcut_manager::ShortcutManagerModal::new(registry));
     vec![]
 }
 
@@ -194,6 +366,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
+    let prompt_cursor_from_app = app.appearance.prompt.cursor.to_config_value();
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
@@ -245,6 +418,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         vim_mode: crate::appearance::cache::load_vim_mode(),
         scroll_speed: crate::appearance::cache::load_scroll_speed(),
         respect_manual_folds: respect_manual_folds_from_app,
+        prompt_cursor: prompt_cursor_from_app.clone(),
         auto_mode_gate: auto_mode_gate_from_app,
         ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
         voice_stt_language: voice_stt_language_from_app,
@@ -266,6 +440,151 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     }
     agent.active_modal = Some(ActiveModal::Settings { state });
     effects
+}
+
+/// Open the grok-pi settings panel — the tabbed F2 surface.
+///
+/// Deliberately separate from [`dispatch_open_settings`]: upstream's modal and
+/// its `Action::OpenSettings` stay exactly as they are, so upstream merges
+/// never collide here. Same snapshot contract, same single-instance rule.
+pub(in crate::app::dispatch) fn dispatch_open_pi_settings(
+    app: &mut AppView,
+    focus_key: Option<&'static str>,
+) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+    use crate::views::pi_settings::PiSettingsState;
+
+    let mut effects = vec![];
+    let id = match app.active_view {
+        ActiveView::Agent(id) => id,
+        _ => {
+            if let Some(existing) = app.agents.keys().next().copied() {
+                crate::app::dispatch::ctx::switch_to_agent(
+                    app,
+                    existing,
+                    crate::app::dispatch::ctx::SwitchCause::Picker,
+                );
+                existing
+            } else {
+                let (new_id, create_effects) =
+                    crate::app::dispatch::session::lifecycle::dispatch_new_session_inner_with_id(
+                        app, None, false,
+                    );
+                effects.extend(create_effects);
+                new_id
+            }
+        }
+    };
+    let registry = app.settings_registry.clone();
+    let ui_snapshot = app.current_ui.clone();
+    let pager_snapshot = build_pager_snapshot(app);
+
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return effects;
+    };
+    if matches!(&agent.active_modal, Some(ActiveModal::PiSettings { .. })) {
+        if focus_key.is_none() {
+            debug_assert!(
+                false,
+                "OpenPiSettings dispatched while the panel is already open — input routing bug"
+            );
+            agent.active_modal = None;
+            return effects;
+        }
+        agent.active_modal = None;
+    }
+
+    tracing::info!(target: "settings", "opened pi settings panel");
+    let mut state = Box::new(PiSettingsState::new(registry, ui_snapshot, pager_snapshot));
+    if let Some(key) = focus_key
+        && state.focus_key(key)
+    {
+        // A locked row stays in Browse — `open_chooser` refuses when locked.
+        if state.open_chooser() {
+            state.close_on_picker_exit = true;
+        }
+    }
+    agent.active_modal = Some(ActiveModal::PiSettings { state });
+    effects
+}
+
+/// Re-read live values into every open grok-pi settings panel, so a mutation
+/// dispatched from the panel (or from anywhere else) repaints with the new
+/// value instead of the snapshot taken at open time.
+pub(crate) fn refresh_open_pi_settings(app: &mut AppView) {
+    use crate::views::modal::ActiveModal;
+    if !app
+        .agents
+        .values()
+        .any(|a| matches!(a.active_modal, Some(ActiveModal::PiSettings { .. })))
+    {
+        return;
+    }
+    let ui_snapshot = app.current_ui.clone();
+    let pager_snapshot = build_pager_snapshot(app);
+    for agent in app.agents.values_mut() {
+        let Some(ActiveModal::PiSettings { state }) = agent.active_modal.as_mut() else {
+            continue;
+        };
+        state.rebuild_rows();
+        state.ui_snapshot = ui_snapshot.clone();
+        state.pager_snapshot = pager_snapshot.clone();
+    }
+}
+
+/// Open the native Pi resource configuration modal. Pi source remains
+/// unmodified; the Pager's Rust compatibility layer reads the Pi settings and
+/// trust files, while this dispatcher owns only the native modal transition.
+pub(in crate::app::dispatch) fn dispatch_open_pi_config(app: &mut AppView) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(cwd) = app.agents.get(&id).map(|agent| agent.session.cwd.clone()) else {
+        return vec![];
+    };
+    match crate::views::pi_config::PiConfigModalState::open(cwd) {
+        Ok(state) => {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.active_modal = Some(ActiveModal::PiConfig {
+                    state: Box::new(state),
+                });
+            }
+        }
+        Err(error) => {
+            let message = format!("Pi config unavailable: {error:#}");
+            app.show_toast(&message);
+        }
+    }
+    vec![]
+}
+
+/// Open the native Pi provider/model management center.
+pub(in crate::app::dispatch) fn dispatch_open_pi_models(app: &mut AppView) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let current_model = app
+        .agents
+        .get(&id)
+        .and_then(|agent| agent.session.models.current_model_id_str())
+        .map(str::to_owned);
+    match crate::views::pi_models::PiModelsModalState::open(current_model) {
+        Ok(state) => {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.active_modal = Some(ActiveModal::PiModels {
+                    state: Box::new(state),
+                });
+            }
+        }
+        Err(error) => {
+            app.show_toast(&format!("Pi models unavailable: {error:#}"));
+        }
+    }
+    vec![]
 }
 
 /// Open the reset-settings confirmation modal.
@@ -634,6 +953,7 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         vim_mode: crate::appearance::cache::load_vim_mode(),
         scroll_speed: crate::appearance::cache::load_scroll_speed(),
         respect_manual_folds: app.appearance.scrollback.scroll.respect_manual_folds,
+        prompt_cursor: app.appearance.prompt.cursor.to_config_value(),
         auto_mode_gate: app.auto_mode_gate,
         ask_user_question_timeout_enabled: app.ask_user_question_timeout_enabled,
         voice_stt_language: app.voice_config.language.clone(),
@@ -649,10 +969,85 @@ pub(in crate::app::dispatch) fn action_for_reset(
     value: &crate::settings::SettingValue,
 ) -> Option<Action> {
     use crate::settings::SettingValue;
+    if let Some(spec) = xai_grok_shell::host_features::feature_spec_by_setting_key(key) {
+        return match value {
+            SettingValue::Bool(enabled) => Some(Action::SetHostFeatureBool {
+                key: spec.key,
+                enabled: *enabled,
+            }),
+            _ => None,
+        };
+    }
     match (key, value) {
         ("compact_mode", SettingValue::Bool(b)) => Some(Action::SetCompactMode(*b)),
         ("show_timestamps", SettingValue::Bool(b)) => Some(Action::SetTimestamps(*b)),
         ("show_timeline", SettingValue::Bool(b)) => Some(Action::SetTimeline(*b)),
+        ("pi_builtin_tools.read", SettingValue::Bool(b)) => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Read,
+            enabled: *b,
+        }),
+        ("pi_builtin_tools.bash", SettingValue::Bool(b)) => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Bash,
+            enabled: *b,
+        }),
+        ("pi_builtin_tools.powershell", SettingValue::Bool(b)) => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::PowerShell,
+            enabled: *b,
+        }),
+        ("pi_builtin_tools.edit", SettingValue::Bool(b)) => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Edit,
+            enabled: *b,
+        }),
+        ("pi_builtin_tools.write", SettingValue::Bool(b)) => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Write,
+            enabled: *b,
+        }),
+        ("pi_builtin_tools.grep", SettingValue::Bool(b)) => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Grep,
+            enabled: *b,
+        }),
+        ("pi_builtin_tools.find", SettingValue::Bool(b)) => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Find,
+            enabled: *b,
+        }),
+        ("pi_builtin_tools.ls", SettingValue::Bool(b)) => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Ls,
+            enabled: *b,
+        }),
+        ("pi_builtin_tools.eval", SettingValue::Bool(b)) => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Eval,
+            enabled: *b,
+        }),
+        ("pi_builtin_tools.codemode", SettingValue::Bool(b)) => Some(Action::SetPiBuiltinTool {
+            tool: crate::app::actions::PiBuiltinTool::Codemode,
+            enabled: *b,
+        }),
+        ("pi_bash", SettingValue::Bool(b)) => Some(Action::SetPiBash(*b)),
+        ("pi_eval", SettingValue::Enum(s)) => Some(Action::SetPiEval((*s).to_string())),
+        ("pi_eval_v2_language", SettingValue::Enum(s)) => {
+            Some(Action::SetPiEvalV2Language((*s).to_string()))
+        }
+        ("pi_eval_v2_display_mode", SettingValue::Enum(s)) => {
+            Some(Action::SetPiEvalV2DisplayMode((*s).to_string()))
+        }
+        ("pi_eval_v2_only", SettingValue::Bool(b)) => Some(Action::SetPiEvalV2Only(*b)),
+        ("pi_eval_mcp", SettingValue::Bool(b)) => Some(Action::SetPiEvalMcp(*b)),
+        ("psm_resume_index", SettingValue::Bool(b)) => Some(Action::SetPsmResumeIndex(*b)),
+        ("pi_tree_file_rollback", SettingValue::Bool(b)) => Some(Action::SetPiTreeFileRollback(*b)),
+        ("pi_tree_skip_summary_prompt", SettingValue::Bool(b)) => {
+            Some(Action::SetPiTreeSkipSummaryPrompt(*b))
+        }
+        ("pi_ask_user_question_notifications", SettingValue::Bool(b)) => {
+            Some(Action::SetPiAskUserQuestionNotifications(*b))
+        }
+        ("pi_cache_graph", SettingValue::Bool(b)) => Some(Action::SetPiCacheGraph(*b)),
+        ("pi_config_skill", SettingValue::Bool(b)) => Some(Action::SetPiConfigSkill(*b)),
+        ("pi_user_markdown", SettingValue::Bool(b)) => Some(Action::SetPiUserMarkdown(*b)),
+        ("pi_at_search_hidden", SettingValue::Bool(b)) => Some(Action::SetPiAtSearchHidden(*b)),
+        ("pi_keep_multi_agent", SettingValue::Bool(b)) => Some(Action::SetPiKeepMultiAgent(*b)),
+        ("show_other_tool_args", SettingValue::Bool(b)) => Some(Action::SetShowOtherToolArgs(*b)),
+        ("review_file_tree", SettingValue::Bool(b)) => Some(Action::SetReviewFileTree(*b)),
+        ("review_include_reads", SettingValue::Bool(b)) => Some(Action::SetReviewIncludeReads(*b)),
         ("page_flip_on_send", SettingValue::Bool(b)) => Some(Action::SetPageFlipOnSend(*b)),
         ("dashboard_preview", SettingValue::Bool(enabled)) => {
             Some(Action::SetDashboardPreview(*enabled))
@@ -665,6 +1060,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
         }
         ("follow_up_behavior", SettingValue::Enum(s)) => {
             crate::appearance::FollowUpBehavior::from_canonical(s).map(Action::SetFollowUpBehavior)
+        }
+        ("cancel_turn_key", SettingValue::Enum(s)) => {
+            Some(Action::SetCancelTurnKey((*s).to_string()))
         }
         ("simple_mode", SettingValue::Bool(b)) => Some(Action::SetSimpleMode(*b)),
         ("contextual_hints.undo", SettingValue::Bool(b)) => Some(Action::SetContextualHintUndo(*b)),
@@ -694,6 +1092,10 @@ pub(in crate::app::dispatch) fn action_for_reset(
             crate::appearance::RenderMermaid::from_canonical(s).map(Action::SetRenderMermaid)
         }
         ("vim_mode", SettingValue::Bool(b)) => Some(Action::SetVimMode(*b)),
+        ("session_recap", SettingValue::Bool(b)) => Some(Action::SetSessionRecap(*b)),
+        ("recap_mermaid", SettingValue::Bool(b)) => Some(Action::SetRecapMermaid(*b)),
+        ("progress_bar", SettingValue::Bool(b)) => Some(Action::SetProgressBar(*b)),
+        ("remote_tui_footer", SettingValue::Bool(b)) => Some(Action::SetRemoteTuiFooter(*b)),
         ("remember_tool_approvals", SettingValue::Bool(b)) => {
             Some(Action::SetRememberToolApprovals(*b))
         }
@@ -713,11 +1115,29 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("invert_scroll", SettingValue::Bool(b)) => Some(Action::SetInvertScroll(*b)),
         ("scroll_lines", SettingValue::Int(v)) => Some(Action::SetScrollLines(*v)),
         ("show_thinking_blocks", SettingValue::Bool(b)) => Some(Action::SetShowThinkingBlocks(*b)),
+        ("thinking_border_colors", SettingValue::Bool(b)) => {
+            Some(Action::SetThinkingBorderColors(*b))
+        }
         ("group_tool_verbs", SettingValue::Bool(b)) => Some(Action::SetGroupToolVerbs(*b)),
         ("collapsed_edit_blocks", SettingValue::Bool(b)) => {
             Some(Action::SetCollapsedEditBlocks(*b))
         }
+        ("side_by_side_edit", SettingValue::Bool(b)) => Some(Action::SetSideBySideEdit(*b)),
+        ("ctrl_o_tool_expansion", SettingValue::Enum(s)) => {
+            Some(Action::SetCtrlOToolExpansion((*s).to_string()))
+        }
+        ("pi_bash_run_display", SettingValue::Enum(s)) => {
+            crate::appearance::ExecuteHeaderContent::from_canonical(s)
+                .map(Action::SetPiBashRunDisplay)
+        }
+        ("pi_bash_command_format", SettingValue::Bool(b)) => {
+            Some(Action::SetPiBashCommandFormat(*b))
+        }
+        ("write_edit_hover_popups", SettingValue::Bool(b)) => {
+            Some(Action::SetWriteEditHoverPopups(*b))
+        }
         ("prompt_suggestions", SettingValue::Bool(b)) => Some(Action::SetPromptSuggestions(*b)),
+        ("prompt_cursor", SettingValue::String(s)) => Some(Action::SetPromptCursor(s.clone())),
         ("respect_manual_folds", SettingValue::Bool(b)) => Some(Action::SetRespectManualFolds(*b)),
         ("default_selected_permission", SettingValue::Enum(s)) => {
             Some(Action::SetDefaultSelectedPermission((*s).to_owned()))
@@ -808,6 +1228,19 @@ pub(in crate::app::dispatch) fn action_for_reset(
                 None
             }
         }
+        ("recap_model", SettingValue::String(s)) => {
+            if s.is_empty() {
+                Some(Action::ClearRecapModel)
+            } else {
+                tracing::error!(
+                    target: "settings",
+                    value = %s,
+                    "action_for_reset(recap_model) received non-empty default — \
+                     registry/dispatch skew (default should be empty string)",
+                );
+                None
+            }
+        }
 
         _ => None,
     }
@@ -828,10 +1261,60 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
 ) -> Vec<Effect> {
     use crate::settings::SettingValue;
     let mut companion_effects: Vec<Effect> = Vec::new();
+    if let Some(spec) = xai_grok_shell::host_features::feature_spec_by_setting_key(key) {
+        if let SettingValue::Bool(enabled) = rollback_value {
+            spec.set_bool(&mut app.current_ui, *enabled);
+            refresh_open_settings_modals(app);
+        } else {
+            tracing::error!(target: "settings", key, "host-feature rollback kind mismatch");
+        }
+        return companion_effects;
+    }
     match (key, rollback_value) {
         ("compact_mode", SettingValue::Bool(b)) => set_compact_mode_inner(app, *b),
         ("show_timestamps", SettingValue::Bool(b)) => set_timestamps_inner(app, *b),
         ("show_timeline", SettingValue::Bool(b)) => set_timeline_inner(app, *b),
+        ("pi_builtin_tools", SettingValue::PiBuiltinTools(value)) => {
+            app.current_ui.pi_builtin_tools = value.clone()
+        }
+        ("pi_bash", SettingValue::Bool(b)) => app.current_ui.pi_bash = *b,
+        ("pi_eval", SettingValue::Enum(s)) => app.current_ui.pi_eval = (*s).to_string(),
+        ("pi_eval_v2_language", SettingValue::Enum(s)) => {
+            app.current_ui.pi_eval_v2_language = (*s).to_string()
+        }
+        ("pi_eval_v2_display_mode", SettingValue::Enum(s)) => {
+            set_pi_eval_v2_display_mode_inner(app, s)
+        }
+        ("pi_eval_v2_only", SettingValue::Bool(b)) => app.current_ui.pi_eval_v2_only = *b,
+        ("pi_eval_mcp", SettingValue::Bool(b)) => app.current_ui.pi_eval_mcp = *b,
+        ("psm_resume_index", SettingValue::Bool(b)) => app.current_ui.psm_resume_index = *b,
+        ("pi_tree_file_rollback", SettingValue::Bool(b)) => {
+            app.current_ui.pi_tree_file_rollback = *b
+        }
+        ("pi_tree_skip_summary_prompt", SettingValue::Bool(b)) => {
+            app.current_ui.pi_tree_skip_summary_prompt = *b
+        }
+        ("pi_ask_user_question_notifications", SettingValue::Bool(b)) => {
+            app.current_ui.pi_ask_user_question_notifications = *b
+        }
+        ("pi_cache_graph", SettingValue::Bool(b)) => app.current_ui.pi_cache_graph = *b,
+        ("pi_config_skill", SettingValue::Bool(b)) => app.current_ui.pi_config_skill = *b,
+        ("pi_user_markdown", SettingValue::Bool(b)) => {
+            app.current_ui.pi_user_markdown = *b;
+            crate::appearance::cache::set_pi_user_markdown(*b);
+        }
+        ("pi_at_search_hidden", SettingValue::Bool(b)) => set_pi_at_search_hidden_inner(app, *b),
+        ("pi_keep_multi_agent", SettingValue::Bool(b)) => {
+            app.current_ui.pi_keep_multi_agent = *b;
+        }
+        ("show_other_tool_args", SettingValue::Bool(b)) => {
+            app.current_ui.show_other_tool_args = *b;
+            let mut config = app.appearance.clone();
+            config.show_other_tool_args = *b;
+            app.set_appearance(config);
+        }
+        ("review_file_tree", SettingValue::Bool(b)) => app.current_ui.review_file_tree = *b,
+        ("review_include_reads", SettingValue::Bool(b)) => app.current_ui.review_include_reads = *b,
         ("page_flip_on_send", SettingValue::Bool(b)) => set_page_flip_on_send_inner(app, *b),
         ("dashboard_preview", SettingValue::Bool(enabled)) => {
             app.current_ui.dashboard_preview = Some(*enabled);
@@ -847,6 +1330,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 set_follow_up_behavior_inner(app, mode);
             }
         }
+        ("cancel_turn_key", SettingValue::Enum(s)) => set_cancel_turn_key_inner(app, s),
         ("simple_mode", SettingValue::Bool(b)) => set_simple_mode_inner(app, *b),
         ("contextual_hints.undo", SettingValue::Bool(b)) => {
             set_contextual_hint_inner(app, |h, v| h.undo = v, *b)
@@ -872,8 +1356,14 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("contextual_hints.ssh_wrap", SettingValue::Bool(b)) => {
             set_contextual_hint_inner(app, |h, v| h.ssh_wrap = v, *b)
         }
+        ("prompt_cursor", SettingValue::String(s)) => {
+            if let Some(cursor) = crate::appearance::PromptCursor::parse_config(s) {
+                set_prompt_cursor_inner(app, cursor);
+            }
+        }
         ("respect_manual_folds", SettingValue::Bool(b)) => set_respect_manual_folds_inner(app, *b),
         ("theme", SettingValue::Enum(s)) => set_theme_inner(app, s),
+        ("theme", SettingValue::String(s)) => set_theme_inner(app, s),
         ("default_selected_permission", SettingValue::Enum(s)) => {
             set_default_selected_permission_inner(
                 app,
@@ -1046,9 +1536,25 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
             }
         }
         ("show_thinking_blocks", SettingValue::Bool(b)) => set_show_thinking_blocks_inner(app, *b),
+        ("thinking_border_colors", SettingValue::Bool(b)) => set_thinking_border_colors_inner(*b),
         ("group_tool_verbs", SettingValue::Bool(b)) => set_group_tool_verbs_inner(app, *b),
         ("collapsed_edit_blocks", SettingValue::Bool(b)) => {
             set_collapsed_edit_blocks_inner(app, *b)
+        }
+        ("side_by_side_edit", SettingValue::Bool(b)) => set_side_by_side_edit_inner(*b),
+        ("ctrl_o_tool_expansion", SettingValue::Enum(s)) => {
+            app.current_ui.ctrl_o_tool_expansion = Some((*s).to_string());
+        }
+        ("pi_bash_run_display", SettingValue::Enum(s)) => {
+            if let Some(value) = crate::appearance::ExecuteHeaderContent::from_canonical(s) {
+                set_pi_bash_run_display_inner(app, value);
+            }
+        }
+        ("pi_bash_command_format", SettingValue::Bool(b)) => {
+            set_pi_bash_command_format_inner(app, *b)
+        }
+        ("write_edit_hover_popups", SettingValue::Bool(b)) => {
+            set_write_edit_hover_popups_inner(app, *b)
         }
         ("prompt_suggestions", SettingValue::Bool(b)) => set_prompt_suggestions_inner(app, *b),
         // keep_text_selection: restore the cache mirror to the canonical value.
@@ -1108,6 +1614,37 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 s.clone()
             };
             set_fork_secondary_model_inner(app, restored);
+        }
+        ("recap_model", SettingValue::String(s)) => {
+            set_recap_model_inner(app, s.clone());
+        }
+        ("recap_model_2", SettingValue::String(s)) => {
+            app.current_ui.recap_model_2 = s.clone();
+        }
+        ("recap_model_3", SettingValue::String(s)) => {
+            app.current_ui.recap_model_3 = s.clone();
+        }
+        ("btw_model", SettingValue::String(s)) => {
+            app.current_ui.btw_model = s.clone();
+        }
+        ("btw_model_2", SettingValue::String(s)) => {
+            app.current_ui.btw_model_2 = s.clone();
+        }
+        ("btw_model_3", SettingValue::String(s)) => {
+            app.current_ui.btw_model_3 = s.clone();
+        }
+        ("recap_mermaid", SettingValue::Bool(b)) => {
+            set_recap_mermaid_inner(app, *b);
+        }
+        ("session_recap", SettingValue::Bool(b)) => {
+            set_session_recap_inner(app, *b);
+        }
+        ("progress_bar", SettingValue::Bool(b)) => {
+            set_progress_bar_inner(app, *b);
+        }
+        ("remote_tui_footer", SettingValue::Bool(b)) => {
+            app.current_ui.remote_tui_footer = Some(*b);
+            app.refresh_external_ui_surface();
         }
 
         _ => {

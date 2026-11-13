@@ -12,8 +12,83 @@ use agent_client_protocol as acp;
 use std::num::NonZeroU64;
 use xai_grok_shell::sampling::types::ReasoningEffort;
 use xai_grok_shell::session::unified_list::SessionKind;
-/// Typed error for model switch failures.
-/// Replaces the raw `String` in `TaskResult::SwitchModelComplete` so dispatch can match on the variant instead of parsing strings.
+
+/// Flattened Pi session-tree node for the `/tree` surface.
+#[derive(Debug, Clone)]
+pub struct SessionTreeNode {
+    pub id: String,
+    pub parent_id: Option<String>,
+    /// Structural depth from root (parent-chain length). Visual indent is
+    /// recomputed after filter using Pi TreeSelector branch-compression rules.
+    pub depth: usize,
+    pub is_leaf: bool,
+    pub is_current: bool,
+    pub on_active_path: bool,
+    pub role: String,
+    pub preview: String,
+    pub detail: String,
+    pub label: Option<String>,
+    pub label_timestamp: Option<String>,
+    pub entry_type: String,
+    pub timestamp: Option<String>,
+    pub child_ids: Vec<String>,
+    /// Assistant messages without text are hidden in default filter (Pi parity).
+    pub has_text: bool,
+}
+
+/// One user message available for Pi message-level `/fork`.
+#[derive(Debug, Clone)]
+pub struct PiForkMessage {
+    pub entry_id: String,
+    pub text: String,
+}
+
+/// Filter modes aligned with Pi `TreeSelector` / settings `treeFilterMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionTreeFilter {
+    #[default]
+    Default,
+    NoTools,
+    UserOnly,
+    LabeledOnly,
+    All,
+}
+
+impl SessionTreeFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::NoTools => "no-tools",
+            Self::UserOnly => "user",
+            Self::LabeledOnly => "labeled",
+            Self::All => "all",
+        }
+    }
+
+    pub fn cycle_forward(self) -> Self {
+        match self {
+            Self::Default => Self::NoTools,
+            Self::NoTools => Self::UserOnly,
+            Self::UserOnly => Self::LabeledOnly,
+            Self::LabeledOnly => Self::All,
+            Self::All => Self::Default,
+        }
+    }
+
+    pub fn cycle_backward(self) -> Self {
+        match self {
+            Self::Default => Self::All,
+            Self::NoTools => Self::Default,
+            Self::UserOnly => Self::NoTools,
+            Self::LabeledOnly => Self::UserOnly,
+            Self::All => Self::LabeledOnly,
+        }
+    }
+}
+
+/// Typed error for model switch failures. Replaces the raw `String` in
+/// `TaskResult::SwitchModelComplete` so dispatch can match on the variant
+/// instead of parsing strings.
 #[derive(Debug, Clone)]
 pub enum SwitchModelError {
     /// The target model requires a different agent harness than the active session.
@@ -28,6 +103,21 @@ pub enum SwitchModelError {
     /// Any other failure (network, auth, server error, etc.).
     Other(String),
 }
+/// Pi built-in tools selectable from the grok-pi F2 settings group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PiBuiltinTool {
+    Read,
+    Bash,
+    PowerShell,
+    Edit,
+    Write,
+    Grep,
+    Find,
+    Ls,
+    Eval,
+    Codemode,
+}
+
 /// The model, effort, and context window a session switch requests.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelChoice {
@@ -92,7 +182,9 @@ pub enum Action {
     QuitForUpdate,
     /// Resume the recent foreign session offered on the launch welcome screen.
     ResumeForeignSession,
-    /// Re-exec into the other screen mode (`true` means minimal).
+    /// Quit and re-exec the pager to reopen the active session in another
+    /// screen mode (`true` = `--minimal`, `false` = fullscreen / non-minimal).
+    /// Driven by `/minimal` and `/fullscreen`.
     RelaunchInScreenMode {
         minimal: bool,
     },
@@ -135,6 +227,8 @@ pub enum Action {
     FetchSessionList,
     /// Cycle the active session picker's source filter.
     CycleSessionSourceFilter,
+    /// Refresh the external agent's session catalog for the selected picker tab.
+    RefreshExternalSessionCatalog,
     /// Load a selected session from the session picker.
     PickSession(usize),
     /// Load a selected session from the session picker into a new worktree.
@@ -148,8 +242,36 @@ pub enum Action {
     },
     /// Open the session picker overlay (from within an active session via /resume).
     ShowSessionPicker,
-    /// The session picker overlay was dismissed without a pick.
-    /// Invalidate any in-flight list/search/foreign scan so a late response can't fall through to the welcome picker fields.
+    /// Open the Pi session entry tree picker (`/tree`).
+    ShowSessionTree,
+    /// Open the branch map: user-messages-only fork view (`/tree-map`).
+    ShowTreeMap,
+    /// Open the process-local Pi notification list for the active session (`/notify`).
+    ShowNotifications,
+    /// Navigate the active Pi session leaf to `entry_id` (`ctx.navigateTree`).
+    NavigateSessionTree {
+        entry_id: String,
+        summarize: bool,
+        custom_instructions: Option<String>,
+    },
+    /// Set or clear a Pi session-tree label (`ctx.setLabel`).
+    LabelSessionTreeEntry {
+        entry_id: String,
+        label: Option<String>,
+    },
+    /// Preview file rollback to a Pi session-tree ancestor entry.
+    RollbackFilesPreview {
+        entry_id: String,
+    },
+    /// Execute file rollback to a Pi session-tree ancestor entry (file-only, leaf unchanged).
+    RollbackFilesExecute {
+        entry_id: String,
+    },
+    /// Close the session tree modal without navigating.
+    SessionTreeClosed,
+    /// The session picker overlay was dismissed without a pick: invalidate any
+    /// in-flight list/search/foreign scan so a late response can't fall
+    /// through to the welcome picker fields.
     SessionPickerClosed,
     /// Create a new session in a git worktree from the welcome screen.
     /// `load_session_id`: when `Some`, loads that session in the new worktree instead of creating a fresh one (`--resume` with `--worktree`).
@@ -451,8 +573,10 @@ pub enum Action {
         tool_name: String,
         enabled: bool,
     },
-    /// Cycle to next model.
+    /// Cycle to next model in the session's Pi scope (or all models).
     NextModel,
+    /// Replace the session-only Pi scoped-model list. Empty means all models.
+    SetScopedModels(Vec<crate::acp::model_state::ScopedModel>),
     /// Switch active model.
     SwitchModel(ModelChoice),
     /// Cancel the currently running turn.
@@ -468,6 +592,11 @@ pub enum Action {
     DemoteToBackground,
     /// Request current bundle cache status via `x.ai/bundle/status`.
     RequestBundleStatus,
+    /// View a catalog entry's raw content in the block viewer.
+    ViewCatalogEntry {
+        kind: String,
+        name: String,
+    },
     /// Hide the announcements banner.
     AnnouncementsHide,
     /// Show the announcements banner.
@@ -475,8 +604,9 @@ pub enum Action {
     /// Open the promo CTA link (url resolved from current state at dispatch time, mirroring how `AnnouncementsHide` resolves its target).
     /// The payload records which UI element activated it, for telemetry.
     AnnouncementsOpenCta(xai_grok_telemetry::events::AnnouncementCtaSurface),
-    /// Cycle session mode (Shift+Tab): Normal, Plan, Auto, Always-Approve, then back to Normal (Auto skipped when the feature gate is off).
-    /// Plan entered on top of a permission (Plan + Auto, Plan + Always-Approve) exits plan and keeps that permission.
+    /// Cycle the current model's supported thinking level without switching models.
+    CycleThinkingLevel,
+    /// Cycle session mode (Normal → Plan → Always-Approve → Normal).
     /// Plan mode sends a signal to the shell; always-approve is local.
     CycleMode,
     /// Toggle YOLO mode (auto-approve all permissions). Ctrl+O.
@@ -526,17 +656,38 @@ pub enum Action {
     /// Set whether agent thinking blocks are shown.
     /// SHELL-owned: updates the process-wide cache mirror and persists to `[ui].show_thinking_blocks` via `Effect::PersistSetting`.
     SetShowThinkingBlocks(bool),
-    /// Set whether runs of consecutive non-destructive tool calls and subagent rows are grouped into one row.
-    /// SHELL-owned: updates the process-wide cache mirror and persists to `[ui].group_tool_verbs` via `Effect::PersistSetting`.
+    /// Set whether the normal prompt border follows the selected thinking/
+    /// reasoning effort color. SHELL-owned: cache mirror +
+    /// `[ui].thinking_border_colors` via `Effect::PersistSetting`.
+    SetThinkingBorderColors(bool),
+    /// Set whether runs of consecutive non-destructive tool calls and
+    /// subagent rows are grouped into one row. SHELL-owned: updates the
+    /// process-wide cache mirror and persists to `[ui].group_tool_verbs`
+    /// via `Effect::PersistSetting`.
     SetGroupToolVerbs(bool),
     /// Set whether Edit blocks default to the collapsed one-line diffstat summary.
     /// SHELL-owned: updates the process-wide cache mirror and persists to `[ui].collapsed_edit_blocks` via `Effect::PersistSetting`.
     SetCollapsedEditBlocks(bool),
-    /// Set whether the predicted-next-prompt ghost text (tab autocomplete) is offered after each turn.
-    /// SHELL-owned: updates the process-wide cache mirror and persists to `[ui].prompt_suggestions` via `Effect::PersistSetting`.
+    /// Set the grok-pi-only side-by-side edit renderer preference. PAGER-owned,
+    /// process-local, default off, and applied on the next render frame.
+    SetSideBySideEdit(bool),
+    /// Set the grok-pi Ctrl+O tool expansion scope (`write_edit` or `all_tools`).
+    SetCtrlOToolExpansion(String),
+    /// Set which fields grok-pi Bash/run headers render.
+    SetPiBashRunDisplay(crate::appearance::ExecuteHeaderContent),
+    /// Set whether Bash commands are formatted for display only.
+    SetPiBashCommandFormat(bool),
+    /// Set whether collapsed Write/Edit rows show expanded hover popups.
+    SetWriteEditHoverPopups(bool),
+    /// Set whether the predicted-next-prompt ghost text (tab autocomplete)
+    /// is offered after each turn. SHELL-owned: updates the process-wide
+    /// cache mirror and persists to `[ui].prompt_suggestions` via
+    /// `Effect::PersistSetting`.
     SetPromptSuggestions(bool),
-    /// Set `[scrollback.scroll].respect_manual_folds`.
-    /// PAGER-owned: live-applied via `AppView::set_appearance` and persisted to pager.toml via `Effect::PersistSetting`.
+    /// Set `[scrollback.scroll].respect_manual_folds`. PAGER-owned:
+    /// live-applied via `AppView::set_appearance` and persisted to
+    /// pager.toml via `Effect::PersistSetting`.
+    SetPromptCursor(String),
     SetRespectManualFolds(bool),
     /// Set the canonical for `[ui].default_selected_permission`. Persists via `Effect::PersistSetting`.
     /// Payload is the registry's canonical string (`default` | `allow_once` | `allow_always` | `reject`).
@@ -577,6 +728,9 @@ pub enum Action {
     /// Mid-turn follow-up routing (`queue` | `steer`).
     /// SHARED-owned: `[ui].follow_up_behavior`.
     SetFollowUpBehavior(crate::appearance::FollowUpBehavior),
+    /// Running-turn cancellation gesture (`esc` | `ctrl_c`). SHARED-owned,
+    /// live-applied and persisted to `[ui].cancel_turn_key`.
+    SetCancelTurnKey(String),
     /// Set simple mode (ASCII / minimal glyphs). Persists via `Effect::PersistSetting`.
     SetSimpleMode(bool),
     /// Set the per-tip contextual-hint user config (`[ui.contextual_hints]`).
@@ -613,6 +767,87 @@ pub enum Action {
     /// Clear the persisted fork-secondary model, restoring the built-in default.
     /// Active agent keeps its value; next fork uses the default.
     ClearForkSecondaryModel,
+    /// Commit the recap model override. Empty-clear via ClearRecapModel.
+    /// Persisted to `[ui].recap_model`.
+    SetRecapModel(acp::ModelId),
+    /// Clear the dedicated recap model (recap generation stays disabled).
+    ClearRecapModel,
+    SetRecapModel2(String),
+    ClearRecapModel2,
+    SetRecapModel3(String),
+    ClearRecapModel3,
+    SetBtwModel(String),
+    ClearBtwModel,
+    SetBtwModel2(String),
+    ClearBtwModel2,
+    SetBtwModel3(String),
+    ClearBtwModel3,
+    /// Open the model picker for the active agent.
+    OpenModelPicker,
+    /// Open the native Pi-style scoped-model multi-selector.
+    OpenScopedModelsPicker,
+    /// Open the native model picker to select the dedicated recap model.
+    OpenRecapModelPicker,
+    /// Open native searchable model picker for a recap/btw settings slot.
+    OpenSideModelPicker {
+        slot_key: &'static str,
+    },
+    /// Commit auto session-recap toggle (`[ui].session_recap`).
+    SetSessionRecap(bool),
+    /// Commit optional Mermaid generation in Recap (`[ui].recap_mermaid`).
+    SetRecapMermaid(bool),
+    /// Commit OSC 9;4 terminal-tab progress indicators (`[ui].progress_bar`).
+    SetProgressBar(bool),
+    /// Commit the experimental Remote TUI footer toggle (`[ui].remote_tui_footer`).
+    SetRemoteTuiFooter(bool),
+    /// Persist a Pi built-in tool preference for the next grok-pi session.
+    SetPiBuiltinTool {
+        tool: PiBuiltinTool,
+        enabled: bool,
+    },
+    /// Enable grok-pi's private Bash/Eval bridge (restart required).
+    SetPiBash(bool),
+    /// Select Eval bridge generation (`v1` or `v2`; restart required).
+    SetPiEval(String),
+    /// Select Eval v2 language exposure (`js`, `py`, or `all`; restart required).
+    SetPiEvalV2Language(String),
+    /// Select Eval v2 presentation (`effects` or `legacy`; live-applied).
+    SetPiEvalV2DisplayMode(String),
+    /// Force Eval v2 and hide every other Pi tool (restart required).
+    SetPiEvalV2Only(bool),
+    /// Authenticated loopback MCP facade over live Eval v2-only (restart).
+    SetPiEvalMcp(bool),
+    /// Enable PSM's optional SQLite catalog source for Pi `/resume`.
+    SetPsmResumeIndex(bool),
+    /// Enable Pi tree file rollback checkpoint tracking.
+    SetPiTreeFileRollback(bool),
+    /// Skip the "Summarize branch?" prompt when navigating the session tree.
+    SetPiTreeSkipSummaryPrompt(bool),
+    /// Set a declaratively registered external-host bool feature.
+    SetHostFeatureBool {
+        key: xai_grok_shell::host_features::HostFeatureKey,
+        enabled: bool,
+    },
+    /// Notify when a native Q&A question arrives while grok-pi is unfocused.
+    SetPiAskUserQuestionNotifications(bool),
+    SetPiCacheGraph(bool),
+    /// Load the bundled grok-pi configuration skill (restart required).
+    SetPiConfigSkill(bool),
+    /// Render grok-pi user prompts with the agent markdown renderer
+    /// (`[ui].pi_user_markdown`, default on).
+    SetPiUserMarkdown(bool),
+    /// Include hidden/dotfile entries in plain `@` file search while keeping
+    /// ignore rules enabled (`[ui].pi_at_search_hidden`, default on).
+    SetPiAtSearchHidden(bool),
+    /// Keep previous agent tabs alive on `/new` so the dashboard can switch
+    /// back (`[ui].pi_keep_multi_agent`, default off → full replacement).
+    SetPiKeepMultiAgent(bool),
+    /// Show raw_input JSON on Other/generic tool cards (`[ui].show_other_tool_args`, default on).
+    SetShowOtherToolArgs(bool),
+    /// Default tree layout for `/review-*` left pane (`[ui].review_file_tree`).
+    SetReviewFileTree(bool),
+    /// Include read ops in `/review-*` (`[ui].review_include_reads`).
+    SetReviewIncludeReads(bool),
     /// Commit the `show_tips` preference. Persisted to `[cli].show_tips`.
     /// Restart-required: tips are resolved once at startup.
     SetShowTips(bool),
@@ -632,7 +867,19 @@ pub enum Action {
     /// Open the settings modal (F2, `/settings`, command palette).
     /// If already open, closes it instead of stacking.
     OpenSettings,
-    /// Open settings on a registry key: its chooser, or the browse row when the setting is locked.
+    /// Open the grok-pi settings panel (F2, `/settings`, command palette).
+    /// If already open, closes it instead of stacking.
+    OpenPiSettings,
+    /// Open the grok-pi settings panel focused on a registry key.
+    OpenPiSettingsFocus {
+        key: &'static str,
+    },
+    /// Open the native Pi resource-configuration modal from F2 settings.
+    OpenPiConfig,
+    /// Open the native Pi provider/model management center.
+    OpenPiModels,
+    /// Open settings on a registry key: its chooser, or the browse row when
+    /// the setting is locked.
     OpenSettingsFocus {
         key: &'static str,
     },
@@ -643,6 +890,13 @@ pub enum Action {
     /// Open the command palette (`/help`).
     /// The keybinding path (Ctrl+P) opens it directly in `handle_agent_action`; this lets a slash command reach the same modal through dispatch.
     OpenCommandPalette,
+    /// Open the keyboard shortcuts cheatsheet (`/hotkeys`, Pi name). Same modal
+    /// as Ctrl+. / Ctrl+X (`ActionId::ShortcutsHelp`); slash path goes through
+    /// dispatch so external profiles can expose it without keybinding knowledge.
+    OpenShortcutsHelp,
+    /// Open the native Pi extension-shortcut manager (`/pi-shortcut-manager`).
+    /// Manages `pi.registerShortcut` entries only; does not touch remote-tui.
+    OpenPiShortcutManager,
     /// Open the in-TUI How-to Guides doc picker (`/docs`, palette "How-to Guides").
     OpenHowtoGuides,
     /// Open the onboarding tutorial overlay (`/tutorial` or the command palette).
@@ -765,8 +1019,10 @@ pub enum Action {
     /// Request a session recap ("where was I" summary).
     /// `auto` is `true` for the automatic return-from-away recap, `false` for an explicit `/recap`.
     /// Bypasses the prompt queue (works while the agent is busy).
+    /// `custom_instructions` is optional free-text from `/recap …` / `/summarize …`.
     SendRecap {
         auto: bool,
+        custom_instructions: Option<String>,
     },
     /// Pick a session from content (deep search) results.
     PickContentSession {
@@ -789,6 +1045,13 @@ pub enum Action {
     TriggerDeepSearch,
     /// Force an immediate deep content search, skipping the debounce.
     ForceDeepSearch,
+    /// Load PSM message preview for the resume picker's preview mode.
+    LoadSessionPreview {
+        session_id: String,
+        session_path: Option<String>,
+    },
+    /// Show privacy and data retention status.
+    ShowPrivacyInfo,
     SetCodingDataSharing {
         opted_in: bool,
     },
@@ -872,12 +1135,15 @@ pub enum Action {
     DashboardStop,
     /// Confirm permanent delete of the armed dashboard row.
     DashboardDelete,
-    /// Cycle the dispatch input's mode for the next spawned agent: Normal, Plan, Auto, Always-Approve, then back around.
-    /// Auto is skipped when gated off. Bound to Shift+Tab.
+    /// Cycle the dispatch input's mode for the next spawned agent.
+    /// Pi uses Normal ↔ Plan; stock Grok retains its wider mode ring.
+    /// Uses Ctrl+Alt+T on Windows and Ctrl+Shift+T elsewhere so Shift+Tab
+    /// remains the thinking shortcut.
     DashboardCycleMode,
-    /// Cycle the PEEKED agent's live mode (same gated rotation as the agent prompt): the peek-panel counterpart to [`Self::DashboardCycleMode`].
-    /// Unlike that staged dispatch mode, this changes the existing agent directly (same effect as Shift+Tab inside the agent's chat view).
-    /// Emitted when Shift+Tab fires while the peek panel is open.
+    /// Cycle the PEEKED agent's live mode — the peek-panel counterpart to
+    /// [`Self::DashboardCycleMode`]. Unlike the staged dispatch mode, this
+    /// changes the existing agent directly. Emitted by the platform Plan
+    /// shortcut while the peek panel is open.
     DashboardPeekCycleMode,
     /// Toggle grouping between State and Directory.
     DashboardToggleGrouping,
@@ -1010,6 +1276,16 @@ pub enum Action {
     /// Toggle the expanded goal detail overlay.
     ToggleGoalDetail,
     ToggleWorkflows,
+    /// Launch a named host workflow (`/workflow <name> [args]`).
+    WorkflowLaunch {
+        name: String,
+        args: String,
+    },
+    /// Manage a workflow run (`pause`/`stop` for now).
+    WorkflowManage {
+        op: String,
+        target: String,
+    },
     Rewind,
     RewindShowPicker,
     RewindPickerSelect(usize),
@@ -1019,12 +1295,31 @@ pub enum Action {
     RewindCancelOffer,
     RewindDismiss,
     RewindDismissError,
+    /// Submit an inline edit: conversation-only rewind to that prompt, then resubmit the edited text (state lives on `AgentView::inline_edit`).
+    InlineEditSubmit,
     /// Open the `/jump` turn picker.
     JumpShowPicker,
     /// Jump to a turn by its prompt's stable id and close the picker.
     JumpPickerSelect(EntryId),
     /// Close the picker and restore the stashed viewport.
     JumpDismiss,
+    /// Open session-level code review (edit/write file changes).
+    ReviewShowSession,
+    /// Open jump-style picker; Enter opens turn-scoped review.
+    ReviewShowMessagePicker,
+    /// Open review modal for the turn owning `prompt_id`.
+    ReviewOpenForTurn(EntryId),
+    /// Close the code-review modal.
+    ReviewDismiss,
+    /// Submit a QA question from the review modal's Right Ask bar.
+    /// Fires a /btw side question scoped to the reviewed files.
+    ReviewAsk(String),
+    /// Close the Pi `/fork` prompt-area message list overlay.
+    PiForkDismiss,
+    /// Pi `/clone`: duplicate current session at the current leaf.
+    PiClone,
+    /// Pi `/reload`: reload settings/extensions/skills/prompts/themes/context.
+    PiReload,
 }
 /// A server-authoritative queue row plus the version its removal is checked against.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1221,7 +1516,10 @@ impl PlanModeKind {
 /// The shell's deny-list treats every gesture value as a stop, so new variants need no shell change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelTrigger {
-    /// `Ctrl+C` pressed (the default cancel keybinding). A bare Esc never cancels; it only hints at this key.
+    /// Wire value `"esc"` (bare Esc mid-turn cancel when enabled by the F2
+    /// cancellation policy, plus the Esc cancel-retry while TurnCancelling).
+    Esc,
+    /// `Ctrl+C` pressed (the default cancel keybinding).
     CtrlC,
     /// The on-screen cancel button was clicked.
     Mouse,
@@ -1232,6 +1530,7 @@ impl CancelTrigger {
     /// Snake_case wire string sent as `_meta.cancelTrigger`.
     pub fn as_wire_str(self) -> &'static str {
         match self {
+            Self::Esc => "esc",
             Self::CtrlC => "ctrl_c",
             Self::Mouse => "mouse",
             Self::DashboardStop => "dashboard_stop",
@@ -1560,7 +1859,67 @@ pub enum Effect {
         grok_home: std::path::PathBuf,
         launch_token: u64,
     },
-    /// Fetch a picker session list.
+    /// Ask an external ACP agent to lazily publish one scoped session catalog
+    /// when the native session picker opens or its tab changes.
+    FetchExternalSessionCatalog {
+        cwd: std::path::PathBuf,
+        all: bool,
+        use_psm_index: bool,
+    },
+    /// Fetch Pi `get_tree` for the active agent and open ArgPicker.
+    FetchSessionTree {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+    },
+    /// Navigate Pi leaf then reload scrollback for the same session id.
+    NavigateSessionTree {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+        entry_id: String,
+        summarize: bool,
+        custom_instructions: Option<String>,
+    },
+    /// Set/clear a Pi tree label then refresh the open tree modal.
+    LabelSessionTreeEntry {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+        entry_id: String,
+        label: Option<String>,
+    },
+    /// Preview file rollback to a Pi tree entry (read-only plan).
+    RollbackFilesPreview {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+        entry_id: String,
+    },
+    /// Execute file rollback to a Pi tree entry (restores files).
+    RollbackFilesExecute {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+        entry_id: String,
+    },
+    /// Fetch Pi `get_fork_messages` for the external `/fork` ArgPicker.
+    FetchPiForkMessages {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+    },
+    /// Execute Pi RPC `fork` from a user-message entry id.
+    ForkPiSession {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+        entry_id: String,
+    },
+    /// Execute Pi RPC `clone` (duplicate current leaf into a new session file).
+    ClonePiSession {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+    },
+    /// Execute Pi resource reload via injected `ctx.reload()` bridge.
+    ReloadPiSession {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+    },
+    /// Fetch session list for the welcome screen session picker.
     FetchSessionList {
         /// The picker this fetch was issued for; the result routes back to this host's storage only.
         host: crate::views::session_picker_surface::SessionPickerHost,
@@ -1647,6 +2006,12 @@ pub enum Effect {
         text: String,
         prompt_id: String,
     },
+    /// Invoke a Pi extension command without creating a Pager turn or queue row.
+    /// Pi owns the command handler and any nested agent work it starts.
+    RunPiExtensionCommand {
+        session_id: acp::SessionId,
+        command: String,
+    },
     /// `session/prompt` with `_meta.executePlan` after a post-turn plan approve
     ExecutePlan {
         agent_id: AgentId,
@@ -1680,6 +2045,10 @@ pub enum Effect {
     Compact {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        /// Optional focus text from `/compact <instructions>`.
+        custom_instructions: Option<String>,
+        /// Upstream shell context passed with the compaction request (`userContext`).
+        user_context: Option<String>,
     },
     /// Kill a background task.
     KillBgTask {
@@ -1790,9 +2159,9 @@ pub enum Effect {
         /// See [`Effect::SendPrompt::prompt_id`].
         prompt_id: String,
     },
-    /// Cancel-and-send: `session/prompt` stamped with `_meta.sendNow`, so the shell cancels the running turn and runs this prompt next.
-    /// Background tasks and the rest of the queue survive.
-    /// Carries structured blocks so pasted images ride along.
+    /// Cancel-and-send: `session/prompt` stamped with `_meta.sendNow`, so the
+    /// shell cancels the running turn and runs this prompt next. Carries
+    /// structured blocks so pasted images ride along.
     SendPromptNow {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -1994,6 +2363,20 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
+    /// Launch a named workflow via `x.ai/workflow/launch`.
+    WorkflowLaunch {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        name: String,
+        args: String,
+    },
+    /// Pause/stop a workflow run via `x.ai/workflow/{pause,stop}`.
+    WorkflowManage {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        op: String,
+        target: String,
+    },
     /// Toggle a skill via x.ai/skills/toggle (enable/disable without restart).
     ToggleSkill {
         agent_id: AgentId,
@@ -2091,6 +2474,8 @@ pub enum Effect {
     },
     /// Fetch current bundle cache status via `x.ai/bundle/status`.
     FetchBundleStatus,
+    /// Fetch a bundled entry's raw content via `x.ai/bundle/entry/get`.
+    FetchCatalogEntry { kind: String, name: String },
     /// Send feedback about the current session (fire-and-forget POST).
     /// `origin` rides through to the completion so a modal send's parked consent can be matched or dropped.
     SendFeedback {
@@ -2153,6 +2538,8 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         question: String,
+        /// Ordered model fallback chain (empty = session model on adapter/extension).
+        models: Vec<String>,
         /// Composer images. Encoded off the TUI thread. Empty keeps the text-only wire.
         images: Vec<crate::prompt_images::PastedImage>,
         cwd: std::path::PathBuf,
@@ -2164,6 +2551,17 @@ pub enum Effect {
     SendRecap {
         session_id: acp::SessionId,
         auto: bool,
+        /// Ordered model fallback chain. Empty = session model.
+        models: Vec<String>,
+        /// Current session reasoning level; omitted for off/unsupported models.
+        thinking_level: Option<String>,
+        /// Whether the recap prompt may request an optional Mermaid diagram.
+        recap_mermaid: bool,
+        /// Terminal columns at request time; extension picks Mermaid LR vs TD.
+        /// `0` means unknown (extension defaults to TD).
+        terminal_width: u16,
+        /// Optional focus text from `/recap …` (injected into the recap prompt).
+        custom_instructions: Option<String>,
     },
     /// Send a mid-turn interjection via x.ai/interject ext method.
     SendInterject {
@@ -2213,6 +2611,12 @@ pub enum Effect {
     },
     /// Unregister a session from the active-sessions registry (clean exit).
     UnregisterActiveSession { session_id: acp::SessionId },
+    /// Experimental Remote TUI: forward a key sequence to the Pi process host.
+    RemoteTuiInput { id: String, data: String },
+    /// Experimental Remote TUI: cancel the active remote component session.
+    RemoteTuiCancel { id: String },
+    /// Extension shortcut matched: dispatch to Pi extension handler via RPC.
+    ShortcutDispatch { key: String },
     /// Quit the application.
     Quit,
     /// Toggle coding data sharing via ACP.
@@ -2262,9 +2666,29 @@ pub enum Effect {
         /// Unresolved index rows are omitted from both classified views.
         headless_policy: xai_grok_shell::session::unified_list::HeadlessPolicy,
     },
-    /// Call `x.ai/session/fork` to create a peer session that resumes from `parent_session_id` in the same cwd (no worktree).
-    /// Mirror of the worktree branch of [`Effect::CreateWorktreeSession`].
-    /// The worktree-fork path reuses `CreateWorktreeSession { load_session_id }` directly so we get worktree creation and code restore for free.
+    /// Full-text search for external (Pi) sessions via PSM SQLite FTS5.
+    PiSessionSearch {
+        query: String,
+        cwd: Option<std::path::PathBuf>,
+        /// Echoed back on [`TaskResult::DeepSearchResults`] so the result is
+        /// routed to the picker host that asked for it.
+        host: crate::views::session_picker_surface::SessionPickerHost,
+        /// Echoed back on [`TaskResult::DeepSearchResults`] so a stale search
+        /// cannot overwrite a newer picker incarnation.
+        generation: u64,
+        seq: u64,
+    },
+    /// Load message preview for a Pi session (PSM `message_entries`).
+    PiSessionPreview {
+        session_id: String,
+        session_path: Option<String>,
+        generation: u64,
+    },
+    /// Call `x.ai/session/fork` to create a peer session that resumes
+    /// from `parent_session_id` in the same cwd (no worktree). Mirror of
+    /// the worktree branch of [`Effect::CreateWorktreeSession`]; the
+    /// worktree-fork path reuses `CreateWorktreeSession { load_session_id }`
+    /// directly so we get worktree creation + code restore for free.
     ForkSession {
         agent_id: AgentId,
         parent_session_id: acp::SessionId,
@@ -2612,6 +3036,100 @@ pub enum TaskResult {
         last_turn_summary: Option<String>,
         /// Generation captured when the hydrate effect was enqueued.
         last_turn_summary_gen: u64,
+    },
+    /// The external-agent session catalog request completed. The agent sends
+    /// the actual entries separately through `pi/ui/session_catalog`.
+    ExternalSessionCatalogRequested,
+    /// The external-agent session catalog request failed before any catalog
+    /// notification could arrive — clear loading flags on dashboard/picker.
+    ExternalSessionCatalogFailed,
+    /// Pi session tree loaded for `/tree` ArgPicker.
+    SessionTreeLoaded {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+        leaf_id: Option<String>,
+        nodes: Vec<SessionTreeNode>,
+    },
+    /// Pi session tree fetch failed.
+    SessionTreeFailed {
+        agent_id: crate::app::agent::AgentId,
+        error: String,
+    },
+    /// Pi tree navigation completed; reload scrollback for the same session.
+    SessionTreeNavigated {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+        leaf_id: Option<String>,
+        editor_text: Option<String>,
+    },
+    /// Pi tree navigation failed; keep current view.
+    SessionTreeNavigateFailed {
+        agent_id: crate::app::agent::AgentId,
+        error: String,
+    },
+    /// Pi tree label set/cleared; refresh nodes if modal still open.
+    SessionTreeLabeled {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+        entry_id: String,
+        label: Option<String>,
+        leaf_id: Option<String>,
+        nodes: Vec<SessionTreeNode>,
+    },
+    SessionTreeLabelFailed {
+        agent_id: crate::app::agent::AgentId,
+        error: String,
+    },
+    /// Pi `/fork` message catalog loaded for ArgPicker.
+    PiForkMessagesLoaded {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+        messages: Vec<PiForkMessage>,
+    },
+    PiForkMessagesFailed {
+        agent_id: crate::app::agent::AgentId,
+        error: String,
+    },
+    /// Pi message-level fork completed; reload with the new session id.
+    PiSessionForked {
+        agent_id: crate::app::agent::AgentId,
+        /// Session id before fork (for diagnostics only).
+        previous_session_id: String,
+        session_id: String,
+        editor_text: Option<String>,
+    },
+    PiSessionForkFailed {
+        agent_id: crate::app::agent::AgentId,
+        error: String,
+    },
+    /// Pi `/clone` completed; reload with the new session id (empty prompt).
+    PiSessionCloned {
+        agent_id: crate::app::agent::AgentId,
+        previous_session_id: String,
+        session_id: String,
+    },
+    PiSessionCloneFailed {
+        agent_id: crate::app::agent::AgentId,
+        error: String,
+    },
+    /// Pi `/reload` completed (resources refreshed; session file unchanged).
+    PiSessionReloaded {
+        agent_id: crate::app::agent::AgentId,
+        session_id: String,
+    },
+    PiSessionReloadFailed {
+        agent_id: crate::app::agent::AgentId,
+        error: String,
+    },
+    /// File rollback preview/execute completed (toast-only; no modal state change).
+    RollbackFilesCompleted {
+        agent_id: crate::app::agent::AgentId,
+        message: String,
+    },
+    /// File rollback failed.
+    RollbackFilesFailed {
+        agent_id: crate::app::agent::AgentId,
+        error: String,
     },
     /// Session list fetched for the welcome screen picker.
     SessionListLoaded {
@@ -2966,6 +3484,13 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         result: Result<Vec<crate::views::extensions_modal::WorkflowInfo>, String>,
     },
+    /// Host workflow launch/manage finished — show toast + optional scrollback line.
+    WorkflowHostMessage {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        message: String,
+        is_error: bool,
+    },
     /// Skill toggle completed (enable/disable).
     SkillsToggleDone {
         agent_id: AgentId,
@@ -3188,6 +3713,14 @@ pub enum TaskResult {
         error: String,
     },
     /// Side question (/btw) response received.
+    CatalogEntryReady {
+        kind: String,
+        name: String,
+        content: String,
+    },
+    CatalogEntryFailed {
+        error: String,
+    },
     BtwResponse {
         agent_id: AgentId,
         result: Result<String, String>,
@@ -3269,9 +3802,15 @@ pub enum TaskResult {
         results: Vec<xai_grok_shell::extensions::session_search::SearchSessionHit>,
         seq: u64,
     },
-    /// `x.ai/session/fork` completed (no-worktree path).
-    /// The pager adopts the new session id and emits [`Effect::LoadSession`] to start the replay.
-    /// Mirrors [`TaskResult::WorktreeForked`] in shape.
+    /// PSM session message preview loaded for resume picker.
+    SessionPreviewLoaded {
+        session_id: String,
+        messages: Vec<crate::views::modal::SessionPreviewMessage>,
+        generation: u64,
+    },
+    /// `x.ai/session/fork` completed (no-worktree path). The pager adopts
+    /// the new session id and emits [`Effect::LoadSession`] to start the
+    /// replay. Mirrors [`TaskResult::WorktreeForked`] in shape.
     ForkSessionReady {
         agent_id: AgentId,
         new_session_id: acp::SessionId,

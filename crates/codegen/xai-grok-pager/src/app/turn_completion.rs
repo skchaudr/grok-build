@@ -469,6 +469,10 @@ fn arm_driver_turn_end_reconcile(
         error_kind,
         received_at: std::time::Instant::now(),
     });
+    agent
+        .session
+        .tracker
+        .finish_response_stream(&mut agent.scrollback);
     true
 }
 

@@ -2819,50 +2819,58 @@ fn tab_toggles_input_and_list_focus() {
     assert!(!state.list_focused, "Tab again returns focus to the input");
 }
 
-/// Shift+Tab emits `DashboardCycleMode` regardless of how the terminal encodes it — `BackTab` (with
-/// or without a SHIFT modifier) or `Tab`+SHIFT. Guards the regression where the registry's
-/// exact-modifier `key!(BackTab)` lookup silently failed on `BackTab`+SHIFT.
+/// The platform Plan shortcut emits `DashboardCycleMode`; Shift+Tab stays
+/// reserved for thinking-level cycling on the agent surface.
 #[test]
-fn shift_tab_emits_cycle_mode_for_all_encodings() {
+fn plan_shortcut_emits_cycle_mode() {
     let reg = crate::actions::ActionRegistry::defaults();
-    for key in [
-        KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
-        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
-        KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
-    ] {
-        let mut state = DashboardState::new();
-        let outcome = state.handle_key(&key, &reg);
-        assert!(
-            matches!(outcome, InputOutcome::Action(Action::DashboardCycleMode)),
-            "Shift+Tab ({key:?}) must emit DashboardCycleMode, got {outcome:?}",
-        );
-    }
+    let key = if cfg!(windows) {
+        KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        )
+    } else {
+        KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )
+    };
+    let mut state = DashboardState::new();
+    let outcome = state.handle_key(&key, &reg);
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::DashboardCycleMode)),
+        "Plan shortcut must emit DashboardCycleMode, got {outcome:?}",
+    );
 }
 
-/// Multiline must not treat Shift+Tab as the submit chord (is_mod_enter
-/// requires KeyCode::Enter).
+/// Multiline drafts are preserved when the mode shortcut fires.
 #[test]
-fn multiline_shift_tab_cycles_mode_with_non_empty_draft() {
+fn multiline_plan_shortcut_cycles_mode_with_non_empty_draft() {
     let reg = crate::actions::ActionRegistry::defaults();
-    for key in [
-        KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
-        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
-        KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
-    ] {
-        let mut state = DashboardState::new();
-        state.multiline_mode = true;
-        state.dispatch.set_text("draft text");
-        let outcome = state.handle_key(&key, &reg);
-        assert!(
-            matches!(outcome, InputOutcome::Action(Action::DashboardCycleMode)),
-            "multiline + {key:?} must DashboardCycleMode, not send, got {outcome:?}",
-        );
-        assert_eq!(
-            state.dispatch.text(),
-            "draft text",
-            "draft must not be consumed by Shift+Tab"
-        );
-    }
+    let key = if cfg!(windows) {
+        KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        )
+    } else {
+        KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )
+    };
+    let mut state = DashboardState::new();
+    state.multiline_mode = true;
+    state.dispatch.set_text("draft text");
+    let outcome = state.handle_key(&key, &reg);
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::DashboardCycleMode)),
+        "multiline + Plan shortcut must cycle mode, not send, got {outcome:?}",
+    );
+    assert_eq!(
+        state.dispatch.text(),
+        "draft text",
+        "draft must not be consumed by the mode shortcut"
+    );
 }
 
 /// Shift+↑/↓ emits the reorder actions even with the peek open (the
@@ -2889,37 +2897,43 @@ fn shift_arrows_emit_reorder_with_peek_open() {
     }
 }
 
-/// Shift+Tab cycles the PEEKED agent's live mode while the peek is
-/// open (emitting `DashboardPeekCycleMode`), but the new-session
+/// The platform Plan shortcut cycles the PEEKED agent's live mode while the
+/// peek is open (emitting `DashboardPeekCycleMode`), but the new-session
 /// staged mode (`DashboardCycleMode`) when no peek is shown.
 #[test]
-fn shift_tab_cycles_peeked_agent_mode_when_peek_open() {
+fn plan_shortcut_cycles_peeked_agent_mode_when_peek_open() {
     let reg = crate::actions::ActionRegistry::defaults();
-    for key in [
-        KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
-        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
-        KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
-    ] {
-        let mut state = make_state_with_selection();
-        state.peek = Some(super::super::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(AgentId(0)),
-            peek_fields_for_test("Idle"),
-        ));
-        let outcome = state.handle_key(&key, &reg);
-        assert!(
-            matches!(
-                outcome,
-                InputOutcome::Action(Action::DashboardPeekCycleMode)
-            ),
-            "Shift+Tab ({key:?}) with peek open must emit DashboardPeekCycleMode, got {outcome:?}",
-        );
-    }
-    // No peek → still the new-session staged-mode cycle.
+    let key = if cfg!(windows) {
+        KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        )
+    } else {
+        KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )
+    };
+    let mut state = make_state_with_selection();
+    state.peek = Some(super::super::peek::PeekPanelState::new(
+        DashboardRowId::TopLevel(AgentId(0)),
+        peek_fields_for_test("Idle"),
+    ));
+    let outcome = state.handle_key(&key, &reg);
+    assert!(
+        matches!(
+            outcome,
+            InputOutcome::Action(Action::DashboardPeekCycleMode)
+        ),
+        "Plan shortcut with peek open must emit DashboardPeekCycleMode, got {outcome:?}",
+    );
+
+    // No peek → the new-session staged-mode cycle.
     let mut state = DashboardState::new();
-    let outcome = state.handle_key(&KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE), &reg);
+    let outcome = state.handle_key(&key, &reg);
     assert!(
         matches!(outcome, InputOutcome::Action(Action::DashboardCycleMode)),
-        "Shift+Tab without peek must emit DashboardCycleMode, got {outcome:?}",
+        "Plan shortcut without peek must emit DashboardCycleMode, got {outcome:?}",
     );
 }
 

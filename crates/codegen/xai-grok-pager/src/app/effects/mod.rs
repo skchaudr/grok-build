@@ -105,6 +105,16 @@ fn apply_permission_mode_override(
     meta.insert("yoloMode".into(), serde_json::Value::Bool(mode.is_always_approve()));
     meta.insert("autoMode".into(), serde_json::Value::Bool(mode.is_auto()));
 }
+// Enqueue synchronously: spawning one task per key reorders rapid typing.
+fn enqueue_remote_tui(tx: &AcpAgentTx, method: &'static str, params: serde_json::Value) {
+    let request = acp::ExtNotification::new(method, serde_json::value::to_raw_value(&params)
+        .expect("serialize remote TUI notification").into());
+    let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+    if tx.send(xai_acp_lib::AcpArgs { request, response_tx }.into()).is_err() {
+        tracing::warn!(method, "Failed to enqueue remote TUI input");
+    }
+}
+
 /// Send `session/new` inside the `session_create.backend_rpc` region and stamp that region's
 /// traceparent, so the agent-side leg nests under this round-trip, not the enclosing phase span.
 async fn create_session_in_backend_rpc(
@@ -758,6 +768,485 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::FetchExternalSessionCatalog {
+            cwd,
+            all,
+            use_psm_index,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let request = acp::ExtRequest::new(
+                    "pi/session/list",
+                    serde_json::value::to_raw_value(&serde_json::json!({
+                        "cwd": cwd.to_string_lossy(),
+                        "scope": if all { "all" } else { "current" },
+                        "usePsmIndex": use_psm_index,
+                    }))
+                    .expect("serialize Pi session catalog request")
+                    .into(),
+                );
+                let result: Result<acp::ExtResponse, _> = acp_send(request, &tx).await;
+                match result {
+                    Ok(_) => TaskResult::ExternalSessionCatalogRequested,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to request external session catalog");
+                        TaskResult::ExternalSessionCatalogFailed
+                    }
+                }
+            });
+        }
+        Effect::FetchSessionTree {
+            agent_id,
+            session_id,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let request = acp::ExtRequest::new(
+                    "pi/session/tree",
+                    serde_json::value::to_raw_value(&serde_json::json!({}))
+                        .expect("serialize Pi session tree request")
+                        .into(),
+                );
+                match acp_send(request, &tx).await {
+                    Ok(resp) => {
+                        let raw = resp.0.get();
+                        let value: serde_json::Value = match serde_json::from_str(raw) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                tracing::warn!(%error, bytes = raw.len(), "failed to parse Pi session tree response");
+                                return TaskResult::SessionTreeFailed {
+                                    agent_id,
+                                    error: format!(
+                                        "Invalid tree response ({} bytes): {error}",
+                                        raw.len()
+                                    ),
+                                };
+                            }
+                        };
+                        // ext_response wraps payload under "result".
+                        let payload = value.get("result").cloned().unwrap_or(value);
+                        let leaf_id = payload
+                            .get("leafId")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned);
+                        let nodes = parse_session_tree_nodes(&payload);
+                        if nodes.is_empty() && payload.get("nodes").is_none() {
+                            tracing::warn!(
+                                keys = ?payload.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()),
+                                "Pi session tree payload missing nodes"
+                            );
+                        }
+                        TaskResult::SessionTreeLoaded {
+                            agent_id,
+                            session_id,
+                            leaf_id,
+                            nodes,
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to fetch Pi session tree");
+                        TaskResult::SessionTreeFailed {
+                            agent_id,
+                            error: sanitize_user_error(&error.to_string()),
+                        }
+                    }
+                }
+            });
+        }
+        Effect::NavigateSessionTree {
+            agent_id,
+            session_id,
+            entry_id,
+            summarize,
+            custom_instructions,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let mut params = serde_json::json!({
+                    "entryId": entry_id,
+                    "summarize": summarize,
+                });
+                if let Some(instructions) = custom_instructions
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    params["customInstructions"] = serde_json::Value::String(instructions.to_owned());
+                }
+                let request = acp::ExtRequest::new(
+                    "pi/session/navigate_tree",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize Pi navigate_tree request")
+                        .into(),
+                );
+                match acp_send(request, &tx).await {
+                    Ok(resp) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let payload = value.get("result").cloned().unwrap_or(value);
+                        let leaf_id = payload
+                            .get("leafId")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned);
+                        let editor_text = payload
+                            .get("editorText")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned);
+                        TaskResult::SessionTreeNavigated {
+                            agent_id,
+                            session_id,
+                            leaf_id,
+                            editor_text,
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to navigate Pi session tree");
+                        TaskResult::SessionTreeNavigateFailed {
+                            agent_id,
+                            error: sanitize_user_error(&error.to_string()),
+                        }
+                    }
+                }
+            });
+        }
+        Effect::LabelSessionTreeEntry {
+            agent_id,
+            session_id,
+            entry_id,
+            label,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let mut params = serde_json::json!({ "entryId": entry_id });
+                match label.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    Some(text) => {
+                        params["label"] = serde_json::Value::String(text.to_owned());
+                    }
+                    None => {
+                        params["clear"] = serde_json::Value::Bool(true);
+                    }
+                }
+                let request = acp::ExtRequest::new(
+                    "pi/session/tree_label",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize Pi tree_label request")
+                        .into(),
+                );
+                match acp_send(request, &tx).await {
+                    Ok(resp) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let payload = value.get("result").cloned().unwrap_or(value);
+                        // Re-fetch full tree so modal stays consistent.
+                        let tree_req = acp::ExtRequest::new(
+                            "pi/session/tree",
+                            serde_json::value::to_raw_value(&serde_json::json!({}))
+                                .expect("serialize tree refresh")
+                                .into(),
+                        );
+                        let (leaf_id, nodes) = match acp_send(tree_req, &tx).await {
+                            Ok(tree_resp) => {
+                                let tree_value: serde_json::Value =
+                                    serde_json::from_str(tree_resp.0.get()).unwrap_or_default();
+                                let tree_payload =
+                                    tree_value.get("result").cloned().unwrap_or(tree_value);
+                                let leaf = tree_payload
+                                    .get("leafId")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_owned)
+                                    .or_else(|| {
+                                        payload
+                                            .get("leafId")
+                                            .and_then(|v| v.as_str())
+                                            .map(str::to_owned)
+                                    });
+                                (leaf, parse_session_tree_nodes(&tree_payload))
+                            }
+                            Err(_) => (
+                                payload
+                                    .get("leafId")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_owned),
+                                Vec::new(),
+                            ),
+                        };
+                        TaskResult::SessionTreeLabeled {
+                            agent_id,
+                            session_id,
+                            entry_id: payload
+                                .get("entryId")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(&entry_id)
+                                .to_owned(),
+                            label: payload
+                                .get("label")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned)
+                                .or(label),
+                            leaf_id,
+                            nodes,
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to label Pi session tree entry");
+                        TaskResult::SessionTreeLabelFailed {
+                            agent_id,
+                            error: sanitize_user_error(&error.to_string()),
+                        }
+                    }
+                }
+            });
+        }
+        Effect::RollbackFilesPreview {
+            agent_id,
+            session_id: _,
+            entry_id,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({ "entryId": entry_id });
+                let request = acp::ExtRequest::new(
+                    "pi/session/rollback_preview",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize rollback preview")
+                        .into(),
+                );
+                match acp_send(request, &tx).await {
+                    Ok(_) => TaskResult::RollbackFilesCompleted {
+                        agent_id,
+                        message: "Rollback preview sent".to_string(),
+                    },
+                    Err(error) => TaskResult::RollbackFilesFailed {
+                        agent_id,
+                        error: sanitize_user_error(&error.to_string()),
+                    },
+                }
+            });
+        }
+        Effect::RollbackFilesExecute {
+            agent_id,
+            session_id: _,
+            entry_id,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({ "entryId": entry_id });
+                let request = acp::ExtRequest::new(
+                    "pi/session/rollback_execute",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize rollback execute")
+                        .into(),
+                );
+                match acp_send(request, &tx).await {
+                    Ok(_) => TaskResult::RollbackFilesCompleted {
+                        agent_id,
+                        message: "Files rolled back".to_string(),
+                    },
+                    Err(error) => TaskResult::RollbackFilesFailed {
+                        agent_id,
+                        error: sanitize_user_error(&error.to_string()),
+                    },
+                }
+            });
+        }
+        Effect::FetchPiForkMessages {
+            agent_id,
+            session_id,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let request = acp::ExtRequest::new(
+                    "pi/session/fork_messages",
+                    serde_json::value::to_raw_value(&serde_json::json!({}))
+                        .expect("serialize Pi fork_messages request")
+                        .into(),
+                );
+                match acp_send(request, &tx).await {
+                    Ok(resp) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let payload = value.get("result").cloned().unwrap_or(value);
+                        let messages = parse_pi_fork_messages(&payload);
+                        TaskResult::PiForkMessagesLoaded {
+                            agent_id,
+                            session_id,
+                            messages,
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to fetch Pi fork messages");
+                        TaskResult::PiForkMessagesFailed {
+                            agent_id,
+                            error: sanitize_user_error(&error.to_string()),
+                        }
+                    }
+                }
+            });
+        }
+        Effect::ForkPiSession {
+            agent_id,
+            session_id,
+            entry_id,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let request = acp::ExtRequest::new(
+                    "pi/session/fork",
+                    serde_json::value::to_raw_value(&serde_json::json!({
+                        "entryId": entry_id,
+                    }))
+                    .expect("serialize Pi fork request")
+                    .into(),
+                );
+                match acp_send(request, &tx).await {
+                    Ok(resp) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let payload = value.get("result").cloned().unwrap_or(value);
+                        if payload
+                            .get("cancelled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            return TaskResult::PiSessionForkFailed {
+                                agent_id,
+                                error: "Fork cancelled".to_string(),
+                            };
+                        }
+                        let new_session_id = payload
+                            .get("sessionId")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                            .filter(|s| !s.is_empty());
+                        let Some(new_session_id) = new_session_id else {
+                            return TaskResult::PiSessionForkFailed {
+                                agent_id,
+                                error: "Fork response missing sessionId".to_string(),
+                            };
+                        };
+                        let editor_text = payload
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned);
+                        TaskResult::PiSessionForked {
+                            agent_id,
+                            previous_session_id: session_id,
+                            session_id: new_session_id,
+                            editor_text,
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to fork Pi session");
+                        TaskResult::PiSessionForkFailed {
+                            agent_id,
+                            error: sanitize_user_error(&error.to_string()),
+                        }
+                    }
+                }
+            });
+        }
+        Effect::ClonePiSession {
+            agent_id,
+            session_id,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let request = acp::ExtRequest::new(
+                    "pi/session/clone",
+                    serde_json::value::to_raw_value(&serde_json::json!({}))
+                        .expect("serialize Pi clone request")
+                        .into(),
+                );
+                match acp_send(request, &tx).await {
+                    Ok(resp) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let payload = value.get("result").cloned().unwrap_or(value);
+                        if payload
+                            .get("cancelled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            return TaskResult::PiSessionCloneFailed {
+                                agent_id,
+                                error: "Clone cancelled".to_string(),
+                            };
+                        }
+                        let new_session_id = payload
+                            .get("sessionId")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                            .filter(|s| !s.is_empty());
+                        let Some(new_session_id) = new_session_id else {
+                            return TaskResult::PiSessionCloneFailed {
+                                agent_id,
+                                error: "Clone response missing sessionId".to_string(),
+                            };
+                        };
+                        TaskResult::PiSessionCloned {
+                            agent_id,
+                            previous_session_id: session_id,
+                            session_id: new_session_id,
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to clone Pi session");
+                        TaskResult::PiSessionCloneFailed {
+                            agent_id,
+                            error: sanitize_user_error(&error.to_string()),
+                        }
+                    }
+                }
+            });
+        }
+        Effect::ReloadPiSession {
+            agent_id,
+            session_id,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let request = acp::ExtRequest::new(
+                    "pi/session/reload",
+                    serde_json::value::to_raw_value(&serde_json::json!({}))
+                        .expect("serialize Pi reload request")
+                        .into(),
+                );
+                match acp_send(request, &tx).await {
+                    Ok(resp) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let payload = value.get("result").cloned().unwrap_or(value);
+                        let ok = payload
+                            .get("ok")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        if !ok {
+                            return TaskResult::PiSessionReloadFailed {
+                                agent_id,
+                                error: "Reload failed".to_string(),
+                            };
+                        }
+                        let reloaded_session_id = payload
+                            .get("sessionId")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(session_id);
+                        TaskResult::PiSessionReloaded {
+                            agent_id,
+                            session_id: reloaded_session_id,
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to reload Pi session resources");
+                        TaskResult::PiSessionReloadFailed {
+                            agent_id,
+                            error: sanitize_user_error(&error.to_string()),
+                        }
+                    }
+                }
+            });
+        }
         Effect::FetchSessionList {
             host,
             cwd_override,
@@ -1361,6 +1850,28 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::RunPiExtensionCommand {
+            session_id,
+            command,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "sessionId": session_id.0.to_string(),
+                    "command": command,
+                });
+                let notification = acp::ExtNotification::new(
+                    "pi/extension_command",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize Pi extension command")
+                        .into(),
+                );
+                if let Err(error) = acp_send(notification, &tx).await {
+                    tracing::warn!(%error, "failed to invoke Pi extension command");
+                }
+                TaskResult::CancelComplete
+            });
+        }
         Effect::SendPrompt {
             agent_id,
             session_id,
@@ -1954,11 +2465,36 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::Compact { agent_id, session_id } => {
+        Effect::Compact {
+            agent_id,
+            session_id,
+            custom_instructions,
+            user_context,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let params = serde_json::json!({ "sessionId": session_id.0.to_string() });
+                    let mut params = serde_json::Map::new();
+                    params
+                        .insert(
+                            "sessionId".into(),
+                            serde_json::Value::String(session_id.0.to_string()),
+                        );
+                    if let Some(instructions) = custom_instructions {
+                        params
+                            .insert(
+                                "customInstructions".into(),
+                                serde_json::Value::String(instructions),
+                            );
+                    }
+                    if let Some(ctx) = user_context {
+                        params
+                            .insert(
+                                "userContext".into(),
+                                serde_json::Value::String(ctx),
+                            );
+                    }
+                    let params = serde_json::Value::Object(params);
                     let req = acp::ExtRequest::new(
                         "x.ai/compact_conversation",
                         serde_json::value::to_raw_value(&params)
@@ -3260,6 +3796,121 @@ pub(crate) fn execute(
                     }
                 });
         }
+
+        Effect::WorkflowLaunch {
+            agent_id,
+            session_id,
+            name,
+            args,
+        } => {
+            let tx = acp_tx.clone();
+            let agent_id = agent_id.clone();
+            let session_id = session_id.clone();
+            let name = name.clone();
+            let args = args.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({ "name": name, "args": args });
+                let req = acp::ExtRequest::new(
+                    "x.ai/workflow/launch",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize workflow/launch params")
+                        .into(),
+                );
+                let (message, is_error) = match acp_send(req, &tx).await {
+                    Ok(resp) => {
+                        let wrapper: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let inner = wrapper.get("result").unwrap_or(&wrapper);
+                        let run_id = inner
+                            .get("runId")
+                            .or_else(|| inner.get("run_id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        (
+                            format!(
+                                "Workflow '{name}' started (run {run_id}). Open /workflows for progress."
+                            ),
+                            false,
+                        )
+                    }
+                    Err(e) => (
+                        sanitize_user_error(&format!("Workflow launch failed: {e}")),
+                        true,
+                    ),
+                };
+                TaskResult::WorkflowHostMessage {
+                    agent_id,
+                    session_id,
+                    message,
+                    is_error,
+                }
+            });
+        }
+        Effect::WorkflowManage {
+            agent_id,
+            session_id,
+            op,
+            target,
+        } => {
+            let tx = acp_tx.clone();
+            let agent_id = agent_id.clone();
+            let session_id = session_id.clone();
+            let op = op.clone();
+            let target = target.clone();
+            tasks.spawn(async move {
+                let method = match op.as_str() {
+                    "pause" => "x.ai/workflow/pause",
+                    "stop" => "x.ai/workflow/stop",
+                    other => {
+                        return TaskResult::WorkflowHostMessage {
+                            agent_id,
+                            session_id,
+                            message: format!("Unsupported workflow op: {other}"),
+                            is_error: true,
+                        };
+                    }
+                };
+                let params = serde_json::json!({ "runId": target, "name": target });
+                let req = acp::ExtRequest::new(
+                    method,
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize workflow manage params")
+                        .into(),
+                );
+                let (message, is_error) = match acp_send(req, &tx).await {
+                    Ok(resp) => {
+                        let wrapper: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let inner = wrapper.get("result").unwrap_or(&wrapper);
+                        let ok = inner
+                            .get("paused")
+                            .or_else(|| inner.get("stopped"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        if ok {
+                            (format!("Workflow {op} ok for '{target}'."), false)
+                        } else {
+                            (
+                                format!(
+                                    "Workflow {op} had no matching active run for '{target}'."
+                                ),
+                                true,
+                            )
+                        }
+                    }
+                    Err(e) => (
+                        sanitize_user_error(&format!("Workflow {op} failed: {e}")),
+                        true,
+                    ),
+                };
+                TaskResult::WorkflowHostMessage {
+                    agent_id,
+                    session_id,
+                    message,
+                    is_error,
+                }
+            });
+        }
         Effect::ToggleSkill { agent_id, session_id: _, skill_name, enabled } => {
             let tx = acp_tx.clone();
             tasks
@@ -3822,8 +4473,11 @@ pub(crate) fn execute(
                 .spawn(async move {
                     match fetch_session_info(&session_id, &tx).await {
                         Ok(info) => {
-                            let title = lookup_session_title(&session_id, &info.cwd)
-                                .await;
+            let title = if info.session_name.is_some() {
+                None
+            } else {
+                lookup_session_title(&session_id, &info.cwd).await
+            };
                             let text = format_session_info(
                                 &info,
                                 title.as_deref(),
@@ -4643,6 +5297,7 @@ pub(crate) fn execute(
             agent_id,
             session_id,
             question,
+            models,
             images,
             cwd,
             minimal_request_id,
@@ -4655,6 +5310,7 @@ pub(crate) fn execute(
                     let attached = images.len();
                     let question_fallback = question.clone();
                     let session_fallback = session_id.clone();
+                    let models_fallback = models.clone();
                     let images = BtwSendImages(images);
                     let prepared = tokio::task::spawn_blocking(move || {
                             let mut encoded = crate::app::dispatch::notes::encode_btw_images(
@@ -4680,6 +5336,7 @@ pub(crate) fn execute(
                             let params = build_btw_params(
                                 &session_id,
                                 &question,
+                                &models,
                                 encoded.blocks.as_deref(),
                             );
                             let raw = serde_json::value::to_raw_value(&params)
@@ -4697,6 +5354,7 @@ pub(crate) fn execute(
                             let params = build_btw_params(
                                 &session_fallback,
                                 &question,
+                                &models_fallback,
                                 None,
                             );
                             let raw = serde_json::value::to_raw_value(&params)
@@ -4737,18 +5395,53 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SendRecap { session_id, auto } => {
+        Effect::SendRecap {
+            session_id,
+            auto,
+            models,
+            thinking_level,
+            recap_mermaid,
+            terminal_width,
+            custom_instructions,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let request = acp::ExtRequest::new(
-                        "x.ai/recap",
-                        serde_json::value::to_raw_value(
-                                &serde_json::json!({
+                    let mut params = serde_json::json!({
                         "sessionId": session_id.0.to_string(),
                         "auto": auto,
-                    }),
-                            )
+                        "models": models,
+                    });
+                    if let Some(model) = params
+                        .get("models")
+                        .and_then(|m| m.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                    {
+                        params["model"] = serde_json::Value::String(model);
+                    }
+                    if let Some(thinking_level) =
+                        thinking_level.filter(|level| !level.trim().is_empty())
+                    {
+                        params["thinkingLevel"] = serde_json::Value::String(thinking_level);
+                    }
+                    params["recapMermaid"] = serde_json::Value::Bool(recap_mermaid);
+                    params["terminalWidth"] = serde_json::Value::from(terminal_width);
+                    if let Some(instructions) = custom_instructions
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        params["customInstructions"] =
+                            serde_json::Value::String(instructions.to_owned());
+                    }
+                    // `params` carries the configured recap model chain and
+                    // auxiliary recap options to the Pi adapter. Sending a
+                    // reduced object here makes recap use the main model.
+                    let request = acp::ExtRequest::new(
+                        "x.ai/recap",
+                        serde_json::value::to_raw_value(&params)
                             .expect("serialize recap params")
                             .into(),
                     );
@@ -4784,6 +5477,61 @@ pub(crate) fn execute(
                 session_id,
                 vec![(text, interjection_id, blocks)],
             );
+        }
+        Effect::FetchCatalogEntry { kind, name } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({ "kind": kind, "name": name });
+                    let request = acp::ExtRequest::new(
+                        "x.ai/bundle/entry/get",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize bundle/entry/get params")
+                            .into(),
+                    );
+                    match acp_send(request, &tx).await {
+                        Ok(resp) => {
+                            let wrapper: serde_json::Value = serde_json::from_str(
+                                    resp.0.get(),
+                                )
+                                .unwrap_or_default();
+                            if let Some(err) = wrapper.get("error") {
+                                let msg = err
+                                    .as_str()
+                                    .map(String::from)
+                                    .unwrap_or_else(|| "unknown error".to_string());
+                                return TaskResult::CatalogEntryFailed {
+                                    error: msg,
+                                };
+                            }
+                            let inner = wrapper.get("result").unwrap_or(&wrapper);
+                            match serde_json::from_value::<
+                                super::bundle::EntryGetResult,
+                            >(inner.clone()) {
+                                Ok(r) => {
+                                    TaskResult::CatalogEntryReady {
+                                        kind: r.kind,
+                                        name: r.name,
+                                        content: r.content,
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!("failed to parse catalog entry response: {e}");
+                                    TaskResult::CatalogEntryFailed {
+                                        error: "couldn't load entry".to_string(),
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            TaskResult::CatalogEntryFailed {
+                                error: sanitize_user_error(
+                                    &format!("couldn't load entry: {e}"),
+                                ),
+                            }
+                        }
+                    }
+                });
         }
         Effect::FetchBundleStatus => {
             let tx = acp_tx.clone();
@@ -5066,6 +5814,180 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::PiSessionSearch {
+            query,
+            cwd,
+            host,
+            generation,
+            seq,
+        } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({
+                        "query": query,
+                        "cwd": cwd.map(|c| c.to_string_lossy().to_string()),
+                        "limit": 20,
+                    });
+                    let request = acp::ExtRequest::new(
+                        "pi/session/search",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize pi search params")
+                            .into(),
+                    );
+                    let mut results = Vec::new();
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        acp_send(request, &tx),
+                    )
+                    .await
+                    {
+                        Ok(Ok(resp)) => {
+                            let wrapper: serde_json::Value =
+                                serde_json::from_str(resp.0.get()).unwrap_or_default();
+                            let payload = wrapper.get("result").unwrap_or(&wrapper);
+                            if let Some(hits) = payload.get("results") {
+                                // Parse PSM search hits into SearchSessionHit.
+                                if let Some(arr) = hits.as_array() {
+                                    for hit in arr {
+                                        let session_id = hit
+                                            .get("sessionId")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string();
+                                        if session_id.is_empty() {
+                                            continue;
+                                        }
+                                        results.push(
+                                            xai_grok_shell::extensions::session_search::SearchSessionHit {
+                                                session_id,
+                                                cwd: hit
+                                                    .get("cwd")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or_default()
+                                                    .to_string(),
+                                                summary: hit
+                                                    .get("summary")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or_default()
+                                                    .to_string(),
+                                                updated_at: hit
+                                                    .get("updatedAt")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or_default()
+                                                    .to_string(),
+                                                score: hit
+                                                    .get("score")
+                                                    .and_then(|v| v.as_f64())
+                                                    .unwrap_or(0.0)
+                                                    as f32,
+                                                matched_fields: hit
+                                                    .get("matchedFields")
+                                                    .and_then(|v| v.as_array())
+                                                    .map(|arr| {
+                                                        arr.iter()
+                                                            .filter_map(|f| f.as_str().map(String::from))
+                                                            .collect()
+                                                    })
+                                                    .unwrap_or_default(),
+                                                snippet: hit
+                                                    .get("snippet")
+                                                    .and_then(|v| v.as_str())
+                                                    .map(String::from),
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!("pi session search failed: {e}");
+                        }
+                        Err(_) => {
+                            tracing::warn!("pi session search timed out");
+                        }
+                    }
+                    TaskResult::DeepSearchResults {
+                        host,
+                        generation,
+                        results,
+                        seq,
+                    }
+                });
+        }
+        Effect::PiSessionPreview {
+            session_id,
+            session_path,
+            generation,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "sessionId": session_id,
+                    "sessionPath": session_path,
+                    "limit": 200,
+                });
+                let request = acp::ExtRequest::new(
+                    "pi/session/messages",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize pi session messages params")
+                        .into(),
+                );
+                let mut messages = Vec::new();
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    acp_send(request, &tx),
+                )
+                .await
+                {
+                    Ok(Ok(resp)) => {
+                        let wrapper: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let payload = wrapper.get("result").unwrap_or(&wrapper);
+                        if let Some(arr) = payload.get("messages").and_then(|v| v.as_array()) {
+                            use crate::views::modal::SessionPreviewMessage;
+                            for item in arr {
+                                // Prefer structured {role, content}; tolerate legacy plain strings.
+                                if let Some(obj) = item.as_object() {
+                                    let role = obj
+                                        .get("role")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("assistant")
+                                        .to_string();
+                                    let content = obj
+                                        .get("content")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    if !content.trim().is_empty() {
+                                        messages.push(SessionPreviewMessage { role, content });
+                                    }
+                                } else if let Some(s) = item.as_str() {
+                                    if !s.trim().is_empty() {
+                                        messages.push(SessionPreviewMessage {
+                                            role: "assistant".into(),
+                                            content: s.to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("pi session preview failed: {e}");
+                    }
+                    Err(_) => {
+                        tracing::warn!("pi session preview timed out");
+                    }
+                }
+                TaskResult::SessionPreviewLoaded {
+                    session_id,
+                    messages,
+                    generation,
+                }
+            });
+        }
+
         Effect::ForkSession {
             agent_id,
             parent_session_id,
@@ -5594,10 +6516,47 @@ async fn lookup_session_title_in(
         .ok()
         .and_then(|s| s.display_title_opt())
 }
+/// Add ASCII thousands separators without introducing a formatting dependency.
+fn format_session_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn format_session_k(value: u64) -> String {
+    if value < 1_000 {
+        return format_session_count(value);
+    }
+    if value >= 100_000 {
+        let rounded_k = (value + 500) / 1_000;
+        return format!("{}k", format_session_count(rounded_k));
+    }
+    let rounded_tenths = (value * 10 + 500) / 1_000;
+    let whole = rounded_tenths / 10;
+    let frac = rounded_tenths % 10;
+    if frac == 0 {
+        format!("{whole}k")
+    } else {
+        format!("{whole}.{frac}k")
+    }
+}
 /// Format session info into a human-readable string.
-/// Mirrors the TUI's `render_session_info` for pager display.
-/// Structured `/session-info` rows: the single source of truth for both the formatted string ([`format_session_info`]) and the modal.
-fn session_info_fields(
+///
+/// Structured `/session-info` rows — the single source of truth for both the
+/// formatted string ([`format_session_info`]) and the modal, so neither has to
+/// re-parse the other. Auth is not a field here; it is prose the string appends
+/// on its own. `compact` marks the dense model/runtime group the modal renders
+/// as `Label: value` on one line.
+///
+/// Pi owns the session-wide message/token/cost totals, so those rows come from
+/// `sessionStats` and trail the Grok runtime group.
+pub(crate) fn session_info_fields(
     info: &SessionInfoResponse,
     title: Option<&str>,
     show_resolved_model: bool,
@@ -5611,8 +6570,15 @@ fn session_info_fields(
                 compact,
             });
     };
-    if let Some(t) = title {
-        push("Title", t.to_string(), false);
+    // Pi names the session itself; fall back to the Grok-side title.
+    if let Some(name) = info
+        .session_name
+        .as_deref()
+        .or(title)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        push("Title", name.to_string(), false);
     }
     push(
         "Shell version",
@@ -5622,6 +6588,14 @@ fn session_info_fields(
     push("Session ID", info.session_id.to_string(), false);
     if let Some(id) = info.data.conversation_id.as_deref().filter(|id| !id.is_empty()) {
         push("Conversation ID", id.to_string(), false);
+    }
+    if let Some(path) = info
+        .session_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        push("Session file", path.to_string(), false);
     }
     push("Working directory", info.cwd.to_string(), false);
     let model = info.data.model.as_deref().unwrap_or("unknown");
@@ -5647,9 +6621,66 @@ fn session_info_fields(
     let ctx = &info.data.context;
     push(
         "Context",
-        format!("{} / {} tokens ({}%)", ctx.used, ctx.total, ctx.usage_pct),
+        format!(
+            "{} / {} tokens ({}%)",
+            format_session_k(ctx.used),
+            format_session_k(ctx.total),
+            ctx.usage_pct
+        ),
         true,
     );
+    if let Some(stats) = info.session_stats.as_ref() {
+        push("Messages — Total", format_session_count(stats.total_messages), false);
+        push("Messages — User", format_session_count(stats.user_messages), false);
+        push(
+            "Messages — Assistant",
+            format_session_count(stats.assistant_messages),
+            false,
+        );
+        push(
+            "Tools",
+            format!(
+                "{} calls, {} results",
+                format_session_count(stats.tool_calls),
+                format_session_count(stats.tool_results),
+            ),
+            false,
+        );
+        let tokens = &stats.tokens;
+        let prompt_tokens = tokens
+            .input
+            .saturating_add(tokens.cache_read)
+            .saturating_add(tokens.cache_write);
+        push("Tokens — Input", format_session_k(prompt_tokens), false);
+        if prompt_tokens > 0 && (tokens.cache_read > 0 || tokens.cache_write > 0) {
+            let hit_rate = (tokens.cache_read as f64 / prompt_tokens as f64) * 100.0;
+            push(
+                "Tokens — Cached",
+                format!("{} ({hit_rate:.1}%)", format_session_k(tokens.cache_read)),
+                false,
+            );
+            push(
+                "Tokens — Uncached",
+                format_session_k(tokens.input.saturating_add(tokens.cache_write)),
+                false,
+            );
+        }
+        push("Tokens — Output", format_session_k(tokens.output), false);
+        push("Tokens — Total", format_session_k(tokens.total), false);
+        push("Cost — Total", format!("${:.3}", stats.cost), false);
+    } else if ctx.message_count > 0 || ctx.tool_call_count > 0 || ctx.turn_count > 0 {
+        // Older agents lack `sessionStats`; keep their compact count surface.
+        push(
+            "Messages",
+            format!(
+                "{} total ({} turns) · {} tool calls",
+                format_session_count(ctx.message_count),
+                format_session_count(ctx.turn_count),
+                format_session_count(ctx.tool_call_count),
+            ),
+            false,
+        );
+    }
     fields
 }
 /// The `/session-info` block as a plain string for minimal-mode scrollback.
@@ -5928,7 +6959,7 @@ fn btw_cap_omission_notice(omitted_by_cap: usize, attached: usize) -> Option<Str
     )
 }
 /// Build the `x.ai/btw` params.
-/// `content` is omitted when `None` so a text-only side question stays byte-identical on the wire.
+/// Pi resolves the ordered `models` fallback chain; `content` remains omitted for text-only questions.
 #[expect(
     clippy::expect_used,
     reason = "ACP content blocks are always JSON-serializable; failure is a bug"
@@ -5936,11 +6967,13 @@ fn btw_cap_omission_notice(omitted_by_cap: usize, attached: usize) -> Option<Str
 fn build_btw_params(
     session_id: &acp::SessionId,
     question: &str,
+    models: &[String],
     blocks: Option<&[acp::ContentBlock]>,
 ) -> serde_json::Value {
     let mut params = serde_json::json!({
         "sessionId": session_id.0.to_string(),
         "question": question,
+        "models": models,
     });
     if let Some(blocks) = blocks && let Some(object) = params.as_object_mut() {
         object

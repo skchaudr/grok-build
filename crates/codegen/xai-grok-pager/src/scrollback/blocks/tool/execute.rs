@@ -2,8 +2,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span, Text};
 
 use super::TOOL_HEADER_RANGE;
-use crate::appearance::AppearanceConfig;
-use crate::appearance::ExecuteHeaderStyle;
+use crate::appearance::{AppearanceConfig, ExecuteHeaderContent, ExecuteHeaderStyle};
 use crate::render::wrapping::word_wrap_lines_with_joiners;
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{
@@ -330,10 +329,15 @@ impl ExecuteToolCallBlock {
         theme: &Theme,
         header_style: ExecuteHeaderStyle,
         muted_command: bool,
-        include_command: bool,
+        header_content: ExecuteHeaderContent,
     ) -> Vec<(Line<'static>, usize)> {
         let strip_run = matches!(header_style, ExecuteHeaderStyle::Label);
-        match self.description_display(strip_run) {
+        let description = if header_content.shows_task_name() {
+            self.description_display(strip_run)
+        } else {
+            None
+        };
+        match description {
             Some(desc) => {
                 let title = match header_style {
                     ExecuteHeaderStyle::Label => {
@@ -353,7 +357,7 @@ impl ExecuteToolCallBlock {
                         (Line::from(Span::styled(desc, style)), 0)
                     }
                 };
-                if include_command {
+                if header_content.shows_command() {
                     let cmd = (self.shell_command_line(theme, muted_command), 1);
                     vec![title, cmd]
                 } else {
@@ -398,11 +402,16 @@ impl ExecuteToolCallBlock {
         width: usize,
         extra_indent: usize,
         truncate_to_width: bool,
-        include_command: bool,
+        header_content: ExecuteHeaderContent,
     ) {
         let strip_run = matches!(header_style, ExecuteHeaderStyle::Label);
-        // Expanded/truncated: command-as-title soft-wrap (Shell and Label)
-        if !truncate_to_width && include_command && self.description_display(strip_run).is_none() {
+        let description = if header_content.shows_task_name() {
+            self.description_display(strip_run)
+        } else {
+            None
+        };
+        // Command is the primary title when task names are hidden or absent.
+        if !truncate_to_width && description.is_none() {
             self.push_command_soft_wrap(
                 lines,
                 theme,
@@ -414,8 +423,13 @@ impl ExecuteToolCallBlock {
             return;
         }
         // Description title (word-wrap) then soft-wrapped `$ command` (both styles).
-        if !truncate_to_width && include_command && self.description_display(strip_run).is_some() {
-            let headers = self.header_lines(theme, header_style, muted_command, false);
+        if !truncate_to_width && description.is_some() && header_content.shows_command() {
+            let headers = self.header_lines(
+                theme,
+                header_style,
+                muted_command,
+                ExecuteHeaderContent::TaskName,
+            );
             for (line, prefix_spans) in headers {
                 let wrapped =
                     crate::render::wrapping::wrap_header_hanging(line, width, extra_indent);
@@ -443,7 +457,7 @@ impl ExecuteToolCallBlock {
             return;
         }
 
-        let headers = self.header_lines(theme, header_style, muted_command, include_command);
+        let headers = self.header_lines(theme, header_style, muted_command, header_content);
         for (line, prefix_spans) in headers {
             if truncate_to_width {
                 let line = crate::render::line_utils::truncate_line(line, width);
@@ -484,6 +498,7 @@ impl ExecuteToolCallBlock {
         truncate: Option<(usize, usize)>,
         header_style: ExecuteHeaderStyle,
         extra_indent: usize,
+        header_content: ExecuteHeaderContent,
         result_pad: usize,
     ) -> BlockOutput {
         let mut lines: Vec<BlockLine> = Vec::new();
@@ -495,7 +510,7 @@ impl ExecuteToolCallBlock {
             width,
             extra_indent,
             false,
-            true, // include $ command when expanded/truncated
+            header_content,
         );
 
         if self.output.is_none()
@@ -631,6 +646,7 @@ impl BlockContent for ExecuteToolCallBlock {
         let theme = Theme::current();
         let config = &ctx.appearance.scrollback.blocks.execute;
         let header_style = config.header_style;
+        let header_content = crate::appearance::cache::load_execute_header_content();
 
         // Content width already nets out the bullet; hang indent is only for `$` / `Run` prefix (adding the bullet again would double-count it)
         let content_width = ctx.content_width();
@@ -654,7 +670,7 @@ impl BlockContent for ExecuteToolCallBlock {
                     content_width,
                     0,
                     true,
-                    false, // hide command when description is the title
+                    header_content,
                 );
                 BlockOutput { lines }
             }
@@ -664,6 +680,7 @@ impl BlockContent for ExecuteToolCallBlock {
                 Some((config.first_lines as usize, config.last_lines as usize)),
                 header_style,
                 0,
+                header_content,
                 result_pad,
             ),
             DisplayMode::Expanded => self.render_with_truncation(
@@ -672,6 +689,7 @@ impl BlockContent for ExecuteToolCallBlock {
                 None,
                 header_style,
                 0,
+                header_content,
                 result_pad,
             ),
         }
@@ -748,6 +766,7 @@ impl BlockContent for ExecuteToolCallBlock {
     fn preamble(&self, ctx: &BlockContext) -> Option<Text<'static>> {
         let theme = Theme::current();
         let header_style = ctx.appearance.scrollback.blocks.execute.header_style;
+        let header_content = crate::appearance::cache::load_execute_header_content();
 
         // `header_lines` flattens `\n` to spaces, which smashes multi-line commands into one run-on row in the block viewer
         // The viewer draws no bullet, so `ctx.width` (not `content_width()`) is the row width
@@ -760,7 +779,7 @@ impl BlockContent for ExecuteToolCallBlock {
             ctx.width as usize,
             /*extra_indent*/ 0,
             /*truncate_to_width*/ false,
-            /*include_command*/ true,
+            header_content,
         );
         let mut lines: Vec<Line<'static>> =
             header_rows.into_iter().map(|row| row.content).collect();
@@ -802,7 +821,12 @@ mod tests {
         block.header_display = Some("echo hi".into());
         assert_eq!(block.command, "cd /proj && echo hi");
         let theme = Theme::current();
-        let headers = block.header_lines(&theme, ExecuteHeaderStyle::Label, false, true);
+        let headers = block.header_lines(
+            &theme,
+            ExecuteHeaderStyle::Label,
+            false,
+            ExecuteHeaderContent::TaskNameAndCommand,
+        );
         assert_eq!(headers.len(), 1);
         let text = line_text(&nth(&headers, 0).0);
         assert!(text.contains("echo hi"), "header={text:?}");
@@ -817,7 +841,12 @@ mod tests {
         let block = ExecuteToolCallBlock::new("cargo test --lib")
             .with_description("Run the unit test suite");
         let theme = Theme::current();
-        let headers = block.header_lines(&theme, ExecuteHeaderStyle::Label, false, true);
+        let headers = block.header_lines(
+            &theme,
+            ExecuteHeaderStyle::Label,
+            false,
+            ExecuteHeaderContent::TaskNameAndCommand,
+        );
         assert_eq!(headers.len(), 2);
         let title = line_text(&nth(&headers, 0).0);
         let cmd = line_text(&nth(&headers, 1).0);
@@ -835,7 +864,12 @@ mod tests {
         let block = ExecuteToolCallBlock::new("cargo test --lib")
             .with_description("Run the unit test suite");
         let theme = Theme::current();
-        let headers = block.header_lines(&theme, ExecuteHeaderStyle::Label, true, false);
+        let headers = block.header_lines(
+            &theme,
+            ExecuteHeaderStyle::Label,
+            true,
+            ExecuteHeaderContent::TaskName,
+        );
         assert_eq!(headers.len(), 1);
         assert_eq!(line_text(&nth(&headers, 0).0), "Run the unit test suite");
     }
@@ -853,7 +887,12 @@ mod tests {
         let block =
             ExecuteToolCallBlock::new("git status -sb").with_description("Check git status");
         let theme = Theme::current();
-        let headers = block.header_lines(&theme, ExecuteHeaderStyle::Shell, false, true);
+        let headers = block.header_lines(
+            &theme,
+            ExecuteHeaderStyle::Shell,
+            false,
+            ExecuteHeaderContent::TaskNameAndCommand,
+        );
         assert_eq!(headers.len(), 2);
         assert_eq!(line_text(&nth(&headers, 0).0), "Check git status");
         assert_eq!(nth(&headers, 0).1, 0);
@@ -866,7 +905,12 @@ mod tests {
     fn label_header_without_description_is_single_run_command_line() {
         let block = ExecuteToolCallBlock::new("echo hi");
         let theme = Theme::current();
-        let headers = block.header_lines(&theme, ExecuteHeaderStyle::Label, false, false);
+        let headers = block.header_lines(
+            &theme,
+            ExecuteHeaderStyle::Label,
+            false,
+            ExecuteHeaderContent::TaskName,
+        );
         assert_eq!(headers.len(), 1);
         let text = line_text(&nth(&headers, 0).0);
         assert!(text.starts_with("Run "), "header={text:?}");
@@ -878,7 +922,12 @@ mod tests {
         // Single-line header path must never embed raw `\n` (ratatui drops them).
         let block = ExecuteToolCallBlock::new("cargo test \\\n  --all");
         let theme = Theme::current();
-        let headers = block.header_lines(&theme, ExecuteHeaderStyle::Label, false, true);
+        let headers = block.header_lines(
+            &theme,
+            ExecuteHeaderStyle::Label,
+            false,
+            ExecuteHeaderContent::TaskNameAndCommand,
+        );
         assert_eq!(headers.len(), 1);
         let text = line_text(&nth(&headers, 0).0);
         assert!(
@@ -904,7 +953,7 @@ mod tests {
             40,
             0,
             false, // expanded: soft-wrap
-            true,
+            ExecuteHeaderContent::TaskName,
         );
         assert!(
             lines.len() >= 2,
@@ -937,10 +986,70 @@ mod tests {
     }
 
     #[test]
+    fn header_content_modes_choose_task_name_and_command_fields() {
+        let block = ExecuteToolCallBlock::new("cargo test --workspace")
+            .with_description("Run workspace tests");
+        let theme = Theme::current();
+
+        let command_only = block.header_lines(
+            &theme,
+            ExecuteHeaderStyle::Label,
+            false,
+            ExecuteHeaderContent::CommandOnly,
+        );
+        assert_eq!(command_only.len(), 1);
+        let command_text = line_text(&command_only[0].0);
+        assert!(command_text.contains("cargo test --workspace"));
+        assert!(!command_text.contains("workspace tests"));
+
+        let task_only = block.header_lines(
+            &theme,
+            ExecuteHeaderStyle::Label,
+            false,
+            ExecuteHeaderContent::TaskName,
+        );
+        assert_eq!(task_only.len(), 1);
+        assert_eq!(line_text(&task_only[0].0), "Run workspace tests");
+
+        let both = block.header_lines(
+            &theme,
+            ExecuteHeaderStyle::Label,
+            false,
+            ExecuteHeaderContent::TaskNameAndCommand,
+        );
+        assert_eq!(both.len(), 2);
+        assert_eq!(line_text(&both[0].0), "Run workspace tests");
+        assert!(line_text(&both[1].0).contains("cargo test --workspace"));
+    }
+
+    #[test]
+    fn task_name_mode_falls_back_to_highlighted_command_without_description() {
+        let block = ExecuteToolCallBlock::new("git status --short");
+        let theme = Theme::current();
+        let lines = block.header_lines(
+            &theme,
+            ExecuteHeaderStyle::Label,
+            false,
+            ExecuteHeaderContent::TaskName,
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(line_text(&lines[0].0).contains("git status --short"));
+        assert!(
+            lines[0].0.spans.len() > 2,
+            "bash tokens should retain syntax spans"
+        );
+    }
+
+    #[test]
     fn empty_description_treated_as_absent() {
         let block = ExecuteToolCallBlock::new("echo hi").with_description("   \n  ");
         let theme = Theme::current();
-        let headers = block.header_lines(&theme, ExecuteHeaderStyle::Label, false, false);
+        let headers = block.header_lines(
+            &theme,
+            ExecuteHeaderStyle::Label,
+            false,
+            ExecuteHeaderContent::TaskName,
+        );
         assert_eq!(headers.len(), 1);
         assert!(line_text(&nth(&headers, 0).0).contains("echo hi"));
     }
@@ -950,7 +1059,12 @@ mod tests {
         let mut block = ExecuteToolCallBlock::new("ls -la").with_description("List files");
         block.bash_mode = true;
         let theme = Theme::current();
-        let headers = block.header_lines(&theme, ExecuteHeaderStyle::Label, false, true);
+        let headers = block.header_lines(
+            &theme,
+            ExecuteHeaderStyle::Label,
+            false,
+            ExecuteHeaderContent::TaskNameAndCommand,
+        );
         assert_eq!(headers.len(), 2);
         let title = line_text(&nth(&headers, 0).0);
         assert_eq!(title, "Run (user) List files");

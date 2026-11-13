@@ -21,10 +21,12 @@ mod interject;
 mod jump;
 mod modes;
 pub(crate) mod notes;
+mod notifications;
 mod permissions;
 mod prompt;
 mod prompt_ack;
 mod queue;
+mod review;
 mod rewind;
 mod router;
 mod session;
@@ -57,8 +59,10 @@ pub(super) use queue::{
     apply_turn_start_shim, arm_send_now_and_paint, flush_held_local_queue_into_wait,
     maybe_drain_queue_and_note_peek, note_peek_page_flip, shim_renders_own_user_block,
 };
-pub(in crate::app) use rewind::find_user_prompt_entry_for_shell_index;
+pub(in crate::app) use rewind::{find_user_prompt_entry_for_shell_index, shell_prompt_index_at};
 pub(crate) use router::{dispatch, flush_image_notices};
+/// Welcome-screen session prewarm for external (Pi) hosts.
+pub(crate) use session::lifecycle::dispatch_prewarm_welcome_session;
 pub(crate) use session::lifecycle::{abandon_unused_home_session, maybe_create_home_session};
 pub(crate) use settings::ui::refresh_open_settings_modals;
 #[cfg(test)]

@@ -54,6 +54,92 @@ fn remote_session_skips_local_drops() -> bool {
     }
 }
 
+const LARGE_PASTE_SELECTOR_MIN_LINES: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LargePasteSource {
+    Bracketed,
+    ClipboardKey,
+}
+
+#[derive(Debug)]
+pub(super) struct PendingLargePaste {
+    text: String,
+    source: LargePasteSource,
+    size_bytes: usize,
+    line_count: usize,
+    is_json: bool,
+}
+
+fn large_paste_line_count(text: &str) -> usize {
+    if !text.contains('\r') {
+        return text.lines().count();
+    }
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .lines()
+        .count()
+}
+
+fn large_paste_needs_selector(text: &str) -> bool {
+    large_paste_line_count(text) >= LARGE_PASTE_SELECTOR_MIN_LINES
+}
+
+fn persist_large_paste_in(
+    dir: &std::path::Path,
+    text: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    for index in 1_u64.. {
+        let path = dir.join(format!("paste-{index}.txt"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(text.as_bytes()) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(error);
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("unbounded paste filename sequence exhausted")
+}
+
+fn format_large_paste_reference(path: &std::path::Path, pending: &PendingLargePaste) -> String {
+    if pending.is_json {
+        format!(
+            "{} [paste: size={}B, lines={}, json=true] ",
+            path.display(),
+            pending.size_bytes,
+            pending.line_count
+        )
+    } else {
+        format!(
+            "{} [paste: size={}B, lines={}] ",
+            path.display(),
+            pending.size_bytes,
+            pending.line_count
+        )
+    }
+}
+
 impl AgentView {
     /// Insert a plain-text (caption) clipboard paste into the prompt, matching the bracketed arm's whitespace policy and slash/suggestion refresh.
     /// The image/file-url portion of a paste is handled by the deferred probe.
@@ -108,6 +194,136 @@ impl AgentView {
             PromptEvent::Ignored => (InputOutcome::Changed, ClipboardTextInsertion::Failed),
         }
     }
+    fn large_paste_temp_dir(&self) -> std::path::PathBuf {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if let Some(session_id) = self.session.session_id.as_ref() {
+            session_id.0.hash(&mut hasher);
+        } else {
+            self.session.cwd.hash(&mut hasher);
+        }
+        std::env::temp_dir()
+            .join("grok-pi")
+            .join(format!("session-{:016x}", hasher.finish()))
+            .join("paste")
+    }
+
+    pub(super) fn try_open_large_paste_selector(
+        &mut self,
+        text: &str,
+        source: LargePasteSource,
+    ) -> bool {
+        if !large_paste_needs_selector(text) {
+            return false;
+        }
+        let pending = PendingLargePaste {
+            text: text.to_owned(),
+            source,
+            size_bytes: text.len(),
+            line_count: large_paste_line_count(text),
+            is_json: serde_json::from_str::<serde_json::Value>(text).is_ok(),
+        };
+        let file_description = if pending.is_json {
+            format!(
+                "{} lines · {} bytes · JSON",
+                pending.line_count, pending.size_bytes
+            )
+        } else {
+            format!(
+                "{} lines · {} bytes",
+                pending.line_count, pending.size_bytes
+            )
+        };
+        let items = vec![
+            crate::slash::command::ArgItem {
+                display: "Save as temporary file".to_string(),
+                match_text: "save temporary file path external".to_string(),
+                insert_text: "file".to_string(),
+                description: file_description,
+            },
+            crate::slash::command::ArgItem {
+                display: "Paste normally".to_string(),
+                match_text: "paste normally current behavior inline".to_string(),
+                insert_text: "inline".to_string(),
+                description: "Current paste behavior".to_string(),
+            },
+        ];
+        self.pending_large_paste = Some(pending);
+        self.active_modal = Some(crate::views::modal::ActiveModal::ArgPicker {
+            command: "large-paste".to_string(),
+            args_query: String::new(),
+            items: items.clone(),
+            original_items: items,
+            state: crate::views::picker::PickerState::default(),
+            previous_palette: None,
+            previous_settings: None,
+            selection: crate::views::modal::ArgPickerSelection::LargePaste,
+            window: crate::views::modal_window::ModalWindowState::new(),
+        });
+        true
+    }
+
+    fn insert_pending_large_paste_default(&mut self, pending: PendingLargePaste) -> InputOutcome {
+        match pending.source {
+            LargePasteSource::Bracketed => self.insert_bracketed_prompt_text(&pending.text).0,
+            LargePasteSource::ClipboardKey => self.insert_prompt_plain_text(Some(&pending.text)).0,
+        }
+    }
+
+    fn insert_paste_as_attachment(&mut self, pending: PendingLargePaste) -> InputOutcome {
+        match persist_large_paste_in(&self.large_paste_temp_dir(), &pending.text) {
+            Ok(path) => {
+                let reference = format_large_paste_reference(&path, &pending);
+                let outcome = self.insert_prompt_plain_text(Some(&reference)).0;
+                self.show_toast("Paste saved as temporary attachment");
+                outcome
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to save large paste to temporary file");
+                self.show_toast("Couldn't save paste attachment; pasted normally");
+                self.insert_pending_large_paste_default(pending)
+            }
+        }
+    }
+
+    /// Opt+Shift+V forces clipboard text into the same temporary-file
+    /// attachment representation used by the large-paste selector.
+    pub(super) fn handle_force_attachment_paste_key(&mut self) -> InputOutcome {
+        let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
+            crate::clipboard::system_clipboard_read_text(),
+        );
+        let Some(text) = clipboard_text
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        else {
+            crate::clipboard::log_paste_key_empty_host_clipboard("prompt_widget_attachment");
+            return InputOutcome::Changed;
+        };
+        let pending = PendingLargePaste {
+            text: text.to_owned(),
+            source: LargePasteSource::ClipboardKey,
+            size_bytes: text.len(),
+            line_count: large_paste_line_count(text),
+            is_json: serde_json::from_str::<serde_json::Value>(text).is_ok(),
+        };
+        self.insert_paste_as_attachment(pending)
+    }
+
+    pub(in crate::app) fn resolve_large_paste_choice(
+        &mut self,
+        save_as_file: bool,
+    ) -> InputOutcome {
+        self.active_modal = None;
+        let Some(pending) = self.pending_large_paste.take() else {
+            return InputOutcome::Changed;
+        };
+        if !save_as_file {
+            return self.insert_pending_large_paste_default(pending);
+        }
+        self.insert_paste_as_attachment(pending)
+    }
+
     fn reject_shared_queue_image_edit(
         &mut self,
         pasted: &crate::prompt_images::PastedImage,
@@ -204,6 +420,11 @@ impl AgentView {
                 },
                 change_count,
             );
+            return InputOutcome::Changed;
+        }
+        if let Some(text) = clipboard_text.as_deref()
+            && self.try_open_large_paste_selector(text, LargePasteSource::ClipboardKey)
+        {
             return InputOutcome::Changed;
         }
         self.insert_prompt_plain_text(clipboard_text.as_deref()).0
@@ -632,6 +853,12 @@ pub(super) mod paste_key_tests {
             mime_type: "image/png".to_string(),
         }
     }
+    fn large_paste_text(line_count: usize, separator: &str) -> String {
+        (0..line_count)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>()
+            .join(separator)
+    }
     #[test]
     fn wrap_host_image_none_paste_not_inserted_as_text() {
         let mut agent = make_agent();
@@ -664,6 +891,28 @@ pub(super) mod paste_key_tests {
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.text(), "hello world");
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn opt_shift_v_forces_short_text_into_attachment_file() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
+            text: Some("short text".to_string()),
+            ..Default::default()
+        });
+
+        let outcome = agent.handle_prompt_key_for_test(&key!('v', ALT | SHIFT).to_key_event());
+        crate::clipboard::clear_clipboard_probe_hook();
+
+        assert!(matches!(outcome, InputOutcome::Changed));
+        let reference = agent.prompt.text();
+        let path = reference
+            .split_once(" [paste:")
+            .map(|(path, _)| std::path::Path::new(path))
+            .expect("forced paste must insert an attachment reference");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "short text");
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn paste_key_multiline_text_creates_element() {
         let mut agent = make_agent();
@@ -677,6 +926,103 @@ pub(super) mod paste_key_tests {
             agent.prompt.textarea().elements().first().map(|e| e.kind),
             Some(KIND_PASTE)
         );
+    }
+    #[test]
+    fn large_paste_selector_threshold_is_100_lines_only() {
+        assert!(!large_paste_needs_selector(&large_paste_text(99, "\n")));
+        assert!(large_paste_needs_selector(&large_paste_text(100, "\n")));
+        assert!(large_paste_needs_selector(&large_paste_text(100, "\r")));
+        assert!(!large_paste_needs_selector(&"x".repeat(100_001)));
+    }
+    #[test]
+    fn event_paste_large_text_defaults_to_file_and_can_paste_normally() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        let text = large_paste_text(100, "\n");
+        let registry = ActionRegistry::defaults();
+        let outcome = agent.handle_input(&Event::Paste(text.clone()), &registry);
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(
+            agent.prompt.text().is_empty(),
+            "selector must intercept before insertion"
+        );
+        let Some(crate::views::modal::ActiveModal::ArgPicker {
+            items,
+            state,
+            selection,
+            ..
+        }) = agent.active_modal.as_ref()
+        else {
+            panic!("large paste must open the selector");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].display, "Save as temporary file");
+        assert_eq!(items[1].display, "Paste normally");
+        assert_eq!(state.selected, 0, "temporary file must be the default");
+        assert_eq!(
+            *selection,
+            crate::views::modal::ArgPickerSelection::LargePaste
+        );
+
+        let outcome = agent.resolve_large_paste_choice(false);
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(agent.prompt.text(), text);
+        assert_eq!(agent.prompt.textarea().elements().len(), 1);
+        assert_eq!(agent.prompt.textarea().elements()[0].kind, KIND_PASTE);
+        assert!(agent.active_modal.is_none());
+        assert!(agent.pending_large_paste.is_none());
+    }
+    #[test]
+    fn paste_key_large_text_opens_selector() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        let text = large_paste_text(100, "\n");
+        let outcome = paste_cmd_v(&mut agent, Some(&text));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(agent.prompt.text().is_empty());
+        assert!(matches!(
+            agent.active_modal,
+            Some(crate::views::modal::ActiveModal::ArgPicker {
+                selection: crate::views::modal::ArgPickerSelection::LargePaste,
+                ..
+            })
+        ));
+    }
+    #[test]
+    fn large_paste_file_reference_always_has_size_and_lines_and_only_hints_json_when_true() {
+        let path = std::path::Path::new("paste-1.txt");
+        let mut pending = PendingLargePaste {
+            text: "line one\nline two".to_string(),
+            source: LargePasteSource::Bracketed,
+            size_bytes: 17,
+            line_count: 2,
+            is_json: false,
+        };
+        assert_eq!(
+            format_large_paste_reference(path, &pending),
+            "paste-1.txt [paste: size=17B, lines=2] "
+        );
+        pending.is_json = true;
+        assert_eq!(
+            format_large_paste_reference(path, &pending),
+            "paste-1.txt [paste: size=17B, lines=2, json=true] "
+        );
+    }
+    #[test]
+    fn large_paste_file_persistence_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = persist_large_paste_in(dir.path(), "first").unwrap();
+        let second = persist_large_paste_in(dir.path(), "second").unwrap();
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some("paste-1.txt")
+        );
+        assert_eq!(
+            second.file_name().and_then(|name| name.to_str()),
+            Some("paste-2.txt")
+        );
+        assert_eq!(std::fs::read_to_string(first).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(second).unwrap(), "second");
     }
     #[test]
     fn paste_key_image_preferred_over_text() {
@@ -2286,6 +2632,7 @@ pub(super) mod paste_key_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
+            &crate::app::bundle::BundleState::default(),
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -2372,6 +2719,9 @@ pub(super) mod paste_key_tests {
     fn ctrl_v_key() -> KeyEvent {
         key!('v', CONTROL).to_key_event()
     }
+    fn cmd_v_key() -> KeyEvent {
+        key!('v', SUPER).to_key_event()
+    }
     /// Target of the enqueued deferred-probe effect, if any.
     fn deferred_probe_target(
         agent: &AgentView,
@@ -2394,7 +2744,7 @@ pub(super) mod paste_key_tests {
             snapshot: Some((Some(1), false)),
             ..Default::default()
         });
-        let outcome = agent.handle_prompt_key_for_test(&ctrl_v_key());
+        let outcome = agent.handle_prompt_key_for_test(&cmd_v_key());
         crate::clipboard::clear_clipboard_probe_hook();
         outcome
     }
@@ -2424,7 +2774,7 @@ pub(super) mod paste_key_tests {
             text: clipboard_text.map(str::to_owned),
             ..crate::clipboard::ClipboardProbeHook::with_raster(None)
         });
-        let _ = agent.handle_prompt_key_for_test(&ctrl_v_key());
+        let _ = agent.handle_prompt_key_for_test(&cmd_v_key());
         let ctx = deferred_probe_ctx(agent).expect("an image paste must defer a probe");
         crate::clipboard::clear_clipboard_probe_hook();
         let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());

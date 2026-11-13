@@ -21,6 +21,13 @@ name = "grok-pi-acp"
 path = "src/bin/grok-pi-acp.rs"
 required-features = ["pi-grok"]
 
+# Pi uses this second composition root, but all rendering and input remain in
+# the exact same production Grok pager library and minimal-renderer package.
+[[bin]]
+name = "grok-pi"
+path = "src/bin/grok-pi.rs"
+required-features = ["pi-grok"]
+
 [dependencies]
 # The pager library (all application logic + the public API main.rs drives).
 xai-grok-pager = { path = "../xai-grok-pager", default-features = false }
@@ -50,7 +57,7 @@ tokio = { workspace = true, features = [
     "io-util",
     "io-std",
 ] }
-tokio-util = { workspace = true, features = ["compat"] }
+tokio-util = { workspace = true, features = ["compat", "rt"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -60,6 +67,12 @@ semver = { workspace = true }
 xai-tty-utils = { workspace = true }
 xai-grok-config = { workspace = true }
 xai-grok-sandbox = { path = "../xai-grok-sandbox", default-features = false }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "logging",
+    "std",
+    "tls12",
+] }
 xai-grok-extra-ca = { workspace = true }
 
 # Binary hardening: compile-time string + control-flow obfuscation.
@@ -97,6 +110,8 @@ tikv-jemalloc-sys = { workspace = true, optional = true }
 tikv-jemalloc-ctl = { workspace = true, optional = true, features = ["stats", "use_std"] }
 
 [dev-dependencies]
+crossterm = { workspace = true }
+ratatui = { workspace = true }
 serial_test = { workspace = true }
 # `PagerArgs::try_parse_from` in the CLI-parsing unit tests (needs the
 # `clap::Parser` trait in scope).
@@ -111,6 +126,7 @@ default = [
     ]
 default-bazel = [
     "stock",
+    "pi-grok",
     "jemalloc",
     "sandbox-enforce",
     "local-workspace",
@@ -123,7 +139,7 @@ stock = [
     "xai-grok-shell/default",
     "xai-grok-update/default",
 ]
-# grok-pi-acp and the single-binary helpers it shares.
+# grok-pi, grok-pi-acp and the single-binary helpers they share.
 pi-grok = ["dep:pi-grok-adapter", "clap", "tempfile", "toml"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc-ctl"]
 # xai-grok-workspace no longer enables sandbox-enforce by default, so enable it here.
@@ -136,5 +152,6 @@ local-workspace = ["xai-grok-pager/local-workspace"]
 test-seams = []
 release-dist = [
     "stock",
+    "pi-grok",
     "xai-grok-pager/release-dist",
     ]

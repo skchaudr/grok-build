@@ -133,6 +133,8 @@ pub(crate) fn handle_pending_delete_key(
 /// Owned data for a single session picker row. Built once per frame and then borrowed by `PickerEntry` / `PickerField` slices.
 /// Shared between the welcome-screen `render_session_picker` and the `ActiveModal::SessionPicker` rendering in `agent_view.rs`.
 pub struct SessionEntryData {
+    /// Display label with tree prefix prepended (e.g. "├─ Fix bug").
+    pub display_label: String,
     pub summary: String,
     pub right_text: String,
     pub is_selected: bool,
@@ -140,8 +142,16 @@ pub struct SessionEntryData {
     pub field_data: Vec<(String, String)>,
     /// Short snippet preview for content search hits (always visible).
     pub snippet_preview: Option<String>,
+    pub label_color: Option<ratatui::style::Color>,
     pub badge: &'static str,
+    pub badge_color: Option<ratatui::style::Color>,
     pub collapsible: bool,
+    /// Tree connector prefix (e.g. "├─ ", "└─ ", "│  ") for fork/copy hierarchy.
+    pub tree_prefix: String,
+    /// Tree depth (0 = root, 1+ = forked children).
+    pub tree_depth: usize,
+    /// Whether this entry has fork children (shown with a ▸/▾ indicator).
+    pub has_children: bool,
 }
 #[derive(Debug, Clone)]
 pub(crate) enum SessionPickerPendingNotice {
@@ -261,7 +271,7 @@ impl SourceFilter {
             Self::Remote => {
                 (source == "remote" || source == "both" || source == "conversation") && !is_headless
             }
-            Self::External => crate::app::is_foreign_picker_source(source),
+            Self::External => source == "pi" || crate::app::is_foreign_picker_source(source),
             Self::All => !is_headless,
         }
     }
@@ -402,9 +412,31 @@ pub(crate) fn effective_filter_query<'a>(
         live_query
     }
 }
-/// Filter session entries by query and source filter, returning indices of matching entries. When
-/// the query is empty, all entries match the text filter. The `source_filter` is always applied
-/// (entries whose `source` field does not pass [`SourceFilter::matches`] are excluded).
+
+/// Filter session entries by query and source filter, returning indices of matching entries.
+///
+/// When the query is empty, all entries match the text filter. The
+/// `source_filter` is always applied (entries whose `source` field
+/// does not pass [`SourceFilter::matches`] are excluded).
+pub(crate) fn sort_session_entries(
+    entries: &mut [SessionPickerEntry],
+    mode: crate::views::picker::SessionSortMode,
+) {
+    match mode {
+        crate::views::picker::SessionSortMode::Recent => {
+            entries.sort_by_key(|entry| {
+                std::cmp::Reverse(entry.last_active_at.unwrap_or(entry.updated_at))
+            });
+        }
+        crate::views::picker::SessionSortMode::Created => {
+            entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
+        }
+        crate::views::picker::SessionSortMode::Name => {
+            entries.sort_by_key(|entry| entry.summary.to_lowercase());
+        }
+    }
+}
+
 pub(crate) fn filter_session_entries(
     entries: Option<&[SessionPickerEntry]>,
     query: &str,
@@ -647,6 +679,146 @@ pub(crate) fn sync_session_picker_query_expansion(
     );
     expand_all_mapped_session_items(state, &entry_map);
 }
+
+// ---------------------------------------------------------------------------
+// Fork tree building
+// ---------------------------------------------------------------------------
+
+/// Per-entry tree display info: connector prefix, depth, and child flag.
+#[derive(Debug, Clone, Default)]
+struct TreeDisplayInfo {
+    prefix: String,
+    depth: usize,
+    has_children: bool,
+}
+
+/// Compute tree display info for each filtered entry based on
+/// `parent_session_path` relationships. Returns a map from
+/// filtered-index position to [`TreeDisplayInfo`].
+///
+/// Sessions whose parent is also in the filtered list are rendered as
+/// children with `├─`/`└─` connectors (like pi-main's threaded view).
+/// Sessions without a parent in the list are roots (no prefix).
+fn compute_tree_display(
+    entries_data: &[SessionPickerEntry],
+    filtered_indices: &[usize],
+) -> std::collections::HashMap<usize, TreeDisplayInfo> {
+    use std::collections::HashMap;
+
+    let mut path_to_fi: HashMap<&str, usize> = HashMap::new();
+    for (fi, &orig_idx) in filtered_indices.iter().enumerate() {
+        if let Some(ref path) = entries_data[orig_idx].session_path {
+            path_to_fi.insert(path.as_str(), fi);
+        }
+    }
+
+    let mut children_of: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut parent_of: HashMap<usize, usize> = HashMap::new();
+    for (fi, &orig_idx) in filtered_indices.iter().enumerate() {
+        if let Some(ref parent_path) = entries_data[orig_idx].parent_session_path
+            && let Some(&parent_fi) = path_to_fi.get(parent_path.as_str())
+        {
+            children_of.entry(parent_fi).or_default().push(fi);
+            parent_of.insert(fi, parent_fi);
+        }
+    }
+
+    for children in children_of.values_mut() {
+        children.sort_by(|&a, &b| {
+            let ta = entries_data[filtered_indices[a]]
+                .last_active_at
+                .unwrap_or(entries_data[filtered_indices[a]].updated_at)
+                .timestamp_millis();
+            let tb = entries_data[filtered_indices[b]]
+                .last_active_at
+                .unwrap_or(entries_data[filtered_indices[b]].updated_at)
+                .timestamp_millis();
+            tb.cmp(&ta)
+        });
+    }
+
+    let mut result: HashMap<usize, TreeDisplayInfo> = HashMap::new();
+    let roots: Vec<usize> = (0..filtered_indices.len())
+        .filter(|fi| !parent_of.contains_key(fi))
+        .collect();
+
+    fn walk(
+        fi: usize,
+        depth: usize,
+        ancestors: &[bool],
+        is_last: bool,
+        children_of: &HashMap<usize, Vec<usize>>,
+        result: &mut HashMap<usize, TreeDisplayInfo>,
+    ) {
+        let prefix = if depth == 0 {
+            String::new()
+        } else {
+            let mut parts: Vec<&str> = ancestors
+                .iter()
+                .map(|&cont| if cont { "│  " } else { "   " })
+                .collect();
+            parts.push(if is_last { "└─ " } else { "├─ " });
+            parts.join("")
+        };
+        let kids = children_of.get(&fi).cloned().unwrap_or_default();
+        result.insert(
+            fi,
+            TreeDisplayInfo {
+                prefix,
+                depth,
+                has_children: !kids.is_empty(),
+            },
+        );
+        for (ci, &child_fi) in kids.iter().enumerate() {
+            let child_is_last = ci == kids.len() - 1;
+            let continues = if depth > 0 { !is_last } else { false };
+            let mut new_ancestors = ancestors.to_vec();
+            new_ancestors.push(continues);
+            walk(
+                child_fi,
+                depth + 1,
+                &new_ancestors,
+                child_is_last,
+                children_of,
+                result,
+            );
+        }
+    }
+
+    for &root_fi in &roots {
+        walk(root_fi, 0, &[], true, &children_of, &mut result);
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Session entry data building
+// ---------------------------------------------------------------------------
+
+fn format_token_count(tokens: u64) -> String {
+    if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn format_cost(cost: f64) -> String {
+    let formatted = format!("{cost:.2}");
+    let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+    format!("${trimmed}")
+}
+
+fn format_session_row_metadata(entry: &SessionPickerEntry) -> String {
+    let age = format_time_ago(entry.last_active_at.unwrap_or(entry.updated_at));
+    if entry.num_messages > 0 {
+        format!("{age} · {} msgs", entry.num_messages)
+    } else {
+        age
+    }
+}
+
 /// Build owned rendering data for each session entry in the filtered list.
 ///
 /// The caller zips the result with `PickerField` slices and builds `PickerEntry` items that borrow from the returned data.
@@ -657,20 +829,29 @@ pub(crate) fn build_session_entry_data(
     content_width: u16,
 ) -> Vec<SessionEntryData> {
     use crate::render::line_utils::truncate_str;
+
+    let tree_info = compute_tree_display(entries_data, filtered_indices);
+
     filtered_indices
         .iter()
         .enumerate()
         .map(|(fi, &orig_idx)| {
             let Some(entry) = entries_data.get(orig_idx) else {
                 return SessionEntryData {
+                    display_label: String::new(),
                     summary: String::new(),
                     right_text: String::new(),
                     is_selected: false,
                     is_expanded: false,
                     field_data: Vec::new(),
                     snippet_preview: None,
+                    label_color: None,
                     badge: "",
+                    badge_color: None,
                     collapsible: false,
+                    tree_prefix: String::new(),
+                    tree_depth: 0,
+                    has_children: false,
                 };
             };
             let summary = if entry.summary.is_empty() {
@@ -678,14 +859,44 @@ pub(crate) fn build_session_entry_data(
             } else {
                 entry.summary.clone()
             };
-            let right_text = format_time_ago(entry.last_active_at.unwrap_or(entry.updated_at));
+            let right_text = format_session_row_metadata(entry);
+
             let is_selected = !state.selection_hidden && fi == state.selected;
-            let collapsible = !crate::app::is_foreign_picker_source(&entry.source);
-            let is_expanded = collapsible && state.expanded.contains(&orig_idx);
+            let is_foreign = crate::app::is_foreign_picker_source(&entry.source);
+            let is_expanded = !is_foreign && state.expanded.contains(&orig_idx);
+            let is_named = entry
+                .name
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty());
+
+            let tree_display = tree_info.get(&fi);
+            let tree_prefix = tree_display.map(|t| t.prefix.clone()).unwrap_or_default();
+            let tree_depth = tree_display.map(|t| t.depth).unwrap_or(0);
+            let has_children = tree_display.map(|t| t.has_children).unwrap_or(false);
+            let display_label = if tree_prefix.is_empty() {
+                summary.clone()
+            } else {
+                format!("{tree_prefix}{summary}")
+            };
+
             let mut field_data: Vec<(String, String)> = Vec::new();
             if is_expanded {
                 field_data.push(("ID".into(), entry.id.clone()));
+                if let Some(ref name) = entry.name {
+                    field_data.push(("Name".into(), name.clone()));
+                }
+                if let Some(first_message) = entry.first_message.as_deref() {
+                    let first_prompt = first_message.lines().collect::<Vec<_>>().join(" ");
+                    let max_width = content_width.saturating_sub(18) as usize;
+                    field_data.push((
+                        "First prompt".into(),
+                        truncate_str(&first_prompt, max_width),
+                    ));
+                }
                 field_data.push(("CWD".into(), entry.cwd.clone()));
+                if let Some(ref session_path) = entry.session_path {
+                    field_data.push(("Path".into(), session_path.clone()));
+                }
                 if let Some(ref model) = entry.model_id {
                     field_data.push(("Model".into(), model.clone()));
                 }
@@ -703,6 +914,15 @@ pub(crate) fn build_session_entry_data(
                 if entry.num_messages > 0 {
                     field_data.push(("Messages".into(), entry.num_messages.to_string()));
                 }
+                if let Some(total_tokens) = entry.total_tokens {
+                    field_data.push(("Tokens".into(), format_token_count(total_tokens)));
+                }
+                if let Some(total_cost) = entry.total_cost {
+                    field_data.push(("Cost".into(), format_cost(total_cost)));
+                }
+                // Recap ("where was I") and the last-turn summary, whenever
+                // available. Truncated to the card width like the Prompt line.
+
                 let max_w = content_width.saturating_sub(4 + 12) as usize;
                 if let Some(recap) = entry.last_recap.as_deref().map(str::trim)
                     && !recap.is_empty()
@@ -727,13 +947,19 @@ pub(crate) fn build_session_entry_data(
             }
             SessionEntryData {
                 summary,
+                display_label,
                 right_text,
                 is_selected,
                 is_expanded,
                 field_data,
                 snippet_preview: None,
+                label_color: is_named.then_some(ratatui::style::Color::Yellow),
                 badge: crate::app::badge_for_picker_source(&entry.source),
-                collapsible,
+                badge_color: None,
+                collapsible: !is_foreign,
+                tree_prefix,
+                tree_depth,
+                has_children,
             }
         })
         .collect()
@@ -774,7 +1000,7 @@ pub(crate) fn build_grouped_picker_entries<'a>(
             non_selectable.push(false);
             let selected = !state.selection_hidden && grouped_pos == state.selected;
             result.push(PickerEntry::Row(PickerRow {
-                label: &b.summary,
+                label: &b.display_label,
                 right_label: &b.right_text,
                 selected,
                 expanded: b.is_expanded,
@@ -783,8 +1009,9 @@ pub(crate) fn build_grouped_picker_entries<'a>(
                 summary_lines: &[],
                 dimmed: false,
                 indent: 1,
+                label_color: b.label_color,
                 badge: b.badge,
-                badge_color: None,
+                badge_color: b.badge_color,
                 collapsible: b.collapsible,
                 underline_last_desc: false,
             }));
@@ -851,14 +1078,20 @@ pub(crate) fn build_content_entry_data(
                 }
             });
             SessionEntryData {
-                summary,
+                summary: summary.clone(),
+                display_label: summary,
                 right_text,
                 is_selected,
                 is_expanded,
                 field_data,
                 snippet_preview,
+                label_color: None,
                 badge: "",
+                badge_color: None,
                 collapsible: true,
+                tree_prefix: String::new(),
+                tree_depth: 0,
+                has_children: false,
             }
         })
         .collect()
@@ -1020,6 +1253,11 @@ mod tests {
         SessionPickerEntry {
             id: id.into(),
             summary: id.into(),
+            name: None,
+            first_message: None,
+            session_path: None,
+            total_tokens: None,
+            total_cost: None,
             updated_at: chrono::Utc::now(),
             created_at: chrono::Utc::now(),
             cwd: format!("/{repo}"),
@@ -1031,6 +1269,7 @@ mod tests {
             branch: None,
             repo_name: repo.into(),
             worktree_label: None,
+            parent_session_path: None,
             last_turn_summary: None,
             last_recap: None,
             session_kind: None,

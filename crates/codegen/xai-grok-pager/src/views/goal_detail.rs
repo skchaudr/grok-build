@@ -241,6 +241,7 @@ fn humanize_goal_event(event: &str, detail: Option<&str>) -> String {
     let phrase = |d: Option<&str>| d.map(|s| strip_control_chars(&s.replace('_', " "), false));
     match event {
         "goal_created" => "Goal created".into(),
+        "goal_replaced" => "Goal updated".into(),
         "planning_started" => "Planning started".into(),
         "planning_completed" => "Planning completed".into(),
         "planning_failed" => "Planning failed".into(),

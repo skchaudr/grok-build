@@ -36,6 +36,7 @@ fn draw(
         None,
         false,
         BannerSlotParams::none(),
+        &crate::app::bundle::BundleState::default(),
         in_overlay,
         &mut Vec::new(),
         AppRenderParams {

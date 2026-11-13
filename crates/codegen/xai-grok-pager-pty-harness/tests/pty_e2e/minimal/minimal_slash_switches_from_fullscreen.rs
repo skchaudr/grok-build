@@ -48,7 +48,7 @@ async fn minimal_slash_switches_from_fullscreen() {
     harness.inject_keys(b"\r").expect("submit /minimal");
 
     harness
-        .wait_for_text(MINIMAL_SWITCH_BACK_IDLE_SENTINEL, Duration::from_secs(45))
+        .wait_for_text(MINIMAL_IDLE_SENTINEL, Duration::from_secs(45))
         .unwrap_or_else(|e| {
             panic!(
                 "/minimal did not switch this session to minimal mode: {e}\nscreen:\n{}",

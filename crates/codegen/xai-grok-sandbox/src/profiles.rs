@@ -123,8 +123,8 @@ pub fn load_sandbox_config(workspace: &Path) -> SandboxConfig {
         config = global;
     }
 
-    // Project config: <workspace>/.grok/sandbox.toml (additive only)
-    let project_path = workspace.join(".grok").join(SANDBOX_CONFIG_FILENAME);
+    // Project config: <workspace>/.grok-pi/sandbox.toml (additive only)
+    let project_path = xai_grok_config::project_config_dir(workspace).join(SANDBOX_CONFIG_FILENAME);
     if let Some(project) = load_config_file(&project_path) {
         merge_project_profiles(&mut config, project);
     }
@@ -134,8 +134,10 @@ pub fn load_sandbox_config(workspace: &Path) -> SandboxConfig {
 
 pub fn sandbox_profile_conflicts(workspace: &Path) -> Vec<String> {
     let global = load_config_file(&grok_home().join(SANDBOX_CONFIG_FILENAME)).unwrap_or_default();
-    let project = load_config_file(&workspace.join(".grok").join(SANDBOX_CONFIG_FILENAME))
-        .unwrap_or_default();
+    let project = load_config_file(
+        &xai_grok_config::project_config_dir(workspace).join(SANDBOX_CONFIG_FILENAME),
+    )
+    .unwrap_or_default();
     mismatched_profile_names(&global, &project)
 }
 

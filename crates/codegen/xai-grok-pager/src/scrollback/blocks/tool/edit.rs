@@ -18,6 +18,7 @@
 //! Cost magnitudes: see `benches/edit_highlight`.
 //! Hunk-only first paint is cheap; full-file runs once per upgrade; the naïve prefix-per-hunk approach is not shipped.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
@@ -104,10 +105,36 @@ const INDENT: &str = "  ";
 const GUTTER_GAP: &str = " ";
 const CONTENT_GAP: &str = "  ";
 
+/// Expand tabs using the global tab_width (`Cow::Borrowed` when none).
+pub(super) fn expand_tabs(text: &str) -> Cow<'_, str> {
+    let tw = crate::appearance::tab_width();
+    if tw == 0 || !text.contains('\t') {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(text.replace('\t', &" ".repeat(tw as usize)))
+}
+
+/// Source lines represented by one rendered row: `(old, new)`.
+pub(crate) type DiffLinePair = (
+    Option<xai_grok_pager_diff::DiffLine>,
+    Option<xai_grok_pager_diff::DiffLine>,
+);
+
+fn diff_line_pair_from_line(line: &xai_grok_pager_diff::DiffLine) -> DiffLinePair {
+    match line.tag {
+        ChangeTag::Equal => (Some(line.clone()), Some(line.clone())),
+        ChangeTag::Delete => (Some(line.clone()), None),
+        ChangeTag::Insert => (None, Some(line.clone())),
+    }
+}
+
 /// A rendered diff line with optional background color.
 pub struct DiffLineOutput {
     pub line: Line<'static>,
     pub background: Option<Color>,
+    /// Source lines represented by this rendered row. Used by the fullscreen
+    /// viewer to preserve patch-copy semantics in either layout.
+    pub(crate) source: Option<DiffLinePair>,
     /// Column where background starts (for partial background).
     pub content_start_col: u16,
     /// Number of gutter spans at the start of this line (for selection exclusion).
@@ -172,11 +199,12 @@ fn render_diff_hunks_core(
             };
             let sep_line = Line::from(vec![
                 Span::raw(indent),
-                Span::styled(sep_text, theme.muted()),
+                Span::styled(config.hunk_separator.clone(), theme.muted()),
             ]);
             lines.push(DiffLineOutput {
                 line: sep_line,
                 background: None,
+                source: None,
                 content_start_col: 0,
                 gutter_span_count: 0,
                 content_text: String::new(),
@@ -342,10 +370,12 @@ pub fn render_diff_hunks_with_styles(
     render_diff_hunks_core(hunks, path, Some(by_new_line), theme, width, config)
 }
 
-/// Full-file map spans for one line, when they may override the cold spans. Equal always; Insert only on banded
-/// themes (bandless paints changed lines with a solid line FG). Delete never: it keeps the per-hunk syntect paint
-/// the user already saw.
-fn map_spans_for_line(
+/// Full-file map spans for one line, when they may override the cold spans:
+/// Equal always; Insert only on banded themes (bandless paints changed lines
+/// with a solid line FG); Delete never (it keeps the per-hunk syntect paint the
+/// user already saw). `None` — missing line, text drift, or nothing visible —
+/// keeps the cold spans.
+pub(super) fn map_spans_for_line(
     line: &xai_grok_pager_diff::DiffLine,
     expanded: &str,
     by_new_line: &HashMap<usize, EditLineStyles>,
@@ -406,6 +436,7 @@ fn assemble_diff_line_outputs(
         return vec![DiffLineOutput {
             line: Line::from(spans),
             background: bg,
+            source: Some(diff_line_pair_from_line(line)),
             content_start_col: bg_start,
             gutter_span_count: gutter_count,
             content_text: raw_content,
@@ -456,6 +487,7 @@ fn assemble_diff_line_outputs(
         outputs.push(DiffLineOutput {
             line: Line::from(spans),
             background: bg,
+            source: (i == 0).then(|| diff_line_pair_from_line(line)),
             content_start_col: bg_start,
             gutter_span_count: gutter_count,
             content_text: wrapped.clone(),
@@ -483,7 +515,8 @@ fn compute_bg_start(config: &DiffRenderConfig, gutter_width: usize, indent_width
     }
 }
 
-fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+/// Simple word-wrap implementation.
+pub(super) fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 || text.is_empty() {
         return vec![text.to_string()];
     }
@@ -685,7 +718,7 @@ fn advance_highlighter(
 }
 
 /// Render content spans with syntax highlighting.
-fn render_content_spans(
+pub(super) fn render_content_spans(
     content: &str,
     tag: ChangeTag,
     theme: &Theme,
@@ -910,7 +943,6 @@ impl EditToolCallBlock {
     }
 
     /// Header line: path painted for `surface` (Collapsed / Expanded / Fullscreen).
-    #[allow(clippy::too_many_arguments)]
     fn header_line(
         &self,
         theme: &Theme,
@@ -940,36 +972,41 @@ impl EditToolCallBlock {
 
         let prefix = self.prefix;
 
-        // Build the suffix spans first so we can reserve space for them. The suffix (diffstat / "(N edits)") renders only
-        // on the collapsed one-liner. Untrusted summaries (multi-file, title-fallback path) never show counts that would
-        // only describe the first diff.
+        // Build the suffix spans first so we can reserve space for them.
+        // The suffix (diffstat / "(N edits)") renders only on the collapsed
+        // one-liner: expanded and fullscreen surfaces show the hunks, so
+        // their headers stay bare. Diffstat counts keep their diff colors
+        // even when the header is muted. `summary_untrusted` means the path /
+        // one-liner may be incomplete, not that hunk-derived +/- counts are
+        // useless; hiding them made multi-edit rows hard to search.
         let collapsed = matches!(
             surface,
             crate::render::tool_paths::ToolPathSurface::Collapsed
         );
-        let suffix_spans: Vec<Span<'static>> =
-            if collapsed && show_summary && !self.hunks.is_empty() && !self.summary_untrusted {
-                let (ins, del) = self.count_changes();
-                if ins > 0 || del > 0 {
-                    vec![
-                        Span::styled(
-                            format!(" +{ins}"),
-                            Style::default().fg(theme.diff_insert_fg),
-                        ),
-                        Span::styled("/", detail_style),
-                        Span::styled(format!("-{del}"), Style::default().fg(theme.diff_delete_fg)),
-                    ]
-                } else {
-                    Vec::new()
-                }
-            } else if collapsed && self.edit_count > 1 {
-                vec![Span::styled(
-                    format!(" ({} edits)", self.edit_count),
-                    detail_style,
-                )]
+        let show_diffstat =
+            collapsed && !self.hunks.is_empty() && (show_summary || self.edit_count > 1);
+        let suffix_spans: Vec<Span<'static>> = if show_diffstat {
+            let (ins, del) = self.count_changes();
+            if ins > 0 || del > 0 {
+                vec![
+                    Span::styled(
+                        format!(" +{ins}"),
+                        Style::default().fg(theme.diff_insert_fg),
+                    ),
+                    Span::styled("/", detail_style),
+                    Span::styled(format!("-{del}"), Style::default().fg(theme.diff_delete_fg)),
+                ]
             } else {
                 Vec::new()
-            };
+            }
+        } else if collapsed && self.edit_count > 1 {
+            vec![Span::styled(
+                format!(" ({} edits)", self.edit_count),
+                detail_style,
+            )]
+        } else {
+            Vec::new()
+        };
         let suffix_width: usize = suffix_spans
             .iter()
             .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
@@ -1003,6 +1040,21 @@ impl EditToolCallBlock {
     /// This is the single dispatch point shared by scrollback `output()` and the fullscreen block viewer.
     /// FileScoped styles baked under a different theme than the live one are skipped (hunk-only paint) so a theme flip never mixes palettes.
     pub fn render_diff_lines(
+        &self,
+        theme: &Theme,
+        width: u16,
+        config: &DiffRenderConfig,
+    ) -> Vec<DiffLineOutput> {
+        if let Some(lines) = super::side_by_side_edit::render_if_enabled(self, theme, width, config)
+        {
+            return lines;
+        }
+        self.render_unified_diff_lines(theme, width, config)
+    }
+
+    /// Render the upstream unified layout regardless of the grok-pi F2 flag.
+    /// Code-review surfaces use this to retain their dual-line-number contract.
+    pub fn render_unified_diff_lines(
         &self,
         theme: &Theme,
         width: u16,
@@ -1436,6 +1488,26 @@ impl BlockContent for EditToolCallBlock {
         }
     }
 
+    fn estimate_reserved_cols(&self) -> u16 {
+        // Mirror `gutter_layout` under the default render config (single
+        // line-number column): indent + max line-number digits + content gap.
+        // The source-text estimate wraps diff text at the full content width,
+        // but the renderer wraps at `width - gutter`; without this reserve an
+        // expanded Edit's estimate systematically under-counts wrapped lines,
+        // feeding the estimate→exact re-measurement cascade.
+        if self.hunks.is_empty() {
+            return 0;
+        }
+        let mut max_num = 1usize;
+        for hunk in &self.hunks {
+            for line in hunk {
+                max_num = max_num.max(line.lo.max(1)).max(line.ln.max(1));
+            }
+        }
+        let digits = max_num.ilog10() as usize + 1;
+        (INDENT.len() + digits + CONTENT_GAP.len()) as u16
+    }
+
     fn preamble(&self, ctx: &BlockContext) -> Option<Text<'static>> {
         let theme = Theme::current();
         let dim_details = ctx.appearance.scrollback.blocks.tool.dim_details;
@@ -1660,8 +1732,29 @@ mod tests {
         assert_eq!(s4.content.as_ref(), "-1");
         assert_eq!(s4.style.fg, Some(theme.diff_delete_fg));
 
-        // The suffix is collapsed-only: expanded and fullscreen headers stay bare; the hunks/body carry the information there
-        // Both suffix shapes (diffstat, "(N edits)" fallback) are gated
+        // Trusted multi-region edits show diffstat even when the generic
+        // one-line summary is disabled; otherwise users only saw "(N edits)"
+        // and lost the +/- totals.
+        let multi_hunk = EditToolCallBlock::new(
+            "/Users/me/project/src/foo.rs",
+            vec![make_hunk(), make_hunk()],
+        )
+        .with_edit_count(2);
+        let header = multi_hunk.header_line(
+            &theme,
+            false,
+            false,
+            false,
+            ToolPathSurface::Collapsed,
+            None,
+            Some(80),
+        );
+        let text: String = header.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "Edit foo.rs +2/-2");
+
+        // The suffix is collapsed-only: expanded and fullscreen headers stay
+        // bare — the hunks/body carry the information there. Both suffix
+        // shapes (diffstat, "(N edits)" fallback) are gated.
         let multi = block.clone().with_edit_count(3);
         for surface in [ToolPathSurface::Expanded, ToolPathSurface::Fullscreen] {
             let header = block.header_line(&theme, false, true, false, surface, None, None);
@@ -1676,8 +1769,9 @@ mod tests {
     }
 
     #[test]
-    fn untrusted_summary_suppresses_diffstat() {
-        // Counts would only describe the first diff of a multi-file call, so the suffix falls back to "(N edits)" / nothing
+    fn untrusted_summary_still_shows_diffstat() {
+        // The path / one-liner may be incomplete, but the hunk-derived counts
+        // are still searchable signal for the collapsed row.
         let block =
             EditToolCallBlock::new("src/foo.rs", vec![make_hunk()]).with_untrusted_summary();
         let theme = Theme::current();
@@ -1691,7 +1785,7 @@ mod tests {
             Some(80),
         );
         let text: String = header.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Edit foo.rs");
+        assert_eq!(text, "Edit foo.rs +1/-1");
 
         let block = block.with_edit_count(3);
         let header = block.header_line(
@@ -1704,7 +1798,7 @@ mod tests {
             Some(80),
         );
         let text: String = header.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Edit foo.rs (3 edits)");
+        assert_eq!(text, "Edit foo.rs +1/-1");
     }
 
     #[test]
@@ -2332,7 +2426,6 @@ mod tests {
         let path = Path::new("test.txt");
         let outputs = render_diff_hunks_highlighted(&[hunk1, hunk2], path, &theme, 80, &config);
 
-        // Lines 2..=9 sit between the hunks: computable gap of 8.
         assert_eq!(outputs.len(), 3);
         assert!(nth(&outputs, 1).is_separator);
         assert_eq!(

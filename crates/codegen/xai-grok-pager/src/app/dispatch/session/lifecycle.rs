@@ -4,6 +4,7 @@ use super::load::dispatch_load_session;
 use super::modal::{drop_other_agents_in_minimal, remove_agent_and_cleanup};
 use crate::acp::model_state::{EffortTokenError, ModelState};
 use crate::acp::tracker::AcpUpdateTracker;
+use crate::app::agent_view::McpInitProgress;
 use crate::app::actions::{
     Action, AfterSessionDelete, Effect, ModelChoice, PermissionModePersist, SwitchModelError,
 };
@@ -159,6 +160,28 @@ pub(in crate::app::dispatch) fn dispatch_new_session(app: &mut AppView) -> Vec<E
     }
     if machine_pick_blocks(app, crate::app::agent_choice::MachinePickIntent::NewSession) {
         return vec![];
+    }
+    // External ACP agents own session lifecycle. Grok's worktree prompt is a
+    // product-specific policy layer and must not intercept `/new` for Pi (or
+    // any other hosted agent). The native pager still creates and renders the
+    // new session; only the backend decision is delegated directly to ACP.
+    if app.is_pi_session() {
+        // Welcome prewarm: attach the background agent started on the
+        // welcome screen so the first keystroke is not blocked on cold
+        // `new_session` RPC latency.
+        if let Some(id) = app.welcome_prewarm_agent.take() {
+            if app.agents.contains_key(&id) {
+                switch_to_agent(app, id, SwitchCause::New);
+                return vec![];
+            }
+        }
+        // Default (pi_keep_multi_agent = false): `/new` fully replaces the
+        // current session — drop the active agent tab so the dashboard only
+        // shows the new one. When the F2 toggle is on, the current agent is
+        // preserved so the dashboard can switch back to it.
+        let mut effects = drop_active_agent_for_replacement(app);
+        effects.extend(dispatch_new_session_inner(app, None));
+        return effects;
     }
     #[cfg(feature = "local-workspace")]
     if matches!(app.active_view, ActiveView::Welcome) {
@@ -454,6 +477,13 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     configure_agent_composer(app, agent_id);
     {
         let agent = app.agents.get_mut(&agent_id).unwrap();
+        // Pi seam: the composer's @-file-search starts hidden for external
+        // profiles (Pi owns its own tool surface). `configure_agent_composer`
+        // above carries the stock-Grok composer defaults.
+        agent
+            .prompt
+            .file_search
+            .set_default_hidden(app.current_ui.pi_at_search_hidden);
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
         agent.active_pane = ActivePane::Prompt;
     }
@@ -532,11 +562,75 @@ pub(in crate::app::dispatch) fn dispatch_exit_session(app: &mut AppView) -> Vec<
     app.session_picker_content_results = None;
     app.session_picker_content_loading = false;
     app.exit_session_pending = None;
-    if app.screen_mode.is_minimal() && !app.is_zdr_blocked() {
+    if app.is_pi_session() {
+        // Pi: re-arm welcome prewarm so the next first keystroke is fast again.
+        effects.extend(dispatch_prewarm_welcome_session(app));
+    } else if app.screen_mode.is_minimal() && !app.is_zdr_blocked() {
         effects.extend(dispatch_new_session(app));
     }
     effects
 }
+
+/// Start a background session while Welcome stays visible (external/Pi only).
+///
+/// Pi's `new_session` RPC is relatively expensive; firing it as soon as the
+/// welcome card appears means the first typed character only attaches the
+/// already-warming agent instead of blocking on "Starting session…".
+pub(crate) fn dispatch_prewarm_welcome_session(app: &mut AppView) -> Vec<Effect> {
+    if !app.is_pi_session() || !app.session_startup_allowed() {
+        return vec![];
+    }
+    if app.welcome_prewarm_agent.is_some() {
+        return vec![];
+    }
+    if !matches!(app.active_view, ActiveView::Welcome) {
+        return vec![];
+    }
+    let (agent_id, effects) = dispatch_new_session_inner_with_id(app, None, false);
+    // `dispatch_new_session_inner_with_id` switches to the agent view; put
+    // Welcome back so the logo/menu stay on screen while CreateSession runs.
+    show_welcome(app);
+    app.welcome_prompt_focused = true;
+    app.welcome_prewarm_agent = Some(agent_id);
+    effects
+}
+/// When `pi_keep_multi_agent` is off (default), `/new` fully replaces the
+/// **current** session: the active agent tab is dropped (its Pi session is
+/// abandoned — Pi switches to the fresh session). Other idle agent tabs in
+/// the dashboard are left untouched. Returns the unregister effect for the
+/// dropped session. When the toggle is on this is a no-op (the current agent
+/// is preserved so the dashboard can switch back to it).
+fn drop_active_agent_for_replacement(app: &mut AppView) -> Vec<Effect> {
+    if app.current_ui.pi_keep_multi_agent {
+        return vec![];
+    }
+    // Only the currently active agent is replaced. Agents sitting idle in
+    // other dashboard tabs stay alive so the user can still switch to them.
+    let id = match app.active_view {
+        ActiveView::Agent(id) => id,
+        _ => return vec![],
+    };
+    let Some(agent) = app.agents.shift_remove(&id) else {
+        return vec![];
+    };
+    let effects = unregister_session_effect(agent.session.session_id);
+    if !effects.is_empty() {
+        crate::memory_release::release_retained_memory("new-replace-agent");
+    }
+    effects
+}
+
+/// Drop a welcome prewarm agent (e.g. user is resuming another session).
+pub(in crate::app::dispatch) fn discard_welcome_prewarm(app: &mut AppView) -> Vec<Effect> {
+    let Some(id) = app.welcome_prewarm_agent.take() else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.shift_remove(&id) else {
+        return vec![];
+    };
+    unregister_session_effect(agent.session.session_id)
+}
+
 /// Aftermath for `/delete` on the active agent: dashboard overlay returns there; standalone agent sessions go home.
 fn after_delete_current_session(
     app: &AppView,
@@ -1310,6 +1404,10 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
         agent
             .prompt
             .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);
+        agent
+            .prompt
+            .file_search
+            .set_default_hidden(app.current_ui.pi_at_search_hidden);
         agent.set_session_recap_available(app.session_recap_available);
         agent.set_voice_mode_available(app.voice_mode_enabled);
         agent.apply_app_scoped_gates(
@@ -1430,6 +1528,60 @@ pub(in crate::app::dispatch) fn refuse_chat_mode_build_agent(app: &mut AppView, 
         }
     }
 }
+pub(in crate::app::dispatch) fn skip_picker_and_create_session(
+    app: &mut AppView,
+    agent_id: AgentId,
+) -> Vec<Effect> {
+    if app.agents.get(&agent_id).is_some_and(|agent| {
+        agent.session.session_id.is_some() || agent.mcp_init_progress.is_some()
+    }) {
+        return vec![];
+    }
+    let chat_kind = consume_chat_kind(app);
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.chat_kind = chat_kind;
+        #[cfg(feature = "local-workspace")]
+        {
+            let local_intent = match &app.welcome_session_local_workspace {
+                Some(Some(_)) => true,
+                Some(None) => false,
+                None => crate::app::session_startup::active_local_workspace()
+                    .ok()
+                    .flatten()
+                    .is_some(),
+            };
+            let (mode, locked) =
+                crate::views::welcome::workspace_mode::indicator_for_opening_session(
+                    agent.chat_kind,
+                    false,
+                    app.local_workspace_startup_locked,
+                    local_intent,
+                );
+            agent.workspace_mode = mode;
+            agent.workspace_mode_cli_locked = locked;
+        }
+        agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
+        agent.mcp_init_progress = Some(McpInitProgress {
+            total: 0,
+            connected: 0,
+            started_at: Instant::now(),
+        });
+        agent.session.prompt_history_loading = true;
+        if let Some(question) = agent.question_view.take() {
+            agent.prompt.restore(question.stashed_prompt);
+        }
+    }
+    let preferred_session_id = app.deferred_startup.preferred_session_id.take();
+    vec![Effect::CreateSession {
+        agent_id,
+        cwd: app.cwd.clone(),
+        model_id: None,
+        permission_mode_override: None,
+        preferred_session_id,
+        chat_kind,
+    }]
+}
+
 pub(in crate::app::dispatch) fn handle_session_created(
     app: &mut AppView,
     agent_id: AgentId,
@@ -1461,6 +1613,11 @@ pub(in crate::app::dispatch) fn handle_session_created(
             )));
         }
         agent.bind_session_id(session_id);
+        // External agents do not emit Grok's MCP lifecycle notifications.
+        // A successful ACP session response is their readiness boundary.
+        if app.external_agent {
+            agent.mcp_init_progress = None;
+        }
         if let Some(m) = new_models {
             let prompt_images = app.models.agent_prompt_images();
             app.models = Some(m).into();
@@ -1970,6 +2127,14 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                 let prev_model = agent.session.models.current.clone();
                 let prev_effort = agent.session.models.reasoning_effort;
                 agent.session.models.set_current(model_id.clone(), effort);
+                if let Some(context_window) = agent.session.models.get_context_window() {
+                    let used = agent
+                        .context_state
+                        .as_ref()
+                        .map(|state| state.used)
+                        .unwrap_or(0);
+                    agent.apply_context_used(used, context_window);
+                }
                 let resolved_effort = agent.session.models.reasoning_effort;
                 if let Some(selection) = context_window_selection
                     && !model_changed_during_switch

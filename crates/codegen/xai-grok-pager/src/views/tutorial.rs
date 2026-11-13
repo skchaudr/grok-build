@@ -19,7 +19,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::theme::Theme;
-use crate::tutorial_docs::TUTORIAL_TOPICS;
+use crate::tutorial_docs::{tutorial_profile, tutorial_topics};
 use crate::views::modal_window::{
     self as mw, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut,
 };
@@ -33,7 +33,7 @@ use crate::views::picker::{
 pub enum TutorialScreen {
     /// The topic list.
     List,
-    /// A single topic page (index into [`TUTORIAL_TOPICS`]).
+    /// A single topic page (index into the active tutorial topics).
     Topic { index: usize },
     /// The full how-to guide a topic's "Go deeper" points at (`d` from the topic page); Esc returns to that topic.
     Guide { topic: usize },
@@ -67,7 +67,7 @@ impl TutorialState {
 
     /// Switch to the topic page at `index`, marking it viewed.
     fn open_topic(&mut self, index: usize) {
-        if index >= TUTORIAL_TOPICS.len() {
+        if index >= tutorial_topics().len() {
             return;
         }
         self.viewed.insert(index);
@@ -87,7 +87,7 @@ impl TutorialState {
 
     /// Open the "Go deeper" guide for the topic at `index`, if it has one.
     fn open_guide(&mut self, index: usize) {
-        let has_guide = TUTORIAL_TOPICS
+        let has_guide = tutorial_topics()
             .get(index)
             .and_then(|t| t.go_deeper)
             .and_then(crate::docs::find_doc)
@@ -221,7 +221,7 @@ fn handle_topic_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
             if let TutorialScreen::Topic { index } = st.screen {
                 match key.code {
                     crossterm::event::KeyCode::Right => {
-                        if index + 1 < TUTORIAL_TOPICS.len() {
+                        if index + 1 < tutorial_topics().len() {
                             st.open_topic(index + 1);
                         } else {
                             st.back_to_list();
@@ -283,7 +283,7 @@ fn handle_list_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
     }
 
     let config = list_picker_config();
-    match handle_picker_input(ev, &mut st.picker, TUTORIAL_TOPICS.len(), &config) {
+    match handle_picker_input(ev, &mut st.picker, tutorial_topics().len(), &config) {
         PickerOutcome::Selected(i) => {
             st.open_topic(i);
             TutorialOutcome::Consumed
@@ -292,13 +292,6 @@ fn handle_list_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
         _ => TutorialOutcome::Consumed,
     }
 }
-
-/// Intro copy shown above the topic list.
-/// It doesn't promise how long the tour takes, just what it is and how to leave.
-const INTRO_LINES: [&str; 2] = [
-    "Quick tips to get the most out of Grok Build.",
-    "Pick a topic. Esc when you're done.",
-];
 
 /// Topic page body: the embedded markdown minus its leading `# ` heading.
 /// The modal window chrome already shows the title, so rendering the H1 would double it.
@@ -315,10 +308,10 @@ pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, com
     match st.screen {
         TutorialScreen::Topic { index } => {
             // `Topic` is only constructed via `open_topic`, which bounds-checks.
-            let Some(topic) = TUTORIAL_TOPICS.get(index) else {
+            let Some(topic) = tutorial_topics().get(index) else {
                 return;
             };
-            let next_hint = match TUTORIAL_TOPICS.get(index + 1) {
+            let next_hint = match tutorial_topics().get(index + 1) {
                 Some(next) => format!("\u{2192} next: {}", next.title),
                 None => "\u{2192} done".to_owned(),
             };
@@ -360,7 +353,7 @@ pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, com
             );
         }
         TutorialScreen::Guide { topic } => {
-            let Some(doc) = TUTORIAL_TOPICS
+            let Some(doc) = tutorial_topics()
                 .get(topic)
                 .and_then(|t| t.go_deeper)
                 .and_then(crate::docs::find_doc)
@@ -384,7 +377,7 @@ pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, com
 }
 
 fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bool, theme: &Theme) {
-    let progress = format!("{}/{} explored", st.viewed.len(), TUTORIAL_TOPICS.len());
+    let progress = format!("{}/{} explored", st.viewed.len(), tutorial_topics().len());
     let shortcuts = [
         Shortcut {
             label: &progress,
@@ -408,7 +401,7 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
         },
     ];
     let modal_config = ModalWindowConfig {
-        title: "Welcome to Grok Build",
+        title: tutorial_profile().title,
         tabs: None,
         shortcuts: &shortcuts,
         sizing: ModalSizing {
@@ -430,7 +423,7 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
     // Intro copy, then a blank row, then the topic rows.
     let intro_style = Style::default().fg(theme.gray_bright);
     let mut y = mca.content.y;
-    for line in INTRO_LINES {
+    for &line in tutorial_profile().intro_lines {
         if y >= mca.content.y + mca.content.height {
             break;
         }
@@ -460,9 +453,9 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
     // Narrow modals can't fit title and blurb on one row; stack the blurb below
     const NARROW_THRESHOLD: u16 = 64;
     let narrow = entries_area.width < NARROW_THRESHOLD;
-    let blurb_slices: Vec<[&str; 1]> = TUTORIAL_TOPICS.iter().map(|t| [t.blurb]).collect();
+    let blurb_slices: Vec<[&str; 1]> = tutorial_topics().iter().map(|t| [t.blurb]).collect();
 
-    let picker_entries: Vec<PickerEntry<'_>> = TUTORIAL_TOPICS
+    let picker_entries: Vec<PickerEntry<'_>> = tutorial_topics()
         .iter()
         .enumerate()
         .map(|(i, t)| {
@@ -481,6 +474,7 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
                 summary_lines: &[],
                 dimmed: false,
                 indent: 0,
+                label_color: None,
                 badge: if viewed { "\u{2713}" } else { "" },
                 badge_color: Some(theme.accent_success),
                 collapsible: false,
@@ -574,7 +568,7 @@ mod tests {
 
     #[test]
     fn d_is_a_noop_on_a_topic_without_a_guide() {
-        let last = TUTORIAL_TOPICS.len() - 1;
+        let last = tutorial_topics().len() - 1;
         assert!(
             TUTORIAL_TOPICS
                 .last()
@@ -592,7 +586,7 @@ mod tests {
         // The window title already names the topic; the H1 must not render a second time inside the page
         assert_eq!(topic_body("# Title\n\nBody text.\n"), "Body text.\n");
         // Every real topic starts with an H1, so every body drops it.
-        for t in TUTORIAL_TOPICS {
+        for t in tutorial_topics() {
             assert!(!topic_body(t.content).starts_with("# "), "{}", t.title);
         }
         // Content without a leading H1 passes through untouched.
@@ -606,7 +600,7 @@ mod tests {
         assert_eq!(st.screen, TutorialScreen::Topic { index: 0 });
 
         // `→` walks the whole tour, marking each topic viewed…
-        for expected in 1..TUTORIAL_TOPICS.len() {
+        for expected in 1..tutorial_topics().len() {
             handle_tutorial_input(&key(KeyCode::Right), &mut st);
             assert_eq!(st.screen, TutorialScreen::Topic { index: expected });
             assert!(st.viewed.contains(&expected));
@@ -615,7 +609,11 @@ mod tests {
         let outcome = handle_tutorial_input(&key(KeyCode::Right), &mut st);
         assert_eq!(outcome, TutorialOutcome::Consumed);
         assert_eq!(st.screen, TutorialScreen::List);
-        assert_eq!(st.viewed.len(), TUTORIAL_TOPICS.len(), "full tour ✓-marked");
+        assert_eq!(
+            st.viewed.len(),
+            tutorial_topics().len(),
+            "full tour ✓-marked"
+        );
     }
 
     #[test]
@@ -671,7 +669,7 @@ mod tests {
         let hit = st.picker.hit_areas.as_ref().expect("hit areas populated");
         assert_eq!(
             hit.item_rects.len(),
-            TUTORIAL_TOPICS.len(),
+            tutorial_topics().len(),
             "one click rect per topic"
         );
     }

@@ -26,9 +26,11 @@
 //!       on an empty prompt) re-enters this level and runs CancelTurn.
 //!   → 3. Esc policy (try_handle_esc_policy) on Prompt or Scrollback only,
 //!       after overlays/dropdowns/selection returned Changed / stole Esc:
-//!       turn running (every mode) → Changed (never cancels; shows a toast
-//!         naming the registry CancelTurn key, Ctrl+C by default)
-//!       turn cancelling → Changed (swallow)
+//!       turn running, F2 cancel policy = Esc → CancelTurn (even with a draft;
+//!         the draft is preserved, unlike Ctrl+C's clear-first gesture)
+//!       turn running, F2 cancel policy = Ctrl+C → Changed (swallow Esc)
+//!       turn cancelling → CancelTurn in every mode (retry lost ack;
+//!         Ctrl+C escalates to Quit)
 //!       idle + non-empty prompt, prompt pane only → ArmPending ClearPrompt (2× within 800ms, hint)
 //!       idle + empty + messages, either pane (Normal composer mode, no
 //!         needs-input overlay pending, no open history search, and not
@@ -131,6 +133,7 @@ use crate::views::plan_approval_view::{PlanApprovalViewState, PlanComment};
 use crate::views::prompt_widget::{PromptWidget, StashedPrompt};
 use crate::views::question_view::QuestionViewState;
 use crate::views::queue_pane::QueuePane;
+use crate::views::subagent_catalog_pane::SubagentCatalogPane;
 use crate::views::tasks_pane::TasksPane;
 use crate::views::todo_pane::TodoPane;
 use ratatui::buffer::Buffer;
@@ -146,6 +149,7 @@ mod elicitation;
 pub(crate) use elicitation::UnansweredElicitation;
 mod input;
 pub(crate) use input::ExternalPromptEditorAccess;
+mod fork_picker;
 mod interactions;
 mod jump;
 mod pi_fork;
@@ -174,6 +178,7 @@ pub(in crate::app) use prompt_stash::prompt_history_text;
 pub use prompt_stash::{PromptStashEntry, StashCause};
 mod queue;
 mod render;
+mod review;
 pub use render::{AppRenderParams, OverlayHeader};
 #[cfg(test)]
 mod dock_input_tests;
@@ -219,6 +224,17 @@ pub type AgentPane = ActivePane;
 pub struct McpInitProgress {
     pub total: u32,
     pub connected: u32,
+    pub started_at: Instant,
+}
+impl McpInitProgress {
+    /// Max age for a `total == 0` seed before it auto-expires.
+    pub const SEED_EXPIRE: std::time::Duration = std::time::Duration::from_secs(30);
+    /// Whether the progress indicator should be visible in the UI.
+    /// `total > 0` (real servers): always visible until
+    /// `total == 0` (seed / 0-server): visible for at most
+    pub fn is_visible(&self) -> bool {
+        self.total > 0 || self.started_at.elapsed() < Self::SEED_EXPIRE
+    }
 }
 /// Current voice record-dot pulse: `(filled, brightness)`.
 /// A smooth sine "breathing" on a fixed ~0.7s wall-clock period (not the animation tick), so the dot animates like a studio recording light and never speeds up or syncs with streaming-text redraws. `filled` picks the FISHEYE/BULLSEYE glyph; `brightness` (0.4–1.0) fades the red color.
@@ -790,6 +806,8 @@ pub struct AgentView {
     pub tip_typing_dismissed: bool,
     pub todo: TodoPane,
     pub tasks: TasksPane,
+    /// Consolidated subagent catalog overlay (F12). See `views/subagent_catalog_pane.rs`.
+    pub catalog: SubagentCatalogPane,
     pub queue: QueuePane,
     /// Per-agent mirror of the server-authoritative shared prompt queue
     /// (`AppView::shared_prompt_queues[sid]`), kept in sync by `handle_queue_changed` and the immediate-send path. The queue pane renders the union of this and the local `pending_prompts`; the edit handlers read it to route remove/reorder by origin. Empty unless a plain prompt was queued server-side while a turn was running.
@@ -890,7 +908,7 @@ pub struct AgentView {
     /// Current special prompt input mode (Normal/Bash/Remember).
     pub prompt_input_mode: PromptInputMode,
     /// Multiline input mode: swap Enter (insert newline) and Shift+Enter (send).
-    /// Toggled by `Ctrl+M` or `/multiline`. Not persisted across sessions.
+    /// Toggled by `Ctrl+M` or `/multiline`. Model picker is `Ctrl+L`. Not persisted across sessions.
     pub multiline_mode: bool,
     /// Vim-mode scrollback keybindings. When `false` (default), bare-letter and Shift+letter scrollback bindings (j/k, h/l, g/G, y/Y, o/O, r, x, e/E, L/H, plus the `i` FocusPrompt alt) are suppressed and the pressed letter forwards to the prompt textarea via `Action::FocusPrompt` + `ActionThenForward`. Arrows / Tab / Esc / Space / PgUp / PgDn and all `Ctrl+letter` bindings remain active regardless of this flag. Pager-owned ephemeral field; reset each session.
     pub vim_mode: bool,
@@ -904,6 +922,7 @@ pub struct AgentView {
     pub bash_turn: bool,
     /// The task ID of the currently running cron turn, if any.
     /// Set when a cron prompt is drained, cleared on turn completion.
+    pub cron_task_id: Option<String>,
     /// Stashed normal prompt state while editing a queued prompt.
     pub stashed_prompt: Option<StashedPrompt>,
     /// One draft set aside for later; see [`prompt_stash`].
@@ -1011,6 +1030,18 @@ pub struct AgentView {
     pub pane_areas: PaneAreas,
     /// Entry index currently hovered by the mouse (for dimmed selection box).
     pub hovered_entry: Option<usize>,
+    /// Entry currently backing the Write/Edit hover popup scroll offset.
+    pub write_edit_hover_popup_entry: Option<usize>,
+    /// When the pointer first entered the current Write/Edit hover candidate.
+    /// Used to enforce the tooltip dwell delay without resetting on small
+    /// movements that stay inside the same row.
+    pub write_edit_hover_started_at: Option<Instant>,
+    /// Independent scroll offset inside the Write/Edit hover popup.
+    pub write_edit_hover_popup_scroll: usize,
+    /// Geometry of the last rendered Write/Edit hover popup, exported by the
+    /// render pass each frame (cleared when the popup is not drawn) so mouse
+    /// handling can keep the popup alive while the pointer rests on it.
+    pub write_edit_hover_popup_frame: Option<crate::views::agent::WriteEditPopupFrame>,
     /// Pending markdown text drag before the pointer crosses the drag threshold.
     pub pending_text_drag: Option<PendingTextDrag>,
     /// Active markdown text drag selection.
@@ -1103,6 +1134,7 @@ pub struct AgentView {
     pub hit_context: HitArea,
     pub hit_credits: HitArea,
     pub hit_todo_close: HitArea,
+    pub hit_catalog_close: HitArea,
     pub hit_bg_close: HitArea,
     pub hit_subagent_close: HitArea,
     pub hit_bg_status: HitArea,
@@ -1225,8 +1257,13 @@ pub struct AgentView {
     /// Active hooks/plugins modal popup. When `Some`, blocks all input and renders as a centered overlay. Opened by `/hooks`, `/plugins`, or `/mcps`.
     /// renders as a centered overlay. Opened by `/hooks`, `/plugins`, or `/mcps`.
     pub(crate) extensions_modal: Option<ExtensionsModalState>,
+    /// Active Pi extension-shortcut manager. Opened by `/pi-shortcut-manager`.
+    /// Independent of remote-tui; does not host extension component UIs.
+    pub(crate) pi_shortcut_manager: Option<crate::views::shortcut_manager::ShortcutManagerModal>,
+    /// Read-only Pi extension shortcut snapshot shown at the top of Grok's
+    /// native all-shortcuts modal. Management remains in `/pi-shortcut-manager`.
+    pub(crate) pi_extension_shortcuts: Vec<crate::app::extension_shortcuts::ExtensionShortcut>,
     /// Active feedback composer modal. When `Some`, blocks all input and renders as a centered overlay with its own composer.
-    /// renders as a centered overlay with its own composer.
     pub(crate) feedback_modal: Option<FeedbackModalState>,
     /// One-shot trace uploads in flight, keyed by the submission id of the POST that earned them.
     pub(crate) pending_feedback_trace_uploads:
@@ -1237,7 +1274,6 @@ pub struct AgentView {
         crate::views::feedback_modal::ParkedFeedbackTraceConsent,
     )>,
     /// Active agents modal popup. When `Some`, blocks all input and renders as a centered overlay. Opened by `/config-agents` or `/agents`.
-    /// renders as a centered overlay. Opened by `/config-agents` or `/agents`.
     pub(crate) agents_modal: Option<crate::views::agents_modal::AgentsModalState>,
     pub(crate) persona_detail: Option<crate::views::persona_detail::PersonaDetailState>,
     /// Active /btw side question overlay. When `Some`, renders as a dismissible
@@ -1266,9 +1302,19 @@ pub struct AgentView {
     /// toasts, keypress dismissal, and subagent open/close when propagated
     /// via [`Self::set_sticky_toast_recursive`].
     pub(crate) sticky_toast: Option<String>,
+    /// Pi RPC widgets placed above the native editor. Pager renders these in
+    /// their own reserved rows instead of overloading the toast slot.
+    pub(crate) external_widgets_above_editor: Vec<String>,
+    /// Latest Remote TUI frame, kept separate so overlay layouts do not consume
+    /// editor widget rows.
+    pub(crate) remote_tui_lines: Vec<String>,
+    /// Pi `ctx.ui.custom()` layout metadata.
+    pub(crate) remote_tui_layout: Option<crate::app::app_view::RemoteTuiLayout>,
+    /// Pi RPC widgets placed below the native editor.
+    pub(crate) external_widgets_below_editor: Vec<String>,
+    /// Pi RPC keyed statuses, rendered by the native status bar.
+    pub(crate) external_statuses: Vec<String>,
     /// Transient "Switched to mode: X" banner shown above the prompt after Shift+Tab. (message, remaining_ticks). Full brightness for 2 s, then fades out over the final 0.3 s.
-    /// Shift+Tab. (message, remaining_ticks). Full brightness for 2 s, then
-    /// fades out over the final 0.3 s.
     pub(crate) mode_switch_banner: Option<(String, u8)>,
     /// Session announcement banner (critical or promo) is showing (set at start of `draw`). Ephemeral-tip occluder: unlike short-lived mode-switch, an announcement can last the session, so tips must not burn TTL/seen counts while hidden.
     pub(crate) session_banner_active: bool,
@@ -1276,6 +1322,11 @@ pub struct AgentView {
     pub(crate) pinned_upgrade_cta_live: bool,
     /// Fullscreen block viewer. When `Some`, replaces the scrollback area.
     pub(crate) block_viewer: Option<BlockViewerPane>,
+    /// A block-viewer Kitty overlay image is (or was recently) placed in the
+    /// shared modal slot; the next block-viewer-free frame clears it.
+    pub(crate) block_viewer_image_active: bool,
+    /// Dismissed block-viewer resume state (upstream): entry/kind/selection/
+    /// scroll/follow snapshot so the viewer can re-open where the user left off.
     pub(crate) block_viewer_resume: Option<BlockViewerResume>,
     /// Active scrollback search session. When `Some`, vim `/` (or `/find`) is
     /// searching the scrollback. Inert until input wiring opens it.
@@ -1319,9 +1370,14 @@ pub struct AgentView {
     /// tool completes, cleared when `exit_plan_mode` tool completes.
     /// Controls prompt accent color and shortcut bar hints.
     pub(crate) plan_mode_active: bool,
-    /// Optimistic plan-mode state set immediately on Shift+Tab.
-    /// Cleared to `None` when `detect_plan_mode_change_replayed` confirms real state.
-    /// The cycle logic uses `plan_mode_pending.unwrap_or(plan_mode_active)` so rapid Shift+Tab presses advance correctly without waiting for ACP.
+    /// Pi adapter's plan file path (sidecar `<session>.plan.md`). Set via
+    /// `pi/ui/plan_file` ext notification. When present, `/view-plan` reads
+    /// this path instead of the Grok-native `~/.grok/sessions/…/plan.md`.
+    pub(crate) pi_plan_file_path: Option<std::path::PathBuf>,
+    /// Optimistic plan-mode state set immediately by the mode shortcut.
+    /// Cleared to `None` when `detect_plan_mode_change()` confirms real state.
+    /// The cycle logic uses `plan_mode_pending.unwrap_or(plan_mode_active)`
+    /// so rapid Plan-shortcut presses advance correctly without waiting for ACP.
     pub(crate) plan_mode_pending: Option<bool>,
     /// Modes from the session response, in ring order. Empty means Shift+Tab stays on the plan/permission cycle.
     pub(crate) available_modes: Vec<agent_client_protocol::SessionMode>,
@@ -1416,13 +1472,26 @@ pub struct AgentView {
     pub(crate) cancel_turn_buttons: Vec<Rect>,
     /// Per-agent mirror of cancel-subagents preference (`Some(true)` means always stop, `Some(false)` always continue). Always choices set this on every agent and persist to `[ui].cancel_subagents_on_turn_cancel`; when unset, cancel falls back to that UI/config field, then the prompt panel.
     pub(crate) cancel_subagents_preference: Option<bool>,
-    /// What gesture triggered the pending turn-cancel (Ctrl+C / mouse / dashboard stop; the pager never sends `Esc`, which only hints at the cancel key).
-    /// Set by the key/mouse handler, consumed by `do_cancel_turn` so `session/cancel` carries `_meta.cancelTrigger`.
+    /// What gesture triggered the pending turn-cancel (Ctrl+C / mouse /
+    /// dashboard stop; Esc via the configurable mid-turn cancel and the
+    /// cancel-retry path while TurnCancelling).
+    /// Set by the key/mouse handler, consumed by `do_cancel_turn` / the
+    /// cancel-retry path so `session/cancel` carries `_meta.cancelTrigger`.
     pub(crate) cancel_trigger_hint: Option<crate::app::actions::CancelTrigger>,
     pub(crate) rewind_state: Option<crate::views::rewind::RewindState>,
     pub(crate) rewind_points: Option<Vec<crate::views::rewind::RewindPointInfo>>,
     /// `/jump` picker overlay (pure client-side turn navigation).
     pub(crate) jump_state: Option<crate::views::jump::JumpState>,
+    /// Session / turn code-review modal (file list + patch preview).
+    pub(crate) review_state: Option<crate::views::review::ReviewState>,
+    /// Pi message-level `/fork` picker (prompt-area list overlay, like `/jump`).
+    pub(crate) fork_state: Option<crate::views::fork_picker::ForkPickerState>,
+    /// In-place edit of a previous user prompt. See `inline_edit.rs`.
+    pub(crate) inline_edit: Option<crate::app::inline_edit::InlineEditState>,
+    /// Edited text awaiting its rewind; `dispatch_rewind_success` resubmits it.
+    /// Set only when the rewind flow emits `Effect::RewindExecute` while the inline editor is open (see `stash_inline_resubmit_if_editing`).
+    /// inline editor is open (see `stash_inline_resubmit_if_editing`).
+    pub(crate) pending_inline_resubmit: Option<String>,
     /// Timeline sidebar rail geometry for the current frame (`None` means
     /// hidden). Set by the renderer, consumed by mouse hit-testing.
     pub(crate) timeline_rail: Option<crate::views::timeline::TimelineRail>,
@@ -1431,10 +1500,9 @@ pub struct AgentView {
     /// Rail part under the mouse; drives hover styling and the tick
     /// preview popup.
     pub(crate) timeline_hover: Option<crate::views::timeline::TimelineHit>,
-    /// Cached tick-hover preview `(turn_idx, text)`. Filled when hover
-    /// lands on a tick; borrowed during render so streaming redraws don't
-    /// rescan/allocate the prompt every frame.
-    pub(crate) timeline_hover_preview: Option<(usize, String)>,
+    /// Marker index, preview text, and creation time for the timeline hover card.
+    pub(crate) timeline_hover_preview:
+        Option<(usize, String, Option<chrono::DateTime<chrono::Local>>)>,
     /// Running agent definition for this session (`x.ai/session/info` `agentName`).
     pub session_agent_name: Option<String>,
     /// Map of child session IDs to subagent metadata. Populated on `SubagentSpawned` notifications, used for permission routing (which agent owns a session) and provenance display.
@@ -1448,6 +1516,12 @@ pub struct AgentView {
     /// Currently open subagent view (child_session_id). When Some, the scrollback area is replaced by the subagent's framed view.
     /// scrollback area is replaced by the subagent's framed view.
     pub active_subagent: Option<String>,
+    /// When true, this AgentView is rendering as a persistent subagent session:
+    /// - Prompt remains interactive so the child can be reused for later turns
+    /// - Turn cancellation targets the child session directly
+    /// - Demote-to-background remains disabled for nested child execution
+    /// - Shortcuts bar shows subagent-specific navigation hints
+    pub is_subagent_view: bool,
     /// Root of its session, or a child mirrored under a parent's takeover; every child-specific gate derives from it.
     role: AgentRole,
     /// Set while the view shows a past session from `/traces`: read-only, no composer. Holds the sessions list to put back on Esc.
@@ -1534,6 +1608,8 @@ pub struct AgentView {
     pub(crate) pending_effects: Vec<super::actions::Effect>,
     /// In-flight deferred clipboard attachment probes for this prompt. A send while `> 0` is stashed (see `deferred_send`) so a paste-then-immediate-send never builds content blocks before the image attaches.
     pub(crate) paste_probe_in_flight: usize,
+    /// Raw text held only while the large-paste selector is open.
+    pending_large_paste: Option<paste::PendingLargePaste>,
     /// A prompt send / interject deferred until the in-flight paste probe(s)
     /// complete. Kind-only: the payload is re-derived from the widget on
     /// reissue so the freshly attached image chip travels with it.
@@ -1953,6 +2029,28 @@ pub(super) fn apply_settings_outcome(
         SettingsKeyOutcome::Unchanged => InputOutcome::Unchanged,
     }
 }
+
+/// Fold a grok-pi settings panel outcome into the agent's input outcome.
+pub(super) fn apply_pi_settings_outcome(
+    agent: &mut AgentView,
+    outcome: crate::views::pi_settings::Outcome,
+) -> InputOutcome {
+    use crate::views::pi_settings::Outcome;
+    match outcome {
+        Outcome::Close => {
+            agent.active_modal = None;
+            InputOutcome::Changed
+        }
+        Outcome::Action(a) => InputOutcome::Action(a),
+        Outcome::ActionPair(a, b) => InputOutcome::ActionPair(a, b),
+        Outcome::ActionThenClose(a) => {
+            agent.active_modal = None;
+            InputOutcome::Action(a)
+        }
+        Outcome::Changed => InputOutcome::Changed,
+        Outcome::Unchanged => InputOutcome::Unchanged,
+    }
+}
 /// Whether this key event represents `#` (hash).
 /// Most terminals report `KeyCode::Char('#')` directly. Under the Kitty keyboard protocol the terminal sends the base key `3` with SHIFT modifier instead of the produced character (crossterm#968).
 fn is_hash_key(key: &KeyEvent) -> bool {
@@ -2015,7 +2113,9 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::FocusPrompt => Action::FocusPrompt,
         ActionId::FocusScrollback => Action::FocusScrollback,
         ActionId::NextModel => Action::NextModel,
+        ActionId::CycleThinkingLevel => Action::CycleThinkingLevel,
         ActionId::CycleMode => Action::CycleMode,
+        ActionId::ReviewSession => Action::ReviewShowSession,
         ActionId::CancelTurn
         | ActionId::Quit
         | ActionId::ExitSession
@@ -2451,6 +2551,8 @@ pub(crate) mod test_fixtures {
             &agent.session.bg_tasks,
             &agent.subagent_sessions,
             &agent.session.scheduled_tasks,
+            None,
+            &std::collections::HashSet::new(),
             &agent.workflow_runs,
         );
     }
@@ -2590,7 +2692,7 @@ pub(crate) mod test_fixtures {
                 .session_id
                 .clone()
                 .unwrap_or_else(|| acp::SessionId::new("parent"));
-            self.insert_subagent_view(
+            self.insert_subagent_view_with_link(
                 child_sid,
                 child,
                 super::ChildLink::unaddressable(parent_sid),
@@ -2615,15 +2717,15 @@ pub(crate) mod test_fixtures {
     pub fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
-    /// Interject chord for VS Code family tests (`Ctrl+L`).
+    /// Interject chord for VS Code family tests (Ctrl+Enter; Ctrl+L is model picker).
     pub fn vscode_interject_key() -> KeyEvent {
-        KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
     }
     /// Host-independent registry for queue/prompt interject tests (Ctrl+Enter).
     pub fn non_vscode_registry() -> ActionRegistry {
         ActionRegistry::non_vscode_for_test()
     }
-    /// Host-independent VS family registry (Ctrl+L interject, OpenExtensions Null).
+    /// Host-independent VS family registry (Ctrl+Enter interject; Ctrl+L model picker).
     pub fn vscode_family_registry() -> ActionRegistry {
         ActionRegistry::vscode_family_for_test()
     }

@@ -42,6 +42,46 @@ pub use mode_support::{ModeSupport, Remedy};
 /// Maximum number of visible rows in the dropdown (scroll beyond this).
 pub const MAX_VISIBLE_SUGGESTIONS: usize = 8;
 
+/// Process-wide builtin command policy. The pager hosts one agent backend per
+/// process, so setting this once before constructing `AppView` keeps every
+/// prompt surface (welcome, agent tabs, dashboard) on the same native command
+/// registry without threading renderer policy through the component tree.
+#[derive(Debug, Clone, Default)]
+pub enum BuiltinCommandProfile {
+    #[default]
+    Grok,
+    External(Vec<String>),
+}
+
+fn command_profile_cell() -> &'static std::sync::RwLock<BuiltinCommandProfile> {
+    static PROFILE: std::sync::OnceLock<std::sync::RwLock<BuiltinCommandProfile>> =
+        std::sync::OnceLock::new();
+    PROFILE.get_or_init(|| std::sync::RwLock::new(BuiltinCommandProfile::Grok))
+}
+
+/// Select the native slash-command surface for the backend hosted by this
+/// pager process. ACP-advertised commands are still merged dynamically.
+pub fn set_builtin_command_profile(profile: BuiltinCommandProfile) {
+    *command_profile_cell()
+        .write()
+        .expect("slash command profile lock poisoned") = profile;
+}
+
+fn profiled_builtin_commands() -> Vec<std::sync::Arc<dyn SlashCommand>> {
+    match command_profile_cell()
+        .read()
+        .expect("slash command profile lock poisoned")
+        .clone()
+    {
+        BuiltinCommandProfile::Grok => commands::builtin_commands(),
+        BuiltinCommandProfile::External(names) => commands::builtin_commands_named(&names),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SuggestionRow
+// ---------------------------------------------------------------------------
+
 /// Grouping for the bare `/` menu, ordered top to bottom. Skills sink below the commands because there can be far more of them than fit on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum MenuGroup {
@@ -548,7 +588,7 @@ impl SlashController {
 
     /// Create a controller pre-loaded with pager builtin commands.
     pub fn with_builtins(cwd: std::path::PathBuf) -> Self {
-        Self::new(CommandRegistry::new(commands::builtin_commands()), cwd)
+        Self::new(CommandRegistry::new(profiled_builtin_commands()), cwd)
     }
 
     /// Mutable access to the registry (for ACP sync).
@@ -1279,24 +1319,33 @@ impl SlashController {
         // `ctx` borrows `&self` and `self.matcher.rank` below needs `&mut self`, so ask before ranking
         let target = command.preselected_arg(&ctx, query);
         let trimmed = query.trim();
+        let uses_pi_model_picker_search = command.name() == "model"
+            && commands::model::uses_pi_model_picker_search(models, query);
         let rows: Vec<SuggestionRow> = if trimmed.is_empty() {
             items.iter().map(SuggestionRow::from_arg).collect()
+        } else if uses_pi_model_picker_search {
+            self.matcher
+                .rank_pi_model_selector(items.as_slice(), trimmed, |item| item.match_text.as_str())
+                .into_iter()
+                .filter_map(|index| items.get(index).map(SuggestionRow::from_arg))
+                .collect()
         } else {
             let fallbacks: Vec<String> = items.iter().map(label_match_haystack).collect();
-            let cands: Vec<(&ArgItem, &str)> = items
+            let candidates: Vec<(&ArgItem, &str)> = items
                 .iter()
                 .zip(fallbacks.iter().map(String::as_str))
                 .collect();
-            let hits = self.matcher.rank_either(
-                cands.as_slice(),
-                trimmed,
-                cands.len(),
-                |cand| cand.0.match_text.as_str(),
-                |cand| cand.1,
-            );
-            hits.into_iter()
-                .filter_map(|(idx, _)| {
-                    let mut row = SuggestionRow::from_arg(items.get(idx)?);
+            self.matcher
+                .rank_either(
+                    candidates.as_slice(),
+                    trimmed,
+                    candidates.len(),
+                    |candidate| candidate.0.match_text.as_str(),
+                    |candidate| candidate.1,
+                )
+                .into_iter()
+                .filter_map(|(index, _)| {
+                    let mut row = SuggestionRow::from_arg(items.get(index)?);
                     row.indices = self.argument_highlight_indices(trimmed, &row.display);
                     Some(row)
                 })
@@ -1759,9 +1808,9 @@ mod tests {
     #[test]
     fn required_arg_command_blocks_without_args() {
         let reg = test_registry();
-        // /model has takes_args=true, args_required=true.
-        assert!(!is_command_complete("/model", &reg));
-        assert!(!is_command_complete("/model ", &reg));
+        // /model has takes_args=true, args_required=false: bare invocation opens the picker.
+        assert!(is_command_complete("/model", &reg));
+        assert!(is_command_complete("/model ", &reg));
         assert!(is_command_complete("/model grok-4", &reg));
     }
 

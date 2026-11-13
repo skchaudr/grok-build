@@ -119,12 +119,18 @@ pub(in crate::app::dispatch) fn dispatch_rename_session(
         return vec![];
     }
     agent.display_name = Some(title.clone());
+    let cwd = agent.session.cwd.clone();
+    let kind = agent.rename_kind();
+    // Pi TUI refreshes the terminal title as soon as session_info_changed
+    // follows setSessionName; mirror that local state transition here rather
+    // than waiting for a future animation tick while the session is idle.
+    app.update_notifications();
     vec![Effect::RenameSession {
         agent_id: id,
         session_id,
         title,
-        cwd: agent.session.cwd.clone(),
-        kind: agent.rename_kind(),
+        cwd,
+        kind,
         external,
     }]
 }

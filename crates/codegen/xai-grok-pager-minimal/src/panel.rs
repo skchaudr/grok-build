@@ -492,6 +492,7 @@ fn render_mcps(
                 summary_lines: &no_lines,
                 dimmed: false,
                 indent: indents.get(i).copied().unwrap_or(0),
+                label_color: None,
                 badge: badges.get(i).map(String::as_str).unwrap_or(""),
                 badge_color: badge_colors.get(i).copied().flatten(),
                 collapsible: collapsibles.get(i).copied().unwrap_or(false),

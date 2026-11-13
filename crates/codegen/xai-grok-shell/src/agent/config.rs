@@ -1056,7 +1056,7 @@ fn resolve_subagent_permission_mode(
 pub use xai_grok_agent::config::AgentDefinition;
 pub use xai_grok_agent::config::Effort;
 pub use xai_grok_agent::config::PermissionMode;
-pub use xai_grok_shared::ui_config::{ContextualHints, UiConfig};
+pub use xai_grok_shared::ui_config::{ContextualHints, PiBuiltinTools, UiConfig};
 /// Set in `config.toml` under `[agent]`: Priority (highest to lowest): ACP session-level `_meta.agentProfile`
 /// CLI `--agent-profile` flag `[agent]` config.toml section (this config) `GROK_AGENT` env var
 /// Default `grok-build` agent

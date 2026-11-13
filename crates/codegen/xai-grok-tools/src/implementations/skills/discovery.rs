@@ -834,7 +834,8 @@ pub fn discover_skills_for_paths(
 ) -> Vec<SkillInfo> {
     // `.grok` and `.agents` are always scanned; `.claude` is gated on the
     // claude-vendor skills cell. (`.cursor` is excluded here by design — see fn docs.)
-    let mut config_dir_names: Vec<&str> = vec![".grok", ".agents"];
+    let mut config_dir_names: Vec<&str> =
+        vec![xai_grok_config::project_config_dirname(), ".agents"];
     if compat.claude.skills {
         config_dir_names.push(".claude");
     }

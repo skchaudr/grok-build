@@ -240,6 +240,10 @@ fn dispatch_load_session_ungated(
     agent_mut
         .prompt
         .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);
+    agent_mut
+        .prompt
+        .file_search
+        .set_default_hidden(app.current_ui.pi_at_search_hidden);
     agent_mut.set_session_recap_available(app.session_recap_available);
     agent_mut.set_voice_mode_available(app.voice_mode_enabled);
     agent_mut.scrollback.begin_batch();
@@ -329,7 +333,9 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
                     .and_then(|entries| entries.get(index))
             })
             .map(|entry| entry.source.as_str());
-        if !source.is_some_and(crate::app::foreign_sessions::is_foreign_picker_source) {
+        if !source.is_some_and(|source| {
+            source == "pi" || crate::app::foreign_sessions::is_foreign_picker_source(source)
+        }) {
             return vec![];
         }
     }
@@ -380,6 +386,9 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
         crate::app::foreign_sessions::ForeignPickerSource::from_picker_source(&source)
     {
         return dispatch_foreign_resume(app, foreign_source, session_id);
+    }
+    if source == "pi" {
+        return dispatch_load_session(app, session_id, Some(std::path::PathBuf::from(cwd)), false);
     }
     let chat_kind = source == "conversation";
     #[cfg(feature = "local-workspace")]
@@ -865,6 +874,7 @@ pub(in crate::app::dispatch) fn dispatch_trigger_deep_search(
     if app.chat_mode {
         return dispatch_chat_search_refetch(app, force);
     }
+    let psm_on = app.current_ui.psm_resume_index;
     if let Some(agent) = get_active_agent_mut(app)
         && let Some(ActiveModal::SessionPicker {
             state,
@@ -876,12 +886,41 @@ pub(in crate::app::dispatch) fn dispatch_trigger_deep_search(
             ..
         }) = agent.active_modal.as_mut()
     {
-        if source_filter.is_content_search_disabled() {
+        if *source_filter == crate::views::session_picker::SourceFilter::External {
+            // Fork seam: the External page includes Pi sessions, so PSM
+            // full-text runs here — but only when F2 `psm_resume_index` is on.
+            if !psm_on {
+                *content_results = None;
+                *content_loading = false;
+                return vec![];
+            }
+            let query = state.query().trim().to_string();
             *deep_search_seq += 1;
-            *content_results = None;
-            *content_loading = false;
-            state.expanded.clear();
-            return vec![];
+            let seq = *deep_search_seq;
+            if query.len() < 2 {
+                *content_results = None;
+                *content_loading = false;
+                state.expanded.clear();
+                return vec![];
+            }
+            *content_loading = true;
+            let cwd = Some(agent.session.cwd.clone());
+            let host = SessionPickerHost::AgentModal;
+            if force {
+                return vec![Effect::PiSessionSearch {
+                    query,
+                    cwd,
+                    host,
+                    generation: *generation,
+                    seq,
+                }];
+            }
+            return vec![Effect::DebounceSessionSearch {
+                host: SessionPickerHost::AgentModal,
+                generation: *generation,
+                query,
+                seq,
+            }];
         }
         let query = state.query().trim().to_string();
         *deep_search_seq += 1;
@@ -910,15 +949,41 @@ pub(in crate::app::dispatch) fn dispatch_trigger_deep_search(
             seq,
         }];
     }
-    if app
-        .session_picker_source_filter
-        .is_content_search_disabled()
-    {
+    // Fork seam: the External page includes Pi sessions, so PSM full-text
+    // runs here — but only when F2 `psm_resume_index` is on.
+    if app.session_picker_source_filter == crate::views::session_picker::SourceFilter::External {
+        if !app.current_ui.psm_resume_index {
+            app.session_picker_content_results = None;
+            app.session_picker_content_loading = false;
+            return vec![];
+        }
+        let query = app.session_picker_state.query().trim().to_string();
         app.session_picker_deep_search_seq += 1;
-        app.session_picker_content_results = None;
-        app.session_picker_content_loading = false;
-        app.session_picker_state.expanded.clear();
-        return vec![];
+        let seq = app.session_picker_deep_search_seq;
+        if query.len() < 2 {
+            app.session_picker_content_results = None;
+            app.session_picker_content_loading = false;
+            app.session_picker_state.expanded.clear();
+            return vec![];
+        }
+        app.session_picker_content_loading = true;
+        let cwd = Some(app.cwd.clone());
+        let host = SessionPickerHost::Welcome;
+        if force {
+            return vec![Effect::PiSessionSearch {
+                query,
+                cwd,
+                host,
+                generation: app.session_picker_generation,
+                seq,
+            }];
+        }
+        return vec![Effect::DebounceSessionSearch {
+            host: SessionPickerHost::Welcome,
+            generation: app.session_picker_generation,
+            query,
+            seq,
+        }];
     }
     let query = app.session_picker_state.query().trim().to_string();
     app.session_picker_deep_search_seq += 1;
@@ -1094,8 +1159,19 @@ pub(in crate::app::dispatch) fn dispatch_pick_content_session(
     session_id: String,
     cwd: String,
 ) -> Vec<Effect> {
+    // PSM full-text hits (External filter) are Pi sessions — load by id+cwd.
     if session_picker_external_filter_active(app) {
-        return vec![];
+        if let Some(agent) = get_active_agent_mut(app) {
+            agent.active_modal = None;
+        }
+        app.session_picker_entries = None;
+        app.session_picker_loading = false;
+        app.session_picker_state.reset();
+        app.session_picker_content_results = None;
+        app.session_picker_content_loading = false;
+        invalidate_picker_fetch_on_dismiss(app);
+        let session_cwd = (!cwd.trim().is_empty()).then(|| std::path::PathBuf::from(&cwd));
+        return dispatch_load_session(app, session_id, session_cwd, false);
     }
     let chat_kind = session_picker_entry_is_conversation(app, &session_id);
     app.session_picker_entries = None;
@@ -1225,6 +1301,10 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
         agent
             .prompt
             .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);
+        agent
+            .prompt
+            .file_search
+            .set_default_hidden(app.current_ui.pi_at_search_hidden);
         agent.set_session_recap_available(app.session_recap_available);
         agent.set_voice_mode_available(app.voice_mode_enabled);
         agent.apply_app_scoped_gates(
@@ -1552,6 +1632,20 @@ pub(in crate::app::dispatch) fn handle_session_search_debounce_expired(
         );
         return vec![];
     }
+    // Route External (Pi) sources to PSM full-text only when the F2 flag is on.
+    if session_picker_is_external(app) {
+        if !psm_resume_features_enabled(app) {
+            return vec![];
+        }
+        let cwd = active_picker_cwd(app);
+        return vec![Effect::PiSessionSearch {
+            query,
+            cwd,
+            host: request.host,
+            generation: request.generation,
+            seq: request.seq,
+        }];
+    }
     if chat_mode {
         vec![Effect::FetchSessionList {
             host: request.host,
@@ -1571,6 +1665,33 @@ pub(in crate::app::dispatch) fn handle_session_search_debounce_expired(
             headless_policy,
         }]
     }
+}
+/// Whether the live session-picker surface is filtered to External (Pi) sources.
+fn psm_resume_features_enabled(app: &AppView) -> bool {
+    app.current_ui.psm_resume_index
+}
+
+fn session_picker_is_external(app: &AppView) -> bool {
+    use crate::views::modal::ActiveModal;
+    if let Some(agent) = get_active_agent(app)
+        && let Some(ActiveModal::SessionPicker { source_filter, .. }) = agent.active_modal.as_ref()
+    {
+        return *source_filter == crate::views::session_picker::SourceFilter::External;
+    }
+    app.session_picker_source_filter == crate::views::session_picker::SourceFilter::External
+}
+/// The cwd to scope a Pi session search to, taken from the live picker surface.
+/// Returns `None` (global search) when the picker is on the "All" tab, so a
+/// full-text search isn't silently limited to the current folder.
+fn active_picker_cwd(app: &AppView) -> Option<std::path::PathBuf> {
+    use crate::views::modal::ActiveModal;
+    if let Some(agent) = get_active_agent(app)
+        && let Some(ActiveModal::SessionPicker { window, .. }) = agent.active_modal.as_ref()
+    {
+        // Tab 1 == "All" → search globally (no cwd scope).
+        return (window.active_tab == 0).then(|| agent.session.cwd.clone());
+    }
+    Some(app.cwd.clone())
 }
 pub(in crate::app::dispatch) fn handle_card_detail_loaded(
     app: &mut AppView,
@@ -1705,24 +1826,150 @@ pub(in crate::app::dispatch) fn handle_deep_search_results(
     ) else {
         return vec![];
     };
-    if target.source_filter.is_content_search_disabled() {
-        tracing::debug!(
-            host = ?request.host,
-            generation = request.generation,
-            seq = request.seq,
-            "deep search results suppressed by the source filter"
-        );
-        return vec![];
-    }
+    // Fork seam: upstream suppresses deep-search hits on the External page
+    // (foreign stores are not FTS-indexed). Our External page includes Pi
+    // sessions whose PSM hits arrive through this same path, so they are
+    // stored instead of dropped.
     *target.content_results = Some(results);
     *target.content_loading = false;
     vec![]
 }
+/// Open the session picker.
+///
+/// For external hosts (Pi), this is the sole resume path — including welcome
+/// Ctrl+S / "Resume session", in-session Ctrl+S (which still dispatches
+/// [`Action::FetchSessionList`]), and `/resume`. Grok's session-store list is
+/// never used for external agents.
+/// Apply async PSM message preview into the live SessionPicker.
+pub(in crate::app::dispatch) fn handle_session_preview_loaded(
+    app: &mut AppView,
+    session_id: String,
+    messages: Vec<crate::views::modal::SessionPreviewMessage>,
+    generation: u64,
+) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+    // Stale if the global detail generation moved on (user navigated away).
+    if generation != app.session_picker_detail_generation {
+        return vec![];
+    }
+    if let Some(agent) = get_active_agent_mut(app)
+        && let Some(ActiveModal::SessionPicker {
+            preview_mode,
+            preview_messages,
+            preview_scroll,
+            ..
+        }) = agent.active_modal.as_mut()
+    {
+        if *preview_mode {
+            // Keep a small identity tag so re-entry can skip redundant loads.
+            let _ = &session_id;
+            *preview_messages = Some(messages);
+            *preview_scroll = 0;
+        }
+        return vec![];
+    }
+    vec![]
+}
+
 pub(in crate::app::dispatch) fn dispatch_show_session_picker(app: &mut AppView) -> Vec<Effect> {
+    use super::lifecycle::discard_welcome_prewarm;
+    use crate::views::modal::ActiveModal;
+    let external_agent = app.external_agent;
+    let has_agent = matches!(app.active_view, crate::app::app_view::ActiveView::Agent(_));
+    // Resume replaces the empty prewarmed session; drop it so we do not leak
+    // a background Pi session the user never typed into.
+    let mut effects = discard_welcome_prewarm(app);
     with_active_agent(app, |agent| {
-        agent.active_modal = Some(crate::views::modal::session_picker_modal(None));
+        // Upstream factors the modal literal into `session_picker_modal`;
+        // patch the fork-owned fields (immediate input focus, External source
+        // filter, list loading only while the Pi catalog is fetched).
+        let mut modal = crate::views::modal::session_picker_modal(None);
+        if let ActiveModal::SessionPicker {
+            state,
+            loading,
+            source_filter,
+            ..
+        } = &mut modal
+        {
+            *state = crate::views::picker::PickerState::input_active();
+            *loading = external_agent;
+            *source_filter = if external_agent {
+                crate::views::session_picker::SourceFilter::External
+            } else {
+                crate::views::session_picker::SourceFilter::default()
+            };
+        }
+        agent.active_modal = Some(modal);
     });
-    dispatch_fetch_session_list(app)
+    if external_agent {
+        if has_agent {
+            effects.extend(dispatch_refresh_external_session_catalog(app));
+        } else {
+            // Welcome screen: no agent modal yet — drive the native welcome
+            // picker with the same Pi catalog `/resume` uses.
+            effects.extend(dispatch_refresh_external_session_catalog_welcome(app));
+        }
+    } else {
+        effects.extend(dispatch_fetch_session_list(app));
+    }
+    effects
+}
+
+/// Populate the welcome-screen session picker from the external (Pi) catalog.
+/// Used when Resume is opened on Welcome before any agent session exists.
+fn dispatch_refresh_external_session_catalog_welcome(app: &mut AppView) -> Vec<Effect> {
+    if !app.external_agent {
+        return vec![];
+    }
+    app.session_picker_detail_generation += 1;
+    app.session_picker_loading = true;
+    app.session_picker_entries = None;
+    app.session_picker_state.reset();
+    app.session_picker_content_results = None;
+    app.session_picker_content_loading = false;
+    app.session_picker_entries_query = None;
+    app.session_picker_source_filter = crate::views::session_picker::SourceFilter::External;
+    vec![Effect::FetchExternalSessionCatalog {
+        cwd: app.cwd.clone(),
+        all: false,
+        use_psm_index: app.current_ui.psm_resume_index,
+    }]
+}
+
+pub(in crate::app::dispatch) fn dispatch_refresh_external_session_catalog(
+    app: &mut AppView,
+) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+    if !app.external_agent {
+        return vec![];
+    }
+    // Welcome has no agent modal: refresh the welcome picker instead.
+    if !matches!(app.active_view, crate::app::app_view::ActiveView::Agent(_)) {
+        return dispatch_refresh_external_session_catalog_welcome(app);
+    }
+    let Some(agent) = get_active_agent_mut(app) else {
+        return dispatch_refresh_external_session_catalog_welcome(app);
+    };
+    let Some(ActiveModal::SessionPicker {
+        entries,
+        loading,
+        source_filter,
+        window,
+        ..
+    }) = agent.active_modal.as_mut()
+    else {
+        return vec![];
+    };
+    if *source_filter != crate::views::session_picker::SourceFilter::External {
+        return vec![];
+    }
+    *entries = None;
+    *loading = true;
+    vec![Effect::FetchExternalSessionCatalog {
+        cwd: agent.session.cwd.clone(),
+        all: window.active_tab == 1,
+        use_psm_index: app.current_ui.psm_resume_index,
+    }]
 }
 /// The picker (modal `/resume` or welcome screen) was dismissed without a pick.
 /// A modal's fields (and generation) die with it, so its in-flight fetches are dropped by host liveness.

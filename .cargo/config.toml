@@ -1,3 +1,12 @@
+# Keep local Cargo runs responsive without saturating the machine. On the
+# 10-performance-core developer Macs, eight workers leaves headroom for the UI
+# and linker while still exposing most workspace-level parallelism.
+[build]
+jobs = 8
+
+[net]
+retry = 1
+
 # link-arg
 # https://pyo3.rs/v0.17.1/building_and_distribution.html#macos
 

@@ -1,7 +1,7 @@
 //! Individual setting setters with persistence effects and toasts.
 
 use super::ui::{refresh_open_settings_modals, save_success_toast};
-use crate::app::actions::{Effect, ModelChoice};
+use crate::app::actions::{Effect, ModelChoice, PiBuiltinTool};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::settings::PendingWrite;
 use agent_client_protocol as acp;
@@ -545,6 +545,38 @@ pub(in crate::app::dispatch) fn set_show_thinking_blocks(
     }]
 }
 
+pub(super) fn set_thinking_border_colors_inner(new: bool) {
+    crate::appearance::cache::set_thinking_border_colors(new);
+}
+
+/// Set whether the normal prompt border follows the selected thinking level.
+///
+/// SHELL-OWNED: cache mirror + `[ui].thinking_border_colors` via
+/// `Effect::PersistSetting`. The render path reads the cache every frame.
+pub(in crate::app::dispatch) fn set_thinking_border_colors(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_thinking_border_colors();
+    if prev == new {
+        return vec![];
+    }
+    set_thinking_border_colors_inner(new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "thinking_border_colors",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&save_success_toast("Thinking border colors", new));
+    vec![Effect::PersistSetting {
+        key: "thinking_border_colors",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
 pub(super) fn set_group_tool_verbs_inner(app: &mut AppView, new: bool) {
     crate::appearance::cache::set_group_tool_verbs(new);
     // Expansion ids describe the OLD grouping shape
@@ -623,6 +655,158 @@ pub(in crate::app::dispatch) fn set_collapsed_edit_blocks(
         key: "collapsed_edit_blocks",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_side_by_side_edit_inner(new: bool) {
+    crate::appearance::cache::set_side_by_side_edit(new);
+}
+
+/// Set the grok-pi-only side-by-side edit renderer preference.
+/// PAGER-owned and intentionally process-local; no persistence effect.
+pub(in crate::app::dispatch) fn set_side_by_side_edit(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_side_by_side_edit();
+    if prev == new {
+        return vec![];
+    }
+    set_side_by_side_edit_inner(new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "side_by_side_edit",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&save_success_toast("Side-by-side edit diffs", new));
+    vec![]
+}
+
+/// Set grok-pi's Ctrl+O expansion scope. SHELL-owned: persists to
+/// `[ui].ctrl_o_tool_expansion` and is read on the hot key path.
+pub(in crate::app::dispatch) fn set_ctrl_o_tool_expansion(
+    app: &mut AppView,
+    new: String,
+) -> Vec<Effect> {
+    let canonical = match new.as_str() {
+        "write_edit" => "write_edit",
+        "all_tools" => "all_tools",
+        _ => return vec![],
+    };
+    let prev = match app.current_ui.ctrl_o_tool_expansion.as_deref() {
+        Some("all_tools") => "all_tools",
+        _ => "write_edit",
+    };
+    if prev == canonical {
+        return vec![];
+    }
+    app.current_ui.ctrl_o_tool_expansion = Some(canonical.to_string());
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!(
+        "Ctrl+O tool expansion: {}",
+        canonical.replace('_', " ")
+    ));
+    vec![Effect::PersistSetting {
+        key: "ctrl_o_tool_expansion",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
+
+pub(super) fn set_pi_bash_run_display_inner(
+    app: &mut AppView,
+    new: crate::appearance::ExecuteHeaderContent,
+) {
+    crate::appearance::cache::set_execute_header_content(new);
+    app.current_ui.pi_bash_run_display = Some(new.as_canonical().to_string());
+    for agent in app.agents.values_mut() {
+        agent.scrollback.invalidate_heights();
+        for child in agent.subagent_views.values_mut() {
+            child.scrollback.invalidate_heights();
+        }
+    }
+}
+
+/// Set the live grok-pi Bash/run header content and persist it to `[ui]`.
+pub(in crate::app::dispatch) fn set_pi_bash_run_display(
+    app: &mut AppView,
+    new: crate::appearance::ExecuteHeaderContent,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_execute_header_content();
+    if prev == new {
+        return vec![];
+    }
+    set_pi_bash_run_display_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "pi_bash_run_display",
+        value = new.as_canonical(),
+        "setting changed",
+    );
+    app.show_toast(&format!(
+        "Bash run display: {}",
+        new.as_canonical().replace('_', " ")
+    ));
+    vec![Effect::PersistSetting {
+        key: "pi_bash_run_display",
+        value: crate::settings::SettingValue::Enum(new.as_canonical()),
+        rollback_value: crate::settings::SettingValue::Enum(prev.as_canonical()),
+    }]
+}
+
+pub(super) fn set_pi_bash_command_format_inner(app: &mut AppView, enabled: bool) {
+    crate::appearance::cache::set_pi_bash_command_format(enabled);
+    app.current_ui.pi_bash_command_format = enabled;
+    for agent in app.agents.values_mut() {
+        agent.scrollback.invalidate_heights();
+        for child in agent.subagent_views.values_mut() {
+            child.scrollback.invalidate_heights();
+        }
+    }
+}
+
+/// Set display-only Bash/Eval formatting and persist it to `[ui]`.
+pub(in crate::app::dispatch) fn set_pi_bash_command_format(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = crate::appearance::cache::load_pi_bash_command_format();
+    if previous == enabled {
+        return vec![];
+    }
+    set_pi_bash_command_format_inner(app, enabled);
+    refresh_open_settings_modals(app);
+    let value = if enabled { "on" } else { "off" };
+    app.show_toast(&format!("✓ Bash/Eval format: {value}"));
+    vec![Effect::PersistSetting {
+        key: "pi_bash_command_format",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(super) fn set_write_edit_hover_popups_inner(app: &mut AppView, enabled: bool) {
+    crate::appearance::cache::set_write_edit_hover_popups(enabled);
+    app.current_ui.write_edit_hover_popups = enabled;
+}
+
+/// Set display-only Write/Edit hover popups and persist it to `[ui]`.
+pub(in crate::app::dispatch) fn set_write_edit_hover_popups(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = crate::appearance::cache::load_write_edit_hover_popups();
+    if previous == enabled {
+        return vec![];
+    }
+    set_write_edit_hover_popups_inner(app, enabled);
+    refresh_open_settings_modals(app);
+    let value = if enabled { "on" } else { "off" };
+    app.show_toast(&format!("✓ Write/Edit hover popups: {value}"));
+    vec![Effect::PersistSetting {
+        key: "write_edit_hover_popups",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
     }]
 }
 
@@ -819,6 +1003,37 @@ pub(in crate::app::dispatch) fn set_scroll_lines(app: &mut AppView, raw: i64) ->
         // prev=None (never configured) can't round-trip through SettingValue::Int
         // Rolling back to an explicit 3 is the same deliberate one-way door as the `d`-reset path
         rollback_value: crate::settings::SettingValue::Int(prev.unwrap_or(3) as i64),
+    }]
+}
+
+pub(super) fn set_prompt_cursor_inner(app: &mut AppView, new: crate::appearance::PromptCursor) {
+    let mut config = app.appearance.clone();
+    config.prompt.cursor = new;
+    app.set_appearance(config);
+}
+
+/// Set the prompt cursor rendered in the input box.
+///
+/// PAGER-OWNED: live-applied to every agent and persisted to `[prompt].cursor`
+/// in pager.toml via `Effect::PersistSetting`.
+pub(in crate::app::dispatch) fn set_prompt_cursor(app: &mut AppView, raw: String) -> Vec<Effect> {
+    let Some(new) = crate::appearance::PromptCursor::parse_config(&raw) else {
+        tracing::warn!(target: "settings", key = "prompt_cursor", value = %raw, "invalid prompt cursor ignored");
+        return vec![];
+    };
+    let prev = app.appearance.prompt.cursor.to_config_value();
+    let canonical = new.to_config_value();
+    if prev == canonical {
+        return vec![];
+    }
+    set_prompt_cursor_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key = "prompt_cursor", value = %canonical, "setting changed");
+    app.show_toast(&format!("\u{2713} Prompt cursor: {canonical}"));
+    vec![Effect::PersistSetting {
+        key: "prompt_cursor",
+        value: crate::settings::SettingValue::String(canonical),
+        rollback_value: crate::settings::SettingValue::String(prev),
     }]
 }
 
@@ -1126,6 +1341,34 @@ pub(in crate::app::dispatch) fn set_follow_up_behavior(
     }]
 }
 
+pub(super) fn set_cancel_turn_key_inner(app: &mut AppView, value: &str) {
+    let canonical = if value == "ctrl_c" { "ctrl_c" } else { "esc" };
+    app.current_ui.cancel_turn_key = Some(canonical.to_string());
+    crate::app::ESC_CANCELS_TURN.store(canonical == "esc", std::sync::atomic::Ordering::Release);
+}
+
+/// SHARED: live cancellation gesture + `[ui].cancel_turn_key` persistence.
+pub(in crate::app::dispatch) fn set_cancel_turn_key(
+    app: &mut AppView,
+    value: String,
+) -> Vec<Effect> {
+    let canonical = if value == "ctrl_c" { "ctrl_c" } else { "esc" };
+    let prev = app.current_ui.cancel_turn_key();
+    if prev == canonical && app.current_ui.cancel_turn_key.is_some() {
+        return vec![];
+    }
+    set_cancel_turn_key_inner(app, canonical);
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key = "cancel_turn_key", value = canonical, "setting changed");
+    let label = if canonical == "esc" { "Esc" } else { "Ctrl+C" };
+    app.show_toast(&format!("\u{2713} Cancel running turn: {label}"));
+    vec![Effect::PersistSetting {
+        key: "cancel_turn_key",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
+
 /// State-only mutation for `simple_mode`.
 ///
 /// Propagates to every agent's `input_mode` so the toggle takes effect immediately (not just on new agents).
@@ -1376,6 +1619,27 @@ fn auto_theme_setting_is_live(key: &str) -> bool {
 /// Updates `app.current_ui.theme`, toggles `AUTO_MODE` based on whether the value is `"auto"`, and applies the live theme.
 /// Unknown / unrecognised names log at `warn` and no-op (a malformed `rollback_value` is a softer failure mode than an unknown commit-time value).
 pub(super) fn set_theme_inner(app: &mut AppView, value: &str) {
+    // Pi themes: `pi:<name>`.
+    if crate::theme::pi::is_pi_theme_id(value) {
+        match crate::theme::pi::apply_pi_theme(value) {
+            Ok(canonical) => {
+                app.current_ui.theme = Some(canonical);
+                crate::theme::cache::set_auto_mode(false);
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "settings",
+                    key = "theme",
+                    value = value,
+                    error = %e,
+                    "failed to apply Pi theme — set_theme_inner no-op",
+                );
+                return;
+            }
+        }
+    }
+
     let Some(kind) = crate::theme::ThemeKind::from_name(value) else {
         tracing::warn!(
             target: "settings",
@@ -1391,27 +1655,33 @@ pub(super) fn set_theme_inner(app: &mut AppView, value: &str) {
     apply_theme_kind_for_display(kind);
 }
 
-/// State, cache, and persist for `theme` commits.
+/// Resolve a theme setting to its canonical persist id.
+fn resolve_theme_canonical(value: &str) -> Option<String> {
+    if crate::theme::pi::is_pi_theme_id(value) {
+        // Validate it exists (or is a known builtin).
+        return crate::theme::pi::load_palette(value).ok().map(|(id, _)| id);
+    }
+    crate::theme::canonical_name(value).map(str::to_owned)
+}
+
+/// State + cache + persist for `theme` commits.
+
 pub(in crate::app::dispatch) fn set_theme(app: &mut AppView, new: String) -> Vec<Effect> {
-    let prev_canonical: &'static str = app
+    let prev_owned = app
         .current_ui
         .theme
-        .as_deref()
-        .and_then(crate::theme::canonical_name)
-        .unwrap_or_else(|| crate::theme::cache::current_kind().display_name());
-    let new_canonical = match crate::theme::canonical_name(&new) {
-        Some(c) => c,
-        None => {
-            tracing::error!(
-                target: "settings",
-                key = "theme",
-                value = %new,
-                "Action::SetTheme dispatched with unknown name — no-op",
-            );
-            return vec![];
-        }
+        .clone()
+        .unwrap_or_else(crate::theme::Theme::current_display_id);
+    let Some(new_canonical) = resolve_theme_canonical(&new) else {
+        tracing::error!(
+            target: "settings",
+            key = "theme",
+            value = %new,
+            "Action::SetTheme dispatched with unknown name — no-op",
+        );
+        return vec![];
     };
-    set_theme_inner(app, &new);
+    set_theme_inner(app, &new_canonical);
     refresh_open_settings_modals(app);
     tracing::info!(
         target: "settings",
@@ -1419,14 +1689,33 @@ pub(in crate::app::dispatch) fn set_theme(app: &mut AppView, new: String) -> Vec
         value = %new_canonical,
         "setting changed",
     );
-    app.show_toast(&save_theme_toast(
-        "Theme",
-        crate::theme::display_name_for_canonical(new_canonical),
-    ));
+    let toast_label = if crate::theme::pi::is_pi_theme_id(&new_canonical) {
+        new_canonical.as_str()
+    } else {
+        crate::theme::display_name_for_canonical(&new_canonical)
+    };
+    app.show_toast(&save_theme_toast("Theme", toast_label));
+
+    // Built-in themes keep SettingValue::Enum for settings-modal parity;
+    // Pi themes use String (dynamic ids are not &'static).
+    let (value, rollback_value) = match (
+        crate::theme::canonical_name(&new_canonical),
+        crate::theme::canonical_name(&prev_owned),
+    ) {
+        (Some(new_static), Some(prev_static)) => (
+            crate::settings::SettingValue::Enum(new_static),
+            crate::settings::SettingValue::Enum(prev_static),
+        ),
+        _ => (
+            crate::settings::SettingValue::String(new_canonical),
+            crate::settings::SettingValue::String(prev_owned),
+        ),
+    };
+
     vec![Effect::PersistSetting {
         key: "theme",
-        value: crate::settings::SettingValue::Enum(new_canonical),
-        rollback_value: crate::settings::SettingValue::Enum(prev_canonical),
+        value,
+        rollback_value,
     }]
 }
 
@@ -1434,6 +1723,18 @@ pub(in crate::app::dispatch) fn set_theme(app: &mut AppView, new: String) -> Vec
 /// Applies the live visual without modifying state, toggling `AUTO_MODE`, persisting, or toasting.
 /// For `"auto"`, resolves and applies the theme but does NOT toggle `AUTO_MODE` (commit-only side effect).
 fn preview_theme_inner(value: &str) {
+    if crate::theme::pi::is_pi_theme_id(value) {
+        if let Err(e) = crate::theme::pi::apply_pi_theme(value) {
+            tracing::warn!(
+                target: "settings",
+                key = "theme",
+                value = value,
+                error = %e,
+                "unknown Pi theme — preview_theme_inner no-op",
+            );
+        }
+        return;
+    }
     let Some(kind) = crate::theme::ThemeKind::from_name(value) else {
         tracing::warn!(
             target: "settings",
@@ -1447,7 +1748,7 @@ fn preview_theme_inner(value: &str) {
 }
 
 pub(in crate::app::dispatch) fn preview_theme(_app: &mut AppView, new: String) -> Vec<Effect> {
-    if crate::theme::canonical_name(&new).is_none() {
+    if crate::theme::canonical_name(&new).is_none() && !crate::theme::pi::is_pi_theme_id(&new) {
         tracing::error!(
             target: "settings",
             key = "theme",
@@ -1995,8 +2296,730 @@ pub(in crate::app::dispatch) fn clear_fork_secondary_model(app: &mut AppView) ->
     }]
 }
 
-// The `web_search_model`, `session_summary_model`, and `default_reasoning_effort` setters were removed alongside their registry entries
-// Mirror fields and TOML schema stay for compat
+/// State-only mutation for `recap_model`.
+pub(super) fn set_recap_model_inner(app: &mut AppView, value: String) {
+    app.current_ui.recap_model = value;
+}
+
+fn save_recap_model_toast(value: &str) -> String {
+    format!("\u{2713} Recap model: {value}")
+}
+
+/// Outer dispatcher for `Action::SetRecapModel`.
+pub(in crate::app::dispatch) fn set_recap_model(
+    app: &mut AppView,
+    new_id: acp::ModelId,
+) -> Vec<Effect> {
+    let ActiveView::Agent(aid) = app.active_view else {
+        return vec![];
+    };
+    let (new_display, available_has_new) = {
+        let Some(agent) = app.agents.get(&aid) else {
+            return vec![];
+        };
+        let display = agent.session.models.display_name_for(&new_id);
+        let has = agent.session.models.available.contains_key(&new_id);
+        (display, has)
+    };
+    if !available_has_new {
+        return vec![];
+    }
+    let new_id_str = new_id.0.to_string();
+    let prev_id_str = app.current_ui.recap_model.clone();
+    if prev_id_str == new_id_str {
+        return vec![];
+    }
+    set_recap_model_inner(app, new_id_str.clone());
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_recap_model_toast(&new_display));
+    vec![Effect::PersistSetting {
+        key: "recap_model",
+        value: crate::settings::SettingValue::String(new_id_str),
+        rollback_value: crate::settings::SettingValue::String(prev_id_str),
+    }]
+}
+
+/// Outer dispatcher for `Action::ClearRecapModel`.
+pub(in crate::app::dispatch) fn clear_recap_model(app: &mut AppView) -> Vec<Effect> {
+    let prev_id_str = app.current_ui.recap_model.clone();
+    if prev_id_str.is_empty() {
+        app.show_toast("\u{2713} Recap model: already disabled");
+        return vec![];
+    }
+    set_recap_model_inner(app, String::new());
+    refresh_open_settings_modals(app);
+    app.show_toast("\u{2713} Recap model: disabled");
+    vec![Effect::PersistSetting {
+        key: "recap_model",
+        value: crate::settings::SettingValue::String(String::new()),
+        rollback_value: crate::settings::SettingValue::String(prev_id_str),
+    }]
+}
+
+/// Persist a Pi built-in tool preference for the next grok-pi session.
+pub(in crate::app::dispatch) fn set_pi_builtin_tool(
+    app: &mut AppView,
+    tool: PiBuiltinTool,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous_tools = app.current_ui.pi_builtin_tools.clone();
+    let current = match tool {
+        PiBuiltinTool::Read => &mut app.current_ui.pi_builtin_tools.read,
+        PiBuiltinTool::Bash => &mut app.current_ui.pi_builtin_tools.bash,
+        PiBuiltinTool::PowerShell => &mut app.current_ui.pi_builtin_tools.powershell,
+        PiBuiltinTool::Edit => &mut app.current_ui.pi_builtin_tools.edit,
+        PiBuiltinTool::Write => &mut app.current_ui.pi_builtin_tools.write,
+        PiBuiltinTool::Grep => &mut app.current_ui.pi_builtin_tools.grep,
+        PiBuiltinTool::Find => &mut app.current_ui.pi_builtin_tools.find,
+        PiBuiltinTool::Ls => &mut app.current_ui.pi_builtin_tools.ls,
+        PiBuiltinTool::Eval => &mut app.current_ui.pi_builtin_tools.eval,
+        PiBuiltinTool::Codemode => &mut app.current_ui.pi_builtin_tools.codemode,
+    };
+    if *current == enabled {
+        return vec![];
+    }
+    *current = enabled;
+    let selected_tools = app.current_ui.pi_builtin_tools.clone();
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!(
+        "\u{2713} Pi {}: {} (next session)",
+        match tool {
+            PiBuiltinTool::Read => "read",
+            PiBuiltinTool::Bash => "bash",
+            PiBuiltinTool::PowerShell => "powershell",
+            PiBuiltinTool::Edit => "edit",
+            PiBuiltinTool::Write => "write",
+            PiBuiltinTool::Grep => "grep",
+            PiBuiltinTool::Find => "find",
+            PiBuiltinTool::Ls => "ls",
+            PiBuiltinTool::Eval => "eval",
+            PiBuiltinTool::Codemode => "codemode",
+        },
+        if enabled { "on" } else { "off" },
+    ));
+    vec![Effect::PersistSetting {
+        key: "pi_builtin_tools",
+        value: crate::settings::SettingValue::PiBuiltinTools(selected_tools),
+        rollback_value: crate::settings::SettingValue::PiBuiltinTools(previous_tools),
+    }]
+}
+
+/// Persist the optional PSM SQLite catalog setting.
+pub(in crate::app::dispatch) fn set_pi_bash(app: &mut AppView, enabled: bool) -> Vec<Effect> {
+    let previous = app.current_ui.pi_bash;
+    if previous == enabled {
+        return vec![];
+    }
+    app.current_ui.pi_bash = enabled;
+    refresh_open_settings_modals(app);
+    let value = if enabled { "on" } else { "off" };
+    app.show_toast(&format!(
+        "\u{2713} Pi Bash bridge: {value} \u{2014} restart grok-pi to apply"
+    ));
+    vec![Effect::PersistSetting {
+        key: "pi_bash",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_pi_eval(app: &mut AppView, requested: String) -> Vec<Effect> {
+    let canonical = match requested.as_str() {
+        "v2" => "v2",
+        _ => "v1",
+    };
+    let previous = match app.current_ui.pi_eval.as_str() {
+        "v2" => "v2",
+        _ => "v1",
+    };
+    if previous == canonical {
+        return vec![];
+    }
+    app.current_ui.pi_eval = canonical.to_string();
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!(
+        "\u{2713} Eval bridge version: {canonical} \u{2014} restart grok-pi to apply"
+    ));
+    vec![Effect::PersistSetting {
+        key: "pi_eval",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_pi_eval_v2_language(
+    app: &mut AppView,
+    requested: String,
+) -> Vec<Effect> {
+    let canonical = match requested.as_str() {
+        "py" => "py",
+        "all" => "all",
+        _ => "js",
+    };
+    let previous = match app.current_ui.pi_eval_v2_language.as_str() {
+        "py" => "py",
+        "all" => "all",
+        _ => "js",
+    };
+    if previous == canonical {
+        return vec![];
+    }
+    app.current_ui.pi_eval_v2_language = canonical.to_string();
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!(
+        "\u{2713} Eval v2 language: {canonical} \u{2014} restart grok-pi to apply"
+    ));
+    vec![Effect::PersistSetting {
+        key: "pi_eval_v2_language",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(previous),
+    }]
+}
+
+pub(super) fn set_pi_eval_v2_display_mode_inner(app: &mut AppView, mode: &str) {
+    let canonical = if mode.eq_ignore_ascii_case("legacy") {
+        "legacy"
+    } else {
+        "effects"
+    };
+    crate::appearance::cache::set_pi_eval_v2_effects_first(canonical == "effects");
+    app.current_ui.pi_eval_v2_display_mode = canonical.to_string();
+    for agent in app.agents.values_mut() {
+        agent.scrollback.invalidate_heights();
+        for child in agent.subagent_views.values_mut() {
+            child.scrollback.invalidate_heights();
+        }
+    }
+}
+
+/// Set Eval v2 presentation and persist it to `[ui]`. This is display-only and
+/// takes effect immediately for existing scrollback blocks.
+pub(in crate::app::dispatch) fn set_pi_eval_v2_display_mode(
+    app: &mut AppView,
+    requested: String,
+) -> Vec<Effect> {
+    let previous = if crate::appearance::cache::load_pi_eval_v2_effects_first() {
+        "effects"
+    } else {
+        "legacy"
+    };
+    let canonical = match requested.trim().to_ascii_lowercase().as_str() {
+        "legacy" => "legacy",
+        "toggle" if previous == "effects" => "legacy",
+        "toggle" => "effects",
+        _ => "effects",
+    };
+    if previous == canonical {
+        return vec![];
+    }
+    set_pi_eval_v2_display_mode_inner(app, canonical);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!("✓ Eval v2 display: {canonical}"));
+    vec![Effect::PersistSetting {
+        key: "pi_eval_v2_display_mode",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_pi_eval_v2_only(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.pi_eval_v2_only;
+    if previous == enabled {
+        return vec![];
+    }
+    app.current_ui.pi_eval_v2_only = enabled;
+    refresh_open_settings_modals(app);
+    let value = if enabled { "on" } else { "off" };
+    app.show_toast(&format!(
+        "\u{2713} Eval v2 only: {value} \u{2014} restart grok-pi to apply"
+    ));
+    vec![Effect::PersistSetting {
+        key: "pi_eval_v2_only",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_pi_eval_mcp(app: &mut AppView, enabled: bool) -> Vec<Effect> {
+    let previous = app.current_ui.pi_eval_mcp;
+    if previous == enabled {
+        return vec![];
+    }
+    app.current_ui.pi_eval_mcp = enabled;
+    refresh_open_settings_modals(app);
+    let value = if enabled { "on" } else { "off" };
+    app.show_toast(&format!(
+        "Eval MCP: {value} — restart grok-pi to apply (requires Eval v2 only)"
+    ));
+    vec![Effect::PersistSetting {
+        key: "pi_eval_mcp",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_psm_resume_index(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.psm_resume_index;
+    if previous == enabled {
+        return vec![];
+    }
+    app.current_ui.psm_resume_index = enabled;
+    crate::appearance::cache::set_psm_resume_index(enabled);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("PSM resume index", enabled));
+    vec![Effect::PersistSetting {
+        key: "psm_resume_index",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_pi_tree_file_rollback(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.pi_tree_file_rollback;
+    if previous == enabled {
+        return vec![];
+    }
+    app.current_ui.pi_tree_file_rollback = enabled;
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("Pi tree file rollback", enabled));
+    vec![Effect::PersistSetting {
+        key: "pi_tree_file_rollback",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_pi_tree_skip_summary_prompt(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.pi_tree_skip_summary_prompt;
+    if previous == enabled {
+        return vec![];
+    }
+    app.current_ui.pi_tree_skip_summary_prompt = enabled;
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("Pi tree skip summary prompt", enabled));
+    vec![Effect::PersistSetting {
+        key: "pi_tree_skip_summary_prompt",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_host_feature_bool(
+    app: &mut AppView,
+    key: xai_grok_shell::host_features::HostFeatureKey,
+    enabled: bool,
+) -> Vec<Effect> {
+    let Some(spec) = xai_grok_shell::host_features::feature_spec(key) else {
+        tracing::error!(target: "settings", key = key.as_str(), "unknown host feature");
+        return vec![];
+    };
+    let previous = spec.current_bool(&app.current_ui);
+    if previous == enabled {
+        return vec![];
+    }
+    spec.set_bool(&mut app.current_ui, enabled);
+    refresh_open_settings_modals(app);
+    let value = if enabled { "on" } else { "off" };
+    if spec.restart_required {
+        app.show_toast(&format!(
+            "\u{2713} {}: {value} \u{2014} restart grok-pi to apply",
+            spec.label
+        ));
+    } else {
+        app.show_toast(&format!("\u{2713} {}: {value}", spec.label));
+    }
+    vec![Effect::PersistSetting {
+        key: spec.key.as_str(),
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_pi_ask_user_question_notifications(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.pi_ask_user_question_notifications;
+    if previous == enabled {
+        return vec![];
+    }
+    app.current_ui.pi_ask_user_question_notifications = enabled;
+    refresh_open_settings_modals(app);
+    let value = if enabled { "on" } else { "off" };
+    app.show_toast(&format!("\u{2713} Q&A desktop notifications: {value}"));
+    vec![Effect::PersistSetting {
+        key: "pi_ask_user_question_notifications",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+/// Persist a side-call model slot (recap/btw fallback chain).
+pub(in crate::app::dispatch) fn set_model_slot(
+    app: &mut AppView,
+    key: &'static str,
+    value: String,
+) -> Vec<Effect> {
+    let previous = match key {
+        "recap_model_2" => app.current_ui.recap_model_2.clone(),
+        "recap_model_3" => app.current_ui.recap_model_3.clone(),
+        "btw_model" => app.current_ui.btw_model.clone(),
+        "btw_model_2" => app.current_ui.btw_model_2.clone(),
+        "btw_model_3" => app.current_ui.btw_model_3.clone(),
+        other => {
+            tracing::error!(key = other, "set_model_slot: unknown key");
+            return vec![];
+        }
+    };
+    if previous == value {
+        return vec![];
+    }
+    match key {
+        "recap_model_2" => app.current_ui.recap_model_2 = value.clone(),
+        "recap_model_3" => app.current_ui.recap_model_3 = value.clone(),
+        "btw_model" => app.current_ui.btw_model = value.clone(),
+        "btw_model_2" => app.current_ui.btw_model_2 = value.clone(),
+        "btw_model_3" => app.current_ui.btw_model_3 = value.clone(),
+        _ => {}
+    }
+    refresh_open_settings_modals(app);
+    let label = if value.is_empty() {
+        "cleared"
+    } else {
+        value.as_str()
+    };
+    app.show_toast(&format!("\u{2713} {key}: {label}"));
+    vec![Effect::PersistSetting {
+        key,
+        value: crate::settings::SettingValue::String(value),
+        rollback_value: crate::settings::SettingValue::String(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_pi_cache_graph(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.pi_cache_graph;
+    if previous == enabled {
+        return vec![];
+    }
+    app.current_ui.pi_cache_graph = enabled;
+    refresh_open_settings_modals(app);
+    let value = if enabled { "on" } else { "off" };
+    app.show_toast(&format!("\u{2713} Pi cache graph in Context: {value}"));
+    vec![Effect::PersistSetting {
+        key: "pi_cache_graph",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_pi_config_skill(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.pi_config_skill;
+    if previous == enabled {
+        return vec![];
+    }
+    app.current_ui.pi_config_skill = enabled;
+    refresh_open_settings_modals(app);
+    let value = if enabled { "on" } else { "off" };
+    app.show_toast(&format!(
+        "\u{2713} Pi config skill: {value} \u{2014} restart grok-pi to apply"
+    ));
+    vec![Effect::PersistSetting {
+        key: "pi_config_skill",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(super) fn set_pi_user_markdown_inner(app: &mut AppView, enabled: bool) {
+    crate::appearance::cache::set_pi_user_markdown(enabled);
+    app.current_ui.pi_user_markdown = enabled;
+    for agent in app.agents.values_mut() {
+        agent.scrollback.apply_pi_user_markdown_flip(enabled);
+        for child in agent.subagent_views.values_mut() {
+            child.scrollback.apply_pi_user_markdown_flip(enabled);
+        }
+    }
+}
+
+pub(in crate::app::dispatch) fn set_pi_user_markdown(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.pi_user_markdown;
+    if previous == enabled && crate::appearance::cache::load_pi_user_markdown() == enabled {
+        return vec![];
+    }
+    set_pi_user_markdown_inner(app, enabled);
+    refresh_open_settings_modals(app);
+    let value = if enabled { "on" } else { "off" };
+    app.show_toast(&format!("\u{2713} Markdown user messages: {value}"));
+    vec![Effect::PersistSetting {
+        key: "pi_user_markdown",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(super) fn set_pi_at_search_hidden_inner(app: &mut AppView, enabled: bool) {
+    app.current_ui.pi_at_search_hidden = enabled;
+    for agent in app.agents.values_mut() {
+        agent.prompt.file_search.set_default_hidden(enabled);
+        for child in agent.subagent_views.values_mut() {
+            child.prompt.file_search.set_default_hidden(enabled);
+        }
+    }
+}
+
+pub(in crate::app::dispatch) fn set_pi_at_search_hidden(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.pi_at_search_hidden;
+    if previous == enabled {
+        return vec![];
+    }
+    set_pi_at_search_hidden_inner(app, enabled);
+    refresh_open_settings_modals(app);
+    let value = if enabled { "on" } else { "off" };
+    app.show_toast(&format!("\u{2713} Hidden files in @ search: {value}"));
+    vec![Effect::PersistSetting {
+        key: "pi_at_search_hidden",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_pi_keep_multi_agent(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.pi_keep_multi_agent;
+    if previous == enabled {
+        return vec![];
+    }
+    app.current_ui.pi_keep_multi_agent = enabled;
+    refresh_open_settings_modals(app);
+    let value = if enabled { "on" } else { "off" };
+    app.show_toast(&format!("\u{2713} Keep multi-agent on /new: {value}"));
+    vec![Effect::PersistSetting {
+        key: "pi_keep_multi_agent",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_show_other_tool_args(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.show_other_tool_args;
+    if previous == enabled && app.appearance.show_other_tool_args == enabled {
+        return vec![];
+    }
+    app.current_ui.show_other_tool_args = enabled;
+    let mut config = app.appearance.clone();
+    config.show_other_tool_args = enabled;
+    app.set_appearance(config);
+    refresh_open_settings_modals(app);
+    let value = if enabled { "on" } else { "off" };
+    app.show_toast(&format!("\u{2713} Other tool args: {value}"));
+    vec![Effect::PersistSetting {
+        key: "show_other_tool_args",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_review_file_tree(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.review_file_tree;
+    if previous == enabled {
+        return vec![];
+    }
+    app.current_ui.review_file_tree = enabled;
+    // Keep open review modal in sync without forcing a full reopen.
+    if let crate::app::app_view::ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+        && let Some(review) = agent.review_state.as_mut()
+    {
+        review.set_tree_mode(enabled);
+    }
+    refresh_open_settings_modals(app);
+    let value = if enabled { "tree" } else { "flat" };
+    app.show_toast(&format!("\u{2713} Review file list: {value}"));
+    vec![Effect::PersistSetting {
+        key: "review_file_tree",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_review_include_reads(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.review_include_reads;
+    if previous == enabled {
+        return vec![];
+    }
+    app.current_ui.review_include_reads = enabled;
+    if let crate::app::app_view::ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+        && let Some(review) = agent.review_state.as_mut()
+    {
+        // Rebuild file set from live scrollback (range stored on state).
+        let files = crate::views::review::extract_review_files(
+            &agent.scrollback,
+            review.entry_range.clone(),
+            if enabled {
+                crate::views::review::ReviewKindFilter::All
+            } else {
+                crate::views::review::ReviewKindFilter::Changes
+            },
+        );
+        review.replace_files(files, enabled);
+        review.ensure_viewer(&agent.scrollback);
+    }
+    refresh_open_settings_modals(app);
+    app.show_toast(if enabled {
+        "\u{2713} Review includes reads"
+    } else {
+        "\u{2713} Review: changes only"
+    });
+    vec![Effect::PersistSetting {
+        key: "review_include_reads",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
+/// State-only mutation for auto session-recap toggle.
+pub(super) fn set_session_recap_inner(app: &mut AppView, enabled: bool) {
+    app.current_ui.session_recap = Some(enabled);
+    app.notification_service.set_session_recap(enabled);
+}
+
+/// Outer dispatcher for `Action::SetSessionRecap`.
+pub(in crate::app::dispatch) fn set_session_recap(app: &mut AppView, enabled: bool) -> Vec<Effect> {
+    let prev = app.current_ui.session_recap.unwrap_or(true);
+    if prev == enabled {
+        return vec![];
+    }
+    set_session_recap_inner(app, enabled);
+    refresh_open_settings_modals(app);
+    app.show_toast(if enabled {
+        "\u{2713} Session recap: on"
+    } else {
+        "\u{2713} Session recap: off"
+    });
+    vec![Effect::PersistSetting {
+        key: "session_recap",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// State-only mutation for optional Mermaid generation in Recap.
+pub(super) fn set_recap_mermaid_inner(app: &mut AppView, enabled: bool) {
+    app.current_ui.recap_mermaid = Some(enabled);
+}
+
+pub(in crate::app::dispatch) fn set_recap_mermaid(app: &mut AppView, enabled: bool) -> Vec<Effect> {
+    let prev = app.current_ui.recap_mermaid.unwrap_or(false);
+    if prev == enabled {
+        return vec![];
+    }
+    set_recap_mermaid_inner(app, enabled);
+    refresh_open_settings_modals(app);
+    app.show_toast(if enabled {
+        "✓ Recap Mermaid: on"
+    } else {
+        "✓ Recap Mermaid: off"
+    });
+    vec![Effect::PersistSetting {
+        key: "recap_mermaid",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// State-only mutation for OSC 9;4 terminal-tab progress indicators.
+pub(super) fn set_progress_bar_inner(app: &mut AppView, enabled: bool) {
+    app.current_ui.progress_bar = Some(enabled);
+    if let Some(escapes) = app.notification_service.set_progress_bar(enabled) {
+        app.pending_notification_escapes
+            .get_or_insert_with(String::new)
+            .push_str(&escapes);
+    }
+}
+
+/// Outer dispatcher for `Action::SetProgressBar`.
+pub(in crate::app::dispatch) fn set_progress_bar(app: &mut AppView, enabled: bool) -> Vec<Effect> {
+    let prev = app.current_ui.progress_bar.unwrap_or(false);
+    if prev == enabled {
+        return vec![];
+    }
+    set_progress_bar_inner(app, enabled);
+    refresh_open_settings_modals(app);
+    app.show_toast(if enabled {
+        "\u{2713} Terminal tab progress: on"
+    } else {
+        "\u{2713} Terminal tab progress: off"
+    });
+    vec![Effect::PersistSetting {
+        key: "progress_bar",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// Outer dispatcher for `Action::SetRemoteTuiFooter`.
+pub(in crate::app::dispatch) fn set_remote_tui_footer(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let prev = app.current_ui.remote_tui_footer.unwrap_or(false);
+    if prev == enabled {
+        return vec![];
+    }
+    app.current_ui.remote_tui_footer = Some(enabled);
+    app.refresh_external_ui_surface();
+    refresh_open_settings_modals(app);
+    app.show_toast(if enabled {
+        "✓ Remote TUI footer: on"
+    } else {
+        "✓ Remote TUI footer: off"
+    });
+    vec![Effect::PersistSetting {
+        key: "remote_tui_footer",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+// `web_search_model`, `session_summary_model`, and
+// `default_reasoning_effort` setters were removed alongside their
+// registry entries. Mirror fields and TOML schema stay for compat.
 
 // max_thoughts_width is an Int-valued setting
 // The registry hands over an `i64`; it is clamped to `(min, max)` bounds and cast to `u16`

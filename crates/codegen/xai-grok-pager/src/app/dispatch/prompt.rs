@@ -843,6 +843,7 @@ pub(super) fn dispatch_send_prompt_submission(
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
+    let prompt_cursor_from_app = app.appearance.prompt.cursor.to_config_value();
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
@@ -1008,6 +1009,7 @@ pub(super) fn dispatch_send_prompt_submission(
                     vim_mode: crate::appearance::cache::load_vim_mode(),
                     scroll_speed: crate::appearance::cache::load_scroll_speed(),
                     respect_manual_folds: respect_manual_folds_from_app,
+                    prompt_cursor: prompt_cursor_from_app.clone(),
                     auto_mode_gate: auto_mode_gate_from_app,
                     ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                     voice_stt_language: voice_stt_language_from_app,
@@ -1243,6 +1245,19 @@ pub(super) fn dispatch_send_prompt_submission(
             CommandResult::QueueCommand(cmd_text) => {
                 agent.session.enqueue_command(cmd_text);
             }
+            CommandResult::DirectPiCommand(command) => {
+                let Some(session_id) = agent.session.session_id.clone() else {
+                    agent.show_toast("Pi session is still starting");
+                    return vec![];
+                };
+                if consume_input {
+                    agent.prompt.set_text("");
+                }
+                return vec![Effect::RunPiExtensionCommand {
+                    session_id,
+                    command,
+                }];
+            }
             CommandResult::InjectSkill {
                 display_text,
                 prompt_blocks,
@@ -1376,12 +1391,18 @@ pub(super) fn dispatch_send_prompt_submission(
             }
             // A new prompt is taking over (same contract as the immediate-send branch below)
             agent.clear_follow_ups();
-            effects.extend(interject::dispatch_send_prompt_now(
-                app,
-                text,
-                images,
-                image_notice,
-            ));
+            // Pi keeps a parked wait as a steering interjection rather than a cancel/restart.
+            if external_pi {
+                app.pending_image_notices.extend(image_notice);
+                effects.extend(interject::dispatch_interject(app, text, images));
+            } else {
+                effects.extend(interject::dispatch_send_prompt_now(
+                    app,
+                    text,
+                    images,
+                    image_notice,
+                ));
+            }
             return effects;
         }
 
@@ -1473,6 +1494,8 @@ pub(super) fn dispatch_send_prompt_submission(
         tip_send_now_after_queue = queued_while_running;
     }
 
+    // Mid-turn local queue: advertise send-now via the ephemeral tip (skip during
+    // a sendable wait — the inline hint already says it).
     if tip_send_now_after_queue {
         let inline_hint_shown = app
             .agents

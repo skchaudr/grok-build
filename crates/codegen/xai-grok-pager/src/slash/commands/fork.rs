@@ -6,7 +6,7 @@
 //! The fork itself is dispatched in `dispatch_fork_resolved`, after the worktree question is resolved and the placeholder spawn succeeds.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
 /// [`parse_fork_args`] returns this, and [`Action::Fork`](crate::app::actions::Action::Fork) carries it to the dispatcher.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -71,14 +71,34 @@ pub fn parse_fork_args(args: &str) -> Result<ForkArgs, String> {
 pub struct ForkCommand;
 
 impl SlashCommand for ForkCommand {
-    slash_meta! {
-        name: "fork",
-        description: "Branch the current session into a peer agent",
-        usage: "/fork [--worktree|--no-worktree] [directive]",
-        takes_args: true,
-        args_required: false,
-        session_scoped: true,
-        arg_placeholder: "[directive]",
+    fn name(&self) -> &str {
+        "fork"
+    }
+
+    fn description(&self) -> &str {
+        // Grok profile: peer agent (+ optional worktree).
+        // External/Pi profile: message-level fork into a new session file.
+        "Fork the current session"
+    }
+
+    fn session_scoped(&self) -> bool {
+        true
+    }
+
+    fn usage(&self) -> &str {
+        "/fork [--worktree|--no-worktree] [directive]"
+    }
+
+    fn takes_args(&self) -> bool {
+        true
+    }
+
+    fn args_required(&self) -> bool {
+        false
+    }
+
+    fn arg_placeholder(&self) -> Option<&str> {
+        Some("[directive]")
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {

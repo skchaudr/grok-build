@@ -15,6 +15,11 @@ impl SlashCommand for WorkflowsCommand {
         usage: "/workflows",
     }
 
+    fn visible(&self, _ctx: &crate::slash::command::AppCtx) -> bool {
+        // The runs pane remains useful while the launch catalog is unavailable or reloading.
+        true
+    }
+
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
         CommandResult::Action(Action::OpenExtensionsModal {
             tab: ExtensionsTab::Workflows,

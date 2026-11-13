@@ -93,6 +93,7 @@ fn child_surface_never_advertises_kill() {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
+            &crate::app::bundle::BundleState::default(),
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),

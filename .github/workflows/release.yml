@@ -1,0 +1,337 @@
+name: Release grok-pi
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag (vX.Y.Z or vX.Y.Z-beta.N)"
+        required: true
+        type: string
+
+env:
+  # One canonical tag drives version stamping, changelog extraction and publishing.
+  # Tag pushes use github.ref_name; manual runs must provide the release tag.
+  GROK_PI_RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+permissions:
+  contents: write
+
+jobs:
+  validate-changelog:
+    name: Validate changelog
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          # Manual dispatch must inspect the existing release tag, not main.
+          ref: ${{ env.GROK_PI_RELEASE_TAG }}
+
+      - name: Require changelog section for release tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${GROK_PI_RELEASE_TAG}"
+          if [[ ! "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
+            echo "Unsupported release tag: $ref" >&2
+            echo "Expected vX.Y.Z or vX.Y.Z-beta.N." >&2
+            exit 1
+          fi
+
+          ver="${ref#v}"
+          python3 scripts/extract-changelog-section.py --self-test
+          python3 scripts/extract-changelog-section.py \
+            "$ver" CHANGELOG.MD \
+            --strict \
+            -o "$RUNNER_TEMP/release-notes.md"
+          echo "Validated CHANGELOG.MD section [$ver] for $ref"
+
+  build:
+    name: ${{ matrix.name }}
+    needs: validate-changelog
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── macOS ────────────────────────────────────────────────────────
+          - name: macOS ARM64
+            runner: macos-14
+            timeout: 150
+            target: aarch64-apple-darwin
+            asset: grok-pi-macos-aarch64.tar.gz
+            bin: grok-pi
+            cross: false
+          - name: macOS Intel
+            runner: macos-14
+            timeout: 150
+            target: x86_64-apple-darwin
+            asset: grok-pi-macos-x86_64.tar.gz
+            bin: grok-pi
+            # Apple Silicon runners can cross-compile Intel with the right target.
+            cross: true
+
+          # ── Linux ────────────────────────────────────────────────────────
+          - name: Linux x64
+            runner: ubuntu-latest
+            timeout: 90
+            target: x86_64-unknown-linux-gnu
+            asset: grok-pi-linux-x86_64.tar.gz
+            bin: grok-pi
+            cross: false
+          - name: Linux ARM64
+            # Build natively on an arm64-hosted runner. Cross-compiling the
+            # large release-dist profile (codegen-units=1 + thin LTO) from a
+            # shared 16 GB x64 runner OOM-kills the job (exit 143).
+            runner: ubuntu-24.04-arm
+            timeout: 90
+            target: aarch64-unknown-linux-gnu
+            asset: grok-pi-linux-aarch64.tar.gz
+            bin: grok-pi
+            cross: false
+
+          # ── Windows ──────────────────────────────────────────────────────
+          - name: Windows x64
+            runner: windows-latest
+            timeout: 90
+            target: x86_64-pc-windows-msvc
+            asset: grok-pi-windows-x86_64.zip
+            bin: grok-pi.exe
+            cross: false
+          - name: Windows ARM64
+            # Build natively on GitHub's Windows ARM64 image instead of spending
+            # an hour cross-compiling ARM64 on an x64 runner. Pin VS2026 while
+            # the windows-11-arm label is migrating to that image.
+            runner: windows-11-vs2026-arm
+            timeout: 90
+            target: aarch64-pc-windows-msvc
+            asset: grok-pi-windows-aarch64.zip
+            bin: grok-pi.exe
+            cross: false
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GROK_PI_RELEASE_TAG }}
+
+      - name: Install Rust 1.94.0
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        if: runner.os != 'Linux'
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Cache local workspace crates on the slower macOS/Windows builders.
+          # Six ~2 GiB target caches exceed GitHub's per-repository cache quota,
+          # so Linux builds intentionally skip the persistent target cache.
+          cache-workspace-crates: true
+          # Do not spend additional time uploading multi-GiB target caches after
+          # a failed build; failed caches are also poor inputs for later releases.
+          cache-on-failure: false
+          # Bump the prefix when changing cache contents so GitHub does not keep
+          # serving an older immutable cache entry without workspace artifacts.
+          prefix-key: "v4-release"
+          shared-key: release-${{ matrix.target }}
+
+      - name: Install protoc on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes protobuf-compiler
+          echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+
+      - name: Install Linux aarch64 cross toolchain
+        if: runner.os == 'Linux' && matrix.cross
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          # Tell cargo/cc which linker to use for the aarch64 target.
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> "$GITHUB_ENV"
+
+      - name: Install protoc on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install protobuf
+          echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+
+      - name: Install protoc on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install protoc --yes --no-progress
+          $protoc = (Get-Command protoc).Source
+          "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          ref="${GROK_PI_RELEASE_TAG}"
+          ver="${ref#v}"
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          echo "Resolved GROK_PI_VERSION=${ver}"
+
+      - name: Build release binary
+        shell: bash
+        env:
+          # Keep the grok-pi product version independent from Grok's
+          # release-only GROK_VERSION stamp.
+          GROK_PI_VERSION: ${{ steps.version.outputs.version }}
+          # beta.9 macOS ARM64/Intel hit the 90-minute job limit during
+          # codegen of the large xai-grok-pager crate. CGU=1 + Thin LTO
+          # + DWARF=1 costs 50+ minutes in that final library alone.
+          # Parallelize LLVM codegen and skip LTO/debug info on macOS only.
+          # Linux/Windows keep the original release-dist profile unchanged.
+          CARGO_PROFILE_RELEASE_DIST_CODEGEN_UNITS: ${{ runner.os == 'macOS' && '16' || '1' }}
+          CARGO_PROFILE_RELEASE_DIST_LTO: ${{ runner.os == 'macOS' && 'off' || 'thin' }}
+          CARGO_PROFILE_RELEASE_DIST_DEBUG: ${{ runner.os == 'macOS' && '0' || '1' }}
+        run: |
+          echo "Release tag: ${GROK_PI_RELEASE_TAG}; pinned source commit: $(git rev-parse HEAD)"
+          echo "Release target: ${{ matrix.target }}"
+          echo "Cargo profile: codegen-units=${CARGO_PROFILE_RELEASE_DIST_CODEGEN_UNITS}, lto=${CARGO_PROFILE_RELEASE_DIST_LTO}, debug=${CARGO_PROFILE_RELEASE_DIST_DEBUG}"
+          cargo build \
+            --locked \
+            --profile release-dist \
+            -p xai-grok-pager-bin \
+            --bin grok-pi \
+            --features release-dist \
+            --target "${{ matrix.target }}"
+
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          src="target/${{ matrix.target }}/release-dist/${{ matrix.bin }}"
+          test -f "$src"
+          # Stage a clean name so tarball root contains just `grok-pi`.
+          stage="$(mktemp -d)"
+          cp "$src" "$stage/grok-pi"
+          chmod 755 "$stage/grok-pi"
+          tar -C "$stage" -czf "dist/${{ matrix.asset }}" grok-pi
+          ls -lh "dist/${{ matrix.asset }}"
+
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $src = "target/${{ matrix.target }}/release-dist/${{ matrix.bin }}"
+          if (-not (Test-Path -LiteralPath $src)) {
+            throw "missing binary: $src"
+          }
+          # Stage as grok-pi.exe at archive root.
+          $stage = Join-Path $env:RUNNER_TEMP "grok-pi-stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -LiteralPath $src -Destination (Join-Path $stage "grok-pi.exe") -Force
+          Compress-Archive -Path (Join-Path $stage "grok-pi.exe") -DestinationPath "dist/${{ matrix.asset }}" -Force
+          Get-Item "dist/${{ matrix.asset }}" | Format-List Name, Length
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out release scripts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GROK_PI_RELEASE_TAG }}
+
+      - name: Download release binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Add installer scripts
+        shell: bash
+        run: |
+          cp install.sh install.ps1 release-assets/
+          chmod +x release-assets/install.sh
+          ls -la release-assets/
+
+      - name: Extract CHANGELOG for this tag
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${GROK_PI_RELEASE_TAG}"
+          ver="${ref#v}"
+          mkdir -p dist
+
+          # Sanity-check the extractor before cutting notes.
+          python3 scripts/extract-changelog-section.py --self-test
+
+          # Use one matching section for normal releases. Preserve cumulative
+          # notes only for the legacy 0.0.x line; newer releases must not emit
+          # the entire historical changelog by default. Override explicitly
+          # with RELEASE_NOTES_SINCE when a cumulative release is intentional.
+          extract_args=(
+            "${ver}"
+            CHANGELOG.MD
+            -o dist/release-notes.md
+            --repo "${GITHUB_REPOSITORY}"
+            --strict
+            --with-install
+          )
+          if [[ -z "${RELEASE_NOTES_SINCE+x}" && "$ver" == 0.0.* ]]; then
+            extract_args+=(--since 0.0.6)
+          elif [[ -n "${RELEASE_NOTES_SINCE:-}" ]]; then
+            extract_args+=(--since "${RELEASE_NOTES_SINCE}")
+          fi
+
+          python3 scripts/extract-changelog-section.py "${extract_args[@]}"
+
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          echo "notes_path=dist/release-notes.md" >> "$GITHUB_OUTPUT"
+          echo "bytes=$(wc -c < dist/release-notes.md | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "--- release notes preview (first 60 lines) ---"
+          head -n 60 dist/release-notes.md
+
+      - name: Upload release notes artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: dist/release-notes.md
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          # CHANGELOG.MD tag section only; do not append GitHub's full commit
+          # history to every release body.
+          body_path: dist/release-notes.md
+          generate_release_notes: false
+          # Manual dispatch and tag pushes share the exact same release tag.
+          tag_name: ${{ env.GROK_PI_RELEASE_TAG }}
+          # The requested tag must already exist (checkout above enforces this).
+          # Do not pass target_commitish: GitHub requires workflow-write permission
+          # when that older commit differs from the default branch workflow files,
+          # and Actions' GITHUB_TOKEN cannot be granted that permission.
+          # A beta tag ships the same six platform assets, but is not promoted
+          # by GitHub's stable `releases/latest` pointer. Unsupported prerelease
+          # suffixes are rejected before the build starts.
+          prerelease: ${{ contains(env.GROK_PI_RELEASE_TAG, '-beta.') }}
+          files: release-assets/*

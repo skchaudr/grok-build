@@ -1,11 +1,13 @@
 //! Frame rendering for [`AgentView`]: the `draw` entry point plus shortcut hints.
 use super::{
-    ActivePane, AgentPane, AgentView, AgentViewLayout, BlockingCard, ComposerRoute, CtaPhase,
-    EscStep, InlineMediaHitAreas, KeyOwner, MODE_BANNER_FADE_TICKS, PromptMode, ViewSurface,
+    ActivePane, AgentPane, AgentView, AgentViewLayout, BlockingCard, CtaPhase, EscStep,
+    ComposerRoute, InlineMediaHitAreas, KeyOwner, MODE_BANNER_FADE_TICKS, PromptInputMode,
+    PromptMode, ViewSurface,
     collect_citation_links, dropdown_content_inset, dropdown_items_width, record_dot_pulse,
     render_dropdown_chrome, supports_osc22,
 };
 use crate::actions::{ActionId, ActionRegistry};
+use crate::appearance::PromptCursor;
 use crate::key;
 use crate::render::SafeBuf;
 use crate::render::line_utils::truncate_line;
@@ -16,7 +18,7 @@ use crate::scrollback::text_selection::{
     ResolvedSelectionBoundaries, ResolvedSelectionModel, render_active_selection_overlay,
     render_block_drag_overlay, render_persistent_selection_overlay,
 };
-use crate::theme::Theme;
+use crate::theme::{Theme, ThinkingLevel};
 use crate::views::agent::AgentViewLayoutParams;
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::modal;
@@ -27,14 +29,21 @@ use crate::views::shortcuts_bar::{HintItem, PendingHint, ShortcutsBar};
 use crate::views::{agent, turn_status};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use std::collections::HashSet;
 use std::time::Instant;
-/// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent view cannot see itself (voice pipeline, Esc ownership, status row).
-/// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render fact extends this struct instead of every `draw` call site.
-/// Tests take `Default` and override only what they exercise.
+use xai_grok_shell::sampling::types::ReasoningEffort;
+/// AppView-owned per-frame inputs to [`AgentView::draw`] — state the agent
+/// view cannot see itself (the voice pipeline and app-level Esc ownership).
+/// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent
+/// view cannot see itself (the voice pipeline, app-level Esc ownership, the
+/// status row).
+/// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render
+/// fact extends this struct instead of every `draw` call site; tests take
+/// `Default` and override only what they exercise.
+
 #[derive(Default)]
 pub struct AppRenderParams<'a> {
     /// Voice feature available (shows the mic affordances).
@@ -46,6 +55,10 @@ pub struct AppRenderParams<'a> {
     /// The status row this frame paints, or `Off` when this frame has none.
     pub status_line: crate::views::status_line::StatusLineFrame,
     pub workspace_dashboard_enabled: bool,
+    /// App-level Esc ownership snapshot (voice dictation listening or a
+    /// cold-start overlay owns the key), so the shortcut bar only advertises
+    /// Esc as the turn-cancel key when it really is one.
+    pub esc_owned_before_agent: bool,
     /// Header chrome the dashboard adds when this view is its session overlay: the agent's title (omitted when the session is
     /// unnamed) and its `i/n` position in the overlay's cycle order. `position` is `None` outside the overlay or for an agent the
     /// dashboard filter hid; a lone agent gets `Some((1, 1))`, so the switcher gates on [`OverlayHeader::can_cycle`], not `is_some`.
@@ -70,6 +83,335 @@ impl OverlayHeader<'_> {
         self.cycle_position().is_some()
     }
 }
+fn thinking_level_for_effort(effort: Option<ReasoningEffort>) -> ThinkingLevel {
+    match effort.unwrap_or(ReasoningEffort::None) {
+        ReasoningEffort::None => ThinkingLevel::Off,
+        ReasoningEffort::Minimal => ThinkingLevel::Minimal,
+        ReasoningEffort::Low => ThinkingLevel::Low,
+        ReasoningEffort::Medium => ThinkingLevel::Medium,
+        ReasoningEffort::High => ThinkingLevel::High,
+        ReasoningEffort::Xhigh => ThinkingLevel::Xhigh,
+        ReasoningEffort::Max => ThinkingLevel::Max,
+    }
+}
+
+fn prompt_border_color_override(
+    theme: &Theme,
+    input_mode: PromptInputMode,
+    plan_tinted: bool,
+    thinking_border_colors: bool,
+    effort: Option<ReasoningEffort>,
+) -> Option<Color> {
+    if plan_tinted {
+        crate::render::color::blend_color(theme.bg_base, theme.accent_plan, 0.4)
+    } else if thinking_border_colors && input_mode == PromptInputMode::Normal {
+        Some(theme.thinking_border_color(thinking_level_for_effort(effort)))
+    } else {
+        None
+    }
+}
+
+/// Paint a configured software cursor and return the hardware-cursor position.
+/// `Native` is a strict passthrough, preserving the existing terminal cursor.
+/// Every other variant paints into the buffer and returns `None`, which makes
+/// the frame writer hide the hardware cursor for that frame.
+fn paint_prompt_cursor(
+    buf: &mut Buffer,
+    cursor_pos: Option<(u16, u16)>,
+    cursor: PromptCursor,
+    color: Color,
+) -> Option<(u16, u16)> {
+    if cursor == PromptCursor::Native {
+        return cursor_pos;
+    }
+    let (x, y) = cursor_pos?;
+    let cell = buf.cell_mut((x, y))?;
+    match cursor {
+        PromptCursor::Native => unreachable!("native cursor returned above"),
+        PromptCursor::Block => {
+            if cell.symbol().trim().is_empty() {
+                cell.set_symbol("█");
+                cell.set_fg(color);
+            } else {
+                cell.modifier.insert(Modifier::REVERSED);
+            }
+        }
+        PromptCursor::Underline => {
+            if cell.symbol().trim().is_empty() {
+                cell.set_char('_');
+                cell.set_fg(color);
+            } else {
+                cell.modifier.insert(Modifier::UNDERLINED);
+            }
+        }
+        PromptCursor::Bar => {
+            cell.set_symbol("│");
+            cell.set_fg(color);
+        }
+        PromptCursor::Custom(ch) => {
+            cell.set_char(ch);
+            cell.set_fg(color);
+        }
+    }
+    None
+}
+
+fn remote_tui_axis_position(
+    position: Option<crate::app::app_view::RemoteTuiPosition>,
+    available: u16,
+    span: u16,
+    fallback: u16,
+) -> i32 {
+    match position {
+        Some(crate::app::app_view::RemoteTuiPosition::Cells(value)) => value,
+        Some(crate::app::app_view::RemoteTuiPosition::Percent(percent)) => {
+            (available.saturating_sub(span) as u32 * u32::from(percent) / 100) as i32
+        }
+        None => i32::from(fallback),
+    }
+}
+
+fn remote_tui_anchor_x(
+    anchor: crate::app::app_view::RemoteTuiAnchor,
+    available: u16,
+    width: u16,
+) -> u16 {
+    match anchor {
+        crate::app::app_view::RemoteTuiAnchor::TopLeft
+        | crate::app::app_view::RemoteTuiAnchor::LeftCenter
+        | crate::app::app_view::RemoteTuiAnchor::BottomLeft => 0,
+        crate::app::app_view::RemoteTuiAnchor::TopRight
+        | crate::app::app_view::RemoteTuiAnchor::RightCenter
+        | crate::app::app_view::RemoteTuiAnchor::BottomRight => available.saturating_sub(width),
+        crate::app::app_view::RemoteTuiAnchor::TopCenter
+        | crate::app::app_view::RemoteTuiAnchor::Center
+        | crate::app::app_view::RemoteTuiAnchor::BottomCenter => {
+            available.saturating_sub(width) / 2
+        }
+    }
+}
+
+fn remote_tui_anchor_y(
+    anchor: crate::app::app_view::RemoteTuiAnchor,
+    available: u16,
+    height: u16,
+) -> u16 {
+    match anchor {
+        crate::app::app_view::RemoteTuiAnchor::TopLeft
+        | crate::app::app_view::RemoteTuiAnchor::TopCenter
+        | crate::app::app_view::RemoteTuiAnchor::TopRight => 0,
+        crate::app::app_view::RemoteTuiAnchor::BottomLeft
+        | crate::app::app_view::RemoteTuiAnchor::BottomCenter
+        | crate::app::app_view::RemoteTuiAnchor::BottomRight => available.saturating_sub(height),
+        crate::app::app_view::RemoteTuiAnchor::LeftCenter
+        | crate::app::app_view::RemoteTuiAnchor::Center
+        | crate::app::app_view::RemoteTuiAnchor::RightCenter => {
+            available.saturating_sub(height) / 2
+        }
+    }
+}
+
+fn remote_tui_overlay_rect(
+    area: Rect,
+    layout: &crate::app::app_view::RemoteTuiLayout,
+    line_count: usize,
+) -> Option<Rect> {
+    if !layout.overlay || area.width == 0 || area.height == 0 || line_count == 0 {
+        return None;
+    }
+    let width = layout.width.clamp(1, area.width);
+    let max_height = layout
+        .max_height
+        .map(|position| remote_tui_axis_position(Some(position), area.height, 0, area.height))
+        .unwrap_or(i32::from(area.height))
+        .clamp(1, i32::from(area.height)) as u16;
+    let height = (line_count.min(usize::from(max_height))) as u16;
+    if height == 0 {
+        return None;
+    }
+    let default_x = remote_tui_anchor_x(layout.anchor, area.width, width);
+    let default_y = remote_tui_anchor_y(layout.anchor, area.height, height);
+    let x = remote_tui_axis_position(layout.col, area.width, width, default_x)
+        .saturating_add(layout.offset_x)
+        .clamp(0, i32::from(area.width.saturating_sub(width))) as u16;
+    let y = remote_tui_axis_position(layout.row, area.height, height, default_y)
+        .saturating_add(layout.offset_y)
+        .clamp(0, i32::from(area.height.saturating_sub(height))) as u16;
+    Some(Rect::new(area.x + x, area.y + y, width, height))
+}
+
+#[cfg(test)]
+mod remote_tui_layout_tests {
+    use super::*;
+    use crate::app::app_view::RemoteTuiLayout;
+
+    #[test]
+    fn center_anchor_places_overlay_in_the_available_area() {
+        let layout = RemoteTuiLayout::from_json(&serde_json::json!({
+            "overlay": true,
+            "width": 20,
+            "anchor": "center"
+        }))
+        .expect("valid layout");
+        assert_eq!(
+            remote_tui_overlay_rect(Rect::new(0, 0, 80, 24), &layout, 4),
+            Some(Rect::new(30, 10, 20, 4))
+        );
+    }
+
+    #[test]
+    fn percentage_position_and_offsets_match_pi_overlay_semantics() {
+        let layout = RemoteTuiLayout::from_json(&serde_json::json!({
+            "overlay": true,
+            "width": 20,
+            "row": "50%",
+            "col": "50%",
+            "offsetX": 2,
+            "offsetY": -1
+        }))
+        .expect("valid layout");
+        assert_eq!(
+            remote_tui_overlay_rect(Rect::new(0, 0, 80, 24), &layout, 4),
+            Some(Rect::new(32, 9, 20, 4))
+        );
+    }
+}
+
+#[cfg(test)]
+mod thinking_border_tests {
+    use super::*;
+
+    #[test]
+    fn maps_every_reasoning_effort_to_the_matching_pi_level() {
+        let expected = [
+            (None, ThinkingLevel::Off),
+            (Some(ReasoningEffort::None), ThinkingLevel::Off),
+            (Some(ReasoningEffort::Minimal), ThinkingLevel::Minimal),
+            (Some(ReasoningEffort::Low), ThinkingLevel::Low),
+            (Some(ReasoningEffort::Medium), ThinkingLevel::Medium),
+            (Some(ReasoningEffort::High), ThinkingLevel::High),
+            (Some(ReasoningEffort::Xhigh), ThinkingLevel::Xhigh),
+            (Some(ReasoningEffort::Max), ThinkingLevel::Max),
+        ];
+        for (effort, level) in expected {
+            assert_eq!(thinking_level_for_effort(effort), level);
+        }
+    }
+
+    #[test]
+    fn normal_prompt_uses_thinking_color_but_special_modes_keep_their_chrome() {
+        let theme = Theme::groknight();
+        assert_eq!(
+            prompt_border_color_override(
+                &theme,
+                PromptInputMode::Normal,
+                false,
+                true,
+                Some(ReasoningEffort::High),
+            ),
+            Some(theme.thinking_border_color(ThinkingLevel::High))
+        );
+        assert_eq!(
+            prompt_border_color_override(
+                &theme,
+                PromptInputMode::Bash,
+                false,
+                true,
+                Some(ReasoningEffort::High),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn disabled_thinking_colors_leave_normal_prompt_border_unmodified() {
+        let theme = Theme::groknight();
+        assert_eq!(
+            prompt_border_color_override(
+                &theme,
+                PromptInputMode::Normal,
+                false,
+                false,
+                Some(ReasoningEffort::High),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn plan_border_keeps_precedence_over_thinking_color() {
+        let theme = Theme::groknight();
+        assert_eq!(
+            prompt_border_color_override(
+                &theme,
+                PromptInputMode::Normal,
+                true,
+                false,
+                Some(ReasoningEffort::Max),
+            ),
+            crate::render::color::blend_color(theme.bg_base, theme.accent_plan, 0.4)
+        );
+    }
+}
+
+#[cfg(test)]
+mod prompt_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn native_cursor_preserves_hardware_position_and_buffer() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buf.cell_mut((1, 0)).unwrap().set_char('x');
+        assert_eq!(
+            paint_prompt_cursor(&mut buf, Some((1, 0)), PromptCursor::Native, Color::Red),
+            Some((1, 0))
+        );
+        assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "x");
+    }
+
+    #[test]
+    fn block_cursor_reverses_existing_cell_and_hides_hardware_cursor() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buf.cell_mut((1, 0)).unwrap().set_char('x');
+        assert_eq!(
+            paint_prompt_cursor(&mut buf, Some((1, 0)), PromptCursor::Block, Color::Red),
+            None
+        );
+        let cell = buf.cell((1, 0)).unwrap();
+        assert_eq!(cell.symbol(), "x");
+        assert!(cell.modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn underline_bar_and_custom_cursor_paint_expected_symbols() {
+        for (cursor, expected) in [
+            (PromptCursor::Underline, "_"),
+            (PromptCursor::Bar, "│"),
+            (PromptCursor::Custom('•'), "•"),
+        ] {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+            assert_eq!(
+                paint_prompt_cursor(&mut buf, Some((1, 0)), cursor, Color::Red),
+                None
+            );
+            assert_eq!(buf.cell((1, 0)).unwrap().symbol(), expected);
+        }
+    }
+
+    #[test]
+    fn light_theme_software_cursor_uses_readability_color() {
+        let theme = Theme::grokday();
+        let color = xai_grok_pager_render::theme::cursor_color_for(&theme);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+
+        assert_eq!(
+            paint_prompt_cursor(&mut buf, Some((1, 0)), PromptCursor::Bar, color),
+            None
+        );
+        assert_eq!(buf.cell((1, 0)).unwrap().fg, theme.text_primary);
+    }
+}
+
 /// What the bottom shortcuts bar renders this frame.
 enum ShortcutsBarContent {
     /// A blocking surface's own keys, rendered as given.
@@ -103,23 +445,16 @@ impl AgentView {
     }
     /// Keep [`Self::timeline_hover_preview`] in sync with [`Self::timeline_hover`].
     /// Called when hover changes (mouse Moved or rail rebuild under a stationary pointer) so render can borrow the cached text.
+
     pub(crate) fn sync_timeline_hover_preview(&mut self) {
-        match self.timeline_hover {
-            Some(crate::views::timeline::TimelineHit::Tick(turn_idx)) => {
-                if self
-                    .timeline_hover_preview
-                    .as_ref()
-                    .is_some_and(|(idx, _)| *idx == turn_idx)
-                {
-                    return;
-                }
-                self.timeline_hover_preview = self
-                    .scrollback
-                    .turn_preview(turn_idx)
-                    .map(|text| (turn_idx, text));
-            }
-            _ => self.timeline_hover_preview = None,
-        }
+        self.timeline_hover_preview = match self.timeline_hover {
+            Some(crate::views::timeline::TimelineHit::Tick(marker_idx)) => self
+                .scrollback
+                .timeline_markers()
+                .get(marker_idx)
+                .map(|marker| (marker_idx, marker.preview.clone(), marker.created_at)),
+            _ => None,
+        };
     }
     /// Shortcut hints for the plan-approval prompt/comment focus states.
     /// Shared by `draw` and the cheatsheet Current section.
@@ -256,8 +591,12 @@ impl AgentView {
     /// Returns the *exact* hints the bottom shortcuts bar would render right now.
     /// Single source of truth for context-sensitive shortcuts (pane, overlays, sub-modes, selection state, turn running, plan/queue).
     /// Both the bar renderer and the Ctrl+. cheatsheet Current section delegate here, so the two stay identical in the active context.
-    pub fn current_shortcut_hints(&self, registry: &ActionRegistry) -> Vec<HintItem> {
-        match self.shortcuts_bar_content(registry) {
+    pub fn current_shortcut_hints(
+        &self,
+        registry: &ActionRegistry,
+        esc_owned_before_agent: bool,
+    ) -> Vec<HintItem> {
+        match self.shortcuts_bar_content(registry, esc_owned_before_agent) {
             ShortcutsBarContent::Surface(hints) | ShortcutsBarContent::Pane(hints) => hints,
             ShortcutsBarContent::Hidden => vec![],
         }
@@ -274,7 +613,11 @@ impl AgentView {
         }
     }
     /// The bar names the surface the keys actually reach, so it asks [`AgentView::key_owner`] rather than keeping an order of its own.
-    fn shortcuts_bar_content(&self, registry: &ActionRegistry) -> ShortcutsBarContent {
+    fn shortcuts_bar_content(
+        &self,
+        registry: &ActionRegistry,
+        esc_owned_before_agent: bool,
+    ) -> ShortcutsBarContent {
         use crate::views::shortcuts_bar::HintItem;
         match self.key_owner() {
             // The panel paints its own key footer.
@@ -316,7 +659,7 @@ impl AgentView {
                 self.card_esc_hint(),
             ]),
             KeyOwner::Pane => {
-                let mut hints = self.normal_pane_hints(registry);
+                let mut hints = self.normal_pane_hints(registry, esc_owned_before_agent);
                 // With no composer, the key that leaves for it reaches nothing.
                 if self.composer_route() == ComposerRoute::Hidden {
                     hints.retain(|hint| hint.label != "prompt");
@@ -346,7 +689,11 @@ impl AgentView {
     }
     /// Shared "normal pane" hints: the flag computation, `build_hints`, and the queue hint.
     /// Single source of truth for the two former duplicated blocks in `current_shortcut_hints` and `draw`.
-    fn normal_pane_hints(&self, registry: &ActionRegistry) -> Vec<HintItem> {
+    fn normal_pane_hints(
+        &self,
+        registry: &ActionRegistry,
+        esc_owned_before_agent: bool,
+    ) -> Vec<HintItem> {
         let fold_label = self.selected_fold_label();
         let is_editing = matches!(self.prompt_mode, PromptMode::EditingQueued { .. });
         let selected_entry = self
@@ -358,7 +705,9 @@ impl AgentView {
             .selected()
             .is_some_and(|idx| self.scrollback.entry_content_hidden_by_group(idx));
         let (selected_supports_copy, selected_meta_label, selected_supports_fullscreen) =
-            if self.active_pane == ActivePane::Tasks {
+            if self.active_pane == ActivePane::Catalog {
+                (false, None, self.catalog.selected_entry().is_some())
+            } else if self.active_pane == ActivePane::Tasks {
                 let has_selected = self.tasks.selected_task_id().is_some_and(|tid| {
                     self.session
                         .bg_tasks
@@ -456,6 +805,11 @@ impl AgentView {
         let thinking_label = self.scrollback.thinking_fold_label();
         let selected_is_user_prompt = selected_entry.is_some_and(|e| e.block.is_user_prompt());
         let selected_is_agent_message = selected_entry.is_some_and(|e| e.block.is_agent_message());
+        // Mirrors the Collapse router branch: ← on this entry opens the tool-trace modal.
+        let selected_has_trace = selected_entry.is_some_and(|e| {
+            e.display_mode == crate::scrollback::types::DisplayMode::Collapsed
+                && !e.tool_traces.is_empty()
+        });
         let mut hints = agent::build_hints(
             self.active_pane,
             self.parked_card()
@@ -486,12 +840,14 @@ impl AgentView {
             self.surface(),
             (self.session.state.is_turn_running() || self.wake_turn_active())
                 && !self.renders_parked(),
+            self.esc_would_cancel_turn(esc_owned_before_agent),
             !self.visible_queue_is_empty(),
             self.queue.mutation(),
             selected_is_user_prompt,
             selected_is_agent_message,
             crate::terminal::terminal_context().prefer_alt_enter_newline(),
             self.scrollback_search.as_ref(),
+            selected_has_trace,
         );
         if (self.queue.is_visible() || !self.visible_queue_is_empty())
             && self.active_pane != ActivePane::Queue
@@ -534,6 +890,45 @@ impl AgentView {
             }
         })
     }
+    fn draw_remote_tui_overlay(&mut self, area: Rect, buf: &mut Buffer, theme: &Theme) {
+        // A Pi input/confirm dialog may be opened from inside custom(). Keep
+        // its native surface visible while it temporarily owns the keyboard.
+        if self.active_modal.is_some()
+            || self
+                .question_view
+                .as_ref()
+                .is_some_and(|q| q.is_pi_extension_ui())
+        {
+            return;
+        }
+        let Some(layout) = self.remote_tui_layout.clone() else {
+            return;
+        };
+        let Some(rect) = remote_tui_overlay_rect(area, &layout, self.remote_tui_lines.len()) else {
+            return;
+        };
+
+        let surface = Style::default().bg(theme.bg_base);
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_char(' ');
+                    cell.set_style(surface);
+                }
+            }
+        }
+        for (index, line) in self
+            .remote_tui_lines
+            .iter()
+            .take(usize::from(rect.height))
+            .enumerate()
+        {
+            let styled = crate::views::agent_status::ansi_remote_tui_line(line, theme);
+            buf.set_line(rect.x, rect.y + index as u16, &styled, rect.width);
+        }
+        self.frame_occluder_rects.push(rect);
+    }
+
     pub fn should_show_tip(&mut self) -> bool {
         false
     }
@@ -578,6 +973,7 @@ impl AgentView {
         pending_hint: Option<PendingHint>,
         overlay_focused: bool,
         banner: super::BannerSlotParams<'_>,
+        bundle_state: &crate::app::bundle::BundleState,
         in_dashboard_overlay: bool,
         link_spans_out: &mut Vec<xai_ratatui_inline::LinkSpan>,
         app_params: AppRenderParams<'_>,
@@ -631,6 +1027,7 @@ impl AgentView {
             voice_interim,
             status_line,
             workspace_dashboard_enabled,
+            esc_owned_before_agent,
             overlay_header,
             overlay_stop_label,
         } = app_params;
@@ -714,6 +1111,7 @@ impl AgentView {
                 scratch,
                 pending_hint,
                 &theme,
+                bundle_state,
                 in_dashboard_overlay.then(|| super::subagent_takeover::InheritedOverlay {
                     header: overlay_header,
                     stop_label: self.overlay_stop_label(),
@@ -762,14 +1160,25 @@ impl AgentView {
             chrome_pad_left: layout_cfg.block_pad_left,
             chrome_pad_right: layout_cfg.block_pad_right,
             bg: PromptBg::Default,
-            accent_color_override: if let Some(c) = self.prompt_input_mode.accent_color(&theme) {
-                Some(c)
-            } else {
-                mode_accent
-            },
-            border_color_override: mode_accent.map(|accent| {
-                crate::render::color::blend_color(theme.bg_base, accent, 0.4).unwrap_or(accent)
-            }),
+            accent_color_override: self
+                .prompt_input_mode
+                .accent_color(&theme)
+                .or(mode_accent),
+            border_color_override: mode_accent
+                .map(|accent| {
+                    crate::render::color::blend_color(theme.bg_base, accent, 0.4)
+                        .unwrap_or(accent)
+                })
+                .or_else(|| {
+                    prompt_border_color_override(
+                        &theme,
+                        self.prompt_input_mode,
+                        false,
+                        crate::appearance::cache::load_thinking_border_colors(),
+                        self.session.models.reasoning_effort,
+                    )
+                }),
+
             prefix_override: if let Some(p) = self.prompt_input_mode.prefix_override(&theme) {
                 Some(p)
             } else if casual_commenting
@@ -911,22 +1320,36 @@ impl AgentView {
             } else {
                 0
             };
-        let cancel_turn_view_h =
-            if slot_card == Some(BlockingCard::CancelTurn) && rewind_view_h == 0 {
-                modal::cancel_turn_panel_height(area.height)
-            } else {
-                0
-            };
-        let fork_view_h = match &self.fork_state {
-            Some(state) if !self.jump_slot_taken() => crate::views::fork_picker::fork_picker_overlay_height(state, area.height),
-            _ => 0,
-        };
         let jump_view_h = if !self.jump_slot_taken() {
             if let Some(ref js) = self.jump_state {
                 crate::views::jump::jump_overlay_height(js, area.height)
             } else {
                 0
             }
+        } else {
+            0
+        };
+        let fork_view_h = if permission_view_h == 0
+            && question_view_h == 0
+            && elicitation_view_h == 0
+            && rewind_view_h == 0
+            && jump_view_h == 0
+        {
+            if !self.fork_slot_taken() {
+                self.fork_state.as_ref().map_or(0, |state| {
+                    crate::views::fork_picker::fork_picker_overlay_height(state, area.height)
+                })
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let cancel_turn_view_h = if slot_card == Some(BlockingCard::CancelTurn)
+            && rewind_view_h == 0
+            && fork_view_h == 0
+        {
+            modal::cancel_turn_panel_height(area.height)
         } else {
             0
         };
@@ -1011,6 +1434,8 @@ impl AgentView {
             fork_view_h
         } else if jump_view_h > 0 {
             jump_view_h
+        } else if fork_view_h > 0 {
+            fork_view_h
         } else if cancel_turn_view_h > 0 {
             cancel_turn_view_h
         } else {
@@ -1034,22 +1459,46 @@ impl AgentView {
                     task.kill_requested_at = None;
                 }
             }
-            for info in self.subagent_sessions.values_mut() {
-                if let Some(requested) = info.attempt.kill_requested_at
-                    && now.duration_since(requested).as_secs() >= PENDING_KILL_TIMEOUT_SECS
-                {
-                    info.attempt.pending_kill = false;
-                    info.attempt.kill_requested_at = None;
-                }
-            }
+            self.clear_stale_descendant_subagent_kills(now, PENDING_KILL_TIMEOUT_SECS);
         }
-        self.tasks.sync(
-            &self.session.bg_tasks,
-            &self.subagent_sessions,
-            &self.session.scheduled_tasks,
-            &self.workflow_runs,
-        );
+        let queued_cron_ids: HashSet<&str> = self
+            .session
+            .pending_prompts
+            .iter()
+            .filter(|p| p.kind == crate::app::agent::QueueEntryKind::Cron)
+            .filter_map(|p| p.task_id.as_deref())
+            .collect();
+        let root_subagent_tree = if self.is_subagent_view {
+            None
+        } else {
+            Some(self.subagent_tree_rows())
+        };
+        if let Some(subagent_tree) = root_subagent_tree.as_ref() {
+            self.tasks.sync_with_subagent_tree(
+                &self.session.bg_tasks,
+                &self.subagent_sessions,
+                subagent_tree,
+                &self.session.scheduled_tasks,
+                self.cron_task_id.as_deref(),
+                &queued_cron_ids,
+                &self.workflow_runs,
+            );
+        } else {
+            self.tasks.sync(
+                &self.session.bg_tasks,
+                &self.subagent_sessions,
+                &self.session.scheduled_tasks,
+                self.cron_task_id.as_deref(),
+                &queued_cron_ids,
+                &self.workflow_runs,
+            );
+        }
+
         if self.active_pane == ActivePane::Tasks && !self.tasks.is_visible() {
+            self.active_pane = ActivePane::Scrollback;
+        }
+        self.catalog.sync_from_bundle(bundle_state);
+        if self.active_pane == ActivePane::Catalog && !self.catalog.is_visible() {
             self.active_pane = ActivePane::Scrollback;
         }
         let viewer_open = self.active_subagent.is_some();
@@ -1061,6 +1510,11 @@ impl AgentView {
             0
         } else {
             self.tasks.desired_height(area.height)
+        };
+        let catalog_height = if viewer_open || dock_on {
+            0
+        } else {
+            self.catalog.desired_height(area.height)
         };
         let todo_height = if viewer_open {
             0
@@ -1162,11 +1616,16 @@ impl AgentView {
         if !self.dock_shown && self.active_pane == ActivePane::Dock {
             self.active_pane = ActivePane::Scrollback;
         }
+        let startup_warning_height = 0;
+        let external_widgets_above_editor_height = self.external_widgets_above_editor.len() as u16;
+        let external_widgets_below_editor_height = self.external_widgets_below_editor.len() as u16;
+        let timeline_markers = self.scrollback.timeline_markers();
+
         let timeline_width = crate::views::timeline::rail_width(
             appearance.show_timeline,
             self.surface(),
             area.width,
-            self.scrollback.turn_count(),
+            timeline_markers.len(),
         );
         let mut layout_params = AgentViewLayoutParams {
             area,
@@ -1175,10 +1634,13 @@ impl AgentView {
             timeline_width,
             prompt_height,
             tasks_height,
+            catalog_height,
             todo_height,
             queue_height,
             btw_height,
             turn_status_height,
+            startup_warning_height,
+            external_widgets_above_editor_height,
             banner_height,
             cta_height,
             follow_ups_height,
@@ -1187,6 +1649,7 @@ impl AgentView {
             pi_widgets_height,
             model_notice_height,
             voice_recording_height,
+            external_widgets_below_editor_height,
             shortcuts_height: 1,
             status_line_height: status_line.height(),
             compact,
@@ -1214,20 +1677,23 @@ impl AgentView {
         if layout.timeline_width > 0 {
             self.sync_pending_user_input_marks();
             self.scrollback.set_cwd(Some(self.session.cwd.clone()));
+            let _ = self.sync_inline_edit_layout(layout.scrollback_content.width);
             self.scrollback.prepare_layout(
                 layout.scrollback_content.width,
                 layout.scrollback_content.height,
             );
+            let (active, up_target, down_target) =
+                self.scrollback.timeline_marker_viewport(&timeline_markers);
             let viewport = crate::views::timeline::RailViewport {
-                active: self.scrollback.active_turn_for_viewport(),
-                up_target: self.scrollback.turn_above_viewport_top(),
-                down_target: self.scrollback.turn_below_viewport_top(),
+                active,
+                up_target,
+                down_target,
                 at_bottom: !self.scrollback.has_content_below(),
             };
             match crate::views::timeline::compute_rail(
                 layout.scrollback,
                 layout.timeline_x,
-                self.scrollback.turn_count(),
+                timeline_markers.len(),
                 viewport,
             ) {
                 Some(rail) => {
@@ -1287,6 +1753,10 @@ impl AgentView {
                 layout.queue = body;
             }
         }
+        if self.jump_state.is_some() || self.fork_state.is_some() {
+            self.timeline_hover = None;
+            self.timeline_hover_preview = None;
+        }
         agent::fill_background(buf, area, layout_cfg, compact, &theme);
         let mut status_line_link_spans: Vec<xai_ratatui_inline::LinkSpan> = Vec::new();
         if let Some(padding) = status_line.padding()
@@ -1316,6 +1786,26 @@ impl AgentView {
         let dim = theme.dim().bg(theme.bg_base);
         let faint = theme.faint().bg(theme.bg_base);
         let mut status = AgentStatusBar::new(&theme);
+        if !self.external_statuses.is_empty() {
+            status.push(
+                "external_status",
+                crate::views::agent_status::ansi_status_line(
+                    &self.external_statuses.join(" · "),
+                    &theme,
+                ),
+            );
+        }
+        if let Some(url) = self.highlighted_link_url() {
+            let max_len = layout.status_bar.width.saturating_sub(20) as usize;
+            let display = if url.len() > max_len {
+                let truncated: String = url.chars().take(max_len.saturating_sub(1)).collect();
+                format!("{truncated}\u{2026}")
+            } else {
+                url.to_string()
+            };
+            let link_style = Style::default().fg(theme.link_fg).bg(theme.bg_base);
+            status.push("link_url", Line::from(Span::styled(display, link_style)));
+        }
         if !dock_on {
             let task_counts = self.tasks.status_counts(
                 &self.session.bg_tasks,
@@ -1587,15 +2077,18 @@ impl AgentView {
         }
         self.hit_upgrade_cta
             .set_unless_dropdown(upgrade_cta_rect, dropdown_open);
+        let mut inline_edit_cursor: Option<(u16, u16)> = None;
         let sticky_gap_row: Option<u16>;
         {
             self.sync_pending_user_input_marks();
             self.scrollback.set_cwd(Some(self.session.cwd.clone()));
+            let inline_edit_dim_from =
+                self.sync_inline_edit_layout(layout.scrollback_content.width);
             self.scrollback.prepare_layout(
                 layout.scrollback_content.width,
                 layout.scrollback_content.height,
             );
-            let rewind_dim_from = self.rewind_dim_from_entry();
+            let rewind_dim_from = self.rewind_dim_from_entry().or(inline_edit_dim_from);
             let sb_focused = self.active_pane == ActivePane::Scrollback && !overlay_focused;
             let search_highlight = if search_active {
                 self.scrollback_search
@@ -1631,6 +2124,12 @@ impl AgentView {
                 sb_rendered.selection_boundaries,
             );
             self.reclamp_drag_head_post_render(false);
+            if self.inline_edit.is_some() {
+                let cursor = self.render_inline_edit(buf, layout.scrollback_content);
+                if self.rewind_state.is_none() {
+                    inline_edit_cursor = cursor;
+                }
+            }
             if search_reserved_rows > 0
                 && let Some(search) = self.scrollback_search.as_ref()
             {
@@ -1744,6 +2243,29 @@ impl AgentView {
                     buf,
                 );
             }
+            self.write_edit_hover_popup_frame = if self.write_edit_hover_popup_ready() {
+                agent::render_write_edit_hover_popup(
+                    buf,
+                    layout.scrollback,
+                    &self.scrollback,
+                    self.hovered_entry,
+                    self.last_mouse_pos,
+                    self.write_edit_hover_popup_scroll,
+                    self.write_edit_hover_popup_frame.map(|frame| frame.area),
+                    &theme,
+                )
+            } else {
+                None
+            };
+            agent::render_hook_hover_popup(
+                buf,
+                layout.scrollback,
+                &self.scrollback,
+                self.hovered_entry,
+                self.last_mouse_pos,
+                &theme,
+            );
+
             let any_drag_active =
                 self.drag_selection.is_some() || self.block_drag_selection.is_some();
             if !any_drag_active
@@ -1761,8 +2283,7 @@ impl AgentView {
                 self.hit_sb_copy.clear();
                 self.hit_sb_view.clear();
             }
-            let rail_shown = self.timeline_rail.is_some();
-            if !rail_shown {
+            if self.timeline_rail.is_none() {
                 agent::render_scrollbar(
                     buf,
                     layout.scrollback,
@@ -1773,7 +2294,10 @@ impl AgentView {
                     &theme,
                 );
             }
-            if !rail_shown && scrollbar_cfg.enabled && sb_output.scroll_info.is_some() {
+            if self.timeline_rail.is_none()
+                && scrollbar_cfg.enabled
+                && sb_output.scroll_info.is_some()
+            {
                 self.hit_scrollbar.set(Some(Rect {
                     x: layout.scrollbar_x,
                     y: layout.scrollback.y,
@@ -1783,26 +2307,33 @@ impl AgentView {
             } else {
                 self.hit_scrollbar.clear();
             }
-            if let Some(ref rail) = self.timeline_rail {
-                crate::views::timeline::render_rail(buf, rail, self.timeline_hover, &theme);
-                if let Some(crate::views::timeline::TimelineHit::Tick(turn_idx)) =
+            if let Some(rail) = self.timeline_rail.as_ref() {
+                crate::views::timeline::render_rail(
+                    buf,
+                    rail,
+                    self.timeline_hover,
+                    &theme,
+                    |marker_idx| {
+                        timeline_markers.get(marker_idx).is_some_and(|marker| {
+                            marker.kind == crate::scrollback::state::TimelineMarkerKind::Compaction
+                        })
+                    },
+                );
+                if let Some(crate::views::timeline::TimelineHit::Tick(marker_idx)) =
                     self.timeline_hover
+                    && let Some((preview_marker, preview, created_at)) =
+                        self.timeline_hover_preview.as_ref()
+                    && *preview_marker == marker_idx
                 {
-                    let preview = self
-                        .timeline_hover_preview
-                        .as_ref()
-                        .filter(|(idx, _)| *idx == turn_idx)
-                        .map(|(_, text)| text.as_str());
-                    if let Some(preview) = preview {
-                        crate::views::timeline::render_tick_hover_popup(
-                            buf,
-                            rail,
-                            layout.scrollback,
-                            turn_idx,
-                            preview,
-                            &theme,
-                        );
-                    }
+                    crate::views::timeline::render_tick_hover_popup(
+                        buf,
+                        rail,
+                        layout.scrollback,
+                        marker_idx,
+                        preview,
+                        *created_at,
+                        &theme,
+                    );
                 }
             }
         }
@@ -1889,13 +2420,21 @@ impl AgentView {
         }
         if tasks_height > 0 {
             let bg_focused = self.active_pane == ActivePane::Tasks && !overlay_focused;
+            let descendant_subagents = root_subagent_tree.as_ref().map(|rows| {
+                rows.iter()
+                    .map(|row| (row.info.child_session_id.to_string(), row.info.clone()))
+                    .collect::<std::collections::HashMap<_, _>>()
+            });
+            let rendered_subagents = descendant_subagents
+                .as_ref()
+                .unwrap_or(&self.subagent_sessions);
             self.tasks.render(
                 layout.tasks,
                 buf,
                 bg_focused,
                 layout_cfg,
                 &self.session.bg_tasks,
-                &self.subagent_sessions,
+                rendered_subagents,
                 &self.session.scheduled_tasks,
             );
             let close_rect = agent::render_todo_chrome(
@@ -1909,6 +2448,24 @@ impl AgentView {
             )
             .and_then(|sel| sel.close_button_rect());
             self.hit_bg_close.set(close_rect);
+        }
+        if catalog_height > 0 {
+            let cat_focused = self.active_pane == ActivePane::Catalog && !overlay_focused;
+            self.catalog
+                .render(layout.catalog, buf, cat_focused, layout_cfg);
+            let close_rect = agent::render_todo_chrome(
+                buf,
+                layout.catalog,
+                layout_cfg,
+                cat_focused,
+                false,
+                self.hit_catalog_close.hovered,
+                &theme,
+            )
+            .and_then(|sel| sel.close_button_rect());
+            self.hit_catalog_close.set(close_rect);
+        } else {
+            self.hit_catalog_close.clear();
         }
         if todo_height > 0 {
             let todo_focused = self.active_pane == ActivePane::Todo && !overlay_focused;
@@ -2162,6 +2719,7 @@ impl AgentView {
                             watching_hovered: self.hit_watching_cue.hovered,
                         }),
                         has_running_execute,
+                        message_interruptible_tool: self.is_message_interruptible_foreground_tool(),
                         total_tokens: self.context_state.as_ref().map(|c| c.used),
                         session_starting_since: self.session_starting_since,
                         is_bash_turn: self.bash_turn,
@@ -2186,6 +2744,27 @@ impl AgentView {
             self.hit_bg_button.clear();
             self.hit_watching_cue.clear();
             self.hit_plan_approval_status.clear();
+        }
+        for (index, line) in self.external_widgets_above_editor.iter().enumerate() {
+            if index >= layout.external_widgets_above_editor.height as usize {
+                break;
+            }
+            let row = Rect::new(
+                layout.external_widgets_above_editor.x,
+                layout.external_widgets_above_editor.y + index as u16,
+                layout.external_widgets_above_editor.width,
+                1,
+            );
+            buf.set_style(row, Style::default().bg(theme.bg_base));
+            let styled = if line.contains('\u{1b}') {
+                crate::views::agent_status::ansi_remote_tui_line(line, &theme)
+            } else {
+                Line::from(Span::styled(
+                    line.clone(),
+                    Style::default().fg(theme.text_secondary).bg(theme.bg_base),
+                ))
+            };
+            crate::tips::render::render_ephemeral_tip(row, buf, &styled);
         }
         let privacy_banner_owns_slot =
             privacy_banner && layout.banner.height >= crate::views::privacy_banner::MIN_HEIGHT;
@@ -2871,8 +3450,17 @@ impl AgentView {
                 crate::views::fork_picker::render_fork_picker_overlay(buf, layout.prompt, state, prompt_focused);
             }
         } else if jump_view_h > 0 {
-            if let Some(ref js) = self.jump_state {
-                crate::views::jump::render_jump_overlay(buf, layout.prompt, js, prompt_focused);
+            if let Some(state) = self.jump_state.as_ref() {
+                crate::views::jump::render_jump_overlay(buf, layout.prompt, state, prompt_focused);
+            }
+        } else if fork_view_h > 0 {
+            if let Some(state) = self.fork_state.as_ref() {
+                crate::views::fork_picker::render_fork_picker_overlay(
+                    buf,
+                    layout.prompt,
+                    state,
+                    prompt_focused,
+                );
             }
         } else if cancel_turn_view_h > 0 {
             let buttons = &mut self.cancel_turn_buttons;
@@ -3296,7 +3884,7 @@ impl AgentView {
             self.pane_areas = layout.pane_areas();
             return (None, crate::terminal::overlay::clear().map(Into::into));
         }
-        match self.shortcuts_bar_content(registry) {
+        match self.shortcuts_bar_content(registry, esc_owned_before_agent) {
             ShortcutsBarContent::Hidden => {}
             ShortcutsBarContent::Surface(hints) => {
                 ShortcutsBar::new(&hints)
@@ -3783,6 +4371,40 @@ impl AgentView {
             self.pane_areas = layout.pane_areas();
             return (None, prompt_post_flush);
         }
+        if self.review_state.is_some() {
+            use ratatui::widgets::{Clear, Widget};
+            let overlay_area = Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: layout.shortcuts.y.saturating_sub(area.y),
+            };
+            let popup_w = ((overlay_area.width as f32 * 0.98) as u16)
+                .max(40)
+                .min(overlay_area.width);
+            // Near full height so filter bar + tree aren't cramped vs prompt row.
+            let popup_h = ((overlay_area.height as f32 * 0.98) as u16)
+                .max(12)
+                .min(overlay_area.height.saturating_sub(1));
+            let popup_x = overlay_area.x + (overlay_area.width.saturating_sub(popup_w)) / 2;
+            // Prefer top-biased placement so modal sits flush above shortcuts.
+            let popup_y = overlay_area.y + (overlay_area.height.saturating_sub(popup_h)).min(1);
+            let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
+            crate::views::file_search::line_viewer::dim_area(buf, overlay_area, theme.bg_base, 0.5);
+            Clear.render(popup_area, buf);
+            if let Some(ref mut review) = self.review_state {
+                crate::views::review::render_review_modal(
+                    buf,
+                    popup_area,
+                    review,
+                    &self.scrollback,
+                );
+            }
+            let hints = self.current_shortcut_hints(registry, esc_owned_before_agent);
+            ShortcutsBar::new(&hints).render(layout.shortcuts, buf);
+            self.pane_areas = layout.pane_areas();
+            return (None, prompt_post_flush);
+        }
         let block_viewer_toast = self.active_toast_message().map(|s| s.to_string());
         if let Some(ref mut viewer) = self.block_viewer {
             use ratatui::style::Modifier;
@@ -3925,6 +4547,32 @@ impl AgentView {
             };
             viewer.render_content(content_area, buf, &entry, true, &prepend_lines);
             viewer.render_text_drag_overlay(buf);
+            let mut image_escape_emitted = false;
+            if let Some(img) = &viewer.image {
+                if let Some(esc) = crate::terminal::overlay::static_centered(
+                    &img.bytes,
+                    img.width,
+                    img.height,
+                    content_area,
+                    img.owner_id,
+                ) {
+                    prompt_post_flush = Some(esc.into());
+                    image_escape_emitted = true;
+                }
+            }
+            if image_escape_emitted {
+                self.block_viewer_image_active = true;
+            } else if self.block_viewer_image_active {
+                // This viewer replaced (or shrank under) an image viewer:
+                // drop the stale shared-slot placement.
+                self.block_viewer_image_active = false;
+                if crate::terminal::image::detect_graphics_protocol()
+                    == crate::terminal::image::GraphicsProtocol::Kitty
+                {
+                    let clear = crate::terminal::overlay::clear_kitty();
+                    prompt_post_flush = Some(clear.into());
+                }
+            }
             let has_input_bar =
                 viewer.list_state.input_mode().is_some() || viewer.list_state.matcher().is_some();
             let in_visual = viewer.list_state.visual_mode;
@@ -4021,6 +4669,18 @@ impl AgentView {
                 post_flush.or_else(|| crate::terminal::overlay::clear().map(Into::into));
             self.pane_areas = layout.pane_areas();
             return (cursor, post_flush);
+        }
+        if let Some(ref modal) = self.pi_shortcut_manager {
+            let overlay_area = Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: layout.shortcuts.y.saturating_sub(area.y).saturating_sub(1),
+            };
+            let theme = Theme::current();
+            modal.render(overlay_area, buf, &theme);
+            self.pane_areas = layout.pane_areas();
+            return (None, crate::terminal::overlay::clear().map(Into::into));
         }
         if let Some(ref mut modal_state) = self.extensions_modal {
             use crate::views::extensions_modal::render_extensions_modal;
@@ -4315,6 +4975,17 @@ impl AgentView {
         if !dropdown_active {
             self.paint_diagram_affordances(buf, scrollback_diagram_affordances, &theme);
         }
+        if self.block_viewer_image_active && self.block_viewer.is_none() {
+            // The block viewer's overlay image outlived the popup: drop the
+            // shared modal placement slot it drew into (Kitty id 1).
+            self.block_viewer_image_active = false;
+            let clear =
+                crate::terminal::overlay::PostFlush::from(crate::terminal::overlay::clear_kitty());
+            match prompt_post_flush.as_mut() {
+                Some(existing) => existing.append(clear),
+                None => prompt_post_flush = Some(clear),
+            }
+        }
         if !self.inline_media_active
             && prompt_post_flush.is_none()
             && let Some(clear) = crate::terminal::overlay::clear()
@@ -4369,6 +5040,7 @@ impl AgentView {
                 self.frame_occluder_rects.push(popup);
             }
         }
+        self.draw_remote_tui_overlay(area, buf, &theme);
         self.pane_areas = layout.pane_areas();
         {
             let route = crate::hyperlink_route::hyperlink_route();
@@ -4454,7 +5126,23 @@ impl AgentView {
                 }
             }
         }
-        (prompt_cursor_pos, prompt_post_flush)
+        let cursor = if self
+            .remote_tui_layout
+            .as_ref()
+            .is_some_and(|layout| layout.overlay)
+        {
+            None
+        } else if self.inline_edit.is_some() {
+            inline_edit_cursor
+        } else {
+            paint_prompt_cursor(
+                buf,
+                prompt_cursor_pos,
+                appearance.prompt.cursor,
+                xai_grok_pager_render::theme::cursor_color_for(&theme),
+            )
+        };
+        (cursor, prompt_post_flush)
     }
 }
 /// Draw one ▼/▲ scroll-indicator arrow centered on row `y`, or clear its hit area when hidden (`y: None`).
@@ -4624,6 +5312,7 @@ mod voice_recording_overlay_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
+            &crate::app::bundle::BundleState::default(),
             false,
             &mut Vec::new(),
             super::AppRenderParams {
@@ -4707,6 +5396,7 @@ mod overlay_cycle_hint_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
+            &crate::app::bundle::BundleState::default(),
             true,
             &mut Vec::new(),
             super::AppRenderParams {
@@ -4771,7 +5461,7 @@ mod overlay_cycle_hint_tests {
             .default_key;
         let ctrl_x_label = |agent: &super::AgentView| {
             agent
-                .current_shortcut_hints(&registry)
+                .current_shortcut_hints(&registry, false)
                 .into_iter()
                 .find(|hint| hint.keys.contains(&stop_key))
                 .map(|hint| hint.label)
@@ -4801,6 +5491,7 @@ mod overlay_cycle_hint_tests {
                 pending,
                 false,
                 crate::app::agent_view::BannerSlotParams::none(),
+                &crate::app::bundle::BundleState::default(),
                 true,
                 &mut Vec::new(),
                 super::AppRenderParams {
@@ -4857,6 +5548,7 @@ mod overlay_post_flush_tests {
                 None,
                 false,
                 crate::app::agent_view::BannerSlotParams::none(),
+                &crate::app::bundle::BundleState::default(),
                 false,
                 &mut Vec::new(),
                 super::AppRenderParams::default(),
@@ -5013,6 +5705,7 @@ mod status_line_draw_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
+            &crate::app::bundle::BundleState::default(),
             false,
             &mut Vec::new(),
             super::AppRenderParams {

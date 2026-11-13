@@ -1,0 +1,144 @@
+{
+  "ts": "2026-07-22T03:21:32.561Z",
+  "kind": "delta",
+  "delta": {
+    "status": "completed",
+    "pdca": {
+      "stage": "act",
+      "stages": [
+        {
+          "id": "plan",
+          "label": "Plan",
+          "status": "completed"
+        },
+        {
+          "id": "do",
+          "label": "Do",
+          "status": "completed"
+        },
+        {
+          "id": "check",
+          "label": "Check",
+          "status": "completed"
+        },
+        {
+          "id": "act",
+          "label": "Act",
+          "status": "completed"
+        }
+      ]
+    },
+    "current_phase": "P3",
+    "updated_at": "2026-07-22T03:21:32.561Z",
+    "phases": [
+      {
+        "id": "P0",
+        "name": "frame objective and constraints",
+        "pdca_stage": "plan",
+        "status": "completed"
+      },
+      {
+        "id": "P1",
+        "name": "execute first tracer path",
+        "pdca_stage": "do",
+        "status": "completed"
+      },
+      {
+        "id": "D1",
+        "name": "choose implementation route",
+        "pdca_stage": "check",
+        "status": "completed",
+        "type": "decision"
+      },
+      {
+        "id": "P2",
+        "name": "validate evidence and regressions",
+        "pdca_stage": "check",
+        "status": "completed"
+      },
+      {
+        "id": "D2",
+        "name": "decide continue, pivot, or close",
+        "pdca_stage": "act",
+        "status": "completed",
+        "type": "decision"
+      },
+      {
+        "id": "P3",
+        "name": "act on learning and hand off",
+        "pdca_stage": "act",
+        "status": "completed"
+      }
+    ],
+    "decision_points": [
+      {
+        "id": "D1",
+        "phase": "D1",
+        "question": "Which route should the next implementation take?",
+        "status": "decided",
+        "options": [
+          {
+            "id": "direct",
+            "label": "Direct implementation",
+            "next_phase": "P2",
+            "criteria": "Scope is clear, blast radius is small, and validation path is known."
+          },
+          {
+            "id": "research",
+            "label": "Research first",
+            "next_phase": "P0",
+            "criteria": "Domain facts, dependencies, or ownership are still unclear."
+          },
+          {
+            "id": "split",
+            "label": "Split into slices",
+            "next_phase": "P1",
+            "criteria": "The work is valid but too broad for one safe change."
+          }
+        ],
+        "selected_option_id": "split",
+        "rationale": "Full upstream compat spans shell seam + External runtime + Pi spawn extension + adapter projection; must ship as S1-S5 not one PR. Research already closed engine/host ownership.",
+        "decided_at": "2026-07-22T02:28:15.618Z"
+      },
+      {
+        "id": "D2",
+        "phase": "D2",
+        "question": "After Check, should this cycle close, pivot, or continue?",
+        "status": "decided",
+        "options": [
+          {
+            "id": "close",
+            "label": "Close cycle",
+            "next_phase": "P3",
+            "criteria": "Acceptance evidence is complete and no important risk remains."
+          },
+          {
+            "id": "continue",
+            "label": "Continue same cycle",
+            "next_phase": "P1",
+            "criteria": "Core direction is right but more execution is required."
+          },
+          {
+            "id": "pivot",
+            "label": "Pivot plan",
+            "next_phase": "P0",
+            "criteria": "Validation changed the problem or invalidated current assumptions."
+          }
+        ],
+        "selected_option_id": "close",
+        "rationale": "Session host wired: ExternalWorkflowRuntime + Pi spawn bridge + workflow_updated projection + launch/pause/stop ACP methods. Unit/check green. Residual is optional live deep-research handtest only.",
+        "decided_at": "2026-07-22T03:21:32.561Z"
+      }
+    ],
+    "validation": {
+      "commands": [
+        "cargo check -p xai-grok-pager-bin --bin grok-pi",
+        "cargo test -p xai-grok-shell --lib session::workflow"
+      ],
+      "notes": "74/75 shell workflow tests pass (1 pre-existing macOS /private symlink). Adapter 100 tests pass. grok-pi check ok."
+    },
+    "next_action": "Optional: handtest deep-research in grok-pi; no blocking work.",
+    "notes": "Workflow full-compat foundation complete; live handtest optional."
+  },
+  "event": "session-host-wired-cycle-closed"
+}

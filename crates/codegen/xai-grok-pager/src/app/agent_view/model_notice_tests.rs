@@ -64,6 +64,7 @@ fn draw(
         None,
         false,
         banner,
+        &crate::app::bundle::BundleState::default(),
         false,
         &mut Vec::new(),
         AppRenderParams {

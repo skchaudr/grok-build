@@ -153,6 +153,8 @@ pub enum RowState {
     Completed,
     /// Finished, with status in ("failed", "cancelled").
     Failed,
+    /// Goal blocked / paused for human reasons (`"blocked"` / `"paused"` status).
+    Blocked,
 }
 
 impl RowState {
@@ -170,6 +172,7 @@ impl RowState {
         match self {
             Self::NeedsInput => 6,
             Self::Working => 5,
+            Self::Blocked => 4,
             Self::Idle => 3,
             // Below Idle (these aren't loaded here, so they're less immediately
             // actionable) but above Done/Failed (they're still live, resumable sessions)
@@ -190,6 +193,7 @@ impl RowState {
             Self::Inactive => "Inactive",
             Self::Completed => "Done",
             Self::Failed => "Failed",
+            Self::Blocked => "Blocked",
         }
     }
 }
@@ -517,9 +521,9 @@ pub struct DashboardState {
     /// (intercepted in `dispatch_dashboard_dispatch_slash`). `None` spawns on the default model. Sticky
     /// across dispatches; reset to `None` on every dashboard-open (alongside `pending_mode`).
     pub pending_model: Option<PendingDispatchModel>,
-    /// Mode the next spawned agent starts in.
-    /// Cycled with Shift+Tab and set by `/plan`.
-    /// Sticky across dispatches; re-seeded from `app.default_yolo` on every dashboard-open (alongside `pending_model`).
+    /// Mode the next spawned agent starts in. Cycled with the platform Plan
+    /// shortcut and set by `/plan`. Sticky across dispatches; re-seeded from
+    /// `app.default_yolo` on every dashboard-open (alongside `pending_model`).
     pub pending_mode: DashboardDispatchMode,
     /// Snapshot of the app-wide model catalog, seeded at dashboard-open so the session-less slash dropdown can suggest real model names for `/model`.
     /// Without this the dropdown would fall back to an empty `ModelState` and offer no completions.
@@ -2519,6 +2523,30 @@ impl DashboardState {
     }
 
     /// Handle a key while the peek panel is open.
+    ///
+    /// The peek panel's `❯ reply` line is a live [`PromptWidget`]
+    /// editor ([`Self::peek_reply`]), so when peek is open it owns the
+    /// bare keys: printable characters, Backspace/Delete/arrows, and
+    /// the widget's editing chords (word nav, `Ctrl+A`/`Ctrl+E`,
+    /// `Alt+Backspace`, undo, Shift+arrow selection, inline paste)
+    /// all edit the reply. Up/Down move the caret WITHIN the reply when
+    /// it has content (multi-line drafts); when the reply is empty (or
+    /// unfocused via Tab) they switch the peeked agent instead (the
+    /// panel follows the selection cursor). Enter sends
+    /// / queues the reply (Ctrl+S sends AND opens the agent; Shift+Enter
+    /// / Alt+Enter insert a newline); Esc closes the panel; and 1–9
+    /// select (toggle) a pending question's option, after which Enter
+    /// answers the selection.
+    ///
+    /// `dashboard_owned` is whether the key resolved to a
+    /// `When::DashboardFocused` registry binding (`Ctrl+X` stop,
+    /// `Shift+↑/↓` reorder, platform Plan shortcut, …) — those return `None`
+    /// so the dashboard handler (and the remaining app-global
+    /// shortcuts) still fire with the panel open.
+    ///
+    /// Returns `Some` for keys the panel consumes and `None` for keys
+    /// it leaves to the normal dashboard / global handling.
+
     fn handle_peek_key(
         &mut self,
         key: &KeyEvent,
@@ -2553,9 +2581,20 @@ impl DashboardState {
             return Some(InputOutcome::Action(Action::DashboardOpenShortcutsHelp));
         }
 
-        // Dashboard-owned chords fall through so the registry actions (Ctrl+X stop, Ctrl+T pin, Shift+↑/↓
-        // reorder, Shift+Tab mode, …) and the hardcoded. CtrlCtrl+/ search toggle keep working with the panel
-        // open.
+        // Dashboard-owned chords fall through so the registry actions
+        // (Ctrl+X stop, Ctrl+T pin, Shift+↑/↓ reorder, platform Plan shortcut,
+        // …) and the hardcoded Ctrl+/ search toggle keep working with
+        // the panel open. Keys the peek itself owns are exempt:
+        //   - bare / Shift printable chars TYPE into the reply (vim's
+        //     bare `j`/`k` nav lose to typing; `?` help only when the
+        //     reply is non-empty — empty handled above),
+        //   - bare Up/Down are the peek's agent switcher (handled
+        //     below, independent of the dispatch box's focus gating),
+        //   - Esc / Enter / Tab drive the peek's own affordances.
+        // Everything else — non-owned Ctrl/Alt/Super editing chords
+        // (word nav, kill-line, undo, …) — falls through to the reply
+        // widget delegation at the bottom.
+
         let is_typing_char = matches!(key.code, KeyCode::Char(_))
             && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT);
         let peek_owned = is_typing_char
@@ -3024,9 +3063,14 @@ impl DashboardState {
             return self.handle_paste_key_deferred(clipboard_text, self.peek_owns_input());
         }
 
-        // Shift+Tab while the peek is open cycles the PEEKED agent's live mode, not the new-session staged
-        // mode.
-        if self.peek_owns_input()
+        // The platform Plan shortcut while the peek is open cycles the PEEKED
+        // agent's live mode, not the new-session staged mode. The registry resolves the
+        // mode shortcut to `DashboardCycleMode`; re-route that to the
+        // peek-scoped action here so the cycle acts on the agent under the
+        // cursor (and the bottom-border badge updates to match). Outside the
+        // peek it still cycles the dispatch box's staged mode.
+
+        if self.peek.is_some()
             && matches!(
                 from_registry,
                 Some(crate::actions::ActionId::DashboardCycleMode)
@@ -3303,8 +3347,8 @@ impl DashboardState {
             }
         }
 
-        // Shift+Tab (DashboardCycleMode) is resolved through the registry `from_registry` path above; its `ActionDef` carries the three terminal
-        // encodings (`BackTab`, `BackTab`+SHIFT, `Tab`+SHIFT) as default/alt keys, so no hardcoded intercept is needed here
+        // The platform Plan shortcut (`DashboardCycleMode`) is resolved through
+        // the registry `from_registry` path above, so no hardcoded intercept is needed here.
 
         // Tab toggles focus between the dispatch input and the overview list (the vim-style way to reach j/k navigation)
         // When the slash / `@` dropdowns are open the intercepts above already consumed Tab (accept completion), so this only fires otherwise
@@ -4182,7 +4226,9 @@ fn dashboard_action_for_id(
         | ActionId::OpenSessions
         | ActionId::OpenExtensions
         | ActionId::SendToBackground
+        | ActionId::CycleThinkingLevel
         | ActionId::CycleMode
+        | ActionId::ReviewSession
         | ActionId::BashMode
         | ActionId::Rewind
         | ActionId::KillBgTask

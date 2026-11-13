@@ -39,9 +39,13 @@ pub mod minimal_hook;
 #[path = "minimal/reprint.rs"]
 pub mod minimal_reprint;
 pub mod models;
+pub mod native_feature_conflicts;
 pub mod notifications;
 #[allow(unused_imports, unused_macros)]
 pub mod obf;
+pub mod pi_model_config;
+pub mod pi_resource_config;
+pub mod pi_resource_policy;
 pub mod plugin_cmd;
 pub mod pty_wrap;
 pub mod recent_dirs;

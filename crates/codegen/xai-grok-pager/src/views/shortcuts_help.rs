@@ -16,7 +16,10 @@
 
 use std::borrow::Cow;
 
+use crossterm::event::{KeyCode, KeyModifiers};
+
 use crate::actions::{ActionDef, ActionId, ActionRegistry, Category, When};
+use crate::app::extension_shortcuts::ExtensionShortcut;
 use crate::input::key::KeyShortcut;
 use crate::views::picker::{PickerConfig, PickerOutcome, PickerState, handle_picker_input};
 use crate::views::shortcuts_bar::HintItem;
@@ -69,9 +72,107 @@ const CATEGORY_ORDER: &[(Category, &str)] = &[
     (Category::Session, "Session"),
     (Category::Dashboard, "Dashboard"),
 ];
+const PI_EXTENSION_CATEGORY_IDX: usize = CATEGORY_ORDER.len();
 
 pub fn default_collapsed() -> std::collections::HashSet<usize> {
     (1..CATEGORY_ORDER.len()).collect()
+}
+
+fn append_pi_extension_shortcuts(
+    entries: &mut Vec<ShortcutsHelpEntry>,
+    shortcuts: &[ExtensionShortcut],
+) {
+    if shortcuts.is_empty() {
+        return;
+    }
+
+    let header_idx = entries.len();
+    entries.push(ShortcutsHelpEntry::SectionHeader {
+        label: "Pi Extension Shortcuts",
+        category_idx: PI_EXTENSION_CATEGORY_IDX,
+        entry_count: 0,
+    });
+
+    for shortcut in shortcuts {
+        let effective_key = shortcut.remapped_to.as_deref().unwrap_or(&shortcut.key);
+        let Some(key) = key_id_to_shortcut(effective_key) else {
+            continue;
+        };
+        let label = if shortcut.description.trim().is_empty() {
+            shortcut.extension.clone()
+        } else {
+            shortcut.description.clone()
+        };
+        let mut item = HintItem::new(key, Cow::Owned(label));
+        item.description = Some(Cow::Owned(if shortcut.description.trim().is_empty() {
+            format!("Shortcut from {}", shortcut.extension)
+        } else {
+            format!("{} ({})", shortcut.description, shortcut.extension)
+        }));
+        entries.push(ShortcutsHelpEntry::Hint {
+            item,
+            dimmed: !shortcut.enabled,
+            action_id: None,
+            long_help: None,
+        });
+    }
+
+    let count = entries.len() - header_idx - 1;
+    if count == 0 {
+        entries.pop();
+    } else if let Some(ShortcutsHelpEntry::SectionHeader { entry_count, .. }) =
+        entries.get_mut(header_idx)
+    {
+        *entry_count = count;
+    }
+}
+
+fn key_id_to_shortcut(key_id: &str) -> Option<KeyShortcut> {
+    let lower = key_id.to_lowercase();
+    let mut parts = lower.split('+').collect::<Vec<_>>();
+    let key_part = parts.pop()?;
+    if key_part.is_empty() {
+        return None;
+    }
+
+    let mut modifiers = KeyModifiers::NONE;
+    for modifier in parts {
+        modifiers |= match modifier {
+            "ctrl" | "control" => KeyModifiers::CONTROL,
+            "alt" | "meta" | "option" => KeyModifiers::ALT,
+            "shift" => KeyModifiers::SHIFT,
+            "super" | "cmd" | "command" | "win" => KeyModifiers::SUPER,
+            _ => return None,
+        };
+    }
+
+    let code = match key_part {
+        "enter" | "return" => KeyCode::Enter,
+        "escape" | "esc" => KeyCode::Esc,
+        "tab" => KeyCode::Tab,
+        "backspace" => KeyCode::Backspace,
+        "delete" | "del" => KeyCode::Delete,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "pageup" => KeyCode::PageUp,
+        "pagedown" => KeyCode::PageDown,
+        "space" => KeyCode::Char(' '),
+        key if key.len() == 1 => KeyCode::Char(key.chars().next()?),
+        key if key.starts_with('f') => {
+            let number = key[1..].parse::<u8>().ok()?;
+            if !(1..=12).contains(&number) {
+                return None;
+            }
+            KeyCode::F(number)
+        }
+        _ => return None,
+    };
+
+    Some(KeyShortcut::new(code, modifiers))
 }
 
 // Man-page body for the paste pseudo-row (Enter detail)
@@ -88,7 +189,8 @@ const PASTE_LONG_HELP: &str = "\
 Pastes clipboard images into the prompt as chips, and plain text as typed.\n\
 Use Ctrl+V for screenshots, browser \"Copy Image\", and file-manager image \
 copies (many terminals swallow Cmd+V and never deliver it to the TUI).\n\
-You can also drag an image file into the prompt.";
+Use Opt+Shift+V to always save clipboard text as a temporary attachment, \
+even when it is short. You can also drag an image file into the prompt.";
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 const PASTE_LONG_HELP: &str = "\
 Pastes clipboard images into the prompt as chips, and plain text as typed.\n\
@@ -133,7 +235,17 @@ pub fn build_entries(
     registry: &ActionRegistry,
     vim_mode: bool,
 ) -> Vec<ShortcutsHelpEntry> {
+    build_entries_with_extension_shortcuts(active_contexts, registry, vim_mode, &[])
+}
+
+pub fn build_entries_with_extension_shortcuts(
+    active_contexts: &[When],
+    registry: &ActionRegistry,
+    vim_mode: bool,
+    extension_shortcuts: &[ExtensionShortcut],
+) -> Vec<ShortcutsHelpEntry> {
     let mut entries: Vec<ShortcutsHelpEntry> = Vec::new();
+    append_pi_extension_shortcuts(&mut entries, extension_shortcuts);
 
     // Keys the dashboard session-overlay claims while it is up
     // The overlay intercept consults `When::DashboardOverlay` before forwarding a key to the agent
@@ -1211,6 +1323,7 @@ impl CheatsheetRows {
                         badge_color: None,
                         collapsible: true,
                         underline_last_desc: false,
+                        label_color: None,
                     }),
                     CheatsheetRowKind::Hint { dimmed, expand } => {
                         let is_expanded =
@@ -1237,6 +1350,7 @@ impl CheatsheetRows {
                             badge_color: None,
                             collapsible: false,
                             underline_last_desc: false,
+                            label_color: None,
                         })
                     }
                     CheatsheetRowKind::Other => PickerEntry::Row(PickerRow {
@@ -1253,6 +1367,7 @@ impl CheatsheetRows {
                         badge_color: None,
                         collapsible: false,
                         underline_last_desc: false,
+                        label_color: None,
                     }),
                 }
             })

@@ -558,6 +558,87 @@ pub fn model_display_name(
     model.to_string()
 }
 
+/// Per-turn assistant usage row for cache hit graph/stats (pi-cache-graph shape).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantUsageMetric {
+    pub sequence: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_branch_sequence: Option<u32>,
+    pub entry_id: String,
+    pub timestamp: String,
+    pub provider: String,
+    pub model: String,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub total_tokens: u64,
+    pub cache_hit_percent: f64,
+    pub is_on_active_branch: bool,
+    /// True when input/output were estimated from content (provider usage was 0).
+    #[serde(default)]
+    pub usage_estimated: bool,
+}
+
+/// Aggregate token totals for cache stats.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CacheUsageTotals {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub total_tokens: u64,
+    pub assistant_messages: u64,
+}
+
+/// Session-wide cache metrics for Context modal graph/stats views.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CacheSessionMetrics {
+    pub all_messages: Vec<AssistantUsageMetric>,
+    pub active_branch_messages: Vec<AssistantUsageMetric>,
+    pub tree_totals: CacheUsageTotals,
+    pub active_branch_totals: CacheUsageTotals,
+    /// Prompt tokens that should have been cache reads but were billed again.
+    #[serde(default)]
+    pub rebilled_tokens: u64,
+    /// Number of cache misses above Pi's 1,024-token noise floor.
+    #[serde(default)]
+    pub cache_miss_count: u32,
+    /// How many assistant rows used content-size estimates (provider wrote 0 usage).
+    #[serde(default)]
+    pub estimated_count: u32,
+}
+
+/// Session-wide token totals from Pi's `get_session_stats` RPC.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SessionTokenTotals {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub total: u64,
+}
+
+/// Session-wide message, tool, token, and billing totals.
+///
+/// Kept separate from [`ContextInfo`]: these aggregate the entire persisted
+/// session (including compacted history), while context is the current window.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SessionUsageStats {
+    pub total_messages: u64,
+    pub user_messages: u64,
+    pub assistant_messages: u64,
+    pub tool_calls: u64,
+    pub tool_results: u64,
+    pub tokens: SessionTokenTotals,
+    pub cost: f64,
+}
+
 /// Full wire response for `x.ai/session/info`.
 ///
 /// Wraps `SessionInfoData` with session-level fields (`session_id`, `cwd`) that come from the agent layer rather than the session actor.
@@ -566,6 +647,19 @@ pub fn model_display_name(
 pub struct SessionInfoResponse {
     pub session_id: String,
     pub cwd: String,
+    /// User-facing Pi session name when one has been assigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
+    /// On-disk session path when the agent persists JSONL (Pi `sessionFile`).
+    /// Absent for in-memory / Grok cloud-only sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_file: Option<String>,
+    /// Optional full-session counts, token totals, and cost (Pi `SessionStats`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_stats: Option<SessionUsageStats>,
+    /// Optional Pi cache-hit series for Context modal graph/stats (grok-pi).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_metrics: Option<CacheSessionMetrics>,
     #[serde(flatten)]
     pub data: SessionInfoData,
 }
@@ -919,6 +1013,64 @@ mod tests {
         assert!(!point.has_file_changes);
         assert_eq!(point.num_file_snapshots, 5);
         assert!(point.prompt_preview.is_none());
+    }
+
+    #[test]
+    fn session_info_stats_are_optional_and_round_trip() {
+        let legacy = serde_json::json!({
+            "sessionId": "s1",
+            "cwd": "/tmp",
+            "model": null,
+            "resolvedModelId": null,
+            "modelFingerprint": null,
+            "turns": 0,
+            "turnIndex": 0,
+            "context": ContextInfo::default()
+        });
+        let parsed: SessionInfoResponse = serde_json::from_value(legacy).unwrap();
+        assert!(parsed.session_name.is_none());
+        assert!(parsed.session_stats.is_none());
+
+        let populated = SessionInfoResponse {
+            session_id: "s2".into(),
+            cwd: "/repo".into(),
+            session_name: Some("named".into()),
+            session_file: Some("/repo/session.jsonl".into()),
+            session_stats: Some(SessionUsageStats {
+                total_messages: 7,
+                user_messages: 2,
+                assistant_messages: 3,
+                tool_calls: 2,
+                tool_results: 2,
+                tokens: SessionTokenTotals {
+                    input: 10,
+                    output: 20,
+                    cache_read: 30,
+                    cache_write: 40,
+                    total: 100,
+                },
+                cost: 0.125,
+            }),
+            cache_metrics: None,
+            data: SessionInfoData {
+                agent_name: None,
+                model: None,
+                model_display_name: None,
+                resolved_model_id: None,
+                model_fingerprint: None,
+                show_model_fingerprint: false,
+                api_backend: None,
+                conversation_id: None,
+                turns: 0,
+                turn_index: 0,
+                context: ContextInfo::default(),
+            },
+        };
+        let value = serde_json::to_value(&populated).unwrap();
+        assert_eq!(value["sessionName"], "named");
+        assert_eq!(value["sessionStats"]["tokens"]["cacheRead"], 30);
+        let roundtrip: SessionInfoResponse = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtrip.session_stats.unwrap().cost, 0.125);
     }
 
     #[test]

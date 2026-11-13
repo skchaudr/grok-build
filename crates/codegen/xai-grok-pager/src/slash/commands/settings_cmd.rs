@@ -17,7 +17,8 @@ impl SlashCommand for SettingsCommand {
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        CommandResult::Action(Action::OpenSettings)
+        // Same surface as F2: the grok-pi settings panel.
+        CommandResult::Action(Action::OpenPiSettings)
     }
 }
 
@@ -61,8 +62,8 @@ mod tests {
         let cmd = SettingsCommand;
         let result = cmd.run(&mut ctx, "");
         assert!(
-            matches!(result, CommandResult::Action(Action::OpenSettings)),
-            "expected OpenSettings, got {result:?}",
+            matches!(result, CommandResult::Action(Action::OpenPiSettings)),
+            "expected OpenPiSettings, got {result:?}",
         );
     }
 
@@ -74,8 +75,8 @@ mod tests {
         for args in ["theme", "  ", "anything goes", "compact-mode"] {
             let result = cmd.run(&mut ctx, args);
             assert!(
-                matches!(result, CommandResult::Action(Action::OpenSettings)),
-                "expected OpenSettings for args={args:?}, got {result:?}",
+                matches!(result, CommandResult::Action(Action::OpenPiSettings)),
+                "expected OpenPiSettings for args={args:?}, got {result:?}",
             );
         }
     }

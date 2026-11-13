@@ -30,6 +30,11 @@ impl AgentView {
     pub(super) fn handle_mouse(&mut self, mouse: &MouseEvent) -> InputOutcome {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // Clicks on the painted popup itself are absorbed so they do
+                // not toggle expansion (or start drags) on the row beneath.
+                if self.write_edit_hover_popup_contains(mouse.column, mouse.row) {
+                    return InputOutcome::Changed;
+                }
                 self.left_mouse_down = true;
                 if self.hit_todo_close.contains(mouse.column, mouse.row) {
                     self.todo.overlay.escape();
@@ -376,12 +381,12 @@ impl AgentView {
                 if let Some(rail) = self.timeline_rail.as_ref()
                     && rail.rect.contains((mouse.column, mouse.row).into())
                 {
-                    let target = rail
+                    if let Some(marker_idx) = rail
                         .hit(mouse.column, mouse.row)
-                        .and_then(|hit| crate::views::timeline::chevron_target(rail, hit));
-                    if let Some(turn_idx) = target {
+                        .and_then(|hit| crate::views::timeline::chevron_target(rail, hit))
+                    {
                         self.set_active_pane(AgentPane::Scrollback, false);
-                        self.scrollback.jump_to_turn(turn_idx);
+                        self.scrollback.jump_to_timeline_marker(marker_idx);
                         return InputOutcome::Changed;
                     }
                     return InputOutcome::Unchanged;
@@ -413,6 +418,16 @@ impl AgentView {
                     return InputOutcome::Unchanged;
                 }
                 match self.pane_areas.hit_test(mouse.column, mouse.row) {
+                    Some(AgentPane::Catalog) => {
+                        self.set_active_pane(AgentPane::Catalog, false);
+                        self.catalog.handle_mouse(
+                            mouse.kind,
+                            mouse.column,
+                            mouse.row,
+                            self.pane_areas.catalog,
+                        );
+                        InputOutcome::Changed
+                    }
                     Some(AgentPane::Dock) => {
                         let item = self.dock_item_at(self.pane_areas.dock, mouse.row);
                         if let Some(hit) = self
@@ -597,7 +612,7 @@ impl AgentView {
                                 }
                             }
                         }
-                        let view_click =
+                        let clicked_view_entry =
                             self.tasks
                                 .view_button_rects
                                 .iter()
@@ -605,8 +620,8 @@ impl AgentView {
                                     rect.contains((mouse.column, mouse.row).into())
                                         .then(|| entry_id.clone())
                                 });
-                        if let Some(entry_id) = view_click {
-                            match entry_id {
+                        if let Some(entry_id) = clicked_view_entry {
+                            match &entry_id {
                                 TaskEntryId::BgTask(tid) => {
                                     let already_open = self
                                         .block_viewer
@@ -623,13 +638,10 @@ impl AgentView {
                                 }
                                 TaskEntryId::Agent(sid) => {
                                     if let Some(child_sid) = self
-                                        .subagent_sessions
-                                        .iter()
-                                        .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
-                                        .map(|(k, _)| k.clone())
-                                        && self.subagent_views.contains_key(&child_sid)
+                                        .descendant_subagent_info(sid)
+                                        .map(|info| info.child_session_id.to_string())
+                                        && self.open_descendant_subagent_fullscreen(child_sid)
                                     {
-                                        self.open_subagent_fullscreen(child_sid);
                                         return InputOutcome::Changed;
                                     }
                                 }
@@ -637,18 +649,13 @@ impl AgentView {
                                     if let Some(sid) = self
                                         .session
                                         .scheduled_tasks
-                                        .get(&tid)
+                                        .get(tid)
                                         .and_then(|info| info.last_subagent_id.clone())
                                         && let Some(child_sid) = self
-                                            .subagent_sessions
-                                            .iter()
-                                            .find(|(_, info)| {
-                                                info.subagent_id.as_ref() == sid.as_str()
-                                            })
-                                            .map(|(k, _)| k.clone())
-                                        && self.subagent_views.contains_key(&child_sid)
+                                            .descendant_subagent_info(&sid)
+                                            .map(|info| info.child_session_id.to_string())
+                                        && self.open_descendant_subagent_fullscreen(child_sid)
                                     {
-                                        self.open_subagent_fullscreen(child_sid);
                                         return InputOutcome::Changed;
                                     }
                                 }
@@ -676,10 +683,10 @@ impl AgentView {
                                 self.last_bg_click = None;
                                 return InputOutcome::Changed;
                             }
-                            if let Some(child_sid) = self.tasks.selected_child_session_id()
-                                && self.subagent_views.contains_key(child_sid)
+                            if let Some(child_sid) =
+                                self.tasks.selected_child_session_id().map(str::to_string)
+                                && self.open_descendant_subagent_fullscreen(child_sid)
                             {
-                                self.open_subagent_fullscreen(child_sid.to_string());
                                 self.last_bg_click = None;
                                 return InputOutcome::Changed;
                             }
@@ -756,6 +763,18 @@ impl AgentView {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.pending_link_click = None;
+                // Absorb bare drags that start inside the popup with no
+                // gesture armed (Down on the popup was already absorbed);
+                // active drags keep extending across the overlay.
+                let gesture_armed = self.scrollbar_dragging
+                    || self.drag_selection.is_some()
+                    || self.block_drag_selection.is_some()
+                    || self.pending_text_drag.is_some()
+                    || self.pending_block_drag.is_some()
+                    || self.deferred_text_press.is_some();
+                if !gesture_armed && self.write_edit_hover_popup_contains(mouse.column, mouse.row) {
+                    return InputOutcome::Changed;
+                }
                 tracing::debug!(
                     event = "scrollback_mouse_drag",
                     col = mouse.column,
@@ -941,15 +960,19 @@ impl AgentView {
                     || self.block_drag_selection.is_some()
                     || self.deferred_text_press.is_some();
                 let hit = self.pane_areas.hit_test(mouse.column, mouse.row);
-                let on_rail = self
-                    .timeline_rail
-                    .as_ref()
-                    .is_some_and(|r| r.rect.contains((mouse.column, mouse.row).into()));
                 let new_timeline_hover = self
                     .timeline_rail
                     .as_ref()
-                    .and_then(|r| r.hit(mouse.column, mouse.row));
-                let new_hover = if on_rail || suppress_scrollback_hover {
+                    .and_then(|rail| rail.hit(mouse.column, mouse.row));
+                let new_hover = if new_timeline_hover.is_none()
+                    && !suppress_scrollback_hover
+                    && self.write_edit_hover_popup_contains(mouse.column, mouse.row)
+                {
+                    // Pointer rests on the painted popup itself: keep the
+                    // current hover target so the overlay stays open instead
+                    // of re-targeting whatever entry lies beneath it.
+                    self.hovered_entry
+                } else if new_timeline_hover.is_some() || suppress_scrollback_hover {
                     None
                 } else {
                     hit.and_then(|pane| match pane {
@@ -965,6 +988,7 @@ impl AgentView {
                         | AgentPane::Queue
                         | AgentPane::Prompt
                         | AgentPane::Tasks
+                        | AgentPane::Catalog
                         | AgentPane::Dock => None,
                     })
                 };
@@ -975,8 +999,8 @@ impl AgentView {
                 if old_mouse_pos != self.last_mouse_pos {
                     self.last_mouse_moved_at = Some(Instant::now());
                 }
-                let mut changed =
-                    new_hover != self.hovered_entry || new_prompt_hover != self.hovered_prompt;
+                let hover_changed = new_hover != self.hovered_entry;
+                let mut changed = hover_changed || new_prompt_hover != self.hovered_prompt;
                 if new_hover.is_some()
                     && old_mouse_pos != self.last_mouse_pos
                     && let Some(idx) = new_hover
@@ -989,6 +1013,11 @@ impl AgentView {
                         ))
                 {
                     changed = true;
+                }
+                if hover_changed {
+                    self.write_edit_hover_popup_entry = new_hover;
+                    self.write_edit_hover_started_at = new_hover.map(|_| Instant::now());
+                    self.write_edit_hover_popup_scroll = 0;
                 }
                 self.hovered_entry = new_hover;
                 self.hovered_prompt = new_prompt_hover;

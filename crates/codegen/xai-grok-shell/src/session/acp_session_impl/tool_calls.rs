@@ -73,6 +73,29 @@ fn is_interruptible_wait_tool(tool_name: &str, args: &serde_json::Value) -> bool
         _ => false,
     }
 }
+
+/// Foreground tools whose runtime contract supports cancelling the whole turn
+/// when a new user prompt arrives. This is deliberately separate from
+/// [`is_interruptible_wait_tool`]: a wait interruption returns a synthetic
+/// tool result while leaving background work alive; foreground Bash/Eval must
+/// instead take the send-now path so their existing AbortSignal tears down the
+/// process tree / eval kernel execution.
+fn is_message_interruptible_foreground_tool(tool_name: &str, args: &serde_json::Value) -> bool {
+    matches!(tool_name, "bash" | "eval")
+        && !args
+            .get("is_background")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+async fn wait_for_pending_interjection(buf: &InterjectionBuffer<acp::ImageContent>) {
+    loop {
+        if !buf.is_empty() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 fn should_flush_held_queue_before_wait(
     has_interruptible_wait: bool,
     steer: bool,
@@ -748,6 +771,10 @@ impl SessionActor {
                 let display_cwd = display_cwd.clone();
                 let interruptible =
                     is_interruptible_wait_tool(&prepared.tool_name, prepared.authored_arguments());
+                let message_interruptible_foreground = is_message_interruptible_foreground_tool(
+                    &prepared.tool_name,
+                    prepared.authored_arguments(),
+                );
                 let prepared = {
                     let mut dispatch_prepared = prepared.clone();
                     if interruptible
@@ -887,6 +914,13 @@ impl SessionActor {
                             result
                         }
                     };
+                    // Unlike a blocking wait, a foreground Bash/Eval keeps its
+                    // normal tool future running here. The guard only opens the
+                    // queue's auto-send-now window; when a user prompt arrives,
+                    // the session cancels this turn and the runtime's existing
+                    // AbortSignal cancels the tool itself.
+                    let _foreground_interrupt_guard = message_interruptible_foreground
+                        .then(|| BlockingWaitGuard::enter(blocking_wait_depth.clone()));
                     let wait_guard = interruptible
                         .then(|| BlockingWaitGuard::enter(blocking_wait_depth.clone()));
                     let (result, wait_aborted) = if interruptible {
@@ -2858,16 +2892,32 @@ impl SessionActor {
                 .is_some_and(|id| consumed_ids.contains(&id))
         });
         let dropped_inputs = dropped.len();
-        let before_notifications = state.pending_notifications.len();
-        state
+        let dropped_notification_ids: Vec<String> = state
             .pending_notifications
-            .retain(|n| !consumed_ids.contains(&n.source.task_id()));
+            .iter()
+            .filter(|n| {
+                n.source
+                    .task_ids()
+                    .iter()
+                    .any(|task_id| consumed_ids.contains(task_id))
+            })
+            .flat_map(|n| n.source.completion_task_ids())
+            .map(str::to_owned)
+            .collect();
+        let before_notifications = state.pending_notifications.len();
+        state.pending_notifications.retain(|n| {
+            !n.source
+                .task_ids()
+                .iter()
+                .any(|task_id| consumed_ids.contains(task_id))
+        });
         let dropped_notifications = before_notifications - state.pending_notifications.len();
         drop(state);
         if let Some(reservations) = &self.tool_context.task_completion_reservations {
             for task_id in dropped
                 .iter()
                 .filter_map(|input| input.input_origin.completion_id())
+                .chain(dropped_notification_ids.iter().map(String::as_str))
             {
                 reservations.release(task_id);
             }
@@ -3754,12 +3804,51 @@ mod plan_approval_helper_tests {
 #[cfg(test)]
 mod wait_interrupt_tests {
     use super::{
-        BlockingWaitGuard, WaitInterruptCause, is_interruptible_wait_tool,
-        should_flush_held_queue_before_wait,
+        BlockingWaitGuard, WaitInterruptCause, interrupted_wait_tool_result,
+        is_interruptible_wait_tool, is_message_interruptible_foreground_tool,
+        should_flush_held_queue_before_wait, wait_for_pending_interjection,
     };
+    use xai_grok_tools::types::output::ToolOutput;
+    use xai_tool_types::TaskOutputOutput;
+
+    /// The interruptible-wait select arms: a pending interjection aborts an in-flight wait.
+    /// `biased` prefers an already-completed wait result over the abort.
+    #[tokio::test(start_paused = true)]
+    async fn pending_interjection_aborts_in_flight_wait() {
+        use super::InterjectionBuffer;
+        use xai_interjection_core::PendingInterjection;
+        let buf: InterjectionBuffer<agent_client_protocol::ImageContent> =
+            InterjectionBuffer::default();
+        let out = tokio::select! {
+            biased;
+            r = async { "wait-result" } => r,
+            _ = wait_for_pending_interjection(&buf) => "aborted",
+        };
+        assert_eq!(out, "wait-result");
+        buf.push(PendingInterjection {
+            text: "user message".into(),
+            attachments: Vec::new(),
+        });
+        let out = tokio::select! {
+            biased;
+            r = async {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                "wait-result"
+            } => r,
+            _ = wait_for_pending_interjection(&buf) => "aborted",
+        };
+        assert_eq!(out, "aborted");
+        let out = tokio::select! {
+            biased;
+            r = async { "wait-result" } => r,
+            _ = wait_for_pending_interjection(&buf) => "aborted",
+        };
+        assert_eq!(out, "wait-result");
+    }
+
     #[test]
     fn interrupted_wait_result_does_not_consume_the_waited_task() {
-        let result = super::interrupted_wait_tool_result(
+        let result = interrupted_wait_tool_result(
             &serde_json::json!({"task_ids": ["bg-running"], "timeout_ms": 120_000}),
             WaitInterruptCause::HumanInterjection,
         );
@@ -3768,6 +3857,7 @@ mod wait_interrupt_tests {
                 .is_empty()
         );
     }
+
     #[test]
     fn wait_start_flush_skips_queue_mode_and_active_goals() {
         assert!(should_flush_held_queue_before_wait(true, true, false));
@@ -3803,6 +3893,48 @@ mod wait_interrupt_tests {
             "read_file",
             &serde_json::json!({"target_file": "/tmp/x"})
         ));
+    }
+    #[test]
+    fn message_interruptible_foreground_tool_only_covers_foreground_bash_eval() {
+        assert!(is_message_interruptible_foreground_tool(
+            "bash",
+            &serde_json::json!({"command": "sleep 30"})
+        ));
+        assert!(is_message_interruptible_foreground_tool(
+            "eval",
+            &serde_json::json!({"code": "await sleep(30)"})
+        ));
+        assert!(!is_message_interruptible_foreground_tool(
+            "bash",
+            &serde_json::json!({"command": "sleep 30", "is_background": true})
+        ));
+        assert!(!is_message_interruptible_foreground_tool(
+            "eval",
+            &serde_json::json!({"code": "await sleep(30)", "is_background": true})
+        ));
+        assert!(!is_message_interruptible_foreground_tool(
+            "read_file",
+            &serde_json::json!({"target_file": "/tmp/x"})
+        ));
+    }
+    #[test]
+    fn interrupted_wait_result_is_cancelled_not_error() {
+        let r = interrupted_wait_tool_result(&serde_json::json!({
+            "task_ids": ["bg-9"],
+            "timeout_ms": 60_000
+        }));
+        assert!(
+            r.prompt_text
+                .contains("Wait interrupted: the user sent a message.")
+        );
+        match &r.output {
+            ToolOutput::TaskOutput(TaskOutputOutput::Result(res)) => {
+                assert_eq!(res.task_id, "bg-9");
+                assert_eq!(res.status, "cancelled");
+            }
+            other => panic!("expected TaskOutput Result, got {other:?}"),
+        }
+        assert!(!r.output.is_error());
     }
     /// `BlockingWaitGuard` counts nested waits; drop always decrements.
     #[test]

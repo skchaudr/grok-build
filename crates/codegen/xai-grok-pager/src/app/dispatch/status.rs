@@ -11,6 +11,8 @@ use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView, PendingCodingDataWrite};
 use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
+use crate::views::modal::ActiveModal;
+use crate::views::modal_window::ModalWindowState;
 use crate::settings::CodingDataSharingLock;
 
 /// Temporary kill switch: client share links are disabled.
@@ -73,6 +75,7 @@ pub(super) fn open_usage_info_modal(
         tab,
         UsageInfoContext {
             session_id: session_id.as_ref().map(|s| s.0.to_string()),
+            session_file: None,
             usage_visible,
             chat_kind: agent.chat_kind,
             billing_redirect_url: redirect_url,
@@ -128,6 +131,7 @@ fn open_dashboard_usage_modal(
         app.usage_visible && !chat_kind && app.usage_billing_redirect_url.is_none();
     let ctx = UsageInfoContext {
         session_id: None,
+        session_file: None,
         usage_visible: app.usage_visible,
         chat_kind,
         billing_redirect_url: app.usage_billing_redirect_url.clone(),
@@ -174,6 +178,43 @@ pub(super) fn dispatch_show_session_info(app: &mut AppView) -> Vec<Effect> {
         show_resolved_model: app.show_resolved_model,
         nonce: Default::default(),
     }]
+}
+
+/// Show privacy and data retention status as a system message in scrollback.
+///
+/// Three-state display: Enterprise ZDR, coding data sharing opted out,
+/// or opted in. Labels align with `CODING_DATA_SHARING_CHOICES` in
+/// `settings/defs.rs`.
+///
+/// Also lists config knobs that `/privacy` does not change (technical
+/// pointers only; no policy claims).
+pub(super) fn dispatch_show_privacy_info(app: &mut AppView) -> Vec<Effect> {
+    let mut lines = Vec::new();
+
+    if app.is_zdr {
+        lines.push("  Zero Data Retention: enabled");
+        lines.push("  Your data is not retained or used for training (ZDR enabled).");
+    } else if app.coding_data_retention_opt_out {
+        lines.push("  Privacy: privacy mode");
+        lines.push("  Your code data will not be trained on or used to improve the product.");
+        lines.push("");
+        lines.push("  Use /privacy opt-in to share data and help improve the product.");
+    } else {
+        lines.push("  Privacy: share data");
+        lines.push("  Usage and code data may be used by SpaceXAI to improve the product.");
+        lines.push("");
+        lines.push("  Use /privacy opt-out to enable privacy mode.");
+    }
+
+    lines.push("");
+    lines.push("  Other settings (not changed by /privacy):");
+    lines.push("  - [features] telemetry / GROK_TELEMETRY_ENABLED");
+    lines.push("  - [telemetry] trace_upload / GROK_TELEMETRY_TRACE_UPLOAD");
+    lines.push("  - GROK_EXTERNAL_OTEL / OTEL_*");
+    lines.push("");
+    lines.push("  Learn more: https://x.ai/legal");
+    push_system_to_any_agent(app, &lines.join("\n"));
+    vec![]
 }
 
 /// State-only mutation for `coding_data_sharing`; the shell owns the setting.
@@ -313,9 +354,29 @@ pub(super) fn scrub_error_for_toast(error: &str) -> String {
     error.to_owned()
 }
 
-/// `/context` and the context-bar click: open the usage modal on its "Context usage" tab, or fetch-and-show in scrollback in minimal mode.
+/// Push a system message to the active agent's scrollback, or to any available
+/// agent if on the welcome screen.
+fn push_system_to_any_agent(app: &mut AppView, msg: &str) {
+    let block = RenderBlock::system(msg.to_string());
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        agent.scrollback.push_block(block);
+        return;
+    }
+    if let Some(agent) = app.agents.values_mut().next() {
+        agent.scrollback.push_block(block);
+    }
+}
+
+/// `/context` and the context-bar click. Stock/full mode uses the upstream
+/// tabbed usage modal. The external grok-pi profile keeps its cache-graph
+/// Context modal when that F2 seam is enabled; minimal mode stays scrollback.
 pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
-    if !app.screen_mode.is_minimal() {
+    let minimal = app.screen_mode.is_minimal();
+    let use_pi_context_modal =
+        crate::app::external_agent_active() && app.current_ui.pi_cache_graph && !minimal;
+    if !minimal && !use_pi_context_modal {
         return open_usage_info_modal(app, crate::views::usage_modal::UsageInfoTab::ContextUsage);
     }
     let ActiveView::Agent(id) = app.active_view else {
@@ -651,6 +712,11 @@ pub(super) fn handle_context_info_complete(
     nonce: u64,
 ) -> Vec<Effect> {
     let minimal = app.screen_mode.is_minimal();
+    // Read the external-only F2 gate before mutably borrowing agents.
+    let cache_graph_enabled = app.current_ui.pi_cache_graph;
+    let show_resolved_model = app.show_resolved_model;
+    let use_pi_context_modal =
+        crate::app::external_agent_active() && cache_graph_enabled && !minimal;
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         if agent.session.session_id.as_ref() != Some(session_id) {
             return vec![];
@@ -662,12 +728,77 @@ pub(super) fn handle_context_info_complete(
             return vec![];
         }
         let model = info.data.model.as_deref().unwrap_or("unknown").to_string();
-        let snapshot = info.data.context;
+        let snapshot = info.data.context.clone();
         agent.apply_full_context_info(snapshot.clone());
-        if let Some(state) = usage_modal_state_mut(agent) {
-            state.context = Some(crate::scrollback::blocks::ContextInfoBlock::new(
-                snapshot, model,
-            ));
+        let cost_usd = info.session_stats.as_ref().map(|stats| stats.cost);
+        if use_pi_context_modal {
+            // Preserve Pi cache-graph view across refresh (`r`) while keeping
+            // the surface transient (never append it to conversation history).
+            let (prev_view, prev_selected, prev_detail) = match &agent.active_modal {
+                Some(ActiveModal::ContextInfo {
+                    view,
+                    selected_row,
+                    detail_open,
+                    ..
+                }) => (*view, *selected_row, *detail_open),
+                _ => (
+                    crate::views::cache_graph::CacheGraphView::Breakdown,
+                    None,
+                    false,
+                ),
+            };
+            let export_basename = info
+                .session_file
+                .as_deref()
+                .and_then(|p| {
+                    std::path::Path::new(p)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_owned)
+                })
+                .filter(|s| !s.is_empty())
+                .or_else(|| agent.session.session_id.as_ref().map(|id| id.0.to_string()))
+                .unwrap_or_else(|| "session".into());
+            let export_basename = crate::views::cache_graph::sanitize_export_name(&export_basename);
+            let cache_metrics = info.cache_metrics.clone();
+            let view = if cache_metrics.is_some() {
+                prev_view
+            } else {
+                crate::views::cache_graph::CacheGraphView::Breakdown
+            };
+            let selected_row = cache_metrics.as_ref().and_then(|metrics| {
+                if metrics.all_messages.is_empty() {
+                    None
+                } else {
+                    Some(
+                        prev_selected
+                            .unwrap_or(metrics.all_messages.len() - 1)
+                            .min(metrics.all_messages.len() - 1),
+                    )
+                }
+            });
+            let session_fields =
+                crate::app::effects::session_info_fields(&info, None, show_resolved_model);
+            let session_file = info.session_file.clone();
+            agent.active_modal = Some(ActiveModal::ContextInfo {
+                block: crate::scrollback::blocks::ContextInfoBlock::new(snapshot, model)
+                    .with_cost(cost_usd),
+                scroll: 0,
+                window: ModalWindowState::new(),
+                cache_metrics,
+                view,
+                selected_row,
+                detail_open: prev_detail,
+                session_file,
+                session_fields,
+                export_cwd: info.cwd.clone(),
+                export_basename,
+            });
+        } else if let Some(state) = usage_modal_state_mut(agent) {
+            state.context = Some(
+                crate::scrollback::blocks::ContextInfoBlock::new(snapshot, model)
+                    .with_cost(cost_usd),
+            );
             state.context_error = None;
         } else if minimal {
             push_and_page_flip(

@@ -30,6 +30,7 @@ pub enum SettingOwner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingCategory {
     Appearance,
+    Popups,
     Mouse,
     Editor,
     Agent,
@@ -43,6 +44,7 @@ impl SettingCategory {
     /// Render order: Appearance first (most-touched), then Mouse, then the rest.
     pub const ALL: &'static [Self] = &[
         Self::Appearance,
+        Self::Popups,
         Self::Mouse,
         Self::Editor,
         Self::Agent,
@@ -56,6 +58,7 @@ impl SettingCategory {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
+            Self::Popups => "Popups",
             Self::Mouse => "Mouse",
             Self::Editor => "Editor & Input",
             Self::Agent => "Agent & Approval",
@@ -63,6 +66,16 @@ impl SettingCategory {
             Self::Models => "Models",
             Self::Session => "Session",
             Self::Advanced => "Advanced",
+        }
+    }
+
+    /// Short label for the modal's tab bar. Tabs share one row, so these
+    /// drop the `&`-conjunctions that [`Self::label`] carries.
+    pub fn tab_label(&self) -> &'static str {
+        match self {
+            Self::Editor => "Editor",
+            Self::Agent => "Agent",
+            other => other.label(),
         }
     }
 }
@@ -132,6 +145,8 @@ pub enum StringValidator {
     /// Validated against the live model catalog at commit time.
     /// Empty input is accepted as a sentinel that clears the default.
     KnownModel,
+    /// `native`, `block`, `underline`, `bar`, or one single-column character.
+    PromptCursor,
     /// No constraint (any UTF-8 accepted).
     Any,
 }
@@ -196,6 +211,9 @@ pub struct SettingMeta {
     pub restart_required: bool,
     /// When `true`, the row is hidden in minimal mode (the setting still exists and applies to the full TUI).
     pub hidden_in_minimal: bool,
+    /// When `true`, the row is only visible in the external (grok-pi)
+    /// profile. Normal Grok F2 hides these settings entirely.
+    pub external_only: bool,
 }
 
 /// A typed value carried by `Action::Set*` payloads, modal preview state, and the rollback path on persist failure.
@@ -207,6 +225,7 @@ pub enum SettingValue {
     String(String),
     Enum(&'static str),
     Int(i64),
+    PiBuiltinTools(xai_grok_shell::agent::config::PiBuiltinTools),
 }
 
 /// The one write of the user key on disk right now, and the newest intent waiting behind it.
@@ -362,6 +381,8 @@ pub struct PagerLocalSnapshot {
     pub scroll_speed: u8,
     /// Mirrors `AppView::appearance.scrollback.scroll.respect_manual_folds` at snapshot time.
     pub respect_manual_folds: bool,
+    /// Canonical `[prompt].cursor` value from `AppView::appearance`.
+    pub prompt_cursor: String,
     /// Mirrors `AppView::auto_mode_gate` at snapshot time.
     /// When false the permission-mode picker hides the "Auto-review" choice (matches the Shift+Tab cycle, which skips it when the feature gate is off).
     pub auto_mode_gate: bool,
@@ -393,6 +414,7 @@ impl Default for PagerLocalSnapshot {
             // Bare `u8::default()` would be `0` (out of range) so we override
             scroll_speed: 50,
             respect_manual_folds: crate::appearance::ScrollConfig::default().respect_manual_folds,
+            prompt_cursor: crate::appearance::PromptCursor::default().to_config_value(),
             auto_mode_gate: false,
             ask_user_question_timeout_enabled: None,
             voice_stt_language: xai_grok_voice::STT_LANGUAGE_DEFAULT.to_string(),
@@ -479,6 +501,18 @@ impl SettingsRegistry {
         Self { entries }
     }
 
+    /// Build the core registry plus settings declared by an external host.
+    /// Stock Grok calls [`Self::defaults`] and therefore never sees host-only
+    /// feature rows.
+    pub fn defaults_with_host_features(
+        manifest: &xai_grok_shell::host_features::HostFeatureManifest,
+    ) -> Self {
+        let mut entries = crate::settings::defs::default_settings();
+        entries.extend(manifest.iter().map(host_feature_setting_meta));
+        assert_unique_keys(&entries);
+        Self { entries }
+    }
+
     /// Build a registry from a caller-supplied list of `SettingMeta`.
     /// Exists for tests; `#[doc(hidden)]` discourages production use.
     /// Panics on duplicate keys.
@@ -539,6 +573,52 @@ fn assert_unique_keys(entries: &[SettingMeta]) {
     );
 }
 
+fn host_feature_setting_meta(
+    spec: &'static xai_grok_shell::host_features::HostFeatureSpec,
+) -> SettingMeta {
+    let category = match spec.category {
+        xai_grok_shell::host_features::HostFeatureCategory::Appearance => {
+            SettingCategory::Appearance
+        }
+        xai_grok_shell::host_features::HostFeatureCategory::Popups => SettingCategory::Popups,
+        xai_grok_shell::host_features::HostFeatureCategory::Mouse => SettingCategory::Mouse,
+        xai_grok_shell::host_features::HostFeatureCategory::Editor => SettingCategory::Editor,
+        xai_grok_shell::host_features::HostFeatureCategory::Agent => SettingCategory::Agent,
+        xai_grok_shell::host_features::HostFeatureCategory::Privacy => SettingCategory::Privacy,
+        xai_grok_shell::host_features::HostFeatureCategory::Models => SettingCategory::Models,
+        xai_grok_shell::host_features::HostFeatureCategory::Session => SettingCategory::Session,
+        xai_grok_shell::host_features::HostFeatureCategory::Advanced => SettingCategory::Advanced,
+    };
+    assert!(
+        crate::settings::layout::sections_for(category).contains(&spec.section),
+        "host feature `{}` declares unknown F2 section `{}` for {:?}",
+        spec.key.as_str(),
+        spec.section,
+        category,
+    );
+    let description = match spec.native_feature_key {
+        Some(conflict_key) => crate::native_feature_conflicts::f2_description_with_conflicts(
+            spec.description,
+            conflict_key,
+        ),
+        None => spec.description,
+    };
+    SettingMeta {
+        key: spec.key.as_str(),
+        category,
+        owner: SettingOwner::Shell,
+        label: spec.label,
+        description,
+        keywords: spec.keywords,
+        kind: SettingKind::Bool {
+            default: spec.default_enabled,
+        },
+        restart_required: spec.restart_required,
+        hidden_in_minimal: false,
+        external_only: true,
+    }
+}
+
 fn build_search_haystack(m: &SettingMeta) -> String {
     let mut s = String::new();
     s.push_str(&m.label.to_lowercase());
@@ -563,11 +643,58 @@ pub fn current_value_for(
     ui: &UiConfig,
     pager: &PagerLocalSnapshot,
 ) -> Option<SettingValue> {
+    if let Some(spec) = xai_grok_shell::host_features::feature_spec_by_setting_key(key) {
+        return Some(SettingValue::Bool(spec.current_bool(ui)));
+    }
     match key {
         // SHARED: UiConfig is the source of truth, the pager keeps a cache
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
         "show_timeline" => Some(SettingValue::Bool(ui.show_timeline_enabled())),
+        "pi_builtin_tools.read" => Some(SettingValue::Bool(ui.pi_builtin_tools.read)),
+        "pi_builtin_tools.bash" => Some(SettingValue::Bool(ui.pi_builtin_tools.bash)),
+        "pi_builtin_tools.powershell" => Some(SettingValue::Bool(ui.pi_builtin_tools.powershell)),
+        "pi_builtin_tools.edit" => Some(SettingValue::Bool(ui.pi_builtin_tools.edit)),
+        "pi_builtin_tools.write" => Some(SettingValue::Bool(ui.pi_builtin_tools.write)),
+        "pi_builtin_tools.grep" => Some(SettingValue::Bool(ui.pi_builtin_tools.grep)),
+        "pi_builtin_tools.find" => Some(SettingValue::Bool(ui.pi_builtin_tools.find)),
+        "pi_builtin_tools.ls" => Some(SettingValue::Bool(ui.pi_builtin_tools.ls)),
+        "pi_builtin_tools.eval" => Some(SettingValue::Bool(ui.pi_builtin_tools.eval)),
+        "pi_builtin_tools.codemode" => Some(SettingValue::Bool(ui.pi_builtin_tools.codemode)),
+        "pi_bash" => Some(SettingValue::Bool(ui.pi_bash)),
+        "pi_eval" => Some(SettingValue::Enum(match ui.pi_eval.as_str() {
+            "v2" => "v2",
+            _ => "v1",
+        })),
+        "pi_eval_v2_language" => Some(SettingValue::Enum(match ui.pi_eval_v2_language.as_str() {
+            "py" => "py",
+            "all" => "all",
+            _ => "js",
+        })),
+        "pi_eval_v2_display_mode" => Some(SettingValue::Enum(
+            match ui.pi_eval_v2_display_mode.as_str() {
+                "legacy" => "legacy",
+                _ => "effects",
+            },
+        )),
+        "pi_eval_v2_only" => Some(SettingValue::Bool(ui.pi_eval_v2_only)),
+        "pi_eval_mcp" => Some(SettingValue::Bool(ui.pi_eval_mcp)),
+        "psm_resume_index" => Some(SettingValue::Bool(ui.psm_resume_index)),
+        "pi_tree_file_rollback" => Some(SettingValue::Bool(ui.pi_tree_file_rollback)),
+        "pi_tree_skip_summary_prompt" => Some(SettingValue::Bool(ui.pi_tree_skip_summary_prompt)),
+        "pi_ask_user_question_notifications" => {
+            Some(SettingValue::Bool(ui.pi_ask_user_question_notifications))
+        }
+        "pi_cache_graph" => Some(SettingValue::Bool(ui.pi_cache_graph)),
+        "pi_config_skill" => Some(SettingValue::Bool(ui.pi_config_skill)),
+        "pi_user_markdown" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_pi_user_markdown(),
+        )),
+        "pi_at_search_hidden" => Some(SettingValue::Bool(ui.pi_at_search_hidden)),
+        "pi_keep_multi_agent" => Some(SettingValue::Bool(ui.pi_keep_multi_agent)),
+        "show_other_tool_args" => Some(SettingValue::Bool(ui.show_other_tool_args)),
+        "review_file_tree" => Some(SettingValue::Bool(ui.review_file_tree)),
+        "review_include_reads" => Some(SettingValue::Bool(ui.review_include_reads)),
         "dashboard_preview" => Some(SettingValue::Bool(ui.dashboard_preview_enabled())),
         // The cache is the send-path source of truth (same pattern as group_tool_verbs)
         "page_flip_on_send" => Some(SettingValue::Bool(
@@ -580,6 +707,7 @@ pub fn current_value_for(
         "follow_up_behavior" => Some(SettingValue::Enum(
             crate::appearance::cache::load_follow_up_behavior().as_canonical(),
         )),
+        "cancel_turn_key" => Some(SettingValue::Enum(ui.cancel_turn_key())),
         "confirm_before_rewind" => Some(SettingValue::Bool(ui.confirm_before_rewind_enabled())),
         "simple_mode" => Some(SettingValue::Bool(ui.simple_mode.unwrap_or(true))),
         // Per-tip contextual hints: `None` (inherit) reads as the default ON
@@ -637,6 +765,10 @@ pub fn current_value_for(
         "show_thinking_blocks" => Some(SettingValue::Bool(
             crate::appearance::cache::load_show_thinking_blocks(),
         )),
+        // Live cache; read by the prompt render path once per frame.
+        "thinking_border_colors" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_thinking_border_colors(),
+        )),
         // Live cache (like `show_thinking_blocks`).
         "group_tool_verbs" => Some(SettingValue::Bool(
             crate::appearance::cache::load_group_tool_verbs(),
@@ -645,10 +777,29 @@ pub fn current_value_for(
         "collapsed_edit_blocks" => Some(SettingValue::Bool(
             crate::appearance::cache::load_collapsed_edit_blocks(),
         )),
+        "side_by_side_edit" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_side_by_side_edit(),
+        )),
+        "ctrl_o_tool_expansion" => Some(SettingValue::Enum(
+            match ui.ctrl_o_tool_expansion.as_deref() {
+                Some("all_tools") => "all_tools",
+                _ => "write_edit",
+            },
+        )),
+        "pi_bash_run_display" => Some(SettingValue::Enum(
+            crate::appearance::cache::load_execute_header_content().as_canonical(),
+        )),
+        "pi_bash_command_format" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_pi_bash_command_format(),
+        )),
+        "write_edit_hover_popups" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_write_edit_hover_popups(),
+        )),
         // Live cache; `GROK_PROMPT_SUGGESTIONS` env overrides at the gate.
         "prompt_suggestions" => Some(SettingValue::Bool(
             crate::appearance::cache::load_prompt_suggestions(),
         )),
+        "prompt_cursor" => Some(SettingValue::String(pager.prompt_cursor.clone())),
         "respect_manual_folds" => Some(SettingValue::Bool(pager.respect_manual_folds)),
         // SHELL: canonicalized from `[ui].hunk_tracker_mode`
         "hunk_tracker_mode" => Some(SettingValue::Enum(canonical_hunk_tracker_mode(
@@ -777,6 +928,21 @@ pub fn current_value_for(
                     .unwrap_or_else(|| ui.fork_secondary_model.clone())
             }
         })),
+        // session_recap: None → on (default).
+        "session_recap" => Some(SettingValue::Bool(ui.session_recap.unwrap_or(true))),
+        // recap_mermaid: None → off (default).
+        "recap_mermaid" => Some(SettingValue::Bool(ui.recap_mermaid.unwrap_or(false))),
+        // progress_bar: None → off (default).
+        "progress_bar" => Some(SettingValue::Bool(ui.progress_bar.unwrap_or(false))),
+        // remote_tui_footer: None → off (default).
+        "remote_tui_footer" => Some(SettingValue::Bool(ui.remote_tui_footer.unwrap_or(false))),
+        // recap_model: empty = recap generation disabled.
+        "recap_model" => Some(SettingValue::String(ui.recap_model.clone())),
+        "recap_model_2" => Some(SettingValue::String(ui.recap_model_2.clone())),
+        "recap_model_3" => Some(SettingValue::String(ui.recap_model_3.clone())),
+        "btw_model" => Some(SettingValue::String(ui.btw_model.clone())),
+        "btw_model_2" => Some(SettingValue::String(ui.btw_model_2.clone())),
+        "btw_model_3" => Some(SettingValue::String(ui.btw_model_3.clone())),
 
         _ => None,
     }
@@ -898,6 +1064,65 @@ mod tests {
                         "show_timeline default drifts from UiConfig::default()"
                     );
                 }
+                ("pi_builtin_tools.read", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.pi_builtin_tools.read);
+                }
+                ("pi_builtin_tools.bash", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.pi_builtin_tools.bash);
+                }
+                ("pi_builtin_tools.powershell", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.pi_builtin_tools.powershell);
+                }
+                ("pi_builtin_tools.edit", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.pi_builtin_tools.edit);
+                }
+                ("pi_builtin_tools.write", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.pi_builtin_tools.write);
+                }
+                ("pi_builtin_tools.grep", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.pi_builtin_tools.grep);
+                }
+                ("pi_builtin_tools.find", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.pi_builtin_tools.find);
+                }
+                ("pi_builtin_tools.ls", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.pi_builtin_tools.ls);
+                }
+                ("pi_builtin_tools.eval", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.pi_builtin_tools.eval);
+                }
+                ("pi_builtin_tools.codemode", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.pi_builtin_tools.codemode);
+                }
+                ("pi_bash", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.pi_bash);
+                }
+                ("pi_eval", SettingKind::Enum { default, .. }) => {
+                    let expected = if ui.pi_eval == "v2" { "v2" } else { "v1" };
+                    assert_eq!(*default, expected);
+                }
+                ("pi_eval_v2_language", SettingKind::Enum { default, .. }) => {
+                    let expected = match ui.pi_eval_v2_language.as_str() {
+                        "py" => "py",
+                        "all" => "all",
+                        _ => "js",
+                    };
+                    assert_eq!(*default, expected);
+                }
+                ("pi_eval_v2_display_mode", SettingKind::Enum { default, .. }) => {
+                    let expected = if ui.pi_eval_v2_display_mode == "legacy" {
+                        "legacy"
+                    } else {
+                        "effects"
+                    };
+                    assert_eq!(*default, expected);
+                }
+                ("pi_eval_v2_only", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.pi_eval_v2_only);
+                }
+                ("pi_eval_mcp", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.pi_eval_mcp);
+                }
                 ("dashboard_preview", SettingKind::Bool { default }) => {
                     assert_eq!(ui.dashboard_preview_enabled(), *default);
                 }
@@ -927,6 +1152,13 @@ mod tests {
                         *default,
                         ui.follow_up_behavior(),
                         "follow_up_behavior default drifts from UiConfig::default()"
+                    );
+                }
+                ("cancel_turn_key", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default,
+                        ui.cancel_turn_key(),
+                        "cancel_turn_key default drifts from UiConfig::default()"
                     );
                 }
                 ("simple_mode", SettingKind::Bool { default }) => {
@@ -981,6 +1213,13 @@ mod tests {
                     assert_eq!(
                         *default, expected,
                         "auto_light_theme default drifts from UiConfig::default()",
+                    );
+                }
+                ("ctrl_o_tool_expansion", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default,
+                        ui.ctrl_o_tool_expansion.as_deref().unwrap_or("write_edit"),
+                        "ctrl_o_tool_expansion default drifts from UiConfig::default()",
                     );
                 }
                 // permission_mode: None on disk falls back to "ask"
@@ -1076,6 +1315,14 @@ mod tests {
                         *default,
                         ui.show_thinking_blocks.unwrap_or(true),
                         "show_thinking_blocks default drifts from UiConfig::default()"
+                    );
+                }
+                // thinking_border_colors: Option<bool>; None reads as true (client default)
+                ("thinking_border_colors", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.thinking_border_colors.unwrap_or(true),
+                        "thinking_border_colors default drifts from UiConfig::default()"
                     );
                 }
                 // group_tool_verbs: Option<bool>; None reads as true (client default)
@@ -1266,6 +1513,208 @@ mod tests {
                          models::default_model() — drift here breaks the empty-fold contract",
                     );
                 }
+                ("progress_bar", SettingKind::Bool { default }) => {
+                    assert!(!default, "progress_bar registry default must be off");
+                    assert_eq!(
+                        *default,
+                        ui.progress_bar.unwrap_or(false),
+                        "progress_bar default drifts from UiConfig::default()",
+                    );
+                }
+                ("remote_tui_footer", SettingKind::Bool { default }) => {
+                    assert!(!default, "remote_tui_footer registry default must be off");
+                    assert_eq!(
+                        *default,
+                        ui.remote_tui_footer.unwrap_or(false),
+                        "remote_tui_footer default drifts from UiConfig::default()",
+                    );
+                }
+                ("session_recap", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.session_recap.unwrap_or(true),
+                        "session_recap default drifts from UiConfig::default()",
+                    );
+                }
+                ("recap_mermaid", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.recap_mermaid.unwrap_or(false),
+                        "recap_mermaid default drifts from UiConfig::default()",
+                    );
+                }
+                ("recap_model", SettingKind::DynamicEnum { default, .. }) => {
+                    assert_eq!(
+                        *default, "",
+                        "recap_model registry default must be empty string (disabled)",
+                    );
+                    assert!(
+                        ui.recap_model.is_empty(),
+                        "UiConfig::default().recap_model must be empty",
+                    );
+                }
+                ("recap_model_2", SettingKind::DynamicEnum { default, .. }) => {
+                    assert_eq!(
+                        *default, "",
+                        "recap_model_2 registry default must be empty string (disabled)",
+                    );
+                    assert!(
+                        ui.recap_model_2.is_empty(),
+                        "UiConfig::default().recap_model_2 must be empty",
+                    );
+                }
+                ("recap_model_3", SettingKind::DynamicEnum { default, .. }) => {
+                    assert_eq!(
+                        *default, "",
+                        "recap_model_3 registry default must be empty string (disabled)",
+                    );
+                    assert!(
+                        ui.recap_model_3.is_empty(),
+                        "UiConfig::default().recap_model_3 must be empty",
+                    );
+                }
+                ("btw_model", SettingKind::DynamicEnum { default, .. }) => {
+                    assert_eq!(
+                        *default, "",
+                        "btw_model registry default must be empty string",
+                    );
+                    assert!(
+                        ui.btw_model.is_empty(),
+                        "UiConfig::default().btw_model must be empty",
+                    );
+                }
+                ("btw_model_2", SettingKind::DynamicEnum { default, .. }) => {
+                    assert_eq!(
+                        *default, "",
+                        "btw_model_2 registry default must be empty string",
+                    );
+                    assert!(
+                        ui.btw_model_2.is_empty(),
+                        "UiConfig::default().btw_model_2 must be empty",
+                    );
+                }
+                ("btw_model_3", SettingKind::DynamicEnum { default, .. }) => {
+                    assert_eq!(
+                        *default, "",
+                        "btw_model_3 registry default must be empty string",
+                    );
+                    assert!(
+                        ui.btw_model_3.is_empty(),
+                        "UiConfig::default().btw_model_3 must be empty",
+                    );
+                }
+                ("psm_resume_index", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.psm_resume_index,
+                        "psm_resume_index default drifts from UiConfig::default()"
+                    );
+                    assert!(!*default, "psm_resume_index must default OFF");
+                }
+                ("pi_tree_file_rollback", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.pi_tree_file_rollback,
+                        "pi_tree_file_rollback default drifts from UiConfig::default()"
+                    );
+                    assert!(!*default, "pi_tree_file_rollback must default OFF");
+                }
+                ("pi_tree_skip_summary_prompt", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.pi_tree_skip_summary_prompt,
+                        "pi_tree_skip_summary_prompt default drifts from UiConfig::default()"
+                    );
+                    assert!(!*default, "pi_tree_skip_summary_prompt must default OFF");
+                }
+                ("pi_ask_user_question_notifications", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.pi_ask_user_question_notifications,
+                        "pi_ask_user_question_notifications default drifts from UiConfig::default()"
+                    );
+                    assert!(
+                        *default,
+                        "pi_ask_user_question_notifications must default ON"
+                    );
+                }
+                ("pi_cache_graph", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.pi_cache_graph,
+                        "pi_cache_graph default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "pi_cache_graph must default ON");
+                }
+                ("pi_config_skill", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.pi_config_skill,
+                        "pi_config_skill default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "pi_config_skill must default ON");
+                }
+                ("pi_user_markdown", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.pi_user_markdown,
+                        "pi_user_markdown default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "pi_user_markdown must default ON");
+                }
+                ("pi_at_search_hidden", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.pi_at_search_hidden,
+                        "pi_at_search_hidden default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "pi_at_search_hidden must default ON");
+                }
+                ("pi_keep_multi_agent", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.pi_keep_multi_agent,
+                        "pi_keep_multi_agent default drifts from UiConfig::default()"
+                    );
+                    assert!(!*default, "pi_keep_multi_agent must default OFF");
+                }
+                ("pi_bash_run_display", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default,
+                        ui.pi_bash_run_display.as_deref().unwrap_or("task_name"),
+                        "pi_bash_run_display default drifts from UiConfig::default()"
+                    );
+                    assert_eq!(
+                        *default, "task_name",
+                        "pi_bash_run_display must default to task_name"
+                    );
+                }
+                ("pi_bash_command_format", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.pi_bash_command_format,
+                        "pi_bash_command_format default drifts from UiConfig::default()"
+                    );
+                    assert!(!*default, "pi_bash_command_format must default OFF");
+                }
+                ("write_edit_hover_popups", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.write_edit_hover_popups,
+                        "write_edit_hover_popups default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "write_edit_hover_popups must default ON");
+                }
+                ("show_other_tool_args", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.show_other_tool_args,
+                        "show_other_tool_args default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "show_other_tool_args must default ON");
+                }
+                ("review_file_tree", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.review_file_tree,
+                        "review_file_tree default drifts from UiConfig::default()"
+                    );
+                    assert!(!*default, "review_file_tree must default OFF");
+                }
+                ("review_include_reads", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.review_include_reads,
+                        "review_include_reads default drifts from UiConfig::default()"
+                    );
+                    assert!(!*default, "review_include_reads must default OFF");
+                }
 
                 _ => panic!(
                     "settings::defs::default_settings() contains entry `{}` with no \
@@ -1273,6 +1722,95 @@ mod tests {
                     meta.key
                 ),
             }
+        }
+    }
+
+    /// Host-feature rows must never leak into stock Grok's registry, and the
+    /// composed registry must project extension-owned JSON in F2 coordinate order.
+    #[test]
+    fn host_feature_rows_are_manifest_scoped() {
+        const HOST_UI: &str = r#"{
+          "schemaVersion": 1,
+          "settings": [
+            {
+              "key": "pi_goal",
+              "label": "Pi goal",
+              "description": "Goal mode",
+              "f2": {"category": "agent", "section": "Pi features", "order": 20},
+              "kind": "bool",
+              "default": false,
+              "restartRequired": true,
+              "configPath": ["ui", "pi_goal"],
+              "nativeFeatureKey": "pi_goal"
+            },
+            {
+              "key": "pi_workflows",
+              "label": "Pi workflows",
+              "description": "Workflow mode",
+              "f2": {"category": "agent", "section": "Pi features", "order": 10},
+              "kind": "bool",
+              "default": false,
+              "restartRequired": true,
+              "configPath": ["ui", "pi_workflows"],
+              "nativeFeatureKey": "pi_workflows"
+            }
+          ]
+        }"#;
+        let manifest = xai_grok_shell::host_features::HostFeatureManifest::from_json_sources(&[(
+            "test/grok-pi.json",
+            HOST_UI,
+        )])
+        .expect("valid host UI descriptor");
+
+        let specs = manifest.iter().collect::<Vec<_>>();
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pi_workflows", "pi_goal"],
+            "F2 order must come from extension JSON, not source declaration order",
+        );
+
+        let stock = SettingsRegistry::defaults();
+        for spec in &specs {
+            assert!(
+                stock.find(spec.key.as_str()).is_none(),
+                "stock defaults() must not contain host-only feature row `{}`",
+                spec.key.as_str(),
+            );
+        }
+
+        let reg = SettingsRegistry::defaults_with_host_features(&manifest);
+        let host_rows = reg
+            .all()
+            .iter()
+            .filter(|meta| specs.iter().any(|spec| spec.key.as_str() == meta.key))
+            .map(|meta| meta.key)
+            .collect::<Vec<_>>();
+        assert_eq!(host_rows, vec!["pi_workflows", "pi_goal"]);
+
+        for spec in specs {
+            let meta = reg
+                .find(spec.key.as_str())
+                .unwrap_or_else(|| panic!("host feature `{}` registered", spec.key.as_str()));
+            assert_eq!(meta.label, spec.label);
+            match &meta.kind {
+                SettingKind::Bool { default } => assert_eq!(*default, spec.default_enabled),
+                other => panic!("host feature must project as Bool row, got {other:?}"),
+            }
+            assert!(!meta.hidden_in_minimal);
+            assert_eq!(meta.restart_required, spec.restart_required);
+
+            let ui = UiConfig::default();
+            assert_eq!(
+                current_value_for(spec.key.as_str(), &ui, &PagerLocalSnapshot::default()),
+                Some(SettingValue::Bool(spec.current_bool(&ui))),
+            );
+            assert_eq!(
+                crate::settings::layout::section_for(spec.key.as_str()),
+                spec.section,
+            );
         }
     }
 
@@ -1293,6 +1831,12 @@ mod tests {
                         "multiline_mode default drifts from PagerLocalSnapshot::default()"
                     );
                 }
+                ("prompt_cursor", SettingKind::String { default, .. }) => {
+                    assert_eq!(
+                        *default, pager.prompt_cursor,
+                        "prompt_cursor default drifts from PagerLocalSnapshot::default()"
+                    );
+                }
                 ("respect_manual_folds", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default, pager.respect_manual_folds,
@@ -1303,6 +1847,13 @@ mod tests {
                         crate::appearance::ScrollConfig::default().respect_manual_folds,
                         "respect_manual_folds default drifts from ScrollConfig::default() — \
                          the appearance config is the source of truth"
+                    );
+                }
+                ("side_by_side_edit", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        crate::appearance::cache::SIDE_BY_SIDE_EDIT_DEFAULT,
+                        "side_by_side_edit default drifts from the process-local cache initializer"
                     );
                 }
                 // plan_mode: per-session, not persisted.
@@ -1701,6 +2252,7 @@ mod tests {
             },
             restart_required: false,
             hidden_in_minimal: false,
+            external_only: false,
         };
         // The same key registered twice panics
         let _ = SettingsRegistry::from_entries(vec![dup_meta.clone(), dup_meta]);

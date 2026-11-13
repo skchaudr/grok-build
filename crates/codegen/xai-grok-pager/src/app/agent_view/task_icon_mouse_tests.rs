@@ -39,6 +39,7 @@ fn draw_frame(agent: &mut AgentView, area: Rect) -> Buffer {
         None,
         false,
         BannerSlotParams::none(),
+        &crate::app::bundle::BundleState::default(),
         false,
         &mut Vec::new(),
         super::AppRenderParams::default(),

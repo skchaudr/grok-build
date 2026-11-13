@@ -1007,8 +1007,7 @@ impl AgentView {
                     child_session_id, ..
                 }) => {
                     let child_sid = child_session_id.clone();
-                    if self.subagent_views.contains_key(&child_sid) {
-                        self.open_subagent_fullscreen(child_sid);
+                    if self.open_descendant_subagent_fullscreen(child_sid) {
                         return InputOutcome::Changed;
                     }
                 }
@@ -1037,11 +1036,10 @@ impl AgentView {
                 }
                 Some(TaskEntry::Agent { subagent_id, .. }) => {
                     let subagent_id = subagent_id.clone();
-                    if self.subagent_sessions.values().any(|s| {
-                        s.subagent_id.as_ref() == subagent_id
-                            && s.is_running()
-                            && !s.attempt.pending_kill
-                    }) {
+                    if self
+                        .descendant_subagent_info(&subagent_id)
+                        .is_some_and(|s| s.is_running() && !s.attempt.pending_kill)
+                    {
                         return InputOutcome::Action(Action::KillSubagent(subagent_id));
                     }
                 }
@@ -1096,6 +1094,140 @@ impl AgentView {
             InputOutcome::Unchanged
         }
     }
+    /// Subagent-pane-focused key handling.
+    pub(super) fn handle_catalog_key(
+        &mut self,
+        key: &KeyEvent,
+        _registry: &ActionRegistry,
+    ) -> InputOutcome {
+        use crate::views::overlay::{handle_overlay_key, handle_overlay_nav_key};
+        let has_input = self.catalog.list_state.input_mode().is_some();
+        let action = handle_overlay_key(&mut self.catalog.overlay, key).or_else(|| {
+            if !has_input {
+                handle_overlay_nav_key(&mut self.catalog.overlay, key)
+            } else {
+                None
+            }
+        });
+        if let Some(action) = action {
+            self.catalog.on_state_change();
+            if !self.catalog.overlay.visible || !self.catalog.overlay.focused {
+                self.set_active_pane(AgentPane::Scrollback, false);
+            }
+            return overlay_action_to_outcome(action);
+        }
+        if key.code == crossterm::event::KeyCode::Enter
+            && key.modifiers == crossterm::event::KeyModifiers::NONE
+        {
+            if let Some((kind, name)) = self.catalog.selected_entry() {
+                return InputOutcome::Action(Action::ViewCatalogEntry {
+                    kind: kind.to_owned(),
+                    name: name.to_owned(),
+                });
+            }
+            return InputOutcome::Unchanged;
+        }
+        if self.catalog.handle_key(key) {
+            InputOutcome::Changed
+        } else {
+            InputOutcome::Unchanged
+        }
+    }
+    const WRITE_EDIT_HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+    pub(crate) fn write_edit_hover_popup_ready(&self) -> bool {
+        self.write_edit_hover_started_at
+            .is_some_and(|started_at| started_at.elapsed() >= Self::WRITE_EDIT_HOVER_DELAY)
+    }
+
+    /// Whether the Write/Edit hover popup is currently painted under
+    /// `(col, row)` and still backed by a valid collapsed Write/Edit tool row.
+    /// Guards against stale frame rects by re-validating the hover target.
+    pub(crate) fn write_edit_hover_popup_contains(&self, col: u16, row: u16) -> bool {
+        let Some(frame) = self.write_edit_hover_popup_frame else {
+            return false;
+        };
+        if !frame.area.contains((col, row).into()) {
+            return false;
+        }
+        let Some(hover_idx) = self.hovered_entry else {
+            return false;
+        };
+        crate::views::agent::write_edit_hover_popup_target(&self.scrollback, hover_idx)
+    }
+
+    pub(crate) fn needs_write_edit_hover_popup_tick(&self) -> bool {
+        if !crate::appearance::cache::load_write_edit_hover_popups() {
+            return false;
+        }
+        let Some(started_at) = self.write_edit_hover_started_at else {
+            return false;
+        };
+        if started_at.elapsed() >= Self::WRITE_EDIT_HOVER_DELAY {
+            return false;
+        }
+        let Some(hover_idx) = self.hovered_entry else {
+            return false;
+        };
+        crate::views::agent::write_edit_hover_popup_target(&self.scrollback, hover_idx)
+    }
+
+    fn handle_write_edit_hover_popup_scroll(&mut self, lines: i32, col: u16, row: u16) -> bool {
+        if lines == 0
+            || !crate::appearance::cache::load_write_edit_hover_popups()
+            || !self.write_edit_hover_popup_ready()
+        {
+            return false;
+        }
+        if !self.pane_areas.scrollback.contains((col, row).into()) {
+            return false;
+        }
+        let Some(hover_idx) = self.hovered_entry else {
+            return false;
+        };
+        if !crate::views::agent::write_edit_hover_popup_target(&self.scrollback, hover_idx) {
+            return false;
+        }
+        let Some((entry_area, _, _)) = self
+            .scrollback
+            .entry_screen_area(hover_idx, self.pane_areas.scrollback)
+        else {
+            return false;
+        };
+        // Accept the wheel over the collapsed row or over the painted popup
+        // body itself; anything else falls through to scrollback scrolling.
+        if !entry_area.contains((col, row).into())
+            && !self.write_edit_hover_popup_contains(col, row)
+        {
+            return false;
+        }
+        if self.write_edit_hover_popup_entry != Some(hover_idx) {
+            self.write_edit_hover_popup_entry = Some(hover_idx);
+            self.write_edit_hover_popup_scroll = 0;
+        }
+        // Clamp against the painted popup's content so the wheel stops at the
+        // ends instead of growing the offset without bound.
+        let max_offset = self
+            .write_edit_hover_popup_frame
+            .map(|frame| {
+                frame
+                    .total_lines
+                    .saturating_sub(frame.inner.height as usize)
+            })
+            .unwrap_or(u16::MAX as usize);
+        let amount = lines.unsigned_abs() as usize;
+        if lines > 0 {
+            self.write_edit_hover_popup_scroll = self
+                .write_edit_hover_popup_scroll
+                .saturating_add(amount)
+                .min(max_offset);
+        } else {
+            self.write_edit_hover_popup_scroll =
+                self.write_edit_hover_popup_scroll.saturating_sub(amount);
+        }
+        true
+    }
+
     /// Handle a normalized scroll event at a screen position.
     /// Hit-tests against pane areas to decide what to scroll:
     /// Scrollback area: scroll the scrollback (uses accelerated line count)
@@ -1128,7 +1260,37 @@ impl AgentView {
                     state.hovered = None;
                     return;
                 }
+                ActiveModal::SubagentHistory { state, .. } => {
+                    let delta = lines.unsigned_abs() as usize;
+                    let current = state.picker.scroll_offset.unwrap_or(0);
+                    state.picker.scroll_offset = Some(if lines > 0 {
+                        current + delta
+                    } else {
+                        current.saturating_sub(delta)
+                    });
+                    state.picker.hovered = None;
+                    return;
+                }
+                ActiveModal::ToolTraceViewer {
+                    input_scroll,
+                    output_scroll,
+                    input_area,
+                    output_area,
+                    ..
+                } => {
+                    if let Some(pane) =
+                        crate::views::modal::tool_trace_pane_at(*input_area, *output_area, col, row)
+                    {
+                        let scroll = match pane {
+                            crate::views::modal::ToolTracePane::Input => input_scroll,
+                            crate::views::modal::ToolTracePane::Output => output_scroll,
+                        };
+                        crate::views::modal::apply_doc_scroll_delta(scroll, lines);
+                    }
+                    return;
+                }
                 ActiveModal::DocViewer { scroll, .. }
+                | ActiveModal::ContextInfo { scroll, .. }
                 | ActiveModal::RememberNoteReview { scroll, .. } => {
                     crate::views::modal::apply_doc_scroll_delta(scroll, lines);
                     return;
@@ -1140,6 +1302,57 @@ impl AgentView {
             viewer.handle_scroll(lines);
             return;
         }
+        // Code-review modal: dual-pane wheel (same path as block_viewer / pi-config).
+        // Must run before scrollback hit-test or trackpad events leak through.
+        if let Some(ref mut review) = self.review_state {
+            use crate::views::review::ReviewFocus;
+            let in_list =
+                review.list_area.area() > 0 && review.list_area.contains((col, row).into());
+            let in_preview =
+                review.preview_area.area() > 0 && review.preview_area.contains((col, row).into());
+            let in_ask = review.ask_area.area() > 0 && review.ask_area.contains((col, row).into());
+            if in_ask {
+                review.focus = ReviewFocus::Ask;
+                let max = review.ask.max_response_scroll(
+                    review.ask_area.width.saturating_sub(2) as usize,
+                    review.ask_area.height.saturating_sub(2) as usize,
+                );
+                review.ask.scroll_response(lines, max);
+            } else if in_list {
+                review.focus = ReviewFocus::List;
+                review.move_sel(lines.signum());
+                review.ensure_viewer(&self.scrollback);
+            } else if in_preview || review.popup_area.contains((col, row).into()) {
+                // Preview under cursor, or anywhere else on the modal chrome.
+                review.focus = ReviewFocus::Preview;
+                review.ensure_viewer(&self.scrollback);
+                if let Some(viewer) = review.viewer.as_mut() {
+                    viewer.handle_scroll(lines);
+                }
+            } else {
+                // Outside popup: still absorb the wheel so scrollback does not move.
+                match review.focus {
+                    ReviewFocus::List => {
+                        review.move_sel(lines.signum());
+                        review.ensure_viewer(&self.scrollback);
+                    }
+                    ReviewFocus::Preview => {
+                        review.ensure_viewer(&self.scrollback);
+                        if let Some(viewer) = review.viewer.as_mut() {
+                            viewer.handle_scroll(lines);
+                        }
+                    }
+                    ReviewFocus::Ask => {
+                        let max = review.ask.max_response_scroll(
+                            review.ask_area.width.saturating_sub(2) as usize,
+                            review.ask_area.height.saturating_sub(2) as usize,
+                        );
+                        review.ask.scroll_response(lines, max);
+                    }
+                }
+            }
+            return;
+        }
         if self.rewind_state.is_some() {
             if let Some(ref mut rw) = self.rewind_state {
                 crate::views::rewind::move_cursor(&mut rw.phase, lines.signum());
@@ -1148,9 +1361,14 @@ impl AgentView {
             return;
         }
         self.dismiss_jump_picker_if_suppressed();
-        if let Some(ref mut js) = self.jump_state {
-            crate::views::jump::move_cursor(js, lines.signum());
+        if let Some(state) = self.jump_state.as_mut() {
+            crate::views::jump::move_cursor(state, lines.signum());
             self.sync_jump_preview();
+            return;
+        }
+        self.dismiss_fork_picker_if_suppressed();
+        if let Some(state) = self.fork_state.as_mut() {
+            crate::views::fork_picker::move_cursor(state, lines.signum());
             return;
         }
         if let Some(ref mut viewer) = self.line_viewer {
@@ -1242,6 +1460,9 @@ impl AgentView {
             }
             return;
         }
+        if self.handle_write_edit_hover_popup_scroll(lines, col, row) {
+            return;
+        }
         let target = self
             .pane_areas
             .hit_test(col, row)
@@ -1262,6 +1483,9 @@ impl AgentView {
             }
             ActivePane::Tasks => {
                 self.tasks.handle_scroll(lines, col, row);
+            }
+            ActivePane::Catalog => {
+                self.catalog.handle_scroll(lines, col, row);
             }
             ActivePane::Dock => match self.dock_section_at(self.pane_areas.dock, row) {
                 Some(crate::views::dock::Section::Queued) | None => {
@@ -1310,7 +1534,190 @@ mod scroll_granularity_tests {
     };
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    /// Selection dropdowns step exactly one item per wheel dispatch: a 3-line notch (or accelerated trackpad flush) must not skip items.
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn write_edit_hover_popup_waits_for_300ms_dwell() {
+        let mut agent = make_agent();
+        agent.write_edit_hover_started_at = Some(Instant::now());
+        assert!(!agent.write_edit_hover_popup_ready());
+
+        agent.write_edit_hover_started_at = Some(Instant::now() - Duration::from_millis(350));
+        assert!(agent.write_edit_hover_popup_ready());
+
+        agent.write_edit_hover_started_at = None;
+        assert!(!agent.write_edit_hover_popup_ready());
+    }
+
+    mod write_edit_hover_popup_interaction_tests {
+        use super::super::super::AgentView;
+        use super::super::super::test_fixtures::make_agent;
+        use crate::app::app_view::InputOutcome;
+        use crate::views::agent::WriteEditPopupFrame;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+        use std::time::{Duration, Instant};
+
+        fn popup_frame(area: Rect) -> WriteEditPopupFrame {
+            WriteEditPopupFrame {
+                area,
+                inner: Rect::new(
+                    area.x.saturating_add(1),
+                    area.y.saturating_add(1),
+                    area.width.saturating_sub(2),
+                    area.height.saturating_sub(2),
+                ),
+                total_lines: 15,
+            }
+        }
+
+        fn moved_to(col: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: col,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        fn left_mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column: col,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        /// Fresh scrollback with one collapsed Edit entry at index 0.
+        fn agent_with_collapsed_edit() -> AgentView {
+            let mut agent = make_agent();
+            agent
+                .scrollback
+                .push_block(crate::scrollback::RenderBlock::edit_with_hunks(
+                    "src/main.rs",
+                    vec![],
+                ));
+            agent
+        }
+
+        #[test]
+        fn moved_onto_popup_keeps_hover_target_and_dwell() {
+            let mut agent = agent_with_collapsed_edit();
+            agent.hovered_entry = Some(0);
+            agent.write_edit_hover_started_at = Some(Instant::now() - Duration::from_millis(350));
+            agent.write_edit_hover_popup_frame = Some(popup_frame(Rect::new(10, 10, 40, 8)));
+
+            // Pointer moves onto the popup body (outside any pane rect).
+            agent.handle_mouse(&moved_to(20, 12));
+
+            assert_eq!(
+                agent.hovered_entry,
+                Some(0),
+                "hover must persist while the pointer rests on the popup"
+            );
+            assert!(
+                agent.write_edit_hover_popup_ready(),
+                "dwell must not reset when moving onto the popup"
+            );
+        }
+
+        #[test]
+        fn stale_popup_frame_does_not_pin_hover() {
+            let mut agent = make_agent();
+            // Non-Edit entry: the frame rect is stale and must not pin hover.
+            agent
+                .scrollback
+                .push_block(crate::scrollback::RenderBlock::user_prompt("hi"));
+            agent.hovered_entry = Some(0);
+            agent.write_edit_hover_popup_frame = Some(popup_frame(Rect::new(10, 10, 40, 8)));
+
+            agent.handle_mouse(&moved_to(20, 12));
+
+            assert_eq!(
+                agent.hovered_entry, None,
+                "a stale frame over a non-Write/Edit row must re-target hover"
+            );
+        }
+
+        #[test]
+        fn click_on_popup_is_absorbed_without_toggling_underlying_row() {
+            let mut agent = agent_with_collapsed_edit();
+            agent.hovered_entry = Some(0);
+            agent.write_edit_hover_started_at = Some(Instant::now() - Duration::from_millis(350));
+            agent.write_edit_hover_popup_frame = Some(popup_frame(Rect::new(10, 10, 40, 8)));
+
+            let out =
+                agent.handle_mouse(&left_mouse(MouseEventKind::Down(MouseButton::Left), 20, 12));
+
+            assert!(matches!(out, InputOutcome::Changed));
+            assert!(!agent.left_mouse_down, "absorbed press must not latch");
+            assert_eq!(agent.hovered_entry, Some(0));
+            assert_eq!(
+                agent.scrollback.get(0).unwrap().display_mode,
+                crate::scrollback::DisplayMode::Collapsed,
+                "the row beneath the popup must stay collapsed"
+            );
+
+            // Control: a click outside the frame latches the button as usual.
+            let _ = agent.handle_mouse(&left_mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+            assert!(agent.left_mouse_down);
+        }
+
+        #[test]
+        fn wheel_over_popup_body_routes_to_popup_scroll_with_clamp() {
+            let mut agent = agent_with_collapsed_edit();
+            agent.pane_areas.scrollback = Rect::new(0, 0, 80, 40);
+            agent.scrollback.prepare_layout(80, 40);
+            agent.hovered_entry = Some(0);
+            agent.write_edit_hover_popup_entry = Some(0);
+            agent.write_edit_hover_started_at = Some(Instant::now() - Duration::from_millis(350));
+            // Popup body far below the single small entry: disjoint rects.
+            agent.write_edit_hover_popup_frame = Some(popup_frame(Rect::new(1, 30, 60, 9)));
+            let wheel_point = (30u16, 34u16);
+
+            assert!(
+                !agent
+                    .write_edit_hover_popup_frame
+                    .unwrap()
+                    .area
+                    .intersects(agent_scroll_entry_area(&agent)),
+                "precondition: popup rect disjoint from the hovered row"
+            );
+
+            // Wheel down over the popup body scrolls only the popup
+            // (offset moves 0 -> 3; scrollback routing would not touch it).
+            agent.handle_scroll(3, wheel_point.0, wheel_point.1);
+            assert_eq!(
+                agent.write_edit_hover_popup_scroll, 3,
+                "wheel inside the popup rect must be intercepted"
+            );
+
+            // Clamp at total_lines - inner.height (15 - 7 = 8).
+            for _ in 0..10 {
+                agent.handle_scroll(3, wheel_point.0, wheel_point.1);
+            }
+            assert_eq!(
+                agent.write_edit_hover_popup_scroll, 8,
+                "scroll offset must clamp to content height"
+            );
+
+            // Wheel up reduces.
+            agent.handle_scroll(-3, wheel_point.0, wheel_point.1);
+            assert_eq!(agent.write_edit_hover_popup_scroll, 5);
+        }
+
+        fn agent_scroll_entry_area(agent: &AgentView) -> Rect {
+            agent
+                .scrollback
+                .entry_screen_area(0, agent.pane_areas.scrollback)
+                .map(|(area, _, _)| area)
+                .expect("entry 0 must be visible")
+        }
+    }
+
+    /// Selection dropdowns step exactly one item per wheel dispatch: a
+    /// 3-line notch (or accelerated trackpad flush) must not skip items.
     #[test]
     fn wheel_notch_over_slash_dropdown_moves_selection_one_step() {
         let mut agent = make_agent();
@@ -1465,6 +1872,38 @@ mod scroll_granularity_tests {
             agent.scrollback.scroll_info().0,
             before,
             "wheel must not leak through the goal detail overlay"
+        );
+        agent.show_goal_detail = false;
+
+        // /review-session modal must also absorb wheel (no scrollback leak).
+        use crate::scrollback::entry::EntryId;
+        use crate::views::review::{ReviewFileItem, ReviewFileKind, ReviewKindFilter, ReviewState};
+        agent.review_state = Some(ReviewState::new(
+            "test",
+            vec![ReviewFileItem {
+                path: "a.rs".into(),
+                kind: ReviewFileKind::Edit,
+                entry_id: EntryId::new(1),
+                additions: 1,
+                deletions: 0,
+                is_error: false,
+                op_count: 1,
+                plain_fallback: "+line\n".into(),
+            }],
+            ReviewKindFilter::Changes,
+        ));
+        // Populate hit areas as if a frame had rendered.
+        if let Some(ref mut review) = agent.review_state {
+            review.popup_area = Rect::new(0, 0, 80, 20);
+            review.list_area = Rect::new(0, 0, 20, 18);
+            review.preview_area = Rect::new(20, 0, 60, 18);
+        }
+        agent.handle_scroll(3, 40, 8);
+        agent.handle_scroll(-3, 5, 4);
+        assert_eq!(
+            agent.scrollback.scroll_info().0,
+            before,
+            "wheel must not leak through the review modal"
         );
     }
 }

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 pub use xai_dirs::{default_grok_home, grok_home, user_grok_home};
 
@@ -7,6 +8,32 @@ const CLAUDE_MANAGED_SETTINGS_PATH: &str =
     "/Library/Application Support/ClaudeCode/managed-settings.json";
 #[cfg(target_os = "linux")]
 const CLAUDE_MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
+
+static PROJECT_CONFIG_DIRNAME: OnceLock<&'static str> = OnceLock::new();
+
+/// Project-local config tree under a repo root (e.g. `.grok` or `.grok-pi`).
+///
+/// grok-pi sets `GROK_PROJECT_DIR=.grok-pi` at startup so project workflows,
+/// hooks, MCP, and skills stay product-isolated from stock Grok's `.grok/`.
+pub fn project_config_dirname() -> &'static str {
+    PROJECT_CONFIG_DIRNAME.get_or_init(|| match std::env::var("GROK_PROJECT_DIR") {
+        Ok(s) if !s.trim().is_empty() => {
+            let s = s.trim();
+            let owned = if s.starts_with('.') {
+                s.to_string()
+            } else {
+                format!(".{s}")
+            };
+            Box::leak(owned.into_boxed_str())
+        }
+        _ => ".grok",
+    })
+}
+
+/// `<root>/$GROK_PROJECT_DIR` (default `<root>/.grok`).
+pub fn project_config_dir(root: impl AsRef<std::path::Path>) -> PathBuf {
+    root.as_ref().join(project_config_dirname())
+}
 
 /// Canonical grok application path: `$GROK_HOME/bin/grok` (Unix) or `grok.exe` (Windows).
 pub fn grok_application() -> PathBuf {

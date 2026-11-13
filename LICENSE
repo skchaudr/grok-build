@@ -1,4 +1,12 @@
 Copyright 2023-2026 SpaceXAI
+Copyright 2026 Dwsy
+
+This repository (grok-pi / pi-grok-build) is a fork of Grok Build
+(https://github.com/xai-org/grok-build), originally published by SpaceXAI
+under the Apache License, Version 2.0. Upstream copyright and license
+terms are retained. Modifications in this fork are Copyright 2026 Dwsy
+and are also licensed under Apache License, Version 2.0, unless a file
+expressly states otherwise.
 
 
                                  Apache License

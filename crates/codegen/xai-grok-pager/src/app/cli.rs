@@ -1618,36 +1618,6 @@ mod tests {
         assert!(args.leader_no_spawn);
     }
     #[test]
-    fn leader_mgmt_list_info_kill_parse() {
-        let list = PagerArgs::try_parse_from(["grok", "leader", "list", "--json"])
-            .expect("grok leader list --json");
-        assert!(matches!(
-            list.command,
-            Some(Command::Leader(LeaderMgmtArgs {
-                command: LeaderMgmtCommand::List { json: true },
-            }))
-        ));
-        let info = PagerArgs::try_parse_from(["grok", "leader", "info", "--pid", "42"])
-            .expect("grok leader info --pid");
-        assert!(matches!(
-            info.command,
-            Some(Command::Leader(LeaderMgmtArgs {
-                command: LeaderMgmtCommand::Info {
-                    target: LeaderTargetArgs { pid: Some(42) },
-                    json: false,
-                },
-            }))
-        ));
-        let kill = PagerArgs::try_parse_from(["grok", "leader", "kill"]).expect("grok leader kill");
-        assert!(matches!(
-            kill.command,
-            Some(Command::Leader(LeaderMgmtArgs {
-                command: LeaderMgmtCommand::Kill,
-            }))
-        ));
-        assert!(PagerArgs::try_parse_from(["grok", "leader", "profile"]).is_err());
-    }
-    #[test]
     fn debug_file_flag_parses_and_is_global() {
         let root = PagerArgs::try_parse_from(["grok", "--debug-file", "/tmp/fire.txt"])
             .expect("--debug-file parses at the root");

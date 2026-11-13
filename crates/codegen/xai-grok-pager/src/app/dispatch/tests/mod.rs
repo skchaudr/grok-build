@@ -134,7 +134,6 @@ fn test_app() -> AppView {
         yolo_policy_block: None,
         yolo_launch_block_notice: None,
         embedded_fallback_notice: None,
-        screen_mode_switch_hint: None,
         require_plan_approval: false,
         plan_mode: false,
         chat_mode: false,
@@ -352,6 +351,9 @@ fn test_app() -> AppView {
         voice_clip_deadline: None,
         voice_cmd_tx: None,
         voice_state: VoiceState::Idle,
+        external_ui: crate::app::app_view::ExternalUiState::default(),
+        external_agent: false,
+        welcome_prewarm_agent: None,
     }
 }
 /// Build a default `AgentSession` for tests.
@@ -871,6 +873,11 @@ fn make_picker_entry(id: &str, cwd: &str) -> crate::app::app_view::SessionPicker
     crate::app::app_view::SessionPickerEntry {
         id: id.into(),
         summary: id.into(),
+        name: None,
+        first_message: None,
+        session_path: None,
+        total_tokens: None,
+        total_cost: None,
         updated_at: chrono::Utc::now(),
         created_at: chrono::Utc::now(),
         cwd: cwd.into(),
@@ -882,6 +889,7 @@ fn make_picker_entry(id: &str, cwd: &str) -> crate::app::app_view::SessionPicker
         branch: None,
         repo_name: "repo".into(),
         worktree_label: None,
+        parent_session_path: None,
         last_turn_summary: None,
         last_recap: None,
         session_kind: None,
@@ -918,6 +926,10 @@ fn open_session_picker_with(
         entries_query: None,
         source_filter: crate::views::session_picker::SourceFilter::default(),
         pending_delete: None,
+        preview_scroll: 0,
+        search_mode: false,
+        preview_mode: false,
+        preview_messages: None,
     });
 }
 /// Live generation of the active agent's SessionPicker modal, for stamping modal-host results the way the executors echo them.

@@ -402,8 +402,9 @@ pub(crate) fn block_lines_containing(harness: &PtyHarness, text: &str) -> usize 
         .count()
 }
 
-/// 19b. **VS Code family: Ctrl+L (form feed)** is the send-now chord, behaving like the default Ctrl+Enter binding.
-/// Harness strips `TERM_PROGRAM` then applies env; pass `vscode` so defaults bind the chord to Ctrl+L.
+/// Ctrl+L (form feed). Opens the searchable model picker (Pi TUI alignment).
+/// Historically used as VS Code family send-now; that chord is now Ctrl+Enter.
+
 pub(crate) const CTRL_L: &[u8] = b"\x0c";
 
 /// Ctrl+O (C0 0x0F).
@@ -499,6 +500,23 @@ pub(crate) fn spawn_esc_double_press_pager(content: &ContentController) -> PtyHa
         &[EnvOp::set(ESC_DOUBLE_PRESS_ENV, "60000")],
     )
     .expect("spawn pager")
+}
+
+/// Block until the turn is idle (running-turn `Ctrl+c:cancel` hint gone): the
+/// Esc policy swallows a bare Esc mid-turn. Call sites run post-sentinel, so
+/// hint absence means finalized, not not-yet-running.
+pub(crate) fn wait_for_turn_idle(harness: &mut PtyHarness) {
+    // Keybar renders this only while `is_turn_running()` (views/agent.rs).
+    const CANCEL_HINT: &str = "Ctrl+c:cancel";
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while harness.contains_text(CANCEL_HINT) {
+        assert!(
+            Instant::now() < deadline,
+            "turn still running: {CANCEL_HINT:?} on screen after 15s\nscreen:\n{}",
+            harness.screen_contents()
+        );
+        harness.update(Duration::from_millis(100));
+    }
 }
 
 /// Reach an agent session with scrollback content, then focus scrollback (Tab).
@@ -1362,6 +1380,18 @@ pub(crate) fn run_wrap_driving(
         Err(error) => panic!("poll grok wrap exit: {error:#}"),
     };
 
+    // Drain post-exit bytes until the reader goes quiet: output written just
+    // before exit can still be buffered in the PTY (same flake class the
+    // requirements-version test hit).
+    let drain_deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < drain_deadline {
+        let before = harness.raw_output().len();
+        harness.update(Duration::from_millis(100));
+        if harness.raw_output().len() == before {
+            break;
+        }
+    }
+
     let raw = String::from_utf8_lossy(harness.raw_output()).into_owned();
     (code, raw)
 }
@@ -1408,6 +1438,45 @@ pub(crate) fn poll_for<T>(timeout: Duration, mut probe: impl FnMut() -> Option<T
 pub(crate) fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
     poll_for(timeout, || cond().then_some(())).is_some()
 }
+
+/// Like [`wait_until`] but requires `cond` to hold *continuously* for `hold`
+/// before succeeding — the state must settle, not merely flicker true once.
+/// Use when a pager-side render can go true a beat before the matching
+/// server-side state lands (e.g. a Ctrl+C rewind clears the scrollback block
+/// optimistically before the shell finishes trimming the rewound copy from
+/// session history). Returns false if no stable window fits inside `timeout`.
+#[cfg(unix)]
+pub(crate) fn wait_until_stable(
+    timeout: Duration,
+    hold: Duration,
+    mut cond: impl FnMut() -> bool,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if cond() {
+            let stable_until = Instant::now() + hold;
+            let mut held = true;
+            while Instant::now() < stable_until {
+                std::thread::sleep(Duration::from_millis(100));
+                if !cond() {
+                    held = false;
+                    break;
+                }
+            }
+            if held {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Dump assistant/tool/user messages (skipping the huge system prompt) from
+/// every request body, to inspect tool args / tool results / user queries in
+/// a failure message without printing megabytes of `{:#?}` bodies.
 
 /// Byte offset of the first `needle` in `haystack` at or after `from`; `None` past the end or when absent.
 pub(crate) fn raw_position_after(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {

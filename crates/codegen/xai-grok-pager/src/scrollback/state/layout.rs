@@ -656,6 +656,13 @@ impl ScrollbackState {
             .width
     }
 
+    /// Content-column width (excluding accent bar and block padding) for a full scrollback width.
+    /// Used to size the inline edit textarea.
+    pub fn entry_text_column_width(&self, width: u16) -> u16 {
+        let simulated_area = Rect::new(0, 0, width, 1);
+        HorizontalLayout::new(simulated_area, &self.appearance.scrollback.layout).content_width()
+    }
+
     /// Measure exact heights for not-yet-measured entries in `[start, end]`. Returns `(entry_index, height_delta)` for
     /// each estimate replaced by an exact height. Hidden (group-truncated, height 0) and synthetic group-header rows
     /// render no markdown, so they are skipped. Their height is owned by group truncation, not measurement.
@@ -728,9 +735,15 @@ impl ScrollbackState {
         changes
     }
 
-    /// Upgrade the on-screen entries from estimated to exact heights and re-anchor the viewport so what the user is looking at stays put.
-    /// Iterates because an exact height shifts later entries, which can reveal a new entry at the bottom edge.
-    /// `measured` grows monotonically so it terminates; the loop bound is a defensive cap.
+    /// Upgrade the on-screen entries from estimated to exact heights and re-anchor
+    /// the viewport so what the user is looking at stays put.
+    ///
+    /// Iterates because an exact height shifts later entries, which can reveal a
+    /// new entry at the bottom edge. `measured` grows monotonically so it
+    /// terminates; iterations are capped per frame
+    /// ([`MAX_SETTLE_ITERS_PER_FRAME`]) so a pathological estimate→exact cascade
+    /// (e.g. a huge expanded Edit diff) can't stall a single frame — the
+    /// remaining entries settle on the following frame(s).
     pub(super) fn settle_visible_measurements(
         &mut self,
         width: u16,
@@ -739,7 +752,11 @@ impl ScrollbackState {
         if self.viewport_height == 0 || self.last_width == 0 {
             return;
         }
-        let max_iters = self.entries.len().saturating_add(2);
+        let max_iters = self
+            .entries
+            .len()
+            .saturating_add(2)
+            .min(MAX_SETTLE_ITERS_PER_FRAME);
         for _ in 0..max_iters {
             let Some((start, end)) = self.measurement_window() else {
                 return;

@@ -560,9 +560,11 @@ pub(super) fn dispatch_toggle_yolo(app: &mut AppView) -> Vec<Effect> {
     set_yolo_mode(app, new)
 }
 
-/// Shift+Tab mode cycle from the agent chat view: the shared cycle body plus plan-nudge acceptance telemetry (the nudge advertises this chord).
-/// The dashboard peek calls [`dispatch_cycle_mode_and_sync`] instead.
-/// A peeked agent (whose prompt the user is not looking at) never attributes an accept and never collapses Auto/Always-Approve for the nudge jump.
+/// Mode-shortcut cycle from the agent chat view: the shared cycle body plus
+/// plan-nudge acceptance telemetry (the nudge advertises this chord). The
+/// dashboard peek calls [`dispatch_cycle_mode_and_sync`] instead, so a peeked
+/// agent — whose prompt the user is not looking at — never attributes an accept
+/// and never collapses Auto/Always-Approve for the nudge jump.
 pub(super) fn dispatch_cycle_mode(app: &mut AppView) -> Vec<Effect> {
     // Capture the pre-cycle nudge visibility and plan state so only a transition into Plan while the nudge is on screen attributes as an acceptance
     // A disabled/absent nudge never emits
@@ -712,15 +714,64 @@ pub(super) fn active_agent_plan_nudge_state(app: &AppView) -> (bool, bool) {
     }
 }
 
-/// Moves the session mode one step along [`mode_choices`] and wraps after the last choice.
-/// Uses `plan_mode_pending` (optimistic) when available, falling back to `plan_mode_active` (confirmed by ACP).
-/// This prevents double-sends when the user presses Shift+Tab faster than the ACP round-trip.
+/// Pi exposes only the backend modes it can isolate correctly: Normal and Plan.
+/// Permission policy remains owned by Pi and thinking effort remains a separate
+/// Shift+Tab action, so the Pager mode shortcut is a strict binary toggle.
+fn dispatch_external_plan_cycle(app: &mut AppView, id: crate::app::agent::AgentId) -> Vec<Effect> {
+    let (session_id, enter_plan) = {
+        let Some(agent) = app.agents.get_mut(&id) else {
+            return vec![];
+        };
+        let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
+        let enter_plan = !in_plan;
+        let session_id = agent.session.session_id.clone();
+        agent.plan_mode_pending = Some(enter_plan);
+        agent.deferred_session_mode = if session_id.is_none() && enter_plan {
+            Some(xai_grok_tools::types::SessionMode::Plan)
+        } else {
+            None
+        };
+        agent.session.yolo_mode = false;
+        agent.session.auto_mode = false;
+        agent.show_mode_switch_banner(if enter_plan { "Plan" } else { "Normal" });
+        (session_id, enter_plan)
+    };
+
+    app.default_yolo = false;
+    app.current_ui.permission_mode = Some("ask".into());
+    refresh_open_settings_modals(app);
+    tracing::info!(enter_plan, "Pi mode toggle");
+
+    if let Some(session_id) = session_id {
+        vec![Effect::SetSessionMode {
+            session_id,
+            mode_id: acp::SessionModeId::new(if enter_plan {
+                xai_grok_tools::types::SessionMode::Plan.as_id()
+            } else {
+                xai_grok_tools::types::SessionMode::Default.as_id()
+            }),
+        }]
+    } else {
+        super::session::lifecycle::skip_picker_and_create_session(app, id)
+    }
+}
+
+/// Cycle session mode. Stock Grok keeps its permission-mode ring; external Pi
+/// sessions use the binary Normal ↔ Plan path above.
+///
+/// Uses `plan_mode_pending` (optimistic) when available, falling back to
+/// `plan_mode_active` (confirmed by ACP). This prevents double-sends when
+/// the user presses the mode shortcut faster than the ACP round-trip.
 fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
     if refuse_prime_mode(app, id) {
         return vec![];
+    }
+    // Pi has only Normal and Plan; its plan-mode extension owns the toggle.
+    if app.is_pi_agent(id) {
+        return dispatch_external_plan_cycle(app, id);
     }
     // Capture the pin before borrowing `agent`: the arms that enter Always-Approve enable yolo
     // A `yolo_enable_blocked(app, _)` call would conflict with the live `&mut agent`

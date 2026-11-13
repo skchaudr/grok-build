@@ -838,8 +838,25 @@ pub(super) fn dispatch_send_btw(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    // grok-pi: native /btw is opt-in (F2 pi_btw). Stock Grok shell always has x.ai/btw.
+    if app.external_agent && !app.current_ui.pi_btw {
+        if let Some(agent) = app.agents.get_mut(&id) {
+            if app.screen_mode.is_minimal() {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(
+                        "Native /btw is off. F2 → Agent → Pi /btw → on, then restart grok-pi.",
+                    ));
+            } else {
+                agent.show_toast(
+                    "Native /btw is off. F2 → Agent → Pi /btw → on, then restart grok-pi.",
+                );
+            }
+        }
+        return vec![];
+    }
     let minimal = app.screen_mode.is_minimal();
-    let (session_id, minimal_request_id, cwd) = {
+    let (session_id, minimal_request_id, models, cwd) = {
         let Some(agent) = app.agents.get_mut(&id) else {
             return vec![];
         };
@@ -873,18 +890,59 @@ pub(super) fn dispatch_send_btw(
             agent.btw_focused = false;
             None
         };
-        (session_id, minimal_request_id, cwd)
+        let models = side_model_chain(
+            &[
+                app.current_ui.btw_model.as_str(),
+                app.current_ui.btw_model_2.as_str(),
+                app.current_ui.btw_model_3.as_str(),
+            ],
+            agent.session.models.current_model_id_str(),
+        );
+        (session_id, minimal_request_id, models, cwd)
     };
+
+    // Only grok-pi needs a resolvable model chain here; stock shell uses the
+    // session actor model and ignores `models`.
+    if app.external_agent && models.is_empty() {
+        if let Some(agent) = app.agents.get_mut(&id) {
+            agent.btw_state = None;
+            agent.minimal_btw_lifecycle = None;
+            agent.show_toast("No active model selected");
+        }
+        return vec![];
+    }
 
     vec![Effect::SendBtw {
         agent_id: id,
         session_id,
         question,
+        models,
         images: images.into_inner(),
         cwd,
         minimal_request_id,
     }]
 }
+
+/// Build ordered non-empty model refs; if all slots empty, use session model.
+pub(super) fn side_model_chain(slots: &[&str], session_model: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    for slot in slots {
+        let t = slot.trim();
+        if !t.is_empty() && !out.iter().any(|x| x == t) {
+            out.push(t.to_owned());
+        }
+    }
+    if out.is_empty() {
+        if let Some(m) = session_model.map(str::trim).filter(|s| !s.is_empty()) {
+            out.push(m.to_owned());
+        }
+    }
+    out
+}
+
+/// Toast when a manual `/recap` produces no summary. Empty sessions get a clear
+/// empty-state message; anything else (model failure, empty summary, etc.) keeps
+/// the generic failure toast.
 
 /// Owns `/btw` attachments until they are handed to the send effect.
 /// Drop unlinks staged temps and session copies.
@@ -1055,10 +1113,19 @@ pub(crate) fn scrollback_has_user_messages(
         .any(|(_, entry)| entry.block.is_user_prompt())
 }
 
-/// Request a session recap.
-/// Bypasses the prompt queue, so it works even while the agent is mid-turn.
-/// The auto path is best-effort and silently no-ops without an active session.
-pub(super) fn dispatch_send_recap(app: &mut AppView, auto: bool) -> Vec<Effect> {
+/// Request a session recap. Bypasses the prompt queue — works even while the
+/// agent is mid-turn. Fires the `x.ai/recap` ext method; the recap arrives
+/// asynchronously as a `SessionRecap` notification (rendered in scrollback).
+///
+/// `auto` is `false` for an explicit `/recap` and `true` for the automatic
+/// return-from-away recap. For the manual path we clear the prompt and, when
+/// no session exists yet, surface a toast; the auto path is best-effort and
+/// silently no-ops without an active session.
+pub(super) fn dispatch_send_recap(
+    app: &mut AppView,
+    auto: bool,
+    custom_instructions: Option<String>,
+) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -1121,7 +1188,48 @@ pub(super) fn dispatch_send_recap(app: &mut AppView, auto: bool) -> Vec<Effect> 
             .note_auto_recap_attempt();
     }
 
-    vec![Effect::SendRecap { session_id, auto }]
+    // Empty recap model slots mean "use the active session model" as the only
+    // candidate. Configured slots form an ordered fallback chain (1→2→3).
+    let models = side_model_chain(
+        &[
+            app.current_ui.recap_model.as_str(),
+            app.current_ui.recap_model_2.as_str(),
+            app.current_ui.recap_model_3.as_str(),
+        ],
+        agent.session.models.current_model_id_str(),
+    );
+    if models.is_empty() {
+        if !auto {
+            if let Some(pending_id) = agent.pending_recap_entry.take() {
+                agent.scrollback.remove_entry(pending_id);
+            }
+            agent.show_toast("No active model selected");
+        }
+        return vec![];
+    }
+
+    let thinking_level = agent
+        .session
+        .models
+        .reasoning_effort
+        .filter(|effort| *effort != xai_grok_shell::sampling::types::ReasoningEffort::None)
+        .map(|effort| effort.to_string());
+
+    let terminal_width = agent.last_terminal_size.0;
+
+    let custom_instructions = custom_instructions
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    vec![Effect::SendRecap {
+        session_id,
+        auto,
+        models,
+        thinking_level,
+        recap_mermaid: app.current_ui.recap_mermaid.unwrap_or(false),
+        terminal_width,
+        custom_instructions,
+    }]
 }
 
 // TaskResult handlers.
@@ -1169,6 +1277,13 @@ pub(super) fn handle_btw_response(
                 app.pending_image_notices
                     .extend(agent.skipped_image_send_notice(skipped_image_numbers));
             }
+            return vec![];
+        }
+        // Route to the review modal's Right Ask panel when its QA is in-flight.
+        if let Some(review) = agent.review_state.as_mut()
+            && review.ask.is_loading()
+        {
+            review.ask.set_response(result);
             return vec![];
         }
         // Cap drops and read failures are disjoint sets; the flush shows them as one message.

@@ -3,7 +3,7 @@
 //! Opens via Ctrl-F on a selected block, replaces the scrollback area.
 //! Provides ListPane-based navigation, search, visual-select, and copy.
 //!
-//! Supports thinking/agent message blocks (markdown content).
+//! Supports markdown-backed blocks, including persisted compaction summaries.
 //! Execute and edit viewers will be added in later phases.
 
 use std::time::Instant;
@@ -84,18 +84,68 @@ impl ListItem for ContentLine {
     }
 }
 
-/// Metadata for a single diff line, stored parallel to `items` in the edit viewer.
-pub struct DiffLineMeta {
-    pub tag: similar::ChangeTag,
-    pub text: String,
-    pub lo: usize,
-    pub ln: usize,
+// ---------------------------------------------------------------------------
+// DiffLineMeta: per-item diff metadata for edit viewer patch copy
+// ---------------------------------------------------------------------------
+
+/// Metadata for one rendered row, stored parallel to `items` in the edit viewer.
+/// A side-by-side row may carry both source lines.
+struct DiffLineMetaLine {
+    tag: similar::ChangeTag,
+    text: String,
+    lo: usize,
+    ln: usize,
+}
+
+struct DiffLineMeta {
+    old: Option<DiffLineMetaLine>,
+    new: Option<DiffLineMetaLine>,
+}
+
+impl DiffLineMeta {
+    fn from_pair(
+        pair: &(
+            Option<xai_grok_pager_diff::DiffLine>,
+            Option<xai_grok_pager_diff::DiffLine>,
+        ),
+    ) -> Self {
+        let to_meta = |line: &xai_grok_pager_diff::DiffLine| DiffLineMetaLine {
+            tag: line.tag,
+            text: line.text.clone(),
+            lo: line.lo,
+            ln: line.ln,
+        };
+        Self {
+            old: pair.0.as_ref().map(to_meta),
+            new: pair.1.as_ref().map(to_meta),
+        }
+    }
+}
+
+fn flatten_diff_meta<'a>(
+    rows: impl IntoIterator<Item = &'a DiffLineMeta>,
+) -> Vec<&'a DiffLineMetaLine> {
+    let mut entries = Vec::new();
+    for row in rows {
+        if let Some(old) = row.old.as_ref() {
+            entries.push(old);
+        }
+        if let Some(new) = row.new.as_ref()
+            && !matches!(
+                row.old.as_ref().map(|old| old.tag),
+                Some(similar::ChangeTag::Equal)
+            )
+        {
+            entries.push(new);
+        }
+    }
+    entries
 }
 
 /// What kind of block content the viewer is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewerKind {
-    /// Thinking or AgentMessage (markdown content).
+    /// Markdown-backed scrollback content.
     Markdown,
     /// Execute tool call (stdout).
     Execute,
@@ -111,6 +161,8 @@ pub enum ViewerKind {
     IntegrationSearch,
     /// Integration tool dispatch (use_tool).
     UseTool,
+    /// Generic/unknown tool call (raw input + output/error).
+    OtherTool,
     /// Read file tool call (file content).
     Read,
     Grep,
@@ -118,6 +170,27 @@ pub enum ViewerKind {
     PlainText,
 }
 
+/// Decoded image payload for a Read viewer whose file is an image.
+///
+/// Rendered as a Kitty/iTerm2 overlay centered in the popup's content area;
+/// shares the modal overlay placement slot (Kitty placement id 1) with the
+/// other image modals.
+#[derive(Debug, Clone)]
+pub struct BlockViewerImage {
+    /// Protocol-prepared bytes (PNG for Kitty, as-is for iTerm2).
+    pub bytes: Vec<u8>,
+    /// Decoded pixel dimensions.
+    pub width: u32,
+    pub height: u32,
+    /// Shared terminal overlay upload owner id (allocated once per viewer).
+    pub owner_id: u64,
+}
+
+/// Fullscreen block content viewer.
+///
+/// Replaces the scrollback area when open. Owns a `ListPaneState` for
+/// navigation, search, and visual-select. Reads block content from the
+/// scrollback via `entry_id`.
 impl ViewerKind {
     pub fn telemetry_kind(self) -> xai_grok_telemetry::events::BlockViewerKind {
         use xai_grok_telemetry::events::BlockViewerKind;
@@ -133,6 +206,7 @@ impl ViewerKind {
             Self::Read => BlockViewerKind::Read,
             Self::Grep => BlockViewerKind::Grep,
             Self::PlainText => BlockViewerKind::PlainText,
+            Self::OtherTool => BlockViewerKind::OtherTool,
         }
     }
 }
@@ -140,6 +214,7 @@ impl ViewerKind {
 /// Fullscreen block content viewer. Replaces the scrollback area when open. Owns a `ListPaneState`
 /// for navigation, search, and visual-select. Reads block content from the scrollback via
 /// `entry_id`.
+
 pub struct BlockViewerPane {
     /// Which scrollback entry we are viewing.
     pub entry_id: EntryId,
@@ -153,6 +228,10 @@ pub struct BlockViewerPane {
     items: Vec<ContentLine>,
     /// Cached content area from last render (for mouse hit-testing).
     last_content_area: Rect,
+    /// Code-review edit viewers retain the upstream unified dual-number layout.
+    edit_review: bool,
+    /// F2 side-by-side state used for the last edit-item build.
+    last_edit_side_by_side: bool,
 
     /// Set by handle_key when 'r' is pressed. Caller should toggle raw mode on the entry and call rebuild_items().
     pub raw_toggle_pending: bool,
@@ -174,8 +253,14 @@ pub struct BlockViewerPane {
     last_theme: ThemeKind,
     /// Modal chrome state (close button hover, popup area, etc.).
     pub modal: ModalWindowState,
-    /// Cached prepend (preamble) ContentLines from the last render, combined with `items` to produce the unified vec the ListPane sees.
-    /// Needed so scroll / mouse / key handlers index into the same item space the layout was prepared against (`prepared_items_count`).
+    /// Image payload when this Read viewer shows an image file. `Some` only
+    /// when the terminal supports a graphics protocol and the bytes loaded;
+    /// otherwise the text lines are the content.
+    pub image: Option<BlockViewerImage>,
+    /// Cached prepend (preamble) ContentLines from the last render. Combined
+    /// with `items` to produce the unified vec the ListPane sees. Needed so
+    /// scroll / mouse / key handlers index into the same item space the
+    /// layout was prepared against (`prepared_items_count`).
     prepend_items: Vec<ContentLine>,
     pub text_drag: Option<TextDrag>,
     /// Text copied on the last drag release.
@@ -193,7 +278,7 @@ pub struct BlockViewerPane {
 }
 
 impl BlockViewerPane {
-    /// Create a viewer for a markdown block (thinking or agent message).
+    /// Create a viewer for a markdown-backed block.
     pub fn for_markdown(entry_id: EntryId, entry: &ScrollbackEntry) -> Option<Self> {
         let lines = Self::extract_markdown_lines(&entry.block)?;
         let generation = Self::extract_generation(&entry.block).unwrap_or(0);
@@ -224,6 +309,8 @@ impl BlockViewerPane {
             },
             items,
             last_content_area: Rect::default(),
+            edit_review: false,
+            last_edit_side_by_side: false,
 
             raw_toggle_pending: false,
             copy_meta_pending: false,
@@ -234,6 +321,7 @@ impl BlockViewerPane {
             bg_task_id: None,
             last_theme: Theme::current_kind(),
             modal: ModalWindowState::new(),
+            image: None,
             prepend_items: Vec::new(),
             text_drag: None,
             drag_copy_text: None,
@@ -282,6 +370,8 @@ impl BlockViewerPane {
             list_style,
             items,
             last_content_area: Rect::default(),
+            edit_review: false,
+            last_edit_side_by_side: false,
 
             raw_toggle_pending: false,
             copy_meta_pending: false,
@@ -292,6 +382,7 @@ impl BlockViewerPane {
             bg_task_id: None,
             last_theme: Theme::current_kind(),
             modal: ModalWindowState::new(),
+            image: None,
             prepend_items: Vec::new(),
             text_drag: None,
             drag_copy_text: None,
@@ -346,6 +437,8 @@ impl BlockViewerPane {
             list_style: ListPaneStyle::default(),
             items,
             last_content_area: Rect::default(),
+            edit_review: false,
+            last_edit_side_by_side: false,
 
             raw_toggle_pending: false,
             copy_meta_pending: false,
@@ -356,6 +449,7 @@ impl BlockViewerPane {
             bg_task_id: None,
             last_theme: Theme::current_kind(),
             modal: ModalWindowState::new(),
+            image: None,
             prepend_items: Vec::new(),
             text_drag: None,
             drag_copy_text: None,
@@ -423,33 +517,71 @@ impl BlockViewerPane {
 
         let content = read.content.as_deref().unwrap_or("");
         let raw_lines: Vec<&str> = content.lines().collect();
-        let base_line = read.line_range.map_or(1, |r| r.start);
-        let max_line = base_line + raw_lines.len().saturating_sub(1);
-        let gutter_width = max_line.checked_ilog10().map_or(1, |d| d as usize + 1);
-        let gutter_style = Style::default().fg(theme.gray_dim);
-        let fallback = Style::default().fg(theme.text_primary);
 
-        let syntect = crate::syntax::get_syntect();
-        let mut highlighter =
-            syntect.highlight_lines_by_file_path(std::path::Path::new(&read.path));
+        // Image reads (the read tool returns placeholder text for images):
+        // load the pixels and show them as the popup body. The text lines
+        // below stay as the fallback for terminals without a graphics
+        // protocol or when the file can't be loaded.
+        let image = if crate::prompt_images::ScrollbackImageRef::from_path(&read.path).is_some() {
+            Self::load_read_image(std::path::Path::new(&read.path))
+        } else {
+            None
+        };
 
-        let lines: Vec<Line<'static>> = raw_lines
-            .iter()
-            .enumerate()
-            .map(|(i, text)| {
-                let gutter = format!("{:>w$}  ", base_line + i, w = gutter_width);
-                let mut spans = vec![Span::styled(gutter, gutter_style)];
-                spans.extend(crate::syntax::highlight_line(
-                    text,
-                    &mut highlighter,
-                    syntect,
-                    fallback,
-                ));
-                Line::from(spans)
-            })
-            .collect();
+        let lines: Vec<Line<'static>> = if image.is_some() {
+            // The overlay image is the content; an empty body keeps the
+            // placeholder text from poking out around the pixels.
+            Vec::new()
+        } else {
+            let base_line = read.line_range.map_or(1, |r| r.start);
+            let max_line = base_line + raw_lines.len().saturating_sub(1);
+            let gutter_width = max_line.checked_ilog10().map_or(1, |d| d as usize + 1);
+            let gutter_style = Style::default().fg(theme.gray_dim);
+            let fallback = Style::default().fg(theme.text_primary);
 
-        Some(Self::for_static_content(entry_id, ViewerKind::Read, lines))
+            let syntect = crate::syntax::get_syntect();
+            let mut highlighter =
+                syntect.highlight_lines_by_file_path(std::path::Path::new(&read.path));
+
+            raw_lines
+                .iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    let gutter = format!("{:>w$}  ", base_line + i, w = gutter_width);
+                    let mut spans = vec![Span::styled(gutter, gutter_style)];
+                    spans.extend(crate::syntax::highlight_line(
+                        text,
+                        &mut highlighter,
+                        syntect,
+                        fallback,
+                    ));
+                    Line::from(spans)
+                })
+                .collect()
+        };
+
+        let mut viewer = Self::for_static_content(entry_id, ViewerKind::Read, lines);
+        viewer.image = image;
+        Some(viewer)
+    }
+
+    /// Load protocol-prepared pixels for an image-file Read viewer.
+    ///
+    /// Returns `None` — leaving the text lines as the content — when the
+    /// terminal has no graphics protocol or the file can't be read/decoded.
+    fn load_read_image(path: &std::path::Path) -> Option<BlockViewerImage> {
+        if !crate::terminal::image::detect_graphics_protocol().supports_images() {
+            return None;
+        }
+        let raw = std::fs::read(path).ok()?;
+        let bytes = crate::terminal::image::prepare_overlay_image_bytes(&raw)?;
+        let (width, height) = crate::prompt_images::decode_image_dimensions(&bytes)?;
+        Some(BlockViewerImage {
+            bytes,
+            width,
+            height,
+            owner_id: crate::terminal::overlay::next_owner_id(),
+        })
     }
 
     fn static_lines_from_block(
@@ -472,6 +604,34 @@ impl BlockViewerPane {
             .into_iter()
             .map(|bl| bl.content)
             .collect()
+    }
+
+    pub fn for_eval(entry_id: EntryId, entry: &ScrollbackEntry) -> Option<Self> {
+        let RenderBlock::ToolCall(ToolCallBlock::Eval(eval)) = &entry.block else {
+            return None;
+        };
+
+        let lines = Self::static_lines_from_block(entry, eval);
+        Some(Self::for_static_content(
+            entry_id,
+            ViewerKind::PlainText,
+            lines,
+        ))
+    }
+
+    /// Create a viewer for a codemode block: the full script, every nested call
+    /// with untruncated args/errors, and the complete script output.
+    pub fn for_codemode(entry_id: EntryId, entry: &ScrollbackEntry) -> Option<Self> {
+        let RenderBlock::ToolCall(ToolCallBlock::Codemode(codemode)) = &entry.block else {
+            return None;
+        };
+
+        let lines = Self::static_lines_from_block(entry, codemode);
+        Some(Self::for_static_content(
+            entry_id,
+            ViewerKind::PlainText,
+            lines,
+        ))
     }
 
     pub fn for_grep(entry_id: EntryId, entry: &ScrollbackEntry) -> Option<Self> {
@@ -725,6 +885,8 @@ impl BlockViewerPane {
             list_style,
             items,
             last_content_area: Rect::default(),
+            edit_review: false,
+            last_edit_side_by_side: false,
 
             raw_toggle_pending: false,
             copy_meta_pending: false,
@@ -735,6 +897,7 @@ impl BlockViewerPane {
             bg_task_id: Some(task_id.to_string()),
             last_theme: Theme::current_kind(),
             modal: ModalWindowState::new(),
+            image: None,
             prepend_items: Vec::new(),
             text_drag: None,
             drag_copy_text: None,
@@ -798,6 +961,8 @@ impl BlockViewerPane {
             },
             items,
             last_content_area: Rect::default(),
+            edit_review: false,
+            last_edit_side_by_side: false,
 
             raw_toggle_pending: false,
             copy_meta_pending: false,
@@ -808,6 +973,7 @@ impl BlockViewerPane {
             bg_task_id: None,
             last_theme: Theme::current_kind(),
             modal: ModalWindowState::new(),
+            image: None,
             prepend_items: Vec::new(),
             text_drag: None,
             drag_copy_text: None,
@@ -867,7 +1033,28 @@ impl BlockViewerPane {
     }
 
     /// Create a viewer for an edit block (diff content).
+    ///
+    /// Uses the same ListPane capabilities as other block viewers: scroll,
+    /// search (`/`), filter (`f`), wrap (`w`), visual select (`v`), and copy
+    /// (`y` patch / `Y` path).
     pub fn for_edit(entry_id: EntryId, entry: &ScrollbackEntry) -> Option<Self> {
+        Self::for_edit_with_options(entry_id, entry, false)
+    }
+
+    /// Edit viewer for the session code-review modal.
+    ///
+    /// Same TUI as [`Self::for_edit`], but enables **dual line numbers**
+    /// (old + new columns) so the review pane matches a fuller GitHub-style
+    /// unified gutter.
+    pub fn for_edit_review(entry_id: EntryId, entry: &ScrollbackEntry) -> Option<Self> {
+        Self::for_edit_with_options(entry_id, entry, true)
+    }
+
+    fn for_edit_with_options(
+        entry_id: EntryId,
+        entry: &ScrollbackEntry,
+        edit_review: bool,
+    ) -> Option<Self> {
         let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block else {
             return None;
         };
@@ -889,7 +1076,7 @@ impl BlockViewerPane {
         list_state.set_clipboard_provider(Box::new(SystemClipboard));
 
         let theme = Theme::current();
-        let (items, diff_meta) = Self::build_edit_items(edit, &theme);
+        let (items, diff_meta) = Self::build_edit_items(edit, &theme, 500, edit_review);
 
         Some(Self {
             entry_id,
@@ -901,6 +1088,8 @@ impl BlockViewerPane {
             },
             items,
             last_content_area: Rect::default(),
+            edit_review,
+            last_edit_side_by_side: false,
 
             raw_toggle_pending: false,
             copy_meta_pending: false,
@@ -911,6 +1100,7 @@ impl BlockViewerPane {
             bg_task_id: None,
             last_theme: Theme::current_kind(),
             modal: ModalWindowState::new(),
+            image: None,
             prepend_items: Vec::new(),
             text_drag: None,
             drag_copy_text: None,
@@ -926,57 +1116,47 @@ impl BlockViewerPane {
     fn build_edit_items(
         edit: &crate::scrollback::blocks::EditToolCallBlock,
         theme: &Theme,
+        width: u16,
+        edit_review: bool,
     ) -> (Vec<ContentLine>, Vec<Option<DiffLineMeta>>) {
         use crate::scrollback::blocks::DiffRenderConfig;
 
-        let config = DiffRenderConfig::default();
-        // Block-owned dispatch so the viewer paints the same highlight phase (including the file-scoped upgrade) as the scrollback output
-        let rendered = edit.render_diff_lines(
-            theme, 500, // wide width, NoWrap mode
-            &config,
-        );
-
-        // Build a flat list of DiffLine references from all hunks, interleaving None for separator lines (which render_diff_lines inserts)
-        // The rendered output has: [hunk0 lines...] [separator] [hunk1 lines...] ...
-        let mut meta_source: Vec<Option<&xai_grok_pager_diff::DiffLine>> = Vec::new();
-        for (i, hunk) in edit.hunks.iter().enumerate() {
-            if i > 0 && !config.hunk_separator.is_empty() {
-                meta_source.push(None); // separator line
-            }
-            for diff_line in hunk {
-                meta_source.push(Some(diff_line));
-                // Wrapped lines: render_diff_hunk_highlighted may produce multiple DiffLineOutput per DiffLine
-                // For now, assume 1:1 mapping since we use width=500 (very wide, unlikely to wrap)
-            }
-        }
+        let config = DiffRenderConfig {
+            dual_line_numbers: edit_review,
+            ..DiffRenderConfig::default()
+        };
+        // Normal viewers follow the live F2 preference and width fallback.
+        // Review viewers retain the upstream unified dual-number contract.
+        let rendered = if edit_review {
+            edit.render_unified_diff_lines(theme, width, &config)
+        } else {
+            edit.render_diff_lines(theme, width, &config)
+        };
 
         let mut items = Vec::with_capacity(rendered.len());
         let mut diff_meta = Vec::with_capacity(rendered.len());
 
         for (i, dl) in rendered.into_iter().enumerate() {
             let plain: String = dl.line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let source = dl.source.as_ref().map(DiffLineMeta::from_pair);
             items.push(ContentLine {
                 content: dl.line,
                 plain_text: plain,
                 id: i as u64,
                 bg: dl.background,
             });
-            diff_meta.push(meta_source.get(i).copied().flatten().map(|d| DiffLineMeta {
-                tag: d.tag,
-                text: d.text.clone(),
-                lo: d.lo,
-                ln: d.ln,
-            }));
+            diff_meta.push(source);
         }
 
         (items, diff_meta)
     }
 
-    /// Extract pre-wrap lines from a markdown block (thinking or agent message).
+    /// Extract pre-wrap lines from a markdown-backed block.
     fn extract_markdown_lines(block: &RenderBlock) -> Option<Vec<Line<'static>>> {
         match block {
             RenderBlock::Thinking(b) => Some(b.content().pre_wrap_lines()),
             RenderBlock::AgentMessage(b) => Some(b.content().pre_wrap_lines()),
+            RenderBlock::SessionEvent(b) => b.fullscreen_markdown_lines(),
             _ => None,
         }
     }
@@ -1031,6 +1211,7 @@ impl BlockViewerPane {
             | ViewerKind::WebSearch
             | ViewerKind::IntegrationSearch
             | ViewerKind::UseTool
+            | ViewerKind::OtherTool
             | ViewerKind::PlainText => {}
         }
     }
@@ -1112,6 +1293,7 @@ impl BlockViewerPane {
                 hints.push(HintItem::new(crate::key!('Y'), "copy cmd"));
             }
             ViewerKind::Edit => {
+                hints.push(HintItem::new(crate::key!('y'), "copy patch"));
                 hints.push(HintItem::new(crate::key!('Y'), "copy path"));
             }
             ViewerKind::WebFetch => {
@@ -1127,7 +1309,10 @@ impl BlockViewerPane {
                 hints.push(HintItem::new(crate::key!('Y'), "copy pattern"));
             }
             ViewerKind::BgTask => {}
-            ViewerKind::IntegrationSearch | ViewerKind::UseTool | ViewerKind::PlainText => {}
+            ViewerKind::IntegrationSearch
+            | ViewerKind::UseTool
+            | ViewerKind::OtherTool
+            | ViewerKind::PlainText => {}
         }
         hints
     }
@@ -1285,10 +1470,10 @@ impl BlockViewerPane {
         out.push_str(&format!("--- a/{path}\n"));
         out.push_str(&format!("+++ b/{path}\n"));
 
-        // Collect non-None entries in the range
-        let entries: Vec<&DiffLineMeta> = range
-            .filter_map(|i| self.diff_meta.get(i).and_then(|m| m.as_ref()))
-            .collect();
+        // Flatten each rendered row back into patch order. Equal rows are
+        // represented on both sides for rendering but occur once in a patch.
+        let entries =
+            flatten_diff_meta(range.filter_map(|i| self.diff_meta.get(i).and_then(|m| m.as_ref())));
         if entries.is_empty() {
             return None;
         }
@@ -1434,6 +1619,67 @@ impl BlockViewerPane {
         self.rebuild_unified_cache();
         self.list_state.scroll_lines(lines, &self.cached_unified);
     }
+
+    /// Half-page scroll for review-modal shell keys (bare `d`/`u`).
+    pub fn half_page_scroll(&mut self, down: bool) {
+        self.rebuild_unified_cache();
+        if down {
+            self.list_state.half_page_down(&self.cached_unified);
+        } else {
+            self.list_state.half_page_up(&self.cached_unified);
+        }
+    }
+
+    /// Body-item indices where each rendered diff hunk starts.
+    ///
+    /// Hunk rows carry `diff_meta: Some(_)`; separators and headers are `None`,
+    /// so a hunk start is the first `Some` row after a `None` (or at index 0).
+    fn diff_hunk_starts(&self) -> Vec<usize> {
+        if self.kind != ViewerKind::Edit {
+            return Vec::new();
+        }
+        let mut starts = Vec::new();
+        for (i, meta) in self.diff_meta.iter().enumerate() {
+            if meta.is_some() && (i == 0 || self.diff_meta[i - 1].is_none()) {
+                starts.push(i);
+            }
+        }
+        starts
+    }
+
+    /// Jump selection to the next (`dir > 0`) / previous (`dir < 0`) diff hunk.
+    ///
+    /// Stops at the ends without wrapping. Returns true when the selection moved.
+    /// The scroll follows on the next `prepare_layout` via selection anchoring.
+    pub fn jump_hunk(&mut self, dir: i32) -> bool {
+        if self.kind != ViewerKind::Edit || dir == 0 {
+            return false;
+        }
+        let starts = self.diff_hunk_starts();
+        if starts.is_empty() {
+            return false;
+        }
+        // Edit viewers index ContentLine ids by body position; offset by any
+        // preamble so ids match the unified vec ListPane selects against.
+        let prepend = self.prepend_items.len();
+        let cur = self.list_state.selected_id().map(|id| id as usize);
+        let target = if dir > 0 {
+            match cur {
+                Some(c) => starts.into_iter().find(|s| prepend + s > c),
+                None => Some(starts[0]),
+            }
+        } else {
+            match cur {
+                Some(c) => starts.into_iter().rev().find(|s| prepend + s < c),
+                None => starts.last().copied(),
+            }
+        };
+        let Some(body_idx) = target else {
+            return false;
+        };
+        self.list_state.select_by_id((prepend + body_idx) as u64);
+        true
+    }
 }
 
 impl BlockViewerPane {
@@ -1453,7 +1699,8 @@ impl BlockViewerPane {
 
         // Detect theme switch and rebuild items and list style
         let current_theme = Theme::current_kind();
-        if current_theme != self.last_theme {
+        let theme_changed = current_theme != self.last_theme;
+        if theme_changed {
             self.last_theme = current_theme;
             self.list_style = match self.kind {
                 ViewerKind::BgTask | ViewerKind::Execute => ListPaneStyle {
@@ -1480,6 +1727,27 @@ impl BlockViewerPane {
                     self.last_generation = u64::MAX;
                 }
                 _ => {}
+            }
+        }
+
+        if self.kind == ViewerKind::Edit {
+            let side_by_side =
+                !self.edit_review && crate::appearance::cache::load_side_by_side_edit();
+            let layout_changed = self.last_content_area.width != content_area.width
+                || self.last_edit_side_by_side != side_by_side;
+            if theme_changed || layout_changed {
+                if let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block {
+                    let (items, diff_meta) = Self::build_edit_items(
+                        edit,
+                        &theme,
+                        content_area.width.max(1),
+                        self.edit_review,
+                    );
+                    self.items = items;
+                    self.diff_meta = diff_meta;
+                    self.list_state.invalidate_layout();
+                }
+                self.last_edit_side_by_side = side_by_side;
             }
         }
 

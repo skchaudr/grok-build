@@ -896,7 +896,7 @@ pub fn user_config_path() -> PathBuf {
 }
 
 pub fn project_config_path(dir: &std::path::Path) -> PathBuf {
-    dir.join(".grok").join("config.toml")
+    xai_grok_config::project_config_dir(dir).join("config.toml")
 }
 
 /// Checks raw key presence rather than deserializing, so malformed entries (the ones users most need `mcp remove` for) are still reported.

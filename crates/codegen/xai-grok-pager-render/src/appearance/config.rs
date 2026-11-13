@@ -24,6 +24,8 @@ pub struct AppearanceConfig {
     pub turn_status: TurnStatusConfig,
     /// Show timestamps on user/agent messages. Toggled via `/timestamps`.
     pub show_timestamps: bool,
+    /// Show raw tool args on Other/generic tool cards. Toggled via F2.
+    pub show_other_tool_args: bool,
     /// Timeline sidebar (per-turn tick rail). Toggled via `/timeline`.
     pub show_timeline: bool,
     /// Whether hooks & plugins UI is disabled (hides /hooks, /plugins commands and scrollback annotations). `false` by default (plugins enabled).
@@ -61,6 +63,66 @@ impl Default for TurnStatusConfig {
     }
 }
 
+/// Cursor rendered at the prompt's insertion point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PromptCursor {
+    /// Preserve the terminal's existing hardware cursor shape and behavior.
+    #[default]
+    Native,
+    /// Solid/reversed block cursor.
+    Block,
+    /// Underline the current cell, or draw `_` on an empty cell.
+    Underline,
+    /// Draw a vertical bar (`│`).
+    Bar,
+    /// Draw a user-provided single-column character.
+    Custom(char),
+}
+
+impl PromptCursor {
+    /// Parse a pager.toml value. Preset names are case-insensitive; any other
+    /// single-column character becomes a custom cursor. Returns `None` for an
+    /// empty, multi-character, control, zero-width, or wide value.
+    pub fn parse_config(value: &str) -> Option<Self> {
+        let trimmed = value.trim();
+        match trimmed.to_ascii_lowercase().as_str() {
+            "native" | "default" => Some(Self::Native),
+            "block" | "box" => Some(Self::Block),
+            "underline" | "underscore" | "line" => Some(Self::Underline),
+            "bar" | "pipe" | "vertical" => Some(Self::Bar),
+            _ => {
+                let mut chars = trimmed.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(ch), None)
+                        if !ch.is_control()
+                            && unicode_width::UnicodeWidthChar::width(ch) == Some(1) =>
+                    {
+                        Some(Self::Custom(ch))
+                    }
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// Parse a pager.toml value, falling back to the safe native cursor when a
+    /// hand-edited developer config contains an invalid value.
+    pub fn from_config(value: &str) -> Self {
+        Self::parse_config(value).unwrap_or_default()
+    }
+
+    /// Canonical pager.toml / settings-modal representation.
+    pub fn to_config_value(self) -> String {
+        match self {
+            Self::Native => "native".to_string(),
+            Self::Block => "block".to_string(),
+            Self::Underline => "underline".to_string(),
+            Self::Bar => "bar".to_string(),
+            Self::Custom(ch) => ch.to_string(),
+        }
+    }
+}
+
 /// Prompt input view configuration (the editor widget, not the scrollback block).
 #[derive(Debug, Clone, Copy)]
 pub struct PromptViewConfig {
@@ -70,6 +132,8 @@ pub struct PromptViewConfig {
     pub mouse_hover: bool,
     /// Show the ❯ prefix character in the prompt editor.
     pub show_prefix: bool,
+    /// Cursor shown at the prompt insertion point.
+    pub cursor: PromptCursor,
     /// Compact mode: remove top padding and reduce info block padding. Toggled at runtime via `/compact-mode`.
     /// This is the DERIVED render value, which the app may force on for short terminals (the persisted user setting is `UiConfig::compact_mode`).
     /// In the pager, write it only via `AppView::apply_effective_compact`.
@@ -82,6 +146,7 @@ impl Default for PromptViewConfig {
             collapse_unfocused: true,
             mouse_hover: true,
             show_prefix: true,
+            cursor: PromptCursor::Native,
             compact: false,
         }
     }
@@ -700,6 +765,10 @@ pub struct RawPromptViewConfig {
     pub mouse_hover: bool,
     /// Show the ❯ prefix character in the prompt editor.
     pub show_prefix: bool,
+    /// Cursor at the input position. Presets: "native" (current behavior),
+    /// "block", "underline", and "bar". A single-column character such as
+    /// "_", "▏", or "•" is also accepted as a custom cursor.
+    pub cursor: String,
 }
 
 impl Default for RawPromptViewConfig {
@@ -708,6 +777,7 @@ impl Default for RawPromptViewConfig {
             collapse_unfocused: true,
             mouse_hover: true,
             show_prefix: true,
+            cursor: "native".to_string(),
         }
     }
 }
@@ -1206,6 +1276,7 @@ impl From<RawAppearanceConfig> for AppearanceConfig {
                 collapse_unfocused: raw.prompt.collapse_unfocused,
                 mouse_hover: raw.prompt.mouse_hover,
                 show_prefix: raw.prompt.show_prefix,
+                cursor: PromptCursor::from_config(&raw.prompt.cursor),
                 compact: false, // runtime-only, not persisted in TOML
             },
             scrollback: ScrollbackConfig {
@@ -1255,6 +1326,7 @@ impl From<RawAppearanceConfig> for AppearanceConfig {
             },
             turn_status: TurnStatusConfig::default(),
             show_timestamps: true, // runtime-only, loaded from config.toml via persist
+            show_other_tool_args: true, // runtime-only; F2 `[ui].show_other_tool_args`
             // Single source: UiConfig::SHOW_TIMELINE_DEFAULT (loaded from config.toml via persist).
             show_timeline: UiConfig::SHOW_TIMELINE_DEFAULT,
             disable_plugins: raw.disable_plugins,
@@ -1810,6 +1882,76 @@ fn persist_respect_manual_folds_to(path: &std::path::Path, enabled: bool) -> std
     xai_grok_config::fs_atomic::write_atomically_bound(&dest, &updated, None)
 }
 
+/// Persist the prompt cursor to `[prompt].cursor` in pager.toml.
+pub fn persist_prompt_cursor(value: &str) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+
+    let cursor = PromptCursor::parse_config(value).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "prompt cursor must be native, block, underline, bar, or one single-column character",
+        )
+    })?;
+    if xai_grok_config::user_grok_home().is_none() {
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            "no user grok home resolved; refusing to write a cwd-relative pager.toml that startup would never read",
+        ));
+    }
+    let _guard = PAGER_TOML_SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let path = crate::util::pager_toml_path();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let updated = upsert_prompt_cursor(&content, &cursor.to_config_value())
+        .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+
+    #[cfg(unix)]
+    let prior_mode: Option<u32> = std::fs::metadata(&path).ok().map(|m| {
+        use std::os::unix::fs::PermissionsExt;
+        m.permissions().mode()
+    });
+
+    let suffix = {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("toml.tmp.{}.{}", std::process::id(), nanos)
+    };
+    let tmp = path.with_extension(suffix);
+    std::fs::write(&tmp, updated)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(mode) = prior_mode {
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
+        }
+    }
+    std::fs::rename(&tmp, &path)
+}
+
+fn upsert_prompt_cursor(content: &str, value: &str) -> Result<String, String> {
+    let mut doc: DocumentMut = content
+        .parse()
+        .map_err(|e: toml_edit::TomlError| e.to_string())?;
+    let prompt = doc
+        .entry("prompt")
+        .or_insert_with(implicit_table)
+        .as_table_mut()
+        .ok_or_else(|| "pager.toml `prompt` is not a table".to_string())?;
+    prompt.insert("cursor", toml_edit::value(value));
+    Ok(doc.to_string())
+}
+
 fn upsert_respect_manual_folds(content: &str, enabled: bool) -> Result<String, String> {
     let mut doc: DocumentMut = content
         .parse()
@@ -2036,6 +2178,51 @@ gutter_bg = true
     }
 
     #[test]
+    fn prompt_cursor_upsert_round_trips_and_preserves_prompt_siblings() {
+        let existing = "[prompt]\nmouse_hover = false\ncursor = \"native\"\n";
+        let updated = upsert_prompt_cursor(existing, "bar").unwrap();
+        let raw: RawAppearanceConfig = toml::from_str(&updated).unwrap();
+        let cfg: AppearanceConfig = raw.into();
+
+        assert_eq!(cfg.prompt.cursor, PromptCursor::Bar);
+        assert!(
+            !cfg.prompt.mouse_hover,
+            "sibling prompt keys must be preserved"
+        );
+        assert!(
+            upsert_prompt_cursor("prompt = 5", "bar").is_err(),
+            "non-table `prompt` must be a hard error",
+        );
+    }
+
+    #[test]
+    fn prompt_cursor_parses_presets_aliases_and_custom_characters() {
+        assert_eq!(PromptCursor::from_config("native"), PromptCursor::Native);
+        assert_eq!(PromptCursor::from_config("BLOCK"), PromptCursor::Block);
+        assert_eq!(PromptCursor::from_config("line"), PromptCursor::Underline);
+        assert_eq!(PromptCursor::from_config("pipe"), PromptCursor::Bar);
+        assert_eq!(PromptCursor::from_config("▏"), PromptCursor::Custom('▏'));
+        assert_eq!(PromptCursor::from_config("•"), PromptCursor::Custom('•'));
+    }
+
+    #[test]
+    fn prompt_cursor_rejects_empty_multi_character_and_wide_values() {
+        assert_eq!(PromptCursor::from_config(""), PromptCursor::Native);
+        assert_eq!(PromptCursor::from_config("ab"), PromptCursor::Native);
+        assert_eq!(PromptCursor::from_config("光"), PromptCursor::Native);
+    }
+
+    #[test]
+    fn prompt_cursor_defaults_to_current_native_behavior() {
+        assert_eq!(PromptViewConfig::default().cursor, PromptCursor::Native);
+        let raw: RawAppearanceConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            AppearanceConfig::from(raw).prompt.cursor,
+            PromptCursor::Native
+        );
+    }
+
+    #[test]
     fn test_to_toml_with_comments() {
         let toml = RawAppearanceConfig::to_toml_with_comments();
         // Check scrollback sections by key names rather than section headers
@@ -2118,6 +2305,10 @@ gutter_bg = true
         assert!(
             toml.contains("mouse_hover = "),
             "Missing mouse_hover in:\n{toml}"
+        );
+        assert!(
+            toml.contains("cursor = "),
+            "Missing prompt cursor in:\n{toml}"
         );
         // Check blocks are under scrollback
         assert!(

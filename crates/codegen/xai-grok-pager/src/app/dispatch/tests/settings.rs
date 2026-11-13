@@ -64,6 +64,40 @@ fn toggle_vim_mode_flips_state_and_persistence_cache() {
         "cache must follow the second toggle"
     );
 }
+
+#[test]
+fn set_prompt_cursor_canonicalizes_and_emits_persist_setting() {
+    use crate::appearance::PromptCursor;
+    use crate::settings::SettingValue;
+
+    let mut app = test_app_with_agent();
+    assert_eq!(app.appearance.prompt.cursor, PromptCursor::Native);
+
+    let effects = dispatch(Action::SetPromptCursor("pipe".to_string()), &mut app);
+    assert_eq!(app.appearance.prompt.cursor, PromptCursor::Bar);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::PersistSetting {
+                key: "prompt_cursor",
+                value: SettingValue::String(value),
+                rollback_value: SettingValue::String(previous),
+            }] if value == "bar" && previous == "native"
+        ),
+        "prompt cursor must persist the canonical value and rollback value, got {effects:?}",
+    );
+
+    assert!(
+        dispatch(Action::SetPromptCursor("bar".to_string()), &mut app).is_empty(),
+        "setting the already-canonical cursor must be a no-op",
+    );
+    assert!(
+        dispatch(Action::SetPromptCursor("too wide".to_string()), &mut app).is_empty(),
+        "invalid cursor strings must not mutate or persist",
+    );
+    assert_eq!(app.appearance.prompt.cursor, PromptCursor::Bar);
+}
+
 /// End-to-end: in vim mode, Tab from the prompt focuses scrollback, and `j` then navigates the scrollback instead of bouncing back to the prompt.
 /// Drives the real loop from handle_input through dispatch.
 #[test]
@@ -1700,6 +1734,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             };
             let _ = dispatch(Action::SetFollowUpBehavior(away), app);
         }
+        "cancel_turn_key" => {
+            let _ = dispatch(Action::SetCancelTurnKey("ctrl_c".to_string()), app);
+        }
         "simple_mode" => {
             let _ = dispatch(Action::SetSimpleMode(false), app);
         }
@@ -1784,6 +1821,12 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "remember_tool_approvals" => {
             let _ = dispatch(Action::SetRememberToolApprovals(false), app);
         }
+        "session_recap" => {
+            let _ = dispatch(Action::SetSessionRecap(false), app);
+        }
+        "progress_bar" => {
+            let _ = dispatch(Action::SetProgressBar(true), app);
+        }
         "toolset.ask_user_question.timeout_enabled" => {
             let _ = dispatch(Action::SetAskUserQuestionTimeoutEnabled(false), app);
         }
@@ -1849,21 +1892,68 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "voice_stt_language" => {
             let _ = dispatch(Action::SetVoiceSttLanguage("es".to_string()), app);
         }
-        "fork_secondary_model" => {
+        "fork_secondary_model" | "recap_model" => {
             use agent_client_protocol as acp;
             use std::sync::Arc;
             if let ActiveView::Agent(aid) = app.active_view
                 && let Some(agent) = app.agents.get_mut(&aid)
             {
-                let id = acp::ModelId::new(Arc::from("test-fork-move"));
-                let info = acp::ModelInfo::new(id.clone(), "Test Fork Move".to_string());
+                let id = acp::ModelId::new(Arc::from("test-aux-model-move"));
+                let info = acp::ModelInfo::new(id.clone(), "Test Aux Model Move".to_string());
                 agent.session.models.available.insert(id.clone(), info);
-                let _ = dispatch(Action::SetForkSecondaryModel(id), app);
+                let action = if key == "recap_model" {
+                    Action::SetRecapModel(id)
+                } else {
+                    Action::SetForkSecondaryModel(id)
+                };
+                let _ = dispatch(action, app);
             }
         }
         "default_selected_permission" => {
             let _ = dispatch(
                 Action::SetDefaultSelectedPermission("allow_once".to_string()),
+                app,
+            );
+        }
+        "pi_bash" => {
+            let _ = dispatch(Action::SetPiBash(false), app);
+        }
+        "pi_eval" => {
+            let _ = dispatch(Action::SetPiEval("v2".to_string()), app);
+        }
+        "pi_eval_v2_language" => {
+            let _ = dispatch(Action::SetPiEvalV2Language("all".to_string()), app);
+        }
+        "pi_eval_v2_only" => {
+            let _ = dispatch(Action::SetPiEvalV2Only(true), app);
+        }
+        "pi_eval_mcp" => {
+            let _ = dispatch(Action::SetPiEvalMcp(true), app);
+        }
+        "pi_herdr" => {
+            let _ = dispatch(
+                Action::SetHostFeatureBool {
+                    key: xai_grok_shell::host_features::PI_HERDR,
+                    enabled: false,
+                },
+                app,
+            );
+        }
+        "pi_subagents" => {
+            let _ = dispatch(
+                Action::SetHostFeatureBool {
+                    key: xai_grok_shell::host_features::PI_SUBAGENTS,
+                    enabled: false,
+                },
+                app,
+            );
+        }
+        "pi_todo" => {
+            let _ = dispatch(
+                Action::SetHostFeatureBool {
+                    key: xai_grok_shell::host_features::PI_TODO,
+                    enabled: false,
+                },
                 app,
             );
         }
@@ -1875,6 +1965,58 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
     }
 }
+#[test]
+fn set_pi_todo_persists_restart_required_toggle() {
+    let mut app = test_app_with_agent();
+    app.current_ui.pi_todo = true;
+
+    let effects = dispatch(
+        Action::SetHostFeatureBool {
+            key: xai_grok_shell::host_features::PI_TODO,
+            enabled: false,
+        },
+        &mut app,
+    );
+    assert!(!app.current_ui.pi_todo);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::PersistSetting {
+            key: "pi_todo",
+            value: crate::settings::SettingValue::Bool(false),
+            rollback_value: crate::settings::SettingValue::Bool(true),
+        }]
+    ));
+    let toast = read_toast(&app);
+    assert!(toast.contains("Pi todo: off"));
+    assert!(toast.contains("restart grok-pi to apply"));
+}
+
+#[test]
+fn set_pi_subagents_persists_restart_required_toggle() {
+    let mut app = test_app_with_agent();
+    app.current_ui.pi_subagents = true;
+
+    let effects = dispatch(
+        Action::SetHostFeatureBool {
+            key: xai_grok_shell::host_features::PI_SUBAGENTS,
+            enabled: false,
+        },
+        &mut app,
+    );
+    assert!(!app.current_ui.pi_subagents);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::PersistSetting {
+            key: "pi_subagents",
+            value: crate::settings::SettingValue::Bool(false),
+            rollback_value: crate::settings::SettingValue::Bool(true),
+        }]
+    ));
+    let toast = read_toast(&app);
+    assert!(toast.contains("Pi subagents: off"));
+    assert!(toast.contains("restart grok-pi to apply"));
+}
+
 #[test]
 fn set_compact_mode_toast_format() {
     let mut app = test_app_with_agent();

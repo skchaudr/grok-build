@@ -600,6 +600,11 @@ pub(super) fn render_version_badge(
     Paragraph::new(version_line).render(version_area, buf);
 }
 
+/// Optional external title and version for branded welcome surfaces.
+pub fn external_welcome_brand() -> Option<(&'static str, &'static str)> {
+    logo::welcome_brand_override().map(|brand| (brand.title, brand.version))
+}
+
 /// Render the prompt box and version line (shared across welcome states). When `skip_version` is
 /// true the version badge is not rendered (it was already drawn inside the hero box).
 #[allow(clippy::too_many_arguments)]
@@ -768,8 +773,9 @@ pub struct WelcomeRenderParams<'a> {
 
 impl WelcomeRenderParams<'_> {
     /// `(title, version)` for the version badge when an external agent reports itself.
+    /// A launch-time brand (`ExternalUiProfile.welcome_brand`, e.g. grok-pi) wins over `agentInfo`.
     fn agent_identity(&self) -> Option<(&str, &str)> {
-        self.agent_title.zip(self.agent_version)
+        external_welcome_brand().or(self.agent_title.zip(self.agent_version))
     }
 }
 
@@ -2409,6 +2415,7 @@ pub(crate) fn render_session_picker_body(
                     summary_lines: &[],
                     dimmed: false,
                     indent: 0,
+                    label_color: None,
                     badge: b.badge,
                     badge_color: None,
                     collapsible: b.collapsible,
@@ -2488,6 +2495,7 @@ pub(crate) fn render_session_picker_body(
             summary_lines: &[],
             dimmed: false,
             indent: 1,
+            label_color: None,
             badge: if has_snippet { "match" } else { "" },
             badge_color: Some(theme.accent_user),
             collapsible: true,
@@ -2907,6 +2915,11 @@ mod tests {
         SessionPickerEntry {
             id: id.into(),
             summary: summary.into(),
+            name: None,
+            first_message: None,
+            session_path: None,
+            total_tokens: None,
+            total_cost: None,
             updated_at: chrono::Utc::now(),
             created_at: chrono::Utc::now(),
             cwd: format!("/home/user/{repo_name}"),
@@ -2918,6 +2931,7 @@ mod tests {
             branch: None,
             repo_name: repo_name.into(),
             worktree_label: None,
+            parent_session_path: None,
             last_turn_summary: None,
             last_recap: None,
             session_kind: None,

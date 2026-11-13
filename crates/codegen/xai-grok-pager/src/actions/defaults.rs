@@ -520,14 +520,14 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Interrupts the agent's current turn and stops generation, keeping the session open.\nCtrl+C cancels when the prompt is empty; with a non-empty draft it clears the prompt first and leaves the turn running.\nEsc never cancels a turn; pressed mid-turn it shows a reminder to use Ctrl+C.\nIt stops the turn, not the app; use the quit shortcut to exit.",
+                "Interrupts the agent's current turn and stops generation, keeping the session open.\nBy default Esc cancels immediately while a turn is running; F2 can require Ctrl+C instead.\nCtrl+C cancels when the prompt is empty; with a non-empty draft it clears the prompt first and leaves the turn running.\nIt stops the turn, not the app; use the quit shortcut to exit.",
             ),
         },
         ActionDef {
-            id: ActionId::CycleMode,
-            label: "mode",
-            description: "Cycle mode (Normal / Plan / Always-approve)",
-            // All Shift+Tab encodings; see `input::key::shift_tab_keys()`
+            id: ActionId::CycleThinkingLevel,
+            label: "thinking",
+            description: "Cycle thinking level",
+            // All Shift+Tab encodings — see `input::key::shift_tab_keys()`.
             default_key: crate::input::key::shift_tab_keys()[0],
             alt_keys: crate::input::key::shift_tab_keys()
                 .get(1..)
@@ -539,7 +539,47 @@ pub(super) fn default_actions(
             hint_key_display: Some("Shift+Tab"),
             requires_confirmation: false,
             long_help: Some(
-                "Steps the session mode: Normal -> Plan -> Auto-review (when enabled) -> Always-Approve -> Normal.\nPlan keeps the agent planning first and writes no files; Auto-review has a classifier approve safe tool calls; Always-Approve runs every tool call without asking.\nCtrl+O toggles auto-approve directly.",
+                "Cycles the current model's supported thinking levels. It does not switch the model or change the session mode.",
+            ),
+        },
+        ActionDef {
+            id: ActionId::CycleMode,
+            label: "plan",
+            description: "Toggle plan mode",
+            default_key: if cfg!(windows) {
+                key!('t', CONTROL | ALT)
+            } else {
+                key!('t', CONTROL | SHIFT)
+            },
+            alt_keys: vec![],
+            category: Category::GettingStarted,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: Some(if cfg!(windows) {
+                "Ctrl+Alt+T"
+            } else {
+                "Ctrl+Shift+T"
+            }),
+            requires_confirmation: false,
+            long_help: Some(if cfg!(windows) {
+                "Toggles plan mode on/off. In plan mode the agent plans before implementing: write tools are gated to the plan file only. Ctrl+Alt+T avoids the Ctrl+Shift+T chord commonly consumed by Windows terminals; /plan-mode is always available."
+            } else {
+                "Toggles plan mode on/off. In plan mode the agent plans before implementing: write tools are gated to the plan file only. Ctrl+Shift+T because Shift+Tab is used for thinking level cycling."
+            }),
+        },
+        ActionDef {
+            id: ActionId::ReviewSession,
+            label: "review",
+            description: "Review session file changes",
+            default_key: key!('R', ALT | SHIFT),
+            alt_keys: vec![],
+            category: Category::ConversationAction,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: Some("Opt/Alt+Shift+R"),
+            requires_confirmation: false,
+            long_help: Some(
+                "Opens the session code-review modal (same as /review-session): left file list, right edit preview for write/edit tool changes in this session.",
             ),
         },
         // ── Panes (agent-level: toggle side panes) ─────────────────
@@ -606,12 +646,9 @@ pub(super) fn default_actions(
             id: ActionId::OpenExtensions,
             label: "extensions",
             description: "Open extensions",
-            // VS Code family: Ctrl+L is interject; plugins via /plugins (no chord here).
-            default_key: if in_vscode_family {
-                key!(Null)
-            } else {
-                key!('l', CONTROL)
-            },
+            // Ctrl+L is reserved for ModelPicker (Pi TUI alignment). Open plugins
+            // via /plugins, /hooks, /mcp, or the command palette.
+            default_key: key!(Null),
             alt_keys: vec![],
             category: Category::Panels,
             context: When::AgentScreen,
@@ -619,7 +656,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Opens the extensions manager for MCP servers and plugins: see what's connected and the tools they add.\nUse it to confirm an integration loaded or browse available tools.\nDistinct from settings, which holds general app options.",
+                "Opens the extensions manager for MCP servers and plugins: see what's connected and the tools they add.\nUse it to confirm an integration loaded or browse available tools.\nNo default chord (Ctrl+L opens the model picker); open via /plugins, /hooks, /mcp, or the command palette.\nDistinct from settings, which holds general app options.",
             ),
         },
         ActionDef {
@@ -641,20 +678,17 @@ pub(super) fn default_actions(
             // "send now" label: Enter queues a follow-up while a turn runs; this chord stops the current turn and runs the message as the next one
             label: "send now",
             description: "Send now while running (cancels the current turn)",
+            // Ctrl+L is reserved for ModelPicker (Pi TUI alignment). VS Code
+            // family previously used Ctrl+L for interject; it now shares the
+            // same Ctrl+Enter / Ctrl+I chords as other terminals.
             default_key: if in_apple_terminal {
                 key!('o', CONTROL)
-            } else if in_vscode_family {
-                // Ctrl+L is a stable C0 form feed on xterm.js; the user guide's interject section explains the choice
-                key!('l', CONTROL)
             } else {
                 key!(Enter, CONTROL)
             },
-            // Windows: Ctrl+Enter may drop Ctrl, so Ctrl+I is an alt
-            // VS Code family: no alts (Ctrl+L sole chord; OpenExtensions unbound so it does not steal)
+            // Windows: Ctrl+Enter may drop Ctrl → Ctrl+I alt.
             alt_keys: if in_apple_terminal {
                 vec![key!(Enter, CONTROL), key!('i', CONTROL)]
-            } else if in_vscode_family {
-                vec![]
             } else {
                 vec![key!('i', CONTROL)]
             },
@@ -713,7 +747,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Toggles a persistent multi-line prompt so the editor stays expanded for composing longer messages.\nInsert newlines with Shift+Enter or Alt+Enter (or a trailing backslash); bare Enter still sends.\nCtrl+M toggles multiline in the prompt; off the prompt it opens the model picker.",
+                "Toggles a persistent multi-line prompt so the editor stays expanded for composing longer messages.\nInsert newlines with Shift+Enter or Alt+Enter (or a trailing backslash); bare Enter still sends.\nCtrl+M toggles multiline while the prompt is focused; use Ctrl+L for the model picker.",
             ),
         },
         ActionDef {
@@ -760,7 +794,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Turns auto-approve (YOLO) on or off for this session.\nWhile on, the agent runs every tool call (edits, shell, deletes) with no per-action confirmation.\nSame state as the Shift+Tab cycle's Always-Approve; use with care.",
+                "Turns auto-approve (YOLO) on or off for this session.\nWhile on, the agent runs every tool call (edits, shell, deletes) with no per-action confirmation.\nThis is a permission policy, separate from Shift+Tab thinking-level cycling; use with care.",
             ),
         },
         ActionDef {
@@ -843,7 +877,8 @@ pub(super) fn default_actions(
             id: ActionId::ModelPicker,
             label: "model",
             description: "Pick model",
-            default_key: key!('m', CONTROL),
+            // Align with Pi TUI `app.model.select` (ctrl+l).
+            default_key: key!('l', CONTROL),
             alt_keys: vec![],
             category: Category::Session,
             context: When::AgentScreen,
@@ -851,7 +886,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Opens the model picker to switch the model for this session; the choice applies to later turns.\nBound to Ctrl+M, but while the prompt is focused that chord toggles multiline instead.\nReach it from the scrollback or the command palette.",
+                "Opens the searchable model picker to switch the model for this session; the choice applies to later turns.\nBound to Ctrl+L (same as Pi TUI), including while the prompt is focused — editor text is retained.\nAlso available via /model or the command palette.",
             ),
         },
         ActionDef {
@@ -988,21 +1023,26 @@ pub(super) fn default_actions(
             id: ActionId::DashboardCycleMode,
             label: "mode",
             description: "Cycle dispatch mode",
-            // All Shift+Tab encodings; see `input::key::shift_tab_keys()`
-            // Registry `matches` is exact-modifier, so the SHIFT-bearing forms must be alts
-            default_key: crate::input::key::shift_tab_keys()[0],
-            alt_keys: crate::input::key::shift_tab_keys()
-                .get(1..)
-                .map(<[_]>::to_vec)
-                .unwrap_or_else(Vec::new),
+            default_key: if cfg!(windows) {
+                key!('t', CONTROL | ALT)
+            } else {
+                key!('t', CONTROL | SHIFT)
+            },
+            alt_keys: vec![],
             category: Category::Dashboard,
             context: When::DashboardFocused,
             hint_priority: None,
-            hint_key_display: Some("Shift+Tab"),
+            hint_key_display: Some(if cfg!(windows) {
+                "Ctrl+Alt+T"
+            } else {
+                "Ctrl+Shift+T"
+            }),
             requires_confirmation: false,
-            long_help: Some(
-                "Cycles the dispatch mode for agents you launch from the dashboard: Normal, Plan, then Always-Approve.\nPlan has new agents plan before changing files; Always-Approve runs their tools without prompting.\nMirrors the in-session Shift+Tab cycle, applied to new dispatches.",
-            ),
+            long_help: Some(if cfg!(windows) {
+                "Cycles the dispatch mode for agents you launch from the dashboard.\nPi uses Normal and Plan; stock Grok may also expose permission modes.\nCtrl+Alt+T avoids the Ctrl+Shift+T chord commonly consumed by Windows terminals."
+            } else {
+                "Cycles the dispatch mode for agents you launch from the dashboard.\nPi uses Normal and Plan; stock Grok may also expose permission modes.\nShift+Tab is reserved for thinking-level cycling."
+            }),
         },
         ActionDef {
             id: ActionId::DashboardToggleGrouping,
@@ -1106,8 +1146,10 @@ pub(super) fn default_actions(
                 "Toggles auto-approve (YOLO) for the selected agent right from the dashboard, without attaching to it.\nWhile on, that agent runs every tool call with no per-action confirmation.\nThe per-session equivalent is Ctrl+O inside a session.",
             ),
         },
-        // Open the location picker, a floating modal to change the working directory new dashboard sessions spawn in
-        // Ctrl+L ("location") is free under `DashboardFocused` (it only binds OpenExtensions under `AgentScreen`, a different context)
+        // Open the location picker — a floating modal to change the
+        // working directory new dashboard sessions spawn in. Ctrl+L
+        // ("location") is free under `DashboardFocused` (ModelPicker
+        // binds Ctrl+L under `AgentScreen`, a different context).
         ActionDef {
             id: ActionId::DashboardOpenLocationPicker,
             label: "location",

@@ -1,17 +1,210 @@
 use serde::{Deserialize, Serialize};
 use xai_grok_config::DisplayRefreshSettings;
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_pi_eval() -> String {
+    "v1".to_string()
+}
+
+fn default_pi_eval_v2_language() -> String {
+    "js".to_string()
+}
+
+fn default_pi_eval_v2_display_mode() -> String {
+    "effects".to_string()
+}
 use xai_grok_status_line::StatusLineConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub max_thoughts_width: u16,
+    /// Pi built-in tool preferences for the grok-pi external profile. The
+    /// default preserves Pi's own default tool set; F2 writes this as a group.
+    #[serde(default, skip_serializing_if = "PiBuiltinTools::is_default")]
+    pub pi_builtin_tools: PiBuiltinTools,
+    /// Enable grok-pi's enhanced Bash bridge. This is separate from
+    /// `pi_builtin_tools.bash`: disabling it restores stock Pi Bash behavior
+    /// while leaving Eval runtime injection independent.
+    /// Default on; takes effect for new grok-pi sessions only.
+    #[serde(default = "default_true")]
+    pub pi_bash: bool,
+    /// Format Bash commands and Eval code for display in detail/popup views.
+    /// Display-only; executed inputs remain unchanged.
+    /// Default off; F2 can enable without restart.
+    #[serde(default)]
+    pub pi_bash_command_format: bool,
+    /// Show hover popups with expanded Write/Edit details from collapsed tool rows.
+    /// Default on; display-only and live-applied.
+    #[serde(default = "default_true")]
+    pub write_edit_hover_popups: bool,
+    /// Select the Eval bridge generation independently of `pi_bash`.
+    /// `v1` keeps the legacy Python + JavaScript runtime; `v2` uses the host-RPC runtime.
+    /// Default v1; takes effect for new grok-pi sessions only.
+    #[serde(default = "default_pi_eval")]
+    pub pi_eval: String,
+    /// Select Eval v2 languages: `js`, `py`, or `all`.
+    /// Default `js` preserves the pre-selector v2 behavior.
+    #[serde(default = "default_pi_eval_v2_language")]
+    pub pi_eval_v2_language: String,
+    /// Select Eval v2 presentation: `effects` hides orchestration source while
+    /// `legacy` keeps the source/result card. Display-only and live-applied.
+    #[serde(default = "default_pi_eval_v2_display_mode")]
+    pub pi_eval_v2_display_mode: String,
+    /// Force Eval Bridge v2 and allow only the Eval tool in the Pi registry.
+    /// This is a restart-required grok-pi isolation mode; it does not mutate
+    /// the stored `pi_eval` or per-tool preferences underneath it.
+    #[serde(default)]
+    pub pi_eval_v2_only: bool,
+    /// Enable a private loopback MCP endpoint over the live Eval v2-only runtime.
+    /// Takes effect at process start, and requires pi_eval_v2_only.
+    #[serde(default)]
+    pub pi_eval_mcp: bool,
+    /// Use Pi Session Manager for external Pi `/resume`: SQLite catalog,
+    /// Ctrl+F full-text search, and message preview. Requires PSM running.
+    /// Disabled by default; off → Pi JSONL list only (no PSM SQLite paths).
+    #[serde(default)]
+    pub psm_resume_index: bool,
+    /// Track write/edit preimages and allow file-only rollback from SessionTree.
+    /// Default off; takes effect for new grok-pi sessions only.
+    #[serde(default)]
+    pub pi_tree_file_rollback: bool,
+    /// Skip the "Summarize branch?" prompt when navigating the session tree.
+    /// When true, Enter navigates immediately without summarization.
+    #[serde(default)]
+    pub pi_tree_skip_summary_prompt: bool,
+    /// Report authoritative Pi lifecycle and session state to Herdr.
+    /// Default off; takes effect for new sessions only.
+    #[serde(default)]
+    pub pi_herdr: bool,
+    /// Enable the built-in Pi child-session subagent bridge.
+    /// Default on; takes effect for new grok-pi sessions only.
+    #[serde(default = "default_true")]
+    pub pi_subagents: bool,
+    /// Enable optional Subagents V2 team tools (`spawn_team`, stable agent
+    /// paths, peer messaging) on top of Pi subagents.
+    /// Default off; takes effect for new grok-pi sessions only.
+    #[serde(default)]
+    pub pi_subagents_v2: bool,
+    /// Enable upstream-compatible Rhai workflows in grok-pi (xai-workflow + Pi spawn).
+    /// Default off; takes effect for new grok-pi sessions only.
+    #[serde(default)]
+    pub pi_workflows: bool,
+    /// Enable grok-pi's built-in structured `todo` tool and native TodoPane projection.
+    /// Default on; takes effect for new grok-pi sessions only.
+    #[serde(default = "default_true")]
+    pub pi_todo: bool,
+    /// Select the todo extension V2 runtime (cross-version migration from V1).
+    /// Default off = V1; takes effect for new grok-pi sessions only.
+    #[serde(default)]
+    pub pi_todo_v2: bool,
+    /// Enable Grok-style `/goal` loop for grok-pi (GoalHost + update_goal).
+    /// Default off; takes effect for new grok-pi sessions only.
+    #[serde(default)]
+    pub pi_goal: bool,
+    /// Enable Grok-style `/loop` scheduled recurring prompts for grok-pi.
+    /// Default off; takes effect for new grok-pi sessions only.
+    #[serde(default)]
+    pub pi_loop: bool,
+    /// Enable native Q&A (`ask_user_question` → Grok QuestionView) in grok-pi.
+    /// Default off; takes effect for new grok-pi sessions only.
+    #[serde(default)]
+    pub pi_ask_user_question: bool,
+    /// Notify the desktop when native Q&A arrives while grok-pi is unfocused.
+    /// Default on; applies immediately.
+    #[serde(default = "default_true")]
+    pub pi_ask_user_question_notifications: bool,
+    /// Enable native `/btw` side questions for grok-pi (Pi extension + x.ai/btw).
+    /// Default off; takes effect for new grok-pi sessions only.
+    #[serde(default)]
+    pub pi_btw: bool,
+    /// Show pi-cache-graph views (1/2/3/s/e) inside the Context modal.
+    /// Default on for grok-pi; F2 can disable without restart.
+    #[serde(default = "default_true")]
+    pub pi_cache_graph: bool,
+    /// Load the bundled grok-pi configuration skill so the agent can answer
+    /// questions about grok-pi settings, F2 toggles, and config files.
+    /// Default on; takes effect for new grok-pi sessions only.
+    #[serde(default = "default_true")]
+    pub pi_config_skill: bool,
+    /// Render grok-pi user prompts with the agent markdown renderer (no
+    /// collapse). Default on; F2 can disable to restore classic collapsible
+    /// plain-text prompts. Applies immediately.
+    #[serde(default = "default_true")]
+    pub pi_user_markdown: bool,
+    /// Include hidden (dotfile) entries in plain `@` file search by default,
+    /// aligning with pi-main's fd `--hidden` behavior: dotfiles are listed while
+    /// ignore rules stay active. `@!` additionally reveals gitignored project
+    /// files, but dependency/package stores such as `.git` and `node_modules`
+    /// remain hard-excluded. Default on; applies live to the current @ walker.
+    #[serde(default = "default_true")]
+    pub pi_at_search_hidden: bool,
+    /// Keep previous agent tabs alive when `/new` starts a fresh session.
+    /// Default off: `/new` fully replaces the current session (old agent tabs
+    /// are dropped). When on, `/new` preserves old agents so the dashboard can
+    /// switch back to them (Pi re-loads their session on demand). Applies
+    /// immediately — no restart required.
+    #[serde(default)]
+    pub pi_keep_multi_agent: bool,
+    /// Show `raw_input` args on Other/generic tool cards when expanded.
+    /// Default off; F2 can enable without restart. Not fabric-only.
+    #[serde(default)]
+    pub show_other_tool_args: bool,
+    /// Default file-list layout in `/review-*` modal: tree (cwd-relative,
+    /// compact Java packages) vs flat basenames. Default off; `t` in modal
+    /// toggles and persists via F2 `review_file_tree`.
+    #[serde(default)]
+    pub review_file_tree: bool,
+    /// Include session `read` tool ops in `/review-*` file list. Default off;
+    /// `r` in modal toggles and persists via F2 `review_include_reads`.
+    #[serde(default)]
+    pub review_include_reads: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
     /// Model ID to use for the secondary agent when forking.
     /// Defaults to the main default model (from default_models.json).
     pub fork_secondary_model: String,
+    /// Optional model for display-only session recap (`/recap` + auto away recap).
+    /// Empty string = fall through to slot 2/3 or the active session model.
+    /// Written by F2 settings.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub recap_model: String,
+    /// Recap fallback model slot 2 (tried after `recap_model`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub recap_model_2: String,
+    /// Recap fallback model slot 3 (tried after `recap_model_2`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub recap_model_3: String,
+    /// Optional model for native `/btw` side questions (slot 1).
+    /// Empty = fall through to slot 2/3 or the active session model.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub btw_model: String,
+    /// `/btw` fallback model slot 2.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub btw_model_2: String,
+    /// `/btw` fallback model slot 3.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub btw_model_3: String,
+    /// Auto session-recap when returning from away. `None` = on (default).
+    /// Manual `/recap` still follows agent capability (`sessionRecap`); this only
+    /// gates the automatic return-from-away path. Written by F2 settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_recap: Option<bool>,
+    /// Allow recap generation to include an optional Markdown Mermaid diagram.
+    /// `None` = off (default). Written by F2 settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recap_mermaid: Option<bool>,
+    /// Show OSC 9;4 progress indicators in the terminal tab bar.
+    /// `None` = off (default). Written by F2 settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_bar: Option<bool>,
+    /// Show the experimental Remote TUI footer below its projected frame.
+    /// `None` = off (default). Written by F2 settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_tui_footer: Option<bool>,
     /// Read by `util::config`, declared here for `serde_ignored`.
     #[serde(default)]
     pub yolo: bool,
@@ -104,6 +297,10 @@ pub struct UiConfig {
     /// always on with no toggle shortcut. The prompt keeps `Ctrl+R` for history search; focus scrollback (Esc/Tab) first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mouse_reporting_toggle: Option<bool>,
+    /// Key required to cancel a running turn: `esc` (default) or `ctrl_c`.
+    /// Written by the F2 settings modal and applied live by the pager.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_turn_key: Option<String>,
     /// When cancelling a parent turn with running subagents: `always_stop` stops them without prompting, `always_continue` leaves them running.
     /// Unset/`ask` shows the cancel-turn picker.
     /// Written by the pager when the user picks "Always stop" / "Always continue".
@@ -127,6 +324,11 @@ pub struct UiConfig {
     /// `None` means on (client default). Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_thinking_blocks: Option<bool>,
+    /// Color the normal prompt border according to the selected thinking/
+    /// reasoning effort. `None` = on (client default). Written by the pager's
+    /// F2 settings modal and applied live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_border_colors: Option<bool>,
     /// Fold runs of consecutive non-destructive tool calls (reads, searches, lists) into one transcript row.
     /// `None` means on (client default). Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +337,15 @@ pub struct UiConfig {
     /// `None` means off (client default). Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collapsed_edit_blocks: Option<bool>,
+    /// Scope toggled by Ctrl+O in a grok-pi session: `write_edit` (default)
+    /// expands write and edit output; `all_tools` expands every tool output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctrl_o_tool_expansion: Option<String>,
+    /// Header content for grok-pi Bash/run tool cards:
+    /// `command_only` | `task_name` (default) | `task_name_and_command`.
+    /// Written by the pager's F2 settings modal and applied live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi_bash_run_display: Option<String>,
     /// Next-prompt suggestions (tab autocomplete ghost text) after each turn.
     /// `None` means on (client default).
     /// Written by the pager's settings modal; the `GROK_PROMPT_SUGGESTIONS` env var overrides at runtime.
@@ -225,6 +436,58 @@ impl ContextualHints {
 
 const DEFAULT_MAX_THOUGHTS_WIDTH: u16 = 120;
 
+/// Per-tool grok-pi preferences. These are applied by the bundled Pi
+/// extension at session startup, not by the Pager itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PiBuiltinTools {
+    pub read: bool,
+    pub bash: bool,
+    pub powershell: bool,
+    pub edit: bool,
+    pub write: bool,
+    pub grep: bool,
+    pub find: bool,
+    pub ls: bool,
+    pub eval: bool,
+    /// Pi's `codemode` tool. Registered by a built-in *extension* rather than
+    /// the built-in tool registry, so grok-pi must also pass
+    /// `--extension builtin:codemode` before this name can be activated.
+    pub codemode: bool,
+}
+
+impl PiBuiltinTools {
+    pub fn is_default(&self) -> bool {
+        self.read
+            && self.bash
+            && self.powershell == cfg!(windows)
+            && self.edit
+            && self.write
+            && !self.grep
+            && !self.find
+            && !self.ls
+            && !self.eval
+            && !self.codemode
+    }
+}
+
+impl Default for PiBuiltinTools {
+    fn default() -> Self {
+        Self {
+            read: true,
+            bash: true,
+            powershell: cfg!(windows),
+            edit: true,
+            write: true,
+            grep: false,
+            find: false,
+            ls: false,
+            eval: false,
+            codemode: false,
+        }
+    }
+}
+
 fn deserialize_keep_text_selection<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -249,8 +512,49 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             max_thoughts_width: DEFAULT_MAX_THOUGHTS_WIDTH,
+            pi_builtin_tools: PiBuiltinTools::default(),
+            pi_bash: true,
+            pi_bash_command_format: false,
+            write_edit_hover_popups: true,
+            pi_eval: default_pi_eval(),
+            pi_eval_v2_language: default_pi_eval_v2_language(),
+            pi_eval_v2_display_mode: default_pi_eval_v2_display_mode(),
+            pi_eval_v2_only: false,
+            pi_eval_mcp: false,
+            psm_resume_index: false,
+            pi_tree_file_rollback: false,
+            pi_tree_skip_summary_prompt: false,
+            pi_herdr: false,
+            pi_subagents: true,
+            pi_subagents_v2: false,
+            pi_workflows: false,
+            pi_todo: true,
+            pi_todo_v2: false,
+            pi_goal: false,
+            pi_loop: false,
+            pi_ask_user_question: false,
+            pi_ask_user_question_notifications: true,
+            pi_btw: false,
+            pi_cache_graph: true,
+            pi_config_skill: true,
+            pi_user_markdown: true,
+            pi_at_search_hidden: true,
+            pi_keep_multi_agent: false,
+            show_other_tool_args: true,
+            review_file_tree: false,
+            review_include_reads: false,
             theme: None,
             fork_secondary_model: xai_grok_models::default_model().to_string(),
+            recap_model: String::new(),
+            recap_model_2: String::new(),
+            recap_model_3: String::new(),
+            btw_model: String::new(),
+            btw_model_2: String::new(),
+            btw_model_3: String::new(),
+            session_recap: None,
+            recap_mermaid: None,
+            progress_bar: None,
+            remote_tui_footer: None,
             yolo: false,
             ui_theme: None,
             compact_mode: false,
@@ -277,12 +581,16 @@ impl Default for UiConfig {
             voice_keybind_enabled: None,
             mouse_reporting_toggle: None,
             remember_tool_approvals: None,
+            cancel_turn_key: None,
             cancel_subagents_on_turn_cancel: None,
             keep_text_selection: None,
             selection_highlight_duration_ms: None,
             show_thinking_blocks: None,
+            thinking_border_colors: None,
             group_tool_verbs: None,
             collapsed_edit_blocks: None,
+            ctrl_o_tool_expansion: None,
+            pi_bash_run_display: None,
             prompt_suggestions: None,
             cursor_blink: None,
             screen_mode: None,
@@ -343,6 +651,16 @@ impl UiConfig {
     /// True when mid-turn follow-ups should promote as interjections (Steer).
     pub fn follow_up_steer_enabled(&self) -> bool {
         self.follow_up_behavior() == "steer"
+    }
+
+    pub const CANCEL_TURN_KEY_DEFAULT: &'static str = "esc";
+
+    /// Resolved running-turn cancellation key. Unknown values fall back to Esc.
+    pub fn cancel_turn_key(&self) -> &'static str {
+        match self.cancel_turn_key.as_deref() {
+            Some("ctrl_c") => "ctrl_c",
+            _ => Self::CANCEL_TURN_KEY_DEFAULT,
+        }
     }
 
     /// True when the highlight should not dismiss on a timer (`hold` / `word_select`, or legacy duration 0).
@@ -425,6 +743,24 @@ mod tests {
             ..Default::default()
         };
         assert!(!off.confirm_before_rewind_enabled());
+    }
+
+    #[test]
+    fn cancel_turn_key_defaults_to_esc_and_accepts_ctrl_c() {
+        let default = UiConfig::default();
+        assert_eq!(default.cancel_turn_key(), "esc");
+
+        let ctrl_c = UiConfig {
+            cancel_turn_key: Some("ctrl_c".into()),
+            ..Default::default()
+        };
+        assert_eq!(ctrl_c.cancel_turn_key(), "ctrl_c");
+
+        let unknown = UiConfig {
+            cancel_turn_key: Some("other".into()),
+            ..Default::default()
+        };
+        assert_eq!(unknown.cancel_turn_key(), "esc");
     }
 
     #[test]

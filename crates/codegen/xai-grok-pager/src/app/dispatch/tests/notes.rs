@@ -103,7 +103,15 @@ fn manual_recap_with_no_messages_toasts_empty_state_and_skips_request() {
         agent.prompt.set_text("/recap");
         assert!(!scrollback_has_user_messages(&agent.scrollback));
     }
-    let effects = dispatch(Action::SendRecap { auto: false }, &mut app);
+
+    let effects = dispatch(
+        Action::SendRecap {
+            auto: false,
+            custom_instructions: None,
+        },
+        &mut app,
+    );
+
     assert!(
         effects.is_empty(),
         "empty session must not fire x.ai/recap: {effects:?}"
@@ -121,6 +129,7 @@ fn manual_recap_with_no_messages_toasts_empty_state_and_skips_request() {
 fn manual_recap_with_messages_requests_and_shows_spinner() {
     let mut app = test_app_with_agent();
     app.session_recap_available = true;
+    app.current_ui.recap_model = "provider/recap-model".into();
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -129,10 +138,25 @@ fn manual_recap_with_messages_requests_and_shows_spinner() {
             .push_block(RenderBlock::user_prompt("hello"));
         assert!(scrollback_has_user_messages(&agent.scrollback));
     }
-    let effects = dispatch(Action::SendRecap { auto: false }, &mut app);
+
+    let effects = dispatch(
+        Action::SendRecap {
+            auto: false,
+            custom_instructions: Some("focus on the API".into()),
+        },
+        &mut app,
+    );
+
     assert!(
-        matches!(effects.as_slice(), [Effect::SendRecap { auto: false, .. }]),
-        "expected SendRecap effect, got {effects:?}"
+        matches!(
+            effects.as_slice(),
+            [Effect::SendRecap {
+                auto: false,
+                custom_instructions: Some(text),
+                ..
+            }] if text == "focus on the API"
+        ),
+        "expected SendRecap effect with focus, got {effects:?}"
     );
     let agent = app.agents.get(&id).unwrap();
     assert!(
@@ -147,6 +171,7 @@ fn manual_recap_with_messages_requests_and_shows_spinner() {
 fn manual_recap_during_batch_load_with_prompts_still_requests() {
     let mut app = test_app_with_agent();
     app.session_recap_available = true;
+    app.current_ui.recap_model = "provider/recap-model".into();
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -157,7 +182,15 @@ fn manual_recap_during_batch_load_with_prompts_still_requests() {
         assert_eq!(agent.scrollback.turn_count(), 0);
         assert!(scrollback_has_user_messages(&agent.scrollback));
     }
-    let effects = dispatch(Action::SendRecap { auto: false }, &mut app);
+
+    let effects = dispatch(
+        Action::SendRecap {
+            auto: false,
+            custom_instructions: None,
+        },
+        &mut app,
+    );
+
     assert!(
         matches!(effects.as_slice(), [Effect::SendRecap { auto: false, .. }]),
         "batched resume with user prompts must still fire x.ai/recap: {effects:?}"
@@ -172,13 +205,22 @@ fn manual_recap_during_batch_load_with_prompts_still_requests() {
 fn manual_recap_while_loading_replay_still_requests() {
     let mut app = test_app_with_agent();
     app.session_recap_available = true;
+    app.current_ui.recap_model = "provider/recap-model".into();
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.loading_replay = true;
         assert!(!scrollback_has_user_messages(&agent.scrollback));
     }
-    let effects = dispatch(Action::SendRecap { auto: false }, &mut app);
+
+    let effects = dispatch(
+        Action::SendRecap {
+            auto: false,
+            custom_instructions: None,
+        },
+        &mut app,
+    );
+
     assert!(
         matches!(effects.as_slice(), [Effect::SendRecap { auto: false, .. }]),
         "loading_replay must not short-circuit to No messages yet: {effects:?}"
@@ -187,6 +229,92 @@ fn manual_recap_while_loading_replay_still_requests() {
     assert!(agent.pending_recap_entry.is_some());
     assert!(agent.toast.is_none());
 }
+#[test]
+fn manual_recap_without_dedicated_model_skips_request_and_explains_configuration() {
+    let mut app = test_app_with_agent();
+    app.session_recap_available = true;
+    let id = AgentId(0);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .scrollback
+        .push_block(RenderBlock::user_prompt("hello"));
+
+    let effects = dispatch(
+        Action::SendRecap {
+            auto: false,
+            custom_instructions: None,
+        },
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    let agent = app.agents.get(&id).unwrap();
+    assert!(agent.pending_recap_entry.is_none());
+    assert_eq!(
+        agent.toast.as_ref().map(|(message, _)| message.as_str()),
+        Some("No active model selected")
+    );
+}
+
+#[test]
+fn manual_recap_uses_active_model_without_dedicated_override() {
+    let mut app = test_app_with_agent();
+    app.session_recap_available = true;
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.models.current = Some(acp::ModelId::new("provider::active-model"));
+        agent.session.models.reasoning_effort =
+            Some(xai_grok_shell::sampling::types::ReasoningEffort::Medium);
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("hello"));
+    }
+
+    let effects = dispatch(
+        Action::SendRecap {
+            auto: false,
+            custom_instructions: None,
+        },
+        &mut app,
+    );
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SendRecap {
+            auto: false,
+            models,
+            thinking_level: Some(level),
+            custom_instructions: None,
+            ..
+        }] if models.as_slice() == ["provider::active-model"] && level == "medium"
+    ));
+}
+
+#[test]
+fn auto_recap_without_dedicated_model_is_silent() {
+    let mut app = test_app_with_agent();
+    app.session_recap_available = true;
+    let id = AgentId(0);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .scrollback
+        .push_block(RenderBlock::user_prompt("hello"));
+
+    let effects = dispatch(
+        Action::SendRecap {
+            auto: true,
+            custom_instructions: None,
+        },
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    assert!(app.agents[&id].toast.is_none());
+}
+
 #[test]
 fn recap_request_transport_failure_with_no_turns_uses_empty_toast() {
     let mut app = test_app_with_agent();

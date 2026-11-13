@@ -151,11 +151,28 @@ impl XaiProtoBuilder {
         }
 
         // Can only process one input file when using --dependency_out=FILE.
+        // Use temp files instead of /dev/stdout|/dev/null so Windows CI works.
         for proto in protos {
+            let dep_path = std::env::temp_dir().join(format!(
+                "xai-proto-deps-{}-{}.d",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            let desc_path = dep_path.with_extension("pb");
+
             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
             command
-                .arg("--dependency_out=/dev/stdout")
-                .arg("--descriptor_set_out=/dev/null");
+                .arg(format!(
+                    "--dependency_out={}",
+                    dep_path.to_str().context("dependency path not UTF-8")?
+                ))
+                .arg(format!(
+                    "--descriptor_set_out={}",
+                    desc_path.to_str().context("descriptor path not UTF-8")?
+                ));
 
             // Add protoc's well-known types include directory first (if found).
             // This is needed for Bazel sandboxed builds where protoc and its
@@ -176,35 +193,67 @@ impl XaiProtoBuilder {
             command.stdin(Stdio::null());
             command.stderr(Stdio::inherit());
 
-            let output = command.output().context("protoc command failed")?;
-            if !output.status.success() {
+            let status = command.status().context("protoc command failed")?;
+            if !status.success() {
+                let _ = fs::remove_file(&dep_path);
+                let _ = fs::remove_file(&desc_path);
                 return Err(anyhow::anyhow!("protoc command failed"));
             }
 
-            let output =
-                String::from_utf8(output.stdout).context("protoc command output not UTF-8")?;
+            let output = fs::read_to_string(&dep_path).with_context(|| {
+                format!(
+                    "failed to read protoc dependency file {}",
+                    dep_path.display()
+                )
+            })?;
+            let _ = fs::remove_file(&dep_path);
+            let _ = fs::remove_file(&desc_path);
 
+            // protoc dependency files look like:
+            //   <descriptor_path>: dep1 dep2 \
+            //     dep3
+            // On Windows the target is an absolute path with a drive letter
+            // (`C:\...`), so never split on the first ':'. Prefer ": " (makefile
+            // style), then fall back to stripping the known descriptor path.
             let mut lines = output.lines();
             let first_line = lines.next().context("protoc command output is empty")?;
-            let prefix = "/dev/null:";
-            let rem = first_line.strip_prefix(prefix).with_context(|| {
-                format!("protoc command output must start with /dev/null: {output:?}")
-            })?;
+            let rem = first_line
+                .split_once(": ")
+                .map(|(_, rest)| rest)
+                .or_else(|| {
+                    let target = desc_path.to_str()?;
+                    first_line.strip_prefix(&format!("{target}:")).or_else(|| {
+                        let alt = target.replace('\\', "/");
+                        first_line.strip_prefix(&format!("{alt}:")).or_else(|| {
+                            first_line.strip_prefix(&format!("{}:", alt.replace('/', "\\")))
+                        })
+                    })
+                })
+                .with_context(|| {
+                    format!("protoc dependency output missing target prefix: {output:?}")
+                })?;
             for line in iter::once(rem).chain(lines) {
-                let line = line.trim();
-                let line = line.strip_suffix("\\").unwrap_or(line);
-                // Depending on absolute paths like
-                // /Users/user/homebrew/Cellar/protobuf/29.1/include/google/protobuf/timestamp.proto
-                // is valid, but we want to have output more deterministic.
-                if line.contains("/include/google/protobuf/") {
+                // Makefile line continuations end with a trailing '\'.
+                let line = line.trim_end();
+                let line = line.strip_suffix('\\').unwrap_or(line).trim();
+                if line.is_empty() {
                     continue;
                 }
+                for dep in line.split_whitespace() {
+                    // Depending on absolute paths like
+                    // /Users/user/homebrew/Cellar/protobuf/29.1/include/google/protobuf/timestamp.proto
+                    // is valid, but we want to have output more deterministic.
+                    let normalized = dep.replace('\\', "/");
+                    if normalized.contains("/include/google/protobuf/") {
+                        continue;
+                    }
 
-                if !fs::exists(line)? {
-                    return Err(anyhow::anyhow!("dependency file not found: {line}"));
+                    if !fs::exists(dep)? {
+                        return Err(anyhow::anyhow!("dependency file not found: {dep}"));
+                    }
+
+                    println!("cargo:rerun-if-changed={dep}");
                 }
-
-                println!("cargo:rerun-if-changed={line}");
             }
         }
 

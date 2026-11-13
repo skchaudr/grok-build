@@ -14,7 +14,31 @@ use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
+use chrono::{DateTime, Utc};
+use std::path::PathBuf;
 use std::time::Instant;
+
+/// Collect recent project dirs without panicking under a Tokio `LocalSet`.
+///
+/// Stock Grok used `block_in_place` + `Handle::block_on`, which panics inside
+/// a `LocalSet` (how `grok-pi` hosts the pager — multi-thread runtime + LocalSet
+/// for `!Send` Pi adapter). Run the async collect on a dedicated OS thread with
+/// its own tiny runtime instead.
+pub(in crate::app::dispatch) fn collect_recent_dirs_blocking(
+    limit: usize,
+) -> Vec<(PathBuf, DateTime<Utc>)> {
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("project picker helper runtime")
+                .block_on(crate::recent_dirs::collect_recent_dirs(limit))
+        })
+        .join()
+        .unwrap_or_default()
+    })
+}
 /// When no flag is given and a persisted `fork_worktree_mode` (`Always` / `Never`) is set, the popup is skipped and that path is taken directly.
 /// The `Ask` default opens the [`open_fork_question`] modal so the user is asked.
 /// If the notification has not arrived yet (the user forks before the shell sends `git_head_changed`), the `worktree = false` fallback is safe.
@@ -22,6 +46,11 @@ pub(in crate::app::dispatch) fn dispatch_fork(
     app: &mut AppView,
     args: crate::slash::commands::fork::ForkArgs,
 ) -> Vec<Effect> {
+    // Pi message-level fork (new session file + prefilled prompt), not Grok
+    // peer-agent / worktree fork.
+    if app.external_agent {
+        return super::pi_fork::dispatch_pi_message_fork(app, args);
+    }
     let ActiveView::Agent(parent_id) = app.active_view else {
         app.show_toast("/fork only works inside a session");
         return vec![];
@@ -193,6 +222,10 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
         agent
             .prompt
             .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);
+        agent
+            .prompt
+            .file_search
+            .set_default_hidden(app.current_ui.pi_at_search_hidden);
         agent.set_session_recap_available(app.session_recap_available);
         agent.set_voice_mode_available(app.voice_mode_enabled);
         agent.apply_app_scoped_gates(

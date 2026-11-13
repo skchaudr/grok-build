@@ -730,6 +730,7 @@ fn render_location_picker(
                 summary_lines: &[],
                 dimmed: false,
                 indent: 0,
+                label_color: None,
                 badge: badge.as_str(),
                 badge_color: (!badge.is_empty()).then_some(theme.accent_user),
                 collapsible: false,
@@ -2991,7 +2992,7 @@ fn state_icon(state: RowState, tick: u64) -> &'static str {
         // Hollow diamond for idle rows; filled diamond for every state that needs visual presence (needs-input, completed, failed)
         // The foreground colour disambiguates (accent_user for needs-input, accent_success for done, accent_error for failed)
         RowState::Idle | RowState::Inactive => crate::glyphs::diamond_hollow(),
-        RowState::NeedsInput | RowState::Completed | RowState::Failed => {
+        RowState::NeedsInput | RowState::Completed | RowState::Failed | RowState::Blocked => {
             crate::glyphs::diamond_filled()
         }
     }
@@ -3004,6 +3005,7 @@ fn state_color(state: RowState, theme: &Theme) -> Color {
         RowState::Idle | RowState::Inactive => theme.gray_dim,
         RowState::Completed => theme.accent_success,
         RowState::Failed => theme.accent_error,
+        RowState::Blocked => theme.warning,
     }
 }
 

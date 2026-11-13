@@ -28,8 +28,21 @@ impl ChildLink {
         }
     }
 
+    /// A Pi-backed persistent child session. Prompts are sent directly to the
+    /// child's ACP session while lifecycle ownership remains with the parent.
+    pub(crate) fn persistent(parent_session_id: acp::SessionId) -> Self {
+        Self {
+            parent_session_id,
+            messaging: ChildMessaging::PersistentSession,
+        }
+    }
+
     pub(crate) fn parent_session_id(&self) -> &acp::SessionId {
         &self.parent_session_id
+    }
+
+    pub(crate) fn is_persistent(&self) -> bool {
+        matches!(self.messaging, ChildMessaging::PersistentSession)
     }
 }
 
@@ -37,6 +50,7 @@ impl ChildLink {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChildMessaging {
     Unaddressable,
+    PersistentSession,
 }
 
 /// Which chrome the view paints: its own session's, or the framed takeover a parent draws around a child.
@@ -50,6 +64,9 @@ pub(crate) enum ViewSurface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ComposerRoute {
     RootSession,
+    /// Pi persistent subagent session; root dispatch routes submission to
+    /// `Effect::SendSubagentPrompt` for the child's ACP session.
+    ChildSession,
     /// No route exists, so the composer gets zero rows and can't take focus.
     Hidden,
 }
@@ -80,6 +97,10 @@ impl AgentView {
                 messaging: ChildMessaging::Unaddressable,
                 ..
             }) => ComposerRoute::Hidden,
+            AgentRole::Child(ChildLink {
+                messaging: ChildMessaging::PersistentSession,
+                ..
+            }) => ComposerRoute::ChildSession,
         }
     }
 }

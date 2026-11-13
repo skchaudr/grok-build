@@ -62,6 +62,105 @@ pub enum AuthStartMode {
     /// External provider (meta.external_provider == true); the browser opens automatically.
     Command,
 }
+
+/// Native pager policy for the connected ACP agent.
+///
+/// `Grok` preserves the production Grok Build surface. `External` keeps the
+/// same terminal, prompt, markdown, tool, scrolling, and modal implementation,
+/// while suppressing Grok-only product commands that an external agent cannot
+/// satisfy. The external adapter supplies its own ACP command catalog.
+#[derive(Debug, Clone)]
+pub enum UiProfile {
+    Grok,
+    External(ExternalUiProfile),
+}
+
+impl Default for UiProfile {
+    fn default() -> Self {
+        Self::Grok
+    }
+}
+
+impl UiProfile {
+    pub fn is_external(&self) -> bool {
+        matches!(self, Self::External(_))
+    }
+}
+
+/// Optional welcome/minimal logo art for an external agent hosted by this pager.
+///
+/// Strings are `'static` so the composition binary can point at compile-time
+/// constants / `include_str!` without cloning per frame. The pager's existing
+/// logo renderer still owns painting, shimmer, and layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalLogoArt {
+    pub full: &'static str,
+    pub small: &'static str,
+}
+
+/// Welcome copy supplied by an external ACP host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalWelcomeBrand {
+    pub title: &'static str,
+    pub subtitle: &'static str,
+    pub version: &'static str,
+}
+
+/// Narrow configuration surface for an external ACP agent hosted by the Grok
+/// pager. Rendering remains the pager's responsibility; the optional logo is
+/// only brand art fed into the existing welcome/minimal logo renderer.
+#[derive(Debug, Clone)]
+pub struct ExternalUiProfile {
+    pub agent_name: String,
+    /// Pager-local builtins that remain available beside agent-advertised
+    /// commands. Names are normalized without a leading slash.
+    pub builtin_commands: Vec<String>,
+    /// Optional welcome/minimal logo art. When set, the composition binary's
+    /// brand replaces Grok's default braille logo via the welcome logo override.
+    pub logo: Option<ExternalLogoArt>,
+    /// Optional title, subtitle, and version for the native welcome surface.
+    pub welcome_brand: Option<ExternalWelcomeBrand>,
+    /// Hide the welcome "New worktree" row (and its Ctrl+W shortcut). Pi does
+    /// not use Grok's worktree product flow on the welcome card yet.
+    pub hide_new_worktree: bool,
+    /// When set, the welcome "Changelog" row opens this https URL in the
+    /// system browser instead of Grok's CDN release-notes viewer.
+    pub changelog_url: Option<&'static str>,
+    /// Allow Pager-owned voice dictation while retaining the external agent's
+    /// ownership of prompts, sessions, and model selection.
+    pub enable_voice_dictation: bool,
+    /// Declarative settings/startup features supported by this host.
+    pub host_features: xai_grok_shell::host_features::HostFeatureManifest,
+}
+
+static LAUNCH_UI_PROFILE: std::sync::OnceLock<ExternalUiProfile> = std::sync::OnceLock::new();
+
+/// Brand a stdio-hosted launch agent (grok-fork started on `grok-pi-acp` alone) the way an
+/// in-process host's `UiProfile::External` does: welcome logo/brand/menu and the settings
+/// host features. Call before the pager starts; the first call wins.
+pub fn set_launch_ui_profile(profile: ExternalUiProfile) {
+    let _ = LAUNCH_UI_PROFILE.set(profile);
+}
+
+pub(crate) fn launch_ui_profile() -> Option<ExternalUiProfile> {
+    LAUNCH_UI_PROFILE.get().cloned()
+}
+
+impl Default for ExternalUiProfile {
+    fn default() -> Self {
+        Self {
+            agent_name: "External agent".to_string(),
+            builtin_commands: Vec::new(),
+            logo: None,
+            welcome_brand: None,
+            hide_new_worktree: false,
+            changelog_url: None,
+            enable_voice_dictation: false,
+            host_features: xai_grok_shell::host_features::HostFeatureManifest::default(),
+        }
+    }
+}
+
 /// The pager's connection to an agent that is running but has not been set up yet.
 /// It holds the channel for sending requests to the agent, the channel for receiving its replies, the token that stops the agent, and the place the agent runs.
 /// `initialize_connection` sends `initialize` over these channels and returns the finished `AcpConnection`.
@@ -96,6 +195,8 @@ pub struct AcpConnection {
     pub rx: AcpClientRx,
     /// Available models and current selection.
     pub models: ModelState,
+    /// UI policy for this connection. The pager still owns all rendering.
+    pub ui_profile: UiProfile,
     /// Whether the agent is a grok-shell instance.
     pub is_grok_shell: bool,
     /// Auth methods advertised by the agent.
@@ -137,6 +238,52 @@ pub struct AcpConnection {
     /// Either way it resolves a fresh bearer per request via the refresh chain.
     pub auth_manager: std::sync::Arc<xai_grok_login::AuthManager>,
 }
+
+impl AcpConnection {
+    /// Build a connection around an already-running external ACP adapter.
+    ///
+    /// The supplied channels are the exact channels consumed by the production
+    /// Grok pager event loop. No secondary terminal or rendering loop is involved.
+    pub fn external(
+        tx: AcpAgentTx,
+        rx: AcpClientRx,
+        models: Option<acp::SessionModelState>,
+        available_commands: Vec<acp::AvailableCommand>,
+        cancel: CancellationToken,
+        profile: ExternalUiProfile,
+    ) -> Self {
+        let auth_manager = std::sync::Arc::new(
+            xai_grok_login::AuthManager::new_without_startup_diagnostics(
+                &xai_grok_shell::util::grok_home::grok_home(),
+                xai_grok_login::GrokComConfig::default(),
+            ),
+        );
+        Self {
+            tx,
+            rx,
+            models: models.into(),
+            ui_profile: UiProfile::External(profile),
+            is_grok_shell: false,
+            auth_methods: Vec::new(),
+            cancel,
+            // The Pi adapter is already running outside Grok's in-process
+            // worker lifecycle, so there is no worker thread for Pager to join.
+            agent_thread: None,
+            available_commands,
+            needs_login: false,
+            login_label: None,
+            login_method_id: None,
+            auth_start_mode: AuthStartMode::Pending,
+            auth_meta: None,
+            leader_status_rx: None,
+            cancel_rewind_enabled: false,
+            session_recap_available: false,
+            feedback_trace_offer: false,
+            auth_manager,
+        }
+    }
+}
+
 /// CLI flags that affect agent configuration, threaded from PagerArgs.
 #[derive(Debug, Clone, Default)]
 pub struct ConnectFlags {
@@ -286,6 +433,7 @@ pub(in crate::acp) async fn initialize_connection(
         tx,
         rx,
         models: agent.models,
+        ui_profile: UiProfile::Grok,
         is_grok_shell: agent.is_grok_shell,
         auth_methods: agent.auth_methods,
         cancel,
@@ -380,6 +528,7 @@ pub async fn connect_via_leader(
         interactivity: Interactivity::Interactive,
     });
     xai_grok_shell::agent::init::update_telemetry_config(&agent_config, &auth_manager);
+
     let endpoint = AgentEndpoint {
         tx: bridge.channel.tx,
         rx: bridge.channel.rx,

@@ -77,9 +77,13 @@ pub fn find_protoc() -> anyhow::Result<Option<PathBuf>> {
         dir_rel.push("..");
     }
 
-    // 3. Try protoc from PATH (system install or other tooling).
-    if check_protoc_good(Path::new("protoc")).is_ok() {
-        return Ok(Some(PathBuf::from("protoc")));
+    // 3. Try protoc from PATH (system install or other tooling). Return the
+    // resolved path: a bare `protoc` makes Cargo watch a nonexistent file in
+    // every dependent package and consequently rerun its build script forever.
+    if let Some(protoc) = find_on_path("protoc")
+        && check_protoc_good(&protoc).is_ok()
+    {
+        return Ok(Some(protoc));
     }
 
     // 4. Not found anywhere.
@@ -90,4 +94,11 @@ pub fn find_protoc() -> anyhow::Result<Option<PathBuf>> {
     }
     eprintln!("`protoc` not found; likely it is missing in docker image");
     Ok(None)
+}
+
+fn find_on_path(command: &str) -> Option<PathBuf> {
+    let paths = env::var_os("PATH")?;
+    env::split_paths(&paths)
+        .map(|dir| dir.join(command))
+        .find(|candidate| candidate.is_file())
 }

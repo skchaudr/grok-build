@@ -27,7 +27,7 @@ fn double_click_text(harness: &mut PtyHarness, needle: &str) {
 /// PTY, against the built binary with real SGR clicks: a finished `!` command shows its full output (success and failure).
 /// Double-click folds the block, and a second double-click restores the full output, never the first/last preview.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
+#[ignore = "PTY e2e; run with cargo test -p xai-grok-pager --test pty_e2e -- --ignored"]
 #[cfg(unix)]
 async fn bash_full_output_double_click_fold_pty() {
     let content = ContentController::start().await.expect("start content");
@@ -127,7 +127,7 @@ async fn bash_full_output_double_click_fold_pty() {
     // 3. A failing command finishes fully expanded too.
     harness.inject_keys(b"\t").expect("refocus prompt");
     harness
-        .wait_for_text("Shift+Tab:mode", Duration::from_secs(10))
+        .wait_for_text("Shift+Tab:thinking", Duration::from_secs(10))
         .expect("prompt owns keys");
     harness
         .inject_keys(b"! printf 'E%02d\\n' $(seq 1 12); false\r")

@@ -223,11 +223,27 @@ pub fn rewind_row_at(phase: &RewindPhase, area: Rect, col: u16, row: u16) -> Opt
         return None;
     }
     match phase {
-        RewindPhase::Picker { points, selected } => crate::views::overlay_list::ListOverlay {
-            len: points.len(),
-            selected: *selected,
+        RewindPhase::Picker { points, selected } => {
+            let first = area.y + 2;
+            if row < first {
+                return None;
+            }
+            let visible_rows = area.height.saturating_sub(3) as usize;
+            let rel = (row - first) as usize;
+            if rel >= visible_rows {
+                return None;
+            }
+            let scroll_offset = if *selected >= visible_rows {
+                selected - visible_rows + 1
+            } else {
+                0
+            };
+            let idx = scroll_offset + rel;
+            if idx >= points.len() {
+                return None;
+            }
+            Some(idx)
         }
-        .row_at(area, col, row),
         RewindPhase::CancelOffer { .. } => match row.checked_sub(area.y + 3) {
             Some(0) => Some(0),
             Some(1) => Some(1),
@@ -303,12 +319,11 @@ pub fn rewind_activate(phase: &RewindPhase) -> RewindInput {
 pub fn rewind_overlay_height(phase: &RewindPhase, screen_h: u16) -> u16 {
     let content = match phase {
         RewindPhase::Loading => 2,
-        RewindPhase::Picker { points, selected } => {
-            return crate::views::overlay_list::ListOverlay {
-                len: points.len(),
-                selected: *selected,
-            }
-            .height(screen_h);
+        RewindPhase::Picker { points, .. } => {
+            let rows = points.len().min(15) as u16;
+            let h = 2 + rows;
+            let cap = (screen_h as u32 * 60 / 100).max(6) as u16;
+            return h.min(cap) + 1;
         }
         RewindPhase::CancelOffer { .. } => 5,
         RewindPhase::Executing { .. } => 2,
@@ -380,10 +395,17 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                     } else {
                         Modifier::empty()
                     });
+                let meta_style = Style::default().fg(theme.gray).bg(ctx.row_bg);
+                let file_info = if point.has_file_changes {
+                    format!(" \u{00B7} {} files", point.num_file_snapshots)
+                } else {
+                    String::new()
+                };
 
                 Line::from(vec![
                     Span::styled("\u{00B7} ", dot_style),
                     Span::styled(preview, text_style),
+                    Span::styled(file_info, meta_style),
                 ])
             });
             return;

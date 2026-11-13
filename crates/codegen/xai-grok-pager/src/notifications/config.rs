@@ -9,13 +9,14 @@ pub struct NotificationConfig {
     pub events: Vec<NotificationEventKind>,
     pub sleep_prevention: bool,
     pub progress_bar: bool,
-    /// Show an automatic "where was I" session recap when you return to the terminal after being away.
-    /// Only applies when the shell has rolled out session recap (`sessionRecap` on ACP initialize or remote settings).
-    /// Manual `/recap` is gated by the shell flag alone, not this toggle.
+    /// Show an automatic "where was I" session recap when you return to the
+    /// terminal after being away. Only applies when the shell has rolled out
+    /// session recap (`sessionRecap` on ACP initialize / remote settings). Manual
+    /// `/recap` is gated by the shell flag alone, not this toggle.
     pub session_recap: bool,
-    /// Minimum seconds the terminal must be unfocused ("stepped away") before the client requests an automatic recap.
-    /// This is a short debounce against quick tab blips.
-    /// The authoritative timing (at least 3 minutes since the last completed turn) is enforced agent-side.
+    /// Optional focus-loss debounce before the client requests an automatic
+    /// recap. The default is zero: eligibility is based on the completed-turn
+    /// age, while current terminal focus is only a boolean gate.
     pub session_recap_threshold_secs: u64,
     pub title: TitleConfig,
     pub hooks: Vec<NotificationHook>,
@@ -32,9 +33,9 @@ impl Default for NotificationConfig {
                 NotificationEventKind::ApprovalRequired,
             ],
             sleep_prevention: true,
-            progress_bar: true,
+            progress_bar: false,
             session_recap: true,
-            session_recap_threshold_secs: 30,
+            session_recap_threshold_secs: 0,
             title: TitleConfig::default(),
             hooks: Vec::new(),
         }
@@ -97,22 +98,40 @@ pub enum TitleItem {
     ActionRequired,
 }
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::AsRefStr, strum::IntoStaticStr,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationEventKind {
-    #[strum(serialize = "Turn complete")]
     TurnComplete,
-    #[strum(serialize = "Approval required")]
     ApprovalRequired,
-    #[strum(serialize = "Session ready")]
     SessionReady,
-    #[strum(serialize = "Task complete")]
     TaskComplete,
-    #[strum(serialize = "Agent error")]
     AgentError,
 }
+
+impl NotificationEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TurnComplete => "Turn complete",
+            Self::ApprovalRequired => "Approval required",
+            Self::SessionReady => "Session ready",
+            Self::TaskComplete => "Task complete",
+            Self::AgentError => "Agent error",
+        }
+    }
+}
+
+impl AsRef<str> for NotificationEventKind {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl From<NotificationEventKind> for &'static str {
+    fn from(kind: NotificationEventKind) -> Self {
+        kind.as_str()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct NotificationHook {
     pub command: String,
@@ -134,8 +153,10 @@ fn default_hook_timeout() -> u64 {
 
 impl NotificationConfig {
     /// Generate a commented TOML template for the `[ui.notifications]` section.
-    /// Mirrors `RawAppearanceConfig::to_toml_with_comments()` for `pager.toml`.
-    /// The output is suitable for documentation or as a starter config snippet.
+    ///
+    /// Mirrors the pattern used by `RawAppearanceConfig::to_toml_with_comments()`
+    /// for `pager.toml`. The output is suitable for inclusion in documentation
+    /// or as a starter config snippet.
     pub fn to_toml_with_comments() -> String {
         "\
 [ui.notifications]
@@ -153,7 +174,7 @@ events = [\"turn_complete\", \"approval_required\"]
 # Prevent display sleep during agent turns (macOS/Linux).
 sleep_prevention = true
 # Show a progress indicator in the terminal tab (OSC 9;4).
-progress_bar = true
+progress_bar = false
 # Show an automatic \"where was I\" session recap when you return after being away.
 # Shell session_recap is on by default; disable via [features] session_recap or
 # GROK_SESSION_RECAP=0. Manual /recap uses only the shell flag.
@@ -231,9 +252,9 @@ mod tests {
             ]
         );
         assert!(parsed.sleep_prevention);
-        assert!(parsed.progress_bar);
+        assert!(!parsed.progress_bar);
         assert!(parsed.session_recap);
-        assert_eq!(parsed.session_recap_threshold_secs, 30);
+        assert_eq!(parsed.session_recap_threshold_secs, 0);
         assert!(parsed.title.enabled);
         assert!(parsed.hooks.is_empty());
     }
@@ -248,10 +269,10 @@ mod tests {
 
         assert_eq!(parsed.method, NotificationMethod::Bel);
         assert_eq!(parsed.idle_threshold_secs, 60);
-        // The remaining fields keep their defaults
+        // Rest should be defaults
         assert_eq!(parsed.condition, NotificationCondition::Unfocused);
         assert!(parsed.sleep_prevention);
-        assert!(parsed.progress_bar);
+        assert!(!parsed.progress_bar);
     }
 
     #[test]
@@ -359,7 +380,8 @@ mod tests {
     fn to_toml_with_comments_hook_section_is_valid_toml() {
         let template = NotificationConfig::to_toml_with_comments();
         // Uncomment only TOML structural lines (table headers and key = value).
-        // Plain-English comment lines are left as comments so they don't produce parse errors
+        // Doc-comment lines (plain English) are left as comments so they
+        // don't produce parse errors.
         let uncommented: String = template
             .lines()
             .map(|line| {

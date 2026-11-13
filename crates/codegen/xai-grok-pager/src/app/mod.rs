@@ -64,7 +64,9 @@ pub(crate) use effects::{CancelMeta, cancel_notification_meta, sanitize_user_err
 mod event_loop;
 mod event_loop_stall;
 mod exit_timeout;
+pub mod extension_shortcuts;
 pub(crate) mod external_editor;
+mod inline_edit;
 mod foreign_sessions;
 #[cfg(all(test, unix))]
 mod leader_cluster;
@@ -185,11 +187,31 @@ static MINIMAL_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(crate) fn minimal_mode_active() -> bool {
     MINIMAL_MODE_ACTIVE.load(Ordering::Acquire)
 }
+/// Whether this process runs the external-agent (grok-pi) UI profile.
+/// Set once at startup from `ui_profile.is_external()`. Gates Pi-specific
+/// settings visibility in the F2 modal.
+static EXTERNAL_AGENT_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Read the cached external-agent profile flag (see [`EXTERNAL_AGENT_ACTIVE`]).
+pub(crate) fn external_agent_active() -> bool {
+    EXTERNAL_AGENT_ACTIVE.load(Ordering::Acquire)
+}
+/// Set the external-agent profile flag. Called once at startup.
+pub(crate) fn set_external_agent_active(on: bool) {
+    EXTERNAL_AGENT_ACTIVE.store(on, Ordering::Release);
+}
 /// Test-only override for [`minimal_mode_active`] (unit tests exercising minimal-gated input paths without a terminal).
 /// Save/restore around use: this is process-global state.
 #[cfg(test)]
 pub(crate) fn set_minimal_mode_active_for_test(on: bool) {
     MINIMAL_MODE_ACTIVE.store(on, Ordering::Release);
+}
+/// Live mirror for `[ui].cancel_turn_key`.
+/// `true` = bare Esc may cancel a running turn; `false` = Ctrl+C is required.
+/// Default is Esc. F2 updates this atomically so input routing and shortcut
+/// hints change on the next keypress/frame without rebuilding agents.
+pub(crate) static ESC_CANCELS_TURN: AtomicBool = AtomicBool::new(true);
+pub(crate) fn esc_cancels_turn() -> bool {
+    ESC_CANCELS_TURN.load(Ordering::Acquire)
 }
 /// Whether the opt-in mouse-reporting toggle feature is enabled (`[ui] mouse_reporting_toggle` / `GROK_MOUSE_REPORTING_TOGGLE`).
 /// Seeded once at startup; gates both the `Ctrl+R` shortcut registration and the `/toggle-mouse-reporting` slash command's visibility/execution.
@@ -199,8 +221,16 @@ pub(crate) static MOUSE_REPORTING_TOGGLE_ENABLED: AtomicBool = AtomicBool::new(f
 pub(crate) fn mouse_reporting_toggle_enabled() -> bool {
     MOUSE_REPORTING_TOGGLE_ENABLED.load(Ordering::Acquire)
 }
-/// Process-global voice gate for view code without an `AppView`.
-/// Written only by [`crate::app::app_view::AppView::apply_voice_mode_enabled`].
+/// Whether voice mode is available (GA default on; remote/`GROK_VOICE_MODE` can
+/// kill or force). Mirrored from
+/// [`crate::app::app_view::AppView::apply_voice_mode_enabled`] so view-layer
+/// code that has no `AppView` handle — the shortcuts cheatsheet — can hide
+/// voice UI when the kill switch is active. Kept in sync on every gate change
+/// (startup + remote settings updates).
+///
+/// Only `apply_voice_mode_enabled` writes it, so tests that gate UI on voice
+/// must drive the flag through that method — setting `AppView::voice_mode_enabled`
+/// directly leaves this stale.
 pub(crate) static VOICE_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
 fn dock_flag_in(layer: &toml::Value) -> Option<bool> {
     layer
@@ -251,6 +281,7 @@ pub(crate) fn resolve_terminal_theme_enabled(remote: Option<bool>) -> bool {
     sources.remote = remote;
     Feature::TerminalTheme.resolve(sources).value
 }
+/// Read the cached voice-mode gate (see [`VOICE_MODE_ENABLED`]).
 pub(crate) fn voice_mode_enabled() -> bool {
     VOICE_MODE_ENABLED.load(Ordering::Acquire)
 }
@@ -449,8 +480,9 @@ fn engage_startup_theme(screen_mode: ScreenMode) {
     if screen_mode.is_minimal() {
         crate::theme::cache::set_terminal_native_lock(true);
     } else {
-        let initial_theme = crate::theme::cache::resolve_initial_theme();
-        crate::theme::cache::set(initial_theme);
+        // Resolve stock and Pi themes before the first frame, then mark the new
+        // in-process mode-switch path ready to reuse the resolved palette.
+        let _ = crate::theme::cache::resolve_and_apply_initial_theme(true);
         mode_switch::mark_theme_resolved();
     }
 }
@@ -459,8 +491,7 @@ fn engage_startup_theme(screen_mode: ScreenMode) {
 /// Does nothing otherwise.
 fn finish_theme_after_probe(requested_minimal: bool, effective_mode: ScreenMode) {
     if requested_minimal && !effective_mode.is_minimal() {
-        let late_theme = crate::theme::cache::resolve_initial_theme_no_osc11();
-        crate::theme::cache::set(late_theme);
+        let late_theme = crate::theme::cache::resolve_and_apply_initial_theme(false);
         crate::theme::apply_cursor_color();
         mode_switch::mark_theme_resolved();
         tracing::info!(?late_theme, "minimal downgrade: resolved regular theme");
@@ -640,6 +671,310 @@ fn resolve_hunk_tracker_mode(
         .find(|s| !s.is_empty())
         .map(str::to_owned)
 }
+
+/// Configuration for running the production Grok pager against an already
+/// connected external ACP adapter.
+pub struct ExternalRunConfig {
+    pub args: PagerArgs,
+    pub connection: crate::acp::AcpConnection,
+    pub session_id: String,
+    pub session_title: Option<String>,
+    pub session_cwd: Option<std::path::PathBuf>,
+    /// When true, skip Welcome and load `session_id` immediately (e.g.
+    /// `grok-pi --continue` / `--session <uuid>`). Default false lands on the
+    /// native Welcome screen so brand logo / menu match stock Grok Build.
+    pub resume_existing_session: bool,
+    /// Print Pi-style resume command after a plain quit (not for `--no-session`).
+    pub emit_resume_hint: bool,
+    /// Explicit `--session-dir` from the host CLI; included in the resume hint
+    /// when set so re-open uses the same storage root. Env defaults omitted.
+    pub resume_session_dir: Option<String>,
+    /// Product version of the external host, used only for its update checks.
+    pub product_version: String,
+}
+
+/// Pager-owned startup fields that are available before an external backend
+/// finishes connecting. Keeping these separate lets external products enter
+/// the native terminal surface while their agent runtime is still booting.
+pub struct ExternalRunStartConfig {
+    pub args: PagerArgs,
+    pub session_cwd: Option<std::path::PathBuf>,
+    pub product_version: String,
+}
+
+/// External backend state that must be real before the Pager event loop starts.
+pub struct ExternalRunReady {
+    pub connection: crate::acp::AcpConnection,
+    pub session_id: String,
+    pub session_title: Option<String>,
+    pub resume_existing_session: bool,
+    pub emit_resume_hint: bool,
+    pub resume_session_dir: Option<String>,
+}
+
+/// Run the native Grok pager against an external ACP backend.
+///
+/// The terminal lifecycle, prompt editor, slash dropdown, markdown renderer,
+/// scrollback, tool blocks, diff renderer and question overlay are exactly the
+/// same components used by the normal Grok Build client. Only authentication
+/// and agent spawning are bypassed.
+pub async fn run_external(config: ExternalRunConfig) -> anyhow::Result<()> {
+    let ExternalRunConfig {
+        args,
+        connection,
+        session_id,
+        session_title,
+        session_cwd,
+        resume_existing_session,
+        emit_resume_hint,
+        resume_session_dir,
+        product_version,
+    } = config;
+
+    run_external_deferred(
+        ExternalRunStartConfig {
+            args,
+            session_cwd,
+            product_version,
+        },
+        async move {
+            Ok(ExternalRunReady {
+                connection,
+                session_id,
+                session_title,
+                resume_existing_session,
+                emit_resume_hint,
+                resume_session_dir,
+            })
+        },
+    )
+    .await
+}
+
+/// Enter the native Pager terminal before an external backend is ready, then
+/// start the normal event loop once `ready` resolves. The backend future owns
+/// no terminal state; failures restore the terminal before propagating.
+pub async fn run_external_deferred(
+    start: ExternalRunStartConfig,
+    ready: impl Future<Output = anyhow::Result<ExternalRunReady>>,
+) -> anyhow::Result<()> {
+    let ExternalRunStartConfig {
+        args,
+        session_cwd,
+        product_version,
+    } = start;
+
+    xai_tty_utils::redirect_native_stderr();
+    let screen_mode_override = screen_mode_relaunch::take_screen_mode_env_override();
+    let raw_config = xai_grok_shell::config::load_effective_config()
+        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+
+    if let Some(ref cwd) = session_cwd {
+        crate::git_info::populate_from_cwd_async(cwd.clone());
+    } else if let Ok(cwd) = std::env::current_dir() {
+        crate::git_info::populate_from_cwd_async(cwd);
+    }
+
+    let mut config_watcher = crate::appearance::ConfigWatcher::start().await?;
+    let alt_screen_config_mode = config_watcher.current().alt_screen;
+    let term_ctx = crate::terminal::terminal_context();
+    let is_control_mode = crate::terminal::detect_tmux_control_mode(term_ctx);
+    let alt_screen_wants_fullscreen = crate::terminal::determine_alt_screen_policy(
+        args.no_alt_screen,
+        alt_screen_config_mode,
+        term_ctx,
+        is_control_mode,
+    );
+    let config_screen_mode = raw_config
+        .get("ui")
+        .and_then(|ui| ui.get("screen_mode"))
+        .and_then(|v| v.as_str());
+    let auto_minimal_mouse_leak = term_ctx.mouse_reporting_leaks_as_raw_text();
+    let explicit_minimal = screen_mode_relaunch::effective_minimal_preference(
+        args.minimal,
+        args.fullscreen,
+        config_screen_mode,
+        config_watcher.current().minimal,
+    );
+    let screen_mode = screen_mode_relaunch::resolve_screen_mode(
+        screen_mode_override,
+        explicit_minimal.unwrap_or(auto_minimal_mouse_leak),
+        alt_screen_wants_fullscreen,
+    );
+    MINIMAL_AUTO_SET_FOR_MOUSE_LEAK.store(
+        screen_mode.is_minimal() && explicit_minimal.is_none() && screen_mode_override.is_none(),
+        Ordering::Release,
+    );
+
+    let minimal = screen_mode.is_minimal();
+    let relaunched_into_minimal = screen_mode_override == Some(ScreenMode::Minimal);
+    let relaunched_into_fullscreen = screen_mode_override == Some(ScreenMode::Fullscreen);
+    engage_startup_theme(screen_mode);
+    let minimal_live_rows = config_watcher.current().minimal_live_rows;
+    let (frame_tx, writer_sync, writer_event_rx, writer_thread) =
+        crate::render::draw::spawn_writer_thread()
+            .context("failed to spawn the term-writer thread")?;
+    let cursor_blink = event_loop::load_initial_ui_config().cursor_blink;
+    let TerminalInit {
+        terminal: mut terminal,
+        screen_mode,
+        startup_typeahead,
+    } = init_terminal(
+        screen_mode,
+        minimal_live_rows,
+        relaunched_into_minimal,
+        frame_tx,
+        writer_sync,
+        cursor_blink,
+    )?;
+    apply_screen_mode_globals(screen_mode);
+    finish_theme_after_probe(minimal, screen_mode);
+    set_terminal_title("grok-pi — starting Pi");
+
+    let ExternalRunReady {
+        connection,
+        session_id,
+        session_title,
+        resume_existing_session,
+        emit_resume_hint,
+        resume_session_dir,
+    } = match ready.await {
+        Ok(ready) => ready,
+        Err(error) => {
+            crate::unified_log::flush_blocking().await;
+            let _ = restore_terminal(
+                terminal,
+                writer_thread,
+                ReaderThread::detached(),
+                screen_mode,
+            );
+            xai_tty_utils::global_process_scope().kill_all();
+            return Err(error);
+        }
+    };
+
+    if let Some(ref title) = session_title {
+        set_terminal_title(title);
+    }
+
+    let effective_args = PagerArgs {
+        resume_session: None,
+        load_session: None,
+        continue_last_session: false,
+        session_id: None,
+        fork_session: false,
+        ..args
+    };
+    // Default: Welcome (logo + menu), same as stock `grok` without --resume.
+    // Only explicit continue/resume composition opts into loading the backend
+    // session immediately.
+    let materialized = if resume_existing_session {
+        session_startup::MaterializedStartup::Resume {
+            session_id,
+            original_cwd: session_cwd.clone(),
+            title: session_title.clone(),
+            deferred_local_miss: false,
+            suppress_code_restore: false,
+        }
+    } else {
+        session_startup::MaterializedStartup::NewAuto
+    };
+    let term_state = event_loop::TerminalState {
+        is_control_mode,
+        screen_mode,
+        relaunched_into_minimal,
+        relaunched_into_fullscreen,
+        initial_theme: crate::theme::cache::current_kind(),
+        startup_typeahead,
+    };
+    // Background update check for grok-pi. The external product supplies its
+    // own release version so Grok's workspace version cannot affect it.
+    let bg_update_rx = if args.no_auto_update {
+        None
+    } else {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let update_version = product_version.clone();
+        tokio::spawn(async move {
+            let result = xai_grok_update::check_pi_update_background(update_version).await;
+            let _ = tx.send(result);
+        });
+        Some(rx)
+    };
+    let cancel = connection.cancel.clone();
+    let pending_startup = xai_grok_telemetry::startup::PendingStartup::new();
+    let tracing_handle = crate::tracing::init_tracing();
+    let mut reader_thread = ReaderThread::detached();
+    let result = event_loop::run(
+        &mut terminal,
+        connection,
+        pending_startup,
+        tracing_handle,
+        &mut config_watcher,
+        &effective_args,
+        session_cwd,
+        None,
+        term_state,
+        materialized,
+        bg_update_rx,
+        writer_event_rx,
+        &mut reader_thread,
+    )
+    .await;
+
+    crate::unified_log::flush_blocking().await;
+    let _ = restore_terminal(terminal, writer_thread, reader_thread, screen_mode);
+    cancel.cancel();
+    xai_tty_utils::global_process_scope().kill_all();
+    // Ctrl+U on Welcome (pending update) → quit, then run the real installer.
+    if let Ok(run_result) = &result {
+        if run_result.quit_for_update {
+            match xai_grok_update::install_pi_update(&product_version, None).await {
+                Ok(ver) => {
+                    eprintln!("Updated to grok-pi v{ver}. Restart grok-pi to use the new binary.");
+                }
+                Err(e) => {
+                    eprintln!("Update failed: {e:#}");
+                    eprintln!(
+                        "Manual install:\n  curl -fsSL https://github.com/Dwsy/grok-pi/releases/latest/download/install.sh | sh"
+                    );
+                }
+            }
+        } else if emit_resume_hint {
+            // Mirror Pi interactive quit (formatResumeCommand): one-line resume.
+            if let Some(info) = run_result.exit_info.as_ref()
+                && !info.session_id.is_empty()
+            {
+                print_external_exit_resume_hint(
+                    &info.session_id,
+                    resume_session_dir.as_deref(),
+                    &mut io::stderr(),
+                );
+            }
+        }
+    }
+    result.map(|_| ())
+}
+
+/// Pi-style quit tail for external hosts (`grok-pi --session <uuid>`).
+///
+/// Matches `formatResumeCommand` in Pi interactive-mode: dim label + command.
+/// Best-effort: closed-pane EIO/BrokenPipe must not panic (`panic = "abort"`).
+fn print_external_exit_resume_hint(
+    session_id: &str,
+    session_dir: Option<&str>,
+    w: &mut impl Write,
+) {
+    let command = format_external_resume_command(session_id, session_dir);
+    let _ = writeln!(w, "\x1b[2mTo resume this session:\x1b[0m {command}");
+}
+
+fn format_external_resume_command(session_id: &str, session_dir: Option<&str>) -> String {
+    match session_dir.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(dir) => format!("grok-pi --session-dir {dir} --session {session_id}"),
+        None => format!("grok-pi --session {session_id}"),
+    }
+}
+
 /// A failed connect attempt, classified for telemetry at the point of failure rather than by parsing the error message.
 struct ConnectFailure {
     outcome: crate::acp::StartupOutcome,
@@ -1040,6 +1375,22 @@ pub async fn run(
         screen_mode.is_minimal() && explicit_minimal.is_none() && screen_mode_override.is_none(),
         Ordering::Release,
     );
+    if args.minimal || args.fullscreen {
+        let want = if args.minimal {
+            "minimal"
+        } else {
+            "fullscreen"
+        };
+        if config_screen_mode != Some(want) {
+            tokio::spawn(async move {
+                if let Err(e) =
+                    xai_grok_shell::util::config::set_screen_mode(want.to_string()).await
+                {
+                    tracing::warn!("failed to persist screen mode preference: {e}");
+                }
+            });
+        }
+    }
     let minimal = screen_mode.is_minimal();
     connect_flags.status_line = event_loop::load_initial_ui_config()
         .status_line
@@ -1087,10 +1438,6 @@ pub async fn run(
         writer_sync,
         cursor_blink,
     )?;
-    MINIMAL_SHOW_SWITCH_BACK_TO_FULLSCREEN.store(
-        relaunched_into_minimal && screen_mode.is_minimal(),
-        Ordering::Release,
-    );
     apply_screen_mode_globals(screen_mode);
     finish_theme_after_probe(minimal, screen_mode);
     if let Some(ref t) = session_title {
@@ -2425,6 +2772,32 @@ mod tests {
             summary: None,
         }
     }
+    #[test]
+    fn format_external_resume_command_session_only() {
+        assert_eq!(
+            format_external_resume_command("019f88c-full-uuid", None),
+            "grok-pi --session 019f88c-full-uuid"
+        );
+    }
+
+    #[test]
+    fn format_external_resume_command_with_session_dir() {
+        assert_eq!(
+            format_external_resume_command("abc123", Some("~/pi-sessions")),
+            "grok-pi --session-dir ~/pi-sessions --session abc123"
+        );
+    }
+
+    #[test]
+    fn print_external_exit_resume_hint_matches_pi_style() {
+        let mut buf = Vec::new();
+        print_external_exit_resume_hint("019f88c", None, &mut buf);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "\x1b[2mTo resume this session:\x1b[0m grok-pi --session 019f88c\n"
+        );
+    }
+
     #[test]
     fn print_exit_resume_hint_writes_expected_lines() {
         let mut buf = Vec::new();

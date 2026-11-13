@@ -323,9 +323,13 @@ impl ScrollbackPane {
             entry_range.clone(),
         );
 
-        // Compute sticky header layout (disabled in compact mode).
+        // Sticky headers: disabled in compact mode (by design) and during a live
+        // turn (`suppress_sticky_headers`) so non-compact sessions match compact
+        // paint cost while the agent is streaming — sticky re-layout/paint on
+        // every spinner frame was the compact-off lag path.
         let use_sticky = state.appearance().scrollback.display.sticky_headers
-            && !state.appearance().prompt.compact;
+            && !state.appearance().prompt.compact
+            && !state.suppress_sticky_headers();
         let sticky = if use_sticky {
             compute_sticky_layout(state.scroll_offset(), area.height, &prompts)
         } else {
@@ -616,7 +620,7 @@ impl ScrollbackPane {
                 &entry.block,
                 RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
             ) {
-            10
+            super::TIMESTAMP_RESERVE
         } else {
             0
         };
@@ -739,8 +743,13 @@ impl ScrollbackPane {
         let left_pad = layout.left_padding;
         let right_pad = layout.right_padding;
 
-        // Get block output with max_lines budget
-        let output = entry.block.output(ctx);
+        // Get block output with max_lines budget via the entry's header cache.
+        // A raw `entry.block.output(ctx)` here re-ran markdown parse + wrap on
+        // EVERY frame for the pinned/pushed header — the non-compact steady-
+        // state lag path. The cache is keyed on the header ctx (mode +
+        // max_lines + width + …); running entries still regenerate per frame.
+        entry.ensure_header_cached(ctx);
+        let output = entry.cached_header_output_ref();
         let block_has_vpad = entry.block.has_vpad(ctx);
 
         let block_bg = entry.block.background(ctx);
@@ -843,9 +852,9 @@ impl ScrollbackPane {
                     && mx < content_area.x + content_area.width
             });
             let ts_str = if ts_hovered {
-                ts.format("  %H:%M:%S | %b %d").to_string()
+                super::message_timestamp_label(ts, true)
             } else {
-                ts.format("  %-I:%M %p").to_string()
+                super::message_timestamp_label(ts, false)
             };
             let ts_width = ts_str.len() as u16;
             if content_area.width > ts_width + 1

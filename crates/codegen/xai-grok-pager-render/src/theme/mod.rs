@@ -15,6 +15,7 @@ mod groknight;
 pub mod md_style;
 pub mod osc11;
 mod oscura;
+pub mod pi;
 mod rosepine;
 pub mod system_appearance;
 mod terminal_default;
@@ -26,6 +27,41 @@ pub use tokyonight::{Theme, pulse_brightness, wave_brightness};
 
 use std::sync::LazyLock;
 
+/// Canonical Pi thinking levels used to tint the prompt border.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingLevel {
+    Off,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+/// Pi's built-in thinking-border palette, selected by theme polarity.
+fn pi_thinking_border_color(dark: bool, level: ThinkingLevel) -> ratatui::style::Color {
+    use ratatui::style::Color;
+
+    match (dark, level) {
+        (true, ThinkingLevel::Off) => Color::DarkGray,
+        (true, ThinkingLevel::Minimal) => Color::Rgb(110, 110, 110),
+        (true, ThinkingLevel::Low) => Color::Rgb(95, 135, 175),
+        (true, ThinkingLevel::Medium) => Color::Rgb(129, 162, 190),
+        (true, ThinkingLevel::High) => Color::Rgb(178, 148, 187),
+        (true, ThinkingLevel::Xhigh) => Color::Rgb(209, 131, 232),
+        (true, ThinkingLevel::Max) => Color::Rgb(255, 95, 255),
+        (false, ThinkingLevel::Off) => Color::Gray,
+        (false, ThinkingLevel::Minimal) => Color::Rgb(118, 118, 118),
+        (false, ThinkingLevel::Low) => Color::Blue,
+        (false, ThinkingLevel::Medium) => Color::Rgb(90, 128, 128),
+        (false, ThinkingLevel::High) => Color::Rgb(135, 95, 135),
+        (false, ThinkingLevel::Xhigh) => Color::Rgb(139, 0, 139),
+        (false, ThinkingLevel::Max) => Color::Rgb(175, 0, 95),
+    }
+}
+
+/// Available theme variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThemeKind {
     GrokNight = 0,
@@ -370,33 +406,37 @@ impl Theme {
         if cache::terminal_native_locked() {
             return Self::terminal_default().quantized(level);
         }
-        let kind = cache::current_kind();
-        // Before polarity adaptations: contrast boost and ANSI16 overrides would paint opaque bgs over `Reset`.
-        if kind.is_terminal_native() {
-            return Self::terminal().quantized(level);
-        }
-        let base = match kind {
-            ThemeKind::GrokNight => Self::groknight(),
-            ThemeKind::TokyoNight => Self::tokyonight(),
-            ThemeKind::GrokDay => Self::grokday(),
-            ThemeKind::RosePineMoon => Self::rosepine_moon(),
-            ThemeKind::OscuraMidnight => Self::oscura_midnight(),
-            ThemeKind::KansoMist => Self::kanso_mist(),
-            ThemeKind::KanagawaWave => Self::kanagawa_wave(),
-            ThemeKind::Kanagawa => Self::kanagawa(),
-            ThemeKind::JetBrainsIslandsDark => Self::jetbrains_islands_dark(),
-            ThemeKind::NightOwl => Self::night_owl(),
-            ThemeKind::OneDarkPro => Self::one_dark_pro(),
-            ThemeKind::NstlgyDark => Self::nstlgy_dark(),
-            ThemeKind::SeveranceDark => Self::severance_dark(),
-            ThemeKind::QuasiMonochromeDark => Self::quasi_monochrome_dark(),
-            ThemeKind::JetBrainsIslandsLight => Self::jetbrains_islands_light(),
-            ThemeKind::MonosamiLight => Self::monosami_light(),
-            ThemeKind::MonosamiInkLight => Self::monosami_ink_light(),
-            // Handled by the early return above.
-            ThemeKind::Terminal => Self::terminal(),
-            // Auto is resolved to a concrete theme before being stored; if reached, fall back to GrokNight
-            ThemeKind::Auto => Self::groknight(),
+        let base = if let Some(custom) = cache::custom() {
+            custom.palette
+        } else {
+            let kind = cache::current_kind();
+            // Before polarity adaptations: contrast boost and ANSI16 overrides would paint opaque bgs over `Reset`.
+            if kind.is_terminal_native() {
+                return Self::terminal().quantized(level);
+            }
+            match kind {
+                ThemeKind::GrokNight => Self::groknight(),
+                ThemeKind::TokyoNight => Self::tokyonight(),
+                ThemeKind::GrokDay => Self::grokday(),
+                ThemeKind::RosePineMoon => Self::rosepine_moon(),
+                ThemeKind::OscuraMidnight => Self::oscura_midnight(),
+                ThemeKind::KansoMist => Self::kanso_mist(),
+                ThemeKind::KanagawaWave => Self::kanagawa_wave(),
+                ThemeKind::Kanagawa => Self::kanagawa(),
+                ThemeKind::JetBrainsIslandsDark => Self::jetbrains_islands_dark(),
+                ThemeKind::NightOwl => Self::night_owl(),
+                ThemeKind::OneDarkPro => Self::one_dark_pro(),
+                ThemeKind::NstlgyDark => Self::nstlgy_dark(),
+                ThemeKind::SeveranceDark => Self::severance_dark(),
+                ThemeKind::QuasiMonochromeDark => Self::quasi_monochrome_dark(),
+                ThemeKind::JetBrainsIslandsLight => Self::jetbrains_islands_light(),
+                ThemeKind::MonosamiLight => Self::monosami_light(),
+                ThemeKind::MonosamiInkLight => Self::monosami_ink_light(),
+                // Handled by the early return above.
+                ThemeKind::Terminal => Self::terminal(),
+                // Auto is resolved to a concrete theme before being stored; if reached, fall back to GrokNight
+                ThemeKind::Auto => Self::groknight(),
+            }
         };
         // Sample polarity before quantizing
         // After quantization `bg_base` may land on a named or indexed entry whose luminance depends on the host palette
@@ -419,8 +459,32 @@ impl Theme {
         }
     }
 
+    /// Get the currently active theme kind.
+    ///
+    /// When a custom (Pi) palette is active this returns the nominal
+    /// placeholder kind (`GrokNight`); use [`Self::current_display_id`] for
+    /// the user-facing theme id.
     pub fn current_kind() -> ThemeKind {
         cache::current_kind()
+    }
+
+    /// User-facing theme id (`groknight`, `auto`, `pi:dark`, …).
+    pub fn current_display_id() -> String {
+        cache::current_display_id()
+    }
+
+    /// Apply a custom (non-enum) palette without persisting.
+    ///
+    /// Used for Pi themes and live preview of custom JSON palettes.
+    /// No-op while the terminal-native lock is engaged.
+    pub fn apply_custom(id: impl Into<String>, palette: Self) -> String {
+        if cache::terminal_native_locked() {
+            return cache::current_display_id();
+        }
+        let id = id.into();
+        cache::set_custom(id.clone(), palette);
+        apply_cursor_color();
+        id
     }
 
     /// Whether this theme paints no diff row bands (`diff_*_bg` is `Reset`).
@@ -432,6 +496,8 @@ impl Theme {
     }
 
     /// In-memory only; the event loop emits OSC 12. No-op while the terminal-native lock is engaged.
+    ///
+    /// Clears any custom palette. Used by the dispatcher, live-preview, and the appearance watcher.
     pub fn apply_kind(kind: ThemeKind) -> ThemeKind {
         if cache::terminal_native_locked() {
             return cache::current_kind();
@@ -508,6 +574,21 @@ impl Theme {
         };
         crate::theme::osc11::classify_luminance(r, g, b)
             == crate::theme::system_appearance::SystemAppearance::Dark
+    }
+
+    /// Pi-compatible prompt-border color for the active thinking level.
+    ///
+    /// The source palette mirrors Pi's built-in dark/light themes, then runs
+    /// through the pager's terminal capability quantizer so the signal remains
+    /// usable on truecolor, 256-color, ANSI16, and no-color terminals.
+    pub fn thinking_border_color(&self, level: ThinkingLevel) -> ratatui::style::Color {
+        let dark = crate::render::color::resolve_to_rgb(self.bg_base)
+            .map(|(r, g, b)| {
+                crate::theme::osc11::classify_luminance(r, g, b)
+                    == crate::theme::system_appearance::SystemAppearance::Dark
+            })
+            .unwrap_or_else(|| self.is_dark());
+        color_support::quantize(pi_thinking_border_color(dark, level))
     }
 
     /// ANSI16 has two grays; naive distance collapses pastel accents onto that ramp and erases state.
@@ -643,14 +724,59 @@ impl Theme {
     }
 }
 
+/// Minimum luminance separation required for a theme-provided cursor color
+/// to be considered readable against the canvas.
+const CURSOR_MIN_LUMINANCE_DELTA: f32 = 0.25;
+
+/// Cursor color with a readability floor against the theme canvas.
+///
+/// On light canvases the native cursor follows `text_primary` rather than a
+/// chromatic `accent_user`. A high-contrast red/purple/blue accent is readable
+/// but still looks like a stale dark-theme cursor after switching to a light
+/// theme. Dark canvases retain the user accent when it is readable.
+/// Transparent canvases (`Color::Reset`) keep the raw accent because the host
+/// background polarity is unknown.
+pub fn cursor_color_for(theme: &Theme) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    let lum = |(r, g, b): (u8, u8, u8)| crate::theme::pi::color::relative_luminance(r, g, b);
+    let Some(accent) = crate::render::color::resolve_to_rgb(theme.accent_user) else {
+        return theme.accent_user;
+    };
+    let Some(bg) = crate::render::color::resolve_to_rgb(theme.bg_base) else {
+        return theme.accent_user;
+    };
+    let bg_lum = lum(bg);
+    if bg_lum >= 0.5 {
+        if let Some(text) = crate::render::color::resolve_to_rgb(theme.text_primary)
+            && (lum(text) - bg_lum).abs() >= CURSOR_MIN_LUMINANCE_DELTA
+        {
+            return theme.text_primary;
+        }
+        return Color::Black;
+    }
+    if (lum(accent) - bg_lum).abs() >= CURSOR_MIN_LUMINANCE_DELTA {
+        return theme.accent_user;
+    }
+    if let Some(text) = crate::render::color::resolve_to_rgb(theme.text_primary)
+        && (lum(text) - bg_lum).abs() >= CURSOR_MIN_LUMINANCE_DELTA
+    {
+        return theme.text_primary;
+    }
+    Color::White
+}
+
 /// Gates OSC 112: an unprompted reset makes Ghostty latch the cursor color and stop tracking theme changes. Only undo what we painted.
 static CURSOR_COLOR_APPLIED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// OSC 12 wants RGB even below truecolor, so every variant is resolved back. `Reset` yields `None` so the terminal keeps its profile cursor.
+///
+/// grok-pi: the emitted color goes through [`cursor_color_for`]'s readability
+/// floor (light canvases follow `text_primary`), matching software cursors.
 pub fn cursor_color_escape() -> Option<String> {
     let theme = Theme::current();
-    let (r, g, b) = crate::render::color::resolve_to_rgb(theme.accent_user)?;
+    let color = cursor_color_for(&theme);
+    let (r, g, b) = crate::render::color::resolve_to_rgb(color)?;
     Some(format!("\x1b]12;rgb:{r:02x}/{g:02x}/{b:02x}\x07"))
 }
 
@@ -839,6 +965,93 @@ mod tests {
         assert!(!Theme::monosami_light().is_dark());
         assert!(!Theme::monosami_ink_light().is_dark());
         assert!(!Theme::grokday().is_dark());
+    }
+
+    #[test]
+    fn cursor_color_uses_text_on_light_canvas_and_accent_on_dark_canvas() {
+        use ratatui::style::Color;
+        let t = Theme::groknight();
+        assert_eq!(cursor_color_for(&t), t.accent_user);
+
+        let t = Theme::grokday();
+        assert_eq!(cursor_color_for(&t), t.text_primary);
+
+        let mut t = Theme::grokday();
+        t.accent_user = Color::Rgb(205, 48, 72);
+        assert_eq!(cursor_color_for(&t), t.text_primary);
+    }
+
+    #[test]
+    fn cursor_color_falls_back_when_accent_blends_into_canvas() {
+        use ratatui::style::Color;
+        // The reported bug shape: near-white accent on a light canvas.
+        let mut t = Theme::grokday();
+        t.accent_user = Color::Rgb(240, 240, 240);
+        assert_eq!(cursor_color_for(&t), t.text_primary);
+        // Mirror case: near-black accent on a dark canvas.
+        let mut t = Theme::groknight();
+        t.accent_user = Color::Rgb(20, 20, 20);
+        assert_eq!(cursor_color_for(&t), t.text_primary);
+    }
+
+    #[test]
+    fn cursor_color_polarity_fallback_when_text_also_blends() {
+        use ratatui::style::Color;
+        let mut t = Theme::grokday();
+        t.accent_user = Color::Rgb(240, 240, 240);
+        t.text_primary = Color::Rgb(230, 230, 230);
+        assert_eq!(cursor_color_for(&t), Color::Black);
+
+        let mut t = Theme::groknight();
+        t.accent_user = Color::Rgb(30, 30, 30);
+        t.text_primary = Color::Rgb(25, 25, 25);
+        assert_eq!(cursor_color_for(&t), Color::White);
+    }
+
+    #[test]
+    fn cursor_color_transparent_canvas_keeps_accent() {
+        use ratatui::style::Color;
+        // Transparent canvas: no contrast claim possible — emit as-is.
+        let mut t = Theme::grokday();
+        t.bg_base = Color::Reset;
+        t.accent_user = Color::Rgb(240, 240, 240);
+        assert_eq!(cursor_color_for(&t), t.accent_user);
+    }
+
+    #[test]
+    fn pi_thinking_border_palette_matches_dark_theme() {
+        use ratatui::style::Color;
+
+        let expected = [
+            (ThinkingLevel::Off, Color::DarkGray),
+            (ThinkingLevel::Minimal, Color::Rgb(110, 110, 110)),
+            (ThinkingLevel::Low, Color::Rgb(95, 135, 175)),
+            (ThinkingLevel::Medium, Color::Rgb(129, 162, 190)),
+            (ThinkingLevel::High, Color::Rgb(178, 148, 187)),
+            (ThinkingLevel::Xhigh, Color::Rgb(209, 131, 232)),
+            (ThinkingLevel::Max, Color::Rgb(255, 95, 255)),
+        ];
+        for (level, color) in expected {
+            assert_eq!(pi_thinking_border_color(true, level), color);
+        }
+    }
+
+    #[test]
+    fn pi_thinking_border_palette_matches_light_theme() {
+        use ratatui::style::Color;
+
+        let expected = [
+            (ThinkingLevel::Off, Color::Gray),
+            (ThinkingLevel::Minimal, Color::Rgb(118, 118, 118)),
+            (ThinkingLevel::Low, Color::Blue),
+            (ThinkingLevel::Medium, Color::Rgb(90, 128, 128)),
+            (ThinkingLevel::High, Color::Rgb(135, 95, 135)),
+            (ThinkingLevel::Xhigh, Color::Rgb(139, 0, 139)),
+            (ThinkingLevel::Max, Color::Rgb(175, 0, 95)),
+        ];
+        for (level, color) in expected {
+            assert_eq!(pi_thinking_border_color(false, level), color);
+        }
     }
 
     #[test]

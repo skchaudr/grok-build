@@ -1,15 +1,21 @@
-//! Each command lives in its own submodule. This module re-exports command structs and provides `builtin_commands()` for registry construction.
+//! Concrete slash command implementations.
+//!
+//! Each command lives in its own submodule. This module re-exports
+//! command structs and provides `builtin_commands()` for registry
+//! construction.
 pub mod always_approve;
 pub mod announcements;
 pub mod auto;
 pub mod btw;
 pub mod cd;
+pub mod clone_cmd;
 pub mod compact;
 pub mod compact_mode;
 pub mod config_agents;
 pub mod context;
 pub mod context_window;
 pub mod copy;
+pub mod create_workflow;
 pub mod dashboard;
 pub mod debug;
 pub mod delete;
@@ -18,6 +24,7 @@ pub mod doctor;
 pub mod edit_prompt;
 pub mod effort;
 pub mod effort_levels;
+pub mod eval_display;
 pub mod exit;
 pub mod expand;
 pub mod export;
@@ -28,6 +35,7 @@ pub mod gboom;
 pub mod help;
 pub mod history;
 pub mod home;
+pub mod hotkeys;
 pub mod imagine;
 pub mod imagine_video;
 pub mod import_claude;
@@ -41,18 +49,27 @@ pub mod memory_ops;
 pub mod model;
 pub mod multiline;
 pub mod new;
+pub mod notify;
 pub mod personas;
+pub mod pi_config;
+pub mod pi_models;
+pub mod pi_shortcut_manager;
 pub mod plan;
+pub mod plan_mode;
 pub mod plugin;
 pub mod privacy;
 pub mod queue;
 pub mod recap;
 pub mod release_notes;
+pub mod reload;
 pub mod remember;
 pub mod rename;
 pub mod resume;
+pub mod review;
 pub mod rewind;
+pub mod scoped_models;
 pub mod screen_mode_switch;
+pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
@@ -63,6 +80,8 @@ pub mod traces;
 pub mod timestamps;
 pub mod toggle_mouse_reporting;
 pub mod transcript;
+pub mod tree;
+pub mod tree_map;
 pub mod tutorial;
 pub mod usage;
 pub mod view_plan;
@@ -165,6 +184,22 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(privacy::PrivacyCommand),
         Arc::new(doctor::DoctorCommand),
         Arc::new(import_claude::ImportClaudeCommand),
+        // grok-pi profile commands retained across upstream menu reordering.
+        Arc::new(hotkeys::HotkeysCommand),
+        Arc::new(clone_cmd::CloneCommand),
+        Arc::new(reload::ReloadCommand),
+        Arc::new(scoped_models::ScopedModelsCommand),
+        Arc::new(eval_display::EvalDisplayCommand),
+        Arc::new(plan_mode::PlanModeCommand),
+        Arc::new(tree::TreeCommand),
+        Arc::new(tree_map::TreeMapCommand),
+        Arc::new(notify::NotifyCommand),
+        Arc::new(create_workflow::CreateWorkflowCommand),
+        Arc::new(pi_config::PiConfigCommand),
+        Arc::new(pi_models::PiModelsCommand),
+        Arc::new(pi_shortcut_manager::PiShortcutManagerCommand),
+        Arc::new(review::ReviewSessionCommand),
+        Arc::new(review::ReviewMessageCommand),
         Arc::new(login::LoginCommand),
         Arc::new(logout::LogoutCommand),
         Arc::new(home::HomeCommand),
@@ -173,9 +208,34 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(exit::ExitCommand),
         // Hidden easter egg: never listed, runs on bare `/gboom`.
         Arc::new(gboom::GboomCommand),
+        // Hidden diagnostic: never listed, toggles the scroll-debug HUD.
+        Arc::new(scroll_debug::ScrollDebugCommand),
         // Debug toggles: always registered, listed only on debug binaries.
         Arc::new(debug::DebugCommand),
     ]
+}
+
+/// Return the subset of pager-local commands requested by an external agent
+/// profile. A requested alias (for example `exit`) also selects its canonical
+/// command (`quit`). Unknown names are ignored so an adapter can stay forward
+/// compatible with older pager builds.
+pub fn builtin_commands_named(names: &[String]) -> Vec<Arc<dyn SlashCommand>> {
+    let allowed: std::collections::HashSet<String> = names
+        .iter()
+        .map(|name| name.trim().trim_start_matches('/').to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect();
+
+    builtin_commands()
+        .into_iter()
+        .filter(|command| {
+            allowed.contains(&command.name().to_ascii_lowercase())
+                || command
+                    .aliases()
+                    .iter()
+                    .any(|alias| allowed.contains(&alias.to_ascii_lowercase()))
+        })
+        .collect()
 }
 #[cfg(test)]
 mod tests {
@@ -265,6 +325,119 @@ mod tests {
             "scheduler_create".to_string()
         ]));
         assert!(reg.get("loop").is_some());
+    }
+    #[test]
+    fn shell_collision_contract_covers_every_pager_command_and_alias() {
+        const SHELL_RESERVED: &[&str] = &[
+            "agents",
+            "agents-dashboard",
+            "always-approve",
+            "announcements",
+            "auto",
+            "btw",
+            "cd",
+            "changelog",
+            "chat",
+            "clear",
+            "cloud",
+            "compact",
+            "compact-mode",
+            "config",
+            "config-agents",
+            "context",
+            "copy",
+            "cost",
+            "dashboard",
+            "debug",
+            "delete",
+            "docs",
+            "doctor",
+            "edit-prompt",
+            "effort",
+            "exit",
+            "expand",
+            "export",
+            "feedback",
+            "find",
+            "fork",
+            "full",
+            "fullscreen",
+            "gboom",
+            "guides",
+            "help",
+            "history",
+            "home",
+            "hooks",
+            "howto",
+            "imagine",
+            "imagine-video",
+            "import-claude",
+            "jump",
+            "login",
+            "logout",
+            "log",
+            "loop",
+            "m",
+            "marketplace",
+            "mcps",
+            "minimal",
+            "ml",
+            "model",
+            "multiline",
+            "new",
+            "onboarding",
+            "personas",
+            "plan",
+            "plan-view",
+            "plugins",
+            "preferences",
+            "prefs",
+            "privacy",
+            "queue",
+            "quit",
+            "recap",
+            "release-notes",
+            "remember",
+            "rename",
+            "resume",
+            "rewind",
+            "scroll-debug",
+            "session-info",
+            "sessions",
+            "settings",
+            "share",
+            "show-plan",
+            "skills",
+            "summarize",
+            "tasks",
+            "terminal-check",
+            "terminal-info",
+            "terminal-setup",
+            "theme",
+            "timeline",
+            "timestamps",
+            "title",
+            "toggle-mouse-reporting",
+            "tour",
+            "transcript",
+            "tutorial",
+            "t",
+            "undo",
+            "usage",
+            "view-plan",
+            "vim-mode",
+            "voice",
+            "welcome",
+            "workflow",
+            "create-workflow",
+            "workflows",
+            "yolo",
+        ];
+        for command in builtin_commands() {
+            for key in std::iter::once(command.name()).chain(command.aliases().iter().copied()) {
+                assert!(SHELL_RESERVED.contains(&key), "unreserved pager key {key}");
+            }
+        }
     }
     #[test]
     fn builtin_registry_lookup_by_alias() {
@@ -373,8 +546,8 @@ mod tests {
             other => panic!("expected QueueCommand, got {other:?}"),
         }
     }
-    /// Bare `/model <name>` returns `SetDefaultModel`, which switches and persists.
-    /// `/model <name> <effort>` returns `SwitchModel`, which is session-scoped.
+    /// Bare `/model <name>` → `SetDefaultModel` (switch + persist).
+    /// `/model <name> <effort>` → `SwitchModel` (session-scoped).
     #[test]
     fn model_resolves_by_display_name() {
         let models = sample_models();
@@ -752,8 +925,19 @@ mod tests {
         let result = cmd.run(&mut ctx, "");
         assert!(matches!(
             result,
-            CommandResult::Action(Action::SendRecap { auto: false })
+            CommandResult::Action(Action::SendRecap {
+                auto: false,
+                custom_instructions: None,
+            })
         ));
+        let focused = cmd.run(&mut ctx, " focus on the API ");
+        match focused {
+            CommandResult::Action(Action::SendRecap {
+                auto: false,
+                custom_instructions: Some(text),
+            }) => assert_eq!(text, "focus on the API"),
+            other => panic!("expected focused SendRecap, got {other:?}"),
+        }
     }
     #[test]
     fn recap_hidden_by_default_in_registry_until_revealed() {
@@ -779,8 +963,31 @@ mod tests {
         reg.set_voice_visible(false);
         assert!(reg.get("voice").is_none());
     }
-    /// Every pager builtin trigger key must appear in the shell's `PAGER_COMMAND_KEYS`.
-    /// Add new names there when adding a pager builtin.
+    #[test]
+    fn external_builtin_filter_accepts_aliases_and_omits_product_commands() {
+        let names = vec![
+            "exit".to_string(),
+            "help".to_string(),
+            "model".to_string(),
+            "queue".to_string(),
+            "theme".to_string(),
+        ];
+        let reg = CommandRegistry::new(builtin_commands_named(&names));
+        assert!(reg.get("quit").is_some());
+        assert!(reg.get("exit").is_some());
+        assert!(reg.get("model").is_some());
+        assert!(reg.get("queue").is_some());
+        assert!(reg.get("theme").is_some());
+        assert!(reg.get("history").is_none());
+        assert!(reg.get("minimal").is_none());
+        assert!(reg.get("fullscreen").is_none());
+        assert!(reg.get("login").is_none());
+        assert!(reg.get("plugins").is_none());
+        assert!(reg.get("usage").is_none());
+    }
+
+    /// Every pager builtin trigger key must appear in the shell's
+    /// `PAGER_COMMAND_KEYS`. Add new names there when adding a pager builtin.
     #[test]
     fn pager_builtin_triggers_are_reserved_in_shell() {
         let reserved: std::collections::HashSet<&str> = xai_grok_shell::session::PAGER_COMMAND_KEYS

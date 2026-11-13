@@ -69,8 +69,7 @@ impl CheckpointStore {
     pub(crate) fn with_cap(cwd: &Path, session_id: &str, cap: usize) -> Self {
         // `session_id` is RPC-controlled: never join it verbatim (a `../../etc` would escape the store root)
         // Map it to a safe, collision-free name first
-        let dir = cwd
-            .join(".grok")
+        let dir = xai_grok_config::project_config_dir(cwd)
             .join(STORE_SUBDIR)
             .join(session_store_dir_name(session_id));
         let cap = cap.max(1);

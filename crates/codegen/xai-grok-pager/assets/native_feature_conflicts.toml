@@ -1,0 +1,54 @@
+# Native feature ↔ conflicting Pi packages (built-in defaults).
+# SSOT for host resource admission + F2 setting blurbs.
+#
+# Runtime overlays (no rebuild) — later wins merge (package union, reason overwrite):
+#   1. $GROK_HOME/native-feature-conflicts.toml          (~/.grok-pi/... for grok-pi)
+#   2. $GROK_PROJECT_DIR/native-feature-conflicts.toml   (<repo>/.grok-pi/...)
+#
+# feature key = F2 `[ui].*` key.
+# packages    = npm: sources blocked only while that native feature is enabled.
+# reason      = short note for diagnostics / F2 description.
+
+[features.pi_ask_user_question]
+reason = "same tool name as native Q&A"
+packages = [
+  "npm:@juicesharp/rpiv-ask-user-question",
+]
+
+[features.pi_todo]
+reason = "same tool name as built-in todo"
+packages = [
+  "npm:@juicesharp/rpiv-todo",
+]
+
+[features.pi_goal]
+reason = "same role as native /goal"
+packages = [
+  "npm:pi-codex-goal",
+  "npm:@narumitw/pi-goal",
+  "npm:@misunders2d/pi-goal",
+  "npm:pi-goal",
+  "npm:pi-goal-x",
+]
+
+# Default-on F2 feature; packages are admitted again when the switch is off.
+[features.pi_subagents]
+reason = "same role as native spawn_subagent"
+packages = [
+  "npm:pi-subagents",
+  "npm:@tintinweb/pi-subagents",
+]
+
+[features.pi_workflows]
+reason = "same role as native Rhai workflows"
+packages = [
+  "npm:@quintinshaw/pi-dynamic-workflows",
+]
+
+[features.pi_btw]
+reason = "same role as native /btw"
+packages = [
+  "npm:pi-btw",
+  "npm:@narumitw/pi-btw",
+  "npm:@juicesharp/rpiv-btw",
+]

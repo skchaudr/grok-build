@@ -7,12 +7,14 @@
 //!
 //! The default consts are hardcoded because `Cell::new` needs a `const` value; tests assert they match `UiConfig::default()`.
 //!
-//! Thread-local `Cell<bool>` is safe because the TUI renders and dispatches on a single thread; multi-thread use would need `AtomicBool`.
+//! Thread-local `Cell<bool>` is safe because the TUI renders and dispatches on a single thread; multi-thread use would need `AtomicBool`. The grok-pi-only side-by-side preference uses an `AtomicBool` so external settings dispatch and render reads share one value.
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use xai_grok_shared::ui_config::UiConfig;
 
+use super::execute_header_content::ExecuteHeaderContent;
 use super::follow_up_behavior::FollowUpBehavior;
 use super::render_mermaid::RenderMermaid;
 use super::scroll_mode::ScrollMode;
@@ -29,10 +31,20 @@ const FOLLOW_UP_BEHAVIOR_DEFAULT: FollowUpBehavior = FollowUpBehavior::Queue;
 const SIMPLE_MODE_DEFAULT: bool = true;
 /// This matches the previous on-disk default.
 const VIM_MODE_DEFAULT: bool = false;
+/// Eval v2 defaults to effects-first presentation.
+const PI_EVAL_V2_EFFECTS_FIRST_DEFAULT: bool = true;
+/// PSM resume index + full-text/preview (defaults OFF; opt-in).
+const PSM_RESUME_INDEX_DEFAULT: bool = false;
 const SHOW_THINKING_BLOCKS_DEFAULT: bool = true;
+/// Prompt border follows the selected thinking/reasoning effort by default.
+const THINKING_BORDER_COLORS_DEFAULT: bool = true;
 const GROUP_TOOL_VERBS_DEFAULT: bool = true;
+/// Hover popups for collapsed Write/Edit details default ON.
+const WRITE_EDIT_HOVER_POPUPS_DEFAULT: bool = true;
 /// Rollout flag; while it is off, edit blocks render as the legacy expanded diffs.
 const COLLAPSED_EDIT_BLOCKS_DEFAULT: bool = false;
+/// grok-pi user prompts use the agent markdown renderer by default.
+const PI_USER_MARKDOWN_DEFAULT: bool = true;
 /// "Prompt suggestions" is the ghost text Tab autocompletes.
 const PROMPT_SUGGESTIONS_DEFAULT: bool = true;
 const KEEP_TEXT_SELECTION_DEFAULT: TextSelection = TextSelection::Flash;
@@ -261,6 +273,67 @@ pub fn set_vim_mode(enabled: bool) {
     VIM_MODE_LOADED.with(|l| l.set(true));
 }
 
+// -- Eval v2 presentation ----------------------------------------------------
+
+thread_local! {
+    static PI_EVAL_V2_EFFECTS_FIRST_CURRENT: Cell<bool> =
+        const { Cell::new(PI_EVAL_V2_EFFECTS_FIRST_DEFAULT) };
+    static PI_EVAL_V2_EFFECTS_FIRST_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether Eval v2 should hide orchestration source and foreground nested effects.
+pub fn load_pi_eval_v2_effects_first() -> bool {
+    PI_EVAL_V2_EFFECTS_FIRST_LOADED.with(|loaded| {
+        if !loaded.get() {
+            let effects_first = load_str_from_effective_config("pi_eval_v2_display_mode")
+                .as_deref()
+                != Some("legacy");
+            PI_EVAL_V2_EFFECTS_FIRST_CURRENT.with(|c| c.set(effects_first));
+            loaded.set(true);
+        }
+    });
+    PI_EVAL_V2_EFFECTS_FIRST_CURRENT.with(|c| c.get())
+}
+
+pub fn set_pi_eval_v2_effects_first(enabled: bool) {
+    PI_EVAL_V2_EFFECTS_FIRST_CURRENT.with(|c| c.set(enabled));
+    PI_EVAL_V2_EFFECTS_FIRST_LOADED.with(|l| l.set(true));
+}
+
+// -- PSM resume index (catalog + full-text + preview) -------------------------
+
+thread_local! {
+    static PSM_RESUME_INDEX_CURRENT: Cell<bool> =
+        const { Cell::new(PSM_RESUME_INDEX_DEFAULT) };
+    static PSM_RESUME_INDEX_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Read cached `[ui].psm_resume_index` (default OFF).
+///
+/// Gates PSM SQLite catalog, Ctrl+F full-text search, and session preview.
+pub fn load_psm_resume_index() -> bool {
+    PSM_RESUME_INDEX_LOADED.with(|loaded| {
+        if !loaded.get() {
+            PSM_RESUME_INDEX_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "psm_resume_index",
+                    PSM_RESUME_INDEX_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    PSM_RESUME_INDEX_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached `psm_resume_index`.
+pub fn set_psm_resume_index(enabled: bool) {
+    PSM_RESUME_INDEX_CURRENT.with(|c| c.set(enabled));
+    PSM_RESUME_INDEX_LOADED.with(|l| l.set(true));
+}
+
+// -- Show thinking blocks ----------------------------------------------------
+
 thread_local! {
     static SHOW_THINKING_BLOCKS_CURRENT: Cell<bool> =
         const { Cell::new(SHOW_THINKING_BLOCKS_DEFAULT) };
@@ -289,6 +362,39 @@ pub fn set_show_thinking_blocks(enabled: bool) {
     SHOW_THINKING_BLOCKS_CURRENT.with(|c| c.set(enabled));
     SHOW_THINKING_BLOCKS_LOADED.with(|l| l.set(true));
 }
+
+// -- Thinking-level prompt border colors -------------------------------------
+
+thread_local! {
+    static THINKING_BORDER_COLORS_CURRENT: Cell<bool> =
+        const { Cell::new(THINKING_BORDER_COLORS_DEFAULT) };
+    static THINKING_BORDER_COLORS_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Read cached `thinking_border_colors`, seeding from `[ui]` on first call.
+/// Default ON when unset. The render path reads this once per frame.
+pub fn load_thinking_border_colors() -> bool {
+    THINKING_BORDER_COLORS_LOADED.with(|loaded| {
+        if !loaded.get() {
+            THINKING_BORDER_COLORS_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "thinking_border_colors",
+                    THINKING_BORDER_COLORS_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    THINKING_BORDER_COLORS_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached `thinking_border_colors`.
+pub fn set_thinking_border_colors(enabled: bool) {
+    THINKING_BORDER_COLORS_CURRENT.with(|c| c.set(enabled));
+    THINKING_BORDER_COLORS_LOADED.with(|l| l.set(true));
+}
+
+// -- Group tool verbs ---------------------------------------------------------
 
 thread_local! {
     static GROUP_TOOL_VERBS_CURRENT: Cell<bool> =
@@ -347,6 +453,57 @@ pub fn set_collapsed_edit_blocks(enabled: bool) {
     COLLAPSED_EDIT_BLOCKS_CURRENT.with(|c| c.set(enabled));
     COLLAPSED_EDIT_BLOCKS_LOADED.with(|l| l.set(true));
 }
+
+// -- Pi user markdown (agent-style user prompts) ------------------------------
+
+thread_local! {
+    static PI_USER_MARKDOWN_CURRENT: Cell<bool> =
+        const { Cell::new(PI_USER_MARKDOWN_DEFAULT) };
+    static PI_USER_MARKDOWN_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Read cached `pi_user_markdown`, seeding from `[ui]` on first call.
+/// Default ON when unset. Render path also requires the external-agent
+/// (grok-pi) profile; stock Grok ignores this flag.
+pub fn load_pi_user_markdown() -> bool {
+    PI_USER_MARKDOWN_LOADED.with(|loaded| {
+        if !loaded.get() {
+            PI_USER_MARKDOWN_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "pi_user_markdown",
+                    PI_USER_MARKDOWN_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    PI_USER_MARKDOWN_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached `pi_user_markdown`.
+pub fn set_pi_user_markdown(enabled: bool) {
+    PI_USER_MARKDOWN_CURRENT.with(|c| c.set(enabled));
+    PI_USER_MARKDOWN_LOADED.with(|l| l.set(true));
+}
+
+// -- Side-by-side edit diffs --------------------------------------------------
+
+/// Default for the grok-pi-only F2 side-by-side edit preference.
+pub const SIDE_BY_SIDE_EDIT_DEFAULT: bool = false;
+
+/// grok-pi-only F2 preference. This is intentionally process-local: it is an
+/// optional renderer choice, not part of the shared shell config contract.
+static SIDE_BY_SIDE_EDIT_CURRENT: AtomicBool = AtomicBool::new(SIDE_BY_SIDE_EDIT_DEFAULT);
+
+pub fn load_side_by_side_edit() -> bool {
+    SIDE_BY_SIDE_EDIT_CURRENT.load(Ordering::Relaxed)
+}
+
+pub fn set_side_by_side_edit(enabled: bool) {
+    SIDE_BY_SIDE_EDIT_CURRENT.store(enabled, Ordering::Relaxed);
+}
+
+// -- Prompt suggestions (tab autocomplete) -----------------------------------
 
 thread_local! {
     static PROMPT_SUGGESTIONS_CURRENT: Cell<Option<bool>> = const { Cell::new(None) };
@@ -548,6 +705,91 @@ pub fn set_scroll_lines(lines: u8) {
     SCROLL_LINES_LOADED.with(|l| l.set(true));
 }
 
+// -- Execute/Bash header content ---------------------------------------------
+
+thread_local! {
+    static EXECUTE_HEADER_CONTENT_CURRENT: Cell<ExecuteHeaderContent> =
+        const { Cell::new(ExecuteHeaderContent::TaskNameAndCommand) };
+    static EXECUTE_HEADER_CONTENT_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Read the cached grok-pi Bash/run header preference, seeding from
+/// `[ui].pi_bash_run_display` on first call.
+pub fn load_execute_header_content() -> ExecuteHeaderContent {
+    EXECUTE_HEADER_CONTENT_LOADED.with(|loaded| {
+        if !loaded.get() {
+            let value = load_str_from_effective_config("pi_bash_run_display")
+                .as_deref()
+                .and_then(ExecuteHeaderContent::from_canonical)
+                .unwrap_or_default();
+            EXECUTE_HEADER_CONTENT_CURRENT.with(|c| c.set(value));
+            loaded.set(true);
+        }
+    });
+    EXECUTE_HEADER_CONTENT_CURRENT.with(|c| c.get())
+}
+
+/// Replace the cached Bash/run header preference (optimistic modal update or rollback).
+pub fn set_execute_header_content(value: ExecuteHeaderContent) {
+    EXECUTE_HEADER_CONTENT_CURRENT.with(|c| c.set(value));
+    EXECUTE_HEADER_CONTENT_LOADED.with(|l| l.set(true));
+}
+
+// -- Bash command display formatting ----------------------------------------
+
+thread_local! {
+    static PI_BASH_COMMAND_FORMAT_CURRENT: Cell<bool> = const { Cell::new(false) };
+    static PI_BASH_COMMAND_FORMAT_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Read the cached grok-pi Bash display-format preference.
+pub fn load_pi_bash_command_format() -> bool {
+    PI_BASH_COMMAND_FORMAT_LOADED.with(|loaded| {
+        if !loaded.get() {
+            let value = load_bool_from_effective_config("pi_bash_command_format", false);
+            PI_BASH_COMMAND_FORMAT_CURRENT.with(|c| c.set(value));
+            loaded.set(true);
+        }
+    });
+    PI_BASH_COMMAND_FORMAT_CURRENT.with(|c| c.get())
+}
+
+/// Replace the cached Bash display-format preference.
+pub fn set_pi_bash_command_format(value: bool) {
+    PI_BASH_COMMAND_FORMAT_CURRENT.with(|c| c.set(value));
+    PI_BASH_COMMAND_FORMAT_LOADED.with(|l| l.set(true));
+}
+
+// -- Write/Edit hover popups ------------------------------------------------
+
+thread_local! {
+    static WRITE_EDIT_HOVER_POPUPS_CURRENT: Cell<bool> = const { Cell::new(WRITE_EDIT_HOVER_POPUPS_DEFAULT) };
+    static WRITE_EDIT_HOVER_POPUPS_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Read the cached Write/Edit hover-popup preference.
+pub fn load_write_edit_hover_popups() -> bool {
+    WRITE_EDIT_HOVER_POPUPS_LOADED.with(|loaded| {
+        if !loaded.get() {
+            let value = load_bool_from_effective_config(
+                "write_edit_hover_popups",
+                WRITE_EDIT_HOVER_POPUPS_DEFAULT,
+            );
+            WRITE_EDIT_HOVER_POPUPS_CURRENT.with(|c| c.set(value));
+            loaded.set(true);
+        }
+    });
+    WRITE_EDIT_HOVER_POPUPS_CURRENT.with(|c| c.get())
+}
+
+/// Replace the cached Write/Edit hover-popup preference.
+pub fn set_write_edit_hover_popups(value: bool) {
+    WRITE_EDIT_HOVER_POPUPS_CURRENT.with(|c| c.set(value));
+    WRITE_EDIT_HOVER_POPUPS_LOADED.with(|l| l.set(true));
+}
+
+// -- Render mermaid (auto | on | off) ---------------------------------------
+
 thread_local! {
     static RENDER_MERMAID_CURRENT: Cell<RenderMermaid> = const { Cell::new(RenderMermaid::Auto) };
     static RENDER_MERMAID_LOADED: Cell<bool> = const { Cell::new(false) };
@@ -598,6 +840,8 @@ pub fn prime(ui: &UiConfig) {
             .unwrap_or(FOLLOW_UP_BEHAVIOR_DEFAULT),
     );
     set_simple_mode(ui.simple_mode.unwrap_or(SIMPLE_MODE_DEFAULT));
+    set_pi_eval_v2_effects_first(ui.pi_eval_v2_display_mode != "legacy");
+    set_psm_resume_index(ui.psm_resume_index);
     set_keep_text_selection(text_selection_from_ui(ui));
     // These keys live in the layered config, not the `UiConfig` arg; seed them so the first frame skips disk
     // `load_*` is a no-op when already set (e.g. by the startup resolve).
@@ -606,10 +850,20 @@ pub fn prime(ui: &UiConfig) {
     let _ = load_scroll_mode();
     let _ = load_invert_scroll();
     let _ = load_scroll_lines();
+    set_execute_header_content(
+        ui.pi_bash_run_display
+            .as_deref()
+            .and_then(ExecuteHeaderContent::from_canonical)
+            .unwrap_or_default(),
+    );
+    set_pi_bash_command_format(ui.pi_bash_command_format);
+    set_write_edit_hover_popups(ui.write_edit_hover_popups);
     let _ = load_render_mermaid();
     let _ = load_show_thinking_blocks();
+    let _ = load_thinking_border_colors();
     let _ = load_group_tool_verbs();
     let _ = load_collapsed_edit_blocks();
+    set_pi_user_markdown(ui.pi_user_markdown);
     let _ = load_prompt_suggestions();
     // `default_selected_permission` owns its own cache in `permission_cursor`.
     crate::appearance::permission_cursor::prime();
@@ -692,6 +946,11 @@ mod tests {
     #[test]
     fn cache_initial_defaults_match_ui_config_default() {
         let ui = UiConfig::default();
+        assert_eq!(
+            PI_EVAL_V2_EFFECTS_FIRST_DEFAULT,
+            ui.pi_eval_v2_display_mode != "legacy"
+        );
+        assert_eq!(PSM_RESUME_INDEX_DEFAULT, ui.psm_resume_index);
         assert_eq!(COMPACT_DEFAULT, ui.compact_mode);
         assert_eq!(TIMESTAMPS_DEFAULT, ui.show_timestamps.unwrap_or(true));
         assert_eq!(TIMELINE_DEFAULT, ui.show_timeline_enabled());
@@ -713,6 +972,11 @@ mod tests {
                 .unwrap_or(SHOW_THINKING_BLOCKS_DEFAULT)
         );
         assert_eq!(
+            THINKING_BORDER_COLORS_DEFAULT,
+            ui.thinking_border_colors
+                .unwrap_or(THINKING_BORDER_COLORS_DEFAULT)
+        );
+        assert_eq!(
             GROUP_TOOL_VERBS_DEFAULT,
             ui.group_tool_verbs.unwrap_or(GROUP_TOOL_VERBS_DEFAULT)
         );
@@ -721,12 +985,17 @@ mod tests {
             ui.collapsed_edit_blocks
                 .unwrap_or(COLLAPSED_EDIT_BLOCKS_DEFAULT)
         );
+        assert_eq!(PI_USER_MARKDOWN_DEFAULT, ui.pi_user_markdown);
         // Deliberately asserting on a constant: the rollout contract pins the default off
         #[allow(clippy::assertions_on_constants)]
         {
             assert!(
                 !COLLAPSED_EDIT_BLOCKS_DEFAULT,
                 "collapsed_edit_blocks must default OFF (rollout flag)"
+            );
+            assert!(
+                PI_USER_MARKDOWN_DEFAULT,
+                "pi_user_markdown must default ON for grok-pi"
             );
         }
         assert_eq!(
@@ -829,6 +1098,18 @@ mod tests {
             assert!(!load_show_thinking_blocks());
             set_show_thinking_blocks(true);
             assert!(load_show_thinking_blocks());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn set_then_load_round_trips_thinking_border_colors() {
+        std::thread::spawn(|| {
+            set_thinking_border_colors(false);
+            assert!(!load_thinking_border_colors());
+            set_thinking_border_colors(true);
+            assert!(load_thinking_border_colors());
         })
         .join()
         .unwrap();

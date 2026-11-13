@@ -179,8 +179,8 @@ struct Bucket<'e> {
 /// The label counts members only: folded thoughts contribute nothing here and appear as their own member rows only
 /// when the group is expanded. Callers with the fold's span pass its exact end so the label counts precisely the
 /// entries the fold claimed.
-pub fn verb_group_header_label(
-    entries: &[&ScrollbackEntry],
+pub fn verb_group_header_label<'e>(
+    entries: &[&'e ScrollbackEntry],
     header_idx: usize,
     end: usize,
     show_thinking: bool,
@@ -207,8 +207,8 @@ pub fn verb_group_header_label(
 /// Thoughts occupy participant slots but are never bucketed: like verb-group labels, group labels stay tools-only.
 /// Thoughts are the only participants a label may silently omit. anything else would make the label under-describe
 /// what the fold conceals.
-pub fn truncation_header_label(
-    entries: &[&ScrollbackEntry],
+pub fn truncation_header_label<'e>(
+    entries: &[&'e ScrollbackEntry],
     range: std::ops::Range<usize>,
     limit: Option<usize>,
     show_thinking: bool,

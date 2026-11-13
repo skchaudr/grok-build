@@ -26,6 +26,9 @@ pub(crate) fn reseed_screen_mode(app: &mut AppView, mode: ScreenMode) {
     if !mode.is_minimal() && !THEME_RESOLVED_FOR_FULL_TUI.swap(true, Ordering::AcqRel) {
         let late_theme = crate::theme::cache::resolve_initial_theme_no_osc11();
         crate::theme::cache::set(late_theme);
+        // The native cursor color must follow the now-active theme; minimal
+        // mode never emitted OSC 12 (terminal-native lock), so emit here.
+        crate::theme::apply_cursor_color();
         tracing::info!(?late_theme, "mode switch: resolved regular theme");
     }
 
@@ -234,7 +237,21 @@ fn dismiss_agent_surfaces(agent: &mut AgentView, writer: &crate::render::draw::E
     agent.image_viewer = None;
     agent.video_viewer = None;
     agent.line_viewer = None;
+    // Upstream: dismiss the block viewer, keeping its resume state so the
+    // viewer can re-open where the user left off.
     agent.dismiss_block_viewer();
+    // Fork seam: the dismissed viewer may have painted a Kitty overlay image.
+    // Clear it outside the draw path (mirrors `close_block_viewer`, whose
+    // `take()` no-ops once dismiss has consumed the viewer) or later keys
+    // carry unexpected release events.
+    if agent.block_viewer_image_active {
+        xai_grok_shell::util::with_locked_stderr(|stderr| {
+            let clear =
+                crate::terminal::overlay::PostFlush::from(crate::terminal::overlay::clear_kitty());
+            let _ = clear.write_to(stderr);
+        });
+        agent.block_viewer_image_active = false;
+    }
     agent.persona_detail = None;
     agent.agents_modal = None;
     agent.show_goal_detail = false;

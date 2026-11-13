@@ -206,6 +206,39 @@ fn load_requirements_permissions() -> Vec<Sourced<PermissionRule>> {
         .collect()
 }
 
+/// Find every `<dir>/.grok/config.toml` from `cwd` upward to the git repo
+/// root (or just `<cwd>/.grok/config.toml` when there is no git repo).
+///
+/// Returned paths are ordered from repo root (lowest priority) to `cwd`
+/// (highest priority), matching `xai-grok-shell::config::find_project_configs`.
+fn find_project_grok_configs(cwd: &Path) -> Vec<PathBuf> {
+    let git_root = git2::Repository::discover(cwd)
+        .ok()
+        .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()));
+
+    let mut configs = Vec::new();
+    if let Some(ref root) = git_root {
+        let mut current = Some(cwd.to_path_buf());
+        while let Some(dir) = current {
+            let p = xai_grok_config::project_config_dir(&dir).join("config.toml");
+            if p.is_file() {
+                configs.push(p);
+            }
+            if dir == *root {
+                break;
+            }
+            current = dir.parent().map(|p| p.to_path_buf());
+        }
+        configs.reverse();
+    } else {
+        let p = xai_grok_config::project_config_dir(cwd).join("config.toml");
+        if p.is_file() {
+            configs.push(p);
+        }
+    }
+    configs
+}
+
 /// Load `[permission]` rules from `~/.grok/config.toml` (lowest) then each `.grok/config.toml` from repo root to `cwd`.
 /// The walk matches [`crate::project_config::find_project_configs`] so detector and loader agree. Empty if no `[permission]` section.
 fn load_config_toml_permissions(cwd: &Path, project_trusted: bool) -> Vec<Sourced<PermissionRule>> {

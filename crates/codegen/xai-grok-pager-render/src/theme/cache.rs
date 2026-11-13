@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use super::ThemeKind;
 use super::system_appearance;
+use super::tokyonight::Theme;
 
 /// In-memory theme kind, encoded as a `u8` matching the `ThemeKind` discriminants.
 /// Loaded from disk once at startup via `load_from_disk()`, then kept in sync by `set()`.
@@ -19,6 +20,19 @@ static CURRENT: AtomicU8 = AtomicU8::new(ThemeKind::GrokNight as u8);
 static LOADED: AtomicBool = AtomicBool::new(false);
 #[cfg(any(test, feature = "test-support"))]
 static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Active custom (non-enum) palette — e.g. a mapped Pi theme.
+///
+/// When `Some`, [`super::Theme::current`] returns this palette instead of
+/// constructing from [`ThemeKind`]. Cleared when applying a built-in kind.
+#[derive(Debug, Clone)]
+pub struct CustomTheme {
+    /// Canonical display/config id (e.g. `pi:dark`).
+    pub id: String,
+    pub palette: Theme,
+}
+
+static CUSTOM: Mutex<Option<CustomTheme>> = Mutex::new(None);
 
 /// Whether auto-switching mode is active. Set when the config file contains `theme = "auto"`.
 /// Checked by the event loop to decide whether the `SystemAppearanceWatcher` should run.
@@ -97,8 +111,15 @@ pub fn selected_kind() -> ThemeKind {
     theme_kind_from_u8(CURRENT.load(Ordering::Relaxed))
 }
 
-/// In-memory only. Disk write is `Effect::PersistSetting`, not here — picker preview must not persist.
+/// Set the in-memory theme kind without writing to disk.
+///
+/// Used by the dispatcher (after `Action::SetTheme` is processed) and
+/// by the live-preview path during the picker. Disk-write happens via
+/// `Effect::PersistSetting`, NOT here.
+///
+/// Clears any active custom palette so built-in kinds take effect.
 pub fn set(kind: ThemeKind) {
+    clear_custom();
     store_kind(kind);
     LOADED.store(true, Ordering::Release);
 }
@@ -109,6 +130,45 @@ pub fn set(kind: ThemeKind) {
 fn store_kind(kind: ThemeKind) {
     CURRENT.store(kind as u8, Ordering::Relaxed);
     sync_markdown_polarity();
+}
+
+// -- Custom (Pi / external) palettes -----------------------------------------
+
+/// Install a custom palette. Marks the cache as loaded and disables auto mode.
+pub fn set_custom(id: impl Into<String>, palette: Theme) {
+    let id = id.into();
+    *CUSTOM.lock().unwrap_or_else(|e| e.into_inner()) = Some(CustomTheme { id, palette });
+    LOADED.store(true, Ordering::Release);
+    set_auto_mode(false);
+}
+
+/// Clear the custom palette slot (built-in kind path resumes).
+pub fn clear_custom() {
+    *CUSTOM.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Whether a custom palette is active.
+#[must_use]
+pub fn has_custom() -> bool {
+    CUSTOM.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
+/// Clone of the active custom theme, if any.
+#[must_use]
+pub fn custom() -> Option<CustomTheme> {
+    CUSTOM.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Active theme id for display/persist: custom id, `"auto"`, or kind name.
+#[must_use]
+pub fn current_display_id() -> String {
+    if let Some(c) = custom() {
+        return c.id;
+    }
+    if is_auto_mode() {
+        return "auto".to_string();
+    }
+    current_kind().display_name().to_string()
 }
 
 // -- Terminal-native palette (minimal-mode lock + `terminal` theme) ----------
@@ -263,7 +323,7 @@ pub fn resolve_auto() -> ThemeKind {
 
 /// Read the theme from the effective config (managed_config.toml merged under config.toml; user wins).
 /// Checks `[ui].theme` first (the canonical location), then falls back to a top-level `theme` key for backwards compatibility.
-fn load_from_disk() -> Option<ThemeKind> {
+pub fn load_theme_string_from_disk() -> Option<String> {
     let root = xai_grok_config::load_effective_config_disk_only().ok()?;
     let table = root.as_table()?;
     // Canonical: [ui] section
@@ -273,7 +333,52 @@ fn load_from_disk() -> Option<ThemeKind> {
         .and_then(|v| v.as_str())
         // Fallback: top-level `theme` key (legacy)
         .or_else(|| table.get("theme").and_then(|v| v.as_str()));
-    value.and_then(ThemeKind::from_name)
+    value.map(str::to_owned)
+}
+
+/// Read the theme from the effective config as a built-in [`ThemeKind`].
+///
+/// Pi themes (`pi:…`) return `None` here — callers must use
+/// [`load_theme_string_from_disk`] + the Pi registry.
+fn load_from_disk() -> Option<ThemeKind> {
+    load_theme_string_from_disk().and_then(|s| ThemeKind::from_name(&s))
+}
+
+/// Resolve and apply the startup theme, including Pi custom palettes.
+///
+/// Returns the concrete built-in kind used as fallback bookkeeping when a
+/// custom palette is active (`GrokNight` placeholder), or the resolved
+/// built-in kind. Callers that only need kind-based state may ignore the
+/// return when [`has_custom`] is true.
+pub fn resolve_and_apply_initial_theme(osc11_fallback: bool) -> ThemeKind {
+    if let Some(raw) = load_theme_string_from_disk() {
+        if super::pi::is_pi_theme_id(&raw) {
+            // Ensure builtins exist even if discovery was not run yet.
+            super::pi::ensure_builtins();
+            match super::pi::apply_pi_theme(&raw) {
+                Ok(_) => {
+                    // Keep kind at GrokNight as nominal placeholder.
+                    CURRENT.store(ThemeKind::GrokNight as u8, Ordering::Relaxed);
+                    LOADED.store(true, Ordering::Release);
+                    return ThemeKind::GrokNight;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "theme",
+                        theme = %raw,
+                        error = %e,
+                        "failed to load Pi theme from config — falling back to groknight"
+                    );
+                    clear_custom();
+                    set(ThemeKind::GrokNight);
+                    return ThemeKind::GrokNight;
+                }
+            }
+        }
+    }
+    let kind = resolve_from_config(load_from_disk(), osc11_fallback);
+    set(kind);
+    kind
 }
 
 /// Reads `[ui].auto_dark_theme` and `[ui].auto_light_theme` from the effective config, parsing them as theme names.
@@ -318,6 +423,7 @@ pub fn reset_for_test() {
     // next test's zero-cursor-escape assertions.
     super::set_cursor_color_applied_for_test(false);
     *AUTO_THEME_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    clear_custom();
 }
 
 /// Seed `AUTO_THEME_CONFIG` with explicit defaults so `auto_theme_config()` never falls through to `load_auto_theme_config()`.

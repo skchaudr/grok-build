@@ -40,7 +40,10 @@ pub(super) fn immediate_server_send_eligible(agent: &AgentView, leader_mode: boo
     let wake_running = agent.running_wake_turn.is_some();
     let server_busy =
         agent.session.state.is_turn_running() || wake_running || !agent.shared_queue.is_empty();
-    (leader_mode || crate::appearance::cache::load_follow_up_steer() || wake_running)
+    (leader_mode
+        || crate::appearance::cache::load_follow_up_steer()
+        || wake_running
+        || agent.is_message_interruptible_foreground_tool())
         && server_busy
         && agent.session.session_id.is_some()
         && agent.session.pending_prompts.is_empty()
@@ -454,14 +457,22 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
 
     // Track whether this turn is a bash-mode command for post-turn focus.
     agent.bash_turn = queued.kind == QueueEntryKind::BashCommand;
+    agent.cron_task_id = if queued.kind == QueueEntryKind::Cron {
+        queued.task_id.clone()
+    } else {
+        None
+    };
     // Generate a fresh prompt_id for every outgoing prompt/command
     // It is threaded through PromptRequest._meta to the agent and echoed on every SessionNotification and the PromptResponse
     // That lets us correlate notifications back to the originating prompt for cancel/rewind
     let prompt_id = uuid::Uuid::new_v4().to_string();
 
     // Record it as self-originated so the ACP gate treats this turn's deltas as ours rather than adopting them as another client's turn
-    // Ours means drive it, and drop a stale post-rewind chunk on a mismatch
-    agent.note_self_originated_prompt(&prompt_id);
+    // Ours means drive it, and drop a stale post-rewind chunk on a mismatch.
+    // The `Cron` arm below re-prefixes `prompt_id` and records that id itself.
+    if queued.kind != QueueEntryKind::Cron {
+        agent.note_self_originated_prompt(&prompt_id);
+    }
 
     match queued.kind {
         QueueEntryKind::Prompt => {
@@ -586,7 +597,13 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
             }
         }
         QueueEntryKind::Command => {
-            let token = crate::slash::parse_invocation(&queued.text).map_or("", |inv| inv.token);
+            let invocation = crate::slash::parse_invocation(&queued.text);
+            let token = invocation.as_ref().map_or("", |inv| inv.token);
+            let compact_context = invocation.as_ref().and_then(|inv| {
+                let args = inv.args.trim();
+                (inv.token == "compact" && !args.is_empty()).then(|| args.to_string())
+            });
+            let user_context = compact_context.clone();
             let (command, started, effect) = match token {
                 "flush" => (
                     AgentCommand::MemoryFlush,
@@ -614,16 +631,14 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
                     Effect::Compact {
                         agent_id,
                         session_id,
+                        custom_instructions: compact_context,
+                        user_context,
                     },
                 ),
             };
             agent.session.start_command(command);
-            // The command owns the pane; a leftover wake marker must not shadow stop.
             agent.running_wake_turn = None;
             agent.turn_started_at = Some(Instant::now());
-            // Invocation marker: each run visibly owns its outcome line (completed/cancelled/failed)
-            // For `/compact` this matches the auto path's "Context N% full. Compacting…".
-            // Local block only: like the outcome lines it is not persisted, so resume replays neither
             agent
                 .scrollback
                 .push_block(RenderBlock::session_event(started));
@@ -653,7 +668,56 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
                 page_flip_entry: None,
             }
         }
+        QueueEntryKind::Cron => {
+            let prompt_id = format!("scheduler-fired-{prompt_id}");
+            agent.note_self_originated_prompt(&prompt_id);
+            agent.start_turn_boundary(Some(&prompt_id));
+            agent.session.current_prompt_id = Some(prompt_id.clone());
+            let prompt_entry_id = agent
+                .scrollback
+                .push_block(RenderBlock::cron_prompt(&queued.text));
+            agent.turn_started_at = Some(Instant::now());
+
+            let prompt_idx = agent.scrollback.len().saturating_sub(1);
+            let flip = page_flip_on_send();
+            agent.scrollback.follow_new_turn(Some(prompt_idx), flip);
+
+            let framed_text = format_cron_prompt(
+                &queued.text,
+                queued.task_id.as_deref().unwrap_or("unknown"),
+                queued.human_schedule.as_deref().unwrap_or("unknown"),
+            );
+
+            let mut meta_map = serde_json::Map::new();
+            meta_map.insert(
+                user_prompt_meta::DISPLAY_TEXT.into(),
+                serde_json::Value::String(queued.text),
+            );
+            meta_map.insert(
+                user_prompt_meta::DISPLAY_AS_CRON.into(),
+                serde_json::Value::Bool(true),
+            );
+            let blocks = vec![acp::ContentBlock::Text(
+                acp::TextContent::new(framed_text).meta(Some(meta_map)),
+            )];
+
+            QueueDrain {
+                effects: vec![Effect::SendPromptBlocks {
+                    agent_id,
+                    session_id,
+                    blocks,
+                    prompt_id,
+                }],
+                page_flip_entry: flip.then_some(prompt_entry_id),
+            }
+        }
     }
+}
+
+/// Frame a scheduler-fired prompt as the system reminder the model reads.
+/// The shell wraps the payload in `<user_query>`, so this must not add one.
+fn format_cron_prompt(prompt: &str, task_id: &str, human_schedule: &str) -> String {
+    xai_grok_tools::reminders::format_scheduled_task_prompt(prompt, task_id, "", human_schedule)
 }
 
 /// Whether [`apply_turn_start_shim`] renders its own user block (i.e. `display_block` is `Some`).
@@ -1392,6 +1456,56 @@ mod tests {
             "queue drain must stay on the parent session, got {:?}",
             drain.effects
         );
+    }
+
+    #[test]
+    fn foreground_message_interruptible_tool_can_immediate_send_without_leader() {
+        use crate::acp::meta::NotificationMeta;
+        use std::sync::Arc;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+
+        let mut tool_meta = acp::Meta::new();
+        tool_meta.insert(
+            "x.ai/tool".to_string(),
+            serde_json::json!({ "name": "bash" }),
+        );
+        agent.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc-bash")), "sleep 30")
+                    .kind(acp::ToolKind::Execute)
+                    .status(acp::ToolCallStatus::Pending)
+                    .raw_input(Some(serde_json::json!({ "command": "sleep 30" })))
+                    .content(vec![])
+                    .locations(vec![])
+                    .meta(Some(tool_meta)),
+            ),
+            &NotificationMeta::default(),
+            &mut agent.scrollback,
+        );
+
+        assert!(agent.is_message_interruptible_foreground_tool());
+        assert!(
+            immediate_server_send_eligible(agent, false),
+            "foreground Bash/Eval must bypass the leader/steer gate so the shell can auto-send-now"
+        );
+    }
+
+    #[test]
+    fn format_cron_prompt_includes_framing() {
+        let out = super::format_cron_prompt("do stuff", "task-1", "every 5m");
+        assert!(out.starts_with("<system-reminder>"));
+        assert!(out.contains("task task-1"));
+        assert!(out.contains("every 5m"));
+        assert!(out.contains("do stuff"));
+        assert!(
+            !out.contains("<user_query>"),
+            "must not add <user_query> — shell does that"
+        );
+        assert!(out.ends_with("do stuff"));
     }
 
     #[test]
@@ -2937,7 +3051,7 @@ mod tests {
         assert_eq!(user_prompt_count(test_agent(&app, id), "ls -la"), 0);
     }
 
-    /// Composer/local-row send-now paints at dispatch too.
+    /// Stock Pager keeps the upstream cancel-and-send path.
     #[test]
     fn send_prompt_now_paints_user_block_at_arm() {
         let mut app = test_app_with_agent();
@@ -2952,6 +3066,25 @@ mod tests {
             &mut app,
         );
         assert!(matches!(effects.as_slice(), [Effect::SendPromptNow { .. }]));
+        assert_eq!(user_prompt_count(test_agent(&app, id), "hurry"), 1);
+    }
+
+    /// The grok-pi external profile preserves steering semantics for Send Now.
+    #[test]
+    fn external_send_prompt_now_uses_steering_interject() {
+        let mut app = test_app_with_agent();
+        app.external_agent = true;
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+        let effects = dispatch(
+            Action::SendPromptNow {
+                text: "hurry".into(),
+                images: vec![],
+                image_notice: None,
+            },
+            &mut app,
+        );
+        assert!(matches!(effects.as_slice(), [Effect::SendInterject { .. }]));
         assert_eq!(user_prompt_count(test_agent(&app, id), "hurry"), 1);
     }
 

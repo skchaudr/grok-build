@@ -14,6 +14,7 @@ use xai_grok_shell::sampling::error::{
     format_rate_limited_user_message, http_status_from_error,
 };
 use xai_grok_shell::session::ExtMethodResult;
+use xai_grok_shell::session::unified_list::ListScope;
 use xai_grok_shell::session::helpers::session_compact::{
     COMPACT_CANCELLED_MSG, CompactErrorKind, compact_error_kind,
 };
@@ -847,6 +848,283 @@ pub(super) fn count_chat_history_stats(history_path: &Path) -> (usize, usize) {
     }
     (turn_count, tool_call_count)
 }
+/// Degraded conversations lane on `x.ai/session/list`, parsed from the
+/// response's `_meta["x.ai/partial"]` envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationsPartial {
+    NoOauth,
+    Timeout,
+    Error,
+}
+impl ConversationsPartial {
+    /// Actionable picker notice for a degraded conversations lane.
+    pub(crate) fn picker_notice(self) -> &'static str {
+        match self {
+            Self::NoOauth => "Couldn't load your chats: log in with /login",
+            Self::Timeout | Self::Error => "Couldn't load conversations: retry",
+        }
+    }
+}
+/// Read `_meta["x.ai/partial"]` from a session-list payload. `None` when the
+/// conversations lane completed (or was skipped); unknown reasons degrade to
+/// [`ConversationsPartial::Error`].
+pub(super) fn parse_session_list_partial(
+    payload: &serde_json::Value,
+) -> Option<ConversationsPartial> {
+    let partial = payload.get("_meta")?.get("x.ai/partial")?;
+    if partial.get("conversations").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    Some(
+        match partial.get("reason").and_then(|v| v.as_str()) {
+            Some("no_oauth") => ConversationsPartial::NoOauth,
+            Some("timeout") => ConversationsPartial::Timeout,
+            _ => ConversationsPartial::Error,
+        },
+    )
+}
+/// Reads `_meta["x.ai/listScope"]` from a session-list payload.
+pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope {
+    match payload
+        .get("_meta")
+        .and_then(|m| m.get("x.ai/listScope"))
+        .and_then(|v| v.as_str())
+    {
+        Some("repo") => ListScope::Repo,
+        Some("all") => ListScope::All,
+        _ => ListScope::Cwd,
+    }
+}
+/// Parse the `x.ai/session/list` response payload (the unwrapped
+/// `{ "sessions": [...] }` object) into [`SessionPickerEntry`] rows.
+///
+/// Shared by the resume picker ([`Effect::FetchSessionList`]) and the
+/// dashboard's non-leader idle-session fallback
+/// ([`Effect::FetchDashboardSessions`]) so both produce identical labels.
+/// Sessions older than 30 days, and sessions with no usable user prompt
+/// (empty `summary` after fallbacks), are dropped.
+pub(super) fn parse_session_picker_entries(
+    payload: &serde_json::Value,
+) -> Vec<crate::app::app_view::SessionPickerEntry> {
+    use crate::app::app_view::SessionPickerEntry;
+    let entries: Vec<serde_json::Value> = payload
+        .get("sessions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let now = chrono::Utc::now();
+    let cutoff = now - chrono::Duration::days(30);
+    entries
+        .into_iter()
+        .filter_map(|v| {
+            let id = v
+                .get("sessionId")
+                .or_else(|| v.get("session_id"))
+                .and_then(|s| s.as_str())?
+                .to_string();
+            let summary = v
+                .get("summary")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let first_prompt = v
+                .get("firstPrompt")
+                .or_else(|| v.get("first_prompt"))
+                .and_then(|s| s.as_str())
+                .map(String::from);
+            let is_conversation = v
+                .get("_meta")
+                .and_then(|m| m.get("x.ai/session"))
+                .and_then(|s| s.get("kind"))
+                .and_then(|k| k.as_str()) == Some("chat");
+            let parsed_updated: Option<chrono::DateTime<chrono::Utc>> = v
+                .get("updatedAt")
+                .or_else(|| v.get("updated_at"))
+                .and_then(|s| s.as_str())
+                .and_then(|s| s.parse().ok());
+            let parsed_created: Option<chrono::DateTime<chrono::Utc>> = v
+                .get("createdAt")
+                .or_else(|| v.get("created_at"))
+                .and_then(|s| s.as_str())
+                .and_then(|s| s.parse().ok());
+            let updated_at: chrono::DateTime<chrono::Utc> = match parsed_updated {
+                Some(ts) => {
+                    if !is_conversation && ts < cutoff {
+                        return None;
+                    }
+                    ts
+                }
+                None => {
+                    if !is_conversation {
+                        return None;
+                    }
+                    parsed_created.unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH)
+                }
+            };
+            use xai_grok_tools::implementations::skills::skill::extract_skill_display_text;
+            let display = if let Some(ref fp) = first_prompt {
+                if let Some(d) = extract_skill_display_text(fp) {
+                    d
+                } else if !summary.is_empty() {
+                    extract_skill_display_text(&summary).unwrap_or(summary)
+                } else {
+                    fp.lines().next().unwrap_or_default().trim().to_string()
+                }
+            } else if !summary.is_empty() {
+                extract_skill_display_text(&summary).unwrap_or(summary)
+            } else {
+                let info_cwd = v
+                    .get("cwd")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let info = xai_grok_shell::session::info::Info {
+                    id: acp::SessionId::new(id.clone()),
+                    cwd: info_cwd,
+                };
+                extract_first_user_prompt(&info).unwrap_or_default()
+            };
+            let created_at: chrono::DateTime<chrono::Utc> = parsed_created
+                .unwrap_or(updated_at);
+            let cwd_str = v
+                .get("cwd")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let hostname = v.get("hostname").and_then(|s| s.as_str()).map(String::from);
+            let source = if is_conversation {
+                "conversation".to_string()
+            } else {
+                v.get("source").and_then(|s| s.as_str()).unwrap_or("local").to_string()
+            };
+            let model_id = v
+                .get("modelId")
+                .or_else(|| v.get("model_id"))
+                .and_then(|s| s.as_str())
+                .map(String::from);
+            let num_messages = v
+                .get("numMessages")
+                .or_else(|| v.get("num_messages"))
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0) as usize;
+            let last_active_at: Option<chrono::DateTime<chrono::Utc>> = v
+                .get("lastActiveAt")
+                .or_else(|| v.get("last_active_at"))
+                .and_then(|s| s.as_str())
+                .and_then(|s| s.parse().ok());
+            let branch = v.get("branch").and_then(|s| s.as_str()).map(String::from);
+            let worktree_label = v
+                .get("worktreeLabel")
+                .or_else(|| v.get("worktree_label"))
+                .and_then(|s| s.as_str())
+                .map(String::from);
+            let last_turn_summary = v
+                .get("lastTurnSummary")
+                .or_else(|| v.get("last_turn_summary"))
+                .and_then(|s| s.as_str())
+                .map(String::from);
+            let last_recap = v
+                .get("lastRecap")
+                .or_else(|| v.get("last_recap"))
+                .and_then(|s| s.as_str())
+                .map(String::from);
+            let repo_name = crate::views::session_picker::repo_name_from_cwd(&cwd_str);
+            Some(SessionPickerEntry {
+                id,
+                summary: display,
+                name: v.get("name").and_then(|s| s.as_str()).map(String::from),
+                first_message: v
+                    .get("firstMessage")
+                    .or_else(|| v.get("first_message"))
+                    .and_then(|s| s.as_str())
+                    .map(String::from),
+                session_path: v
+                    .get("sessionPath")
+                    .or_else(|| v.get("session_path"))
+                    .and_then(|s| s.as_str())
+                    .map(String::from),
+                total_tokens: v
+                    .get("totalTokens")
+                    .or_else(|| v.get("total_tokens"))
+                    .and_then(|n| n.as_u64()),
+                total_cost: v
+                    .get("totalCost")
+                    .or_else(|| v.get("total_cost"))
+                    .and_then(|n| n.as_f64()),
+                updated_at,
+                created_at,
+                cwd: cwd_str,
+                hostname,
+                source,
+                model_id,
+                num_messages,
+                last_active_at,
+                branch,
+                repo_name,
+                worktree_label,
+                parent_session_path: v
+                    .get("parentSessionPath")
+                    .or_else(|| v.get("parent_session_path"))
+                    .and_then(|s| s.as_str())
+                    .map(String::from),
+                last_turn_summary,
+                last_recap,
+                session_kind: v
+                    .get("sessionKind")
+                    .or_else(|| v.get("session_kind"))
+                    .and_then(|s| s.as_str())
+                    .map(String::from),
+                card_detail: None,
+            })
+        })
+        .filter_map(|mut e| {
+            if e.summary.is_empty() {
+                if e.source == "conversation" {
+                    e.summary = "Untitled".to_string();
+                } else {
+                    return None;
+                }
+            }
+            if e.source == "remote"
+                && xai_grok_shell::session::resolve_local_session_any_cwd(&e.id)
+                    .is_some()
+            {
+                e.source = "local".to_string();
+            }
+            Some(e)
+        })
+        .collect()
+}
+/// Convert a resume-picker session into a dormant dashboard roster row.
+///
+/// Used by the non-leader dashboard fallback: local on-disk sessions have no
+/// live activity signal, so they map to [`RosterActivity::Dormant`] and render
+/// in the dashboard's **Inactive** group. The label, cwd, model, and worktree
+/// badge all come straight from the picker entry.
+pub(super) fn session_picker_entry_to_roster(
+    e: &crate::app::app_view::SessionPickerEntry,
+) -> crate::app::roster::RosterEntry {
+    use crate::app::roster::{RosterActivity, RosterEntry, RosterOrigin};
+    let last_change = e.last_active_at.unwrap_or(e.updated_at);
+    RosterEntry {
+        session_id: e.id.clone(),
+        title: Some(e.summary.clone()).filter(|s| !s.trim().is_empty()),
+        cwd: e.cwd.clone(),
+        is_worktree: e.worktree_label.is_some(),
+        model_id: e.model_id.clone(),
+        yolo: false,
+        session_kind: None,
+        activity: RosterActivity::Dormant,
+        last_turn_summary: e.last_turn_summary.clone(),
+        resident: false,
+        last_change_unix_ms: last_change.timestamp_millis(),
+        origin: RosterOrigin {
+            kind: e.source.clone(),
+            host: e.hostname.clone(),
+        },
+    }
+}
+
 pub(super) async fn send_logout(tx: &AcpAgentTx) {
     let req = acp::ExtRequest::new(
         "x.ai/auth/logout",
@@ -1035,6 +1313,14 @@ pub(crate) async fn persist_setting(
     value: crate::settings::SettingValue,
 ) -> Result<(), String> {
     use crate::settings::SettingValue;
+    if let Some(spec) = xai_grok_shell::host_features::feature_spec_by_setting_key(key) {
+        let SettingValue::Bool(enabled) = value else {
+            return Err(kind_mismatch(key, "Bool", &value));
+        };
+        return xai_grok_shell::util::config::set_host_feature_bool(spec.key, enabled)
+            .await
+            .map_err(|e| e.to_string());
+    }
     fn kind_mismatch(key: &str, expected: &str, got: &SettingValue) -> String {
         format!("persist_setting({key}) expected {expected}, got {got:?}")
     }
@@ -1108,6 +1394,14 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("follow_up_behavior", "Enum", &value));
             };
             xai_grok_shell::util::config::set_follow_up_behavior(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "cancel_turn_key" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("cancel_turn_key", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_cancel_turn_key(s.to_string())
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -1200,10 +1494,15 @@ pub(crate) async fn persist_setting(
                 .map_err(|e| e.to_string())
         }
         "theme" => {
-            let SettingValue::Enum(s) = value else {
-                return Err(kind_mismatch("theme", "Enum", &value));
+            // Built-ins use Enum; Pi themes (`pi:…`) use String.
+            let s = match value {
+                SettingValue::Enum(s) => (*s).to_owned(),
+                SettingValue::String(s) => s,
+                other => {
+                    return Err(kind_mismatch("theme", "Enum|String", &other));
+                }
             };
-            xai_grok_shell::util::config::set_theme(s.to_string())
+            xai_grok_shell::util::config::set_theme(s)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -1451,6 +1750,283 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("fork_secondary_model", "String", &value));
             };
             xai_grok_shell::util::config::set_fork_secondary_model(s)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "thinking_border_colors" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("thinking_border_colors", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_thinking_border_colors(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "ctrl_o_tool_expansion" => {
+            let SettingValue::Enum(value) = value else {
+                return Err(kind_mismatch("ctrl_o_tool_expansion", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_ctrl_o_tool_expansion(value.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_bash_run_display" => {
+            let SettingValue::Enum(value) = value else {
+                return Err(kind_mismatch("pi_bash_run_display", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_pi_bash_run_display(value.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_bash_command_format" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("pi_bash_command_format", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_pi_bash_command_format(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "write_edit_hover_popups" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("write_edit_hover_popups", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_write_edit_hover_popups(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "prompt_cursor" => {
+            let SettingValue::String(s) = value else {
+                return Err(kind_mismatch("prompt_cursor", "String", &value));
+            };
+            tokio::task::spawn_blocking(move || crate::appearance::persist_prompt_cursor(&s))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())
+        }
+        "recap_model" => {
+            let SettingValue::String(s) = value else {
+                return Err(kind_mismatch("recap_model", "String", &value));
+            };
+            xai_grok_shell::util::config::set_recap_model(s)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "recap_model_2" => {
+            let SettingValue::String(s) = value else {
+                return Err(kind_mismatch("recap_model_2", "String", &value));
+            };
+            xai_grok_shell::util::config::set_recap_model_2(s)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "recap_model_3" => {
+            let SettingValue::String(s) = value else {
+                return Err(kind_mismatch("recap_model_3", "String", &value));
+            };
+            xai_grok_shell::util::config::set_recap_model_3(s)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "btw_model" => {
+            let SettingValue::String(s) = value else {
+                return Err(kind_mismatch("btw_model", "String", &value));
+            };
+            xai_grok_shell::util::config::set_btw_model(s)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "btw_model_2" => {
+            let SettingValue::String(s) = value else {
+                return Err(kind_mismatch("btw_model_2", "String", &value));
+            };
+            xai_grok_shell::util::config::set_btw_model_2(s)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "btw_model_3" => {
+            let SettingValue::String(s) = value else {
+                return Err(kind_mismatch("btw_model_3", "String", &value));
+            };
+            xai_grok_shell::util::config::set_btw_model_3(s)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_builtin_tools" => {
+            let SettingValue::PiBuiltinTools(tools) = value else {
+                return Err(kind_mismatch("pi_builtin_tools", "PiBuiltinTools", &value));
+            };
+            xai_grok_shell::util::config::set_pi_builtin_tools(tools)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_bash" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("pi_bash", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_pi_bash(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_eval" => {
+            let SettingValue::Enum(version) = value else {
+                return Err(kind_mismatch("pi_eval", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_pi_eval(version.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_eval_v2_language" => {
+            let SettingValue::Enum(language) = value else {
+                return Err(kind_mismatch("pi_eval_v2_language", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_pi_eval_v2_language(language.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_eval_v2_display_mode" => {
+            let SettingValue::Enum(mode) = value else {
+                return Err(kind_mismatch("pi_eval_v2_display_mode", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_pi_eval_v2_display_mode(mode.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_eval_v2_only" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("pi_eval_v2_only", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_pi_eval_v2_only(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_eval_mcp" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("pi_eval_mcp", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_pi_eval_mcp(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "psm_resume_index" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("psm_resume_index", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_psm_resume_index(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_tree_file_rollback" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("pi_tree_file_rollback", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_pi_tree_file_rollback(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_ask_user_question_notifications" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "pi_ask_user_question_notifications",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_pi_ask_user_question_notifications(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_cache_graph" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("pi_cache_graph", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_pi_cache_graph(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_config_skill" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("pi_config_skill", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_pi_config_skill(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_user_markdown" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("pi_user_markdown", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_pi_user_markdown(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_at_search_hidden" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("pi_at_search_hidden", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_pi_at_search_hidden(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "pi_keep_multi_agent" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("pi_keep_multi_agent", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_pi_keep_multi_agent(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "show_other_tool_args" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("show_other_tool_args", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_show_other_tool_args(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "review_file_tree" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("review_file_tree", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_review_file_tree(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "review_include_reads" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("review_include_reads", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_review_include_reads(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "session_recap" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("session_recap", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_session_recap(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "recap_mermaid" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("recap_mermaid", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_recap_mermaid(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "progress_bar" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("progress_bar", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_progress_bar(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "remote_tui_footer" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("remote_tui_footer", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_remote_tui_footer(b)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -1762,5 +2338,127 @@ pub(super) fn unregister_active_session_best_effort_in(
         )
         }
         Err(e) => tracing::warn!(?e, "Failed to unregister active session"),
+    }
+}
+
+pub(super) fn parse_session_tree_nodes(payload: &serde_json::Value) -> Vec<crate::app::actions::SessionTreeNode> {
+    payload
+        .get("nodes")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|node| {
+            Some(crate::app::actions::SessionTreeNode {
+                id: node.get("id")?.as_str()?.to_owned(),
+                parent_id: node
+                    .get("parentId")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                depth: node.get("depth").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                is_leaf: node
+                    .get("isLeaf")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                is_current: node
+                    .get("isCurrent")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                on_active_path: node
+                    .get("onActivePath")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                role: node
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned(),
+                preview: node
+                    .get("preview")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned(),
+                detail: node
+                    .get("detail")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned(),
+                label: node
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                label_timestamp: node
+                    .get("labelTimestamp")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                entry_type: node
+                    .get("entryType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned(),
+                timestamp: node
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                child_ids: node
+                    .get("childIds")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect(),
+                has_text: node
+                    .get("hasText")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+            })
+        })
+        .collect()
+}
+
+pub(super) fn parse_pi_fork_messages(
+    payload: &serde_json::Value,
+) -> Vec<crate::app::actions::PiForkMessage> {
+    payload
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|message| {
+            let entry_id = message
+                .get("entryId")
+                .or_else(|| message.get("id"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|id| !id.is_empty())?
+                .to_owned();
+            let text = message
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            Some(crate::app::actions::PiForkMessage { entry_id, text })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod pi_fork_parse_tests {
+    use super::parse_pi_fork_messages;
+    use serde_json::json;
+
+    #[test]
+    fn parse_pi_fork_messages_reads_entry_id_and_text() {
+        let messages = parse_pi_fork_messages(&json!({
+            "messages": [
+                { "entryId": "e1", "text": "hello" },
+                { "id": "e2", "text": "world" },
+                { "entryId": "  ", "text": "skip" },
+            ]
+        }));
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].entry_id, "e1");
+        assert_eq!(messages[0].text, "hello");
+        assert_eq!(messages[1].entry_id, "e2");
+        assert_eq!(messages[1].text, "world");
     }
 }

@@ -11,11 +11,11 @@ mod timeline;
 mod types;
 pub mod verb_group;
 
-pub(crate) use layout::ScrollAnchor;
 pub use layout::compute_paint_window;
-pub use timeline::TimelineEntry;
+pub use timeline::{TimelineEntry, TimelineMarker, TimelineMarkerKind};
 pub use types::*;
 
+pub(crate) use layout::ScrollAnchor;
 use layout::{LayoutCache, StructuralScrollAnchor};
 
 use std::collections::{HashSet, VecDeque};
@@ -37,9 +37,17 @@ use crate::appearance::AppearanceConfig;
 use crate::render::Renderable;
 use crate::theme::Theme;
 
-/// Lifecycle of a scroll-up warm-up that a resize postponed until the width settles.
-/// Settling is measured in frames, not `prepare_layout` calls.
-/// One frame prepares layout several times, so a call-based rule would run the warm-up during the very resize that deferred it.
+/// Scope selected by grok-pi's Ctrl+O setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolOutputExpansionScope {
+    WriteEdit,
+    AllTools,
+}
+
+/// Lifecycle of a scroll-up warm-up that a resize postponed until the width
+/// settles. Settling is measured in FRAMES, not `prepare_layout` calls: one
+/// frame prepares layout several times, so a call-based rule would run the
+/// warm-up during the very resize that deferred it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum DeferredWarmAbove {
     #[default]
@@ -218,8 +226,19 @@ pub struct ScrollbackState {
     #[cfg(test)]
     layout_rebuilds: usize,
 
+    /// Inline-edit height override (entry id, reserved height) for the entry being edited.
+    /// The layout then reserves room for the live edit textarea.
+    /// Cleared when editing ends.
+    pub(super) inline_edit_height: Option<(EntryId, u16)>,
+
     /// Session/worktree cwd (`AgentSession.cwd`) for Expanded tool paths.
     cwd: Option<std::path::PathBuf>,
+
+    /// When true, sticky section headers are skipped for this paint — same as
+    /// compact mode. Set during a live turn so non-compact sessions do not pay
+    /// sticky re-layout/paint on every spinner/stream frame (compact-on is
+    /// smooth; compact-off was lagging for the same transcript).
+    suppress_sticky_headers: bool,
 }
 
 impl Default for ScrollbackState {
@@ -274,12 +293,24 @@ impl ScrollbackState {
             content_generation: 0,
             #[cfg(test)]
             layout_rebuilds: 0,
+            inline_edit_height: None,
             cwd: None,
+            suppress_sticky_headers: false,
         }
     }
 
     pub fn cwd(&self) -> Option<&std::path::Path> {
         self.cwd.as_deref()
+    }
+
+    /// Suppress sticky headers for the next paint passes (live turn hot path).
+    pub fn set_suppress_sticky_headers(&mut self, suppress: bool) {
+        self.suppress_sticky_headers = suppress;
+    }
+
+    /// Whether sticky headers are suppressed for this paint.
+    pub fn suppress_sticky_headers(&self) -> bool {
+        self.suppress_sticky_headers
     }
 
     /// Update session cwd; invalidates cwd-dependent paint, layout, and link maps.
@@ -460,9 +491,12 @@ impl ScrollbackState {
     /// Conservative: with no layout yet (before the first draw), every entry counts as visible.
     fn any_running_in_viewport(&self) -> bool {
         self.running.iter().any(|id| {
-            self.entries
-                .get_index_of(id)
-                .is_some_and(|idx| self.entry_index_in_viewport(idx))
+            let Some(idx) = self.entries.get_index_of(id) else {
+                return false;
+            };
+            self.entries.get_index(idx).is_some_and(|(_, entry)| {
+                entry.block.animates_running_accent() && self.entry_index_in_viewport(idx)
+            })
         })
     }
 
@@ -475,6 +509,38 @@ impl ScrollbackState {
     /// not demand ticks: they animate opportunistically while ticks flow for other reasons.
     pub fn needs_animation(&self) -> bool {
         !self.running.is_empty() && self.any_running_in_viewport()
+    }
+
+    /// Whether an expanded Edit/Write diff is currently inside the viewport.
+    ///
+    /// Expanded edit blocks are paint-heavy (full hunk layout + styled spans).
+    /// During a live turn the pager otherwise redraws at animation/spinner
+    /// cadence; keeping an expanded edit on screen makes every frame expensive
+    /// and freezes input. Callers use this to drop pure animation/status
+    /// redraws while the user is inspecting a diff (content/input redraws
+    /// still flow). Resume/idle paths never hit that hot loop, so the same
+    /// expanded card is cheap there.
+    ///
+    /// Conservative when layout is not ready: any expanded edit counts as
+    /// visible (same fail-open as [`Self::any_running_in_viewport`]).
+    pub fn has_expanded_edit_in_viewport(&self) -> bool {
+        for (idx, (_, entry)) in self.entries.iter().enumerate() {
+            if entry.display_mode != DisplayMode::Expanded {
+                continue;
+            }
+            let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block else {
+                continue;
+            };
+            // Empty success headers are one-line either way; only real diffs
+            // (or error bodies) pay the expanded paint cost.
+            if edit.hunks.is_empty() && edit.error.is_none() {
+                continue;
+            }
+            if self.entry_index_in_viewport(idx) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Get the current animation tick value.
@@ -821,6 +887,26 @@ impl ScrollbackState {
         self.bump_content_generation();
     }
 
+    /// Set (or clear) the inline-edit height override for an entry.
+    /// Marks affected entries height-dirty; no-op when unchanged (called per frame).
+    pub fn set_inline_edit_height(&mut self, override_h: Option<(EntryId, u16)>) {
+        if self.inline_edit_height == override_h {
+            return;
+        }
+        if let Some((old_id, _)) = self.inline_edit_height {
+            self.mark_height_dirty(old_id);
+        }
+        if let Some((new_id, _)) = override_h {
+            self.mark_height_dirty(new_id);
+        }
+        self.inline_edit_height = override_h;
+    }
+
+    /// Current inline-edit height override, if any.
+    pub fn inline_edit_height(&self) -> Option<(EntryId, u16)> {
+        self.inline_edit_height
+    }
+
     /// Get number of entries.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -1075,8 +1161,14 @@ impl ScrollbackState {
         self.invalidate_heights();
     }
 
-    /// Get the index of an entry by its ID.
-    /// O(1) average via IndexMap.
+    /// Re-render UserPrompt blocks when grok-pi toggles markdown user rendering.
+    /// Both renderers support the same fold states, so toggling style must not
+    /// overwrite a default or user-selected collapsed/expanded mode.
+    pub fn apply_pi_user_markdown_flip(&mut self, _enabled: bool) {
+        self.invalidate_heights();
+    }
+
+    /// Get the index of an entry by its ID. O(1) average via IndexMap.
     pub fn index_of_id(&self, id: EntryId) -> Option<usize> {
         self.entries.get_index_of(&id)
     }
@@ -1087,7 +1179,6 @@ impl ScrollbackState {
         self.capture_scroll_anchor()
     }
 
-    /// Re-pin the viewport to a bookmark from [`Self::capture_scroll_bookmark`].
     pub(crate) fn restore_scroll_bookmark(&mut self, bookmark: ScrollAnchor) {
         self.restore_scroll_anchor(bookmark);
     }
@@ -1121,8 +1212,15 @@ impl ScrollbackState {
     /// For thinking blocks, the thinking_time_ms will be displayed in collapsed mode.
     pub fn finish_running_with_time(&mut self, id: EntryId, thinking_time_ms: Option<i64>) {
         self.running.remove(&id);
-        // Track the finish-flash window so `tick()` checks O(flashing) entries instead of scanning the whole scrollback per tick
-        if self.entries.contains_key(&id) && !self.flashing.contains(&id) {
+        // Track the finish-flash window so `tick()` checks O(flashing)
+        // entries instead of scanning the whole scrollback per tick. Message
+        // chrome is intentionally static, so message completion never enters
+        // the flash list.
+        let animates_running_accent = self
+            .entries
+            .get(&id)
+            .is_some_and(|entry| entry.block.animates_running_accent());
+        if animates_running_accent && !self.flashing.contains(&id) {
             self.flashing.push(id);
         }
         let thinking_mode = self.thinking_display_mode;
@@ -1147,6 +1245,7 @@ impl ScrollbackState {
                 RenderBlock::ToolCall(ToolCallBlock::Eval(b)) => b.finish(),
                 RenderBlock::ToolCall(ToolCallBlock::Codemode(b)) => b.finish(),
                 RenderBlock::ToolCall(ToolCallBlock::Read(b)) => b.finish(),
+                RenderBlock::ToolCall(ToolCallBlock::Codemode(b)) => b.finish(),
                 RenderBlock::ToolCall(ToolCallBlock::Edit(b)) => b.finish(),
                 RenderBlock::ToolCall(ToolCallBlock::Search(b)) => b.finish(),
                 RenderBlock::ToolCall(ToolCallBlock::ListDir(b)) => b.finish(),
@@ -2011,6 +2110,73 @@ mod tests {
         .unwrap();
     }
 
+    /// Expanded Edit/Write diffs in the viewport drive the live-turn paint
+    /// throttle (see `AppView::tick` / `tick_demand`). Collapsed or empty
+    /// edits must not trip it; off-screen expanded ones are ignored once a
+    /// layout exists.
+    #[test]
+    fn has_expanded_edit_in_viewport_detects_visible_diffs() {
+        use similar::ChangeTag;
+        use xai_grok_pager_diff::DiffLine;
+
+        let hunks = vec![vec![DiffLine {
+            text: "fn main() {}\n".into(),
+            lo: 0,
+            ln: 1,
+            tag: ChangeTag::Insert,
+        }]];
+
+        let mut state = edit_state(false);
+        // No layout yet: fail-open treats any expanded diff as visible.
+        let expanded_id =
+            state.push_block(edit_block(EditToolCallBlock::new("a.rs", hunks.clone())));
+        state
+            .get_by_id_mut(expanded_id)
+            .unwrap()
+            .set_display_mode(DisplayMode::Expanded);
+        assert!(
+            state.has_expanded_edit_in_viewport(),
+            "pre-layout expanded edit must count as visible"
+        );
+
+        // Collapsed edit with hunks is cheap (one-liner) — not heavy.
+        let mut collapsed = edit_state(false);
+        let id = collapsed.push_block(edit_block(EditToolCallBlock::new("b.rs", hunks.clone())));
+        collapsed
+            .get_by_id_mut(id)
+            .unwrap()
+            .set_display_mode(DisplayMode::Collapsed);
+        collapsed.prepare_layout(80, 20);
+        assert!(
+            !collapsed.has_expanded_edit_in_viewport(),
+            "collapsed edit must not trip the heavy-edit gate"
+        );
+
+        // Expanded empty edit (no hunks / error) is also cheap.
+        let mut empty = edit_state(false);
+        let id = empty.push_block(edit_block(EditToolCallBlock::new("c.rs", vec![])));
+        empty
+            .get_by_id_mut(id)
+            .unwrap()
+            .set_display_mode(DisplayMode::Expanded);
+        empty.prepare_layout(80, 20);
+        assert!(
+            !empty.has_expanded_edit_in_viewport(),
+            "empty expanded edit header is not paint-heavy"
+        );
+
+        // After layout, an expanded diff in a short transcript is on-screen.
+        state.prepare_layout(80, 20);
+        assert!(
+            state.has_expanded_edit_in_viewport(),
+            "laid-out expanded edit in a short viewport must be detected"
+        );
+    }
+
+    /// The untrusted rising edge overrides the Edit-to-Edit preserve rule:
+    /// once a later Diff reveals a multi-file call, the collapsed one-liner
+    /// lies and the entry must open. Steady-state untrusted swaps keep a
+    /// user's collapse.
     #[test]
     fn pending_permission_edit_expands() {
         let mut state = edit_state(false);
@@ -2401,6 +2567,191 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn pi_user_markdown_flip_preserves_fold_state() {
+        std::thread::spawn(|| {
+            crate::app::set_external_agent_active(true);
+            crate::appearance::cache::set_pi_user_markdown(false);
+            let mut state = ScrollbackState::new();
+            let id = state.push_block(RenderBlock::user_prompt("one\ntwo\nthree\nfour"));
+            assert_eq!(
+                state.get_by_id(id).unwrap().display_mode,
+                DisplayMode::Collapsed
+            );
+
+            state.apply_pi_user_markdown_flip(true);
+            assert_eq!(
+                state.get_by_id(id).unwrap().display_mode,
+                DisplayMode::Collapsed,
+                "enabling markdown must preserve the prompt fold state"
+            );
+
+            state.get_by_id_mut(id).unwrap().display_mode = DisplayMode::Expanded;
+            state.apply_pi_user_markdown_flip(false);
+            assert_eq!(
+                state.get_by_id(id).unwrap().display_mode,
+                DisplayMode::Expanded,
+                "disabling markdown must preserve the prompt fold state"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn stop_hooks_attach_only_to_turn_terminal_markers() {
+        use crate::scrollback::blocks::SessionEvent;
+        use crate::scrollback::blocks::tool::{HookRunEntry, HookRunStatus};
+        let entries = || {
+            vec![HookRunEntry {
+                name: "h".into(),
+                status: HookRunStatus::Success {
+                    elapsed: std::time::Duration::from_millis(1),
+                },
+                output: None,
+            }]
+        };
+
+        let mut state = ScrollbackState::new();
+        let marker = state.push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
+            elapsed: Some(std::time::Duration::from_secs(2)),
+        }));
+        // An unstamped marker can't confirm a stamped batch — refused; an
+        // unstamped batch keeps the tail-only heuristic.
+        assert_eq!(
+            state.latest_turn_marker_accepting("stop", Some("pid-a")),
+            None
+        );
+        assert!(!state.attach_stop_hooks_to_marker(
+            marker,
+            "stop".into(),
+            entries(),
+            Some("pid-a")
+        ));
+        assert_eq!(
+            state.latest_turn_marker_accepting("stop", None),
+            Some(marker)
+        );
+        assert!(state.attach_stop_hooks_to_marker(marker, "stop".into(), entries(), None));
+
+        // Same-name repeat is refused; a new event name is accepted.
+        assert_eq!(state.latest_turn_marker_accepting("stop", None), None);
+        assert_eq!(
+            state.latest_turn_marker_accepting("stop_failure", None),
+            Some(marker)
+        );
+    }
+
+    #[test]
+    fn stop_hooks_respect_marker_prompt_id() {
+        use crate::scrollback::blocks::tool::{HookRunEntry, HookRunStatus};
+        use crate::scrollback::blocks::{SessionEvent, SessionEventBlock};
+        let entries = || {
+            vec![HookRunEntry {
+                name: "h".into(),
+                status: HookRunStatus::Success {
+                    elapsed: std::time::Duration::from_millis(1),
+                },
+                output: None,
+            }]
+        };
+
+        let mut state = ScrollbackState::new();
+        let marker = state.push_block(RenderBlock::SessionEvent(
+            SessionEventBlock::with_stop_hooks(
+                SessionEvent::TurnCompleted {
+                    elapsed: Some(std::time::Duration::from_secs(2)),
+                },
+                Vec::new(),
+                Some("pid-new".into()),
+            ),
+        ));
+
+        // A batch stamped with another turn's pid is refused even though the
+        // marker has no same-name group; an unstamped (legacy) batch and a
+        // matching pid are accepted.
+        assert_eq!(
+            state.latest_turn_marker_accepting("stop", Some("pid-old")),
+            None
+        );
+        assert!(!state.attach_stop_hooks_to_marker(
+            marker,
+            "stop".into(),
+            entries(),
+            Some("pid-old")
+        ));
+        assert_eq!(
+            state.latest_turn_marker_accepting("stop", None),
+            Some(marker)
+        );
+        assert_eq!(
+            state.latest_turn_marker_accepting("stop", Some("pid-new")),
+            Some(marker)
+        );
+        assert!(state.attach_stop_hooks_to_marker(
+            marker,
+            "stop".into(),
+            entries(),
+            Some("pid-new")
+        ));
+    }
+
+    #[test]
+    fn stop_hooks_merge_walks_past_interleaved_tail_blocks() {
+        use crate::scrollback::blocks::{SessionEvent, SessionEventBlock};
+
+        let mut state = ScrollbackState::new();
+        let marker = state.push_block(RenderBlock::SessionEvent(
+            SessionEventBlock::with_stop_hooks(
+                SessionEvent::TurnCompleted {
+                    elapsed: Some(std::time::Duration::from_secs(2)),
+                },
+                Vec::new(),
+                Some("pid-new".into()),
+            ),
+        ));
+        // A block lands between the marker and the batch (compaction, recap,
+        // a previous batch's standalone fallback, …).
+        state.push_block(RenderBlock::session_event(
+            SessionEvent::CompactionCompleted {
+                tokens_before: Some(100),
+                tokens_after: 10,
+                elapsed_ms: Some(5),
+            },
+        ));
+
+        // An exact pid match merges across the interleaved block; an
+        // unstamped batch can't be attributed off-tail and a foreign pid is
+        // refused outright.
+        assert_eq!(
+            state.latest_turn_marker_accepting("stop", Some("pid-new")),
+            Some(marker)
+        );
+        assert_eq!(state.latest_turn_marker_accepting("stop", None), None);
+        assert_eq!(
+            state.latest_turn_marker_accepting("stop", Some("pid-old")),
+            None
+        );
+
+        // The walk never skips past a newer turn-terminal marker: the batch
+        // belongs to the latest turn or to nothing.
+        state.push_block(RenderBlock::SessionEvent(
+            SessionEventBlock::with_stop_hooks(
+                SessionEvent::TurnCompleted {
+                    elapsed: Some(std::time::Duration::from_secs(3)),
+                },
+                Vec::new(),
+                Some("pid-newer".into()),
+            ),
+        ));
+        assert_eq!(
+            state.latest_turn_marker_accepting("stop", Some("pid-new")),
+            None
+        );
+    }
+
+    /// A finished user `!` command expands to its full output; a Collapsed
+    /// entry keeps its fold (no snap-open at completion).
     /// A finished user `!` command expands to its full output; a Collapsed entry keeps its fold (no snap-open at completion).
     #[test]
     fn bash_execute_expands_on_finish_unless_user_collapsed() {
@@ -2446,8 +2797,47 @@ mod tests {
 
     // ── Animation gating: off-screen running entries must not redraw ────
 
-    /// A running entry scrolled far out of the viewport must not demand animation ticks or redraws; the wave accent can't be seen there.
-    /// 30fps redraws of a static screen were the dominant idle-CPU cost (e.g. a background task left running while reading elsewhere).
+    #[test]
+    fn running_message_entries_do_not_demand_animation_ticks_or_finish_flashes() {
+        for block in [
+            RenderBlock::user_prompt("hello"),
+            RenderBlock::agent_message("hello"),
+        ] {
+            let mut state = ScrollbackState::new();
+            let id = state.push_block(block);
+            state.set_last_running(true);
+
+            assert!(state.has_running_entries(), "running semantics stay intact");
+            assert!(
+                !state.needs_animation(),
+                "message-only running state must not arm the animation timer"
+            );
+            assert!(
+                !state.tick(),
+                "message-only running state must not request a redraw tick"
+            );
+
+            state.finish_running(id);
+            assert!(
+                !state.flashing.contains(&id),
+                "message completion must not create a left-accent flash"
+            );
+        }
+
+        let mut state = ScrollbackState::new();
+        state.push_block(stub_block("tool activity"));
+        state.set_last_running(true);
+        assert!(
+            state.needs_animation(),
+            "non-message activity blocks keep native running animation"
+        );
+    }
+
+    /// A running entry scrolled far out of the viewport must not demand
+    /// animation ticks or redraws — the wave accent can't be seen, and
+    /// 30fps redraws of a static screen were the dominant idle-CPU cost
+    /// (e.g. a background task entry left running while reading elsewhere).
+
     #[test]
     fn offscreen_running_entry_needs_no_animation() {
         let mut state = ScrollbackState::new();

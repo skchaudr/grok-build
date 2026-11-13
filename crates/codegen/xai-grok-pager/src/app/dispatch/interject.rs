@@ -55,9 +55,29 @@ fn dispatch_interject_on_inner(
         // Hard-reset only; `text` may not be from the composer
         let _ = voice_stop_on_submit(app);
     }
+    let reconnect_pending = app.reconnect_pending;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
+
+    // Mid-outage guard: requeue locally instead of firing into a dead channel.
+    if reconnect_pending {
+        let queue_id = agent.session.next_queue_id;
+        agent.session.next_queue_id += 1;
+        agent
+            .session
+            .pending_prompts
+            .push_front(crate::app::agent::QueuedPrompt {
+                images,
+                ..crate::app::agent::QueuedPrompt::plain(
+                    queue_id,
+                    &text,
+                    crate::app::agent::QueueEntryKind::Prompt,
+                )
+            });
+        agent.show_toast("Reconnecting, please wait...");
+        return vec![];
+    }
 
     if user_submit {
         agent.ephemeral_tip.clear_on_submit();

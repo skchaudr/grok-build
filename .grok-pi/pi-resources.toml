@@ -1,0 +1,22 @@
+# Project-local Pi resource admission policy (外挂).
+# Edit freely — no rebuild. Restart grok-pi to apply.
+#
+# Layers (later merges on top):
+#   1. ~/.grok-pi/config.toml  → [pi.resources]
+#   2. .grok-pi/config.toml    → [pi.resources]
+#   3. this file              → top-level keys (or [pi.resources])
+#
+# Built-in defaults still apply (pi-tool-display, pi-custom-header/footer,
+# pi-pretty, …). Use `allow` to force-load a default-blocked package.
+
+# Extra packages / path fragments to block beyond built-ins.
+block = [
+  "npm:@heyhuynhgiabuu/pi-pretty",
+  "npm:pi-pretty",
+]
+
+# Force-allow even if default-blocked or listed in block.
+allow = []
+
+# true = skip renderer-name heuristics; only explicit allow/block + defaults.
+# disable_heuristics = false

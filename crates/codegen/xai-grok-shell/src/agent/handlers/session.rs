@@ -125,6 +125,10 @@ async fn handle_session_info(
     let response = SessionInfoResponse {
         session_id,
         cwd: session.info.cwd.clone(),
+        session_name: None,
+        session_file: None,
+        session_stats: None,
+        cache_metrics: None,
         data,
     };
 

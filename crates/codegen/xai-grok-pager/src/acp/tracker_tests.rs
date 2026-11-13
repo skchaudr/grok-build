@@ -83,6 +83,153 @@ fn user_message(text: &str) -> acp::SessionUpdate {
         acp::TextContent::new(text.to_string()),
     )))
 }
+
+#[test]
+fn tool_trace_preserves_acp_input_output_usage_and_timing() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let mut tool_meta = acp::Meta::new();
+    tool_meta.insert(
+        "piToolUsage".into(),
+        serde_json::json!({
+            "input": 101,
+            "output": 23,
+            "cacheRead": 17,
+            "cost": 0.01
+        }),
+    );
+    let start = acp::SessionUpdate::ToolCall(
+        acp::ToolCall::new(acp::ToolCallId::new(Arc::from("trace-1")), "read")
+            .kind(acp::ToolKind::Read)
+            .status(acp::ToolCallStatus::InProgress)
+            .raw_input(Some(serde_json::json!({ "path": "README.md" })))
+            .meta(Some(tool_meta)),
+    );
+    let start_meta = NotificationMeta {
+        total_tokens: Some(900),
+        agent_timestamp_ms: Some(1_200),
+        stream_start_ms: Some(1_000),
+        ..Default::default()
+    };
+    assert!(tracker.handle_update(start, &start_meta, &mut sb));
+    let trace = &sb.get(0).expect("tool entry").tool_traces[0];
+    assert_eq!(trace.tool_call_id, "trace-1");
+    assert_eq!(
+        trace
+            .raw_input
+            .as_ref()
+            .and_then(|v| v.get("path"))
+            .and_then(|v| v.as_str()),
+        Some("README.md")
+    );
+    assert_eq!(
+        trace
+            .usage
+            .as_ref()
+            .and_then(|v| v.get("input"))
+            .and_then(|v| v.as_u64()),
+        Some(101)
+    );
+    assert_eq!(trace.context_tokens, Some(900));
+    assert_eq!(trace.started_at_ms, Some(1_200));
+
+    let completed = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from("trace-1")),
+        acp::ToolCallUpdateFields::new()
+            .status(Some(acp::ToolCallStatus::Completed))
+            .raw_output(Some(serde_json::json!({ "content": "hello" }))),
+    ));
+    let end_meta = NotificationMeta {
+        total_tokens: Some(925),
+        agent_timestamp_ms: Some(1_350),
+        stream_start_ms: Some(1_000),
+        ..Default::default()
+    };
+    assert!(tracker.handle_update(completed, &end_meta, &mut sb));
+    let trace = &sb.get(0).expect("completed tool entry").tool_traces[0];
+    assert_eq!(trace.status, "Completed");
+    assert_eq!(
+        trace
+            .raw_output
+            .as_ref()
+            .and_then(|v| v.get("content"))
+            .and_then(|v| v.as_str()),
+        Some("hello")
+    );
+    assert_eq!(
+        trace
+            .usage
+            .as_ref()
+            .and_then(|v| v.get("output"))
+            .and_then(|v| v.as_u64()),
+        Some(23)
+    );
+    assert_eq!(trace.context_tokens, Some(925));
+    assert_eq!(trace.started_at_ms, Some(1_200));
+    assert_eq!(trace.updated_at_ms, Some(1_350));
+    let content =
+        crate::scrollback::entry::format_tool_traces_split(&sb.get(0).unwrap().tool_traces);
+    assert!(content.input.contains("## Input"));
+    assert!(content.output.contains("## Output"));
+    assert!(content.input.contains("## LLM segment usage"));
+    assert!(content.input.contains("**Started:**"));
+    assert!(!content.input.contains("UTC ms"));
+}
+
+#[test]
+fn replayed_codemode_completion_durations_use_agent_stamp_delta() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+
+    let start = acp::SessionUpdate::ToolCall(
+        acp::ToolCall::new(acp::ToolCallId::new(Arc::from("cm-1")), "codemode")
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::InProgress)
+            .raw_input(Some(serde_json::json!({
+                "variant": "Codemode",
+                "code": "return 1;"
+            }))),
+    );
+    // Replayed start: the real wall time rides in `agentTimestampMs`.
+    let start_meta = NotificationMeta {
+        agent_timestamp_ms: Some(1_000),
+        is_replay: true,
+        ..Default::default()
+    };
+    assert!(tracker.handle_update(start, &start_meta, &mut sb));
+
+    let completed = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from("cm-1")),
+        acp::ToolCallUpdateFields::new()
+            .status(Some(acp::ToolCallStatus::Completed))
+            .raw_output(Some(serde_json::json!({
+                "type": "Codemode",
+                "calls": [
+                    { "id": "c/1", "name": "ffind", "args": "{}", "status": "ok", "durationMs": 12.942792000001646 }
+                ],
+                "output": "done",
+                "full_output_path": ""
+            }))),
+    ));
+    let end_meta = NotificationMeta {
+        agent_timestamp_ms: Some(1_000 + 5_684),
+        is_replay: true,
+        ..Default::default()
+    };
+    assert!(tracker.handle_update(completed, &end_meta, &mut sb));
+
+    let entry = sb.get(0).expect("codemode entry");
+    let RenderBlock::ToolCall(ToolCallBlock::Codemode(cm)) = &entry.block else {
+        panic!("expected a codemode block, got {:?}", entry.block);
+    };
+    // The local Instant spans only the replay batching latency; the header
+    // duration must come from the agent-stamped start/end delta instead.
+    assert_eq!(cm.elapsed_ms, Some(5_684));
+    // Pi reports fractional `performance.now()` deltas; an integer-only parse
+    // would drop the row duration entirely.
+    assert_eq!(cm.calls[0].duration_ms, Some(13));
+}
+
 #[test]
 fn streaming_agent_message() {
     let mut sb = ScrollbackState::new();
@@ -1359,6 +1506,38 @@ fn test_search_tool_call_flow() {
         );
     }
 }
+#[test]
+fn pi_find_and_ls_select_native_render_blocks() {
+    let find = acp::ToolCall::new(acp::ToolCallId::new("find-1"), "find")
+        .kind(acp::ToolKind::Search)
+        .status(acp::ToolCallStatus::Completed)
+        .raw_input(Some(serde_json::json!({
+            "pattern": "*.rs",
+            "glob_pattern": "*.rs",
+            "output_mode": "files_with_matches"
+        })));
+    let find_block = tool_call_to_block(&find, None);
+    let RenderBlock::ToolCall(ToolCallBlock::Search(search)) = find_block else {
+        panic!("Pi find must use the native Search block");
+    };
+    assert_eq!(search.pattern, ".");
+    assert_eq!(search.meta.glob.as_deref(), Some("*.rs"));
+
+    let ls = acp::ToolCall::new(acp::ToolCallId::new("ls-1"), "ls")
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Completed)
+        .raw_input(Some(serde_json::json!({ "path": "src" })))
+        .content(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+            acp::TextContent::new("main.rs"),
+        ))]);
+    let ls_block = tool_call_to_block(&ls, None);
+    let RenderBlock::ToolCall(ToolCallBlock::ListDir(list_dir)) = ls_block else {
+        panic!("Pi ls must use the native ListDir block");
+    };
+    assert_eq!(list_dir.path, "src");
+    assert_eq!(list_dir.output, "main.rs");
+}
+
 /// Scrollback with pager.toml `expanded_by_default` set. Does not touch the flag cache.
 fn edit_config_scrollback(expanded_by_default: bool) -> ScrollbackState {
     use crate::appearance::AppearanceConfig;
@@ -2129,6 +2308,111 @@ fn meta_stream(stream_start: i64) -> NotificationMeta {
         ..Default::default()
     }
 }
+/// First live streamStartMs of a turn must pre-create empty Thinking…
+/// (external agents stamp meta from the first update, not a prior sentinel).
+#[test]
+fn first_stream_start_pre_creates_thinking() {
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    assert!(tracker.last_stream_start_ms.is_none());
+    // Mode update is a no-op body, but stream meta still runs the boundary.
+    tracker.handle_update(
+        acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
+            acp::SessionModeId::new("default"),
+        )),
+        &meta_stream(1_000),
+        &mut sb,
+    );
+    assert!(
+        tracker.current_thinking.is_some(),
+        "first live streamStartMs must pre-create Thinking…"
+    );
+    assert_eq!(tracker.last_stream_start_ms, Some(1_000));
+    assert!(
+        sb.get(0)
+            .is_some_and(|e| matches!(&e.block, RenderBlock::Thinking(t) if t.text().is_empty())),
+        "pre-create should be an empty streaming Thinking block"
+    );
+    crate::appearance::cache::set_show_thinking_blocks(true);
+}
+/// A new stream boundary must discard an empty pre-created thinking block.
+///
+/// Model switching can start a fresh stream before the previous stream emits
+/// its first thinking token. The old empty block must not remain registered
+/// as the active thinking entry across that boundary.
+#[test]
+fn stream_start_replaces_empty_precreated_thinking() {
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+
+    tracker.handle_update(
+        acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
+            acp::SessionModeId::new("default"),
+        )),
+        &meta_stream(1_000),
+        &mut sb,
+    );
+    let first_id = tracker
+        .current_thinking
+        .expect("first stream should pre-create thinking");
+    assert_eq!(sb.len(), 1);
+
+    tracker.handle_update(
+        acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
+            acp::SessionModeId::new("default"),
+        )),
+        &meta_stream(2_000),
+        &mut sb,
+    );
+
+    let second_id = tracker
+        .current_thinking
+        .expect("new stream should pre-create a fresh thinking block");
+    assert_ne!(
+        first_id, second_id,
+        "empty thinking entry from the previous stream must not survive the boundary"
+    );
+    assert!(
+        sb.get_by_id(first_id).is_none(),
+        "old empty thinking entry should be removed"
+    );
+    assert!(
+        sb.get_by_id(second_id)
+            .is_some_and(|e| matches!(&e.block, RenderBlock::Thinking(t) if t.text().is_empty())),
+        "replacement thinking entry should be the new empty pre-create"
+    );
+    assert_eq!(
+        sb.len(),
+        1,
+        "only the fresh pre-created block should remain"
+    );
+    crate::appearance::cache::set_show_thinking_blocks(true);
+}
+
+/// Replay must not pre-create empty thinking on first streamStartMs alone.
+#[test]
+fn first_replay_stream_start_does_not_pre_create_thinking() {
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let mut m = meta_stream(1_000);
+    m.is_replay = true;
+    tracker.handle_update(
+        acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
+            acp::SessionModeId::new("default"),
+        )),
+        &m,
+        &mut sb,
+    );
+    assert!(
+        tracker.current_thinking.is_none(),
+        "replay must not invent empty Thinking… on first streamStartMs"
+    );
+    assert_eq!(sb.len(), 0);
+    crate::appearance::cache::set_show_thinking_blocks(true);
+}
 /// Regression test: agent message (stream A), then thinking (stream B), then agent message (stream B).
 /// Without stream_start_ms boundary detection, stream B's agent message chunks were appended to stream A's entry.
 /// The cause: handle_thought_chunk never resets current_agent_msg.
@@ -2279,6 +2563,49 @@ fn activity_tool_running_when_tool_pending() {
             description: None,
         })
     );
+}
+
+#[test]
+fn message_interruptible_foreground_tool_uses_wire_meta_and_excludes_background() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let mut tool_meta = acp::Meta::new();
+    tool_meta.insert(
+        "x.ai/tool".to_string(),
+        serde_json::json!({ "name": "bash" }),
+    );
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc-bash")), "sleep 30")
+                .kind(acp::ToolKind::Execute)
+                .status(acp::ToolCallStatus::Pending)
+                .raw_input(Some(serde_json::json!({ "command": "sleep 30" })))
+                .content(vec![])
+                .locations(vec![])
+                .meta(Some(tool_meta)),
+        ),
+        &meta(),
+        &mut sb,
+    );
+    assert!(tracker.message_interruptible_foreground_tool_running());
+
+    tracker.handle_update(tool_update_completed("tc-bash"), &meta(), &mut sb);
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc-eval-bg")), "eval")
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .raw_input(Some(serde_json::json!({
+                    "code": "await sleep(30)",
+                    "is_background": true
+                })))
+                .content(vec![])
+                .locations(vec![]),
+        ),
+        &meta(),
+        &mut sb,
+    );
+    assert!(!tracker.message_interruptible_foreground_tool_running());
 }
 /// Foreground execute tools often carry a human `description` in raw_input (e.g. sleep with "Wait 5 seconds…").
 /// Surface it for the spinner.
@@ -5074,6 +5401,7 @@ fn cursor_todo_write_suppressed_by_title() {
     assert!(is_todo_tool(&initial_tool_call("tc1", "TodoWrite")));
     assert!(is_todo_tool(&initial_tool_call("tc2", "Updating plan")));
     assert!(is_todo_tool(&initial_tool_call("tc3", "todo_write")));
+    assert!(is_todo_tool(&initial_tool_call("tc4", "todo")));
 }
 #[test]
 fn todo_write_suppressed_by_variant() {

@@ -44,6 +44,13 @@ impl OtherToolCallBlock {
         }
     }
 
+    /// Attach pretty-printed tool args (`raw_input`) for display.
+    pub fn with_input_json(mut self, input_json: impl Into<String>) -> Self {
+        let text = input_json.into();
+        self.input = (!text.trim().is_empty()).then_some(text);
+        self
+    }
+
     /// Set error (marks as failed).
     pub fn with_error(mut self, error: impl Into<String>) -> Self {
         self.error = Some(error.into());
@@ -123,8 +130,14 @@ impl OtherToolCallBlock {
         }
     }
 
-    /// Render collapsed line: `Label` `content` or `Name`. Otherwise renders the full name in bold.
-    fn collapsed_line(&self, theme: &Theme, muted: bool, width: Option<usize>) -> Line<'static> {
+    /// Render the compact tool row, optionally appending one-line JSON arguments.
+    fn collapsed_line(
+        &self,
+        theme: &Theme,
+        muted: bool,
+        width: Option<usize>,
+        show_args: bool,
+    ) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
         } else {
@@ -157,11 +170,41 @@ impl OtherToolCallBlock {
             }
         }
 
+        if show_args && let Some(input) = self.compact_input_json() {
+            spans.push(Span::styled(
+                format!("  {input}"),
+                ratatui::style::Style::default().fg(theme.gray_dim),
+            ));
+        }
+
         let line = Line::from(spans);
         if let Some(w) = width {
             crate::render::line_utils::truncate_line(line, w)
         } else {
             line
+        }
+    }
+
+    fn compact_input_json(&self) -> Option<String> {
+        let input = self.input_json.as_deref()?;
+        serde_json::from_str::<serde_json::Value>(input)
+            .ok()
+            .and_then(|value| serde_json::to_string(&value).ok())
+            .filter(|text| !text.is_empty())
+    }
+
+    fn push_input_lines(&self, lines: &mut Vec<BlockLine>, theme: &Theme, width: usize) {
+        let Some(input) = self.input_json.as_deref() else {
+            return;
+        };
+        lines.push(Line::from("").into());
+        let styled_lines: Vec<Line<'static>> = input
+            .lines()
+            .map(|line| Line::from(Span::styled(format!("  {line}"), theme.muted())))
+            .collect();
+        let wrapped = word_wrap_lines(styled_lines, width.saturating_sub(2).max(20));
+        for wrapped_line in wrapped {
+            lines.push(BlockLine::styled(wrapped_line));
         }
     }
 }
@@ -175,7 +218,8 @@ impl BlockContent for OtherToolCallBlock {
 
         // Inline media blocks (image_gen / video_gen): render the header and a filepath line on every terminal
         if let Some(media_path) = self.media_ref_path() {
-            let header = self.collapsed_line(&theme, muted_collapsed, Some(ctx.content_width()));
+            let header =
+                self.collapsed_line(&theme, muted_collapsed, Some(ctx.content_width()), false);
             let max_w = ctx.content_width();
             // Percent-decode for display only (e.g. `%2F` becomes `/`); the stored path is unchanged so Open / copy-path still target the file.
             let raw_path = media_path.display().to_string();
@@ -236,16 +280,27 @@ impl BlockContent for OtherToolCallBlock {
             return BlockOutput { lines };
         }
 
+        // F2 show_other_tool_args controls both the compact row preview and expanded raw input.
+        let show_args = ctx.appearance.show_other_tool_args;
         match ctx.mode {
             DisplayMode::Collapsed => BlockOutput {
                 lines: vec![
-                    self.collapsed_line(&theme, muted_collapsed, Some(ctx.content_width()))
-                        .into(),
+                    self.collapsed_line(
+                        &theme,
+                        muted_collapsed,
+                        Some(ctx.content_width()),
+                        show_args,
+                    )
+                    .into(),
                 ],
             },
             DisplayMode::Truncated | DisplayMode::Expanded => {
                 let mut lines: Vec<BlockLine> =
-                    vec![self.collapsed_line(&theme, false, None).into()];
+                    vec![self.collapsed_line(&theme, false, None, false).into()];
+
+                if show_args {
+                    self.push_input_lines(&mut lines, &theme, width);
+                }
 
                 if let Some(output) = &self.output {
                     // Try to render as structured Q&A (AskUserQuestion output).
@@ -355,7 +410,7 @@ impl BlockContent for OtherToolCallBlock {
     }
 
     fn is_foldable(&self) -> bool {
-        self.output.is_some() || self.error.is_some()
+        self.output.is_some() || self.error.is_some() || self.input_json.is_some()
     }
 
     fn default_display_mode(&self) -> DisplayMode {

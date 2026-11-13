@@ -2,6 +2,7 @@ mod codemode;
 mod edit;
 mod eval;
 mod execute;
+pub(crate) mod hook;
 pub mod list_dir;
 pub(crate) mod memory_search;
 mod other;
@@ -9,18 +10,20 @@ mod read;
 pub mod search;
 mod search_tool;
 mod sent_message;
+mod side_by_side_edit;
 mod use_tool;
 mod web_fetch;
 mod web_search;
 
+pub use codemode::CodemodeToolCallBlock;
 pub use edit::{
     DiffLineOutput, DiffRenderConfig, EDIT_HL_MAX_BYTES, EDIT_HL_MAX_LINES, EditHighlightPhase,
     EditLineStyles, EditToolCallBlock, compute_file_scoped_styles, file_text_within_hl_caps,
     render_diff_hunk_highlighted, render_diff_hunks_highlighted, render_diff_hunks_with_styles,
 };
-pub use codemode::CodemodeToolCallBlock;
 pub use eval::EvalToolCallBlock;
 pub use execute::ExecuteToolCallBlock;
+pub use hook::{HookPhase, HookRunEntry, HookRunStatus, ToolCallHookData};
 pub use list_dir::ListDirToolCallBlock;
 pub use memory_search::MemorySearchToolCallBlock;
 pub use other::OtherToolCallBlock;
@@ -280,6 +283,10 @@ impl BlockContent for ToolCallBlock {
 
     fn inline_open_button(&self) -> Option<(std::path::PathBuf, bool)> {
         delegate_tool!(self, inline_open_button())
+    }
+
+    fn estimate_reserved_cols(&self) -> u16 {
+        delegate_tool!(self, estimate_reserved_cols())
     }
 
     fn preamble(&self, ctx: &BlockContext) -> Option<ratatui::text::Text<'static>> {
@@ -615,6 +622,7 @@ impl ToolCallBlock {
             ToolCallBlock::Skill(b) | ToolCallBlock::Other(b) => join_searchable([
                 Some(b.name.clone()),
                 Some(b.summary.clone()),
+                b.input.clone(),
                 b.output.clone(),
                 b.error.clone(),
             ]),

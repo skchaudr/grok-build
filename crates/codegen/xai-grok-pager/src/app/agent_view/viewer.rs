@@ -1,6 +1,8 @@
 //! Line and block viewer popups plus the /btw panel: open/confirm/dismiss and their key/mouse handlers.
 
 use super::{AgentPane, AgentView, BlockViewerResume, render_char_buttons};
+use crate::app::actions::Action;
+
 use crate::app::app_view::InputOutcome;
 use crate::key;
 use crate::scrollback::selection::SelectionBox;
@@ -955,6 +957,30 @@ impl AgentView {
 
     // -- Block viewer input handling ------------------------------------------
 
+    fn is_tool_viewer_block(block: &crate::scrollback::block::RenderBlock) -> bool {
+        matches!(
+            block,
+            crate::scrollback::block::RenderBlock::ToolCall(_)
+                | crate::scrollback::block::RenderBlock::BgTask(_)
+        ) && block.has_normal_fullscreen_viewer()
+    }
+
+    fn adjacent_tool_viewer_index(&self, current: usize, forward: bool) -> Option<usize> {
+        let is_candidate = |idx: usize| {
+            !self.scrollback.entry_content_hidden_by_group(idx)
+                && self
+                    .scrollback
+                    .entry(idx)
+                    .is_some_and(|entry| Self::is_tool_viewer_block(&entry.block))
+        };
+
+        if forward {
+            (current.saturating_add(1)..self.scrollback.len()).find(|&idx| is_candidate(idx))
+        } else {
+            (0..current).rev().find(|&idx| is_candidate(idx))
+        }
+    }
+
     pub(crate) fn dismiss_block_viewer(&mut self) {
         if let Some(viewer) = self.block_viewer.take() {
             self.block_viewer_resume = Some(BlockViewerResume {
@@ -1033,11 +1059,13 @@ impl AgentView {
         use crate::scrollback::blocks::ToolCallBlock;
         let id = entry.id;
         match &entry.block {
-            RenderBlock::Thinking(_) | RenderBlock::AgentMessage(_) => {
+            RenderBlock::Thinking(_) | RenderBlock::AgentMessage(_) | RenderBlock::SessionEvent(_) => {
                 BlockViewerPane::for_markdown(id, entry)
             }
             RenderBlock::UserPrompt(b) => Some(BlockViewerPane::for_user_prompt(id, &b.text)),
             RenderBlock::ToolCall(ToolCallBlock::Execute(_)) => BlockViewerPane::for_execute(id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::Eval(_)) => BlockViewerPane::for_eval(id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::Codemode(_)) => BlockViewerPane::for_codemode(id, entry),
             RenderBlock::ToolCall(ToolCallBlock::Edit(_)) => BlockViewerPane::for_edit(id, entry),
             RenderBlock::ToolCall(ToolCallBlock::Read(_)) => BlockViewerPane::for_read(id, entry),
             RenderBlock::ToolCall(ToolCallBlock::Search(_)) => BlockViewerPane::for_grep(id, entry),
@@ -1150,6 +1178,30 @@ impl AgentView {
     ///
     /// Returns `Changed` if consumed, `Unchanged` if the key should bubble up.
     pub(super) fn handle_block_viewer_key(&mut self, key: &KeyEvent) -> InputOutcome {
+        let tool_navigation = self.block_viewer.as_ref().and_then(|viewer| {
+            let forward = match (key.code, key.modifiers) {
+                (KeyCode::Left, KeyModifiers::NONE) => false,
+                (KeyCode::Right, KeyModifiers::NONE) => true,
+                _ => return None,
+            };
+            if viewer.list_state.input_mode().is_some() || viewer.list_state.visual_mode {
+                return None;
+            }
+            let current = self.scrollback.selected()?;
+            let entry = self.scrollback.entry(current)?;
+            (entry.id == viewer.entry_id && Self::is_tool_viewer_block(&entry.block))
+                .then_some((current, forward))
+        });
+
+        if let Some((current, forward)) = tool_navigation {
+            if let Some(target) = self.adjacent_tool_viewer_index(current, forward) {
+                self.scrollback.set_selected(Some(target));
+                self.dismiss_block_viewer();
+                return InputOutcome::Action(Action::OpenBlockViewer);
+            }
+            return InputOutcome::Changed;
+        }
+
         let Some(viewer) = self.block_viewer.as_ref() else {
             return InputOutcome::Unchanged;
         };
@@ -1247,6 +1299,7 @@ impl AgentView {
         match modal_outcome {
             ModalWindowOutcome::CloseRequested => {
                 self.dismiss_block_viewer();
+
                 return InputOutcome::Changed;
             }
             ModalWindowOutcome::Handled => return InputOutcome::Changed,

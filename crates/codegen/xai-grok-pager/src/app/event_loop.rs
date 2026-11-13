@@ -214,7 +214,9 @@ fn replay_startup_typeahead(
 pub(crate) struct TerminalState {
     pub is_control_mode: bool,
     pub screen_mode: super::ScreenMode,
-    /// One-shot `/minimal` re-exec (env override already consumed).
+    /// This process was re-exec'd by `/minimal` (one-shot env override, already
+    /// consumed). Queues the minimal welcome card so the viewport re-anchors at
+    /// the top of the freshly cleared main screen.
     pub relaunched_into_minimal: bool,
     /// One-shot `/fullscreen` re-exec (env override already consumed).
     pub relaunched_into_fullscreen: bool,
@@ -908,8 +910,36 @@ fn run_pending_suspends(
     }
     Ok(())
 }
-/// Consume a pending in-process switch between `/minimal` and `/fullscreen`.
-/// Returns `true` when the caller must quit (exec fallback armed on `app.relaunch`).
+
+/// Welcome logo, menu and brand from an external host profile; `None` restores Grok's.
+fn apply_welcome_profile(profile: Option<&crate::acp::ExternalUiProfile>) {
+    use crate::views::welcome::logo;
+    logo::set_logo_override(profile.and_then(|p| p.logo));
+    logo::set_welcome_menu_override(profile.map(|p| logo::ExternalWelcomeMenu {
+        hide_new_worktree: p.hide_new_worktree,
+        changelog_url: p.changelog_url,
+    }));
+    logo::set_welcome_brand_override(profile.and_then(|p| p.welcome_brand).map(|brand| {
+        logo::ExternalWelcomeBrand {
+            title: brand.title,
+            subtitle: brand.subtitle,
+            version: brand.version,
+        }
+    }));
+}
+
+fn sync_timeline_appearance(app: &mut AppView, show_timeline: bool) {
+    app.current_ui.show_timeline = Some(show_timeline);
+    if app.appearance.show_timeline != show_timeline {
+        let mut config = app.appearance.clone();
+        config.show_timeline = show_timeline;
+        app.set_appearance(config);
+    }
+}
+
+/// Consume a pending in-process `/minimal` ⇄ `/fullscreen` switch; returns
+/// `true` when the caller must quit (exec fallback armed on `app.relaunch`).
+
 #[allow(clippy::too_many_arguments)]
 fn run_pending_mode_switch(
     app: &mut AppView,
@@ -1052,7 +1082,49 @@ pub(crate) async fn run(
 ) -> anyhow::Result<RunResult> {
     crate::unified_log::init(connection.tx.clone());
     crate::unified_log::info("pager started", None, None);
+
+    // Select the native pager command surface before any PromptWidget is
+    // constructed. External agents still use the exact same Grok composer,
+    // dropdown, modal, markdown, tool, and scrollback implementations; only
+    // product commands that their protocol cannot satisfy are omitted.
+    let ui_profile = connection.ui_profile.clone();
+    let external_agent = ui_profile.is_external();
+    let external_voice_dictation_enabled = matches!(
+        &ui_profile,
+        crate::acp::UiProfile::External(profile) if profile.enable_voice_dictation
+    );
+    // A launch-time profile (grok-fork started on `grok-pi-acp` alone) brands the welcome
+    // surface and settings only; the slash menu stays per session (`slash::pi_menu`).
+    let launch_profile = crate::acp::launch_ui_profile();
+    match &ui_profile {
+        crate::acp::UiProfile::Grok => {
+            crate::slash::set_builtin_command_profile(crate::slash::BuiltinCommandProfile::Grok);
+            apply_welcome_profile(launch_profile.as_ref());
+        }
+        crate::acp::UiProfile::External(profile) => {
+            crate::slash::set_builtin_command_profile(
+                crate::slash::BuiltinCommandProfile::External(profile.builtin_commands.clone()),
+            );
+            apply_welcome_profile(Some(profile));
+            crate::unified_log::info(
+                "external agent pager profile enabled",
+                None,
+                Some(serde_json::json!({
+                    "agent": profile.agent_name,
+                    "logo_override": profile.logo.is_some(),
+                    "welcome_brand_override": profile.welcome_brand.is_some(),
+                    "hide_new_worktree": profile.hide_new_worktree,
+                    "changelog_url": profile.changelog_url,
+                    "voice_dictation_enabled": profile.enable_voice_dictation,
+                })),
+            );
+        }
+    }
+
     xai_grok_telemetry::startup::enter(xai_grok_telemetry::startup::StartupPhase::AppInit);
+    // Host palette entries are placement metadata for commands that may be
+    // feature-gated or registered later. The live ACP command catalog is the
+    // source of truth: palette construction joins against available commands.
     let mut app = {
         let _t = xai_grok_telemetry::instrumentation::timer("startup.app_init.app_view_new");
         AppView::new(
@@ -1063,6 +1135,20 @@ pub(crate) async fn run(
         )
     };
     app.cwd = args.session_cwd()?;
+    // grok-pi passes its profile on the in-process connection; grok-fork launching
+    // `grok-pi-acp` alone sets one at startup (`crate::acp::set_launch_ui_profile`).
+    let host_profile = match &ui_profile {
+        crate::acp::UiProfile::External(profile) => Some(profile),
+        crate::acp::UiProfile::Grok => launch_profile.as_ref(),
+    };
+    if let Some(profile) = host_profile {
+        app.settings_registry = std::sync::Arc::new(
+            crate::settings::SettingsRegistry::defaults_with_host_features(&profile.host_features),
+        );
+        app.external_ui.host_palette = profile.host_features.palette().to_vec();
+    }
+    crate::app::set_external_agent_active(host_profile.is_some());
+
     app.pending_startup = Some(pending_startup);
     app.tracing_rx = Some(tracing_handle.rx);
     app.last_known_terminal_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(0);
@@ -1080,13 +1166,13 @@ pub(crate) async fn run(
     app.screen_mode = term_state.screen_mode;
     app.registry = crate::actions::ActionRegistry::defaults_for(term_state.screen_mode);
     app.welcome_prompt.set_screen_mode(term_state.screen_mode);
+    // Screen-mode relaunch into minimal (`/minimal` from fullscreen): queue the
+    // same top-of-screen welcome card `/new` uses so the first draw re-homes the
+    // viewport to row 0 and the resumed session starts cleanly under it. The
+    // `is_minimal` guard covers a Minimal→Inline probe downgrade in
+    // `init_terminal`, where the card must not be queued.
     if app.screen_mode.is_minimal() && term_state.relaunched_into_minimal {
         app.minimal_state.welcome_pending = true;
-    }
-    if term_state.relaunched_into_minimal && app.screen_mode.is_minimal() {
-        app.screen_mode_switch_hint = Some("Switched to minimal mode · /fullscreen to go back");
-    } else if term_state.relaunched_into_fullscreen && !app.screen_mode.is_minimal() {
-        app.screen_mode_switch_hint = Some("Switched to fullscreen mode · /minimal to go back");
     }
     let remote_permission_mode = remote_settings
         .as_ref()
@@ -1189,6 +1275,10 @@ pub(crate) async fn run(
         .and_then(|s| s.show_resolved_model)
         .unwrap_or(true);
     app.sharing_enabled = false;
+    app.plugin_cta_enabled = !external_agent
+        && xai_grok_config::env_bool("GROK_PLUGIN_CTA")
+            .or_else(|| remote_settings.as_ref().and_then(|s| s.plugin_cta))
+            .unwrap_or(false);
     app.privacy_notice_rollout = xai_grok_config::env_bool("GROK_PRIVACY_NOTICE_ROLLOUT")
         .or_else(|| {
             remote_settings
@@ -1211,6 +1301,12 @@ pub(crate) async fn run(
                 .privacy
                 .privacy_banner_acked
         });
+    // Voice dictation stays Pager-owned: it only writes a transcript into the
+    // native prompt. External hosts opt in explicitly and still use their ACP
+    // backend for prompt submission, sessions, and model selection.
+    if external_agent {
+        app.usage_visible = false;
+    }
     app.plugin_cta_enabled = xai_grok_config::env_bool("GROK_PLUGIN_CTA")
         .or_else(|| remote_settings.as_ref().and_then(|s| s.plugin_cta))
         .unwrap_or(false);
@@ -1325,12 +1421,17 @@ pub(crate) async fn run(
         if !app.consumer_account() {
             app.usage_visible = false;
             app.sync_billing_surface_to_agents();
+            // Pi: enable voice for API keys (reuses local Grok STT bearer).
+            app.ensure_voice_for_api_key();
         }
     }
-    let voice_mode_enabled = crate::app::resolve_voice_mode_live(
-        remote_settings.as_ref().and_then(|s| s.voice_mode_enabled),
-        app.is_api_key_auth,
-    );
+    // After auth so API-key + managed policy resolve correctly.
+    let voice_mode_enabled = (!external_agent || external_voice_dictation_enabled)
+        && crate::app::resolve_voice_mode_live(
+            remote_settings.as_ref().and_then(|s| s.voice_mode_enabled),
+            app.is_api_key_auth,
+        );
+
     if !voice_mode_enabled {
         app.voice_reset();
         app.voice_ui_active = false;
@@ -1370,11 +1471,18 @@ pub(crate) async fn run(
         codex: compat.codex,
         cursor: compat.cursor,
     };
+
+    // Load notification config from [ui.notifications] in config.toml.
+    // Prefer explicit `[ui].session_recap` when set (F2 settings).
     if let Some(raw) = effective_config {
-        app.notification_service = crate::notifications::NotificationService::new(
-            crate::notifications::load_notification_config(raw),
-            app.escape_writer.clone(),
-        );
+        let mut notif = crate::notifications::load_notification_config(raw);
+        if let Some(enabled) = app.current_ui.session_recap {
+            notif.session_recap = enabled;
+        }
+        notif.progress_bar = app.current_ui.progress_bar.unwrap_or(false);
+        app.notification_service =
+            crate::notifications::NotificationService::new(notif, app.escape_writer.clone());
+
         if let Some(table) = raw.as_table() {
             let endpoints_base =
                 xai_grok_shell::agent::config::EndpointsConfig::from_config_value(raw)
@@ -1432,7 +1540,8 @@ pub(crate) async fn run(
     if app.is_access_blocked() {
         app.welcome_prompt_focused = false;
     }
-    {
+
+    if !external_agent {
         use xai_grok_shell::util::config::{
             resolve_announcements, resolve_slash_command_tags, resolve_tips,
         };
@@ -1477,6 +1586,11 @@ pub(crate) async fn run(
         let empty_toml = toml::Value::Table(Default::default());
         let tags_config = effective_config.unwrap_or(&empty_toml);
         *app.command_tags.borrow_mut() = resolve_slash_command_tags(tags_config, remote_slash_tags);
+    } else {
+        app.active_announcements.clear();
+        app.announcement = None;
+        app.tips.clear();
+        app.tip = None;
     }
     let hints = xai_grok_shell::util::config::resolve_hints(
         effective_config,
@@ -1561,9 +1675,12 @@ pub(crate) async fn run(
     crate::app::status_line::metrics::global().report_config(&app.current_ui.status_line);
     let show_timeline = crate::appearance::cache::load_show_timeline();
     app.current_ui.show_timeline = Some(show_timeline);
-    if app.appearance.show_timeline != show_timeline {
+    if app.appearance.show_timeline != show_timeline
+        || app.appearance.show_other_tool_args != app.current_ui.show_other_tool_args
+    {
         let mut config = app.appearance.clone();
         config.show_timeline = show_timeline;
+        config.show_other_tool_args = app.current_ui.show_other_tool_args;
         app.set_appearance(config);
     }
     let page_flip_on_send = crate::appearance::cache::load_page_flip_on_send();
@@ -1593,6 +1710,16 @@ pub(crate) async fn run(
         app.current_ui.voice_keybind_enabled.unwrap_or(true),
         std::sync::atomic::Ordering::Release,
     );
+    // Seed the F2-configurable running-turn cancellation gesture. Unset and
+    // unknown values resolve to Esc in UiConfig.
+    crate::app::ESC_CANCELS_TURN.store(
+        app.current_ui.cancel_turn_key() == "esc",
+        std::sync::atomic::Ordering::Release,
+    );
+    // Resolve the per-tip contextual hints now that `current_ui` is hydrated and
+    // propagate the prompt-relevant tips to any agents built at startup. New
+    // agents adopt the gates at creation; settings toggles re-apply at runtime.
+
     let resolved_hints = xai_grok_shell::util::config::resolve_contextual_hints(
         &app.current_ui.contextual_hints,
         app.remote_contextual_hints.as_ref(),
@@ -1627,8 +1754,16 @@ pub(crate) async fn run(
         })),
     );
     let config_session_bools = load_initial_config_session_bools();
-    app.show_tips = config_session_bools.show_tips;
-    app.auto_update = config_session_bools.auto_update;
+    app.show_tips = if external_agent {
+        Some(false)
+    } else {
+        config_session_bools.show_tips
+    };
+    app.auto_update = if external_agent {
+        Some(false)
+    } else {
+        config_session_bools.auto_update
+    };
     app.ask_user_question_timeout_enabled = config_session_bools.ask_user_question_timeout_enabled;
     crate::appearance::cache::prime(&app.current_ui);
     crate::appearance::cache::apply_remote_keep_text_selection_default(
@@ -1641,13 +1776,25 @@ pub(crate) async fn run(
     app.scroll_config = crate::input::mouse::ScrollConfig::from_settings();
     crate::terminal::xtversion::probe_at_startup();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<TimedInputEvent>();
-    seed_trust_state(&mut app, remote_settings.as_ref());
-    seed_consent_state_from_gate(
-        &mut app,
-        remote_settings
-            .as_ref()
-            .and_then(|s| s.consent_gate.as_ref()),
-    );
+    // Folder-trust verdict, seeded BEFORE the first render, before any session
+    // is created (no repo-local MCP/LSP/hooks/plugins have loaded yet), and —
+    // for the type-ahead gate just below — before the reader thread starts.
+    // Feature-off (kill-switch / opt-out / local build) resolves `Trusted`, so
+    // External hosts own trust/consent policy; do not apply stock Grok repo gates.
+    if external_agent {
+        app.trust_state = TrustState::Done;
+    } else {
+        seed_trust_state(&mut app, remote_settings.as_ref());
+        seed_consent_state_from_gate(
+            &mut app,
+            remote_settings
+                .as_ref()
+                .and_then(|s| s.consent_gate.as_ref()),
+        );
+    }
+
+    // Type-ahead captured while the app was still loading (see `init_terminal`), replayed only when the composer is already the active consumer
+    // A startup screen still being up means the keys are dropped, not replayed
     let mut startup_typeahead = std::mem::take(&mut term_state.startup_typeahead);
     if app.ready_for_startup_typeahead() {
         replay_startup_typeahead(&input_tx, &mut startup_typeahead);
@@ -1701,12 +1848,15 @@ pub(crate) async fn run(
     const TRACES_POLL_INTERVAL: Duration = Duration::from_secs(1);
     let mut traces_poll_at: Option<Instant> = None;
     const RECAP_POLL_INTERVAL: Duration = Duration::from_secs(20);
+    // grok-pi (external agent) also supports recap via injected Pi extension.
     let mut recap_poll_at: Option<Instant> = Some(Instant::now() + RECAP_POLL_INTERVAL);
     let mut presenter = Presenter::new();
     let mut suspend_retry_after: Option<Instant> = None;
     let mut suspend_wait_reports = SuspendWaitReports::default();
     presenter.request_presentation(&mut app, terminal, false);
-    if matches!(app.auth_state, AuthState::Done) {
+
+    // status only; shell auto-syncs post-auth
+    if !external_agent && matches!(app.auth_state, AuthState::Done) {
         let effs = dispatch::dispatch(Action::RequestBundleStatus, &mut app);
         if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
             return Ok(finish_run(&mut app));
@@ -1831,6 +1981,22 @@ pub(crate) async fn run(
             return Ok(finish_run(&mut app));
         }
         presenter.request_presentation(&mut app, terminal, false);
+    } else if external_agent
+        && matches!(materialized, MaterializedStartup::NewAuto)
+        && matches!(app.active_view, ActiveView::Welcome)
+        && app.session_startup_allowed()
+        && !app.is_zdr_blocked()
+    {
+        // Pi: warm the RPC session behind the native Welcome surface so the
+        // first keystroke can attach immediately.
+        let effs = dispatch::dispatch_prewarm_welcome_session(&mut app);
+        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+            return Ok(finish_run(&mut app));
+        }
+        presenter.request_presentation(&mut app, terminal, false);
+        if args.initial_prompt().is_none() && !minimal_will_open_session(&term_state, &app) {
+            app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Ok);
+        }
     } else if args.initial_prompt().is_none() && !minimal_will_open_session(&term_state, &app) {
         app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Ok);
     }
@@ -2361,9 +2527,20 @@ pub(crate) async fn run(
                 if state_changed {
                     schedule_tick(&mut animation_tick_at, &app, tick_interval);
                     resize_debounce_at = None;
-                    // Cap paint rate so terminal input isn't starved during heavy ACP streaming
+                    // Cap paint rate so terminal input isn't starved during
+                    // heavy ACP streaming. Expanded Edit/Write diffs in the
+                    // viewport make each paint much more expensive — use a
+                    // floor so live turns stay responsive while a diff is open.
+
                     let now = Instant::now();
-                    if presenter.request_throttled(now, min_draw_interval) {
+                    let draw_interval = if app.active_agent().is_some_and(|a| {
+                        a.scrollback.has_expanded_edit_in_viewport()
+                    }) {
+                        min_draw_interval.max(Duration::from_millis(120))
+                    } else {
+                        min_draw_interval
+                    };
+                    if presenter.request_throttled(now, draw_interval) {
                         app.update_notifications();
                     }
                 }
@@ -2579,6 +2756,13 @@ pub(crate) async fn run(
                         super::workspace_sync::refresh(&mut app)
                     } else if leader_status_rx.is_some() {
                         vec![Effect::FetchRoster]
+                    } else if app.external_agent {
+                        vec![Effect::FetchExternalSessionCatalog {
+                            cwd: app.cwd.clone(),
+                            all: false,
+                            use_psm_index: app.current_ui.psm_resume_index,
+                        }]
+
                     } else {
                         vec![Effect::FetchDashboardSessions]
                     };
@@ -2593,7 +2777,13 @@ pub(crate) async fn run(
             // Cheap no-op while focused / not-yet-eligible
             _ = recap_poll => {
                 if should_pregenerate_away_recap(&app) {
-                    let effs = dispatch::dispatch(Action::SendRecap { auto: true }, &mut app);
+                    let effs = dispatch::dispatch(
+                        Action::SendRecap {
+                            auto: true,
+                            custom_instructions: None,
+                        },
+                        &mut app,
+                    );
                     if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                         break;
                     }
@@ -2613,6 +2803,7 @@ pub(crate) async fn run(
                 config.prompt.compact = app.appearance.prompt.compact;
                 config.show_timestamps = app.appearance.show_timestamps;
                 config.show_timeline = app.appearance.show_timeline;
+                config.show_other_tool_args = app.appearance.show_other_tool_args;
                 tick_interval = config.animation.tick_interval();
                 crate::appearance::set_tab_width(config.scrollback.display.tab_width);
                 app.set_appearance(config);
@@ -3324,7 +3515,11 @@ async fn drain_and_process(
                     force_repaint = true;
                     needs_draw = true;
                 }
-                let recap_due = app.session_recap_available
+                // External Pi recap is generated only while unfocused by the
+                // injected background extension. Stock Grok captures focus-time
+                // eligibility before on_focus_gained() clears the away timer.
+                let recap_due = !app.external_agent
+                    && app.session_recap_available
                     && app.notification_service.focus_tracker.recap_due()
                     && app.notification_service.config().session_recap;
                 app.notification_service.focus_tracker.on_focus_gained();
@@ -3351,7 +3546,10 @@ async fn drain_and_process(
                         );
                         if recap_due && eligible {
                             let effs = dispatch::dispatch(
-                                crate::app::actions::Action::SendRecap { auto: true },
+                                crate::app::actions::Action::SendRecap {
+                                    auto: true,
+                                    custom_instructions: None,
+                                },
                                 app,
                             );
                             if process_effects(effs, tasks, app, progress_tx) {
@@ -3432,6 +3630,7 @@ async fn drain_and_process(
             routed.paste_provenance,
         ) {
             InputOutcome::Action(action) => {
+                let action = remap_external_session_list_action(app, action);
                 let effs = dispatch::dispatch(action, app);
                 if process_effects(effs, tasks, app, progress_tx) {
                     return true;
@@ -3440,6 +3639,8 @@ async fn drain_and_process(
                 had_non_resize_change = true;
             }
             InputOutcome::ActionThenForward(action) => {
+                // One combined effect wave so forwarded state (e.g. CycleMode) shapes session/new meta.
+                let action = remap_external_session_list_action(app, action);
                 let effs = dispatch_then_forward(
                     action,
                     ev,
@@ -3454,10 +3655,13 @@ async fn drain_and_process(
                 had_non_resize_change = true;
             }
             InputOutcome::ActionPair(first, second) => {
+                // Effect barrier: first must fully resolve before second.
+                let first = remap_external_session_list_action(app, first);
                 let effs = dispatch::dispatch(first, app);
                 if process_effects(effs, tasks, app, progress_tx) {
                     return true;
                 }
+                let second = remap_external_session_list_action(app, second);
                 let effs = dispatch::dispatch(second, app);
                 if process_effects(effs, tasks, app, progress_tx) {
                     return true;
@@ -3837,6 +4041,22 @@ fn merge_paste_fragments(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
     }
     result
 }
+
+/// External hosts (Pi) own sessions outside Grok's store. Any code path that
+/// still emits [`Action::FetchSessionList`] (notably in-session Ctrl+S) must
+/// open the same SessionPicker `/resume` uses.
+fn remap_external_session_list_action(
+    app: &AppView,
+    action: super::actions::Action,
+) -> super::actions::Action {
+    match action {
+        super::actions::Action::FetchSessionList if app.external_agent => {
+            super::actions::Action::ShowSessionPicker
+        }
+        other => other,
+    }
+}
+
 /// True when this batch should consume the welcome local-workspace one-shot.
 #[cfg(feature = "local-workspace")]
 pub(crate) fn welcome_oneshot_applies_to_effects(effs: &[super::actions::Effect]) -> bool {
@@ -6128,6 +6348,27 @@ mod tests {
         let flags = session_flags_for_effects(&mut unnamed, &[]);
         assert_eq!(flags.external_agent_label.as_deref(), Some("agent"));
     }
+
+    #[test]
+    fn timeline_startup_sync_updates_ui_and_renderer() {
+        use crate::app::agent::AgentId;
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        assert!(!app.appearance.show_timeline);
+
+        sync_timeline_appearance(&mut app, true);
+
+        assert_eq!(app.current_ui.show_timeline, Some(true));
+        assert!(app.appearance.show_timeline);
+        assert!(
+            app.agents[&AgentId(0)]
+                .scrollback
+                .appearance()
+                .show_timeline
+        );
+    }
+    // ── finish_run exit info ──────────────────────────────────────────────
+
     /// App focused on an agent (session `test-session`) with a seeded prompt, prompt, response exchange in its scrollback.
     fn seeded_quit_app(screen_mode: crate::app::ScreenMode) -> AppView {
         use crate::scrollback::block::RenderBlock;

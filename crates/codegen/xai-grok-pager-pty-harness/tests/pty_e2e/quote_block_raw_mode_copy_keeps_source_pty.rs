@@ -9,7 +9,7 @@ const QUOTE_OUTRO: &str = "QUOTE_OUTRO_RAW_DONE";
 /// in raw mode keeps the `>` marker; the rule that excludes the pretty-mode bar from copies must
 /// not leak into raw mode.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
+#[ignore = "PTY e2e; run with cargo test -p xai-grok-pager --test pty_e2e -- --ignored"]
 async fn quote_block_raw_mode_copy_keeps_source_pty() {
     let content = ContentController::start().await.expect("start content");
     // Bare-letter scrollback bindings like `r` (ToggleRaw) resolve only in vim mode

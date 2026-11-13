@@ -71,6 +71,8 @@ pub struct PickerRow<'a> {
     /// Indentation level (0 is top-level, 1 is nested under a group header, etc.).
     /// Each level adds 2 spaces of left padding.
     pub indent: u8,
+    /// Optional foreground override for the entry label.
+    pub label_color: Option<ratatui::style::Color>,
     /// Optional badge text shown right after the label (e.g., "[installed]").
     pub badge: &'a str,
     /// Color for the badge text. If `None`, uses `gray`.
@@ -101,6 +103,23 @@ pub struct PickerFrame {
 /// How the picker is framed on screen. Used by the welcome-screen session picker. Modal popups
 /// (command palette, arg picker, etc.) use [`super::modal_window::ModalWindow`] for chrome. They
 /// use [`render_picker_content`] for the entry list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSortMode {
+    Recent,
+    Created,
+    Name,
+}
+
+impl SessionSortMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Recent => Self::Created,
+            Self::Created => Self::Name,
+            Self::Name => Self::Recent,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub enum PickerMode {
     /// Centered content filling the given area (no border, no dim).
@@ -936,6 +955,19 @@ pub fn render_picker_row(
     } else {
         Style::default().fg(theme.text_primary).bg(row_bg)
     };
+    // `Color::Yellow` marks a renamed Pi session. Resolve it through the
+    // active palette rather than emitting ANSI bright-yellow, which has poor
+    // contrast in light themes.
+    let label_style = row
+        .label_color
+        .map(|color| {
+            label_style.fg(if color == ratatui::style::Color::Yellow {
+                theme.warning
+            } else {
+                color
+            })
+        })
+        .unwrap_or(label_style);
 
     let prefix_width = indent_str.width() as u16 + fold_width;
     let trailing_pad = 1u16; // space before border/scrollbar
@@ -1501,6 +1533,8 @@ pub struct PickerState {
     pub filter_hovered: bool,
     /// Whether the tab bar region has keyboard focus. When true, Left/Right cycle tabs.
     pub tabs_focused: bool,
+    /// Local ordering for session pickers; all other picker surfaces ignore it.
+    pub session_sort: SessionSortMode,
     /// Suppress the list selection highlight while keyboard focus is on the search bar (via edge navigation).
     /// Cleared once the selection is meaningful again (typing, navigating back into the list, mouse click/hover).
     /// Session-picker rows gate their `selected` flag on `!selection_hidden`.
@@ -1524,6 +1558,7 @@ impl Default for PickerState {
             filter_area: None,
             filter_hovered: false,
             tabs_focused: false,
+            session_sort: SessionSortMode::Recent,
             selection_hidden: false,
         }
     }
@@ -1560,6 +1595,7 @@ impl PickerState {
         self.filter_area = None;
         self.filter_hovered = false;
         self.tabs_focused = false;
+        self.session_sort = SessionSortMode::Recent;
         self.selection_hidden = false;
     }
 
@@ -3381,6 +3417,7 @@ mod tests {
                 indent: 0,
                 badge: "",
                 badge_color: None,
+                label_color: None,
                 collapsible: true,
                 underline_last_desc,
             };
@@ -3526,6 +3563,37 @@ mod tests {
             ),
             PickerOutcome::Collapse(0)
         ));
+    }
+
+    #[test]
+    fn expandable_e_and_y_work_in_nav_not_while_search_focused() {
+        let mut config = cfg(true, false);
+        config.expandable = true;
+        let mut state = PickerState::default();
+
+        assert!(matches!(
+            handle_picker_input(&press('e'), &mut state, 3, &config),
+            PickerOutcome::Expand(0)
+        ));
+        assert!(matches!(
+            handle_picker_input(&press('y'), &mut state, 3, &config),
+            PickerOutcome::Copy(0)
+        ));
+        assert!(matches!(
+            handle_picker_input(
+                &Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+                &mut state,
+                3,
+                &config,
+            ),
+            PickerOutcome::Expand(0)
+        ));
+
+        // Focused search must type e/y into the query, not expand/copy.
+        state.search_active = true;
+        let outcome = handle_picker_input(&press('e'), &mut state, 3, &config);
+        assert!(matches!(outcome, PickerOutcome::QueryChanged));
+        assert_eq!(state.query(), "e");
     }
 
     #[test]

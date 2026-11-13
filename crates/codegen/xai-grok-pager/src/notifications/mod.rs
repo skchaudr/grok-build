@@ -4,6 +4,7 @@ pub mod hooks;
 pub mod progress;
 pub mod protocol;
 pub mod sleep;
+pub(crate) mod system;
 pub mod title;
 pub mod tmux;
 
@@ -72,6 +73,23 @@ impl NotificationService {
 
     pub fn config(&self) -> &NotificationConfig {
         &self.config
+    }
+
+    /// Live-update the auto session-recap toggle (F2 settings).
+    pub fn set_session_recap(&mut self, enabled: bool) {
+        self.config.session_recap = enabled;
+    }
+
+    /// Live-update OSC 9;4 progress indicators (F2 settings).
+    pub fn set_progress_bar(&mut self, enabled: bool) -> Option<String> {
+        self.config.progress_bar = enabled;
+        if enabled {
+            None
+        } else {
+            let mut buf = String::new();
+            self.clear_progress_into(&mut buf);
+            (!buf.is_empty()).then_some(buf)
+        }
     }
 
     pub fn protocol(&self) -> protocol::NotificationProtocol {

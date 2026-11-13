@@ -17,6 +17,88 @@ Plugins stay off until you install and enable them, and a plugin's hooks and MCP
 
 ## Add a marketplace
 
+Grok discovers plugins from these locations, in priority order:
+
+| Location | Scope | Trust |
+|----------|-------|-------|
+| `_meta.pluginDirs` (`session/new` / `session/load`) | Session -- loaded for that session only | Trusted automatically |
+| `--plugin-dir` (CLI flag, `grok agent`) | Process -- loaded for that agent process only | Trusted automatically |
+| `.grok/plugins/` | Project -- shared with the team through version control | Requires trust |
+| `~/.grok/plugins/` | User -- personal plugins for every project | Trusted automatically |
+| `[plugins].paths` (config) | Custom directories you add in `config.toml` | Depends on location |
+
+Grok also reads the `.claude/plugins/` equivalents for compatibility. When two plugins share a name, the higher-priority location wins.
+
+The Agent SDKs load per-session plugins through `GrokOptions.plugins`, which arrives as `_meta.pluginDirs` on `session/new` and `session/load`; because the caller controls the directory, these plugins are always trusted -- their hooks and MCP servers activate without a prompt, and they never persist beyond the session. The `--plugin-dir` flag is the process-wide equivalent for direct CLI use (repeatable: `grok agent --no-leader --plugin-dir A --plugin-dir B stdio`); it applies to dedicated agent processes only and is ignored in leader mode (the shared leader discovers its own plugins).
+
+---
+
+## Manage plugins in the TUI
+
+### Open the modal
+
+| Action | Opens |
+|--------|-------|
+| `/plugins` | Plugins tab |
+| command palette | Plugins / Hooks / MCP (`Ctrl+L` is the model picker) |
+
+The modal has five tabs: **Hooks**, **Plugins**, **Marketplace**, **Skills**, and **MCP Servers**. Switch tabs with `Tab` (forward) or `Shift+Tab` (backward). The `/hooks`, `/marketplace`, `/skills`, and `/mcps` commands each open the modal on the matching tab.
+
+### Plugins tab
+
+Press `Enter` to expand a plugin row and show its details:
+
+- **Name** and **version**
+- **Scope** -- `cli`, `project`, `user`, `custom path`, or the marketplace source name
+- **Skills** -- names or count
+- **Agents** -- names or count
+- **Hooks** -- count
+- **MCP servers** -- count (or `blocked` when the plugin is not trusted)
+- **Description** and **path**
+
+Use these keys in the Plugins tab:
+
+| Key | Action |
+|-----|--------|
+| `r` | Reload all plugins |
+| `a` | Add a plugin from `owner/repo`, a URL, or a local path |
+| `Space` | Enable or disable the selected plugin |
+| `x` | Uninstall the selected plugin (asks for confirmation) |
+| `f` | Filter by status (all, enabled, or disabled) |
+| `Enter` | Expand or collapse plugin details |
+| `/` | Search plugins by name |
+
+Uninstall asks for confirmation: press lowercase `y` to confirm, or any other key (including `Esc`) to cancel.
+
+### Marketplace tab
+
+Browse and install plugins from your configured marketplace sources.
+
+Use these keys in the Marketplace tab:
+
+| Key | Action |
+|-----|--------|
+| `i` | Install the selected plugin |
+| `d` | Uninstall the selected plugin (asks for confirmation) |
+| `a` | Add a marketplace source |
+| `x` | Remove the selected source and all its plugins (asks for confirmation) |
+| `r` | Refresh marketplace sources |
+| `u` | Update the selected marketplace plugin |
+| `Enter` | Expand or collapse a source or plugin |
+| `/` | Search plugins by name |
+
+Component summaries on list rows and per-category component details in the
+expanded view appear only for marketplaces that publish a `plugin-index.json`
+catalog.
+
+---
+
+## CLI commands
+
+Manage plugins without starting an interactive session.
+
+### Plugin commands
+
 A marketplace source is a GitHub repository, a git URL on any host, or a local folder. Add one from the command line:
 
 ```bash

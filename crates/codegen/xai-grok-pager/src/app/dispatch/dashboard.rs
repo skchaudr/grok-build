@@ -16,6 +16,7 @@ use super::session::lifecycle::{
 use super::session::load::dispatch_load_session;
 use super::session::load::focus_if_session_already_open;
 use super::session::modal::{dispatch_sessions_confirm_close, remove_agent_and_cleanup};
+use super::task_result::unregister_all_active_sessions;
 use super::turn::dispatch_cancel_turn;
 use super::voice::{merge_prompt_with_voice_interim, voice_stop_on_submit};
 use crate::app::actions::{Action, Effect, PermissionModeKind};
@@ -117,9 +118,12 @@ fn configure_dashboard_state(app: &mut AppView) {
     let bootstrap_commands = app.bootstrap_acp_commands.clone();
     let models = app.models.clone();
     let disable_plugins = app.appearance.disable_plugins;
-    let default_yolo = app.default_yolo;
+    // External Pi exposes only Normal/Plan; never seed a dashboard dispatch
+    // with Grok's Always-Approve policy mode.
+    let default_yolo = app.default_yolo && !app.external_agent;
     let default_auto = app.auto_mode_gate
         && !default_yolo
+        && !app.external_agent
         && app.current_ui.permission_mode.as_deref() == Some("auto");
     let cwd = app.cwd.clone();
     let cwd_has_git_ancestor = app.cwd_has_git_ancestor;
@@ -221,6 +225,15 @@ pub(super) fn dispatch_open_dashboard(app: &mut AppView) -> Vec<Effect> {
     app.dashboard_sessions_loading = true;
     if app.leader_mode {
         return vec![Effect::FetchRoster];
+    }
+    // External hosts own their session store. Pi projects its catalog through
+    // the existing ACP extension seam rather than using Grok's local scanner.
+    if app.external_agent {
+        return vec![Effect::FetchExternalSessionCatalog {
+            cwd: app.cwd.clone(),
+            all: false,
+            use_psm_index: app.current_ui.psm_resume_index,
+        }];
     }
     vec![Effect::FetchDashboardSessions]
 }
@@ -813,9 +826,11 @@ pub(super) fn dispatch_dashboard_open_location_picker(app: &mut AppView) -> Vec<
         return vec![];
     }
     let cwd = app.cwd.clone();
-    let recent = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(crate::recent_dirs::collect_recent_dirs(10))
-    });
+    // LocalSet-safe collect (see `collect_recent_dirs_blocking`); never
+    // `block_in_place` here — panics under grok-pi's composition runtime.
+    let recent = super::session::fork::collect_recent_dirs_blocking(10);
+
+    // Worktree label index keyed by root path, built once and reused to tag both recents and live directory suggestions
     let worktrees = crate::git_info::worktree_label_index();
     let worktree_label = |path: &std::path::Path| -> Option<String> {
         let key = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -1108,8 +1123,31 @@ pub(super) fn dispatch_dashboard_dispatch(
         });
     let (prompt_text, mut pasted_images, chip_elements) = prompt_state.into_submission();
     log_dashboard_launched("prompt");
-    let (new_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id, false);
-    set_create_permission_mode(&mut effects, pending_mode);
+    // Pi's headless RPC process is a single-session host. Keep exactly one live
+    // local AgentView before issuing `new_session`; completed sessions remain in
+    // Pi's persisted catalog and return as dormant roster rows. This prevents an
+    // old dashboard row from sending user text into the newly active Pi context.
+    let mut effects = if app.external_agent {
+        let effects = unregister_all_active_sessions(app);
+        let had_agents = !app.agents.is_empty();
+        app.agents.clear();
+        app.welcome_prewarm_agent = None;
+        if had_agents {
+            crate::memory_release::release_retained_memory("pi-dashboard-session-isolation");
+        }
+        if let Some(d) = app.dashboard.as_mut() {
+            d.close_popup();
+            d.focus_new_agent_button();
+        }
+        effects
+    } else {
+        Vec::new()
+    };
+
+    let (new_id, mut create_effects) = dispatch_new_session_inner_with_id(app, model_id, false);
+    set_create_permission_mode(&mut create_effects, pending_mode);
+    effects.extend(create_effects);
+    let policy_block = app.yolo_policy_block;
     if let Some(agent) = app.agents.get_mut(&new_id) {
         agent.session.enqueue_prompt(prompt_text);
         if let Some(entry) = agent.session.pending_prompts.back_mut() {
@@ -1162,6 +1200,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
+    let prompt_cursor_from_app = app.appearance.prompt.cursor.to_config_value();
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
@@ -1249,6 +1288,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                 vim_mode: crate::appearance::cache::load_vim_mode(),
                 scroll_speed: crate::appearance::cache::load_scroll_speed(),
                 respect_manual_folds: respect_manual_folds_from_app,
+                prompt_cursor: prompt_cursor_from_app.clone(),
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                 voice_stt_language: voice_stt_language_from_app,
@@ -1349,7 +1389,8 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             }
             vec![]
         }
-        CommandResult::QueueCommand(_)
+        CommandResult::DirectPiCommand(_)
+        | CommandResult::QueueCommand(_)
         | CommandResult::InjectSkill { .. }
         | CommandResult::PassThrough(_) => dispatch_dashboard_dispatch(app, text, false),
     }

@@ -48,6 +48,7 @@ fn draw_frame(agent: &mut AgentView, registry: &ActionRegistry) -> Buffer {
             mouse_pos: None,
             tip: None,
         },
+        &crate::app::bundle::BundleState::default(),
         false,
         &mut Vec::new(),
         AppRenderParams::default(),

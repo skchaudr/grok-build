@@ -19,7 +19,7 @@ use crate::scrollback::render::ScratchBuffer;
 use crate::views::prompt_widget::PromptWidget;
 use crate::views::welcome::WelcomePromptFocus;
 use agent_client_protocol as acp;
-use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use indexmap::IndexMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -103,9 +103,193 @@ impl NewWorktreeDialogState {
         }
     }
 }
-/// Per-visit announcement UI state on the welcome screen.
-/// Reset on every return-to-welcome transition (see `show_welcome`) so a previously expanded announcement can't leak into a freshly shown screen.
-/// The non-`expanded` fields are recomputed each frame, so resetting them is harmless.
+/// State surfaced by an external ACP backend through native Grok pager UI.
+///
+/// The adapter owns no terminal widgets. It only updates this small semantic
+/// state; the existing Grok toast, sticky-banner, prompt and question-view
+/// components remain the sole renderers.
+#[derive(Debug, Default)]
+pub struct ExternalUiState {
+    pub statuses: std::collections::BTreeMap<String, String>,
+    /// Pi-owned session title from bootstrap / rename. `ctx.ui.setTitle()` is
+    /// temporary extension UI and deliberately does not overwrite this value:
+    /// Pi restores the session title during `resetExtensionUI()` on reload.
+    pub session_title: Option<String>,
+    /// Pi extension notifications retained by active session for `/notify`.
+    /// This is process-local UI state and deliberately not persisted to Pi.
+    pub notifications: std::collections::HashMap<String, Vec<ExternalNotification>>,
+    pub widgets: std::collections::BTreeMap<String, ExternalWidget>,
+    /// Layout metadata for the active `ctx.ui.custom(..., { overlay: true })`.
+    pub remote_tui_layout: Option<RemoteTuiLayout>,
+    pub pending_toasts: std::collections::VecDeque<String>,
+    /// Info notifications that arrived before any agent view existed (Pi
+    /// extension `session_start` fires while the host is still bootstrapping).
+    /// `tick()` flushes them into the first active agent's scrollback so
+    /// content-bearing messages like the eval-pi-mcp URL are never dropped.
+    pub pending_system_messages: std::collections::VecDeque<String>,
+    /// Session metadata from the external agent, rendered by the existing
+    /// native SessionPicker rather than by an adapter-owned selector.
+    pub session_catalog: Vec<SessionPickerEntry>,
+    /// Experimental Remote TUI session id (PI_GROK_REMOTE_TUI). When set,
+    /// keyboard input is forwarded as Pi key sequences instead of prompt edit.
+    pub remote_tui_id: Option<String>,
+    /// New hosts publish lifecycle separately from display-only frames.
+    pub remote_tui_session_managed: bool,
+    /// Overlay stack for Remote TUI components (push/pop/focus).
+    /// The top of the stack receives key input. Corresponds to TS-side
+    /// showOverlay/hideOverlay semantics.
+    pub remote_tui_overlays: Vec<RemoteTuiOverlay>,
+    /// Extension shortcut registry (populated from pi/ui/shortcuts RPC).
+    pub extension_shortcuts: crate::app::extension_shortcuts::ExtensionShortcutRegistry,
+    /// Extension-owned Cmd+P placement metadata imported by grok-pi.
+    pub host_palette: Vec<xai_grok_shell::host_features::HostPaletteSpec>,
+}
+
+/// A single overlay entry in the Remote TUI overlay stack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTuiOverlay {
+    pub id: String,
+    pub title: Option<String>,
+    /// Last rendered frame lines (projected to the widget surface).
+    pub lines: Vec<String>,
+}
+
+/// Semantic placement supplied by an external ACP adapter. Grok's native
+/// pager has one persistent status/banner surface rather than arbitrary
+/// extension-owned terminal regions, so placement controls ordering within
+/// that surface instead of creating a second renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalWidgetPlacement {
+    AboveEditor,
+    BelowEditor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalWidget {
+    pub lines: Vec<String>,
+    pub placement: ExternalWidgetPlacement,
+}
+
+/// Pi `TUI.showOverlay()` positioning semantics projected to the native Pager.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteTuiAnchor {
+    Center,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    TopCenter,
+    BottomCenter,
+    LeftCenter,
+    RightCenter,
+}
+
+/// Absolute cells or a percentage of the available terminal dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteTuiPosition {
+    Cells(i32),
+    Percent(u16),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTuiLayout {
+    pub overlay: bool,
+    /// Width used when the Pi component rendered its latest frame.
+    pub width: u16,
+    pub max_height: Option<RemoteTuiPosition>,
+    pub anchor: RemoteTuiAnchor,
+    pub row: Option<RemoteTuiPosition>,
+    pub col: Option<RemoteTuiPosition>,
+    pub offset_x: i32,
+    pub offset_y: i32,
+}
+
+impl RemoteTuiLayout {
+    pub fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let width = value
+            .get("width")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|width| *width > 0)
+            .map(|width| width.min(u16::MAX as u64) as u16)?;
+        let anchor = match value.get("anchor").and_then(serde_json::Value::as_str) {
+            Some("top-left") => RemoteTuiAnchor::TopLeft,
+            Some("top-right") => RemoteTuiAnchor::TopRight,
+            Some("bottom-left") => RemoteTuiAnchor::BottomLeft,
+            Some("bottom-right") => RemoteTuiAnchor::BottomRight,
+            Some("top-center") => RemoteTuiAnchor::TopCenter,
+            Some("bottom-center") => RemoteTuiAnchor::BottomCenter,
+            Some("left-center") => RemoteTuiAnchor::LeftCenter,
+            Some("right-center") => RemoteTuiAnchor::RightCenter,
+            Some("center") | None => RemoteTuiAnchor::Center,
+            Some(_) => return None,
+        };
+        let position = |key: &str| {
+            let value = value.get(key)?;
+            if let Some(cells) = value.as_i64() {
+                return Some(RemoteTuiPosition::Cells(
+                    cells.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                ));
+            }
+            let percent = value.as_str()?.strip_suffix('%')?.parse::<u16>().ok()?;
+            Some(RemoteTuiPosition::Percent(percent.min(100)))
+        };
+        let offset = |key: &str| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_i64)
+                .map(|offset| offset.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+                .unwrap_or(0)
+        };
+        Some(Self {
+            overlay: value
+                .get("overlay")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            width,
+            max_height: position("maxHeight"),
+            anchor,
+            row: position("row"),
+            col: position("col"),
+            offset_x: offset("offsetX"),
+            offset_y: offset("offsetY"),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalNotification {
+    pub message: String,
+    pub kind: Option<String>,
+}
+
+fn append_external_widgets(
+    output: &mut Vec<String>,
+    widgets: &std::collections::BTreeMap<String, ExternalWidget>,
+    placement: ExternalWidgetPlacement,
+    skip_remote_tui: bool,
+) {
+    for (key, widget) in widgets {
+        if skip_remote_tui && key == "remote_tui" {
+            continue;
+        }
+        if widget.placement != placement {
+            continue;
+        }
+        // Align with Pi interactive setWidget: each widget keeps its own
+        // multi-line frame. Do not join lines or prefix keys.
+        for line in &widget.lines {
+            if !line.trim().is_empty() {
+                output.push(line.clone());
+            }
+        }
+    }
+}
+
+/// Per-visit announcement UI state on the welcome screen. Reset on every
+/// return-to-welcome transition (see `show_welcome`) so a previously expanded
+/// announcement can't leak into a freshly shown screen; the non-`expanded`
+/// fields are recomputed each frame, so resetting them is harmless.
+
 #[derive(Debug, Default)]
 pub struct WelcomeAnnouncementState {
     /// Whether a long announcement is expanded inline (default: 2 lines with a trailing `…`).
@@ -263,10 +447,19 @@ fn reconnect_success_hides_mismatch(current: Option<&str>, incoming: &str) -> bo
         && (incoming.starts_with("Reconnected.") || incoming.starts_with("Session restored."))
 }
 /// Entry from the session list wire: welcome/resume pickers and non-leader dashboard roster fallback (`session_picker_entry_to_roster`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionPickerEntry {
     pub id: String,
     pub summary: String,
+    /// User-assigned Pi session name, when present. Native sessions leave this empty.
+    pub name: Option<String>,
+    /// Pi's first user message, retained separately from a user-assigned name.
+    pub first_message: Option<String>,
+    /// Backing Pi JSONL path, shown in expanded session details.
+    pub session_path: Option<String>,
+    /// Aggregated persisted assistant usage. Absent for non-Pi or older sessions.
+    pub total_tokens: Option<u64>,
+    pub total_cost: Option<f64>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub cwd: String,
@@ -282,6 +475,9 @@ pub struct SessionPickerEntry {
     pub repo_name: String,
     /// Human-readable worktree label (if the session was created in a named worktree).
     pub worktree_label: Option<String>,
+    /// Backing Pi session path of the fork/copy parent, when this session was
+    /// branched from another. Used to render the fork/copy relationship tree.
+    pub parent_session_path: Option<String>,
     /// Per-turn secondary line (`lastTurnSummary` on the session/list wire).
     /// Shown as the "Last turn" line on the expanded resume card and used for non-leader dashboard roster rows.
     pub last_turn_summary: Option<String>,
@@ -294,8 +490,36 @@ pub struct SessionPickerEntry {
     /// Lazy-loaded detail for the expanded card view.
     pub card_detail: Option<CardDetail>,
 }
+
+/// Convert a resume-picker / external catalog entry into a dormant dashboard
+/// roster row (Inactive group). Mirrors the Grok non-leader
+/// `session_picker_entry_to_roster` path used for on-disk idle sessions.
+fn session_picker_entry_to_dashboard_roster(
+    entry: &SessionPickerEntry,
+) -> crate::app::roster::RosterEntry {
+    use crate::app::roster::{RosterActivity, RosterEntry, RosterOrigin};
+    let last_change = entry.last_active_at.unwrap_or(entry.updated_at);
+    RosterEntry {
+        session_id: entry.id.clone(),
+        title: Some(entry.summary.clone()).filter(|s| !s.trim().is_empty()),
+        cwd: entry.cwd.clone(),
+        is_worktree: entry.worktree_label.is_some(),
+        model_id: entry.model_id.clone(),
+        yolo: false,
+        session_kind: None,
+        activity: RosterActivity::Dormant,
+        resident: false,
+        last_change_unix_ms: last_change.timestamp_millis(),
+        last_turn_summary: entry.last_turn_summary.clone(),
+        origin: RosterOrigin {
+            kind: entry.source.clone(),
+            host: entry.hostname.clone(),
+        },
+    }
+}
+
 /// Detail loaded on-demand when a session card is expanded.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardDetail {
     pub turn_count: usize,
     pub tool_call_count: usize,
@@ -432,8 +656,14 @@ impl PendingAction {
 }
 /// Cap for the `GROK_ESC_DOUBLE_PRESS_MS` override; the pty_e2e suite sets exactly this value.
 pub const ESC_DOUBLE_PRESS_TEST_MS: u64 = 60_000;
-/// Idle-Esc double-press confirm window, `GROK_ESC_DOUBLE_PRESS_MS`-overridable (read once, bounded).
-/// The override exists for tests: a loaded pty_e2e shard's render round-trip between the presses can outlast the 800ms default and expire the arm.
+/// Pi interactive mode uses a fixed 500ms interval for double Escape.
+/// Raised to 800ms to match the Grok ESC_DOUBLE_PRESS_TTL — 500ms is too
+/// tight for human double-press with no visual feedback on the first press.
+const PI_DOUBLE_ESC_TTL: Duration = Duration::from_millis(800);
+/// Idle-Esc double-press confirm window, `GROK_ESC_DOUBLE_PRESS_MS`-overridable
+/// (read once, bounded). Test seam: a loaded pty_e2e shard's render round-trip
+/// between the two presses can outlast the 800ms default and expire the arm.
+
 pub(crate) fn esc_double_press_ttl() -> Duration {
     use std::sync::OnceLock;
     static TTL: OnceLock<Duration> = OnceLock::new();
@@ -809,6 +1039,8 @@ pub struct AppView {
     pub(crate) session_picker_lanes: crate::views::session_picker::SessionPickerLanes,
     /// Invalidates the welcome picker's in-flight card-detail reads when its rows or filters change.
     pub(crate) session_picker_detail_seq: u64,
+    /// Fork detail-preview generation guard for the PSM preview path.
+    pub(crate) session_picker_detail_generation: u64,
     /// Allocator for picker incarnation generations.
     /// Starts at 0; the first allocation returns 1, so a freshly-constructed modal's 0 placeholder can never collide with an allocated generation.
     /// (No producer stamps a request before the allocator runs.)
@@ -1108,6 +1340,16 @@ pub struct AppView {
     /// One state at a time, so inconsistent combinations are unrepresentable.
     /// Production mutates it only through the `AppView::voice_*` transition methods.
     pub voice_state: VoiceState,
+    /// Semantic state supplied by an external ACP adapter (for example Pi).
+    /// Empty for the normal Grok backend.
+    pub external_ui: ExternalUiState,
+    /// True when the native pager is hosting an external ACP adapter. Used to
+    /// suppress Grok-backend persistence while preserving native controls.
+    pub external_agent: bool,
+    /// Background session created while the Welcome screen is visible (Pi).
+    /// First keystroke attaches this agent instead of waiting on a cold
+    /// `new_session` RPC. Cleared on attach, resume-pick, or discard.
+    pub welcome_prewarm_agent: Option<AgentId>,
     /// Minted per press; the pipeline stamps events with it and [`crate::voice::handle_tagged_voice_event`] drops
     /// older ones.
     pub voice_session: xai_grok_voice::VoiceSessionId,
@@ -1348,10 +1590,7 @@ impl AppView {
     /// Force voice on for API-key sessions when only a remote rule left it off.
     /// Requirement / env / config pins still win.
     pub(crate) fn ensure_voice_for_api_key(&mut self) {
-        if !self.is_api_key_auth || self.voice_mode_enabled {
-            return;
-        }
-        if crate::app::resolve_voice_mode_live(None, false) {
+        if self.is_api_key_auth && !self.voice_mode_enabled {
             self.apply_voice_mode_enabled(true);
         }
     }
@@ -1474,6 +1713,7 @@ impl AppView {
             foreign_scan_coordinator: Default::default(),
             session_picker_lanes: Default::default(),
             session_picker_detail_seq: 0,
+            session_picker_detail_generation: 0,
             picker_generation_counter: 0,
             session_picker_generation: 0,
             dashboard_session_picker: None,
@@ -1626,6 +1866,9 @@ impl AppView {
             voice_auth: None,
             voice_cmd_tx: None,
             voice_state: VoiceState::Idle,
+            external_ui: ExternalUiState::default(),
+            external_agent: false,
+            welcome_prewarm_agent: None,
             voice_session: xai_grok_voice::VoiceSessionId::default(),
             voice_trailing_final: None,
             voice_clip_deadline: None,
@@ -1653,25 +1896,16 @@ impl AppView {
     pub fn voice_can_start_pipeline(&self) -> bool {
         self.voice_mode_enabled && xai_grok_voice::AUDIO_SUPPORTED
     }
-    /// Sync voice availability into slash surfaces, cheatsheet, and settings.
-    /// Mirrors `apply_session_recap_available` for `/recap`.
+    /// Sync voice availability into the execution gate and every slash surface
+    /// (so `/voice` is hidden/shown in lockstep). Callers resolve the gate via
+    /// [`crate::app::resolve_voice_mode_enabled`] (env > remote > default on);
+    /// `false` is a kill switch. Mirrors `apply_session_recap_available` for
+    /// `/recap`.
     pub fn apply_voice_mode_enabled(&mut self, enabled: bool) {
         self.voice_mode_enabled = enabled;
         crate::app::VOICE_MODE_ENABLED.store(enabled, std::sync::atomic::Ordering::Release);
         for agent in self.agents.values_mut() {
             agent.set_voice_mode_available(enabled);
-            match agent.active_modal.as_mut() {
-                Some(crate::views::modal::ActiveModal::Settings { state }) => {
-                    state.rebuild_rows();
-                }
-                Some(crate::views::modal::ActiveModal::ResetSettingsConfirm {
-                    settings_state,
-                    ..
-                }) => {
-                    settings_state.rebuild_rows();
-                }
-                _ => {}
-            }
         }
         self.welcome_prompt.set_voice_visible(enabled);
         if let Some(dashboard) = self.dashboard.as_mut() {
@@ -1876,6 +2110,30 @@ impl AppView {
             let _ = crate::voice::commit_interim_into_prompt(self);
         }
     }
+    /// Whether an app-level surface owns Esc before the focused agent sees it.
+    ///
+    /// Mirrors `handle_input`'s intercepts, in their order: the focused dev
+    /// tracing pane (step 1a consumes all non-global keys), the cloud modal
+    /// (step 1d), the import-Claude modal (agent-arm intercept),
+    /// [`Self::voice_listening`] — listening OR pending cold-start, the
+    /// handler's actual condition, not the render-only recording flag — and
+    /// the dashboard's attached-agent popup (dashboard-arm intercept). Keep
+    /// this list in lockstep with those intercepts when adding a top-level
+    /// Esc owner.
+    pub(crate) fn esc_owned_before_agent(&self) -> bool {
+        if matches!(self.active_view, ActiveView::AgentDashboard)
+            && self
+                .dashboard
+                .as_ref()
+                .and_then(|d| d.attached_agent)
+                .is_some_and(|id| self.agents.contains_key(&id))
+        {
+            return true;
+        }
+        self.import_claude_modal.is_some()
+            || self.voice_listening()
+            || self.voice_state.is_pending_cold_start()
+    }
     /// The agent tab on screen.
     /// Always the root agent, even when a subagent view is focused within the tab.
     /// The unused home session on Welcome is not this — use [`Self::home_session`].
@@ -1883,6 +2141,12 @@ impl AppView {
         match self.active_view {
             ActiveView::Agent(id) => self.agents.get(&id),
             ActiveView::Welcome | ActiveView::AgentDashboard => None,
+        }
+    }
+    pub fn active_agent_mut(&mut self) -> Option<&mut AgentView> {
+        match self.active_view {
+            ActiveView::Agent(id) => self.agents.get_mut(&id),
+            _ => None,
         }
     }
     /// Unused optimistic session kept behind Welcome. Not the session the user left.
@@ -1956,6 +2220,755 @@ impl AppView {
                 ));
             }
         }
+    }
+
+    /// Queue a Pi/external-backend notification for Grok's native surfaces.
+    /// The Pager toast has one visible slot, so external notifications go
+    /// through FIFO draining rather than replacing the currently visible one.
+    ///
+    /// Explicit `info` always appends a SystemMessage to the active agent
+    /// scrollback (Pi `showStatus` / chatContainer), never toast-only — so
+    /// slash results like `/gapp list` stay in the main view. warning/error
+    /// stay transient toasts. All kinds are also recorded for `/notify`.
+    pub fn show_external_notification(&mut self, message: &str, kind: Option<&str>) {
+        if let Some(session_id) = self.active_external_session_id() {
+            self.external_ui
+                .notifications
+                .entry(session_id)
+                .or_default()
+                .push(ExternalNotification {
+                    message: message.to_string(),
+                    kind: kind.map(str::to_owned),
+                });
+        }
+
+        if kind == Some("info") {
+            if let ActiveView::Agent(id) = self.active_view
+                && let Some(agent) = self.agents.get_mut(&id)
+            {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(message));
+            } else {
+                // No agent view yet (startup race: Pi's session_start fires
+                // while the host is still bootstrapping). Queue for `tick()`
+                // to flush into the first active agent's scrollback instead
+                // of silently dropping the message.
+                self.external_ui
+                    .pending_system_messages
+                    .push_back(message.to_string());
+            }
+            return;
+        }
+
+        let rendered = match kind {
+            Some("warning") => format!("Warning: {message}"),
+            Some("error") => format!("Error: {message}"),
+            _ => message.to_string(),
+        };
+        self.external_ui.pending_toasts.push_back(rendered);
+    }
+
+    fn active_external_session_id(&self) -> Option<String> {
+        if !self.external_agent {
+            return None;
+        }
+        let ActiveView::Agent(id) = self.active_view else {
+            return None;
+        };
+        self.agents
+            .get(&id)?
+            .session
+            .session_id
+            .as_ref()
+            .map(ToString::to_string)
+    }
+
+    pub(crate) fn external_notifications_for_active_session(&self) -> &[ExternalNotification] {
+        self.active_external_session_id()
+            .and_then(|session_id| self.external_ui.notifications.get(&session_id))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_external_notification_for_test(
+        &mut self,
+        session_id: impl Into<String>,
+        message: impl Into<String>,
+        kind: Option<&str>,
+    ) {
+        self.external_ui
+            .notifications
+            .entry(session_id.into())
+            .or_default()
+            .push(ExternalNotification {
+                message: message.into(),
+                kind: kind.map(str::to_owned),
+            });
+    }
+
+    /// Project an external session catalog into the native picker and/or the
+    /// dashboard dormant-session roster.
+    ///
+    /// - `/resume` SessionPicker: fills the External source tab (`current`/`all`).
+    /// - Welcome Resume (no agent yet): fills the welcome-screen session list.
+    /// - Agent Dashboard: cwd-scoped (`current`) entries become inactive roster
+    ///   rows so Pi idle sessions appear beside live in-memory agents.
+    pub fn set_external_session_catalog(
+        &mut self,
+        entries: Vec<SessionPickerEntry>,
+        scope: &str,
+    ) -> bool {
+        if !self.external_agent {
+            return false;
+        }
+
+        let mut changed = false;
+
+        // Dashboard non-leader roster: only the cwd-scoped catalog matches the
+        // Grok `x.ai/session/list` fallback semantics used for idle rows.
+        if matches!(self.active_view, ActiveView::AgentDashboard) && scope == "current" {
+            let sessions: Vec<crate::app::roster::RosterEntry> = entries
+                .iter()
+                .map(session_picker_entry_to_dashboard_roster)
+                .collect();
+            // RosterEntry is not PartialEq; always replace and clear loading so
+            // open/poll paths never stick on the spinner.
+            self.dashboard_local_sessions = sessions;
+            self.dashboard_sessions_loading = false;
+            changed = true;
+        }
+
+        // Welcome-screen Resume: same catalog `/resume` uses, projected into
+        // the native welcome picker (no agent modal yet).
+        if matches!(self.active_view, ActiveView::Welcome)
+            && self.session_picker_source_filter
+                == crate::views::session_picker::SourceFilter::External
+            && scope == "current"
+        {
+            let picker_changed = self.session_picker_entries.as_ref() != Some(&entries)
+                || self.session_picker_loading;
+            if picker_changed {
+                self.session_picker_state.expanded.clear();
+            }
+            self.session_picker_entries = Some(entries.clone());
+            self.session_picker_loading = false;
+            return changed || picker_changed;
+        }
+
+        let ActiveView::Agent(agent_id) = self.active_view else {
+            return changed;
+        };
+        let Some(agent) = self.agents.get_mut(&agent_id) else {
+            return changed;
+        };
+        let Some(crate::views::modal::ActiveModal::SessionPicker {
+            state,
+            entries: picker_entries,
+            loading,
+            source_filter,
+            window,
+            ..
+        }) = agent.active_modal.as_mut()
+        else {
+            return changed;
+        };
+        let expected_tab = match scope {
+            "current" => 0,
+            "all" => 1,
+            _ => return changed,
+        };
+        if *source_filter != crate::views::session_picker::SourceFilter::External
+            || window.active_tab != expected_tab
+        {
+            return changed;
+        }
+        let picker_changed = picker_entries.as_ref() != Some(&entries) || *loading;
+        if picker_changed {
+            state.expanded.clear();
+        }
+        *picker_entries = Some(entries);
+        *loading = false;
+        changed || picker_changed
+    }
+
+    /// Clear dashboard/picker loading when an external catalog request fails
+    /// before any `pi/ui/session_catalog` notification arrives.
+    pub fn mark_external_session_catalog_failed(&mut self) -> bool {
+        if !self.external_agent {
+            return false;
+        }
+        let mut changed = false;
+        if self.dashboard_sessions_loading {
+            self.dashboard_sessions_loading = false;
+            changed = true;
+        }
+        if matches!(self.active_view, ActiveView::Welcome) && self.session_picker_loading {
+            self.session_picker_loading = false;
+            changed = true;
+        }
+        if let ActiveView::Agent(agent_id) = self.active_view
+            && let Some(agent) = self.agents.get_mut(&agent_id)
+            && let Some(crate::views::modal::ActiveModal::SessionPicker {
+                loading,
+                source_filter,
+                ..
+            }) = agent.active_modal.as_mut()
+            && *source_filter == crate::views::session_picker::SourceFilter::External
+            && *loading
+        {
+            *loading = false;
+            changed = true;
+        }
+        changed
+    }
+
+    pub fn set_external_status(&mut self, key: String, text: Option<String>) -> bool {
+        match text.filter(|value| !value.trim().is_empty()) {
+            Some(value) => {
+                self.external_ui.statuses.insert(key, value);
+            }
+            None => {
+                self.external_ui.statuses.remove(&key);
+            }
+        }
+        self.refresh_external_ui_surface()
+    }
+
+    /// Project Pi's session name onto the native prompt-border inline title.
+    ///
+    /// Pi owns the session and its name (auto-generated or via rename), so the
+    /// name arriving over `pi/ui/title` is the authoritative session title. We
+    /// store it in the active agent's `display_name` — the field the prompt
+    /// border reads (see agent_view/render.rs) — reusing the existing native
+    /// surface rather than adding a second title channel. Sanitised here because
+    /// the prompt widget renders `display_name` verbatim. Returns whether the
+    /// stored title changed (drives a redraw).
+    pub fn set_external_session_title(&mut self, title: &str) -> bool {
+        let clean = crate::views::session_title::sanitize_display_text(title.trim());
+        let next = (!clean.trim().is_empty()).then(|| clean.into_owned());
+        self.external_ui.session_title = next.clone();
+        match self.active_agent_mut() {
+            Some(agent) if agent.display_name != next => {
+                agent.display_name = next;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Mirror Pi interactive's `resetExtensionUI()` for the subset of
+    /// extension state that Grok Pager projects onto its native surfaces.
+    ///
+    /// Pi calls this before replacing the extension runner during reload, so
+    /// do not wait for the new runner to send individual clear events: an
+    /// extension can be unloaded and never get a chance to emit them. Returns
+    /// the Pi-owned session title that must replace a temporary extension
+    /// terminal title.
+    pub fn reset_external_extension_ui(&mut self) -> Option<String> {
+        if !self.external_agent {
+            return None;
+        }
+
+        self.external_ui.statuses.clear();
+        self.external_ui.widgets.clear();
+        self.external_ui.remote_tui_layout = None;
+        self.external_ui.remote_tui_id = None;
+        self.external_ui.remote_tui_overlays.clear();
+        self.external_ui.extension_shortcuts = Default::default();
+        self.pending_effects
+            .retain(|effect| !matches!(effect, crate::app::actions::Effect::RemoteTuiInput { .. }));
+        for agent in self.agents.values_mut() {
+            agent.pi_shortcut_manager = None;
+        }
+        self.refresh_external_ui_surface();
+
+        Some(
+            self.external_ui
+                .session_title
+                .clone()
+                .unwrap_or_else(|| "Pi".to_string()),
+        )
+    }
+
+    /// Set or clear one Pi extension widget. The content remains owned and
+    /// rendered by Grok: we project it into the existing persistent banner
+    /// surface, preserving the requested above/status/below ordering without
+    /// introducing adapter-side Ratatui widgets.
+    pub fn set_external_widget(
+        &mut self,
+        key: String,
+        lines: Option<Vec<String>>,
+        placement: ExternalWidgetPlacement,
+    ) -> bool {
+        // Explicit ownership survives frame replacement and async factories.
+        // An old close cannot unlock the composer underneath a newer component.
+        if key == "__pi_grok_remote_tui_session__" {
+            let message = lines
+                .as_ref()
+                .and_then(|lines| lines.first())
+                .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok());
+            if let Some(message) = message
+                && let Some(id) = message.get("id").and_then(serde_json::Value::as_str)
+            {
+                match message.get("op").and_then(serde_json::Value::as_str) {
+                    Some("open") => self.external_ui.remote_tui_id = Some(id.to_owned()),
+                    Some("close") if self.external_ui.remote_tui_id.as_deref() == Some(id) => {
+                        self.external_ui.remote_tui_id = None;
+                    }
+                    _ => {}
+                }
+                self.external_ui.remote_tui_session_managed = true;
+            }
+            return true;
+        }
+        // Pi extension shortcut catalog (pi-grok-shortcut-manager → setWidget).
+        // Never render as a banner; feed the native `/pi-shortcut-manager` registry.
+        if key == "__pi_extension_shortcuts__" {
+            if let Some(lines) = lines.as_ref() {
+                if let Some(raw) = lines.first() {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+                        let shortcuts: Vec<crate::app::extension_shortcuts::ExtensionShortcut> =
+                            value
+                                .get("shortcuts")
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| {
+                                            Some(
+                                                crate::app::extension_shortcuts::ExtensionShortcut {
+                                                    key: v.get("key")?.as_str()?.to_string(),
+                                                    description: v
+                                                        .get("description")
+                                                        .and_then(|d| d.as_str())
+                                                        .unwrap_or("")
+                                                        .to_string(),
+                                                    extension: v
+                                                        .get("extension")
+                                                        .and_then(|e| e.as_str())
+                                                        .unwrap_or("unknown")
+                                                        .to_string(),
+                                                    enabled: v
+                                                        .get("enabled")
+                                                        .and_then(|e| e.as_bool())
+                                                        .unwrap_or(true),
+                                                    remapped_to: v
+                                                        .get("remappedTo")
+                                                        .and_then(|r| r.as_str())
+                                                        .map(|s| s.to_string()),
+                                                },
+                                            )
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                        self.external_ui
+                            .extension_shortcuts
+                            .set_shortcuts(shortcuts);
+                        self.refresh_external_ui_surface();
+                        // Refresh open manager snapshot if user has it open.
+                        if let ActiveView::Agent(id) = self.active_view
+                            && let Some(agent) = self.agents.get_mut(&id)
+                            && agent.pi_shortcut_manager.is_some()
+                        {
+                            agent.pi_shortcut_manager =
+                                Some(crate::views::shortcut_manager::ShortcutManagerModal::new(
+                                    &self.external_ui.extension_shortcuts,
+                                ));
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+        // Extension-host Remote TUI reuses setWidget("remote_tui", lines).
+        // Arm keyboard capture whenever that widget is present.
+        if key == "remote_tui" {
+            if self.external_ui.remote_tui_session_managed {
+                if self.external_ui.remote_tui_id.is_none() && lines.is_some() {
+                    return false;
+                }
+            } else {
+                match &lines {
+                    Some(_) => {
+                        if self.external_ui.remote_tui_id.is_none() {
+                            self.external_ui.remote_tui_id = Some("widget".to_string());
+                        }
+                    }
+                    None => {
+                        if self.external_ui.remote_tui_id.as_deref() == Some("widget") {
+                            self.external_ui.remote_tui_id = None;
+                        }
+                    }
+                }
+            }
+        }
+        match lines.filter(|lines| lines.iter().any(|line| !line.trim().is_empty())) {
+            Some(lines) => {
+                self.external_ui
+                    .widgets
+                    .insert(key, ExternalWidget { lines, placement });
+            }
+            None => {
+                self.external_ui.widgets.remove(&key);
+            }
+        }
+        self.refresh_external_ui_surface()
+    }
+
+    /// Update the layout for the active Remote TUI component.
+    pub fn set_remote_tui_layout(&mut self, layout: Option<RemoteTuiLayout>) -> bool {
+        if self.external_ui.remote_tui_layout == layout {
+            return false;
+        }
+        self.external_ui.remote_tui_layout = layout;
+        self.refresh_external_ui_surface()
+    }
+
+    /// Experimental Remote TUI open/frame/close (env-gated on Pi side).
+    pub fn apply_remote_tui(
+        &mut self,
+        op: &str,
+        id: Option<String>,
+        lines: Option<Vec<String>>,
+        title: Option<String>,
+    ) -> bool {
+        match op {
+            "open" => {
+                let overlay_id = id.unwrap_or_else(|| "default".to_string());
+                self.external_ui.remote_tui_id = Some(overlay_id.clone());
+                self.external_ui.remote_tui_overlays.push(RemoteTuiOverlay {
+                    id: overlay_id,
+                    title: title.clone(),
+                    lines: lines.unwrap_or_default(),
+                });
+                let _ = self.project_remote_tui_frame();
+                true
+            }
+            "frame" => {
+                if let Some(id) = &id {
+                    self.external_ui.remote_tui_id = Some(id.clone());
+                }
+                // Update the top overlay's lines (or create one if stack is empty)
+                if let Some(top) = self.external_ui.remote_tui_overlays.last_mut() {
+                    if let Some(lines) = lines {
+                        top.lines = lines;
+                    }
+                    if let Some(t) = title {
+                        top.title = Some(t);
+                    }
+                } else {
+                    let overlay_id = id.unwrap_or_else(|| "default".to_string());
+                    self.external_ui.remote_tui_id = Some(overlay_id.clone());
+                    self.external_ui.remote_tui_overlays.push(RemoteTuiOverlay {
+                        id: overlay_id,
+                        title,
+                        lines: lines.unwrap_or_default(),
+                    });
+                }
+                self.project_remote_tui_frame()
+            }
+            "overlay_push" => {
+                // showOverlay: push a new overlay onto the stack
+                let overlay_id = id.unwrap_or_else(|| {
+                    format!("overlay-{}", self.external_ui.remote_tui_overlays.len())
+                });
+                self.external_ui.remote_tui_id = Some(overlay_id.clone());
+                self.external_ui.remote_tui_overlays.push(RemoteTuiOverlay {
+                    id: overlay_id,
+                    title,
+                    lines: lines.unwrap_or_default(),
+                });
+                let _ = self.project_remote_tui_frame();
+                true
+            }
+            "overlay_pop" => {
+                // hideOverlay: pop the top overlay, restore previous
+                self.external_ui.remote_tui_overlays.pop();
+                if let Some(top) = self.external_ui.remote_tui_overlays.last() {
+                    self.external_ui.remote_tui_id = Some(top.id.clone());
+                    self.project_remote_tui_frame()
+                } else {
+                    // Stack empty — close entirely
+                    self.external_ui.remote_tui_id = None;
+                    let _ = self.set_external_widget(
+                        "remote_tui".to_string(),
+                        None,
+                        ExternalWidgetPlacement::AboveEditor,
+                    );
+                    true
+                }
+            }
+            "close" => {
+                // Close a specific overlay by id, or the top one
+                if let Some(id) = &id {
+                    self.external_ui.remote_tui_overlays.retain(|o| &o.id != id);
+                } else {
+                    self.external_ui.remote_tui_overlays.pop();
+                }
+                if let Some(top) = self.external_ui.remote_tui_overlays.last() {
+                    self.external_ui.remote_tui_id = Some(top.id.clone());
+                    self.project_remote_tui_frame()
+                } else {
+                    self.external_ui.remote_tui_id = None;
+                    let _ = self.set_external_widget(
+                        "remote_tui".to_string(),
+                        None,
+                        ExternalWidgetPlacement::AboveEditor,
+                    );
+                    true
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Project the top overlay's frame lines to the widget surface.
+    fn project_remote_tui_frame(&mut self) -> bool {
+        let Some(top) = self.external_ui.remote_tui_overlays.last() else {
+            return self.set_external_widget(
+                "remote_tui".to_string(),
+                None,
+                ExternalWidgetPlacement::AboveEditor,
+            );
+        };
+        let mut frame = Vec::new();
+        if let Some(title) = &top.title {
+            if !title.trim().is_empty() {
+                frame.push(format!("\x1b[1m{}\x1b[0m", title));
+            }
+        }
+        frame.extend(top.lines.iter().cloned());
+        self.set_external_widget(
+            "remote_tui".to_string(),
+            Some(frame),
+            ExternalWidgetPlacement::AboveEditor,
+        )
+    }
+
+    /// Encode a key in Kitty CSI-u form so Pi-TUI can preserve repeat/release
+    /// events. Plain presses keep the legacy sequences used by existing widgets.
+    pub fn remote_tui_key_sequence(key: &crossterm::event::KeyEvent) -> Option<String> {
+        use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+        fn kitty_modifier_value(modifiers: KeyModifiers) -> u8 {
+            let mut value = 1;
+            if modifiers.contains(KeyModifiers::SHIFT) {
+                value += 1;
+            }
+            if modifiers.contains(KeyModifiers::ALT) {
+                value += 2;
+            }
+            if modifiers.contains(KeyModifiers::CONTROL) {
+                value += 4;
+            }
+            if modifiers.contains(KeyModifiers::SUPER) {
+                value += 8;
+            }
+            value
+        }
+
+        fn kitty_sequence(key: &crossterm::event::KeyEvent) -> Option<String> {
+            let event = match key.kind {
+                KeyEventKind::Repeat => ":2",
+                KeyEventKind::Release => ":3",
+                KeyEventKind::Press => "",
+            };
+            let modifier = kitty_modifier_value(key.modifiers);
+            let functional = match key.code {
+                KeyCode::Up => Some(("1", 'A')),
+                KeyCode::Down => Some(("1", 'B')),
+                KeyCode::Right => Some(("1", 'C')),
+                KeyCode::Left => Some(("1", 'D')),
+                KeyCode::Home => Some(("1", 'H')),
+                KeyCode::End => Some(("1", 'F')),
+                KeyCode::PageUp => Some(("5", '~')),
+                KeyCode::PageDown => Some(("6", '~')),
+                KeyCode::Insert => Some(("2", '~')),
+                KeyCode::Delete => Some(("3", '~')),
+                _ => None,
+            };
+            if let Some((code, terminator)) = functional {
+                return Some(format!("\u{001b}[{code};{modifier}{event}{terminator}"));
+            }
+            let codepoint = match key.code {
+                KeyCode::Char(c) => c as u32,
+                KeyCode::Enter => 13,
+                KeyCode::Esc => 27,
+                KeyCode::Backspace => 127,
+                KeyCode::Tab => 9,
+                KeyCode::BackTab => 9,
+                _ => return None,
+            };
+            Some(format!("\u{001b}[{codepoint};{modifier}{event}u"))
+        }
+
+        // Native terminals normally deliver Shift+letters as uppercase text.
+        // Keep Pi components using literal letter actions compatible, while
+        // preserving modifiers and event types for other keys/repeat/release.
+        if key.kind == KeyEventKind::Press
+            && key.modifiers == KeyModifiers::SHIFT
+            && let KeyCode::Char(c) = key.code
+            && c.is_ascii_alphabetic()
+        {
+            return Some(c.to_ascii_uppercase().to_string());
+        }
+
+        if key.kind != KeyEventKind::Press
+            || key.modifiers.intersects(
+                KeyModifiers::SHIFT
+                    | KeyModifiers::ALT
+                    | KeyModifiers::CONTROL
+                    | KeyModifiers::SUPER,
+            )
+        {
+            if key.kind == KeyEventKind::Press && key.modifiers == KeyModifiers::CONTROL {
+                match key.code {
+                    KeyCode::Char('c') => return Some("\u{0003}".to_string()),
+                    KeyCode::Char('d') => return Some("\u{0004}".to_string()),
+                    _ => {}
+                }
+            }
+            return kitty_sequence(key);
+        }
+
+        match key.code {
+            KeyCode::Up => Some("\u{001b}[A".to_string()),
+            KeyCode::Down => Some("\u{001b}[B".to_string()),
+            KeyCode::Right => Some("\u{001b}[C".to_string()),
+            KeyCode::Left => Some("\u{001b}[D".to_string()),
+            KeyCode::Enter => Some("\r".to_string()),
+            KeyCode::Esc => Some("\u{001b}".to_string()),
+            KeyCode::Backspace => Some("\u{007f}".to_string()),
+            KeyCode::Tab => Some("\t".to_string()),
+            KeyCode::BackTab => Some("\u{001b}[Z".to_string()),
+            KeyCode::Home => Some("\u{001b}[H".to_string()),
+            KeyCode::End => Some("\u{001b}[F".to_string()),
+            KeyCode::PageUp => Some("\u{001b}[5~".to_string()),
+            KeyCode::PageDown => Some("\u{001b}[6~".to_string()),
+            KeyCode::Char(c) => Some(c.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Replace the text in whichever native Grok composer currently owns
+    /// keyboard input.
+    pub fn set_external_editor_text(&mut self, text: String) -> bool {
+        match self.active_view {
+            ActiveView::Agent(id) => {
+                let Some(agent) = self.agents.get_mut(&id) else {
+                    return false;
+                };
+                if let Some(child_sid) = agent.active_subagent.clone()
+                    && let Some(child) = agent.subagent_views.get_mut(&child_sid)
+                {
+                    child.prompt.set_text(&text);
+                } else {
+                    agent.prompt.set_text(&text);
+                }
+                true
+            }
+            ActiveView::Welcome => {
+                self.welcome_prompt.set_text(&text);
+                true
+            }
+            ActiveView::AgentDashboard => {
+                if let Some(dashboard) = self.dashboard.as_mut() {
+                    dashboard.dispatch.set_text(&text);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Dismiss a Pi-backed interaction that expired in Pi's RPC layer.
+    ///
+    /// The production QuestionView owns prompt stashing/restoration, so this
+    /// uses the same resolved-interaction path rather than mutating overlay
+    /// fields from the adapter.
+    pub fn dismiss_external_interaction(&mut self, tool_call_id: &str) -> bool {
+        let mut changed = false;
+        for agent in self.agents.values_mut() {
+            changed |= agent.dismiss_resolved_interaction(tool_call_id);
+            for child in agent.subagent_views.values_mut() {
+                changed |= child.dismiss_resolved_interaction(tool_call_id);
+            }
+        }
+        changed
+    }
+
+    /// Reconcile external UI state into the matching native Pager surfaces.
+    /// Widgets retain their Pi placement, statuses use the status bar, and the
+    /// unrelated sticky toast remains available for Pager-owned notices.
+    pub fn refresh_external_ui_surface(&mut self) -> bool {
+        if !self.external_agent {
+            return false;
+        }
+        let remote_tui_overlay = self
+            .external_ui
+            .remote_tui_layout
+            .as_ref()
+            .is_some_and(|layout| layout.overlay);
+        let mut widgets_above_editor = Vec::new();
+        append_external_widgets(
+            &mut widgets_above_editor,
+            &self.external_ui.widgets,
+            ExternalWidgetPlacement::AboveEditor,
+            remote_tui_overlay,
+        );
+        let statuses = self
+            .external_ui
+            .statuses
+            .iter()
+            .map(|(key, value)| {
+                if self.external_ui.statuses.len() == 1 {
+                    value.clone()
+                } else {
+                    format!("{key}: {value}")
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut widgets_below_editor = Vec::new();
+        append_external_widgets(
+            &mut widgets_below_editor,
+            &self.external_ui.widgets,
+            ExternalWidgetPlacement::BelowEditor,
+            remote_tui_overlay,
+        );
+        let global_shortcuts_enabled = self.external_ui.extension_shortcuts.is_global_enabled();
+        let mut extension_shortcuts = self
+            .external_ui
+            .extension_shortcuts
+            .all()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if !global_shortcuts_enabled {
+            for shortcut in &mut extension_shortcuts {
+                shortcut.enabled = false;
+            }
+        }
+        let remote_tui_lines = self
+            .external_ui
+            .widgets
+            .get("remote_tui")
+            .map(|widget| widget.lines.as_slice())
+            .unwrap_or(&[]);
+        let remote_tui_layout = self.external_ui.remote_tui_layout.clone();
+        self.agents.values_mut().fold(false, |changed, agent| {
+            agent
+                .pi_extension_shortcuts
+                .clone_from(&extension_shortcuts);
+            let changed = agent.set_external_ui_surface(
+                &widgets_above_editor,
+                &widgets_below_editor,
+                &statuses,
+            ) || changed;
+            agent.set_remote_tui_surface(remote_tui_lines, remote_tui_layout.clone()) || changed
+        })
     }
     /// Insert or replace a leader roster entry, keyed by `session_id`.
     pub fn upsert_roster_entry(&mut self, entry: crate::app::roster::RosterEntry) {
@@ -2368,6 +3381,31 @@ impl AppView {
                 _ => InputOutcome::Unchanged,
             };
         }
+        // Native `/pi-shortcut-manager` modal owns keys while open (before
+        // extension shortcut dispatch and remote-tui). Does not replace remote-tui.
+        if let ActiveView::Agent(id) = self.active_view {
+            let open = self
+                .agents
+                .get(&id)
+                .is_some_and(|a| a.pi_shortcut_manager.is_some());
+            if open {
+                if let Some(key) = key_event
+                    && let Some(agent) = self.agents.get_mut(&id)
+                {
+                    let mut modal = agent
+                        .pi_shortcut_manager
+                        .take()
+                        .expect("pi_shortcut_manager present");
+                    let registry = agent.pi_shortcuts.get_or_insert_with(Default::default);
+                    if !modal.handle_key(key, registry) {
+                        agent.pi_shortcut_manager = Some(modal);
+                    }
+                    return InputOutcome::Changed;
+                }
+                // Swallow mouse/paste/etc while the manager is open.
+                return InputOutcome::Changed;
+            }
+        }
         if let Event::Resize(_, rows) = ev {
             for agent in self.agents.values_mut() {
                 agent.note_terminal_resize();
@@ -2383,7 +3421,7 @@ impl AppView {
         {
             let stale_idle_arm_while_busy = matches!(
                 pending.action,
-                Action::ClearPrompt | Action::RewindShowPicker
+                Action::ClearPrompt | Action::RewindShowPicker | Action::ShowSessionTree
             ) && matches!(
                 self.active_view,
                 ActiveView::Agent(id) if self.agents.get(&id).is_some_and(|a| {
@@ -2482,7 +3520,11 @@ impl AppView {
                     menu_count: if zdr_blocked {
                         2
                     } else {
-                        3 + if self.has_claude_import { 1 } else { 0 }
+                        let hide_worktree = crate::views::welcome::logo::welcome_menu_override()
+                            .is_some_and(|m| m.hide_new_worktree);
+                        // Resume + Quit, plus optional New worktree.
+                        (if hide_worktree { 2 } else { 3 })
+                            + if self.has_claude_import { 1 } else { 0 }
                             + if self.welcome_show_changelog_action {
                                 1
                             } else {
@@ -2530,6 +3572,7 @@ impl AppView {
                     sp_source_filter: &mut self.session_picker_source_filter,
                     sp_pending_delete: &mut self.session_picker_pending_delete,
                     chat_mode: self.chat_mode,
+                    external_agent: self.external_agent,
                     #[cfg(feature = "local-workspace")]
                     workspace_mode: &mut self.welcome_workspace_mode,
                     #[cfg(feature = "local-workspace")]
@@ -2740,7 +3783,25 @@ impl AppView {
                     return InputOutcome::Action(Action::TracesLeaveView);
                 }
                 let prompt_paging = !overlay_active && !self.screen_mode.is_minimal();
-                let outcome = match self.agents.get_mut(&id) {
+                let ctrl_o_scope = match self.current_ui.ctrl_o_tool_expansion.as_deref() {
+                    Some("all_tools") => {
+                        crate::scrollback::state::ToolOutputExpansionScope::AllTools
+                    }
+                    _ => crate::scrollback::state::ToolOutputExpansionScope::WriteEdit,
+                };
+                if self.external_agent
+                    && !self.screen_mode.is_minimal()
+                    && key_event.is_some_and(|key| {
+                        key.code == KeyCode::Char('o')
+                            && key.modifiers == KeyModifiers::CONTROL
+                            && key.kind != KeyEventKind::Release
+                    })
+                    && let Some(agent) = self.agents.get_mut(&id)
+                {
+                    agent.scrollback.toggle_tool_output_expansion(ctrl_o_scope);
+                    return InputOutcome::Changed;
+                }
+                let mut outcome = match self.agents.get_mut(&id) {
                     Some(agent) => {
                         let transcript_before = agent.active_subagent.clone();
                         let workflows_before = agent.show_workflows;
@@ -2769,10 +3830,37 @@ impl AppView {
                 if self.pending_editor.is_some()
                     && matches!(outcome, InputOutcome::Action(Action::EditPromptExternal))
                 {
-                    InputOutcome::Unchanged
-                } else {
-                    outcome
+                    outcome = InputOutcome::Unchanged;
                 }
+                // Empty composer Esc Esc → SessionTree for Pi (prompt or
+                // scrollback). Do not require prompt focus: agent Esc policy
+                // arms rewind from either pane when empty.
+                let pi_double_esc = self.external_agent
+                    && key_event
+                        .is_some_and(|key| key.code == KeyCode::Esc && key.modifiers.is_empty())
+                    && self
+                        .agents
+                        .get(&id)
+                        .is_some_and(AgentView::can_arm_pi_session_tree_on_esc);
+                if pi_double_esc
+                    && matches!(
+                        &outcome,
+                        InputOutcome::Changed
+                            | InputOutcome::ArmPending {
+                                action: Action::RewindShowPicker,
+                                ..
+                            }
+                    )
+                    && let Some(key) = key_event
+                {
+                    outcome = InputOutcome::ArmPending {
+                        action: Action::ShowSessionTree,
+                        shortcut: KeyShortcut::from(*key),
+                        label: Some("tree"),
+                        ttl: PI_DOUBLE_ESC_TTL,
+                    };
+                }
+                outcome
             }
             ActiveView::AgentDashboard => {
                 self.close_dashboard_send_echo_window(key_event);
@@ -3209,6 +4297,9 @@ struct WelcomeInputCtx<'a> {
     sp_pending_delete: &'a mut Option<crate::views::session_picker::PendingDelete>,
     /// Process-wide `--chat`: the session picker hides its source filter (conversations-only list), so `f` must not cycle it.
     chat_mode: bool,
+    /// External ACP host (e.g. Pi): resume must use `/resume` SessionPicker
+    /// semantics rather than Grok's session-store list.
+    external_agent: bool,
     #[cfg(feature = "local-workspace")]
     workspace_mode: &'a mut crate::views::welcome::WelcomeWorkspaceMode,
     #[cfg(feature = "local-workspace")]
@@ -3509,9 +4600,9 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             filter_active: !ctx.chat_mode && source_filter.is_active(),
             header_note: None,
             action_keys: if ctx.chat_mode || focused_is_foreign {
-                &[]
+                &[('s', "sort")]
             } else {
-                &[('d', "delete")]
+                &[('d', "delete"), ('s', "sort")]
             },
             disable_search: false,
             compact_bottom_bar: false,
@@ -3537,6 +4628,21 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 && (key!('c', CONTROL).matches(key) || key!('d', CONTROL).matches(key))
             {
                 return InputOutcome::Action(Action::Quit);
+            }
+            if !ctx.sp_state.search_active
+                && key.kind == KeyEventKind::Press
+                && key.modifiers.is_empty()
+                && matches!(key.code, crossterm::event::KeyCode::Char('s'))
+                && let Some(entries) = ctx.sp_entries.as_mut()
+            {
+                ctx.sp_state.session_sort = ctx.sp_state.session_sort.next();
+                crate::views::session_picker::sort_session_entries(
+                    entries,
+                    ctx.sp_state.session_sort,
+                );
+                ctx.sp_state.selected = 0;
+                ctx.sp_state.scroll_offset = None;
+                return InputOutcome::Changed;
             }
             if let Some(selection) = session_picker_worktree_selection(
                 key,
@@ -3748,10 +4854,19 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     xai_grok_telemetry::events::AnnouncementCtaSurface::Keyboard,
                 ));
             }
-            if key!('w', CONTROL).matches(key) && ctx.cwd_has_git_ancestor {
+            let menu_policy = crate::views::welcome::logo::welcome_menu_override();
+            let hide_worktree = menu_policy.is_some_and(|m| m.hide_new_worktree);
+            if key!('w', CONTROL).matches(key) && ctx.cwd_has_git_ancestor && !hide_worktree {
                 return InputOutcome::Action(Action::OpenNewWorktreeDialog);
             }
             if ctx.registry.matches_id(ActionId::OpenSessions, key) {
+                return InputOutcome::Action(if ctx.external_agent {
+                    Action::ShowSessionPicker
+                } else {
+                    Action::FetchSessionList
+                });
+            }
+            if key!(F(3)).matches(key) {
                 return InputOutcome::Action(Action::FetchSessionList);
             }
             if ctx.registry.matches_id(ActionId::CommandPalette, key)
@@ -3812,6 +4927,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     ctx.has_claude_import,
                     ctx.show_changelog_action,
                     ctx.changelog_markdown.as_deref(),
+                    ctx.external_agent,
                 );
             }
         }
@@ -3950,6 +5066,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                             ctx.has_claude_import,
                             ctx.show_changelog_action,
                             ctx.changelog_markdown.as_deref(),
+                            ctx.external_agent,
                         );
                     }
                 }
@@ -3996,12 +5113,18 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 }
                 if let Some(rect) = ctx.changelog_cta_rect
                     && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-                    && let Some(md) = ctx.changelog_markdown.as_deref()
                 {
-                    return InputOutcome::Action(Action::ShowReleaseNotes {
-                        title: "Release Notes".to_string(),
-                        content: md.trim().to_string(),
-                    });
+                    if let Some(url) = crate::views::welcome::logo::welcome_menu_override()
+                        .and_then(|m| m.changelog_url)
+                    {
+                        return InputOutcome::Action(Action::OpenUrl(url.to_string()));
+                    }
+                    if let Some(md) = ctx.changelog_markdown.as_deref() {
+                        return InputOutcome::Action(Action::ShowReleaseNotes {
+                            title: "Release Notes".to_string(),
+                            content: md.trim().to_string(),
+                        });
+                    }
                 }
                 if let Some(rect) = ctx.announcement_rect
                     && (ctx.announcement_truncated || *ctx.announcement_expanded)
@@ -4198,41 +5321,58 @@ fn dispatch_access_gate_menu_action(index: usize) -> InputOutcome {
     }
 }
 /// Dispatch an action for a welcome menu item by index.
-/// Menu order: `[Import]`, New worktree, Resume session, `[Changelog]`, Quit.
-/// `show_changelog_action` is true when the Changelog row is rendered; release notes open only once `changelog_md` is available.
+///
+/// Menu order: `[Import]`, `[New worktree]`, Resume session, `[Changelog]`, Quit.
+/// `show_changelog_action` is true when the Changelog row is rendered. External
+/// hosts may hide New worktree, open Changelog as a URL, and route Resume to
+/// the same SessionPicker as `/resume`.
+
 fn dispatch_menu_action(
     index: usize,
     has_claude_import: bool,
     show_changelog_action: bool,
     changelog_md: Option<&str>,
+    external_agent: bool,
 ) -> InputOutcome {
-    let base = if has_claude_import { 1 } else { 0 };
-    let worktree_idx = base;
-    let resume_idx = base + 1;
-    let (changelog_idx, quit_idx) = if show_changelog_action {
-        (Some(base + 2), base + 3)
-    } else {
-        (None, base + 2)
-    };
+    let menu_policy = crate::views::welcome::logo::welcome_menu_override();
+    let hide_worktree = menu_policy.is_some_and(|m| m.hide_new_worktree);
+    let changelog_url = menu_policy.and_then(|m| m.changelog_url);
+
+    let mut next = if has_claude_import { 1 } else { 0 };
     if has_claude_import && index == 0 {
         return InputOutcome::Action(Action::ImportClaudeSettings);
     }
-    if index == worktree_idx {
-        return InputOutcome::Action(Action::OpenNewWorktreeDialog);
-    }
-    if index == resume_idx {
-        return InputOutcome::Action(Action::FetchSessionList);
-    }
-    if Some(index) == changelog_idx {
-        if let Some(md) = changelog_md {
-            return InputOutcome::Action(Action::ShowReleaseNotes {
-                title: "Release Notes".to_string(),
-                content: md.trim().to_string(),
-            });
+    if !hide_worktree {
+        if index == next {
+            return InputOutcome::Action(Action::OpenNewWorktreeDialog);
         }
-        return InputOutcome::Unchanged;
+        next += 1;
     }
-    if index == quit_idx {
+    if index == next {
+        // External (Pi): same path as `/resume`. Stock Grok: welcome inline list.
+        return InputOutcome::Action(if external_agent {
+            Action::ShowSessionPicker
+        } else {
+            Action::FetchSessionList
+        });
+    }
+    next += 1;
+    if show_changelog_action {
+        if index == next {
+            if let Some(url) = changelog_url {
+                return InputOutcome::Action(Action::OpenUrl(url.to_string()));
+            }
+            if let Some(md) = changelog_md {
+                return InputOutcome::Action(Action::ShowReleaseNotes {
+                    title: "Release Notes".to_string(),
+                    content: md.trim().to_string(),
+                });
+            }
+            return InputOutcome::Unchanged;
+        }
+        next += 1;
+    }
+    if index == next {
         return InputOutcome::Action(Action::Quit);
     }
     InputOutcome::Unchanged
@@ -4411,6 +5551,7 @@ impl AppView {
         self.maybe_trigger_small_screen_tip();
         self.maybe_trigger_ssh_wrap_tip();
         let compact = self.appearance.prompt.compact;
+        let esc_owned_before_agent = self.esc_owned_before_agent();
         let zdr_blocked_for_draw = self.is_zdr_blocked();
         let has_access = self.has_access();
         let privacy_banner = self.privacy_banner_should_show();
@@ -4885,6 +6026,7 @@ impl AppView {
                                             None
                                         },
                                     },
+                                    &self.bundle_state,
                                     overlay_active,
                                     link_spans,
                                     AppRenderParams {
@@ -4894,6 +6036,7 @@ impl AppView {
                                         status_line: status_line_frame.clone(),
                                         workspace_dashboard_enabled: self
                                             .workspace_dashboard_enabled,
+                                        esc_owned_before_agent,
                                         overlay_header,
                                         overlay_stop_label: None,
                                     },
@@ -5031,6 +6174,7 @@ impl AppView {
                                                         None,
                                                         false,
                                                         crate::app::agent_view::BannerSlotParams::none(),
+                                                        &self.bundle_state,
                                                         false,
                                                         link_spans,
                                                         AppRenderParams {
@@ -5396,6 +6540,25 @@ impl AppView {
     pub fn tick(&mut self) -> bool {
         self.fps_hud.note_tick();
         let mut needs_redraw = false;
+        needs_redraw |= self.refresh_external_ui_surface();
+        if let ActiveView::Agent(id) = self.active_view
+            && let Some(agent) = self.agents.get_mut(&id)
+        {
+            if agent.toast.is_none()
+                && let Some(message) = self.external_ui.pending_toasts.pop_front()
+            {
+                agent.show_toast(&message);
+                needs_redraw = true;
+            }
+            // Flush info notifications that arrived before this agent view
+            // existed; they render as persistent scrollback system blocks.
+            if let Some(message) = self.external_ui.pending_system_messages.pop_front() {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(message));
+                needs_redraw = true;
+            }
+        }
         needs_redraw |= self.minimal_state.needs_frames();
         needs_redraw |= self.poll_clipboard_focus_tip();
         if matches!(self.active_view, ActiveView::Welcome) {
@@ -5471,6 +6634,8 @@ impl AppView {
             }
             let spinner_frame_tick =
                 agent.scrollback.animation_tick() % crate::views::turn_status::SPINNER_DIVISOR == 0;
+            // Always redraw on spinner frame ticks during a live turn — never
+            // gate this on heavy expanded edits (that freezes the braille glyph).
             needs_redraw |= !agent.session.state.is_idle() && spinner_frame_tick;
             needs_redraw |= (agent.session_starting_since.is_some() || agent.mcp_chip_visible())
                 && spinner_frame_tick;
@@ -5756,6 +6921,7 @@ impl AppView {
                 needs_redraw |= viewer.tick(entry);
             } else {
                 agent.clear_block_viewer();
+
                 needs_redraw = true;
             }
         }
@@ -5888,6 +7054,14 @@ impl AppView {
                     });
                 if fast {
                     return TickDemand::Fast;
+                }
+                if agent.needs_write_edit_hover_popup_tick()
+                    || agent
+                        .subagent_views
+                        .values()
+                        .any(|child| child.needs_write_edit_hover_popup_tick())
+                {
+                    return TickDemand::Slow;
                 }
                 if cfg!(target_os = "macos")
                     && (agent.needs_link_modifier_poll()

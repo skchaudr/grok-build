@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 
+use ansi_to_tui::IntoText;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -43,6 +44,116 @@ pub struct AgentStatusBar<'a> {
     theme: &'a Theme,
     /// Padding from the right edge of the status bar area.
     right_pad: u16,
+}
+
+/// Convert ANSI-formatted external status text into a Pager-native status line.
+/// Invalid ANSI falls back to the original text so status updates are never lost.
+pub fn ansi_status_line(ansi: &str, theme: &Theme) -> Line<'static> {
+    let mut line = ansi
+        .as_bytes()
+        .into_text()
+        .ok()
+        .and_then(|text| text.lines.into_iter().next())
+        .unwrap_or_else(|| Line::raw(ansi.to_owned()));
+    for span in &mut line.spans {
+        use ratatui::style::Color;
+        span.style.fg = Some(match span.style.fg {
+            Some(Color::Green) => theme.accent_success,
+            Some(Color::Yellow) => theme.warning,
+            Some(Color::Red) => theme.accent_error,
+            Some(Color::Blue) => theme.accent_system,
+            Some(Color::Magenta) => theme.accent_assistant,
+            Some(Color::Cyan) => theme.running,
+            None | Some(Color::Reset) | Some(Color::White) => theme.text_secondary,
+            _ => theme.gray,
+        });
+        span.style.bg = None;
+    }
+    line
+}
+
+/// Remote TUI frames: map ANSI into the active Grok theme.
+///
+/// Pi components often use reverse video (`ESC[7m`) for cursors / field chrome.
+/// Keeping the REVERSED modifier inverts against the terminal cell and looks
+/// wrong under both light (too dark) and dark (too light) themes. Convert it
+/// to an explicit theme highlight instead.
+pub fn ansi_remote_tui_line(ansi: &str, theme: &Theme) -> Line<'static> {
+    use ratatui::style::{Color, Modifier};
+
+    // `ansi-to-tui` expands reverse video into a background colour but does
+    // not reliably clear that colour at `ESC[27m`. Pi's Input puts its trailing
+    // padding after that reset, so it otherwise inherits the cursor highlight.
+    // Rewrite reverse video to an ordinary dark background with its matching
+    // background reset before parsing; the mapping below lifts that one cell
+    // into the active theme's highlight.
+    let normalized = ansi
+        .replace("\x1b[7m", "\x1b[48;5;0m")
+        .replace("\x1b[27m", "\x1b[49m");
+    let mut line = normalized
+        .as_bytes()
+        .into_text()
+        .ok()
+        .and_then(|text| text.lines.into_iter().next())
+        .unwrap_or_else(|| Line::raw(ansi.to_owned()));
+    // Pi's selectable lists use an arrow prefix. ANSI foreground colour alone
+    // is too subtle after theme mapping, so retain the selection state with the
+    // Pager's native highlight background across the selected row.
+    let selected_row = line
+        .spans
+        .iter()
+        .any(|span| span.content.trim_start().starts_with('→'));
+
+    for span in &mut line.spans {
+        let reversed = span.style.add_modifier.contains(Modifier::REVERSED);
+        // Always clear reverse; we re-encode selection/cursor with theme colors.
+        span.style = span.style.remove_modifier(Modifier::REVERSED);
+
+        // Some parsers expand reverse into an explicit dark/light bg pair instead
+        // of Modifier::REVERSED. Treat dark fills as field chrome too.
+        let dark_fill = match span.style.bg {
+            Some(Color::Black) | Some(Color::DarkGray) | Some(Color::Indexed(0 | 8)) => true,
+            // Truecolor backgrounds are data for pixel-like components such as
+            // pi-doom's half-block renderer, not reverse-video chrome.
+            _ => false,
+        };
+
+        if reversed || dark_fill {
+            span.style.fg = Some(theme.text_primary);
+            span.style.bg = Some(theme.bg_highlight);
+            continue;
+        }
+
+        span.style.fg = Some(match span.style.fg {
+            Some(Color::Green) => theme.accent_success,
+            Some(Color::Yellow) => theme.warning,
+            Some(Color::Red) => theme.accent_error,
+            Some(Color::Blue) => theme.accent_system,
+            Some(Color::Magenta) => theme.accent_assistant,
+            Some(Color::Cyan) => theme.running,
+            None | Some(Color::Reset) | Some(Color::White) => theme.text_primary,
+            Some(Color::Black) | Some(Color::DarkGray) => theme.gray,
+            Some(Color::Gray) => theme.text_secondary,
+            // Pi's active theme emits its semantic accents as 24-bit ANSI.
+            // Keep them intact: collapsing RGB to text_secondary made provider
+            // selection, configured-state, and muted labels monochrome.
+            Some(Color::Rgb(r, g, b)) => Color::Rgb(r, g, b),
+            Some(Color::Indexed(index)) => Color::Indexed(index),
+            Some(color) => color,
+        });
+        // Keep truecolor backgrounds: half-block renderers use them for the
+        // second pixel. Other ANSI backgrounds fall back to Pager surfaces so
+        // ordinary extension rows do not inherit terminal-default chrome.
+        span.style.bg = match span.style.bg {
+            Some(Color::Rgb(_, _, _)) => span.style.bg,
+            _ => Some(if selected_row {
+                theme.bg_highlight
+            } else {
+                theme.bg_base
+            }),
+        };
+    }
+    line
 }
 
 impl<'a> AgentStatusBar<'a> {
@@ -354,6 +465,89 @@ mod task_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
+
+    #[test]
+    fn ansi_status_line_removes_escape_sequences() {
+        let line = ansi_status_line("\x1b[38;2;118;118;118m-- tok/s\x1b[39m", &Theme::current());
+
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "-- tok/s");
+    }
+
+    #[test]
+    fn ansi_remote_tui_line_maps_reverse_to_theme_highlight() {
+        use ratatui::style::Modifier;
+        let theme = Theme::current();
+        // Pi Input cursor: reverse video on one cell, then normal.
+        let line = ansi_remote_tui_line("a\x1b[7m \x1b[27mb", &theme);
+        assert!(line.spans.iter().any(|span| {
+            span.content == " "
+                && span.style.bg == Some(theme.bg_highlight)
+                && !span.style.add_modifier.contains(Modifier::REVERSED)
+        }));
+        // Non-reversed cells pin to surface bg.
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| { span.content == "a" && span.style.bg == Some(theme.bg_base) })
+        );
+    }
+
+    #[test]
+    fn ansi_remote_tui_line_does_not_extend_cursor_background_to_padding() {
+        let theme = Theme::current();
+        let line = ansi_remote_tui_line("> 2222222\x1b[7m \x1b[27m                    ", &theme);
+
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| { span.content == " " && span.style.bg == Some(theme.bg_highlight) })
+        );
+        assert!(line.spans.iter().any(|span| {
+            span.content == "                    " && span.style.bg == Some(theme.bg_base)
+        }));
+    }
+
+    #[test]
+    fn ansi_remote_tui_line_highlights_selected_rows() {
+        let theme = Theme::current();
+        let line = ansi_remote_tui_line("\x1b[36m→ selected option\x1b[0m", &theme);
+
+        assert!(
+            line.spans
+                .iter()
+                .all(|span| span.style.bg == Some(theme.bg_highlight))
+        );
+    }
+
+    #[test]
+    fn ansi_remote_tui_line_preserves_pi_rgb_semantic_colors() {
+        let theme = Theme::current();
+        let line = ansi_remote_tui_line(
+            "\x1b[38;2;59;130;246m→ provider\x1b[0m \x1b[38;2;45;212;191m✓ configured\x1b[0m",
+            &theme,
+        );
+
+        assert!(line.spans.iter().any(|span| {
+            span.content == "→ provider" && span.style.fg == Some(Color::Rgb(59, 130, 246))
+        }));
+        assert!(line.spans.iter().any(|span| {
+            span.content == "✓ configured" && span.style.fg == Some(Color::Rgb(45, 212, 191))
+        }));
+    }
+
+    #[test]
+    fn ansi_remote_tui_line_preserves_truecolor_backgrounds_for_half_blocks() {
+        let theme = Theme::current();
+        let line = ansi_remote_tui_line("\x1b[38;2;255;0;0m\x1b[48;2;0;255;0m▀\x1b[0m", &theme);
+
+        assert!(line.spans.iter().any(|span| {
+            span.content == "▀"
+                && span.style.fg == Some(Color::Rgb(255, 0, 0))
+                && span.style.bg == Some(Color::Rgb(0, 255, 0))
+        }));
+    }
 
     #[test]
     fn tokens_compact_sub_thousand() {

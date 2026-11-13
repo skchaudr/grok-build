@@ -882,6 +882,100 @@ fn prepare_bash_display_text(command: &str) -> String {
     out
 }
 
+fn bash_display_text(command: &str) -> String {
+    let text = prepare_bash_display_text(command);
+    if crate::appearance::cache::load_pi_bash_command_format() {
+        format_bash_command_for_display(&text)
+    } else {
+        text
+    }
+}
+
+fn format_bash_command_for_display(command: &str) -> String {
+    let breaks = soft_break_offsets_after_operators(command);
+    if breaks.is_empty() {
+        return command.to_string();
+    }
+
+    let heredoc_payload = heredoc_payload_byte_ranges(command);
+    let mut out = String::with_capacity(command.len() + breaks.len() * 3);
+    let mut offset = 0usize;
+
+    for (line_idx, physical) in command.split('\n').enumerate() {
+        if line_idx > 0 {
+            out.push('\n');
+            offset += 1;
+        }
+
+        let line_start = offset;
+        let line_end = line_start + physical.len();
+        if physical.is_empty() || range_fully_inside(line_start, line_end, &heredoc_payload) {
+            out.push_str(physical);
+            offset += physical.len();
+            continue;
+        }
+
+        let mut segments = Vec::new();
+        let mut pos = 0usize;
+        for end in breaks
+            .iter()
+            .copied()
+            .filter(|&b| b > line_start && b < line_end)
+            .map(|b| b - line_start)
+            .filter(|&b| physical.is_char_boundary(b))
+        {
+            let raw = &physical[pos..end];
+            let segment = if segments.is_empty() {
+                raw.trim_end()
+            } else {
+                raw.trim()
+            };
+            if !segment.is_empty() {
+                segments.push(segment);
+            }
+            pos = end;
+        }
+
+        let raw = &physical[pos..];
+        let rest = if segments.is_empty() {
+            raw.trim_end()
+        } else {
+            raw.trim()
+        };
+        if !rest.is_empty() {
+            segments.push(rest);
+        }
+
+        if segments.is_empty() {
+            out.push_str(physical);
+        } else {
+            for (i, segment) in segments.into_iter().enumerate() {
+                if i > 0 {
+                    out.push('\n');
+                    out.push_str("  ");
+                }
+                out.push_str(segment);
+            }
+        }
+        offset += physical.len();
+    }
+
+    out
+}
+
+/// Compute the display row string slices for one physical `line`: soft-wraps
+/// at tree-sitter-validated shell operators (`&&` / `||` / `|` / `;`) first,
+/// then quote-aware width wrap within each segment, keeping heredoc payload
+/// lines intact. Every returned slice is a sub-slice of `line` (so a caller
+/// can recover its byte offset via pointer arithmetic), which lets
+/// [`build_raw_bash_lines`] slice already-highlighted spans per row without
+/// ever re-lexing a wrap fragment.
+///
+/// At most `max_rows` rows are produced, and wrap work stops once the cap is
+/// reached — a collapsed huge one-liner is never fully wrapped, and its
+/// chunk boundaries are discovered lazily rather than materialized. The
+/// capped prefix is identical to the same rows of an uncapped call (packing
+/// is greedy left-to-right).
 fn soft_wrap_row_texts<'a>(
     line: &'a str,
     line_start: usize,
@@ -1184,7 +1278,7 @@ fn build_raw_bash_lines(
     content_width: usize,
     max_rows: usize,
 ) -> Vec<Line<'static>> {
-    let text = prepare_bash_display_text(command);
+    let text = bash_display_text(command);
     if text.is_empty() || max_rows == 0 {
         return Vec::new();
     }
@@ -1239,7 +1333,7 @@ fn build_raw_bash_lines(
 }
 
 fn count_raw_bash_rows(command: &str, content_width: usize, max_rows: usize) -> usize {
-    let text = prepare_bash_display_text(command);
+    let text = bash_display_text(command);
     if text.is_empty() {
         return 0;
     }
@@ -2275,6 +2369,22 @@ mod tests {
         assert_eq!(rows.len(), 4);
         assert_eq!(row_text(at(&rows, 3)), "echo line3");
         assert!(build_raw_bash_lines(&script, 80, 0).is_empty());
+    }
+
+    #[test]
+    fn format_bash_command_for_display_breaks_operator_chain() {
+        assert_eq!(
+            format_bash_command_for_display("echo one && echo two || echo three"),
+            "echo one &&\n  echo two ||\n  echo three"
+        );
+    }
+
+    #[test]
+    fn format_bash_command_for_display_ignores_quoted_operators() {
+        assert_eq!(
+            format_bash_command_for_display("echo 'a && b' && echo c"),
+            "echo 'a && b' &&\n  echo c"
+        );
     }
 
     #[test]

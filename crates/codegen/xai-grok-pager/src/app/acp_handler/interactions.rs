@@ -1,5 +1,151 @@
 use super::*;
 
+/// Decode the product-owned selection envelope emitted by the grok-pi
+/// subagent extension.  The extension still uses the normal
+/// `x.ai/ask_user_question` reverse request; this envelope only selects the
+/// existing Pi resource manager as its native presentation.
+fn pi_grok_resource_picker_request(
+    raw_params: &serde_json::Value,
+) -> Result<Option<crate::views::pi_config::PiResourcePickerRequest>, String> {
+    use crate::pi_resource_config::PiResourceType;
+    use crate::views::pi_config::{PiResourcePickerExtra, PiResourcePickerRequest};
+
+    let Some(value) = raw_params.get("piGrokResourcePicker") else {
+        return Ok(None);
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| "piGrokResourcePicker must be an object".to_owned())?;
+    let title = object
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .ok_or_else(|| "piGrokResourcePicker.title is required".to_owned())?
+        .to_owned();
+    let parse_type = |value: &str| match value.to_ascii_lowercase().as_str() {
+        "extensions" | "extension" => Ok(PiResourceType::Extensions),
+        "skills" | "skill" => Ok(PiResourceType::Skills),
+        _ => Err(format!("unsupported Pi resource type: {value}")),
+    };
+    let resource_types = object
+        .get("resourceTypes")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "piGrokResourcePicker.resourceTypes is required".to_owned())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| "piGrokResourcePicker.resourceTypes must contain strings".to_owned())
+                .and_then(parse_type)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if resource_types.is_empty() {
+        return Err("piGrokResourcePicker.resourceTypes must not be empty".to_owned());
+    }
+    let initial_paths = object
+        .get("initialPaths")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .collect();
+    let extra_resources = object
+        .get("extraResources")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let object = entry.as_object()?;
+            let path = object.get("path")?.as_str()?.trim();
+            let label = object.get("label")?.as_str()?.trim();
+            let resource_type = parse_type(object.get("type")?.as_str()?).ok()?;
+            (!path.is_empty() && !label.is_empty()).then(|| PiResourcePickerExtra {
+                path: std::path::PathBuf::from(path),
+                label: label.to_owned(),
+                resource_type,
+            })
+        })
+        .collect();
+    Ok(Some(PiResourcePickerRequest {
+        title,
+        resource_types,
+        initial_paths,
+        extra_resources,
+    }))
+}
+
+fn pi_grok_subagent_history_request(
+    raw_params: &serde_json::Value,
+) -> Result<Option<crate::views::modal::SubagentHistoryRequest>, String> {
+    use crate::views::modal::{SubagentHistoryEntry, SubagentHistoryRequest};
+
+    let Some(value) = raw_params.get("piGrokSubagentHistory") else {
+        return Ok(None);
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| "piGrokSubagentHistory must be an object".to_owned())?;
+    let title = object
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .ok_or_else(|| "piGrokSubagentHistory.title is required".to_owned())?
+        .to_owned();
+    let raw_entries = object
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "piGrokSubagentHistory.entries is required".to_owned())?;
+    if raw_entries.is_empty() {
+        return Err("piGrokSubagentHistory.entries must not be empty".to_owned());
+    }
+    let mut entries = Vec::with_capacity(raw_entries.len());
+    for value in raw_entries {
+        let entry = value
+            .as_object()
+            .ok_or_else(|| "piGrokSubagentHistory.entries must contain objects".to_owned())?;
+        let required = |key: &str| {
+            entry
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| format!("piGrokSubagentHistory entry {key} is required"))
+        };
+        entries.push(SubagentHistoryEntry {
+            id: required("id")?,
+            description: required("description")?,
+            status: required("status")?,
+            subagent_type: required("type")?,
+            turn_count: entry
+                .get("turnCount")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "piGrokSubagentHistory entry turnCount is required".to_owned())?,
+            tool_call_count: entry
+                .get("toolCallCount")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    "piGrokSubagentHistory entry toolCallCount is required".to_owned()
+                })?,
+            model_id: entry
+                .get("modelId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+            background: entry
+                .get("background")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| "piGrokSubagentHistory entry background is required".to_owned())?,
+        });
+    }
+    Ok(Some(SubagentHistoryRequest { title, entries }))
+}
+
 /// Resolve a superseded elicitation's reverse-request with `Cancel` so the awaiting MCP server is released before a replacement takes the slot.
 fn cancel_elicitation_request(
     response_tx: tokio::sync::oneshot::Sender<xai_acp_lib::AcpResult<acp::ExtResponse>>,
@@ -99,8 +245,47 @@ pub(crate) fn handle_ask_user_question(
         AskUserQuestionExtRequest, AskUserQuestionExtResponse,
     };
 
-    // Parse the typed request from the ext-method params.
-    let ext_req: AskUserQuestionExtRequest = match serde_json::from_str(ext.request.params.get()) {
+    // Parse both the typed request and the narrow Pi adapter extensions.
+    // `initialText` and `noFreeform` are deliberately client-side hints: the
+    // canonical ask-user-question wire type remains unchanged.
+    let raw_params: serde_json::Value = match serde_json::from_str(ext.request.params.get()) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to parse ask-user-question params");
+            ext.response_tx
+                .send(Err(acp::Error::new(-32602, format!("Invalid params: {e}"))))
+                .ok();
+            return false;
+        }
+    };
+    let initial_text = raw_params
+        .get("initialText")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let no_freeform = raw_params
+        .get("noFreeform")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let resource_picker_request = match pi_grok_resource_picker_request(&raw_params) {
+        Ok(request) => request,
+        Err(error) => {
+            ext.response_tx
+                .send(Err(acp::Error::new(-32602, error)))
+                .ok();
+            return false;
+        }
+    };
+    let subagent_history_request = match pi_grok_subagent_history_request(&raw_params) {
+        Ok(request) => request,
+        Err(error) => {
+            ext.response_tx
+                .send(Err(acp::Error::new(-32602, error)))
+                .ok();
+            return false;
+        }
+    };
+
+    let ext_req: AskUserQuestionExtRequest = match serde_json::from_value(raw_params.clone()) {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, "Failed to parse AskUserQuestionExtRequest");
@@ -131,10 +316,47 @@ pub(crate) fn handle_ask_user_question(
         return false;
     };
 
-    // Mandatory ingress wins: evict an open feedback modal before this question installs and stashes its own state.
+    // Mandatory ingress wins: evict an open feedback modal before this ACP
+    // ingress (Pi subagent-history picker, Pi resource picker, or the question
+    // itself) installs and stashes its own state.
     agent.displace_feedback_modal(
         crate::views::feedback_modal::FeedbackModalDisplacement::AcpQuestion,
     );
+
+    if let Some(request) = subagent_history_request {
+        agent.active_modal = Some(crate::views::modal::ActiveModal::SubagentHistory {
+            state: crate::views::modal::SubagentHistoryPickerState::new(request, ext.response_tx),
+            window: crate::views::modal_window::ModalWindowState::new(),
+        });
+        agent.last_active_at = Some(std::time::Instant::now());
+        return is_active;
+    }
+
+    if let Some(request) = resource_picker_request {
+        let cwd = agent.session.cwd.clone();
+        match crate::views::pi_config::PiConfigModalState::open_picker(
+            cwd,
+            request,
+            ext.response_tx,
+        ) {
+            Ok(state) => {
+                if let Some(crate::views::modal::ActiveModal::PiConfig { state }) =
+                    agent.active_modal.as_mut()
+                {
+                    state.complete_picker(false);
+                }
+                agent.active_modal = Some(crate::views::modal::ActiveModal::PiConfig {
+                    state: Box::new(state),
+                });
+                agent.last_active_at = Some(std::time::Instant::now());
+                return is_active;
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to open Pi resource picker");
+                return false;
+            }
+        }
+    }
 
     // If a question is already active, cancel it before replacing.
     if let Some(mut old_qv) = agent.question_view.take() {
@@ -189,16 +411,33 @@ pub(crate) fn handle_ask_user_question(
         }
     }
 
-    // Stash the composer so it comes back when this question closes.
-    agent.question_view = Some(QuestionViewState::with_response_tx(
+    // Stash the current prompt so the composer comes back when this question closes.
+    // Pi's select and confirm requests set `noFreeform`; input/editor requests use
+    // the native freeform row and can seed it through `initialText`.
+    let mut question_view = QuestionViewState::with_response_tx(
         ext_req.tool_call_id,
         ext_req.questions,
         agent.prompt.stash(),
         Some(ext.response_tx),
         ext_req.mode,
-    ));
+    );
+    if no_freeform {
+        question_view = question_view.with_no_freeform();
+    }
 
-    agent.prompt.set_text("");
+    let mut editor_seed = String::new();
+    if !question_view.no_freeform
+        && let Some(text) = initial_text
+        && !question_view.questions.is_empty()
+    {
+        question_view.per_question_freeform[0] = text;
+        question_view.per_question_cursor[0] = question_view.questions[0].options.len();
+        editor_seed = question_view.activate_freeform_input();
+    }
+    agent.question_view = Some(question_view);
+
+    // QuestionView reuses the production PromptWidget as its freeform editor.
+    agent.prompt.set_text(&editor_seed);
 
     // Stamp the "last activity" anchor so the dashboard's NeedsInput row shows time since this question arrived, not the previous turn's end
     agent.last_active_at = Some(std::time::Instant::now());
@@ -210,8 +449,15 @@ pub(crate) fn handle_ask_user_question(
         "Opened question view from ext_method"
     );
 
-    // Only the currently-displayed view needs an immediate redraw
-    // A question parked on a background agent shows up via the roster `NeedsInput` delta and renders when the user switches to that session
+    if app.current_ui.pi_ask_user_question_notifications
+        && !app.notification_service.focus_tracker.is_focused()
+    {
+        crate::notifications::system::notify("Grok", "A question is waiting for your response.");
+    }
+
+    // Only the currently-displayed view needs an immediate redraw; a question
+    // parked on a background agent surfaces via the roster `NeedsInput` delta
+    // and renders when the user switches to that session.
     is_active
 }
 
@@ -277,7 +523,21 @@ pub(super) fn handle_exit_plan_mode(
     // - active_modal: draw returns before line_viewer (plan never paints); keys still route to the invisible plan viewer
     // - block_viewer: draw returns on line_viewer (plan visible) but handle_scroll prefers block_viewer, so wheel hits the hidden Edit pane
     agent.active_modal = None;
+    // Upstream: dismiss the block viewer, keeping its resume state so the
+    // viewer can re-open where the user left off.
     agent.dismiss_block_viewer();
+    // Fork seam: the dismissed viewer may have painted a Kitty overlay image.
+    // Clear it outside the draw path (mirrors `close_block_viewer`, whose
+    // `take()` no-ops once dismiss has consumed the viewer) or later keys
+    // carry unexpected release events.
+    if agent.block_viewer_image_active {
+        xai_grok_shell::util::with_locked_stderr(|stderr| {
+            let clear =
+                crate::terminal::overlay::PostFlush::from(crate::terminal::overlay::clear_kitty());
+            let _ = clear.write_to(stderr);
+        });
+        agent.block_viewer_image_active = false;
+    }
 
     let source = plan_review_source_for_tool(&params.tool_call_id, agent);
 

@@ -1,17 +1,18 @@
 //! PTY e2e tests for the experimental `--minimal` (scrollback-native) mode.
 //!
-//! Grouped under one `mod minimal;` so the parent `pty_e2e` module isn't interleaved with a dozen `minimal_*` entries.
-//! A full-pager contributor can skip this whole subtree.
-//! These exercise the sibling `xai-grok-pager-minimal` crate end-to-end through the built binary (which installs the minimal hook).
-//! They therefore live with the rest of the pty suite rather than in a separate crate.
-//! Shared harness helpers are reached via `crate::common`, the root of the `pty_e2e` test crate.
+//! Grouped under one `mod minimal;` so the parent `pty_e2e` module isn't
+//! interleaved with a dozen `minimal_*` entries — a full-pager contributor can
+//! skip this whole subtree. These exercise the sibling `xai-grok-pager-minimal`
+//! crate end-to-end through the built binary (which installs the minimal hook).
+//! Shared harness helpers are reached via `crate::common`, the root of the migrated
+//! `pty_e2e` test crate.
 
-mod minimal_cli_screen_mode_does_not_persist;
 mod minimal_commits_response_to_scrollback;
 mod minimal_commits_thinking_body_to_scrollback;
 mod minimal_committed_content_survives_overlay_grow;
 mod minimal_continue_reprints_transcript;
 mod minimal_ctrl_c_arms_and_quits;
+mod minimal_ctrl_o_send_now_queued_apple_terminal;
 mod minimal_double_esc_committed_queued_prompt_single_render;
 mod minimal_esc_mid_turn_hints_ctrl_c;
 mod minimal_external_editor_round_trip;
@@ -36,6 +37,7 @@ mod minimal_short_response_stays_on_screen;
 mod minimal_slash_dropdown_dismisses_with_esc;
 mod minimal_slash_switches_from_fullscreen;
 mod minimal_slash_switches_to_fullscreen;
+mod minimal_sticky_screen_mode_persists;
 mod minimal_switch_exec_escape_hatch;
 mod minimal_switch_mid_turn_keeps_streaming;
 mod minimal_switch_preserves_queued_prompt;

@@ -58,8 +58,20 @@ pub enum CommandResult {
         /// The real `ScheduledTaskCreated` notification from the shell replaces it.
         scheduled_task_preview: Option<ScheduledTaskPreview>,
     },
-    /// Command text should be sent as a regular prompt. This variant deliberately covers two different cases. Unknown
-    /// commands (pager doesn't know them, shell might).
+    /// Command text should be dispatched to Pi immediately without creating a
+    /// Pager turn or queue row. Only Pi extension commands use this path; Pi
+    /// remains responsible for the command handler and any nested agent work.
+    DirectPiCommand(String),
+    /// Command text should be sent as a regular prompt. The shell resolves it.
+    ///
+    /// Phase-1 simplification: this intentionally covers two semantically
+    /// different cases in a single variant:
+    /// 1. ACP-advertised commands (shell explicitly supports them)
+    /// 2. Unknown commands (pager doesn't know them, shell might)
+    ///
+    /// Both are sent identically today. If behavior ever needs to diverge
+    /// (e.g., different UX confidence, error messaging, or telemetry),
+    /// split into `AcpPassThrough` and `UnknownPassThrough` variants.
     PassThrough(String),
 }
 
@@ -318,9 +330,21 @@ pub trait SlashCommand: Send + Sync {
         false
     }
 
-    /// Tool names the agent must have registered for this command to work. Override for commands that only make sense
-    /// when specific tools are available. The registry hides commands whose requirements aren't all present in the
-    /// agent's advertised toolset.
+    /// Absolute path to the skill's `SKILL.md`, if this command is a skill.
+    ///
+    /// Used to open a read-only preview popup of the skill definition. The
+    /// default (`None`) suits non-skill commands; `AcpSlashCommand` overrides
+    /// it to return the `path` from ACP `_meta`.
+    fn skill_path(&self) -> Option<&str> {
+        None
+    }
+
+    /// Tool names the agent must have registered for this command to work.
+    ///
+    /// Default is empty (no tool dependency). Override for commands that
+    /// only make sense when specific tools are available -- e.g. `/loop`
+    /// requires `scheduler_create`. The registry hides commands whose
+    /// requirements aren't all present in the agent's advertised toolset.
     fn required_tools(&self) -> &[&str] {
         &[]
     }

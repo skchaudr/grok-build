@@ -180,17 +180,17 @@ pub(crate) fn session_usage_block_text(
     let mut rows = Vec::new();
     rows.push(format!(
         "  Input tokens:   {} ({} cached)",
-        group_thousands(t.input_tokens),
-        group_thousands(t.cached_read_tokens),
+        format_token_k(t.input_tokens),
+        format_token_k(t.cached_read_tokens),
     ));
     rows.push(format!(
         "  Output tokens:  {} ({} reasoning)",
-        group_thousands(t.output_tokens),
-        group_thousands(t.reasoning_tokens),
+        format_token_k(t.output_tokens),
+        format_token_k(t.reasoning_tokens),
     ));
     rows.push(format!(
         "  Total tokens:   {}",
-        group_thousands(t.total_tokens)
+        format_token_k(t.total_tokens)
     ));
     rows.push(format!(
         "  Model calls:    {} · API time: {}",
@@ -213,6 +213,25 @@ pub(crate) fn session_usage_block_text(
         rows,
     )
 }
+
+fn format_token_k(value: u64) -> String {
+    if value < 1_000 {
+        return group_thousands(value);
+    }
+    if value >= 100_000 {
+        let rounded_k = (value + 500) / 1_000;
+        return format!("{}k", group_thousands(rounded_k));
+    }
+    let rounded_tenths = (value * 10 + 500) / 1_000;
+    let whole = rounded_tenths / 10;
+    let frac = rounded_tenths % 10;
+    if frac == 0 {
+        format!("{whole}k")
+    } else {
+        format!("{whole}.{frac}k")
+    }
+}
+
 /// Formats one `By model:` row. The cost cell is omitted when `cost_usd_ticks` is `None`.
 fn format_by_model_row(
     model: &str,
@@ -379,6 +398,14 @@ mod tests {
         assert_eq!(group_thousands(1_000), "1,000");
         assert_eq!(group_thousands(1_234_567), "1,234,567");
     }
+    #[test]
+    fn format_token_k_compacts_thousands() {
+        assert_eq!(format_token_k(999), "999");
+        assert_eq!(format_token_k(1_000), "1k");
+        assert_eq!(format_token_k(12_345), "12.3k");
+        assert_eq!(format_token_k(1_234_567), "1,235k");
+    }
+
     #[test]
     fn first_nonempty_line_skips_blank_leading_lines() {
         assert_eq!(first_nonempty_line("\n  \n  hello \nworld"), "hello");

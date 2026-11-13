@@ -516,7 +516,8 @@ pub(crate) fn top_level_last_change_at(agent: &AgentView, state: RowState) -> Sy
         | RowState::Idle
         | RowState::Inactive
         | RowState::Completed
-        | RowState::Failed => agent.last_active_at.unwrap_or_else(fallback_epoch),
+        | RowState::Failed
+        | RowState::Blocked => agent.last_active_at.unwrap_or_else(fallback_epoch),
     };
     crate::util::system_time_from_instant(anchor)
 }

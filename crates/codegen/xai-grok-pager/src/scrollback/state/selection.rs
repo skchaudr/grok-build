@@ -498,6 +498,46 @@ impl ScrollbackState {
         }
     }
 
+    /// Toggle expansion for the configured tool-call scope only.
+    ///
+    /// The scan determines one target state, then the update batches cache
+    /// invalidation and generation work into a single pass.
+    pub fn toggle_tool_output_expansion(&mut self, scope: ToolOutputExpansionScope) {
+        let matches_scope = |entry: &ScrollbackEntry| match scope {
+            ToolOutputExpansionScope::WriteEdit => {
+                matches!(entry.block, RenderBlock::ToolCall(ToolCallBlock::Edit(_)))
+            }
+            ToolOutputExpansionScope::AllTools => entry.block.is_tool_call(),
+        };
+        let any_collapsed = self.entries.values().any(|entry| {
+            matches_scope(entry)
+                && entry.is_foldable()
+                && entry.display_mode == DisplayMode::Collapsed
+        });
+        let target_mode = if any_collapsed {
+            DisplayMode::Expanded
+        } else {
+            DisplayMode::Collapsed
+        };
+
+        let mut changed = false;
+        for (id, entry) in &mut self.entries {
+            if matches_scope(entry) && entry.is_foldable() && entry.display_mode != target_mode {
+                entry.display_mode = target_mode;
+                entry.display_mode_pinned = false;
+                entry.invalidate_cache();
+                self.dirty_heights.insert(*id);
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+        self.expanded_groups.clear();
+        self.gaps_may_be_dirty = true;
+        self.bump_generation();
+    }
+
     /// Toggle expand/collapse for all thinking blocks only. Otherwise collapse all thinking blocks. Also sets
     /// `thinking_display_mode` so that future thinking blocks adopt the chosen mode when they finish running.
     pub fn expand_all_thinking(&mut self) {

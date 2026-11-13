@@ -8,7 +8,7 @@
 use crate::actions::ActionRegistry;
 use crate::app::agent_view::child_action_filter::filter_child_outcome;
 use crate::app::agent_view::viewer::IdleEnterQuote;
-use crate::app::agent_view::{AgentView, AppRenderParams, OverlayHeader};
+use crate::app::agent_view::{AgentView, AppRenderParams, ComposerRoute, OverlayHeader};
 use crate::app::app_view::InputOutcome;
 use crate::key;
 use crate::render::SafeBuf;
@@ -32,12 +32,18 @@ pub(super) struct InheritedOverlay<'a> {
 impl AgentView {
     /// Open the fullscreen subagent view for `child_sid`, replaying child `updates.jsonl` when the child scrollback is still empty (or the child finished).
     pub(crate) fn open_subagent_fullscreen(&mut self, child_sid: String) {
-        let Some(child) = self.subagent_views.get(&child_sid) else {
-            return;
+        let parent_session_id = {
+            let Some(child) = self.subagent_views.get_mut(&child_sid) else {
+                return;
+            };
+            // A child may be hydrated lazily from persisted state. Opening the
+            // takeover is the final ownership boundary, so stamp the child
+            // surface before its input/hints are consulted.
+            child.mark_as_subagent_view();
+            child
+                .child_link()
+                .map(|link| link.parent_session_id().clone())
         };
-        let parent_session_id = child
-            .child_link()
-            .map(|link| link.parent_session_id().clone());
         if self.active_subagent.as_deref() != Some(child_sid.as_str()) {
             self.close_subagent_fullscreen();
         }
@@ -49,6 +55,47 @@ impl AgentView {
             "opened subagent fullscreen"
         );
         self.active_subagent = Some(child_sid);
+    }
+
+    /// Open a descendant from the root Tasks tree by activating each ancestor
+    /// in turn. Rendering then follows the existing takeover stack at every
+    /// depth instead of creating a parallel navigation path.
+    pub(crate) fn open_descendant_subagent_fullscreen(&mut self, child_sid: String) -> bool {
+        if self.subagent_views.contains_key(&child_sid) {
+            self.open_subagent_fullscreen(child_sid);
+            return true;
+        }
+        let Some(next_sid) = self.subagent_views.iter().find_map(|(sid, child)| {
+            child
+                .has_descendant_subagent_view(&child_sid)
+                .then(|| sid.clone())
+        }) else {
+            return false;
+        };
+        self.open_subagent_fullscreen(next_sid.clone());
+        self.subagent_views
+            .get_mut(&next_sid)
+            .is_some_and(|child| child.open_descendant_subagent_fullscreen(child_sid))
+    }
+
+    /// Retire stale pending-kill indicators throughout the nested Pi child
+    /// hierarchy; root rendering invokes this alongside background-task cleanup.
+    pub(crate) fn clear_stale_descendant_subagent_kills(
+        &mut self,
+        now: std::time::Instant,
+        timeout_secs: u64,
+    ) {
+        for info in self.subagent_sessions.values_mut() {
+            if let Some(requested) = info.attempt.kill_requested_at
+                && now.duration_since(requested).as_secs() >= timeout_secs
+            {
+                info.attempt.pending_kill = false;
+                info.attempt.kill_requested_at = None;
+            }
+        }
+        for child in self.subagent_views.values_mut() {
+            child.clear_stale_descendant_subagent_kills(now, timeout_secs);
+        }
     }
     /// Open the takeover for the child the selected row links to (`RenderBlock::child_session_id`). `false`, so the
     /// caller keeps its routing, on a group header, an unlinked row, or a child this view does not own (a row
@@ -100,6 +147,7 @@ impl AgentView {
         scratch: &mut ScratchBuffer,
         pending_hint: Option<PendingHint>,
         theme: &Theme,
+        bundle_state: &crate::app::bundle::BundleState,
         overlay: Option<InheritedOverlay<'_>>,
     ) -> (
         Option<(u16, u16)>,
@@ -326,6 +374,7 @@ impl AgentView {
                 pending_hint,
                 false,
                 crate::app::agent_view::BannerSlotParams::none(),
+                bundle_state,
                 overlay.is_some(),
                 &mut Vec::new(),
                 AppRenderParams {
@@ -356,6 +405,16 @@ impl AgentView {
         if key.is_some_and(|key| key!('q', CONTROL).matches(key)) {
             return Some(InputOutcome::Unchanged);
         }
+        // The parent takeover owns its close keys. They must never become a
+        // child cancel or mutate a child's draft, regardless of which child
+        // pane currently has focus.
+        if key.is_some_and(|key| {
+            key.modifiers.is_empty()
+                && (key.code == KeyCode::Esc || key.code == KeyCode::Char('q'))
+        }) {
+            self.close_subagent_fullscreen();
+            return Some(InputOutcome::Changed);
+        }
         if let Event::Mouse(mouse) = ev
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self
@@ -371,16 +430,6 @@ impl AgentView {
                 .hit_subagent_frame_close
                 .update_hover(mouse.column, mouse.row)
         {
-            return Some(InputOutcome::Changed);
-        }
-        let child_in_scrollback = self
-            .subagent_views
-            .get(&child_sid)
-            .is_some_and(|c| c.is_bare_scrollback());
-        if child_in_scrollback
-            && key.is_some_and(|key| key!('q').matches(key) || key.code == KeyCode::Esc)
-        {
-            self.close_subagent_fullscreen();
             return Some(InputOutcome::Changed);
         }
         let child_quote = key.and_then(|key| {
@@ -400,10 +449,18 @@ impl AgentView {
         let Some(child_view) = self.subagent_views.get_mut(&child_sid) else {
             return Some(InputOutcome::Unchanged);
         };
+        let persistent = child_view.composer_route() == ComposerRoute::ChildSession;
         let outcome = child_view.handle_input_inner(ev, registry, prompt_paging);
         let mut child_effects = std::mem::take(&mut child_view.pending_effects);
         self.pending_effects.append(&mut child_effects);
-        Some(filter_child_outcome(outcome))
+        Some(if persistent {
+            // Pi persistent children intentionally retain the fork's fully
+            // interactive composer/queue behavior. Root-only chords are still
+            // hidden by `ViewSurface::ChildTakeover` before an action is made.
+            outcome
+        } else {
+            filter_child_outcome(outcome)
+        })
     }
 }
 #[cfg(test)]

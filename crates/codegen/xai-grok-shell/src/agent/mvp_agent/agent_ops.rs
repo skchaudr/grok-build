@@ -4609,7 +4609,8 @@ impl MvpAgent {
             if servers.is_empty() {
                 let user_path = xai_grok_tools::util::grok_home::grok_home()
                     .join("lsp.json");
-                let project_path = tool_ctx.cwd.as_path().join(".grok").join("lsp.json");
+                let project_path =
+                    xai_grok_config::project_config_dir(tool_ctx.cwd.as_path()).join("lsp.json");
                 tracing::debug!(
                     cwd = %tool_ctx.cwd,
                     user_lsp_path = %user_path.display(),

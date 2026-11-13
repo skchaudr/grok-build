@@ -29,24 +29,19 @@ pub(super) fn dispatch_jump_show_picker(app: &mut AppView) -> Vec<Effect> {
         selected: agent.scrollback.selected(),
         follow_mode: agent.scrollback.is_follow_mode(),
     };
-    // Open on the turn currently at the viewport top (rows are oldest-first, so the row index is the turn index)
     let selected = agent
         .scrollback
         .active_turn_for_viewport()
         .unwrap_or(entries.len() - 1)
         .min(entries.len() - 1);
 
-    let Some(preview_id) = entries.get(selected).map(|e| e.prompt_entry_id) else {
+    let Some(preview_id) = entries.get(selected).map(|entry| entry.prompt_entry_id) else {
         return vec![];
     };
-    agent.jump_state = Some(JumpState {
-        entries,
-        selected,
-        restore,
-    });
-    // The same top anchor that cursor moves preview and that Enter lands on
-    if let Some(idx) = agent.scrollback.index_of_id(preview_id) {
-        agent.scrollback.scroll_to_entry_top(idx);
+    agent.jump_state = Some(JumpState::new(entries, selected, restore));
+    // The same top anchor that cursor moves preview and that Enter lands on.
+    if let Some(index) = agent.scrollback.index_of_id(preview_id) {
+        agent.scrollback.scroll_to_entry_top(index);
     }
     vec![]
 }
@@ -58,13 +53,11 @@ pub(super) fn dispatch_jump_picker_select(app: &mut AppView, prompt_id: EntryId)
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    let Some(js) = agent.jump_state.take() else {
+    let Some(state) = agent.jump_state.take() else {
         return vec![];
     };
-    // The stable id resolves at the boundary; it fails only if the prompt was removed (async clear/rewind) while the picker was open
-    // Restore the captured viewport so a failed jump never strands the transcript at the last preview scroll
     if !agent.scrollback.jump_to_entry(prompt_id) {
-        agent.restore_jump_viewport(js.restore);
+        agent.restore_jump_viewport(state.restore);
     }
     vec![]
 }

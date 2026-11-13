@@ -335,6 +335,16 @@ impl AgentView {
         if key.code == KeyCode::Esc {
             return self.handle_card_esc();
         }
+        // Pi's `tui.select.cancel` defaults to both Escape and Ctrl+C for all
+        // stock extension dialogs, including input/editor while text is active.
+        if key!('c', CONTROL).matches(key)
+            && self
+                .question_view
+                .as_ref()
+                .is_some_and(crate::views::question_view::QuestionViewState::is_pi_extension_ui)
+        {
+            return self.submit_question_answers(true);
+        }
         let Some(ref mut qv) = self.question_view else {
             return InputOutcome::Unchanged;
         };
@@ -351,6 +361,15 @@ impl AgentView {
                     qv.focus = QuestionFocus::Navigation;
                     self.last_prompt_click_ms = None;
                     return InputOutcome::Changed;
+                }
+                if crate::input::key::is_force_attachment_paste_key(key) {
+                    return self.handle_force_attachment_paste_key();
+                }
+                if crate::input::key::is_paste_key(key) {
+                    let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
+                        crate::clipboard::system_clipboard_read_text(),
+                    );
+                    return self.handle_paste_key_deferred(clipboard_text);
                 }
                 match self.prompt.route_enter(key) {
                     EnterOutcome::NewlineInserted => {
@@ -2038,6 +2057,7 @@ mod question_no_freeform_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
+            &crate::app::bundle::BundleState::default(),
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -2401,7 +2421,7 @@ mod question_answer_focus_tests {
     }
     fn hint_labels(agent: &AgentView) -> Vec<String> {
         agent
-            .current_shortcut_hints(&ActionRegistry::defaults())
+            .current_shortcut_hints(&ActionRegistry::defaults(), false)
             .iter()
             .map(|hint| hint.label.to_string())
             .collect()

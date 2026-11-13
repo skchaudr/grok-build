@@ -55,6 +55,10 @@ fn log_plan_submit(action: &str) {
 }
 impl AgentView {
     /// Resolve the absolute path to the plan file for this session.
+    ///
+    /// For Pi-backed sessions the adapter publishes the sidecar path via
+    /// `pi/ui/plan_file` notification (stored in `pi_plan_file_path`).
+    /// Falls back to the Grok-native `~/.grok/sessions/...` layout.
     fn plan_file_path(&self) -> Option<std::path::PathBuf> {
         if let Some(path) = &self.pi_plan_file_path {
             return Some(path.clone());

@@ -18,9 +18,37 @@ struct CachedOutput {
     rendered: RenderedBlockOutput,
 }
 
-/// Caches truncated-mode line count so layout need not call `block.output()` (syntect or full wrap) on every redraw.
-/// Streaming invalidates the layout cache on each push; without this, every entry height is recomputed.
-/// `cwd` is keyed because Edit/Read header wrap can change between absolute and relative paths.
+/// Cached sticky-header render output.
+///
+/// Sticky headers render through `context_with_mode_and_budget` — a display
+/// mode override plus a `max_lines` budget — so they can't reuse
+/// `cached_output` (keyed on the entry's own display mode, no budget).
+/// Without this cache the pinned/pushed header re-runs `block.output()`
+/// (markdown parse + word-wrap) on EVERY frame, which is the non-compact
+/// per-frame lag path. Keyed on everything the header ctx varies by;
+/// running entries bypass the hit so spinner animation still ticks.
+#[derive(Debug, Clone)]
+struct CachedHeaderOutput {
+    width: u16,
+    mode: DisplayMode,
+    max_lines: Option<u16>,
+    raw: bool,
+    theme: ThemeKind,
+    is_selected: bool,
+    cwd: Option<PathBuf>,
+    output: BlockOutput,
+}
+
+/// Cached truncated-mode height: `(width, raw, theme, cwd, height)`.
+///
+/// Computing the truncated-mode height requires calling `block.output()` with
+/// the display mode forced to `Truncated`, which for Edit blocks triggers full
+/// syntect syntax highlighting and for Markdown blocks triggers full word-wrap.
+/// During heavy streaming on a busy subagent, the layout cache is invalidated
+/// every time a new block is pushed, so this height is recomputed for every
+/// entry on every redraw without a per-entry cache. We only need the line
+/// count, so this caches just the resulting `u16` height. `cwd` is keyed
+/// because Expanded/Truncated Edit/Read header wrap can change absolute↔relative.
 type CachedTruncatedHeight = (u16, bool, ThemeKind, Option<PathBuf>, u16);
 
 /// Unique identifier for a scrollback entry.
@@ -56,7 +84,196 @@ fn wrapped_lines_from_widths(widths: &[u32], content_width: u16) -> u16 {
     total.max(1) as u16
 }
 
-/// A scrollback entry: block content and display state.
+/// Immutable-at-the-UI-boundary diagnostic data for one ACP tool call.
+///
+/// The tracker refreshes this snapshot as ToolCallUpdate messages arrive. Keeping
+/// it beside the rendered entry means the trace modal never needs to read session
+/// JSONL or perform another agent RPC.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolTraceSnapshot {
+    pub tool_call_id: String,
+    pub title: String,
+    pub status: String,
+    pub raw_input: Option<serde_json::Value>,
+    pub raw_output: Option<serde_json::Value>,
+    /// Usage of the assistant model segment that emitted this tool call.
+    pub usage: Option<serde_json::Value>,
+    /// Session/context token count carried by SessionNotification metadata.
+    pub context_tokens: Option<u64>,
+    pub stream_start_ms: Option<i64>,
+    pub started_at_ms: Option<i64>,
+    pub updated_at_ms: Option<i64>,
+}
+
+/// Render tool trace JSON for the DocViewer, decoding raw byte payloads.
+///
+/// Native tool payloads carry stdout/stderr as `Vec<u8>` (`BashOutput.output`,
+/// `GrepSearchOutput.stdout`/`stderr`), which serde emits as an array of byte
+/// values. Those arrays are decoded to text so the trace shows the command
+/// output instead of a wall of ASCII codes.
+fn pretty_json(value: &serde_json::Value) -> String {
+    let readable = decode_byte_arrays(value);
+    serde_json::to_string_pretty(&readable).unwrap_or_else(|_| value.to_string())
+}
+
+/// Recursively replace JSON byte arrays with their decoded text.
+fn decode_byte_arrays(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => match decode_bytes(items) {
+            Some(text) => serde_json::Value::String(text),
+            None => serde_json::Value::Array(items.iter().map(decode_byte_arrays).collect()),
+        },
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), decode_byte_arrays(value)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Decode an array as UTF-8 bytes when every element is a byte and the result
+/// is text. Genuine numeric arrays (line numbers, exit codes) decode to control
+/// characters or fail UTF-8 validation, so they pass through untouched.
+fn decode_bytes(items: &[serde_json::Value]) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(items.len());
+    for item in items {
+        bytes.push(u8::try_from(item.as_u64()?).ok()?);
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    let is_text = text.chars().all(is_text_char);
+    is_text.then_some(text)
+}
+
+/// Terminal output keeps ANSI escapes and simple bells/backspaces inline; every
+/// other control byte means the array is binary data, not text.
+fn is_text_char(char: char) -> bool {
+    !char.is_control() || matches!(char, '\n' | '\r' | '\t' | '\u{7}' | '\u{8}' | '\u{1b}')
+}
+
+/// Format one or more ACP-backed tool traces for the shared DocViewer modal.
+pub fn format_tool_traces_markdown(traces: &[ToolTraceSnapshot]) -> String {
+    traces
+        .iter()
+        .enumerate()
+        .map(|(index, trace)| {
+            let mut out = String::new();
+            if traces.len() > 1 {
+                out.push_str(&format!("# Call {}\n\n", index + 1));
+            }
+            out.push_str(&format!(
+                "**Tool:** {}  \n**Tool call ID:** `{}`  \n**Status:** {}",
+                trace.title, trace.tool_call_id, trace.status
+            ));
+            if let Some(tokens) = trace.context_tokens {
+                out.push_str(&format!("  \n**Context tokens at event:** {tokens}"));
+            }
+            if let Some(ms) = trace.started_at_ms {
+                out.push_str(&format!("  \n**Started (UTC ms):** {ms}"));
+            }
+            if let Some(ms) = trace.updated_at_ms {
+                out.push_str(&format!("  \n**Updated (UTC ms):** {ms}"));
+            }
+            if let Some(ms) = trace.stream_start_ms {
+                out.push_str(&format!("  \n**Model stream start (UTC ms):** {ms}"));
+            }
+            out.push_str("\n\n## Input\n\n");
+            match trace.raw_input.as_ref() {
+                Some(value) => out.push_str(&format!("````json\n{}\n````", pretty_json(value))),
+                None => out.push_str("Not reported by agent."),
+            }
+            out.push_str("\n\n## Output\n\n");
+            match trace.raw_output.as_ref() {
+                Some(value) => out.push_str(&format!("````json\n{}\n````", pretty_json(value))),
+                None => out.push_str("Not reported by agent."),
+            }
+            out.push_str("\n\n## LLM segment usage\n\n");
+            match trace.usage.as_ref() {
+                Some(value) => out.push_str(&format!("````json\n{}\n````", pretty_json(value))),
+                None => out.push_str("Not reported by agent."),
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
+}
+
+fn format_local_timestamp(ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .map(|dt| {
+            dt.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S%.3f %:z")
+                .to_string()
+        })
+        .unwrap_or_else(|| ms.to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolTraceSplitContent {
+    pub input: String,
+    pub output: String,
+}
+
+/// Format ACP-backed tool traces into independently scrollable input/output panes.
+pub fn format_tool_traces_split(traces: &[ToolTraceSnapshot]) -> ToolTraceSplitContent {
+    let mut input_parts = Vec::with_capacity(traces.len());
+    let mut output_parts = Vec::with_capacity(traces.len());
+
+    for (index, trace) in traces.iter().enumerate() {
+        let call_heading =
+            (traces.len() > 1).then(|| format!("# Call {} · {}\n\n", index + 1, trace.title));
+
+        let mut input = call_heading.clone().unwrap_or_default();
+        input.push_str(&format!(
+            "**Tool:** {}  \n**Tool call ID:** `{}`  \n**Status:** {}",
+            trace.title, trace.tool_call_id, trace.status
+        ));
+        if let Some(tokens) = trace.context_tokens {
+            input.push_str(&format!("  \n**Context tokens at event:** {tokens}"));
+        }
+        if let Some(ms) = trace.started_at_ms {
+            input.push_str(&format!("  \n**Started:** {}", format_local_timestamp(ms)));
+        }
+        if let Some(ms) = trace.updated_at_ms {
+            input.push_str(&format!("  \n**Updated:** {}", format_local_timestamp(ms)));
+        }
+        if let Some(ms) = trace.stream_start_ms {
+            input.push_str(&format!(
+                "  \n**Model stream start:** {}",
+                format_local_timestamp(ms)
+            ));
+        }
+        input.push_str("\n\n## Input\n\n");
+        match trace.raw_input.as_ref() {
+            Some(value) => input.push_str(&format!("````json\n{}\n````", pretty_json(value))),
+            None => input.push_str("Not reported by agent."),
+        }
+        input.push_str("\n\n## LLM segment usage\n\n");
+        match trace.usage.as_ref() {
+            Some(value) => input.push_str(&format!("````json\n{}\n````", pretty_json(value))),
+            None => input.push_str("Not reported by agent."),
+        }
+        input_parts.push(input);
+
+        let mut output = call_heading.unwrap_or_default();
+        output.push_str("## Output\n\n");
+        match trace.raw_output.as_ref() {
+            Some(value) => output.push_str(&format!("````json\n{}\n````", pretty_json(value))),
+            None => output.push_str("Not reported by agent."),
+        }
+        output_parts.push(output);
+    }
+
+    ToolTraceSplitContent {
+        input: input_parts.join("\n\n---\n\n"),
+        output: output_parts.join("\n\n---\n\n"),
+    }
+}
+
+/// A scrollback entry: block content + display state.
 #[derive(Debug, Clone)]
 pub struct ScrollbackEntry {
     pub id: EntryId,
@@ -78,6 +295,14 @@ pub struct ScrollbackEntry {
     /// Raw mode: if true and block has_raw_mode(), render markdown as raw.
     pub raw: bool,
 
+    /// Hook data attached to this entry (only meaningful for ToolCall blocks).
+    pub hook_data: Option<super::blocks::tool::ToolCallHookData>,
+
+    /// ACP-backed diagnostics for the tool call(s) represented by this row.
+    /// Multiple entries are possible when adjacent Edit rows are coalesced.
+    pub tool_traces: Vec<ToolTraceSnapshot>,
+
+    /// When this entry was created (local time).
     pub created_at: Option<DateTime<Local>>,
 
     /// When this entry finished running (monotonic). Used by the renderer to flash the accent briefly after completion.
@@ -93,8 +318,14 @@ pub struct ScrollbackEntry {
     /// Populated lazily by `ensure_truncated_height_cached`. Cleared by `invalidate_cache` together with `cached_output`.
     cached_truncated_height: RefCell<Option<CachedTruncatedHeight>>,
 
-    /// Cached cheap height-estimate line count: `(content_width, lines)`.
-    /// Lets a same-width rebuild reuse the estimate instead of re-cloning the block's source text. Cleared by `invalidate_cache`.
+    /// Cached sticky-header output. See [`CachedHeaderOutput`] for why this
+    /// needs its own cache separate from `cached_output`. Cleared by
+    /// `invalidate_cache` and `evict_render_cache`.
+    cached_header_output: RefCell<Option<CachedHeaderOutput>>,
+
+    /// Cached cheap height-estimate line count: `(content_width, lines)`. Lets a
+    /// same-width rebuild reuse the estimate instead of re-cloning the block's
+    /// source text. Cleared by `invalidate_cache`.
     cached_estimate_lines: RefCell<Option<(u16, u16)>>,
 
     /// Display width of each source line. Width-independent, so unlike every other cache here it survives a resize.
@@ -157,10 +388,13 @@ impl ScrollbackEntry {
             display_mode,
             display_mode_pinned: false,
             raw: false,
+            hook_data: None,
+            tool_traces: Vec::new(),
             created_at: Some(Local::now()),
             finished_at: None,
             cached_output: RefCell::new(None),
             cached_truncated_height: RefCell::new(None),
+            cached_header_output: RefCell::new(None),
             cached_estimate_lines: RefCell::new(None),
             cached_line_widths: RefCell::new(None),
         }
@@ -186,10 +420,13 @@ impl ScrollbackEntry {
             display_mode,
             display_mode_pinned: false,
             raw: false,
+            hook_data: None,
+            tool_traces: Vec::new(),
             created_at: Some(Local::now()),
             finished_at: None,
             cached_output: RefCell::new(None),
             cached_truncated_height: RefCell::new(None),
+            cached_header_output: RefCell::new(None),
             cached_estimate_lines: RefCell::new(None),
             cached_line_widths: RefCell::new(None),
         }
@@ -252,6 +489,7 @@ impl ScrollbackEntry {
     pub fn invalidate_width_caches(&mut self) {
         *self.cached_output.borrow_mut() = None;
         *self.cached_truncated_height.borrow_mut() = None;
+        *self.cached_header_output.borrow_mut() = None;
         *self.cached_estimate_lines.borrow_mut() = None;
     }
 
@@ -263,6 +501,7 @@ impl ScrollbackEntry {
         if had_output {
             *self.cached_output.borrow_mut() = None;
         }
+        *self.cached_header_output.borrow_mut() = None;
         self.block.evict_render_caches();
         had_output
     }
@@ -386,9 +625,69 @@ impl ScrollbackEntry {
         })
     }
 
-    /// Without this cache, `block.output` runs uncached on every layout rebuild and re-highlights every entry on each streaming push.
-    /// Key is `(content_width, raw, theme, cwd)`; `is_selected` is excluded because line count never depends on selection.
-    /// Cleared together with `cached_output` by `invalidate_cache`.
+    /// Ensure the sticky-header output cache is populated for `ctx`.
+    ///
+    /// `ctx` is the header context built by `context_with_mode_and_budget`
+    /// (mode override + `max_lines` budget), which is why this cache is
+    /// separate from `cached_output`. Running entries always regenerate so
+    /// spinner/elapsed animation isn't frozen by the cache.
+    pub(crate) fn ensure_header_cached(&self, ctx: &BlockContext) {
+        let current_theme = theme_cache::current_kind();
+        if !self.is_running {
+            let cache = self.cached_header_output.borrow();
+            if let Some(cached) = cache.as_ref()
+                && cached.width == ctx.width
+                && cached.mode == ctx.mode
+                && cached.max_lines == ctx.max_lines
+                && cached.raw == ctx.raw
+                && cached.theme == current_theme
+                && cached.is_selected == ctx.is_selected
+                && cached.cwd == ctx.cwd
+            {
+                return; // cache hit
+            }
+        }
+
+        let output = self.block.output(ctx);
+        *self.cached_header_output.borrow_mut() = Some(CachedHeaderOutput {
+            width: ctx.width,
+            mode: ctx.mode,
+            max_lines: ctx.max_lines,
+            raw: ctx.raw,
+            theme: current_theme,
+            is_selected: ctx.is_selected,
+            cwd: ctx.cwd.clone(),
+            output,
+        });
+    }
+
+    /// Borrow the cached sticky-header output.
+    ///
+    /// Panics if `ensure_header_cached` was not called first.
+    pub(crate) fn cached_header_output_ref(&self) -> Ref<'_, BlockOutput> {
+        Ref::map(self.cached_header_output.borrow(), |opt| {
+            &opt.as_ref()
+                .expect("ensure_header_cached must be called first")
+                .output
+        })
+    }
+
+    /// Ensure the truncated-mode height cache is populated, returning the height.
+    ///
+    /// Returns the line count (including vpad) the entry would occupy if
+    /// rendered in `DisplayMode::Truncated`. Used by the layout cache to
+    /// precompute sticky header heights for every entry.
+    ///
+    /// Without this cache, `block.output(&ctx)` runs uncached on every layout
+    /// rebuild; for Edit blocks that triggers full syntect highlighting and
+    /// for Markdown blocks a full word-wrap. During heavy subagent streaming
+    /// the layout cache is invalidated on every new block (see
+    /// `ScrollbackState::push`), so this would otherwise re-highlight every
+    /// entry on every redraw.
+    ///
+    /// The cache key is `(content_width, raw, theme, cwd)`. `is_selected` is
+    /// intentionally excluded because line count never depends on selection
+    /// styling. Cleared together with `cached_output` by `invalidate_cache`.
     pub fn ensure_truncated_height_cached(
         &self,
         content_width: u16,
@@ -493,6 +792,46 @@ impl ScrollbackEntry {
         self.block.rendered_output(ctx).output
     }
 
+    fn rendered_output_with_hooks(&self, ctx: &BlockContext) -> RenderedBlockOutput {
+        let mut rendered = self.block.rendered_output(ctx);
+        let output = &mut rendered.output;
+        if let Some(ref hd) = self.hook_data {
+            use super::blocks::tool::hook::{
+                render_hook_separator, render_hooks_for_mode, render_hooks_inline_suffix,
+            };
+            match ctx.mode {
+                DisplayMode::Collapsed => {
+                    if let Some(suffix_spans) = render_hooks_inline_suffix(hd)
+                        && let Some(first_line) = output.lines.first_mut()
+                    {
+                        first_line.content.spans.extend(suffix_spans);
+                    }
+                }
+                _ => {
+                    let pre = render_hooks_for_mode("pre_tool_use", &hd.pre_hooks, ctx.mode);
+                    let post = render_hooks_for_mode("post_tool_use", &hd.post_hooks, ctx.mode);
+                    let has_any = !pre.is_empty() || !post.is_empty() || !hd.lifecycle.is_empty();
+                    if has_any {
+                        output.lines.push(render_hook_separator());
+                    }
+                    output.lines.extend(pre);
+                    output.lines.extend(post);
+                    for (event_name, runs) in &hd.lifecycle {
+                        output
+                            .lines
+                            .extend(render_hooks_for_mode(event_name, runs, ctx.mode));
+                    }
+                }
+            }
+        }
+        rendered
+    }
+
+    /// Produce block output with hook lines injected (tool first, then hooks).
+    pub fn output_with_hooks(&self, ctx: &BlockContext) -> BlockOutput {
+        self.rendered_output_with_hooks(ctx).output
+    }
+
     pub fn context_with_budget(
         &self,
         width: u16,
@@ -561,6 +900,44 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use ratatui::style::Color;
+
+    #[test]
+    fn pretty_json_decodes_byte_arrays_to_text() {
+        let raw = serde_json::json!({
+            "type": "GrepSearch",
+            "stdout": "a/b.json".as_bytes().to_vec(),
+            "stderr": Vec::<u8>::new(),
+            "file_matches": [],
+            "line_numbers": [1, 2, 3],
+        });
+        let rendered = pretty_json(&raw);
+        assert!(rendered.contains("\"stdout\": \"a/b.json\""), "{rendered}");
+        // Empty byte arrays and genuine numeric arrays stay as-is.
+        assert!(rendered.contains("\"stderr\": []"), "{rendered}");
+        // serde_json pretty-prints with two-space indentation, so a numeric
+        // array that survived decoding still shows one number per indented line.
+        assert!(
+            rendered.contains("\"line_numbers\": [\n    1,"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn pretty_json_leaves_non_text_byte_arrays_alone() {
+        // Invalid UTF-8 (0xff) and control bytes are not text.
+        let rendered = pretty_json(&serde_json::json!({"output": [104, 0, 255]}));
+        assert!(rendered.contains("104"), "{rendered}");
+    }
+
+    #[test]
+    fn pretty_json_keeps_ansi_escapes_in_decoded_output() {
+        let raw = serde_json::json!({"output": "\u{1b}[32mok\u{1b}[0m".as_bytes().to_vec()});
+        assert!(
+            pretty_json(&raw).contains("\\u001b[32mok\\u001b[0m"),
+            "{}",
+            pretty_json(&raw)
+        );
+    }
 
     #[test]
     fn test_entry_new() {

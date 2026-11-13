@@ -1,0 +1,139 @@
+{
+  "ts": "2026-07-22T02:28:15.618Z",
+  "kind": "delta",
+  "delta": {
+    "pdca": {
+      "stage": "check",
+      "stages": [
+        {
+          "id": "plan",
+          "label": "Plan",
+          "status": "completed"
+        },
+        {
+          "id": "do",
+          "label": "Do",
+          "status": "completed"
+        },
+        {
+          "id": "check",
+          "label": "Check",
+          "status": "in_progress"
+        },
+        {
+          "id": "act",
+          "label": "Act",
+          "status": "planned"
+        }
+      ]
+    },
+    "current_phase": "D1",
+    "updated_at": "2026-07-22T02:28:15.618Z",
+    "phases": [
+      {
+        "id": "P0",
+        "name": "frame objective and constraints",
+        "pdca_stage": "plan",
+        "status": "completed"
+      },
+      {
+        "id": "P1",
+        "name": "execute first tracer path",
+        "pdca_stage": "do",
+        "status": "completed"
+      },
+      {
+        "id": "D1",
+        "name": "choose implementation route",
+        "pdca_stage": "check",
+        "status": "in_progress",
+        "type": "decision"
+      },
+      {
+        "id": "P2",
+        "name": "validate evidence and regressions",
+        "pdca_stage": "check",
+        "status": "planned"
+      },
+      {
+        "id": "D2",
+        "name": "decide continue, pivot, or close",
+        "pdca_stage": "act",
+        "status": "planned",
+        "type": "decision"
+      },
+      {
+        "id": "P3",
+        "name": "act on learning and hand off",
+        "pdca_stage": "act",
+        "status": "planned"
+      }
+    ],
+    "decision_points": [
+      {
+        "id": "D1",
+        "phase": "D1",
+        "question": "Which route should the next implementation take?",
+        "status": "decided",
+        "options": [
+          {
+            "id": "direct",
+            "label": "Direct implementation",
+            "next_phase": "P2",
+            "criteria": "Scope is clear, blast radius is small, and validation path is known."
+          },
+          {
+            "id": "research",
+            "label": "Research first",
+            "next_phase": "P0",
+            "criteria": "Domain facts, dependencies, or ownership are still unclear."
+          },
+          {
+            "id": "split",
+            "label": "Split into slices",
+            "next_phase": "P1",
+            "criteria": "The work is valid but too broad for one safe change."
+          }
+        ],
+        "selected_option_id": "split",
+        "rationale": "Full upstream compat spans shell seam + External runtime + Pi spawn extension + adapter projection; must ship as S1-S5 not one PR. Research already closed engine/host ownership.",
+        "decided_at": "2026-07-22T02:28:15.618Z"
+      },
+      {
+        "id": "D2",
+        "phase": "D2",
+        "question": "After Check, should this cycle close, pivot, or continue?",
+        "status": "open",
+        "options": [
+          {
+            "id": "close",
+            "label": "Close cycle",
+            "next_phase": "P3",
+            "criteria": "Acceptance evidence is complete and no important risk remains."
+          },
+          {
+            "id": "continue",
+            "label": "Continue same cycle",
+            "next_phase": "P1",
+            "criteria": "Core direction is right but more execution is required."
+          },
+          {
+            "id": "pivot",
+            "label": "Pivot plan",
+            "next_phase": "P0",
+            "criteria": "Validation changed the problem or invalidated current assumptions."
+          }
+        ],
+        "selected_option_id": null,
+        "rationale": "",
+        "decided_at": null
+      }
+    ],
+    "validation": {
+      "notes": "Plan-only: architecture locked; no code verification yet."
+    },
+    "next_action": "Write docs/issues architecture planning issue (S0), then implement S1 shell WorkflowAgentSpawn trait with Grok default backend regression tests.",
+    "notes": "Architecture: xai-workflow + shell seam + Pi Spawn backend only. Risks: pub(crate) export, fork_context best-effort, appendEntry spawn bridge."
+  },
+  "event": "p0-framed-d1-split"
+}

@@ -974,6 +974,81 @@ fn announcements_show_clears_hidden_promo_ids() {
     );
 }
 #[test]
+fn scoped_models_drive_next_model_order_and_effort() {
+    use crate::acp::model_state::ScopedModel;
+    use xai_grok_shell::sampling::types::ReasoningEffort;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_a = acp::ModelId::new(std::sync::Arc::from("model-a"));
+    let model_b = acp::ModelId::new(std::sync::Arc::from("model-b"));
+    {
+        let models = &mut app.agents.get_mut(&id).unwrap().session.models;
+        models.available.insert(
+            model_a.clone(),
+            acp::ModelInfo::new(model_a.clone(), "Model A".to_string()),
+        );
+        models.available.insert(
+            model_b.clone(),
+            acp::ModelInfo::new(model_b.clone(), "Model B".to_string()),
+        );
+        models.current = Some(model_a.clone());
+    }
+    let effort: ReasoningEffort = "high".parse().unwrap();
+    let effects = dispatch(
+        Action::SetScopedModels(vec![
+            ScopedModel::new(model_b.clone(), Some(effort.clone())),
+            ScopedModel::new(model_a, None),
+        ]),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(app.agents[&id].session.models.scoped_models().len(), 2);
+
+    let effects = dispatch(Action::NextModel, &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SwitchModel {
+            model_id,
+            effort: Some(actual_effort),
+            ..
+        }] if model_id == &model_b && actual_effort == &effort
+    ));
+    assert!(app.agents[&id].session.model_switch_pending);
+}
+
+#[test]
+fn clearing_scoped_models_restores_all_model_cycle() {
+    use crate::acp::model_state::ScopedModel;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_a = acp::ModelId::new(std::sync::Arc::from("model-a"));
+    let model_b = acp::ModelId::new(std::sync::Arc::from("model-b"));
+    {
+        let models = &mut app.agents.get_mut(&id).unwrap().session.models;
+        models.available.insert(
+            model_a.clone(),
+            acp::ModelInfo::new(model_a.clone(), "Model A".to_string()),
+        );
+        models.available.insert(
+            model_b.clone(),
+            acp::ModelInfo::new(model_b.clone(), "Model B".to_string()),
+        );
+        models.current = Some(model_a.clone());
+        models.set_scoped_models(vec![ScopedModel::new(model_b.clone(), None)]);
+    }
+    let effects = dispatch(Action::SetScopedModels(Vec::new()), &mut app);
+    assert!(effects.is_empty());
+    assert!(!app.agents[&id].session.models.has_scoped_models());
+    let effects = dispatch(Action::NextModel, &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SwitchModel { model_id, effort: None, .. }] if model_id == &model_b
+    ));
+}
+
+#[test]
 fn switch_model_dispatch_produces_effect_and_sets_pending() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -1303,14 +1378,133 @@ fn slash_model_invalid_arg_produces_scrollback_error() {
     assert!(agent_ref(&app, id).prompt.text().is_empty());
 }
 #[test]
-fn slash_model_no_args_produces_scrollback_error() {
+fn slash_model_no_args_opens_model_picker() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let initial_scrollback = agent_ref(&app, id).scrollback.len();
+    let model_id = acp::ModelId::new("test-provider::test-model");
+    app.agents
+        .get_mut(&id)
+        .expect("agent")
+        .session
+        .models
+        .available
+        .insert(
+            model_id.clone(),
+            acp::ModelInfo::new(model_id.clone(), "Test Model"),
+        );
+    app.agents
+        .get_mut(&id)
+        .expect("agent")
+        .session
+        .models
+        .current = Some(model_id);
     let effects = dispatch(Action::SendPrompt("/model".into()), &mut app);
     assert!(effects.is_empty());
-    assert_eq!(agent_ref(&app, id).scrollback.len(), initial_scrollback + 1);
+    assert!(matches!(
+        app.agents[&id].active_modal,
+        Some(crate::views::modal::ActiveModal::ArgPicker { ref command, .. })
+            if command == "model"
+    ));
 }
+#[test]
+fn recap_model_setting_opens_native_model_picker() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = acp::ModelId::new("test-provider::test-model");
+    app.agents
+        .get_mut(&id)
+        .expect("agent")
+        .session
+        .models
+        .available
+        .insert(
+            model_id.clone(),
+            acp::ModelInfo::new(model_id, "Test Model"),
+        );
+
+    let effects = dispatch(Action::OpenRecapModelPicker, &mut app);
+
+    assert!(effects.is_empty());
+    let Some(crate::views::modal::ActiveModal::ArgPicker {
+        command,
+        selection,
+        items,
+        ..
+    }) = &app.agents[&id].active_modal
+    else {
+        panic!("expected native model picker");
+    };
+    assert_eq!(command, "model");
+    assert_eq!(
+        *selection,
+        crate::views::modal::ArgPickerSelection::SetModelSlot("recap_model")
+    );
+    assert_eq!(items[0].display, "(no override)");
+}
+
+#[test]
+fn side_model_picker_stashes_open_settings_modal() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::settings_modal::SettingsModalState;
+    use std::sync::Arc;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = acp::ModelId::new("test-provider::test-model");
+    app.agents
+        .get_mut(&id)
+        .expect("agent")
+        .session
+        .models
+        .available
+        .insert(
+            model_id.clone(),
+            acp::ModelInfo::new(model_id, "Test Model"),
+        );
+
+    // Seed an open F2 settings modal (as if user is in Recap models group).
+    let registry = crate::settings::SettingsRegistry::defaults();
+    let mut settings = SettingsModalState::new(
+        Arc::new(registry),
+        app.current_ui.clone(),
+        crate::settings::PagerLocalSnapshot::default(),
+    );
+    // Enter the recap models group if present.
+    if let Some(idx) = settings.rows.iter().position(|r| {
+        matches!(r, crate::views::settings_modal::RowEntry::Setting { key, .. } if *key == "recap_models")
+    }) {
+        settings.selected = idx;
+        let _ = settings.try_enter_picking_group();
+    }
+    app.agents.get_mut(&id).unwrap().active_modal = Some(ActiveModal::Settings {
+        state: Box::new(settings),
+    });
+
+    let effects = dispatch(
+        Action::OpenSideModelPicker {
+            slot_key: "recap_model",
+        },
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    let Some(ActiveModal::ArgPicker {
+        previous_settings,
+        selection,
+        ..
+    }) = &app.agents[&id].active_modal
+    else {
+        panic!("expected ArgPicker stacked over settings");
+    };
+    assert!(
+        previous_settings.is_some(),
+        "settings modal must be stashed while choosing a side model"
+    );
+    assert_eq!(
+        *selection,
+        crate::views::modal::ArgPickerSelection::SetModelSlot("recap_model")
+    );
+}
+
 #[test]
 fn slash_hooks_opens_modal() {
     let mut app = test_app_with_agent();
@@ -1382,6 +1576,40 @@ fn acp_bootstrap_command_executes_as_passthrough() {
         "ACP command should passthrough, got: {effects:?}"
     );
 }
+#[test]
+fn pi_extension_command_bypasses_local_prompt_queue() {
+    let mut app = test_app();
+    app.bootstrap_acp_commands = vec![
+        acp::AvailableCommand::new("review".to_string(), "Review changes".to_string()).meta(
+            serde_json::json!({ "piCommandSource": "extension" })
+                .as_object()
+                .cloned(),
+        ),
+    ];
+    dispatch(Action::NewSession, &mut app);
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some("sess-1".into());
+        agent.session.state = AgentState::TurnRunning;
+        agent.prompt.sync_acp_commands(
+            &agent.session.available_commands,
+            agent.session.available_tools.as_ref(),
+            &agent.session.models,
+        );
+    }
+
+    let effects = dispatch(Action::SendPrompt("/review focus queue".into()), &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::RunPiExtensionCommand { session_id, command }]
+            if session_id.0.as_ref() == "sess-1" && command == "/review focus queue"
+    ));
+    assert_eq!(app.agents[&id].session.queue_len(), 0);
+    assert!(app.agents[&id].shared_queue.is_empty());
+    assert!(app.agents[&id].session.state.is_turn_running());
+}
+
 #[test]
 fn acp_runtime_update_replaces_commands_in_autocomplete() {
     let mut app = test_app();
@@ -2216,8 +2444,11 @@ fn pr13_each_setter_writes_to_its_own_mirror() {
     assert_eq!(app.auto_update, Some(false));
     assert_eq!(app.show_tips, Some(false));
 }
-/// The PAGER registry default must agree with `PagerLocalSnapshot::default()` and with `AgentView::new`'s runtime initializer.
-/// `defaults_match_pager_state` in `registry::tests` covers the snapshot leg; the registry test alone can't see `AgentView::new`'s constant.
+/// Runtime alignment pin: each PAGER registry default must agree with its
+/// construction-time source. Agent-owned values are checked against
+/// `AgentView::new`; external-only process-local values are checked against
+/// their cache initializer.
+
 #[test]
 fn pager_registry_default_matches_agent_view_new_initializer() {
     use crate::settings::{SettingKind, SettingOwner, SettingsRegistry};
@@ -2265,6 +2496,14 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
                          from the agent's default appearance config ({live}). Update one \
                          to match the other — ScrollConfig::default() is the source of \
                          truth.",
+                );
+            }
+            ("side_by_side_edit", SettingKind::Bool { default }) => {
+                assert_eq!(
+                    *default,
+                    crate::appearance::cache::SIDE_BY_SIDE_EDIT_DEFAULT,
+                    "registry default for `side_by_side_edit` drifts from the process-local \
+                     renderer preference initializer",
                 );
             }
             _ => {
@@ -2788,6 +3027,59 @@ fn delete_session_refuses_conversation_row() {
     );
     assert!(read_toast(&app).contains("isn't supported"));
 }
+
+#[test]
+fn collapse_on_minimal_tool_trace_opens_split_trace_viewer() {
+    use crate::scrollback::entry::ToolTraceSnapshot;
+    use crate::scrollback::{DisplayMode, RenderBlock};
+    use crate::views::modal::ActiveModal;
+
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let entry_id = agent
+        .scrollback
+        .push_block(RenderBlock::tool_call("read", "README.md", true));
+    let index = agent.scrollback.index_of_id(entry_id).unwrap();
+    let entry = agent.scrollback.get_by_id_mut(entry_id).unwrap();
+    entry.display_mode = DisplayMode::Collapsed;
+    entry.tool_traces.push(ToolTraceSnapshot {
+        tool_call_id: "trace-1".into(),
+        title: "read".into(),
+        status: "Completed".into(),
+        raw_input: Some(serde_json::json!({ "path": "README.md" })),
+        raw_output: Some(serde_json::json!({ "content": "hello" })),
+        usage: Some(serde_json::json!({ "input": 101, "output": 23 })),
+        context_tokens: Some(925),
+        stream_start_ms: Some(1_000),
+        started_at_ms: Some(1_200),
+        updated_at_ms: Some(1_350),
+    });
+    agent.scrollback.set_selected(Some(index));
+
+    let effects = dispatch(Action::Collapse, &mut app);
+    assert!(effects.is_empty());
+    let agent = get_active_agent(&app).expect("active agent");
+    let Some(ActiveModal::ToolTraceViewer {
+        title,
+        input,
+        output,
+        input_scroll,
+        output_scroll,
+        ..
+    }) = agent.active_modal.as_ref()
+    else {
+        panic!("expected ToolTraceViewer");
+    };
+    assert!(title.contains("read"));
+    assert!(input.contains("README.md"));
+    assert!(input.contains("LLM segment usage"));
+    assert!(output.contains("hello"));
+    assert_eq!(*input_scroll, 0);
+    assert_eq!(*output_scroll, 0);
+}
+
+/// Expanding a conversation card must not read `chat_history.jsonl`
+/// (it doesn't exist); the row still toggles open.
 #[test]
 fn delete_session_refuses_known_read_only_workspace_member() {
     let mut app = test_app_with_agent();
@@ -2828,6 +3120,7 @@ fn delete_session_refuses_known_read_only_workspace_member() {
     assert!(read_toast(&app).contains("workspace is read-only"));
 }
 /// Expanding a conversation card must not read `chat_history.jsonl` (it doesn't exist); the row still toggles open.
+
 #[test]
 fn expand_conversation_card_skips_detail_load() {
     use crate::views::modal::ActiveModal;

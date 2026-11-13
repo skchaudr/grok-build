@@ -115,20 +115,10 @@ impl ScrollbackState {
     }
 
     /// Common logic for switching to a specific turn (jumps to its prompt).
-    fn activate_turn(&mut self, turn_idx: usize) {
+    pub(super) fn activate_turn(&mut self, turn_idx: usize) {
         if let Some(prompt_index) = self.turns.get(turn_idx).map(|t| t.prompt_index) {
             self.activate_entry(turn_idx, prompt_index);
         }
-    }
-
-    /// Jump directly to a turn by index: select its prompt and scroll it to the viewport top (same behavior as h/l turn navigation, random access).
-    /// Returns `false` for an out-of-range index.
-    pub fn jump_to_turn(&mut self, turn_idx: usize) -> bool {
-        if turn_idx >= self.turns.len() {
-            return false;
-        }
-        self.activate_turn(turn_idx);
-        true
     }
 
     /// Jump to a turn by its prompt's stable [`EntryId`]: resolve to the current index and activate that turn.
@@ -138,7 +128,11 @@ impl ScrollbackState {
         let Some(entry_idx) = self.index_of_id(prompt_id) else {
             return false;
         };
-        let Some(turn_idx) = self.turns.iter().position(|t| t.prompt_index == entry_idx) else {
+        let Some(turn_idx) = self
+            .turns
+            .iter()
+            .position(|turn| turn.prompt_index == entry_idx)
+        else {
             return false;
         };
         self.activate_turn(turn_idx);

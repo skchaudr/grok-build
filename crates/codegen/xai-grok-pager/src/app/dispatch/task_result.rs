@@ -17,7 +17,7 @@ use super::ctx::{find_agent_by_session_id, get_active_agent_mut};
 use super::notes::{handle_btw_response, handle_memory_note_saved};
 use super::prompt::{
     defer_to_open_reload_window, handle_compact_complete, handle_memory_command_complete,
-    handle_prompt_response, handle_suggestion_debounce_expired,
+    handle_prompt_response, handle_subagent_prompt_response, handle_suggestion_debounce_expired,
 };
 use super::queue::push_and_page_flip;
 use super::rewind::{
@@ -737,6 +737,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::PiSessionReply { agent_id, op, reply } => {
             super::session::pi_session::handle_pi_session_reply(app, agent_id, op, reply)
         }
+        TaskResult::ExternalSessionCatalogRequested => vec![],
+        TaskResult::ExternalSessionCatalogFailed => {
+            app.mark_external_session_catalog_failed();
+            vec![]
+        }
         TaskResult::SessionListFailed {
             host,
             generation,
@@ -767,6 +772,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             },
             query,
         ),
+
         TaskResult::RosterLoaded { sessions } => {
             app.leader_roster = sessions;
             app.dashboard_sessions_loading = false;
@@ -1460,6 +1466,23 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::WorkflowHostMessage {
+            agent_id,
+            session_id,
+            message,
+            is_error: _,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id)
+                && agent.session.session_id.as_ref() == Some(&session_id)
+            {
+                agent.show_toast(message.as_str());
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::RenderBlock::system(message));
+            }
+            vec![]
+        }
+
         TaskResult::SkillsToggleDone { agent_id, result } => {
             handle_skills_toggle_done(app, agent_id, result)
         }
@@ -1522,6 +1545,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 }
                 agent.apply_full_context_info(info.data.context);
                 if let Some(state) = usage_modal_state_mut(agent) {
+                    state.ctx.session_file = info.session_file.clone();
                     state.session_fields = Some(fields);
                     state.session_error = None;
                 } else if minimal {
@@ -2140,6 +2164,32 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             tracing::warn!(error = %error, "bundle status fetch failed");
             vec![]
         }
+        TaskResult::CatalogEntryReady {
+            kind,
+            name,
+            content,
+        } => {
+            if let ActiveView::Agent(id) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&id)
+            {
+                let title = format!("{kind}: {name}");
+                agent.show_block_viewer(
+                    crate::views::block_viewer::BlockViewerPane::for_plain_text(&title, &content),
+                );
+            }
+            vec![]
+        }
+        TaskResult::CatalogEntryFailed { error } => {
+            tracing::warn!(error = %error, "catalog entry fetch failed");
+            if let ActiveView::Agent(id) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&id)
+            {
+                agent
+                    .scrollback
+                    .push_block(RenderBlock::system(format!("Couldn't load entry: {error}")));
+            }
+            vec![]
+        }
         TaskResult::BtwResponse {
             agent_id,
             result,
@@ -2180,7 +2230,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             remaining,
         } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
-                for (text, interjection_id, _blocks) in remaining.into_iter().rev() {
+                for (text, interjection_id, blocks) in remaining.into_iter().rev() {
                     agent.self_interjection_ids.remove(&interjection_id);
                     if let Some(entry_id) =
                         agent.interjection_painted_blocks.remove(&interjection_id)
@@ -2200,9 +2250,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                             id,
                             text,
                             kind: crate::app::agent::QueueEntryKind::Prompt,
-                            wire_blocks: None,
+                            wire_blocks: blocks,
                             images,
                             display_as_skill: false,
+                            task_id: None,
+                            human_schedule: None,
                             chip_elements: Vec::new(),
                             skill_token_ranges: Vec::new(),
                             combined_texts: Vec::new(),
@@ -2300,6 +2352,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 seq,
             },
             results,
+        ),
+        TaskResult::SessionPreviewLoaded {
+            session_id,
+            messages,
+            generation,
+        } => super::session::load::handle_session_preview_loaded(
+            app, session_id, messages, generation,
         ),
         TaskResult::RewindPointsLoaded { agent_id, points } => {
             handle_rewind_points_loaded(app, agent_id, points)

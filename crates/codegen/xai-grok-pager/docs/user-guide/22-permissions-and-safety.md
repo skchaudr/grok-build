@@ -548,7 +548,7 @@ Recommended combination for untrusted code:
 - Permission decisions appear in the transcript.
 - The `/always-approve` command toggles always-approve mode; other modes are set through `defaultMode` (see [How to set the mode](#how-to-set-the-mode)).
 - Permission prompts include per-command "Always allow" options that persist for the current project only (on by default; disable with `[ui] remember_tool_approvals = false`). See [Interactive Approvals](#interactive-approvals-and-where-they-persist).
-- To manage hooks and plugins, run `/hooks` or `/plugins` (on most terminals, **Ctrl+L** also opens the Extensions modal; on VS Code, Cursor, Windsurf, and Zed, `Ctrl+L` is mid-turn interject instead). See [10-hooks.md](10-hooks.md).
+- To manage hooks and plugins, run `/hooks` or `/plugins` (`Ctrl+L` is the model picker). See [10-hooks.md](10-hooks.md).
 
 ---
 
@@ -569,4 +569,3 @@ Recommended combination for untrusted code:
 - [Agent mode](15-agent-mode.md) — ACP, stdio, and agent servers
 - [Sandbox](18-sandbox.md) — OS-level isolation profiles
 - [Configuration](05-configuration.md) — Native `config.toml` structure
-

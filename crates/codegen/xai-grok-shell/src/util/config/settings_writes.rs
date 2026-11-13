@@ -1,9 +1,11 @@
+use super::mcp::Config;
 use super::persist::update_config;
 use crate::agent::config::Feature;
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
+use xai_grok_shared::ui_config::PiBuiltinTools;
 use xai_grok_config::fs_atomic::BoundDest;
 
 // --------------------------------------------------------------------------- Settings helpers: typed disk-write wrappers for each setting
@@ -182,6 +184,11 @@ pub async fn set_follow_up_behavior(value: String) -> Result<()> {
     update_config(|cfg| cfg.ui.follow_up_behavior = Some(value)).await
 }
 
+/// Persist `[ui].cancel_turn_key` (`"esc"` | `"ctrl_c"`).
+pub async fn set_cancel_turn_key(value: String) -> Result<()> {
+    update_config(|cfg| cfg.ui.cancel_turn_key = Some(value)).await
+}
+
 /// Persist `[ui].simple_mode` via `update_config`.
 /// The `Option<bool>` shape matches `show_timestamps`.
 pub async fn set_simple_mode(value: bool) -> Result<()> {
@@ -350,6 +357,184 @@ pub async fn set_fork_secondary_model(value: String) -> Result<()> {
     .await
 }
 
+/// Persist `[ui].recap_model` via `update_config`.
+///
+/// Empty string clears the override (use active session model).
+pub async fn set_recap_model(value: String) -> Result<()> {
+    set_named_model_override("recap_model", value, |cfg, v| cfg.ui.recap_model = v).await
+}
+
+pub async fn set_recap_model_2(value: String) -> Result<()> {
+    set_named_model_override("recap_model_2", value, |cfg, v| cfg.ui.recap_model_2 = v).await
+}
+
+pub async fn set_recap_model_3(value: String) -> Result<()> {
+    set_named_model_override("recap_model_3", value, |cfg, v| cfg.ui.recap_model_3 = v).await
+}
+
+pub async fn set_btw_model(value: String) -> Result<()> {
+    set_named_model_override("btw_model", value, |cfg, v| cfg.ui.btw_model = v).await
+}
+
+pub async fn set_btw_model_2(value: String) -> Result<()> {
+    set_named_model_override("btw_model_2", value, |cfg, v| cfg.ui.btw_model_2 = v).await
+}
+
+pub async fn set_btw_model_3(value: String) -> Result<()> {
+    set_named_model_override("btw_model_3", value, |cfg, v| cfg.ui.btw_model_3 = v).await
+}
+
+async fn set_named_model_override(
+    key: &str,
+    value: String,
+    assign: impl FnOnce(&mut Config, String),
+) -> Result<()> {
+    if value.len() > MAX_DEFAULT_MODEL_LEN {
+        anyhow::bail!(
+            "{key} name too long ({} > {} bytes)",
+            value.len(),
+            MAX_DEFAULT_MODEL_LEN
+        );
+    }
+    update_config(|cfg| {
+        assign(cfg, value);
+    })
+    .await
+}
+
+/// Persist `[ui].session_recap` (auto return-from-away recap toggle).
+pub async fn set_session_recap(value: bool) -> Result<()> {
+    update_config(|cfg| {
+        cfg.ui.session_recap = Some(value);
+    })
+    .await
+}
+
+/// Persist `[ui].recap_mermaid` (optional Markdown Mermaid in recap output).
+pub async fn set_recap_mermaid(value: bool) -> Result<()> {
+    update_config(|cfg| {
+        cfg.ui.recap_mermaid = Some(value);
+    })
+    .await
+}
+
+/// Persist `[ui].progress_bar` (OSC 9;4 terminal-tab progress indicators).
+pub async fn set_progress_bar(value: bool) -> Result<()> {
+    update_config(|cfg| {
+        cfg.ui.progress_bar = Some(value);
+    })
+    .await
+}
+
+/// Persist `[ui].remote_tui_footer` (experimental Remote TUI footer).
+pub async fn set_remote_tui_footer(value: bool) -> Result<()> {
+    update_config(|cfg| {
+        cfg.ui.remote_tui_footer = Some(value);
+    })
+    .await
+}
+
+/// Persist the `grok-pi` F2 selection of Pi built-in tools. Pi applies this
+/// only in its external profile, so normal Grok sessions are unaffected.
+pub async fn set_pi_builtin_tools(value: PiBuiltinTools) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_builtin_tools = value).await
+}
+
+/// Persist the grok-pi Bash/Eval bridge master switch.
+pub async fn set_pi_bash(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_bash = value).await
+}
+
+/// Persist the grok-pi Eval bridge generation (`v1` or `v2`).
+pub async fn set_pi_eval(value: String) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_eval = value).await
+}
+
+/// Persist the Eval v2 language selector (`js`, `py`, or `all`).
+pub async fn set_pi_eval_v2_language(value: String) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_eval_v2_language = value).await
+}
+
+/// Persist the Eval v2 presentation mode (`effects` or `legacy`).
+pub async fn set_pi_eval_v2_display_mode(value: String) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_eval_v2_display_mode = value).await
+}
+
+/// Persist the grok-pi Eval v2 isolation mode.
+pub async fn set_pi_eval_v2_only(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_eval_v2_only = value).await
+}
+
+/// Persist the opt-in Eval v2-only MCP facade.
+pub async fn set_pi_eval_mcp(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_eval_mcp = value).await
+}
+
+/// Persist the optional PSM SQLite session-index preference for grok-pi.
+pub async fn set_psm_resume_index(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.psm_resume_index = value).await
+}
+
+/// Persist `[ui].pi_tree_file_rollback` via `update_config`.
+pub async fn set_pi_tree_file_rollback(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_tree_file_rollback = value).await
+}
+
+/// Persist a registered host-feature bool through its typed UiConfig binding.
+pub async fn set_host_feature_bool(
+    key: crate::host_features::HostFeatureKey,
+    value: bool,
+) -> Result<()> {
+    let spec = crate::host_features::feature_spec(key)
+        .ok_or_else(|| anyhow::anyhow!("unknown host feature: {}", key.as_str()))?;
+    update_config(move |cfg| spec.set_bool(&mut cfg.ui, value)).await
+}
+
+/// Persist `[ui].pi_ask_user_question_notifications` via `update_config`.
+pub async fn set_pi_ask_user_question_notifications(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_ask_user_question_notifications = value).await
+}
+
+/// Persist `[ui].pi_keep_multi_agent` via `update_config`.
+pub async fn set_pi_keep_multi_agent(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_keep_multi_agent = value).await
+}
+
+/// Persist `[ui].pi_cache_graph` via `update_config`.
+pub async fn set_pi_cache_graph(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_cache_graph = value).await
+}
+
+/// Persist `[ui].pi_config_skill` via `update_config`.
+pub async fn set_pi_config_skill(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_config_skill = value).await
+}
+
+/// Persist `[ui].pi_user_markdown` via `update_config`.
+pub async fn set_pi_user_markdown(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_user_markdown = value).await
+}
+
+/// Persist `[ui].pi_at_search_hidden` via `update_config`.
+pub async fn set_pi_at_search_hidden(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_at_search_hidden = value).await
+}
+
+/// Persist `[ui].show_other_tool_args` via `update_config`.
+pub async fn set_show_other_tool_args(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.show_other_tool_args = value).await
+}
+
+/// Persist `[ui].review_file_tree` via `update_config`.
+pub async fn set_review_file_tree(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.review_file_tree = value).await
+}
+
+/// Persist `[ui].review_include_reads` via `update_config`.
+pub async fn set_review_include_reads(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.review_include_reads = value).await
+}
+
 /// Bounds for [`set_max_thoughts_width`].
 /// They mirror the pager's registry consts; a CI test pins the agreement.
 const MAX_THOUGHTS_WIDTH_SHELL_MIN: i64 = 40;
@@ -407,6 +592,11 @@ pub async fn set_show_thinking_blocks(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.show_thinking_blocks = Some(value)).await
 }
 
+/// Persist `[ui].thinking_border_colors` via `update_config`.
+pub async fn set_thinking_border_colors(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.thinking_border_colors = Some(value)).await
+}
+
 /// Persist `[ui].prompt_suggestions` via `update_config`.
 pub async fn set_prompt_suggestions(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.prompt_suggestions = Some(value)).await
@@ -426,6 +616,26 @@ pub async fn set_group_tool_verbs(value: bool) -> Result<()> {
 /// Persist `[ui].collapsed_edit_blocks` via `update_config`.
 pub async fn set_collapsed_edit_blocks(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.collapsed_edit_blocks = Some(value)).await
+}
+
+/// Persist `[ui].ctrl_o_tool_expansion` (`write_edit` | `all_tools`).
+pub async fn set_ctrl_o_tool_expansion(value: String) -> Result<()> {
+    update_config(|cfg| cfg.ui.ctrl_o_tool_expansion = Some(value)).await
+}
+
+/// Persist `[ui].pi_bash_run_display`.
+pub async fn set_pi_bash_run_display(value: String) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_bash_run_display = Some(value)).await
+}
+
+/// Persist `[ui].pi_bash_command_format` via `update_config`.
+pub async fn set_pi_bash_command_format(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.pi_bash_command_format = value).await
+}
+
+/// Persist `[ui].write_edit_hover_popups` via `update_config`.
+pub async fn set_write_edit_hover_popups(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.write_edit_hover_popups = value).await
 }
 
 /// Persist `[ui].keep_text_selection` (`flash` | `hold` | `word_select`).

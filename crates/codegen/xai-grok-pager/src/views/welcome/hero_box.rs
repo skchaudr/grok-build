@@ -328,7 +328,10 @@ pub(super) fn render_hero_box(
         buf.set_span(
             layout.hero_subtitle.x,
             layout.hero_subtitle.y,
-            &Span::styled(HERO_SUBTITLE, subtitle_style),
+            &Span::styled(
+                super::logo::welcome_brand_override().map_or(HERO_SUBTITLE, |brand| brand.subtitle),
+                subtitle_style,
+            ),
             layout.hero_subtitle.width,
         );
     }

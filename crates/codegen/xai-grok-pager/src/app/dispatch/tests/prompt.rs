@@ -1,6 +1,84 @@
 //! Tests for prompt and bash submission, queueing, and interject shims.
 
 use super::*;
+use crate::app::dispatch::queue::maybe_drain_queue;
+
+#[test]
+fn active_subagent_prompt_reuses_child_session() {
+    let mut app = test_app_with_agent();
+    let parent_id = AgentId(0);
+    let child_sid = "child-reuse".to_string();
+    let child_session = make_test_agent_session(&app, AgentId(99), &child_sid);
+    let mut child = AgentView::new(child_session, ScrollbackState::new());
+    child.session.state = AgentState::Idle;
+    app.agents
+        .get_mut(&parent_id)
+        .unwrap()
+        .insert_subagent_view(child_sid.clone(), Box::new(child));
+    app.agents.get_mut(&parent_id).unwrap().active_subagent = Some(child_sid.clone());
+
+    let effects = dispatch(Action::SendPrompt("continue here".into()), &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SendSubagentPrompt {
+            parent_agent_id,
+            child_session_id,
+            text,
+            ..
+        }] if *parent_agent_id == parent_id
+            && child_session_id.0.as_ref() == child_sid
+            && text == "continue here"
+    ));
+    let child = &app.agents[&parent_id].subagent_views[&child_sid];
+    assert!(child.session.state.is_turn_running());
+    assert_eq!(child.session.queue_len(), 0);
+}
+
+#[test]
+fn subagent_prompt_response_finishes_child_without_touching_parent() {
+    let mut app = test_app_with_agent();
+    let parent_id = AgentId(0);
+    let child_sid = "child-finish".to_string();
+    let child_session = make_test_agent_session(&app, AgentId(99), &child_sid);
+    let mut child = AgentView::new(child_session, ScrollbackState::new());
+    child.session.enqueue_prompt("again".into());
+    let mut image_notices = Vec::new();
+    let drain = maybe_drain_queue(&mut child, &mut image_notices);
+    assert!(image_notices.is_empty());
+    let prompt_id = match drain.effects.as_slice() {
+        [Effect::SendPrompt { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("expected child prompt effect, got {other:?}"),
+    };
+    app.agents
+        .get_mut(&parent_id)
+        .unwrap()
+        .insert_subagent_view(child_sid.clone(), Box::new(child));
+
+    let response = acp::PromptResponse::new(acp::StopReason::EndTurn).meta(Some(
+        serde_json::json!({"promptId": prompt_id})
+            .as_object()
+            .unwrap()
+            .clone(),
+    ));
+    let effects = dispatch_task_result(
+        TaskResult::SubagentPromptResponse {
+            parent_agent_id: parent_id,
+            child_session_id: acp::SessionId::new(child_sid.clone()),
+            result: Ok(response),
+            http_status: None,
+            prompt_id: Some(prompt_id),
+        },
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(app.agents[&parent_id].session.state.is_idle());
+    assert!(
+        app.agents[&parent_id].subagent_views[&child_sid]
+            .session
+            .state
+            .is_idle()
+    );
+}
 
 fn agent_ref(app: &AppView, id: AgentId) -> &AgentView {
     let Some(agent) = app.agents.get(&id) else {
@@ -4195,13 +4273,13 @@ fn interject_before_paste_probe_keeps_image() {
     let sent_image = effects.iter().any(|e| {
         matches!(
             e,
-            Effect::SendPromptNow { blocks, .. }
+            Effect::SendInterject { blocks: Some(blocks), .. }
                 if blocks.iter().any(|b| matches!(b, acp::ContentBlock::Image(_)))
         )
     });
     assert!(
         sent_image,
-        "the re-issued send-now must carry the pasted image; effects = {effects:?}"
+        "the re-issued interject must carry the pasted image; effects = {effects:?}"
     );
     assert_eq!(
         agent_ref(&app, id).prompt.text(),
@@ -5194,12 +5272,16 @@ fn send_prompt_now_during_reconnect_requeues_locally() {
     assert!(agent.toast.is_some(), "the outage must explain itself");
 }
 
-/// A failed send-now RPC requeues its payload (front) instead of silently dropping the message, and retires the optimistic queue echo.
+/// Regression (queue-architecture-redesign): Send Now now takes the steering
+/// (interject) path, which never pushes an optimistic shared-queue echo. That
+/// echo — paired with the text-based reconcile that failed to retire it — was
+/// the root cause of the duplicate-message bug: every rapid Send Now press
+/// minted a new echo that was never reconciled away, so phantom rows piled up.
+/// Asserting the echo is absent locks the fix in place.
 #[test]
-fn failed_send_now_requeues_payload_and_retires_echo() {
-    use agent_client_protocol as acp;
-
+fn send_now_steers_without_optimistic_echo() {
     let mut app = test_app_with_agent();
+    app.external_agent = true;
     let id = AgentId(0);
     dispatch(Action::SendPrompt("first".into()), &mut app);
 
@@ -5211,46 +5293,14 @@ fn failed_send_now_requeues_payload_and_retires_echo() {
         },
         &mut app,
     );
-    let prompt_id = match effects.as_slice() {
-        [Effect::SendPromptNow { prompt_id, .. }] => prompt_id.clone(),
-        other => panic!("expected SendPromptNow effect, got {other:?}"),
-    };
     assert!(
-        agent_ref(&app, id)
-            .shared_queue
-            .iter()
-            .any(|e| e.id == prompt_id),
-        "the optimistic echo must be visible before the failure"
-    );
-
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::SendPromptNowFailed {
-            agent_id: id,
-            session_id: acp::SessionId::new("test-session"),
-            prompt_id: prompt_id.clone(),
-            error: "transport closed".into(),
-            blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
-                "gets lost on the wire".to_string(),
-            ))],
-        }),
-        &mut app,
-    );
-
-    let agent = agent_ref(&app, id);
-    assert_eq!(
-        agent
-            .session
-            .pending_prompts
-            .front()
-            .map(|p| p.text.as_str()),
-        Some("gets lost on the wire"),
-        "the failed payload must be requeued at the front"
+        matches!(effects.as_slice(), [Effect::SendInterject { .. }]),
+        "send-now must steer via interject, got {effects:?}"
     );
     assert!(
-        !agent.shared_queue.iter().any(|e| e.id == prompt_id),
-        "the optimistic echo must be retired"
+        app.agents[&id].shared_queue.is_empty(),
+        "steering pushes no optimistic queue echo, so nothing can accumulate"
     );
-    assert!(agent.toast.is_some(), "the failure must explain itself");
 }
 
 /// An image-bearing prompt submitted during a parked sendable wait routes through send-now (images ride as content blocks).
@@ -5286,6 +5336,58 @@ fn image_prompt_during_sendable_wait_routes_to_send_now() {
         }
         other => {
             panic!("expected SendPromptNow for an image prompt in a sendable wait, got {other:?}")
+        }
+    }
+    let agent = agent_ref(&app, id);
+    assert!(
+        agent.session.pending_prompts.is_empty(),
+        "the message must not ALSO be held in the local queue"
+    );
+    assert!(
+        agent.prompt.images.is_empty(),
+        "the composer images must be consumed by the send"
+    );
+}
+
+/// External grok-pi routes an image-bearing prompt during a parked sendable wait through steering.
+/// The image must ride the interject blocks and must not remain in the local queue.
+#[test]
+fn external_image_prompt_during_sendable_wait_routes_to_interject() {
+    use crate::app::agent_view::test_fixtures::simulate_task_output_wait;
+
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    let id = AgentId(0);
+    dispatch(Action::SendPrompt("first".into()), &mut app);
+    simulate_task_output_wait(app.agents.get_mut(&id).unwrap(), "bg-1");
+
+    let img = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+        data: vec![1, 2, 3],
+        mime_type: "image/png".into(),
+    });
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        // A real chip insert: `drain_images` reconciles against live textarea elements, so a bare `images.push` would be dropped as stale
+        agent.prompt.insert_image(img).unwrap();
+    }
+
+    let effects = dispatch(Action::SendPrompt("look at [Image #1]".into()), &mut app);
+    match effects.as_slice() {
+        [
+            Effect::SendInterject {
+                blocks: Some(blocks),
+                ..
+            },
+        ] => {
+            assert!(
+                blocks
+                    .iter()
+                    .any(|b| matches!(b, acp::ContentBlock::Image(_))),
+                "the pasted image must ride the interject blocks"
+            );
+        }
+        other => {
+            panic!("expected SendInterject for an image prompt in a sendable wait, got {other:?}")
         }
     }
     let agent = agent_ref(&app, id);

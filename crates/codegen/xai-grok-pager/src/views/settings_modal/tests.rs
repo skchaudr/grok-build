@@ -18,6 +18,17 @@ use crate::settings::{
 use crate::theme::Theme;
 use xai_grok_shell::agent::config::UiConfig;
 
+#[test]
+fn debug_print_row_order() {
+    let prev_voice = crate::app::voice_mode_enabled();
+    crate::app::set_voice_mode_enabled_for_test(false);
+    let s = make_state();
+    for (i, row) in s.rows.iter().enumerate() {
+        eprintln!("[{i}] {row:?}");
+    }
+    crate::app::set_voice_mode_enabled_for_test(prev_voice);
+}
+
 fn make_state() -> SettingsModalState {
     SettingsModalState::new(
         Arc::new(SettingsRegistry::defaults()),
@@ -194,9 +205,9 @@ fn setting_row_visible_gates_voice_capture_on_key_releases() {
     let voice = meta_for(&reg, "voice_capture_mode");
     let vim = meta_for(&reg, "vim_mode");
     // voice_mode = true; kitty_releases varies.
-    assert!(!setting_row_visible(voice, false, false, true));
-    assert!(setting_row_visible(voice, true, false, true));
-    assert!(setting_row_visible(vim, false, false, true));
+    assert!(!setting_row_visible(voice, false, false, true, false));
+    assert!(setting_row_visible(voice, true, false, true, false));
+    assert!(setting_row_visible(vim, false, false, true, false));
 }
 
 #[test]
@@ -206,18 +217,19 @@ fn setting_row_visible_hides_voice_rows_when_voice_mode_off() {
     let capture = meta_for(&reg, "voice_capture_mode");
     let language = meta_for(&reg, "voice_stt_language");
     let vim = meta_for(&reg, "vim_mode");
-    // Gate off: all voice rows gone even with kitty releases and full TUI
-    assert!(!setting_row_visible(keybind, true, false, false));
-    assert!(!setting_row_visible(capture, true, false, false));
-    assert!(!setting_row_visible(language, true, false, false));
+    // Gate off: all voice rows gone even with kitty releases + full TUI.
+    assert!(!setting_row_visible(keybind, true, false, false, false));
+    assert!(!setting_row_visible(capture, true, false, false, false));
+    assert!(!setting_row_visible(language, true, false, false, false));
+
     // Non-voice rows unaffected.
-    assert!(setting_row_visible(vim, true, false, false));
+    assert!(setting_row_visible(vim, true, false, false, false));
     // Gate on: all visible (kitty releases for capture).
-    assert!(setting_row_visible(keybind, true, false, true));
-    assert!(setting_row_visible(capture, true, false, true));
-    assert!(setting_row_visible(language, true, false, true));
+    assert!(setting_row_visible(keybind, true, false, true, false));
+    assert!(setting_row_visible(capture, true, false, true, false));
+    assert!(setting_row_visible(language, true, false, true, false));
     // The keybind row (unlike capture) doesn't need key-release reporting.
-    assert!(setting_row_visible(keybind, false, false, true));
+    assert!(setting_row_visible(keybind, false, false, true, false));
 }
 
 #[test]
@@ -262,19 +274,20 @@ fn setting_row_visible_hides_theme_rows_when_hide_appearance() {
         let meta = meta_for(&reg, key);
         assert!(meta.hidden_in_minimal, "{key} must declare the flag");
         assert!(
-            !setting_row_visible(meta, true, true, true),
-            "{key} when hide_appearance"
+            !setting_row_visible(meta, true, true, true, false),
+            "{key} in minimal"
         );
         assert!(
-            setting_row_visible(meta, true, false, true),
-            "{key} when appearance rows stay visible"
+            setting_row_visible(meta, true, false, true, false),
+            "{key} in full TUI"
         );
     }
     assert!(setting_row_visible(
         meta_for(&reg, "vim_mode"),
         true,
         true,
-        true
+        true,
+        false,
     ));
 }
 
@@ -441,6 +454,30 @@ fn every_dynamic_enum_setting_has_action_for_string_arm() {
                      SetForkSecondaryModel(_), got {nonempty_action:?}",
                 );
             }
+            "recap_model" => {
+                assert!(matches!(empty_action, Some(Action::ClearRecapModel)));
+                assert!(matches!(nonempty_action, Some(Action::SetRecapModel(_))));
+            }
+            "recap_model_2" => {
+                assert!(matches!(empty_action, Some(Action::ClearRecapModel2)));
+                assert!(matches!(nonempty_action, Some(Action::SetRecapModel2(_))));
+            }
+            "recap_model_3" => {
+                assert!(matches!(empty_action, Some(Action::ClearRecapModel3)));
+                assert!(matches!(nonempty_action, Some(Action::SetRecapModel3(_))));
+            }
+            "btw_model" => {
+                assert!(matches!(empty_action, Some(Action::ClearBtwModel)));
+                assert!(matches!(nonempty_action, Some(Action::SetBtwModel(_))));
+            }
+            "btw_model_2" => {
+                assert!(matches!(empty_action, Some(Action::ClearBtwModel2)));
+                assert!(matches!(nonempty_action, Some(Action::SetBtwModel2(_))));
+            }
+            "btw_model_3" => {
+                assert!(matches!(empty_action, Some(Action::ClearBtwModel3)));
+                assert!(matches!(nonempty_action, Some(Action::SetBtwModel3(_))));
+            }
             other => panic!(
                 "Unknown DynamicEnum key `{other}` — add a discriminating arm in \
                  every_dynamic_enum_setting_has_action_for_string_arm so future \
@@ -505,6 +542,7 @@ fn render_setting_row_selected_is_reversed_on_terminal_theme() {
         kind: SettingKind::Bool { default: false },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     };
     let area = Rect {
         x: 0,
@@ -521,13 +559,17 @@ fn render_setting_row_selected_is_reversed_on_terminal_theme() {
         &mut buf,
         area,
         &meta,
-        &SettingValue::Bool(false),
+        Some(&SettingValue::Bool(false)),
         15,
-        true, // selected
-        &theme,
-        false,
-        false,
+        RowStyle {
+            selected: true,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
+        // selected
+        &theme,
     );
     for x in [0u16, 4, 40, 79] {
         assert!(
@@ -546,13 +588,16 @@ fn render_setting_row_selected_is_reversed_on_terminal_theme() {
         &mut buf,
         area,
         &meta,
-        &SettingValue::Bool(false),
+        Some(&SettingValue::Bool(false)),
         15,
-        true,
-        &theme,
-        false,
-        false,
+        RowStyle {
+            selected: true,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
+        &theme,
     );
     assert!(
         buf.cell((4, 0)).is_some_and(|c| !c
@@ -580,6 +625,7 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
         kind: SettingKind::Bool { default: false },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     };
     let area = Rect {
         x: 0,
@@ -600,6 +646,7 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
         false, // is_expanded
         false, // is_hovered
         None,
+        &theme,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -691,9 +738,15 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "group_tool_verbs",
             // SHELL-owned collapsed_edit_blocks (Appearance; live cache, default OFF rollout flag)
             "collapsed_edit_blocks",
+            // Pi-Grok tool rendering controls retained across upstream syncs.
+            "ctrl_o_tool_expansion",
             // SHELL-owned display_refresh_auto_cadence (Appearance).
             "display_refresh_auto_cadence",
-            // Mouse: scroll and drag selection. The scroll classification/lines/direction knobs follow scroll_speed.
+            "show_other_tool_args",
+            "progress_bar",
+            "remote_tui_footer",
+            // Mouse — scroll + drag selection. The scroll
+            // classification/lines/direction knobs follow scroll_speed.
             "scroll_speed",
             "scroll_mode",
             "scroll_lines",
@@ -703,6 +756,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // Registered before multiline_mode, so it renders first
             "combine_queued_prompts",
             "follow_up_behavior",
+            "cancel_turn_key",
             "confirm_before_rewind",
             // PAGER-owned multiline (Editor category).
             "multiline_mode",
@@ -719,6 +773,11 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             // PAGER-owned plan_mode (Agent category).
             "plan_mode",
+            // Pi-Grok session and F2 configuration controls.
+            "psm_resume_index",
+            "pi_config",
+            "session_recap",
+            "recap_mermaid",
             // SHELL-owned coding_data_sharing (Privacy category).
             "coding_data_sharing",
             // SHELL-owned default_model (Models category).
@@ -727,7 +786,11 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "subagent_model_inheritance",
             // Models category. `default_reasoning_effort`, `web_search_model`, and `session_summary_model` are not exposed in the modal.
             "fork_secondary_model",
-            // `auto_compact_threshold_percent` (Session category) is not exposed in the modal
+            // Pi-Grok grouped recap/BtW model slots.
+            "recap_models",
+            // `auto_compact_threshold_percent` (Session category) is
+            // not exposed in the modal.
+
             // Advanced category.
             "show_tips",
             // Per-tip contextual-hints GROUP row, placed right after `show_tips`
@@ -749,7 +812,9 @@ fn initial_selection_skips_header() {
     };
     match row {
         RowEntry::Setting { key, .. } => assert_eq!(*key, "compact_mode"),
-        RowEntry::Header { .. } => panic!("selection landed on a header"),
+        RowEntry::Header { .. } | RowEntry::Section { .. } => {
+            panic!("selection landed on a non-setting row")
+        }
     }
 }
 
@@ -1009,13 +1074,16 @@ fn selected_browse_row_label_is_bold() {
         &mut buf,
         area,
         meta,
-        &SettingValue::Bool(false),
+        Some(&SettingValue::Bool(false)),
         40,
-        true,
-        &theme,
-        false,
-        false,
+        RowStyle {
+            selected: true,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
+        &theme,
     );
 
     assert!(
@@ -1444,6 +1512,7 @@ fn render_setting_row_emits_restart_pill_when_required() {
         kind: SettingKind::Bool { default: false },
         restart_required: true,
         hidden_in_minimal: false,
+        external_only: false,
     };
     let area = Rect {
         x: 0,
@@ -1465,6 +1534,8 @@ fn render_setting_row_emits_restart_pill_when_required() {
         true,  // is_expanded, gate on
         false, // is_hovered
         None,
+        // is_selected
+        &theme,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -1483,13 +1554,15 @@ fn render_setting_row_emits_restart_pill_when_required() {
         &mut buf,
         area,
         &meta,
-        &SettingValue::Bool(true), // edited from default `false`
+        Some(&SettingValue::Bool(true)),
+        // edited from default `false`
         10,
         false,
         &theme,
         false, // is_expanded, off
         false, // is_hovered
         None,
+        &theme,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -1517,6 +1590,7 @@ fn render_setting_row_hides_restart_pill_when_at_default_and_collapsed() {
         kind: SettingKind::Bool { default: false },
         restart_required: true,
         hidden_in_minimal: false,
+        external_only: false,
     };
     let area = Rect {
         x: 0,
@@ -1530,13 +1604,17 @@ fn render_setting_row_hides_restart_pill_when_at_default_and_collapsed() {
         &mut buf,
         area,
         &meta,
-        &SettingValue::Bool(false),
+        Some(&SettingValue::Bool(false)),
         10,
-        false,
-        &theme,
-        false, // is_expanded
-        false, // is_hovered
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
+        // is_hovered
         None,
+        &theme,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -1572,6 +1650,7 @@ fn editor_render_fixture(buffer: &str, cursor_byte: usize) -> SettingsModalState
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     };
     let registry = SettingsRegistry::from_entries(vec![synthetic_meta]);
     let snapshot = PagerLocalSnapshot {
@@ -2349,6 +2428,7 @@ fn synthetic_enum_meta() -> SettingMeta {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     }
 }
 
@@ -2861,6 +2941,7 @@ fn picker_string_original_value_fills_committed_marker() {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     }];
     let mut s2 = SettingsModalState::new(
         Arc::new(SettingsRegistry::from_entries(entries)),
@@ -3145,6 +3226,7 @@ fn render_picker_drops_description_when_wrap_block_exceeds_height() {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     };
     let registry = SettingsRegistry::from_entries(vec![synthetic_meta]);
     let mut s = SettingsModalState::new(
@@ -3204,6 +3286,7 @@ fn render_picker_long_description_wraps_no_ellipsis() {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     }];
     let mut s = SettingsModalState::new(
         Arc::new(SettingsRegistry::from_entries(entries)),
@@ -3253,6 +3336,7 @@ fn render_picker_long_description_wraps_no_ellipsis() {
 
 /// Long enum-choice descriptions wrap across lines instead of clipping with `…`.
 /// Pins the wrap-at-width=60 catalog case from the user-feedback screenshot.
+
 #[test]
 fn picker_long_description_wraps_to_multiple_lines() {
     let entries = vec![SettingMeta {
@@ -3280,6 +3364,7 @@ fn picker_long_description_wraps_to_multiple_lines() {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     }];
     let mut s = SettingsModalState::new(
         Arc::new(SettingsRegistry::from_entries(entries)),
@@ -3402,6 +3487,7 @@ fn picker_short_description_stays_one_line() {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     }];
     let mut s = SettingsModalState::new(
         Arc::new(SettingsRegistry::from_entries(entries)),
@@ -3470,6 +3556,7 @@ fn picker_no_description_renders_symbol_and_display_only() {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     }];
     let mut s = SettingsModalState::new(
         Arc::new(SettingsRegistry::from_entries(entries)),
@@ -3539,6 +3626,7 @@ fn picker_multi_line_choice_hit_rect_spans_all_lines() {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     }];
     let mut s = SettingsModalState::new(
         Arc::new(SettingsRegistry::from_entries(entries)),
@@ -3657,6 +3745,7 @@ fn picker_scroll_offset_accounts_for_variable_height() {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     }];
     let registry = Arc::new(SettingsRegistry::from_entries(entries));
     // Focus the LAST choice (c4); the scroll math must keep it in view
@@ -3726,6 +3815,7 @@ fn render_picker_truncates_long_display_with_ellipsis() {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     }];
     let mut s = SettingsModalState::new(
         Arc::new(SettingsRegistry::from_entries(entries)),
@@ -3776,6 +3866,7 @@ fn render_picker_truncates_long_title_with_ellipsis() {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     }];
     let mut s = SettingsModalState::new(
         Arc::new(SettingsRegistry::from_entries(entries)),
@@ -3854,6 +3945,7 @@ fn render_picker_shows_more_indicator_when_choices_overflow() {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     }];
     let mut s = SettingsModalState::new(
         Arc::new(SettingsRegistry::from_entries(entries)),
@@ -4331,8 +4423,8 @@ fn compute_filtered_empty_query_returns_identity() {
         },
     ];
     let registry = SettingsRegistry::defaults();
-    let result = compute_filtered(&rows, &registry, "");
-    assert_eq!(result, vec![0, 1, 2]);
+    let result = compute_filtered(&rows, &registry, "", Some(SettingCategory::Appearance));
+    assert_eq!(result, vec![1, 2]);
 }
 
 #[test]
@@ -4348,7 +4440,12 @@ fn compute_filtered_excludes_header_when_no_children_match() {
         },
     ];
     let registry = SettingsRegistry::defaults();
-    let result = compute_filtered(&rows, &registry, "xyzzy-no-match");
+    let result = compute_filtered(
+        &rows,
+        &registry,
+        "xyzzy-no-match",
+        Some(SettingCategory::Appearance),
+    );
     assert!(
         result.is_empty(),
         "header must be excluded when no settings in its section match, got {result:?}"
@@ -4376,7 +4473,12 @@ fn compute_filtered_single_word_match_emits_header_then_setting() {
     ];
     let registry = SettingsRegistry::defaults();
     // "density" is a compact_mode keyword only.
-    let result = compute_filtered(&rows, &registry, "density");
+    let result = compute_filtered(
+        &rows,
+        &registry,
+        "density",
+        Some(SettingCategory::Appearance),
+    );
     assert_eq!(result, vec![0, 1], "header then compact_mode in order");
 }
 
@@ -4393,7 +4495,12 @@ fn compute_filtered_multi_word_and_match_narrows_further() {
     ];
     let registry = SettingsRegistry::defaults();
     // Both "compact" and "density" are compact_mode keywords.
-    let result = compute_filtered(&rows, &registry, "compact density");
+    let result = compute_filtered(
+        &rows,
+        &registry,
+        "compact density",
+        Some(SettingCategory::Appearance),
+    );
     assert_eq!(result, vec![0, 1]);
 }
 
@@ -4622,8 +4729,9 @@ fn row_rects_shift_down_for_blank_lines_above_headers() {
                 .registry
                 .all()
                 .get(*meta_index)
-                .map(|m| m.label.to_string())
+                .map(|meta| meta.label.to_string())
                 .unwrap_or_else(|| panic!("meta {meta_index}")),
+            RowEntry::Section { name, .. } => name.to_string(),
         };
         assert!(
             row_text.contains(&expected_substring),
@@ -4687,6 +4795,7 @@ fn synthetic_long_label_meta() -> SettingMeta {
         kind: SettingKind::Bool { default: false },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     }
 }
 
@@ -4705,6 +4814,7 @@ fn synthetic_enum_chevron_meta() -> SettingMeta {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     }
 }
 
@@ -4733,6 +4843,7 @@ fn narrow_terminal_drops_value_to_second_line() {
         false,
         false, // is_hovered
         None,
+        &theme,
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -4782,13 +4893,17 @@ fn wide_terminal_keeps_value_on_first_line() {
         &mut buf,
         area,
         &meta,
-        &SettingValue::Bool(false),
+        Some(&SettingValue::Bool(false)),
         24,
-        false,
-        &theme,
-        false,
-        false, // is_hovered
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
+        // is_hovered
         None,
+        &theme,
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -4808,38 +4923,42 @@ fn wide_terminal_keeps_value_on_first_line() {
 
 /// `row_layout`'s pathological-truncation branch: when even the label alone exceeds the row width, the label truncates with `…` on line 1.
 /// The value still drops to line 2.
+
 #[test]
-fn pathologically_narrow_truncates_label_with_ellipsis() {
+fn render_setting_row_keeps_value_on_single_line() {
     let meta = synthetic_long_label_meta();
     let area = Rect {
         x: 0,
         y: 0,
-        width: 25,
+        width: 60,
         height: 2,
     };
     let mut buf = Buffer::empty(area);
     let theme = Theme::current();
-    render_setting_row(
+    let value_rect = render_setting_row(
         &mut buf,
         area,
         &meta,
-        &SettingValue::Bool(false),
+        Some(&SettingValue::Bool(false)),
         24,
-        false,
-        &theme,
-        false,
-        false, // is_hovered
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
+        &theme,
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
     assert!(
-        line1.contains('\u{2026}'),
-        "line 1 must contain the `…` ellipsis when label is too wide: {line1:?}"
+        line1.contains("off"),
+        "value must render on the row line: {line1:?}"
     );
     assert!(
-        line2.contains("off"),
-        "value `off` must still drop to line 2 even when label is truncated: {line2:?}"
+        line2.chars().all(|c| c == ' '),
+        "fixed-height row must leave following line blank: {line2:?}"
     );
 }
 
@@ -5437,7 +5556,7 @@ fn filter_search_bar_keeps_narrow_graphemes_and_cursor_aligned() {
     };
     let mut buffer = Buffer::empty(area);
     let theme = Theme::current();
-    render_row_list_with_search_bar(&mut buffer, area, &mut state, &theme);
+    render_browse(&mut buffer, area, &mut state, &theme);
 
     let mut row = String::new();
     for x in 0..area.width {
@@ -5465,6 +5584,7 @@ fn bool_off_value_renders_in_dim_color() {
         kind: SettingKind::Bool { default: false },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     };
     let area = Rect {
         x: 0,
@@ -5480,13 +5600,16 @@ fn bool_off_value_renders_in_dim_color() {
         &mut buf_off,
         area,
         &meta,
-        &SettingValue::Bool(false),
+        Some(&SettingValue::Bool(false)),
         15,
-        false,
-        &theme,
-        false,
-        false,
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
+        &theme,
     );
     // Use `find_text_col` so the column index is the actual buffer position, not a byte offset cast to u16 (which only works for ASCII content)
     let off_col = find_text_col(&buf_off, 0, "off").expect("must find `off` substring");
@@ -5509,13 +5632,16 @@ fn bool_off_value_renders_in_dim_color() {
         &mut buf_on,
         area,
         &meta,
-        &SettingValue::Bool(true),
+        Some(&SettingValue::Bool(true)),
         15,
-        false,
-        &theme,
-        false,
-        false,
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
+        &theme,
     );
     let on_col = find_text_col(&buf_on, 0, "on").expect("must find `on` substring");
     let on_cell = buf_on.cell((on_col, 0)).expect("on cell");
@@ -5550,6 +5676,7 @@ fn chevron_column_is_at_constant_right_offset() {
         kind: SettingKind::Bool { default: false },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     };
     let enum_meta = synthetic_enum_chevron_meta();
     let area = Rect {
@@ -5566,13 +5693,16 @@ fn chevron_column_is_at_constant_right_offset() {
         &mut buf_bool,
         area,
         &bool_meta,
-        &SettingValue::Bool(true),
+        Some(&SettingValue::Bool(true)),
         10,
-        false,
-        &theme,
-        false,
-        false,
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
+        &theme,
     );
 
     // Enum row; chevron column contains the `›` glyph
@@ -5581,13 +5711,16 @@ fn chevron_column_is_at_constant_right_offset() {
         &mut buf_enum,
         area,
         &enum_meta,
-        &SettingValue::Enum("choice_a"),
+        Some(&SettingValue::Enum("choice_a")),
         10,
-        false,
-        &theme,
-        false,
-        false,
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
+        &theme,
     );
 
     // The chevron column is a 2-cell block at `area.right - ROW_RIGHT_PAD_W - ROW_CHEVRON_COL_W` (i.e. `area.right - 3` in this fixture).
@@ -5644,25 +5777,31 @@ fn chevron_column_is_at_constant_right_offset() {
         &mut buf_multi,
         bool_area,
         &bool_meta,
-        &SettingValue::Bool(false),
+        Some(&SettingValue::Bool(false)),
         10,
-        false,
-        &theme,
-        false,
-        false,
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
+        &theme,
     );
     let _ = render_setting_row(
         &mut buf_multi,
         enum_area,
         &enum_meta,
-        &SettingValue::Enum("choice_a"),
+        Some(&SettingValue::Enum("choice_a")),
         10,
-        false,
-        &theme,
-        false,
-        false,
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
+        &theme,
     );
     // Bool row's `off` ends at column N; Enum row's `›` glyph lands at column M
     // The contract: N == M's column minus 1 (the gap between value and chevron column)
@@ -5706,13 +5845,16 @@ fn chevron_column_aligns_across_one_and_two_line_layouts() {
         &mut buf_two,
         area_two,
         &synthetic_enum_chevron_meta(),
-        &SettingValue::Enum("choice_a"),
+        Some(&SettingValue::Enum("choice_a")),
         10,
-        false,
-        &theme,
-        false,
-        false,
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
+        &theme,
     );
     let area_one = Rect {
         x: 0,
@@ -5725,13 +5867,16 @@ fn chevron_column_aligns_across_one_and_two_line_layouts() {
         &mut buf_one,
         area_one,
         &synthetic_enum_chevron_meta(),
-        &SettingValue::Enum("choice_a"),
+        Some(&SettingValue::Enum("choice_a")),
         10,
-        false,
-        &theme,
-        false,
-        false,
+        RowStyle {
+            selected: false,
+            hovered: false,
+            dimmed: false,
+            expanded: false,
+        },
         None,
+        &theme,
     );
     // The column offset from the area's right edge is constant: `area.right - ROW_RIGHT_PAD_W - 1` is the `›` glyph position
     // The chevron span " ›" is 2 cells; the second cell holds the glyph
@@ -5913,6 +6058,7 @@ fn picker_description_word_wraps_no_ellipsis() {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     };
     let registry = SettingsRegistry::from_entries(vec![synthetic_meta]);
     let mut s = SettingsModalState::new(
@@ -7109,6 +7255,7 @@ fn max_thoughts_width_preview_only_renders_for_max_thoughts_width_key() {
         },
         restart_required: false,
         hidden_in_minimal: false,
+        external_only: false,
     };
     let registry = SettingsRegistry::from_entries(vec![synthetic_meta]);
     let mut s = SettingsModalState::new(
@@ -7736,7 +7883,6 @@ fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
     let mut s = make_locked_state(CodingDataSharingLock::TeamManaged);
     let idx = coding_data_sharing_row_idx(&s);
     s.selected = idx;
-    s.expanded_keys.insert("coding_data_sharing");
     let mut buf = Buffer::empty(area);
     render_rows(&mut buf, area, &mut s, &theme);
     let text = flatten(&buf);
@@ -7763,7 +7909,6 @@ fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
     // Control arm: unlocked expansion shows the description only.
     let mut s = make_state();
     s.selected = idx;
-    s.expanded_keys.insert("coding_data_sharing");
     let mut buf = Buffer::empty(area);
     render_rows(&mut buf, area, &mut s, &theme);
     let text = flatten(&buf);

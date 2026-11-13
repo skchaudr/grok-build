@@ -100,9 +100,12 @@ pub enum ActionId {
     SendToBackground,
 
     // Prompt
+    CycleThinkingLevel,
     EditPromptExternal,
     CycleMode,
     BashMode,
+    /// Open `/review-session` two-pane code review for the current session.
+    ReviewSession,
 
     // Scrollback (contextual)
     Rewind,
@@ -329,10 +332,7 @@ impl ActionRegistry {
                 def.default_key = key!(Enter, CONTROL);
                 def.alt_keys = vec![key!('i', CONTROL)];
             }
-            if def.id == ActionId::OpenExtensions {
-                def.default_key = key!('l', CONTROL);
-                def.alt_keys = vec![];
-            }
+            // OpenExtensions stays unbound; Ctrl+L is ModelPicker (Pi alignment).
         }
         Self::new(actions)
     }
@@ -358,7 +358,8 @@ impl ActionRegistry {
         Self::new(actions)
     }
 
-    /// Registry pinned to VS Code family interject / extensions bindings.
+    /// Registry pinned to VS Code family interject chords.
+    /// Ctrl+L remains ModelPicker (Pi alignment); interject uses Ctrl+Enter.
     #[cfg(test)]
     pub fn vscode_family_for_test() -> Self {
         Self::vscode_family_for_mode_for_test(crate::app::ScreenMode::Fullscreen)
@@ -371,8 +372,8 @@ impl ActionRegistry {
         let mut actions = defaults::default_actions(screen_mode, false);
         for def in actions.iter_mut() {
             if def.id == ActionId::InterjectPrompt {
-                def.default_key = key!('l', CONTROL);
-                def.alt_keys = vec![];
+                def.default_key = key!(Enter, CONTROL);
+                def.alt_keys = vec![key!('i', CONTROL)];
             }
             if def.id == ActionId::OpenExtensions {
                 def.default_key = key!(Null);
@@ -562,35 +563,36 @@ mod tests {
     }
 
     #[test]
-    fn vscode_family_interject_lookup_uses_ctrl_l_without_alts() {
+    fn vscode_family_interject_uses_ctrl_enter_and_ctrl_l_is_model_picker() {
         let registry = vscode_family_interject_registry();
         let ctrl_l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        let ctrl_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL);
+        let ctrl_i = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL);
+
+        // Pi alignment: Ctrl+L opens the model picker, not interject.
         assert_eq!(
+            registry.lookup(&ctrl_l, When::AgentScreen),
+            Some(ActionId::ModelPicker)
+        );
+        assert_ne!(
             registry.lookup(&ctrl_l, When::PromptFocused),
             Some(ActionId::InterjectPrompt)
         );
-        assert!(registry.matches_id(ActionId::InterjectPrompt, &ctrl_l));
-        // No alt chords on VS family.
-        let ctrl_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL);
-        assert_ne!(
-            registry.lookup(&ctrl_enter, When::PromptFocused),
-            Some(ActionId::InterjectPrompt)
-        );
-        assert!(!registry.matches_id(ActionId::InterjectPrompt, &ctrl_enter));
-        let ctrl_i = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL);
-        assert_ne!(
-            registry.lookup(&ctrl_i, When::PromptFocused),
-            Some(ActionId::InterjectPrompt)
-        );
-        // OpenExtensions must not claim Ctrl+L on VS family (plugins via /plugins).
         assert_ne!(
             registry.lookup(&ctrl_l, When::AgentScreen),
             Some(ActionId::OpenExtensions)
         );
+
+        // Interject uses the same Ctrl+Enter / Ctrl+I chords as other hosts.
+        assert_eq!(
+            registry.lookup(&ctrl_enter, When::PromptFocused),
+            Some(ActionId::InterjectPrompt)
+        );
+        assert!(registry.matches_id(ActionId::InterjectPrompt, &ctrl_i));
         let def = registry
             .find(ActionId::InterjectPrompt)
             .expect("InterjectPrompt");
-        assert!(def.alt_keys.is_empty());
+        assert!(!def.alt_keys.is_empty());
     }
 
     #[test]
@@ -849,6 +851,34 @@ mod tests {
     }
 
     #[test]
+    fn review_session_bound_to_alt_shift_r_on_agent_screen() {
+        let registry = ActionRegistry::defaults();
+        let def = registry
+            .find(ActionId::ReviewSession)
+            .expect("ReviewSession must be registered");
+        assert_eq!(def.context, When::AgentScreen);
+        assert_eq!(def.hint_key_display, Some("Opt/Alt+Shift+R"));
+
+        let chord = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT | KeyModifiers::SHIFT);
+        assert_eq!(
+            registry.lookup(&chord, When::AgentScreen),
+            Some(ActionId::ReviewSession)
+        );
+        assert_eq!(registry.lookup(&chord, When::PromptFocused), None);
+        assert_eq!(registry.lookup(&chord, When::ScrollbackFocused), None);
+        assert_eq!(registry.lookup(&chord, When::Always), None);
+
+        let ctrl_shift_r = KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_ne!(
+            registry.lookup(&ctrl_shift_r, When::AgentScreen),
+            Some(ActionId::ReviewSession)
+        );
+    }
+
+    #[test]
     fn toggle_mouse_capture_disabled_by_default() {
         // Opt-in via config.toml; default registry must not register it.
         let registry = ActionRegistry::defaults();
@@ -881,18 +911,23 @@ mod tests {
             registry.lookup(&ctrl_r, When::ScrollbackFocused),
             Some(ActionId::ToggleMouseCapture)
         );
-        assert_eq!(
-            registry.lookup(&ctrl_r, When::AgentScreen),
-            Some(ActionId::OpenSessions)
-        );
+        // Not on agent/prompt contexts (Ctrl+R is deliberately unbound there;
+        // agent keeps the model picker on Ctrl+L).
+        assert_eq!(registry.lookup(&ctrl_r, When::AgentScreen), None);
         assert_eq!(registry.lookup(&ctrl_r, When::PromptFocused), None);
+        let ctrl_l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
         assert_eq!(
-            registry.lookup(&ctrl_m, When::AgentScreen),
+            registry.lookup(&ctrl_l, When::AgentScreen),
             Some(ActionId::ModelPicker)
         );
         assert_eq!(
             registry.lookup(&ctrl_m, When::PromptFocused),
             Some(ActionId::ToggleMultiline)
+        );
+        // Ctrl+M on agent screen is no longer ModelPicker.
+        assert_ne!(
+            registry.lookup(&ctrl_m, When::AgentScreen),
+            Some(ActionId::ModelPicker)
         );
         // Former mouse-toggle dual bindings removed from scrollback.
         assert_eq!(registry.lookup(&f9, When::ScrollbackFocused), None);
@@ -903,9 +938,10 @@ mod tests {
             None
         );
         assert_eq!(registry.lookup(&ctrl_shift_m, When::Always), None);
-        // Voice capture is bound to BOTH Ctrl+Space and F8, and is global (`When::Always`)
-        // It resolves on the agent screen and the dashboard alike (distinct from the Ctrl+M model picker / multiline)
-        // It is not agent-scoped, so an exact AgentScreen lookup misses
+        // Voice capture is bound to BOTH Ctrl+Space and F8, and is global
+        // (`When::Always`) so it resolves on the agent screen and the dashboard
+        // alike (distinct from Ctrl+L model picker / Ctrl+M multiline). It is not
+        // agent-scoped, so an exact AgentScreen lookup misses.
         assert_eq!(
             registry.lookup(&ctrl_space, When::Always),
             Some(ActionId::VoiceToggle)

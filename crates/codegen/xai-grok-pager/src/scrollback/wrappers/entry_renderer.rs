@@ -247,12 +247,34 @@ impl<'a> EntryRenderer<'a> {
             // Diamond chrome in BOTH states, same family as the "N more" headers.
             // The selection caret (the expandable indicator in scrollback_pane.rs) overdraws the diamond on the selected row
             // It flips `›`/`⌄` with the group's fold state
+            use unicode_width::UnicodeWidthStr;
+
             let prefix = group_header_chrome_prefix();
             let mut spans = vec![ratatui::text::Span::styled(
-                prefix,
+                prefix.clone(),
                 Style::default().fg(glyph_color),
             )];
-            spans.extend(vg.line.spans.iter().cloned());
+            // Keep hook metadata visible on narrow terminals: truncate the
+            // descriptive label first and reserve the suffix width.
+            let hook_start = vg
+                .line
+                .spans
+                .iter()
+                .position(|span| span.content.starts_with("  [hooks: "));
+            if let Some(hook_start) = hook_start {
+                let suffix_width: usize = vg.line.spans[hook_start..]
+                    .iter()
+                    .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                    .sum();
+                let label_budget = usize::from(content_area.width)
+                    .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
+                    .saturating_sub(suffix_width);
+                let label = ratatui::text::Line::from(vg.line.spans[..hook_start].to_vec());
+                spans.extend(crate::render::line_utils::truncate_line(label, label_budget).spans);
+                spans.extend(vg.line.spans[hook_start..].iter().cloned());
+            } else {
+                spans.extend(vg.line.spans.iter().cloned());
+            }
             let line = ratatui::text::Line::from(spans);
             // Group-header content is registered selectable (GROUP_HEADER_RANGE_ID)
             // Its selection maps visual columns, so it must paint visual too
@@ -320,7 +342,7 @@ impl<'a> EntryRenderer<'a> {
     /// When non-zero, content is wrapped at `content_width - reserved` so text never collides with the timestamp overlay.
     fn timestamp_reserved(&self) -> u16 {
         if self.appearance().show_timestamps && self.should_show_timestamp() {
-            10 // max short format: "  12:30 PM"
+            crate::scrollback::TIMESTAMP_RESERVE // max short format: "  MM-DD HH:MM"
         } else {
             0
         }
@@ -393,7 +415,9 @@ impl<'a> EntryRenderer<'a> {
         {
             1
         } else {
-            self.entry.estimate_source_lines(content_width)
+            let reserved = self.entry.block.estimate_reserved_cols();
+            self.entry
+                .estimate_source_lines(content_width.saturating_sub(reserved))
         };
         self.entry.store_estimate_lines(content_width, lines);
         lines
@@ -686,8 +710,8 @@ impl Renderable for EntryRenderer<'_> {
                 RenderBlock::ToolCall(_) | RenderBlock::Thinking(_)
             );
 
-        // Collapsed rows are one-line summaries, so a rail beside them is noise, flash included
-        // Truncated counts as open: it shows real content, and thinking blocks rest in that state
+        // Collapsed rows are one-line summaries, so a static rail beside them is noise.
+        // Running tool/thinking rows retain the fork animation fallback so active work stays visible.
         let accent = (!self.hide_accent && self.entry.display_mode != DisplayMode::Collapsed)
             .then(|| {
                 if recently_finished {
@@ -702,7 +726,15 @@ impl Renderable for EntryRenderer<'_> {
                 }
             })
             .flatten();
-
+        let accent = match accent {
+            None if self.entry.is_running
+                && self.entry.block.animates_running_accent()
+                && !self.hide_accent =>
+            {
+                Some(AccentStyle::animated(self.theme.accent_running))
+            }
+            other => other,
+        };
         // The column stays reserved either way, so nothing reflows
         // Clear it or a previous frame bleeds through
         if accent.is_none() {
@@ -808,7 +840,10 @@ impl Renderable for EntryRenderer<'_> {
         }
 
         // Overlay timestamp on the first content line for message blocks.
-        // Short format (h:mm AM/PM) by default; expands to full format (HH:mm:ss | MMM DD) when the mouse hovers over the timestamp area
+        // Today's messages show time only (`HH:MM`); earlier messages prefix
+        // the numeric date (`MM-DD HH:MM`). Hover appends seconds. Numeric,
+        // locale-free formats — no English month names or AM/PM markers.
+
         // Gated on appearance.show_timestamps (toggled via /timestamps).
         if self.appearance().show_timestamps
             && content_skip == 0
@@ -824,9 +859,9 @@ impl Renderable for EntryRenderer<'_> {
                     && mx < content_area.x + content_area.width
             });
             let ts_str = if ts_hovered {
-                ts.format("  %H:%M:%S | %b %d").to_string()
+                crate::scrollback::message_timestamp_label(ts, true)
             } else {
-                ts.format("  %-I:%M %p").to_string()
+                crate::scrollback::message_timestamp_label(ts, false)
             };
             let ts_width = ts_str.len() as u16;
             if content_area.width > ts_width + 1 && first_content_y < max_row {
@@ -1059,6 +1094,43 @@ mod tests {
     }
 
     #[test]
+    fn running_messages_do_not_receive_wave_accent_fallback() {
+        let theme = Theme::current();
+        for block in [
+            RenderBlock::user_prompt("hello"),
+            RenderBlock::agent_message("hello"),
+        ] {
+            let entry = ScrollbackEntry::running(block);
+            assert!(entry.is_running, "precondition: entry is running");
+            assert!(
+                !entry.block.animates_running_accent(),
+                "message chrome must stay static while content streams"
+            );
+
+            let area = Rect::new(0, 0, 60, 3);
+            let mut frames = Vec::new();
+            for tick in [0u64, 11, 23] {
+                let mut buf = Buffer::empty(area);
+                EntryRenderer::new(&entry, &theme)
+                    .with_tick(tick)
+                    .render(area, &mut buf);
+                frames.push(
+                    (0..area.height)
+                        .map(|y| {
+                            let cell = buf.cell((0, y)).unwrap();
+                            (cell.symbol().to_string(), cell.fg)
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            }
+            assert!(
+                frames.windows(2).all(|pair| pair[0] == pair[1]),
+                "message accent column must be tick-invariant"
+            );
+        }
+    }
+
+    #[test]
     fn non_pending_running_tool_keeps_default_bullet() {
         // Sanity check: when is_pending_user_input is false we leave the normal Diamond bullet alone
         // The running wave animation runs on top of it as before
@@ -1092,19 +1164,20 @@ mod tests {
         (content_right - renderer.timestamp_reserved())..content_right
     }
 
-    /// Check that a right-aligned timestamp ending with "AM" or "PM" exists on a row.
+    /// Check that a right-aligned timestamp label exists on a row.
     /// Only scans the rightmost 16 columns to avoid false positives from content text.
-    fn has_ampm_timestamp(buf: &Buffer, y: u16, x_end: u16) -> bool {
+    fn row_contains_label(buf: &Buffer, y: u16, x_end: u16, label: &str) -> bool {
         let x_start = x_end.saturating_sub(16);
         let text = collect_row_symbols(buf, y, x_start, x_end);
-        text.contains("AM") || text.contains("PM")
+        text.contains(label)
     }
 
     #[test]
     fn test_timestamp_short_format_for_user_prompt() {
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::user_prompt("hello"));
-        // Not selected: short format "h:mm AM/PM"
+        // Not selected → short format ("HH:MM" today, "MM-DD HH:MM" earlier).
+
         let renderer = EntryRenderer::new(&entry, &theme);
 
         let width: u16 = 80;
@@ -1114,7 +1187,7 @@ mod tests {
         renderer.render(area, &mut buf);
 
         // UserPrompt has vpad=true, first content row is y=1.
-        let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
+        let expected = crate::scrollback::message_timestamp_label(entry.created_at.unwrap(), false);
         let ts_width = expected.len() as u16;
         let ts_x = width - 2 - ts_width;
         let content_row = 1u16;
@@ -1139,7 +1212,7 @@ mod tests {
         renderer.render(area, &mut buf);
 
         // AgentMessage has vpad=false, first content row is y=0.
-        let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
+        let expected = crate::scrollback::message_timestamp_label(entry.created_at.unwrap(), false);
         let ts_width = expected.len() as u16;
         let ts_x = width - 2 - ts_width;
 
@@ -1166,13 +1239,11 @@ mod tests {
         let mut buf = Buffer::empty(area);
         renderer.render(area, &mut buf);
 
-        // Compare against the entry's captured timestamp, not a fresh Local::now()
-        // Re-sampling the clock here races the second boundary (%H:%M:%S) and made this test flaky
-        let expected = entry
-            .created_at
-            .unwrap()
-            .format("%H:%M:%S | %b %d")
-            .to_string();
+        // Compare against the entry's captured timestamp, not a fresh
+        // Local::now() — re-sampling the clock here races the second boundary
+        // (%H:%M:%S) and made this test flaky.
+        let expected = crate::scrollback::message_timestamp_label(entry.created_at.unwrap(), true);
+
         let ts_width = expected.len() as u16;
         let ts_x = width - 2 - ts_width;
 
@@ -1203,19 +1274,36 @@ mod tests {
         renderer.render(area, &mut buf_away);
 
         let row_hover = collect_row_symbols(&buf_hover, 0, 0, width);
+
         assert!(
-            row_hover.contains('|'),
-            "Hovered should show expanded format with '|'"
+            row_contains_label(
+                &buf_hover,
+                0,
+                width,
+                &crate::scrollback::message_timestamp_label(entry.created_at.unwrap(), true),
+            ),
+            "Hovered should show seconds-expanded timestamp"
         );
 
         let row_away = collect_row_symbols(&buf_away, 0, 0, width);
+
         assert!(
-            has_ampm_timestamp(&buf_away, 0, width),
-            "Non-hovered should show short AM/PM timestamp"
+            row_contains_label(
+                &buf_away,
+                0,
+                width,
+                &crate::scrollback::message_timestamp_label(entry.created_at.unwrap(), false),
+            ),
+            "Non-hovered should show short timestamp"
         );
         assert!(
-            !row_away.contains('|'),
-            "Non-hovered should NOT show '|' separator"
+            !row_contains_label(
+                &buf_away,
+                0,
+                width,
+                &crate::scrollback::message_timestamp_label(entry.created_at.unwrap(), true),
+            ),
+            "Non-hovered should NOT show seconds-expanded timestamp"
         );
     }
 
@@ -1235,7 +1323,12 @@ mod tests {
 
         for y in 0..height {
             assert!(
-                !has_ampm_timestamp(&buf, y, width),
+                !row_contains_label(
+                    &buf,
+                    y,
+                    width,
+                    &crate::scrollback::message_timestamp_label(entry.created_at.unwrap(), false),
+                ),
                 "Thinking block should not have a timestamp on row {y}"
             );
         }
@@ -1256,7 +1349,12 @@ mod tests {
 
         for y in 0..height {
             assert!(
-                !has_ampm_timestamp(&buf, y, width),
+                !row_contains_label(
+                    &buf,
+                    y,
+                    width,
+                    &crate::scrollback::message_timestamp_label(entry.created_at.unwrap(), false),
+                ),
                 "Tool call block should not have a timestamp on row {y}"
             );
         }
@@ -1284,9 +1382,11 @@ mod tests {
             let mut buf = Buffer::empty(area);
             renderer.render(area, &mut buf);
 
+            let short =
+                crate::scrollback::message_timestamp_label(entry.created_at.unwrap(), false);
             assert!(
-                has_ampm_timestamp(&buf, content_row, width),
-                "{name} should show AM/PM timestamp on row {content_row}"
+                row_contains_label(&buf, content_row, width, &short),
+                "{name} should show a timestamp on row {content_row}"
             );
         }
 
@@ -1308,7 +1408,12 @@ mod tests {
 
             let mut found = false;
             for y in 0..height {
-                if has_ampm_timestamp(&buf, y, width) {
+                if row_contains_label(
+                    &buf,
+                    y,
+                    width,
+                    &crate::scrollback::message_timestamp_label(entry.created_at.unwrap(), false),
+                ) {
                     found = true;
                     break;
                 }
@@ -1323,8 +1428,10 @@ mod tests {
         let entry = ScrollbackEntry::new(RenderBlock::user_prompt("hi"));
         let renderer = EntryRenderer::new(&entry, &theme);
 
-        // Short timestamp "h:mm AM" is 7-8 chars; code requires content_width > ts_width + 1.
-        // Width 12: chrome (5 actual) leaves content_width 7, just barely not enough for the 8-char timestamp plus 1
+        // Short timestamp "HH:MM" is 5 chars; code requires content_width > ts_width + 1.
+        // Width 12: chrome leaves less than the reserve + label, so the render
+        // path suppresses the overlay. Suppress.
+
         let width: u16 = 12;
         let height = renderer.desired_height(width);
         let area = Rect::new(0, 0, width, height);
@@ -1333,7 +1440,12 @@ mod tests {
 
         for y in 0..height {
             assert!(
-                !has_ampm_timestamp(&buf, y, width),
+                !row_contains_label(
+                    &buf,
+                    y,
+                    width,
+                    &crate::scrollback::message_timestamp_label(entry.created_at.unwrap(), false),
+                ),
                 "Narrow width should suppress timestamp on row {y}"
             );
         }
@@ -1392,8 +1504,9 @@ mod tests {
         buf.set_string(ghost_x, 0, "X", Style::default());
         renderer.render(area, &mut buf);
 
-        // AgentMessage has no vpad, so the first content row is y=0
-        let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
+        // AgentMessage has no vpad → first content row is y=0.
+        let expected = crate::scrollback::message_timestamp_label(entry.created_at.unwrap(), false);
+
         let ts_width = expected.len() as u16;
         let ts_x = width - 2 - ts_width;
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);

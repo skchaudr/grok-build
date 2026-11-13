@@ -16,8 +16,8 @@ pub(crate) fn session_hook_inputs() -> (ProcessHookInputs, DisabledHooks) {
     ProcessHookInputs::read_with_disabled(managed_settings(), crate::claude_import::import_marker())
 }
 
-/// Every session startup and mid-session reload loads hooks through this function.
-/// This is the one place that chooses which hook sources to load.
+/// Single load entry point: build compat-aware sources, gate project sources on trust, then load.
+/// Every session-startup and mid-session reload site routes through here so the source policy stays in one place.
 pub(crate) fn discover_hooks(
     inputs: &ProcessHookInputs,
     git_root: Option<&Path>,

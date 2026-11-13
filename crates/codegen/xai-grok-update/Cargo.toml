@@ -7,6 +7,7 @@ edition.workspace = true
 [dependencies]
 dunce = { workspace = true }
 anyhow = { workspace = true }
+base64 = { workspace = true }
 futures = { workspace = true }
 indicatif = { workspace = true }
 reqwest = { workspace = true }
@@ -17,6 +18,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["serde"] }
 tokio = { workspace = true, features = ["fs", "process", "io-util", "macros", "time"] }
+toml_edit = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 xai-dirs = { workspace = true }

@@ -6,15 +6,18 @@ use super::{
     PluginCtaState, PromptInputMode, PromptMode, REWOUND_PROMPT_ID_CAP, ReplayRebuiltState,
     SELF_ORIGINATED_PROMPT_CAP, SessionReload, ViewSurface,
 };
+use agent_client_protocol as acp;
 use crate::app::agent::{AgentSession, GoalDisplayStatus};
 use crate::app::app_view::InputOutcome;
 use crate::app::cancel_latency::{CancelLatency, CancelOrigin, TurnEnd};
 use crate::app::prompt_ack::{AckSignal, PromptAckWatch};
+use crate::app::subagent::SubagentInfo;
 use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::text_selection::ResolvedSelectionModel;
 use crate::views::prompt_widget::PromptWidget;
 use crate::views::queue_mutation::QueueMutation;
 use crate::views::queue_pane::QueuePane;
+use crate::views::subagent_catalog_pane::SubagentCatalogPane;
 use crate::views::tasks_pane::TasksPane;
 use crate::views::todo_pane::TodoPane;
 use ratatui::layout::Rect;
@@ -147,6 +150,7 @@ impl AgentView {
             tip_typing_dismissed: false,
             todo: TodoPane::new(),
             tasks: TasksPane::new(),
+            catalog: SubagentCatalogPane::new(),
             queue: QueuePane::new(),
             shared_queue: Vec::new(),
             attached_as_viewer: false,
@@ -194,6 +198,7 @@ impl AgentView {
             vim_mode: crate::appearance::cache::load_vim_mode(),
             input_mode: InputMode::Vim,
             bash_turn: false,
+            cron_task_id: None,
             stashed_prompt: None,
             prompt_stash: None,
             draft_consumed: false,
@@ -241,6 +246,10 @@ impl AgentView {
             last_activity: None,
             pane_areas: PaneAreas::default(),
             hovered_entry: None,
+            write_edit_hover_popup_entry: None,
+            write_edit_hover_started_at: None,
+            write_edit_hover_popup_scroll: 0,
+            write_edit_hover_popup_frame: None,
             pending_text_drag: None,
             drag_selection: None,
             pending_block_drag: None,
@@ -280,6 +289,7 @@ impl AgentView {
             hit_context: Default::default(),
             hit_credits: Default::default(),
             hit_todo_close: Default::default(),
+            hit_catalog_close: Default::default(),
             hit_bg_close: Default::default(),
             hit_subagent_close: Default::default(),
             hit_bg_status: Default::default(),
@@ -333,6 +343,8 @@ impl AgentView {
             terminal_size_stale: false,
             inline_media_hits: InlineMediaHitAreas::default(),
             extensions_modal: None,
+            pi_shortcut_manager: None,
+            pi_extension_shortcuts: Vec::new(),
             feedback_modal: None,
             pending_feedback_trace_uploads: Default::default(),
             parked_feedback_trace_consents: Default::default(),
@@ -348,10 +360,16 @@ impl AgentView {
             last_word_select_probe: None,
             export_copy_detector: Default::default(),
             sticky_toast: None,
+            external_widgets_above_editor: Vec::new(),
+            remote_tui_lines: Vec::new(),
+            remote_tui_layout: None,
+            external_widgets_below_editor: Vec::new(),
+            external_statuses: Vec::new(),
             mode_switch_banner: None,
             session_banner_active: false,
             pinned_upgrade_cta_live: false,
             block_viewer: None,
+            block_viewer_image_active: false,
             block_viewer_resume: None,
             scrollback_search: None,
             hit_sb_copy: Default::default(),
@@ -370,6 +388,7 @@ impl AgentView {
             question_scroll_region: None,
             plan_mode_active: false,
             plan_mode_pending: None,
+            pi_plan_file_path: None,
             available_modes: Vec::new(),
             capabilities: crate::app::agent_view::AgentCapabilities::default(),
             session_mode: xai_grok_tools::types::SessionMode::Default,
@@ -411,6 +430,10 @@ impl AgentView {
             rewind_state: None,
             rewind_points: None,
             jump_state: None,
+            review_state: None,
+            fork_state: None,
+            inline_edit: None,
+            pending_inline_resubmit: None,
             timeline_rail: None,
             side_panel: Default::default(),
             timeline_hover: None,
@@ -419,6 +442,7 @@ impl AgentView {
             subagent_sessions: HashMap::new(),
             subagent_views: HashMap::new(),
             active_subagent: None,
+            is_subagent_view: false,
             role: AgentRole::Root,
             trace_return: None,
             trace_origin: None,
@@ -453,6 +477,7 @@ impl AgentView {
             last_turn_summary_gen: 0,
             pending_effects: Vec::new(),
             paste_probe_in_flight: 0,
+            pending_large_paste: None,
             deferred_send: None,
             pending_turn_end_reconcile: None,
             pending_cancel_resend: None,
@@ -484,32 +509,185 @@ impl AgentView {
         view.set_input_mode(mode);
         view
     }
-    /// Register a child view; the sole path that turns a view into a child, so the role is stamped exactly once.
-    /// A child always opens on its transcript, whatever `AgentView::new` chose: `q`/`Esc` close from bare scrollback.
-    /// Its composer stays hidden until a role gives it a route, and its queue pane is a read-only mirror.
+    /// Establish persistent Pi child-session identity before a view is stored
+    /// or opened. The compatibility flag keeps fork chrome stable while the
+    /// role carries the new upstream routing policy.
+    pub(crate) fn mark_as_subagent_view(&mut self) {
+        self.is_subagent_view = true;
+        if matches!(self.role, AgentRole::Root) {
+            let parent_session_id = self
+                .session
+                .session_id
+                .clone()
+                .unwrap_or_else(|| acp::SessionId::new("parent"));
+            self.role = AgentRole::Child(ChildLink::persistent(parent_session_id));
+        }
+    }
+
+    /// Register a persistent Pi child. Its composer and queue remain usable so
+    /// later prompts reuse the existing child ACP session.
     pub(crate) fn insert_subagent_view(
+        &mut self,
+        child_sid: String,
+        mut child_view: Box<AgentView>,
+    ) {
+        let parent_session_id = self
+            .session
+            .session_id
+            .clone()
+            .unwrap_or_else(|| acp::SessionId::new("parent"));
+        child_view.is_subagent_view = true;
+        child_view.role = AgentRole::Child(ChildLink::persistent(parent_session_id));
+        self.subagent_views.insert(child_sid, child_view);
+    }
+
+    /// Register an upstream mirrored child with the explicit wire link. An
+    /// unaddressable child is transcript-only and keeps the upstream read-only
+    /// queue/composer behavior.
+    pub(crate) fn insert_subagent_view_with_link(
         &mut self,
         child_sid: String,
         mut child_view: Box<AgentView>,
         link: ChildLink,
     ) {
+        let persistent = link.is_persistent();
+        child_view.is_subagent_view = true;
         child_view.role = AgentRole::Child(link);
-        child_view.active_pane = ActivePane::Scrollback;
-        child_view.queue.set_mutation(QueueMutation::ReadOnly);
+        if !persistent {
+            child_view.active_pane = ActivePane::Scrollback;
+            child_view.queue.set_mutation(QueueMutation::ReadOnly);
+        }
         self.subagent_views.insert(child_sid, child_view);
     }
-    /// The folder the header and the dashboard show, on the session's own computer
+    /// Whether this view owns a subagent at any depth.
+    pub(crate) fn has_descendant_subagent_view(&self, child_sid: &str) -> bool {
+        self.subagent_views.contains_key(child_sid)
+            || self
+                .subagent_views
+                .values()
+                .any(|child| child.has_descendant_subagent_view(child_sid))
+    }
+    /// Locate durable subagent metadata by public subagent id at any depth.
+    pub(crate) fn descendant_subagent_info(&self, subagent_id: &str) -> Option<&SubagentInfo> {
+        if let Some(info) = self
+            .subagent_sessions
+            .values()
+            .find(|info| info.subagent_id.as_ref() == subagent_id)
+        {
+            return Some(info);
+        }
+        self.subagent_views
+            .values()
+            .find_map(|child| child.descendant_subagent_info(subagent_id))
+    }
+    /// Locate the AgentView that directly owns a subagent id at any depth.
+    /// This is the authority boundary for cancel RPCs: nested agents must be
+    /// cancelled through their direct parent's session, not the root session.
+    pub(crate) fn descendant_subagent_owner_mut(
+        &mut self,
+        subagent_id: &str,
+    ) -> Option<&mut AgentView> {
+        let owns = self
+            .subagent_sessions
+            .values()
+            .any(|info| info.subagent_id.as_ref() == subagent_id);
+        if owns {
+            return Some(self);
+        }
+        for child in self.subagent_views.values_mut() {
+            if let Some(owner) = child.descendant_subagent_owner_mut(subagent_id) {
+                return Some(owner);
+            }
+        }
+        None
+    }
+    /// Locate a subagent view at any depth. Direct children keep the existing
+    /// replay-before-first-live-update funnel; deeper children recurse through
+    /// their direct parent so the same invariant holds at every level.
+    pub(crate) fn descendant_view_for_live_update_mut(
+        &mut self,
+        child_sid: &str,
+    ) -> Option<&mut AgentView> {
+        if self.subagent_views.contains_key(child_sid) {
+            return self.child_view_for_live_update_mut(child_sid);
+        }
+        for child in self.subagent_views.values_mut() {
+            if let Some(found) = child.descendant_view_for_live_update_mut(child_sid) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    /// Locate the direct parent view that owns `child_sid`, at any depth.
+    pub(crate) fn descendant_parent_view_mut(&mut self, child_sid: &str) -> Option<&mut AgentView> {
+        if self.subagent_views.contains_key(child_sid) {
+            return Some(self);
+        }
+        for child in self.subagent_views.values_mut() {
+            if let Some(found) = child.descendant_parent_view_mut(child_sid) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    /// Flatten the recursive subagent hierarchy for the root Tasks pane while
+    /// retaining enough display metadata to render a stable tree. Child views
+    /// deliberately do not use this path, so their existing flat/top chrome is
+    /// unchanged.
+    pub(crate) fn subagent_tree_rows(&self) -> Vec<crate::views::tasks_pane::SubagentTreeRow> {
+        fn collect(
+            view: &AgentView,
+            visual_prefix: &str,
+            order_prefix: &str,
+            rows: &mut Vec<crate::views::tasks_pane::SubagentTreeRow>,
+        ) {
+            let mut infos: Vec<_> = view.subagent_sessions.values().cloned().collect();
+            infos.sort_by(|left, right| {
+                left.attempt
+                    .started_at
+                    .cmp(&right.attempt.started_at)
+                    .then_with(|| left.child_session_id.cmp(&right.child_session_id))
+            });
+            let count = infos.len();
+            for (index, info) in infos.into_iter().enumerate() {
+                let last = index + 1 == count;
+                let connector = if last { "└─ " } else { "├─ " };
+                let prefix = format!("{visual_prefix}{connector}");
+                let order = format!("{order_prefix}{index:06}/");
+                let child_sid = info.child_session_id.to_string();
+                rows.push(crate::views::tasks_pane::SubagentTreeRow {
+                    info,
+                    order: order.clone(),
+                    prefix,
+                });
+                if let Some(child) = view.subagent_views.get(&child_sid) {
+                    let next_visual =
+                        format!("{visual_prefix}{}", if last { "   " } else { "│  " },);
+                    collect(child, &next_visual, &order, rows);
+                }
+            }
+        }
+
+        let mut rows = Vec::new();
+        collect(self, "", "", &mut rows);
+        rows
+    }
+
+    /// The folder the header and the dashboard show, on the session's own computer.
     pub(crate) fn location_path(&self) -> &std::path::Path {
         &self.session.cwd
     }
+
     #[cfg(test)]
     pub(crate) fn subagent_view(&self, child_sid: &str) -> Option<&AgentView> {
         self.subagent_views.get(child_sid).map(|v| &**v)
     }
+
     #[cfg(test)]
     pub(crate) fn subagent_view_mut(&mut self, child_sid: &str) -> Option<&mut AgentView> {
         self.subagent_views.get_mut(child_sid).map(|v| &mut **v)
     }
+
     /// Called at every turn-termination site; clears the wall anchor so a turn that reuses a prompt id cannot report the prior attempt's wall span.
     pub(crate) fn mark_turn_finished(&mut self, end: TurnEnd) {
         let now = Instant::now();
@@ -695,6 +873,7 @@ impl AgentView {
     /// The transcript is NOT cleared; it stays recoverable until [`finish_session_reload`](Self::finish_session_reload) decides the outcome.
     pub(crate) fn begin_session_reload(&mut self, generation: u64) {
         self.dismiss_jump_picker();
+        self.dismiss_fork_picker();
         if let Some(prev) = self.session_reload.take() {
             tracing::warn!(
                 generation,
@@ -1328,6 +1507,7 @@ impl AgentView {
             ActivePane::Queue => ActivePaneSnapshot::Queue,
             ActivePane::Prompt => ActivePaneSnapshot::Prompt,
             ActivePane::Tasks => ActivePaneSnapshot::Tasks,
+            ActivePane::Catalog => ActivePaneSnapshot::Catalog,
             ActivePane::Dock => ActivePaneSnapshot::Other,
         };
         let outcome_snap = match outcome {

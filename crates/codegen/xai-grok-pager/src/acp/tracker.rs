@@ -17,7 +17,7 @@ use crate::scrollback::blocks::tool::{
     MemorySearchToolCallBlock, OtherToolCallBlock, ReadMediaKind, ReadToolCallBlock, ToolCallBlock,
     UseToolCallBlock, WebFetchToolCallBlock, WebSearchToolCallBlock,
 };
-use crate::scrollback::entry::{EntryId, ScrollbackEntry};
+use crate::scrollback::entry::{EntryId, ScrollbackEntry, ToolTraceSnapshot};
 use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::state::verb_group::verb_group_kind_changed;
 use agent_client_protocol as acp;
@@ -48,6 +48,78 @@ fn stamp_replayed_row(scrollback: &mut ScrollbackState, id: EntryId, meta: &Noti
         && let Some(entry) = scrollback.get_by_id_mut(id)
     {
         entry.created_at = Some(utc_ms_to_local(ms));
+    }
+}
+
+/// Real tool duration from agent-stamped wall times, for replayed completions.
+/// Replay batches the start and the completion into one pass, so a local
+/// `Instant` measures batching latency (~0ms) rather than the tool's wall time;
+/// the events' own `agentTimestampMs` values carry the true start and end.
+fn replay_elapsed_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64> {
+    match (start_ms, end_ms) {
+        (Some(start), Some(end)) if end >= start => Some(end - start),
+        _ => None,
+    }
+}
+fn tool_trace_from_call(tc: &acp::ToolCall, meta: &NotificationMeta) -> ToolTraceSnapshot {
+    ToolTraceSnapshot {
+        tool_call_id: tc.tool_call_id.0.to_string(),
+        title: tc.title.clone(),
+        status: format!("{:?}", tc.status),
+        raw_input: tc.raw_input.clone(),
+        raw_output: tc.raw_output.clone(),
+        usage: tc
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("piToolUsage"))
+            .cloned(),
+        context_tokens: meta.total_tokens,
+        stream_start_ms: meta.stream_start_ms,
+        started_at_ms: meta.agent_timestamp_ms,
+        updated_at_ms: meta.agent_timestamp_ms,
+    }
+}
+
+fn refresh_tool_trace(
+    scrollback: &mut ScrollbackState,
+    entry_id: EntryId,
+    tc: &acp::ToolCall,
+    meta: &NotificationMeta,
+) {
+    let Some(entry) = scrollback.get_by_id_mut(entry_id) else {
+        return;
+    };
+    let incoming = tool_trace_from_call(tc, meta);
+    if let Some(trace) = entry
+        .tool_traces
+        .iter_mut()
+        .find(|trace| trace.tool_call_id == incoming.tool_call_id)
+    {
+        trace.title = incoming.title;
+        trace.status = incoming.status;
+        if incoming.raw_input.is_some() {
+            trace.raw_input = incoming.raw_input;
+        }
+        if incoming.raw_output.is_some() {
+            trace.raw_output = incoming.raw_output;
+        }
+        if incoming.usage.is_some() {
+            trace.usage = incoming.usage;
+        }
+        if incoming.context_tokens.is_some() {
+            trace.context_tokens = incoming.context_tokens;
+        }
+        if incoming.stream_start_ms.is_some() {
+            trace.stream_start_ms = incoming.stream_start_ms;
+        }
+        if trace.started_at_ms.is_none() {
+            trace.started_at_ms = incoming.started_at_ms;
+        }
+        if incoming.updated_at_ms.is_some() {
+            trace.updated_at_ms = incoming.updated_at_ms;
+        }
+    } else {
+        entry.tool_traces.push(incoming);
     }
 }
 /// What the agent is currently doing within a turn. Note: `Idle` here means "the tracker has no in-flight work".
@@ -464,6 +536,11 @@ struct PendingTool {
     /// `transfer_timing_from` can't cross variant boundaries (Other to Search, etc.), so refining to the real kind would silently drop the timing.
     /// This field preserves the instant so `set_started_at` can apply it to whatever variant the refined block becomes.
     started_at: Option<std::time::Instant>,
+    /// Agent-stamped start wall time (`agentTimestampMs` of the start event).
+    /// Replay delivers the start and the completion in one batch, so the `Instant`
+    /// above spans only batching latency; the real duration comes from this stamp
+    /// minus the completion event's stamp.
+    started_at_ms: Option<i64>,
 }
 /// Streaming UTF-8 decoder for incremental byte deltas. Without buffering, both halves would be replaced with
 /// U+FFFD by `from_utf8_lossy`, permanently corrupting the character. Only genuinely invalid sequences (not just
@@ -523,6 +600,17 @@ impl AcpUpdateTracker {
     /// `pending_compaction`).
     pub(crate) fn snapshot_output_epoch(&mut self) {
         self.epoch_at_last_finish = self.agent_output_epoch;
+    }
+    /// Close only the visible response stream without finishing the turn.
+    ///
+    /// A terminal broadcast can arrive just before the driver's PromptResponse.
+    /// During that reconcile grace window the RPC still owns turn teardown, but
+    /// the response text is already complete and must not keep reporting
+    /// `Responding`.
+    pub(crate) fn finish_response_stream(&mut self, scrollback: &mut ScrollbackState) {
+        if let Some(agent_id) = self.current_agent_msg.take() {
+            scrollback.finish_running(agent_id);
+        }
     }
     fn bump_agent_output_epoch(&mut self) {
         self.agent_output_epoch = self.agent_output_epoch.wrapping_add(1);
@@ -659,6 +747,40 @@ impl AcpUpdateTracker {
         self.blocking_waits
             .retain(|_, w| current_stream.is_some() && w.stream_start_ms == current_stream);
     }
+    /// Whether the current visible tool phase includes a foreground tool whose
+    /// runtime contract supports cancel-and-send on a new user message.
+    ///
+    /// The canonical `x.ai/tool.name` is preferred because later ACP updates
+    /// may replace the human-facing title with the command/code. Exact-title
+    /// fallback covers older shells that did not stamp the canonical envelope.
+    pub fn message_interruptible_foreground_tool_running(&self) -> bool {
+        if !matches!(self.activity(), Some(TurnActivity::ToolRunning { .. })) {
+            return false;
+        }
+        self.pending_tools.values().any(|pending| {
+            let base = &pending.base;
+            let explicitly_background = base
+                .raw_input
+                .as_ref()
+                .and_then(|v| v.get("is_background"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if explicitly_background {
+                return false;
+            }
+            let canonical_name = base
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("x.ai/tool"))
+                .and_then(|tool| tool.get("name"))
+                .and_then(serde_json::Value::as_str);
+            matches!(
+                canonical_name.unwrap_or(base.title.as_str()),
+                "bash" | "eval"
+            )
+        })
+    }
+
     pub fn tool_title(&self, tool_call_id: &str) -> Option<&str> {
         self.pending_tools
             .get(tool_call_id)
@@ -868,11 +990,15 @@ impl AcpUpdateTracker {
     fn finish_completed_tool(
         &mut self,
         block: RenderBlock,
+        trace: ToolTraceSnapshot,
         scrollback: &mut ScrollbackState,
         is_replay: bool,
     ) -> EntryId {
         let wants_hl = Self::edit_wants_file_hl(&block);
         let id = scrollback.push_block(block);
+        if let Some(entry) = scrollback.get_by_id_mut(id) {
+            entry.tool_traces.push(trace);
+        }
         if !is_replay && wants_hl {
             self.pending_edit_hl.push(id);
         }
@@ -880,8 +1006,11 @@ impl AcpUpdateTracker {
         self.try_coalesce_edit(id, scrollback, is_replay);
         id
     }
-    /// The Edit block of `entry` if it qualifies for coalescing with an adjacent same-file Edit.
-    /// Qualifying means: completed successfully with hunks and a trustworthy one-liner summary.
+    /// The Edit block of `entry` if it qualifies for coalescing with an
+    /// adjacent same-file Edit: completed successfully with hunks, a
+    /// trustworthy one-liner summary, and free of per-entry attachments a
+    /// merge would misplace. Tool traces are concatenated by
+    /// `merge_edit_entries`, so they remain safe to coalesce.
     fn coalescable_edit(entry: &ScrollbackEntry) -> Option<&EditToolCallBlock> {
         if entry.is_running || entry.is_pending_user_input {
             return None;
@@ -974,12 +1103,17 @@ impl AcpUpdateTracker {
         scrollback: &mut ScrollbackState,
         is_replay: bool,
     ) {
-        let (removed_hunks, removed_edit_count) =
-            match scrollback.get_by_id(removed).map(|e| &e.block) {
-                Some(RenderBlock::ToolCall(ToolCallBlock::Edit(edit))) => {
-                    (edit.hunks.clone(), edit.edit_count)
-                }
-                _ => return,
+        let (removed_hunks, removed_edit_count, removed_traces) =
+            match scrollback.get_by_id(removed) {
+                Some(entry) => match &entry.block {
+                    RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) => (
+                        edit.hunks.clone(),
+                        edit.edit_count,
+                        entry.tool_traces.clone(),
+                    ),
+                    _ => return,
+                },
+                None => return,
             };
         if let Some(entry) = scrollback.get_by_id_mut(survivor) {
             if let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &mut entry.block {
@@ -990,6 +1124,7 @@ impl AcpUpdateTracker {
                 edit.edit_count = merged_edit_count;
                 edit.highlight = EditHighlightPhase::HunkOnly;
             }
+            entry.tool_traces.extend(removed_traces);
             entry.invalidate_cache();
         }
         scrollback.mark_structurally_dirty(survivor);
@@ -1027,23 +1162,20 @@ impl AcpUpdateTracker {
             self.hooks_running = None;
         }
         if let Some(new_start) = meta.stream_start_ms {
-            if self
+            let stream_boundary = self
                 .last_stream_start_ms
-                .is_some_and(|prev| prev != new_start)
-            {
-                let thinking_has_content = self
-                    .current_thinking
-                    .and_then(|id| scrollback.get_by_id(id))
-                    .is_some_and(|e| {
-                        if let RenderBlock::Thinking(t) = &e.block {
-                            !t.text().is_empty()
-                        } else {
-                            false
-                        }
-                    });
-                if thinking_has_content {
-                    self.finish_thinking(scrollback);
-                }
+                .map(|prev| prev != new_start)
+                // First live streamStartMs of a turn: same empty-window
+                // Thinking… pre-create stock Grok uses on StreamStarted.
+                // External agents (Pi) only start stamping meta mid-session;
+                // without this arm the first segment never pre-creates.
+                .unwrap_or(!meta.is_replay);
+            if stream_boundary {
+                // Always release the previous stream's thinking entry. Empty
+                // pre-created blocks are removed by `finish_thinking`; keeping
+                // one here makes `current_thinking` leak across model/stream
+                // switches and falsely reports `TurnActivity::Thinking`.
+                self.finish_thinking(scrollback);
                 if let Some(agent_id) = self.current_agent_msg.take() {
                     scrollback.finish_running(agent_id);
                 }
@@ -1072,7 +1204,7 @@ impl AcpUpdateTracker {
             }
             acp::SessionUpdate::ToolCall(tc) => self.handle_tool_call(tc, scrollback, meta),
             acp::SessionUpdate::ToolCallUpdate(tcu) => {
-                self.handle_tool_call_update(tcu, scrollback, meta.is_replay)
+                self.handle_tool_call_update(tcu, scrollback, meta)
             }
             acp::SessionUpdate::UserMessageChunk(chunk) => {
                 self.handle_user_message(chunk, meta, scrollback)
@@ -1377,7 +1509,8 @@ impl AcpUpdateTracker {
                 self.session_cwd.as_deref(),
                 &self.subagent_labels.borrow(),
             );
-            let id = self.finish_completed_tool(block, scrollback, is_replay);
+            let trace = tool_trace_from_call(&merged, meta);
+            let id = self.finish_completed_tool(block, trace, scrollback, is_replay);
             stamp_replayed_row(scrollback, id, meta);
             return true;
         }
@@ -1391,7 +1524,8 @@ impl AcpUpdateTracker {
                 self.session_cwd.as_deref(),
                 &self.subagent_labels.borrow(),
             );
-            let id = self.finish_completed_tool(block, scrollback, is_replay);
+            let trace = tool_trace_from_call(&tc, meta);
+            let id = self.finish_completed_tool(block, trace, scrollback, is_replay);
             stamp_replayed_row(scrollback, id, meta);
         } else {
             let block = tool_call_to_block(
@@ -1402,6 +1536,7 @@ impl AcpUpdateTracker {
             // A replayed call keeps a live clock too: joining a live grok session, its completion arrives live with no
             // duration of its own. A past transcript drops these clocks before finishing (`clear_running_clocks`).
             let id = scrollback.push_block(block);
+            refresh_tool_trace(scrollback, id, &tc, meta);
             scrollback.set_last_running(true);
             stamp_replayed_row(scrollback, id, meta);
             let started_at = Some(std::time::Instant::now());
@@ -1412,6 +1547,7 @@ impl AcpUpdateTracker {
                     base: tc,
                     utf8_decoder: Utf8Decoder::default(),
                     started_at,
+                    started_at_ms: meta.agent_timestamp_ms,
                 },
             );
         }
@@ -1422,8 +1558,9 @@ impl AcpUpdateTracker {
         &mut self,
         tcu: acp::ToolCallUpdate,
         scrollback: &mut ScrollbackState,
-        is_replay: bool,
+        meta: &NotificationMeta,
     ) -> bool {
+        let is_replay = meta.is_replay;
         let tc_id_str = tcu.tool_call_id.0.to_string();
         if self.bg_deferred_tools.contains_key(&tc_id_str) {
             return false;
@@ -1476,7 +1613,8 @@ impl AcpUpdateTracker {
                             self.session_cwd.as_deref(),
                             &self.subagent_labels.borrow(),
                         );
-                        self.finish_completed_tool(block, scrollback, is_replay);
+                        let trace = tool_trace_from_call(&base, meta);
+                        self.finish_completed_tool(block, trace, scrollback, is_replay);
                         return true;
                     }
                 }
@@ -1503,6 +1641,9 @@ impl AcpUpdateTracker {
                 let bash_output = extract_bash_output_from_value(&tcu.fields.raw_output);
                 pending.base.update(tcu.fields);
                 accumulate_terminal_output(&mut pending.base, tcu.meta.as_ref());
+                if let Some(entry_id) = pending.entry_id {
+                    refresh_tool_trace(scrollback, entry_id, &pending.base, meta);
+                }
                 if pending.entry_id.is_none() && is_bg_tool(&pending.base) {
                     let desc = extract_raw_field(&pending.base, "description");
                     Some((tc_id.clone(), desc, false))
@@ -1563,6 +1704,7 @@ impl AcpUpdateTracker {
                         pending.entry_id = Some(id);
                         id
                     };
+                    refresh_tool_trace(scrollback, entry_id, &pending.base, meta);
                     if let Some(bash_output) = bash_output {
                         if let Some(delta) = &bash_output.output_delta {
                             let text = pending.utf8_decoder.decode(delta);
@@ -1595,8 +1737,20 @@ impl AcpUpdateTracker {
         if let Some(mut pending) = self.pending_tools.remove(&tc_id) {
             accumulate_terminal_output(&mut pending.base, tcu.meta.as_ref());
             let merged = merge_tool_call_update(pending.base, tcu);
-            let block = self.tool_block(&merged);
+            let mut block = self.tool_block(&merged);
+            // Replay timing: the stashed `Instant` spans only the batching
+            // latency between the replayed start and completion, so the card
+            // would show 0ms. Prefer the agent-stamped start/end delta there;
+            // live completions keep the monotonic `Instant` measurement.
+            if is_replay
+                && let Some(elapsed_ms) =
+                    replay_elapsed_ms(pending.started_at_ms, meta.agent_timestamp_ms)
+                && let RenderBlock::ToolCall(tc) = &mut block
+            {
+                tc.set_elapsed_ms(elapsed_ms);
+            }
             if let Some(entry_id) = pending.entry_id {
+                refresh_tool_trace(scrollback, entry_id, &merged, meta);
                 if scrollback.replace_tool_block(entry_id, block, pending.started_at)
                     && let Some(entry) = scrollback.get_by_id(entry_id)
                 {
@@ -1605,7 +1759,8 @@ impl AcpUpdateTracker {
                 scrollback.finish_running(entry_id);
                 self.try_coalesce_edit(entry_id, scrollback, is_replay);
             } else {
-                self.finish_completed_tool(block, scrollback, is_replay);
+                let trace = tool_trace_from_call(&merged, meta);
+                self.finish_completed_tool(block, trace, scrollback, is_replay);
             }
             true
         } else if let Some((entry_id, base)) = self.cancel_drained.remove(&tc_id) {
@@ -2461,10 +2616,20 @@ fn tool_call_to_block_inner(
             RenderBlock::ToolCall(ToolCallBlock::WebSearch(block))
         }
         acp::ToolKind::Search => {
-            let pattern = extract_raw_field(tc, "pattern")
+            let mut pattern = extract_raw_field(tc, "pattern")
                 .or_else(|| extract_raw_field(tc, "glob_pattern"))
                 .unwrap_or_else(|| tc.title.clone());
-            let meta = extract_search_meta(tc);
+            let mut meta = extract_search_meta(tc);
+            // Pi `find` is a file-glob search, not a regex search. The native
+            // Search card represents that as a trivial pattern plus `glob`;
+            // normalize it here at the renderer boundary so the card reads
+            // `Search *.rs` instead of `Search "*.rs" in *.rs`.
+            if meta.output_mode == SearchOutputMode::FilesWithMatches
+                && let Some(glob) = meta.glob.clone()
+            {
+                pattern = ".".to_string();
+                meta.glob = Some(glob);
+            }
             let grep = extract_grep_output(&tc.raw_output).unwrap_or_default();
             let mut block = SearchToolCallBlock::new(pattern);
             if is_memory_v2_activity(tc) {
@@ -2501,14 +2666,21 @@ fn tool_call_to_block_inner(
             }
             RenderBlock::ToolCall(ToolCallBlock::WebFetch(block))
         }
-        _ if extract_raw_field(tc, "target_directory").is_some() => {
-            let path = extract_raw_field(tc, "target_directory").unwrap();
+        _ if is_list_dir_tool_call(tc) => {
+            let path = extract_raw_field(tc, "target_directory")
+                .or_else(|| extract_raw_field(tc, "path"))
+                .unwrap_or_else(|| ".".to_string());
             let mut block = ListDirToolCallBlock::new(make_relative_path(&path));
             if is_memory_v2_activity(tc) {
                 block = block.with_memory_activity();
             }
             if let Some(content) = extract_listdir_content(&tc.raw_output) {
                 block = block.with_output(content);
+            } else {
+                let text = content_text(tc);
+                if !text.is_empty() {
+                    block = block.with_output(text);
+                }
             }
             if !success {
                 block = block.with_error("List directory failed");
@@ -2668,11 +2840,9 @@ fn tool_call_to_block_inner(
                 (name.into_owned(), ToolCallBlock::Other)
             };
             let mut block = OtherToolCallBlock::new(label, summary);
-            block.input = tc
-                .raw_input
-                .as_ref()
-                .filter(|v| !v.is_null())
-                .and_then(|v| serde_json::to_string_pretty(v).ok());
+            if let Some(input_json) = format_other_tool_input(tc) {
+                block = block.with_input_json(input_json);
+            }
             let mut ct = content_text(tc);
             if ct.is_empty()
                 && let Some(extracted) = extract_use_tool_output(&tc.raw_output)
@@ -2924,13 +3094,33 @@ fn raw_input_requests_background(input: &serde_json::Value) -> bool {
 /// Check if an Edit-kind tool call is a whole-file write (write) rather than a targeted replacement (search_replace / edit).
 ///
 /// Detection: a Write-family `rawInput.variant` tag.
+fn is_list_dir_tool_call(tc: &acp::ToolCall) -> bool {
+    let name = tc.title.trim().to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "ls" | "list_dir" | "listdir" | "list_directory"
+    ) || extract_raw_field(tc, "target_directory").is_some()
+        || matches!(
+            tc.raw_output
+                .as_ref()
+                .and_then(|raw| raw.get("type"))
+                .and_then(|value| value.as_str()),
+            Some("ListDir")
+        )
+}
+
 fn is_write_tool(tc: &acp::ToolCall) -> bool {
-    is_write_variant(
+    if is_write_variant(
         tc.raw_input
             .as_ref()
             .and_then(|v| v.get("variant"))
             .and_then(|v| v.as_str()),
-    )
+    ) {
+        return true;
+    }
+    // Pi builtin `write` (and similarly named tools) without a variant tag.
+    let title = tc.title.trim();
+    title.eq_ignore_ascii_case("write") || title.to_ascii_lowercase().ends_with("_write")
 }
 /// Extract the serde variant tag from a tool call's `raw_input.variant`.
 ///
@@ -2951,12 +3141,15 @@ fn is_todo_variant(variant: Option<&str>) -> bool {
     matches!(variant, Some("TodoWrite"))
 }
 /// Check if a tool call is a todo-related tool.
-/// Suppressed from scrollback because the dedicated todo pane provides better visibility.
-/// Covers the `todo_write` / `TodoWrite` ids, the `Updating plan` title, and TodoWrite-family variant tags.
+///
+/// Suppressed from scrollback because the dedicated todo pane provides
+/// better visibility. Covers the `todo_write` / `TodoWrite` ids, the
+/// `Updating plan` title, TodoWrite-family variant tags, and Pi
+/// `@juicesharp/rpiv-todo`'s tool name `todo` (projected via ACP Plan).
 fn is_todo_tool(tc: &acp::ToolCall) -> bool {
     matches!(
         tc.title.as_str(),
-        "todo_write" | "TodoWrite" | "Updating plan"
+        "todo_write" | "TodoWrite" | "Updating plan" | "todo"
     ) || is_todo_variant(extract_variant(tc))
 }
 /// Check if a tool call is a task tool (subagent spawn).
@@ -3064,9 +3257,10 @@ fn extract_search_meta(tc: &acp::ToolCall) -> SearchInputMeta {
         .filter(|p| p != ".");
     SearchInputMeta {
         path,
-        glob: str_field("glob"),
+        glob: str_field("glob").or_else(|| str_field("glob_pattern")),
         output_mode: SearchOutputMode::from_str_opt(output_mode_str),
-        case_insensitive: bool_field("-i"),
+        // Grok uses `-i`; Pi uses `ignoreCase`.
+        case_insensitive: bool_field("-i") || bool_field("ignoreCase"),
         file_type: str_field("type"),
         multiline: bool_field("multiline"),
     }
@@ -3394,6 +3588,20 @@ fn maybe_pretty_json(s: &str) -> String {
         s.to_owned()
     }
 }
+/// Pretty-print Other-tool `raw_input` for the generic tool card body.
+///
+/// Display is gated by F2 `show_other_tool_args` at render time; this only
+/// materializes JSON for compact and expanded rendering on the block.
+fn format_other_tool_input(tc: &acp::ToolCall) -> Option<String> {
+    let raw = tc.raw_input.as_ref()?;
+    if raw.is_null() || raw.as_object().is_some_and(|o| o.is_empty()) {
+        return None;
+    }
+    serde_json::to_string_pretty(raw)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
 /// Extract input arguments from a use_tool or MCPTool call's raw_input.tool_input.
 /// Flattens the top-level JSON object into key-value string pairs for display.
 /// Nested objects/arrays are rendered as compact JSON strings.

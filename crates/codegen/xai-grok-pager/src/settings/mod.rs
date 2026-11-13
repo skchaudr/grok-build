@@ -17,8 +17,10 @@
 //! This mirrors the `ActionRegistry` pattern. No `LazyLock`, no global state.
 
 pub mod defs;
+pub mod layout;
 pub mod registry;
 
+pub use layout::{OTHER_SECTION, section_for, sections_for};
 pub use registry::{
     CodingDataSharingLock, DynamicEnumSource, EnumChoice, FeatureOverrideState, OwnedEnumChoice,
     PagerLocalSnapshot, PendingWrite, SettingCategory, SettingKey, SettingKind, SettingMeta,

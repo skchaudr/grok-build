@@ -11,11 +11,14 @@ use ratatui::text::Line;
 use ratatui::widgets::Widget;
 
 use super::actions::Action;
-use super::agent_view::{AgentView, active_contexts_for_pane, apply_settings_outcome};
+use super::agent_view::{
+    AgentView, active_contexts_for_pane, apply_pi_settings_outcome, apply_settings_outcome,
+    render_dropdown_chrome,
+};
 use super::app_view::InputOutcome;
 
 use crate::theme::Theme;
-use crate::views::modal::{self, ActiveModal};
+use crate::views::modal::{self, ActiveModal, ArgPickerSelection};
 
 impl AgentView {
     /// `suggest_args` falls back to model rows when `picked` is not a sub-phase; window and effort rows all extend it.
@@ -132,35 +135,58 @@ impl AgentView {
             modal,
             ActiveModal::CommandPalette { .. }
                 | ActiveModal::ArgPicker { .. }
+                | ActiveModal::Notifications { .. }
+                | ActiveModal::SubagentHistory { .. }
                 | ActiveModal::SessionPicker { .. }
                 | ActiveModal::DocPicker { .. }
         ) {
             // Extract window state for handle_modal_key.
-            let (window, query_empty, esc_clears) = match modal {
+            let (window, query_empty, esc_clears, external_session_picker) = match modal {
                 ActiveModal::CommandPalette { window, state, .. } => {
-                    (window, state.query().is_empty(), true)
+                    (window, state.query().is_empty(), true, false)
                 }
                 ActiveModal::ArgPicker { window, state, .. } => {
-                    (window, state.query().is_empty(), false)
+                    (window, state.query().is_empty(), false, false)
                 }
-                ActiveModal::SessionPicker { window, state, .. } => {
-                    (window, state.query().is_empty(), false)
+                ActiveModal::Notifications { window, state } => {
+                    (window, state.picker.query().is_empty(), true, false)
                 }
+                ActiveModal::SubagentHistory { window, state } => {
+                    (window, state.picker.query().is_empty(), true, false)
+                }
+                ActiveModal::SessionPicker {
+                    window,
+                    state,
+                    source_filter,
+                    ..
+                } => (
+                    window,
+                    state.query().is_empty(),
+                    false,
+                    *source_filter == crate::views::session_picker::SourceFilter::External,
+                ),
                 ActiveModal::DocPicker { window, state, .. } => {
-                    (window, state.query().is_empty(), true)
+                    (window, state.query().is_empty(), true, false)
                 }
                 _ => unreachable!(),
             };
-            // These modals don't use fold; fold_info is None so Left/Right/h/l return Unhandled and reach the picker
+            // These modals don't use fold; fold_info is None so
+            // Left/Right/h/l return Unhandled and reach the picker.
+            let external_tabs = ["Current folder", "All"];
+
             let chrome_cfg = mw::ModalWindowConfig {
                 title: "",
-                tabs: None,
+                tabs: external_session_picker.then_some(&external_tabs),
                 shortcuts: &[],
                 sizing: mw::ModalSizing::default(),
                 fold_info: None,
             };
             let outcome = mw::handle_modal_key(window, key, &chrome_cfg);
             match outcome {
+                ModalWindowOutcome::TabChanged(index) if external_session_picker => {
+                    window.active_tab = index;
+                    return InputOutcome::Action(Action::RefreshExternalSessionCatalog);
+                }
                 ModalWindowOutcome::CloseRequested => {
                     // If the query is non-empty and esc_clears_query is set, clear the query first
                     if esc_clears && !query_empty {
@@ -175,25 +201,45 @@ impl AgentView {
                                 state.selected = 0;
                                 state.scroll_offset = None;
                             }
+                            ActiveModal::Notifications { state, .. } => {
+                                state.picker.clear_query();
+                            }
+                            ActiveModal::SubagentHistory { state, .. } => {
+                                state.picker.clear_query();
+                            }
                             _ => {}
                         }
                         return InputOutcome::Changed;
                     }
-                    // Otherwise delegate close to the picker handler which knows about palette snapshots / restore logic
+                    // Otherwise delegate close to the picker handler which
+                    // knows about palette snapshots / restore logic.
+                    let ev = crossterm::event::Event::Key(*key);
+
                     if matches!(self.active_modal, Some(ActiveModal::DocPicker { .. })) {
-                        let ev = crossterm::event::Event::Key(*key);
                         return self.handle_doc_input(&ev);
                     }
-                    let ev = crossterm::event::Event::Key(*key);
+                    if matches!(self.active_modal, Some(ActiveModal::Notifications { .. })) {
+                        return self.handle_notifications_input(&ev);
+                    }
+                    if matches!(self.active_modal, Some(ActiveModal::SubagentHistory { .. })) {
+                        return self.handle_subagent_history_input(&ev);
+                    }
                     return self.handle_palette_or_arg_input_with_registry(&ev, registry);
                 }
                 ModalWindowOutcome::Unhandled => {
-                    // Non-Esc key (including Left/Right/h/l): forward to the picker input handler
+                    // Non-Esc key (including Left/Right/h/l):
+                    // forward to picker input handler.
+                    let ev = crossterm::event::Event::Key(*key);
+
                     if matches!(self.active_modal, Some(ActiveModal::DocPicker { .. })) {
-                        let ev = crossterm::event::Event::Key(*key);
                         return self.handle_doc_input(&ev);
                     }
-                    let ev = crossterm::event::Event::Key(*key);
+                    if matches!(self.active_modal, Some(ActiveModal::Notifications { .. })) {
+                        return self.handle_notifications_input(&ev);
+                    }
+                    if matches!(self.active_modal, Some(ActiveModal::SubagentHistory { .. })) {
+                        return self.handle_subagent_history_input(&ev);
+                    }
                     return self.handle_palette_or_arg_input_with_registry(&ev, registry);
                 }
                 _ => return InputOutcome::Changed,
@@ -263,7 +309,143 @@ impl AgentView {
             }
         }
 
-        // DocViewer: route through ModalWindow chrome, then handle scroll.
+        // DocViewer / ContextInfo: route through ModalWindow chrome, then handle scroll.
+        // Cache graph keys (1/2/3/s/e/r/v/0) when metrics present.
+        if matches!(modal, ActiveModal::ContextInfo { .. }) {
+            use crate::views::cache_graph::{CacheGraphView, build_cache_stats_csv};
+            use crossterm::event::KeyCode;
+
+            let ActiveModal::ContextInfo {
+                window,
+                scroll,
+                cache_metrics,
+                view,
+                selected_row,
+                detail_open,
+                session_file,
+                export_cwd,
+                export_basename,
+                ..
+            } = modal
+            else {
+                unreachable!();
+            };
+            let chrome_cfg = mw::ModalWindowConfig {
+                title: "",
+                tabs: None,
+                shortcuts: &[],
+                sizing: mw::ModalSizing::default(),
+                fold_info: None,
+            };
+            match mw::handle_modal_key(window, key, &chrome_cfg) {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+                ModalWindowOutcome::Unhandled => {
+                    if matches!(key.code, KeyCode::Char('c')) {
+                        if let Some(path) = session_file.as_deref() {
+                            let delivery = crate::clipboard::copy_text_or_file(path);
+                            self.show_toast(delivery.toast_message().as_ref());
+                            return InputOutcome::Changed;
+                        }
+                    }
+                    // View switching / table navigation when cache metrics are attached.
+                    if let Some(metrics) = cache_metrics.as_ref() {
+                        if *view != CacheGraphView::Breakdown {
+                            if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                                if let Some(selected) = selected_row.as_mut() {
+                                    *selected = selected.saturating_sub(1);
+                                }
+                                return InputOutcome::Changed;
+                            }
+                            if matches!(key.code, KeyCode::Down | KeyCode::Char('j')) {
+                                if let Some(selected) = selected_row.as_mut() {
+                                    *selected = selected
+                                        .saturating_add(1)
+                                        .min(metrics.all_messages.len().saturating_sub(1));
+                                }
+                                return InputOutcome::Changed;
+                            }
+                            if matches!(key.code, KeyCode::Enter) && selected_row.is_some() {
+                                *detail_open = !*detail_open;
+                                return InputOutcome::Changed;
+                            }
+                        }
+                        let next = match key.code {
+                            KeyCode::Char('0') => Some(CacheGraphView::Breakdown),
+                            KeyCode::Char('1') => Some(CacheGraphView::PerTurn),
+                            KeyCode::Char('2') => Some(CacheGraphView::CumulativePercent),
+                            KeyCode::Char('3') => Some(CacheGraphView::CumulativeTotal),
+                            KeyCode::Char('s') => Some(CacheGraphView::Stats),
+                            KeyCode::Char('v') => Some(view.cycle_forward()),
+                            _ => None,
+                        };
+                        if let Some(next_view) = next {
+                            if next_view != *view {
+                                *view = next_view;
+                                *scroll = 0;
+                                *detail_open = false;
+                                *selected_row = (!metrics.all_messages.is_empty())
+                                    .then(|| metrics.all_messages.len() - 1);
+                            }
+                            return InputOutcome::Changed;
+                        }
+                        if matches!(key.code, KeyCode::Char('e')) {
+                            if let Some(metrics) = cache_metrics.as_ref() {
+                                let path = std::path::Path::new(export_cwd)
+                                    .join(format!("{export_basename}.csv"));
+                                let csv = build_cache_stats_csv(metrics);
+                                match std::fs::write(&path, csv) {
+                                    Ok(()) => {
+                                        self.show_toast(&format!(
+                                            "Exported cache stats to {}",
+                                            path.display()
+                                        ));
+                                    }
+                                    Err(err) => {
+                                        self.show_toast(&format!("Cache export failed: {err}"));
+                                    }
+                                }
+                                return InputOutcome::Changed;
+                            }
+                        }
+                        if matches!(key.code, KeyCode::Char('r')) {
+                            // Re-fetch session/info; view preserved in complete handler.
+                            return InputOutcome::Action(
+                                crate::app::actions::Action::ShowContextInfo,
+                            );
+                        }
+                    }
+                    if crate::views::modal::apply_doc_scroll(key.code, scroll) {
+                        return InputOutcome::Changed;
+                    }
+                    return InputOutcome::Unchanged;
+                }
+                _ => return InputOutcome::Changed,
+            }
+        }
+        if let ActiveModal::ToolTraceViewer {
+            input_scroll,
+            output_scroll,
+            focus,
+            ..
+        } = modal
+        {
+            return match crate::views::modal::apply_tool_trace_key(
+                key.code,
+                focus,
+                input_scroll,
+                output_scroll,
+            ) {
+                crate::views::modal::ToolTraceKeyOutcome::Close => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                crate::views::modal::ToolTraceKeyOutcome::Changed => InputOutcome::Changed,
+                crate::views::modal::ToolTraceKeyOutcome::Unchanged => InputOutcome::Unchanged,
+            };
+        }
         if let ActiveModal::DocViewer {
             window,
             previous_palette,
@@ -457,6 +639,77 @@ impl AgentView {
             }
         }
 
+        // grok-pi settings panel: the chrome owns close and tab switching,
+        // then the panel handles the rest. Sub-panes own their own Esc, so
+        // they bypass the chrome entirely.
+        if let ActiveModal::PiSettings { state } = modal {
+            use crate::views::pi_settings;
+            // Search, section focus, and sub-panes give Esc a local meaning,
+            // so they bypass the chrome's Esc-closes-the-modal rule.
+            if state.owns_escape() {
+                let out = pi_settings::handle_key(state, key);
+                return apply_pi_settings_outcome(self, out);
+            }
+            let chrome_cfg = mw::ModalWindowConfig {
+                title: "",
+                tabs: None,
+                shortcuts: &[],
+                sizing: mw::ModalSizing::default(),
+                fold_info: None,
+            };
+            return match mw::handle_modal_key(&mut state.window, key, &chrome_cfg) {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::Unhandled => {
+                    let out = pi_settings::handle_key(state, key);
+                    apply_pi_settings_outcome(self, out)
+                }
+                _ => InputOutcome::Changed,
+            };
+        }
+
+        if let ActiveModal::PiConfig { state } = modal {
+            return match crate::views::pi_config::PiConfigModalState::handle_key(state, key) {
+                crate::views::pi_config::PiConfigOutcome::Close => {
+                    state.complete_picker(false);
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                crate::views::pi_config::PiConfigOutcome::PickerSubmit => {
+                    state.complete_picker(true);
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                crate::views::pi_config::PiConfigOutcome::Changed => InputOutcome::Changed,
+            };
+        }
+
+        if let ActiveModal::PiModels { state } = modal {
+            return match state.handle_key(key) {
+                crate::views::pi_models::PiModelsOutcome::Close => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                crate::views::pi_models::PiModelsOutcome::Changed => InputOutcome::Changed,
+                crate::views::pi_models::PiModelsOutcome::Reload => {
+                    InputOutcome::Action(Action::PiReload)
+                }
+                crate::views::pi_models::PiModelsOutcome::Activate(query) => {
+                    let Some(model_id) = self.session.models.resolve_by_name_or_id(&query) else {
+                        state.set_error(format!(
+                            "Model '{query}' is not in the live catalog. Save/reload, then try again."
+                        ));
+                        return InputOutcome::Changed;
+                    };
+                    InputOutcome::Action(Action::SwitchModel(
+                        crate::app::actions::ModelChoice::new(model_id),
+                    ))
+                }
+            };
+        }
+
         // UsageInfo: chrome (Esc/close) first, then tabs / scroll / copy.
         if let ActiveModal::UsageInfo { state } = modal {
             let outcome = crate::views::usage_modal::route_usage_modal_key(state, key);
@@ -507,13 +760,22 @@ impl AgentView {
             } => self.handle_edit_confirm_choice(confirm, pending_target, ch),
             ActiveModal::CommandPalette { .. }
             | ActiveModal::ArgPicker { .. }
+            | ActiveModal::Notifications { .. }
+            | ActiveModal::SubagentHistory { .. }
+            | ActiveModal::SessionTree { .. }
+            | ActiveModal::TreeMap { .. }
             | ActiveModal::SessionPicker { .. }
             | ActiveModal::DocPicker { .. }
             | ActiveModal::DocViewer { .. }
+            | ActiveModal::ToolTraceViewer { .. }
+            | ActiveModal::ContextInfo { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Traces { .. }
             | ActiveModal::Settings { .. }
+            | ActiveModal::PiSettings { .. }
+            | ActiveModal::PiConfig { .. }
+            | ActiveModal::PiModels { .. }
             | ActiveModal::UsageInfo { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
             | ActiveModal::RememberNoteReview { .. }
@@ -533,6 +795,9 @@ impl AgentView {
         let event = crossterm::event::Event::Paste(text.to_owned());
         if matches!(self.active_modal, Some(ActiveModal::DocPicker { .. })) {
             return self.handle_doc_input(&event);
+        }
+        if matches!(self.active_modal, Some(ActiveModal::SubagentHistory { .. })) {
+            return self.handle_subagent_history_input(&event);
         }
         if matches!(
             self.active_modal,
@@ -555,6 +820,19 @@ impl AgentView {
         }
         if let Some(ActiveModal::MemoryBrowser { state }) = self.active_modal.as_mut() {
             return crate::views::memory_modal::handle_memory_paste(state, text);
+        }
+        if let Some(ActiveModal::PiModels { state }) = self.active_modal.as_mut() {
+            state.handle_paste(text);
+            return InputOutcome::Changed;
+        }
+        let pi_settings_outcome = match self.active_modal.as_mut() {
+            Some(ActiveModal::PiSettings { state }) => {
+                Some(crate::views::pi_settings::handle_paste(state, text))
+            }
+            _ => None,
+        };
+        if let Some(outcome) = pi_settings_outcome {
+            return apply_pi_settings_outcome(self, outcome);
         }
         let settings_outcome = match self.active_modal.as_mut() {
             Some(ActiveModal::Settings { state }) => Some(
@@ -583,15 +861,22 @@ impl AgentView {
             FilterChanged,
         }
 
-        let (command_clone, in_effort_phase, entry_count) = match self.active_modal.as_ref() {
-            Some(ActiveModal::ArgPicker {
-                command,
-                args_query,
-                items,
-                ..
-            }) => (command.clone(), !args_query.is_empty(), items.len()),
-            _ => return InputOutcome::Changed,
-        };
+        let (command_clone, in_effort_phase, entry_count, selection) =
+            match self.active_modal.as_ref() {
+                Some(ActiveModal::ArgPicker {
+                    command,
+                    args_query,
+                    items,
+                    selection,
+                    ..
+                }) => (
+                    command.clone(),
+                    !args_query.is_empty(),
+                    items.len(),
+                    *selection,
+                ),
+                _ => return InputOutcome::Changed,
+            };
 
         let config = PickerConfig {
             title: None,
@@ -637,38 +922,64 @@ impl AgentView {
         match step {
             ArgPickerStep::FilterChanged => {
                 if let Some(ActiveModal::ArgPicker {
+                    command,
+                    args_query,
                     items,
                     original_items,
                     state,
                     ..
                 }) = self.active_modal.as_mut()
                 {
-                    let q = state.query().to_lowercase();
-                    *items = original_items
-                        .iter()
-                        .filter(|item| {
-                            q.is_empty()
-                                || item.match_text.to_lowercase().contains(&q)
-                                || item.display.to_lowercase().contains(&q)
-                                || item.description.to_lowercase().contains(&q)
-                        })
-                        .cloned()
-                        .collect();
+                    let query = state.query().to_owned();
+                    if matches!(command.as_str(), "model" | "m") && args_query.is_empty() {
+                        // Keep the model picker aligned with Pi TUI: fuzzyFilter
+                        // ranks all matching rows instead of requiring the raw
+                        // query to occur as one contiguous substring.
+                        let indexes = crate::slash::matcher::FuzzyMatcher::new()
+                            .rank_pi_model_selector(original_items, &query, |item| {
+                                item.match_text.as_str()
+                            });
+                        *items = indexes
+                            .into_iter()
+                            .filter_map(|index| original_items.get(index).cloned())
+                            .collect();
+                    } else {
+                        let q = query.to_lowercase();
+                        *items = original_items
+                            .iter()
+                            .filter(|item| {
+                                q.is_empty()
+                                    || item.match_text.to_lowercase().contains(&q)
+                                    || item.display.to_lowercase().contains(&q)
+                                    || item.description.to_lowercase().contains(&q)
+                            })
+                            .cloned()
+                            .collect();
+                    }
                     state.selected = state.selected.min(items.len().saturating_sub(1));
                 }
                 InputOutcome::Changed
             }
             ArgPickerStep::Closed => {
+                if matches!(selection, ArgPickerSelection::LargePaste) {
+                    return self.resolve_large_paste_choice(false);
+                }
                 if in_effort_phase && self.try_arg_picker_step_back_from_effort() {
                     return InputOutcome::Changed;
                 }
-                let snapshot = match self.active_modal.as_mut() {
+                let (snapshot, settings) = match self.active_modal.as_mut() {
                     Some(ActiveModal::ArgPicker {
-                        previous_palette, ..
-                    }) => previous_palette.take(),
-                    _ => None,
+                        previous_palette,
+                        previous_settings,
+                        ..
+                    }) => (previous_palette.take(), previous_settings.take()),
+                    _ => (None, None),
                 };
-                if let Some(snapshot) = snapshot {
+                if let Some(state) = settings {
+                    // Refresh values so the just-cleared/changed slot paints.
+                    // (commit path also refreshes via PersistSetting effects.)
+                    self.active_modal = Some(ActiveModal::Settings { state });
+                } else if let Some(snapshot) = snapshot {
                     self.active_modal = Some(ActiveModal::CommandPalette {
                         entries: snapshot.entries,
                         state: snapshot.state,
@@ -680,6 +991,102 @@ impl AgentView {
                 InputOutcome::Changed
             }
             ArgPickerStep::Selected(item) => {
+                if matches!(selection, ArgPickerSelection::LargePaste) {
+                    return self.resolve_large_paste_choice(item.insert_text == "file");
+                }
+                if matches!(selection, ArgPickerSelection::ToggleScopedModel) {
+                    if item.insert_text.eq_ignore_ascii_case("all") {
+                        self.session.models.clear_scoped_models();
+                    } else if let Some(model_id) =
+                        crate::slash::commands::model::resolve_model_for_arg_item(
+                            &self.session.models,
+                            &item,
+                        )
+                    {
+                        self.session.models.toggle_scoped_model(model_id);
+                    }
+                    if let Some(cmd) = self.prompt.slash_controller.registry().get(&command_clone) {
+                        let ctx = self.prompt.slash_controller.app_ctx(&self.session.models);
+                        if let Some(updated) = cmd.suggest_args(&ctx, "")
+                            && let Some(ActiveModal::ArgPicker {
+                                items,
+                                original_items,
+                                state,
+                                ..
+                            }) = self.active_modal.as_mut()
+                        {
+                            *original_items = updated;
+                            let query = state.query().to_lowercase();
+                            *items = original_items
+                                .iter()
+                                .filter(|candidate| {
+                                    query.is_empty()
+                                        || candidate.match_text.to_lowercase().contains(&query)
+                                        || candidate.display.to_lowercase().contains(&query)
+                                        || candidate.description.to_lowercase().contains(&query)
+                                })
+                                .cloned()
+                                .collect();
+                            state.selected = state.selected.min(items.len().saturating_sub(1));
+                        }
+                    }
+                    return InputOutcome::Changed;
+                }
+                if let ArgPickerSelection::SetModelSlot(slot_key) = selection {
+                    let settings = match self.active_modal.as_mut() {
+                        Some(ActiveModal::ArgPicker {
+                            previous_settings, ..
+                        }) => previous_settings.take(),
+                        _ => None,
+                    };
+                    let restore = |this: &mut Self, settings: Option<Box<_>>| {
+                        if let Some(state) = settings {
+                            this.active_modal = Some(ActiveModal::Settings { state });
+                        } else {
+                            this.active_modal = None;
+                        }
+                    };
+                    if item.insert_text.is_empty() {
+                        let action = match slot_key {
+                            "recap_model" => Action::ClearRecapModel,
+                            "recap_model_2" => Action::ClearRecapModel2,
+                            "recap_model_3" => Action::ClearRecapModel3,
+                            "btw_model" => Action::ClearBtwModel,
+                            "btw_model_2" => Action::ClearBtwModel2,
+                            "btw_model_3" => Action::ClearBtwModel3,
+                            other => {
+                                tracing::error!(key = other, "unknown model slot clear");
+                                restore(self, settings);
+                                return InputOutcome::Changed;
+                            }
+                        };
+                        restore(self, settings);
+                        return InputOutcome::Action(action);
+                    }
+                    let Some(model_id) = crate::slash::commands::model::resolve_model_for_arg_item(
+                        &self.session.models,
+                        &item,
+                    ) else {
+                        restore(self, settings);
+                        return InputOutcome::Changed;
+                    };
+                    let id = model_id.0.to_string();
+                    let action = match slot_key {
+                        "recap_model" => Action::SetRecapModel(model_id),
+                        "recap_model_2" => Action::SetRecapModel2(id),
+                        "recap_model_3" => Action::SetRecapModel3(id),
+                        "btw_model" => Action::SetBtwModel(id),
+                        "btw_model_2" => Action::SetBtwModel2(id),
+                        "btw_model_3" => Action::SetBtwModel3(id),
+                        other => {
+                            tracing::error!(key = other, "unknown model slot set");
+                            restore(self, settings);
+                            return InputOutcome::Changed;
+                        }
+                    };
+                    restore(self, settings);
+                    return InputOutcome::Action(action);
+                }
                 let chains_to_effort = matches!(command_clone.as_str(), "model" | "m")
                     && item.insert_text.ends_with(char::is_whitespace);
                 if chains_to_effort {
@@ -748,15 +1155,10 @@ impl AgentView {
         };
 
         match modal {
-            ActiveModal::CommandPalette {
-                entries: _, state, ..
-            } => {
-                // Build filtered entries for count and non-selectable indices.
-                let filtered = crate::views::modal::filter_palette_entries(
-                    state.query(),
-                    self.sharing_enabled,
-                    &self.prompt.slash_controller,
-                );
+            ActiveModal::CommandPalette { entries, state, .. } => {
+                // Filter the modal's full entry catalog. This includes live Pi
+                // commands captured when the palette opened.
+                let filtered = crate::views::modal::filter_palette_entries(entries, state.query());
                 let non_sel: Vec<bool> = filtered
                     .iter()
                     .map(|e| matches!(e.command, PaletteCommand::SectionHeader(_)))
@@ -871,7 +1273,7 @@ impl AgentView {
                             }
                             PaletteCommand::OpenSettings => {
                                 self.active_modal = None;
-                                InputOutcome::Action(Action::OpenSettings)
+                                InputOutcome::Action(Action::OpenPiSettings)
                             }
                             PaletteCommand::OpenAgentsModal => {
                                 self.active_modal = None;
@@ -903,8 +1305,28 @@ impl AgentView {
                                             state: state.clone(),
                                         })
                                     };
-                                    self.active_modal =
-                                        Some(crate::views::modal::session_picker_modal(prev));
+                                    self.active_modal = Some(ActiveModal::SessionPicker {
+                                        state: crate::views::picker::PickerState::default(),
+                                        entries: None,
+                                        loading: true,
+                                        lanes: Default::default(),
+                                        previous_palette: prev,
+                                        window: crate::views::modal_window::ModalWindowState::new(),
+                                        content_results: None,
+                                        content_loading: false,
+                                        generation: 0,
+                                        detail_seq: 0,
+                                        deep_search_seq: 0,
+                                        entries_query: None,
+                                        source_filter:
+                                            crate::views::session_picker::SourceFilter::default(),
+                                        pending_delete: None,
+                                        preview_scroll: 0,
+                                        search_mode: false,
+                                        preview_mode: false,
+                                        preview_messages: None,
+                                    });
+
                                     return InputOutcome::Action(Action::FetchSessionList);
                                 }
 
@@ -941,6 +1363,8 @@ impl AgentView {
                                             state: crate::views::picker::PickerState::input_active(
                                             ),
                                             previous_palette: prev,
+                                            previous_settings: None,
+                                            selection: ArgPickerSelection::RunCommand,
                                             window:
                                                 crate::views::modal_window::ModalWindowState::new(),
                                         });
@@ -958,17 +1382,16 @@ impl AgentView {
                         InputOutcome::Changed
                     }
                     PickerOutcome::QueryChanged => {
-                        // Re-filter entries based on updated query.
-                        let sharing_enabled = self.sharing_enabled;
+                        // Keep `entries` as the complete catalog; only clamp the
+                        // selection against the filtered view. Mutating entries
+                        // here would permanently discard live Pi commands.
                         if let Some(ActiveModal::CommandPalette { entries, state, .. }) =
                             self.active_modal.as_mut()
                         {
-                            *entries = crate::views::modal::filter_palette_entries(
-                                state.query(),
-                                sharing_enabled,
-                                &self.prompt.slash_controller,
-                            );
-                            state.selected = state.selected.min(entries.len().saturating_sub(1));
+                            let filtered_len =
+                                crate::views::modal::filter_palette_entries(entries, state.query())
+                                    .len();
+                            state.selected = state.selected.min(filtered_len.saturating_sub(1));
                         }
                         InputOutcome::Changed
                     }
@@ -978,6 +1401,11 @@ impl AgentView {
                 }
             }
             ActiveModal::ArgPicker { .. } => unreachable!("routed via handle_arg_picker_input"),
+            ActiveModal::SessionTree { .. } => {
+                // Modal already restored by caller for owned-match paths; for
+                // ref matches this arm is unused because early routing handles it.
+                self.handle_session_tree_input(ev)
+            }
             ActiveModal::SessionPicker {
                 entries,
                 state,
@@ -988,6 +1416,11 @@ impl AgentView {
                 entries_query,
                 source_filter,
                 pending_delete,
+                window,
+                search_mode,
+                preview_mode,
+                preview_messages,
+                preview_scroll,
                 ..
             } => {
                 use crate::views::session_picker::{
@@ -1027,6 +1460,9 @@ impl AgentView {
 
                 // Chat-mode picker lists conversations only: the source filter and local-disk delete are dead weight there
                 let chat_mode = self.app_chat_mode;
+                let external_picker =
+                    *source_filter == crate::views::session_picker::SourceFilter::External;
+                let external_tabs = ["Current folder", "All"];
                 let config = PickerConfig {
                     title: Some("Resume session"),
                     show_search_hint: true,
@@ -1037,16 +1473,22 @@ impl AgentView {
                     non_selectable: &non_sel,
                     non_selectable_clickable: &[],
                     shortcuts_area: None,
-                    tabs: None,
-                    active_tab: 0,
-                    filter_label: (!chat_mode).then(|| source_filter.label()),
-                    filter_key_hint: (!chat_mode).then_some("f"),
-                    filter_active: !chat_mode && source_filter.is_active(),
+                    tabs: external_picker.then_some(&external_tabs),
+                    active_tab: if external_picker {
+                        window.active_tab
+                    } else {
+                        0
+                    },
+                    filter_label: (!chat_mode && !external_picker).then(|| source_filter.label()),
+                    filter_key_hint: (!chat_mode && !external_picker).then_some("f"),
+                    filter_active: !chat_mode && !external_picker && source_filter.is_active(),
                     header_note: None,
-                    action_keys: if chat_mode || focused_is_foreign {
+                    action_keys: if external_picker {
+                        &[('s', "sort")]
+                    } else if chat_mode || focused_is_foreign {
                         &[]
                     } else {
-                        &[('d', "delete")]
+                        &[('d', "delete"), ('s', "sort")]
                     },
                     disable_search: false,
                     compact_bottom_bar: false,
@@ -1067,6 +1509,255 @@ impl AgentView {
                     }
                     crate::views::session_picker::PendingDeleteKey::Disarmed
                     | crate::views::session_picker::PendingDeleteKey::NotArmed => {}
+                }
+
+                // Ctrl+F full-text page: External + F2 `psm_resume_index` only.
+                // Adapter still requires PSM online (port 52131).
+                let psm_features = crate::appearance::cache::load_psm_resume_index();
+                if psm_features
+                    && *source_filter == crate::views::session_picker::SourceFilter::External
+                    && let crossterm::event::Event::Key(key) = ev
+                    && key.kind == KeyEventKind::Press
+                    && key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && matches!(key.code, crossterm::event::KeyCode::Char('f'))
+                {
+                    *search_mode = !*search_mode;
+                    if *search_mode {
+                        state.search_active = true;
+                        state.set_query("");
+                        *content_results = None;
+                        *content_loading = false;
+                        state.selected = 0;
+                        state.scroll_offset = None;
+                    }
+                    return InputOutcome::Changed;
+                }
+
+                // ── Preview mode (PSM/external picker only) ──
+                // Right loads messages from PSM and enters preview; Left exits.
+                // Right loads messages from PSM and enters preview; Left exits.
+                if psm_features
+                    && *source_filter == crate::views::session_picker::SourceFilter::External
+                    && let crossterm::event::Event::Key(key) = ev
+                    && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                    && key.modifiers.is_empty()
+                {
+                    match key.code {
+                        crossterm::event::KeyCode::Right
+                            if !*preview_mode && key.kind == KeyEventKind::Press =>
+                        {
+                            let selected = entry_map
+                                .get(state.selected)
+                                .and_then(|entry| entry.as_ref());
+                            match selected {
+                                Some(PickerItem::Fuzzy { original_index }) => {
+                                    if let Some(entry) =
+                                        entries.as_ref().and_then(|ents| ents.get(*original_index))
+                                    {
+                                        return InputOutcome::Action(Action::LoadSessionPreview {
+                                            session_id: entry.id.clone(),
+                                            session_path: entry.session_path.clone(),
+                                        });
+                                    }
+                                }
+                                Some(PickerItem::Content { hit_index }) => {
+                                    if let Some(hit) = content_results
+                                        .as_ref()
+                                        .and_then(|hits| hits.get(*hit_index))
+                                    {
+                                        return InputOutcome::Action(Action::LoadSessionPreview {
+                                            session_id: hit.session_id.clone(),
+                                            session_path: None,
+                                        });
+                                    }
+                                }
+                                _ => {}
+                            }
+                            // No selectable row — still enter empty preview.
+                            *preview_mode = true;
+                            *preview_messages = Some(Vec::new());
+                            *preview_scroll = 0;
+                            return InputOutcome::Changed;
+                        }
+                        crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Left
+                            if *preview_mode && key.kind == KeyEventKind::Press =>
+                        {
+                            *preview_mode = false;
+                            *preview_messages = None;
+                            *preview_scroll = 0;
+                            return InputOutcome::Changed;
+                        }
+                        // Scroll keys: same dispatch as Read/DocViewer (supports key-repeat).
+                        code if *preview_mode
+                            && crate::views::modal::apply_doc_scroll(code, preview_scroll) =>
+                        {
+                            return InputOutcome::Changed;
+                        }
+                        // y / c — copy full transcript
+                        crossterm::event::KeyCode::Char(ch)
+                            if *preview_mode
+                                && key.kind == KeyEventKind::Press
+                                && matches!(ch, 'y' | 'c') =>
+                        {
+                            if let Some(msgs) = preview_messages.as_ref() {
+                                let text = format_preview_transcript(msgs);
+                                self.copy_to_clipboard(&text);
+                            }
+                            return InputOutcome::Changed;
+                        }
+                        // Enter — resume the focused session from preview
+                        crossterm::event::KeyCode::Enter
+                            if *preview_mode && key.kind == KeyEventKind::Press =>
+                        {
+                            let selected = entry_map
+                                .get(state.selected)
+                                .and_then(|entry| entry.as_ref());
+                            match selected {
+                                Some(PickerItem::Fuzzy { original_index }) => {
+                                    return InputOutcome::Action(Action::PickSession(
+                                        *original_index,
+                                    ));
+                                }
+                                Some(PickerItem::Content { hit_index }) => {
+                                    if let Some(hit) = content_results
+                                        .as_ref()
+                                        .and_then(|hits| hits.get(*hit_index))
+                                    {
+                                        return InputOutcome::Action(Action::PickContentSession {
+                                            session_id: hit.session_id.clone(),
+                                            cwd: hit.cwd.clone(),
+                                        });
+                                    }
+                                }
+                                _ => {}
+                            }
+                            return InputOutcome::Changed;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // ── Search mode input handling ──
+                // When search_mode is active, all keys are consumed by the
+                // full-text search page (query input, Tab scope, nav, Esc).
+                if *search_mode {
+                    if let crossterm::event::Event::Key(key) = ev
+                        && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                    {
+                        use crossterm::event::KeyCode;
+                        match key.code {
+                            // Esc / Ctrl+F — exit search mode
+                            KeyCode::Esc if key.kind == KeyEventKind::Press => {
+                                *search_mode = false;
+                                *content_results = None;
+                                *content_loading = false;
+                                return InputOutcome::Changed;
+                            }
+                            KeyCode::Char('f')
+                                if key
+                                    .modifiers
+                                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                            {
+                                *search_mode = false;
+                                *content_results = None;
+                                *content_loading = false;
+                                return InputOutcome::Changed;
+                            }
+                            // Tab — toggle cwd/all scope (re-trigger search)
+                            KeyCode::Tab if key.kind == KeyEventKind::Press => {
+                                // Cycle source filter to toggle scope
+                                return InputOutcome::Action(Action::CycleSessionSourceFilter);
+                            }
+                            // Enter — resume selected search result
+                            KeyCode::Enter if key.kind == KeyEventKind::Press => {
+                                if let Some(hits) = content_results.as_ref()
+                                    && let Some(hit) = hits.get(state.selected)
+                                {
+                                    let session_id = hit.session_id.clone();
+                                    let cwd = hit.cwd.clone();
+                                    return InputOutcome::Action(Action::PickContentSession {
+                                        session_id,
+                                        cwd,
+                                    });
+                                }
+                                return InputOutcome::Changed;
+                            }
+                            // ↑/↓ — navigate results
+                            KeyCode::Up | KeyCode::Char('k')
+                                if !key
+                                    .modifiers
+                                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                            {
+                                if state.selected > 0 {
+                                    state.selected -= 1;
+                                    if let Some(off) = state.scroll_offset.as_mut() {
+                                        if state.selected < *off {
+                                            *off = state.selected;
+                                        }
+                                    }
+                                }
+                                return InputOutcome::Changed;
+                            }
+                            KeyCode::Down | KeyCode::Char('j')
+                                if !key
+                                    .modifiers
+                                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                            {
+                                let max = content_results
+                                    .as_ref()
+                                    .map_or(0, |r| r.len())
+                                    .saturating_sub(1);
+                                if state.selected < max {
+                                    state.selected += 1;
+                                }
+                                return InputOutcome::Changed;
+                            }
+                            // Backspace — delete last char from query
+                            KeyCode::Backspace if key.kind == KeyEventKind::Press => {
+                                let q = state.query().to_string();
+                                if !q.is_empty() {
+                                    let new_q: String =
+                                        q.chars().take(q.chars().count() - 1).collect();
+                                    state.set_query(&new_q);
+                                    state.selected = 0;
+                                    state.scroll_offset = None;
+                                    return InputOutcome::Action(Action::TriggerDeepSearch);
+                                }
+                                return InputOutcome::Changed;
+                            }
+                            // Regular char — append to query
+                            KeyCode::Char(c)
+                                if !key
+                                    .modifiers
+                                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                            {
+                                let mut q = state.query().to_string();
+                                q.push(c);
+                                state.set_query(&q);
+                                state.selected = 0;
+                                state.scroll_offset = None;
+                                return InputOutcome::Action(Action::TriggerDeepSearch);
+                            }
+                            _ => {}
+                        }
+                    }
+                    return InputOutcome::Changed;
+                }
+
+                if let crossterm::event::Event::Key(key) = ev
+                    && !state.search_active
+                    && key.kind == KeyEventKind::Press
+                    && key.modifiers.is_empty()
+                    && matches!(key.code, crossterm::event::KeyCode::Char('s'))
+                    && let Some(entries) = entries.as_mut()
+                {
+                    state.session_sort = state.session_sort.next();
+                    crate::views::session_picker::sort_session_entries(entries, state.session_sort);
+                    state.selected = 0;
+                    state.scroll_offset = None;
+                    return InputOutcome::Changed;
                 }
 
                 if let crossterm::event::Event::Key(key) = ev
@@ -1241,6 +1932,10 @@ impl AgentView {
                     PickerOutcome::FilterCycled => {
                         InputOutcome::Action(Action::CycleSessionSourceFilter)
                     }
+                    PickerOutcome::TabChanged(index) if external_picker => {
+                        window.active_tab = index;
+                        InputOutcome::Action(Action::RefreshExternalSessionCatalog)
+                    }
                     PickerOutcome::Action('d') => {
                         *pending_delete =
                             crate::views::session_picker::pending_delete_from_selection(
@@ -1256,6 +1951,71 @@ impl AgentView {
                     | PickerOutcome::Action(_) => InputOutcome::Changed,
                 }
             }
+            _ => InputOutcome::Changed,
+        }
+    }
+
+    fn handle_subagent_history_input(&mut self, ev: &crossterm::event::Event) -> InputOutcome {
+        use crate::views::picker::{PickerConfig, PickerOutcome, handle_picker_input};
+
+        let outcome = {
+            let Some(ActiveModal::SubagentHistory { state, .. }) = self.active_modal.as_mut()
+            else {
+                return InputOutcome::Changed;
+            };
+            let entry_count = state.filtered_entries().len();
+            let config = PickerConfig {
+                title: None,
+                show_search_hint: true,
+                expandable: false,
+                esc_clears_query: true,
+                shortcuts: Some(crate::views::picker::picker_shortcuts()),
+                pending_hint: None,
+                non_selectable: &[],
+                non_selectable_clickable: &[],
+                shortcuts_area: None,
+                tabs: None,
+                active_tab: 0,
+                filter_label: None,
+                filter_key_hint: None,
+                filter_active: false,
+                header_note: None,
+                action_keys: &[],
+                disable_search: false,
+                compact_bottom_bar: false,
+                search_only_on_slash: false,
+                vim_normal_first: false,
+            };
+            handle_picker_input(ev, &mut state.picker, entry_count, &config)
+        };
+
+        match outcome {
+            PickerOutcome::Closed => {
+                if let Some(ActiveModal::SubagentHistory { state, .. }) = self.active_modal.as_mut()
+                {
+                    state.complete(None);
+                }
+                self.active_modal = None;
+                InputOutcome::Changed
+            }
+            PickerOutcome::Selected(index) => {
+                let selected_id = self.active_modal.as_ref().and_then(|modal| {
+                    let ActiveModal::SubagentHistory { state, .. } = modal else {
+                        return None;
+                    };
+                    state
+                        .filtered_entries()
+                        .get(index)
+                        .map(|entry| entry.id.clone())
+                });
+                if let Some(ActiveModal::SubagentHistory { state, .. }) = self.active_modal.as_mut()
+                {
+                    state.complete(selected_id.as_deref());
+                }
+                self.active_modal = None;
+                InputOutcome::Changed
+            }
+            PickerOutcome::Unchanged => InputOutcome::Unchanged,
             _ => InputOutcome::Changed,
         }
     }
@@ -1305,6 +2065,7 @@ impl AgentView {
                         expanded: false,
                         dimmed: false,
                         indent: 0,
+                        label_color: None,
                         badge: "",
                         badge_color: None,
                         collapsible: false,
@@ -1420,9 +2181,13 @@ impl AgentView {
             Some(
                 ActiveModal::CommandPalette { .. }
                     | ActiveModal::ArgPicker { .. }
+                    | ActiveModal::Notifications { .. }
+                    | ActiveModal::SubagentHistory { .. }
                     | ActiveModal::SessionPicker { .. }
                     | ActiveModal::DocPicker { .. }
                     | ActiveModal::DocViewer { .. }
+                    | ActiveModal::ToolTraceViewer { .. }
+                    | ActiveModal::ContextInfo { .. }
                     | ActiveModal::ShortcutsHelp { .. }
                     | ActiveModal::RememberNoteReview { .. }
             )
@@ -1431,27 +2196,59 @@ impl AgentView {
             let window = match self.active_modal.as_mut() {
                 Some(ActiveModal::CommandPalette { window, .. }) => window,
                 Some(ActiveModal::ArgPicker { window, .. }) => window,
+                Some(ActiveModal::Notifications { window, .. }) => window,
+                Some(ActiveModal::SubagentHistory { window, .. }) => window,
                 Some(ActiveModal::SessionPicker { window, .. }) => window,
                 Some(ActiveModal::DocPicker { window, .. }) => window,
                 Some(ActiveModal::DocViewer { window, .. }) => window,
+                Some(ActiveModal::ToolTraceViewer { window, .. }) => window,
+                Some(ActiveModal::ContextInfo { window, .. }) => window,
                 Some(ActiveModal::ShortcutsHelp { window, .. }) => window,
                 Some(ActiveModal::RememberNoteReview { window, .. }) => window,
                 _ => unreachable!(),
             };
             let outcome = mw::handle_modal_mouse(window, mouse.kind, mouse.column, mouse.row);
             match outcome {
+                ModalWindowOutcome::TabChanged(_)
+                    if matches!(
+                        self.active_modal,
+                        Some(ActiveModal::SessionPicker {
+                            source_filter: crate::views::session_picker::SourceFilter::External,
+                            ..
+                        })
+                    ) =>
+                {
+                    return InputOutcome::Action(Action::RefreshExternalSessionCatalog);
+                }
                 ModalWindowOutcome::CloseRequested => {
                     // Match keyboard Esc: step back from model effort phase before fully dismissing the ArgPicker
                     if self.try_arg_picker_step_back_from_effort() {
                         return InputOutcome::Changed;
                     }
-                    // Match keyboard Esc: a closed SessionPicker may still have a list/search fetch in flight
-                    // The dispatch layer must invalidate it (its landing surface is gone)
+                    // Match keyboard Esc: dismissing the large-paste select
+                    // pastes normally instead of leaking the pending paste.
+                    let large_paste_open = self.active_modal.as_ref().is_some_and(|m| {
+                        matches!(
+                            m,
+                            ActiveModal::ArgPicker { command, .. }
+                                if command == "large-paste"
+                        )
+                    });
+                    if large_paste_open {
+                        return self.resolve_large_paste_choice(false);
+                    }
+                    // Match keyboard Esc: a closed SessionPicker may still
+                    // have a list/search fetch in flight — the dispatch
+                    // layer must invalidate it (its landing surface is gone).
+
                     let closed_session_picker =
                         matches!(self.active_modal, Some(ActiveModal::SessionPicker { .. }));
                     // Single take() handles all modal types
                     // Two takes would re-introduce the bug where the first consume drops the value before the second branch can match
                     match self.active_modal.take() {
+                        Some(ActiveModal::SubagentHistory { mut state, .. }) => {
+                            state.complete(None);
+                        }
                         Some(ActiveModal::DocViewer {
                             previous_palette,
                             standalone,
@@ -1461,6 +2258,13 @@ impl AgentView {
                                 self.active_modal =
                                     Some(crate::views::modal::howto_list_modal(previous_palette));
                             }
+                        }
+                        Some(ActiveModal::ContextInfo { .. }) => {}
+                        Some(ActiveModal::ArgPicker {
+                            previous_settings: Some(state),
+                            ..
+                        }) => {
+                            self.active_modal = Some(ActiveModal::Settings { state });
                         }
                         Some(
                             ActiveModal::ArgPicker {
@@ -1496,9 +2300,73 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 ModalWindowOutcome::Unhandled => {
-                    // DocViewer / RememberNoteReview: wheel scrolls the markdown body.
+                    if let Some(ActiveModal::ContextInfo {
+                        view,
+                        selected_row,
+                        cache_metrics: Some(metrics),
+                        ..
+                    }) = self.active_modal.as_mut()
+                        && *view != crate::views::cache_graph::CacheGraphView::Breakdown
+                    {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                if let Some(selected) = selected_row.as_mut() {
+                                    *selected = selected.saturating_sub(1);
+                                }
+                                return InputOutcome::Changed;
+                            }
+                            MouseEventKind::ScrollDown => {
+                                if let Some(selected) = selected_row.as_mut() {
+                                    *selected = selected
+                                        .saturating_add(1)
+                                        .min(metrics.all_messages.len().saturating_sub(1));
+                                }
+                                return InputOutcome::Changed;
+                            }
+                            _ => return InputOutcome::Changed,
+                        }
+                    }
+                    if let Some(ActiveModal::ToolTraceViewer {
+                        focus,
+                        input_scroll,
+                        output_scroll,
+                        input_area,
+                        output_area,
+                        ..
+                    }) = self.active_modal.as_mut()
+                    {
+                        let pane = modal::tool_trace_pane_at(
+                            *input_area,
+                            *output_area,
+                            mouse.column,
+                            mouse.row,
+                        );
+                        if matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                        ) {
+                            if let Some(pane) = pane {
+                                let scroll = match pane {
+                                    crate::views::modal::ToolTracePane::Input => input_scroll,
+                                    crate::views::modal::ToolTracePane::Output => output_scroll,
+                                };
+                                let _ = modal::apply_doc_mouse_scroll(mouse.kind, scroll);
+                            }
+                            return InputOutcome::Changed;
+                        }
+                        if matches!(
+                            mouse.kind,
+                            MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                        ) && let Some(pane) = pane
+                        {
+                            *focus = pane;
+                        }
+                        return InputOutcome::Changed;
+                    }
+                    // DocViewer / Context breakdown / RememberNoteReview: wheel scrolls the body.
                     if let Some(
                         ActiveModal::DocViewer { scroll, .. }
+                        | ActiveModal::ContextInfo { scroll, .. }
                         | ActiveModal::RememberNoteReview { scroll, .. },
                     ) = self.active_modal.as_mut()
                     {
@@ -1507,10 +2375,30 @@ impl AgentView {
                         }
                         return InputOutcome::Changed;
                     }
-                    // Content area events: delegate to picker input
+                    // Session preview mode: same wheel semantics as Read/DocViewer.
+                    if let Some(ActiveModal::SessionPicker {
+                        preview_mode: true,
+                        preview_scroll,
+                        ..
+                    }) = self.active_modal.as_mut()
+                    {
+                        if modal::apply_doc_mouse_scroll(mouse.kind, preview_scroll) {
+                            return InputOutcome::Changed;
+                        }
+                        // Swallow other mouse in preview so it doesn't hit list picker.
+                        return InputOutcome::Changed;
+                    }
+                    // Content area events — delegate to picker input.
+                    let ev = crossterm::event::Event::Mouse(*mouse);
+
                     if matches!(self.active_modal, Some(ActiveModal::DocPicker { .. })) {
-                        let ev = crossterm::event::Event::Mouse(*mouse);
                         return self.handle_doc_input(&ev);
+                    }
+                    if matches!(self.active_modal, Some(ActiveModal::Notifications { .. })) {
+                        return self.handle_notifications_input(&ev);
+                    }
+                    if matches!(self.active_modal, Some(ActiveModal::SubagentHistory { .. })) {
+                        return self.handle_subagent_history_input(&ev);
                     }
                     if let Some(ActiveModal::ShortcutsHelp {
                         entries,
@@ -1603,6 +2491,10 @@ impl AgentView {
                     self.active_modal = None;
                     return InputOutcome::Changed;
                 }
+                ModalWindowOutcome::TabChanged(index) => {
+                    state.set_active_tab(index);
+                    return InputOutcome::Changed;
+                }
                 ModalWindowOutcome::Handled => {
                     if matches!(mouse.kind, MouseEventKind::Moved) {
                         state.hover_row = None;
@@ -1622,6 +2514,98 @@ impl AgentView {
             }
         }
 
+        // Pi resources: modal chrome owns close/tabs, then the native resource
+        // tree receives clicks and wheel input.
+        if let Some(ActiveModal::PiConfig { state }) = &mut self.active_modal {
+            let outcome =
+                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
+            return match outcome {
+                ModalWindowOutcome::CloseRequested => {
+                    state.complete_picker(false);
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::TabChanged(index) => {
+                    state.select_tab(index);
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::Handled => InputOutcome::Changed,
+                ModalWindowOutcome::Unhandled => match state.handle_mouse(mouse) {
+                    crate::views::pi_config::PiConfigOutcome::Close => {
+                        state.complete_picker(false);
+                        self.active_modal = None;
+                        InputOutcome::Changed
+                    }
+                    crate::views::pi_config::PiConfigOutcome::PickerSubmit => {
+                        state.complete_picker(true);
+                        self.active_modal = None;
+                        InputOutcome::Changed
+                    }
+                    crate::views::pi_config::PiConfigOutcome::Changed => InputOutcome::Changed,
+                },
+                _ => InputOutcome::Changed,
+            };
+        }
+
+        // grok-pi settings panel: the chrome owns close and tab clicks, the
+        // panel owns sidebar, row, and chooser hit testing.
+        if let Some(ActiveModal::PiSettings { state }) = &mut self.active_modal {
+            let outcome =
+                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
+            return match outcome {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::TabChanged(index) => {
+                    state.set_active_tab(index);
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::Handled => {
+                    if matches!(mouse.kind, MouseEventKind::Moved) {
+                        state.hover = None;
+                    }
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::Unhandled => {
+                    let out = crate::views::pi_settings::handle_mouse(
+                        state,
+                        mouse.kind,
+                        mouse.column,
+                        mouse.row,
+                    );
+                    apply_pi_settings_outcome(self, out)
+                }
+                _ => InputOutcome::Changed,
+            };
+        }
+
+        // Pi models: modal chrome owns the frame; the model center owns
+        // dirty-close confirmation and content hit testing.
+        if let Some(ActiveModal::PiModels { state }) = &mut self.active_modal {
+            let outcome =
+                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
+            return match outcome {
+                ModalWindowOutcome::CloseRequested => {
+                    let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+                    match state.handle_key(&key) {
+                        crate::views::pi_models::PiModelsOutcome::Close => {
+                            self.active_modal = None;
+                            InputOutcome::Changed
+                        }
+                        _ => InputOutcome::Changed,
+                    }
+                }
+                ModalWindowOutcome::Handled => InputOutcome::Changed,
+                ModalWindowOutcome::Unhandled => {
+                    state.handle_mouse(mouse);
+                    InputOutcome::Changed
+                }
+                _ => InputOutcome::Changed,
+            };
+        }
+
+        // UsageInfo: chrome (close / tab clicks / footer copy), then wheel scroll.
         // UsageInfo: chrome first (tabs / close / footer stay clickable), then drag / wheel.
         if let Some(ActiveModal::UsageInfo { state }) = &mut self.active_modal {
             let outcome = crate::views::usage_modal::route_usage_modal_mouse(
@@ -1725,10 +2709,10 @@ impl AgentView {
         let Some(ActiveModal::UsageInfo { state }) = self.active_modal.as_ref() else {
             return;
         };
-        let Some(id) = state.ctx.session_id.clone() else {
+        let Some(path) = state.ctx.session_file.clone() else {
             return;
         };
-        let delivery = crate::clipboard::copy_text_or_file(&id);
+        let delivery = crate::clipboard::copy_text_or_file(&path);
         self.show_toast(delivery.toast_message().as_ref());
     }
 
@@ -1755,6 +2739,95 @@ impl AgentView {
                 self as mw, ModalSizing, ModalWindowConfig, Shortcut,
             };
             use crate::views::picker::{self, PickerEntry, PickerRow};
+
+            // Large paste: render as a bottom select anchored above the prompt
+            // (same chrome family as the slash/completion dropdowns) instead of
+            // a centered modal window. Content reuses picker rendering and
+            // populates `state.hit_areas`, so `handle_arg_picker_input` keeps
+            // owning keys and mouse unchanged.
+            if let modal::ActiveModal::ArgPicker {
+                command,
+                items,
+                state,
+                window,
+                ..
+            } = active_modal
+                && command == "large-paste"
+            {
+                let appearance = self.scrollback.appearance().clone();
+                let layout_cfg = &appearance.scrollback.layout;
+                let compact = self.scrollback.appearance().prompt.compact;
+                let item_count = items.len();
+                match render_dropdown_chrome(
+                    buf,
+                    item_count,
+                    item_count as u16,
+                    self.inline_prompt_area,
+                    self.pane_areas.prompt,
+                    area,
+                    layout_cfg,
+                    compact,
+                    false,
+                    &theme,
+                ) {
+                    Some(chrome) => {
+                        let entries: Vec<PickerEntry> = items
+                            .iter()
+                            .enumerate()
+                            .map(|(i, item)| {
+                                PickerEntry::Row(PickerRow {
+                                    label: &item.display,
+                                    right_label: &item.description,
+                                    selected: state.hovered == Some(i)
+                                        || (state.hovered.is_none() && i == state.selected),
+                                    expanded: false,
+                                    fields: &[],
+                                    description_lines: &[],
+                                    summary_lines: &[],
+                                    dimmed: false,
+                                    indent: 0,
+                                    label_color: None,
+                                    badge: "",
+                                    badge_color: None,
+                                    collapsible: false,
+                                    underline_last_desc: false,
+                                })
+                            })
+                            .collect();
+                        let content_hit = picker::render_picker_content(
+                            buf,
+                            chrome.items,
+                            &theme,
+                            state,
+                            &entries,
+                            &[],
+                            &[],
+                            Some(theme.bg_light),
+                            false,
+                        );
+                        state.hit_areas = Some(picker::PickerHitAreas {
+                            close_button: Rect::default(),
+                            search_bar: Rect::default(),
+                            item_rects: content_hit.item_rects,
+                            entry_indices: content_hit.entry_indices,
+                            tab_rects: vec![],
+                            filter_rect: None,
+                        });
+                        // Clicks outside the panel dismiss (chrome
+                        // click-outside rule via `popup_area`); clicks inside
+                        // fall through to the picker hit areas above.
+                        window.popup_area = Some(chrome.panel);
+                        self.frame_occluder_rects.push(chrome.panel);
+                    }
+                    None => {
+                        // No room above the prompt: keep Esc working, drop
+                        // stale hit areas so clicks can't hit ghost rows.
+                        window.popup_area = None;
+                        state.hit_areas = None;
+                    }
+                }
+                return;
+            }
 
             // Standard footer shortcuts for picker-style modals.
             let mut picker_shortcuts: Vec<Shortcut> = vec![
@@ -1790,11 +2863,14 @@ impl AgentView {
             } = active_modal
             {
                 // Command palette: ModalWindow chrome and picker content
-                let filtered = modal::filter_palette_entries(
-                    state.query(),
+                // No live Pi commands on this surface: rebuild the default
+                // catalog, then filter it with the shared palette filter.
+                let catalog = modal::default_palette_entries(
                     self.sharing_enabled,
                     &self.prompt.slash_controller,
                 );
+                let filtered = modal::filter_palette_entries(&catalog, state.query());
+
                 let non_sel: Vec<bool> = filtered
                     .iter()
                     .map(|e| matches!(e.command, modal::PaletteCommand::SectionHeader(_)))
@@ -1817,6 +2893,7 @@ impl AgentView {
                                 summary_lines: &[],
                                 dimmed: false,
                                 indent: 0,
+                                label_color: None,
                                 badge: "",
                                 badge_color: None,
                                 collapsible: false,
@@ -1876,13 +2953,23 @@ impl AgentView {
                     "theme" | "t" => "Pick theme",
                     _ => "Pick option",
                 };
+                // Model list rows show the model name and provider. Metadata for
+                // the hovered/selected model is rendered in a bottom detail pane
+                // (pi-model-selector-x), not as a right-column label.
+                let is_model_list =
+                    matches!(command.as_str(), "model" | "m") && args_query.is_empty();
+                let empty_right = "";
                 let picker_entries: Vec<PickerEntry> = items
                     .iter()
                     .enumerate()
                     .map(|(i, item)| {
                         PickerEntry::Row(PickerRow {
                             label: &item.display,
-                            right_label: &item.description,
+                            right_label: if is_model_list {
+                                empty_right
+                            } else {
+                                &item.description
+                            },
                             selected: state.hovered == Some(i)
                                 || (state.hovered.is_none() && i == state.selected),
                             expanded: false,
@@ -1891,6 +2978,7 @@ impl AgentView {
                             summary_lines: &[],
                             dimmed: false,
                             indent: 0,
+                            label_color: None,
                             badge: "",
                             badge_color: None,
                             collapsible: false,
@@ -1901,14 +2989,240 @@ impl AgentView {
                 let compact = self.scrollback.appearance().prompt.compact;
                 // Surface `i search` in the footer when vim nav mode is active.
                 mw::push_vim_nav_search_hint(&mut picker_shortcuts, state.search_active);
+                // Model picker is shorter than generic arg pickers (theme, etc.).
+                let is_model_picker = matches!(command.as_str(), "model" | "m");
+                let sizing = ModalSizing {
+                    width_pct: if is_model_list { 0.55 } else { 0.50 },
+                    max_width: if is_model_list { 88 } else { 80 },
+                    min_width: 44,
+                    // Keep the model list at roughly 70% of the terminal height,
+                    // including when compact prompt mode is enabled.
+                    v_margin: if is_model_list {
+                        area.height.saturating_mul(15).saturating_add(99) / 100
+                    } else if is_model_picker {
+                        8
+                    } else {
+                        4
+                    },
+                    h_pad: 2,
+                    v_pad: 1,
+                    footer_lines: 2,
+                };
                 let modal_config = ModalWindowConfig {
                     title,
                     tabs: None,
                     shortcuts: &picker_shortcuts,
+                    sizing: if is_model_list {
+                        sizing
+                    } else {
+                        sizing.with_compact(compact)
+                    },
+                    fold_info: None,
+                };
+                if let Some(mca) = mw::render_modal_window(buf, area, window, &modal_config, &theme)
+                {
+                    let detail_lines = if is_model_list {
+                        selected_model_detail_lines(items, state, &self.session.models)
+                    } else {
+                        Vec::new()
+                    };
+                    let (list_area, detail_area) =
+                        split_model_picker_content(mca.content, detail_lines.len());
+                    picker::render_picker_in_modal(
+                        buf,
+                        list_area,
+                        mca.inner_x,
+                        mca.inner_width,
+                        &theme,
+                        state,
+                        &picker_entries,
+                        &[],
+                        false,
+                    );
+                    if let Some(detail_area) = detail_area {
+                        render_model_picker_detail(buf, detail_area, &detail_lines, &theme);
+                    }
+                }
+            } else if let modal::ActiveModal::SubagentHistory { state, window } = active_modal {
+                let rows: Vec<(String, String, Vec<String>)> = state
+                    .filtered_entries()
+                    .into_iter()
+                    .map(|entry| {
+                        let label = format!("{}  {}", entry.id, entry.description);
+                        let right = entry.status.clone();
+                        let mode = if entry.background {
+                            "background"
+                        } else {
+                            "foreground"
+                        };
+                        let model = entry.model_id.as_deref().unwrap_or("default model");
+                        let summary = vec![format!(
+                            "{} · {} turns · {} tools · {} · {}",
+                            entry.subagent_type,
+                            entry.turn_count,
+                            entry.tool_call_count,
+                            mode,
+                            model
+                        )];
+                        (label, right, summary)
+                    })
+                    .collect();
+                let summary_lines: Vec<Vec<&str>> = rows
+                    .iter()
+                    .map(|(_, _, summary)| summary.iter().map(String::as_str).collect())
+                    .collect();
+                let picker_entries: Vec<PickerEntry> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (label, right, _))| {
+                        PickerEntry::Row(PickerRow {
+                            label,
+                            right_label: right,
+                            selected: state.picker.hovered == Some(index)
+                                || (state.picker.hovered.is_none()
+                                    && index == state.picker.selected),
+                            expanded: false,
+                            fields: &[],
+                            description_lines: &[],
+                            summary_lines: &summary_lines[index],
+                            dimmed: false,
+                            indent: 0,
+                            label_color: None,
+                            badge: "",
+                            badge_color: None,
+                            collapsible: false,
+                            underline_last_desc: false,
+                        })
+                    })
+                    .collect();
+                let shortcuts = [
+                    mw::Shortcut {
+                        label: "↑/↓ nav",
+                        clickable: false,
+                        id: 0,
+                    },
+                    mw::Shortcut {
+                        label: "↵ open",
+                        clickable: false,
+                        id: 0,
+                    },
+                    mw::Shortcut {
+                        label: "type search",
+                        clickable: false,
+                        id: 0,
+                    },
+                    mw::Shortcut {
+                        label: "Esc close",
+                        clickable: false,
+                        id: 0,
+                    },
+                ];
+                let modal_config = ModalWindowConfig {
+                    title: state.title.as_str(),
+                    tabs: None,
+                    shortcuts: &shortcuts,
                     sizing: ModalSizing {
-                        width_pct: 0.50,
-                        max_width: 80,
-                        min_width: 44,
+                        width_pct: 0.78,
+                        max_width: 132,
+                        min_width: 56,
+                        v_margin: 3,
+                        h_pad: 2,
+                        v_pad: 1,
+                        footer_lines: 2,
+                    }
+                    .with_compact(compact),
+                    fold_info: None,
+                };
+                if let Some(mca) = mw::render_modal_window(buf, area, window, &modal_config, &theme)
+                {
+                    picker::render_picker_in_modal(
+                        buf,
+                        mca.content,
+                        mca.inner_x,
+                        mca.inner_width,
+                        &theme,
+                        &mut state.picker,
+                        &picker_entries,
+                        &[],
+                        false,
+                    );
+                }
+            } else if let modal::ActiveModal::Notifications { state, window } = active_modal {
+                // label = first line preview; expand body = full multi-line message.
+                let rows: Vec<(String, String, Vec<String>)> = state
+                    .filtered_notifications()
+                    .into_iter()
+                    .map(|notification| {
+                        let kind = notification.kind.clone().unwrap_or_else(|| "info".into());
+                        let body_lines: Vec<String> = if notification.message.is_empty() {
+                            vec![String::new()]
+                        } else {
+                            notification.message.lines().map(str::to_owned).collect()
+                        };
+                        let label = body_lines
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| notification.message.clone());
+                        (label, kind, body_lines)
+                    })
+                    .collect();
+                let desc_lines: Vec<Vec<&str>> = rows
+                    .iter()
+                    .map(|(_, _, body)| body.iter().map(String::as_str).collect())
+                    .collect();
+                let picker_entries: Vec<PickerEntry> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (label, kind, _))| {
+                        let is_expanded = state.picker.expanded.contains(&index);
+                        PickerEntry::Row(PickerRow {
+                            label,
+                            right_label: kind,
+                            selected: state.picker.hovered == Some(index)
+                                || (state.picker.hovered.is_none()
+                                    && index == state.picker.selected),
+                            expanded: is_expanded,
+                            fields: &[],
+                            description_lines: if is_expanded { &desc_lines[index] } else { &[] },
+                            summary_lines: &[],
+                            dimmed: false,
+                            indent: 0,
+                            label_color: None,
+                            badge: "",
+                            badge_color: None,
+                            collapsible: true,
+                            underline_last_desc: false,
+                        })
+                    })
+                    .collect();
+                picker_shortcuts.push(Shortcut {
+                    label: "e/→/↵ expand",
+                    clickable: false,
+                    id: 0,
+                });
+                picker_shortcuts.push(Shortcut {
+                    label: "← collapse",
+                    clickable: false,
+                    id: 0,
+                });
+                picker_shortcuts.push(Shortcut {
+                    label: "y copy",
+                    clickable: false,
+                    id: 0,
+                });
+                picker_shortcuts.push(Shortcut {
+                    label: "type search",
+                    clickable: false,
+                    id: 0,
+                });
+                let modal_config = ModalWindowConfig {
+                    title: "Notifications",
+                    tabs: None,
+                    shortcuts: &picker_shortcuts,
+                    sizing: ModalSizing {
+                        width_pct: 0.70,
+                        max_width: 120,
+                        min_width: 48,
                         v_margin: 4,
                         h_pad: 2,
                         v_pad: 1,
@@ -1925,11 +3239,109 @@ impl AgentView {
                         mca.inner_x,
                         mca.inner_width,
                         &theme,
-                        state,
+                        &mut state.picker,
                         &picker_entries,
                         &[],
                         false,
                     );
+                }
+            } else if let modal::ActiveModal::SessionTree { state, window } = active_modal {
+                use crate::views::session_tree::render_session_tree;
+                let shortcuts = [
+                    mw::Shortcut {
+                        label: "↑/↓ nav",
+                        clickable: false,
+                        id: 0,
+                    },
+                    mw::Shortcut {
+                        label: "click select",
+                        clickable: false,
+                        id: 0,
+                    },
+                    mw::Shortcut {
+                        label: "dblclick go",
+                        clickable: false,
+                        id: 0,
+                    },
+                    mw::Shortcut {
+                        label: "Tab fold",
+                        clickable: false,
+                        id: 0,
+                    },
+                    mw::Shortcut {
+                        label: "Esc close",
+                        clickable: false,
+                        id: 0,
+                    },
+                ];
+                let title = if state.loading {
+                    "Session tree · loading".to_string()
+                } else {
+                    format!("Session tree · {}", state.filter.label())
+                };
+                let modal_config = ModalWindowConfig {
+                    title: title.as_str(),
+                    tabs: None,
+                    shortcuts: &shortcuts,
+                    sizing: ModalSizing {
+                        width_pct: 0.72,
+                        max_width: 120,
+                        min_width: 56,
+                        v_margin: 2,
+                        h_pad: 1,
+                        v_pad: 0,
+                        footer_lines: 2,
+                    }
+                    .with_compact(compact),
+                    fold_info: None,
+                };
+                if let Some(mca) = mw::render_modal_window(buf, area, window, &modal_config, &theme)
+                {
+                    render_session_tree(buf, mca.content, state, &theme);
+                }
+            } else if let modal::ActiveModal::TreeMap { state, window } = active_modal {
+                use crate::views::tree_map::render_tree_map;
+                let shortcuts = [
+                    mw::Shortcut {
+                        label: "↑/↓ nav",
+                        clickable: false,
+                        id: 0,
+                    },
+                    mw::Shortcut {
+                        label: "click go",
+                        clickable: false,
+                        id: 0,
+                    },
+                    mw::Shortcut {
+                        label: "Esc close",
+                        clickable: false,
+                        id: 0,
+                    },
+                ];
+                let title = if state.loading {
+                    "Branch map · loading".to_string()
+                } else {
+                    format!("Branch map · {} messages", state.nodes.len())
+                };
+                let modal_config = ModalWindowConfig {
+                    title: title.as_str(),
+                    tabs: None,
+                    shortcuts: &shortcuts,
+                    sizing: ModalSizing {
+                        width_pct: 0.60,
+                        max_width: 90,
+                        min_width: 44,
+                        v_margin: 3,
+                        h_pad: 1,
+                        v_pad: 0,
+                        footer_lines: 1,
+                    }
+                    .with_compact(compact),
+                    fold_info: None,
+                };
+                if let Some(mca) = mw::render_modal_window(buf, area, window, &modal_config, &theme)
+                {
+                    render_tree_map(buf, mca.content, state, &theme);
                 }
             } else if let modal::ActiveModal::SessionPicker {
                 entries,
@@ -1942,301 +3354,605 @@ impl AgentView {
                 entries_query,
                 source_filter,
                 pending_delete,
+                preview_scroll,
+                search_mode,
+                preview_mode,
+                preview_messages,
                 ..
             } = active_modal
             {
-                // Session picker: ModalWindow chrome and picker content
                 use crate::app::app_view::filter_session_entries;
                 use crate::views::picker::PickerField;
                 use crate::views::session_picker::{
                     build_content_entry_data, build_content_header_label,
                 };
-                // While a delete confirmation is armed, the footer swaps to a "y confirm / n cancel" prompt
-                // Otherwise show the normal hints plus the `d delete` action
-                // Chat mode drops the deep-search / filter / delete hints (local-disk-row actions)
-                let chat_mode = self.app_chat_mode;
-                let session_shortcuts: Vec<Shortcut> = if pending_delete.is_some() {
-                    vec![
+                // ── Preview mode: markdown message stream (reuses MarkdownContent) ──
+                if *preview_mode {
+                    let compact = self.scrollback.appearance().prompt.compact;
+                    let preview_shortcuts: Vec<Shortcut> = vec![
                         Shortcut {
-                            label: "y confirm delete",
+                            label: "\u{2191}\u{2193} scroll",
                             clickable: false,
                             id: 0,
                         },
                         Shortcut {
-                            label: "n cancel",
+                            label: "PgUp/PgDn page",
                             clickable: false,
                             id: 0,
                         },
-                    ]
-                } else {
+                        Shortcut {
+                            label: "y copy",
+                            clickable: false,
+                            id: 0,
+                        },
+                        Shortcut {
+                            label: "\u{2190} back",
+                            clickable: false,
+                            id: 0,
+                        },
+                        Shortcut {
+                            label: "\u{23ce} resume",
+                            clickable: false,
+                            id: 0,
+                        },
+                    ];
+                    let modal_config = ModalWindowConfig {
+                        title: "Session preview",
+                        tabs: None,
+                        shortcuts: &preview_shortcuts,
+                        sizing: ModalSizing {
+                            width_pct: 0.85,
+                            max_width: 180,
+                            min_width: 48,
+                            v_margin: 3,
+                            h_pad: 1,
+                            v_pad: 0,
+                            footer_lines: 2,
+                        }
+                        .with_compact(compact),
+                        fold_info: None,
+                    };
+                    if let Some(mca) =
+                        mw::render_modal_window(buf, area, window, &modal_config, &theme)
+                    {
+                        render_session_message_preview(
+                            buf,
+                            mca.content,
+                            preview_messages.as_deref(),
+                            preview_scroll,
+                            &theme,
+                        );
+                    }
+                } else
+                // ── Search mode: dedicated full-text search page ──
+                if *search_mode {
+                    let compact = self.scrollback.appearance().prompt.compact;
                     let external =
                         *source_filter == crate::views::session_picker::SourceFilter::External;
-                    let mut shortcuts = vec![Shortcut {
-                        label: "\u{2191}\u{2193} nav",
-                        clickable: false,
-                        id: 0,
-                    }];
-                    if !external {
-                        shortcuts.push(Shortcut {
-                            label: "e expand",
-                            clickable: false,
-                            id: 0,
-                        });
-                    }
-                    shortcuts.push(Shortcut {
-                        label: "/ search",
-                        clickable: false,
-                        id: 0,
-                    });
-                    if !chat_mode {
-                        shortcuts.push(Shortcut {
-                            label: "f filter",
-                            clickable: false,
-                            id: 0,
-                        });
-                        if !external {
-                            shortcuts.push(Shortcut {
-                                label: "d delete",
-                                clickable: false,
-                                id: 0,
-                            });
-                        }
-                    }
-                    shortcuts
-                };
-                let compact = self.scrollback.appearance().prompt.compact;
-                let modal_config = ModalWindowConfig {
-                    title: "Resume session",
-                    tabs: None,
-                    shortcuts: &session_shortcuts,
-                    sizing: ModalSizing {
-                        width_pct: 0.65,
-                        max_width: 120,
-                        min_width: 48,
-                        v_margin: 4,
-                        h_pad: 2,
-                        v_pad: 1,
-                        footer_lines: 2,
-                    }
-                    .with_compact(compact),
-                    fold_info: None,
-                };
-                if let Some(mca) = mw::render_modal_window(buf, area, window, &modal_config, &theme)
-                {
-                    let content_area = mca.content;
-                    crate::views::session_picker_surface::render_session_picker_search_bar(
-                        buf,
-                        Rect::new(content_area.x, content_area.y, content_area.width, 1),
-                        &theme,
-                        state,
-                    );
-                    // Render filter indicator on the search bar row (hidden in chat mode; every row is a conversation)
-                    if chat_mode {
-                        state.filter_area = None;
+                    let scope_label = if external { "cwd" } else { "all" };
+                    let hits = content_results.as_deref().unwrap_or(&[]);
+                    let result_count = hits.len();
+                    let title = if *content_loading {
+                        format!("Full-text search · {scope_label} · searching…")
+                    } else if result_count > 0 {
+                        format!("Full-text search · {scope_label} · {result_count} results")
                     } else {
-                        let filter_rect = picker::render_filter_indicator(
+                        format!("Full-text search · {scope_label}")
+                    };
+                    let search_shortcuts: Vec<Shortcut> = vec![
+                        Shortcut {
+                            label: "↑↓ nav",
+                            clickable: false,
+                            id: 0,
+                        },
+                        Shortcut {
+                            label: "Tab scope",
+                            clickable: false,
+                            id: 0,
+                        },
+                        Shortcut {
+                            label: "Enter resume",
+                            clickable: false,
+                            id: 0,
+                        },
+                        Shortcut {
+                            label: "Esc back",
+                            clickable: false,
+                            id: 0,
+                        },
+                    ];
+                    let modal_config = ModalWindowConfig {
+                        title: title.as_str(),
+                        tabs: None,
+                        shortcuts: &search_shortcuts,
+                        sizing: ModalSizing {
+                            width_pct: 0.85,
+                            max_width: 180,
+                            min_width: 48,
+                            v_margin: 3,
+                            h_pad: 1,
+                            v_pad: 0,
+                            footer_lines: 2,
+                        }
+                        .with_compact(compact),
+                        fold_info: None,
+                    };
+                    if let Some(mca) =
+                        mw::render_modal_window(buf, area, window, &modal_config, &theme)
+                    {
+                        let content_area = mca.content;
+                        // Search input bar
+                        picker::render_picker_search_bar(
                             buf,
                             content_area.x,
                             content_area.y,
                             content_area.width,
                             &theme,
-                            source_filter.label(),
-                            "f",
-                            source_filter.is_active(),
-                            state.filter_hovered,
-                        );
-                        state.filter_area = Some(filter_rect);
-                    }
-                    // Divider; spans full inner width
-                    let sep_y = content_area.y + 1;
-                    if sep_y < content_area.y + content_area.height {
-                        picker::render_divider(
-                            buf,
-                            mca.inner_x,
-                            sep_y,
-                            mca.inner_width,
-                            &theme,
+                            state,
+                            true, // always active in search mode
+                            true,
                             Some(theme.bg_base),
                         );
-                    }
-                    let entries_start_y = sep_y + 1;
-                    let search_bar_rect =
-                        Rect::new(content_area.x, content_area.y, content_area.width, 1);
-
-                    // Build session picker entries (shared helper)
-                    // The same effective query must drive filtering AND the content header/rows gates below
-                    // Otherwise this render and the input handler's `build_entry_map` (which receives the effective query) disagree on row indices
-                    let filter_query = crate::views::session_picker::effective_filter_query(
-                        state.query(),
-                        entries_query.as_deref(),
-                    );
-                    let entries_data = entries.as_deref().unwrap_or(&[]);
-                    let filtered_indices =
-                        filter_session_entries(entries.as_deref(), filter_query, *source_filter);
-                    let built = crate::views::session_picker::build_session_entry_data(
-                        entries_data,
-                        &filtered_indices,
-                        state,
-                        content_area.width,
-                    );
-                    let fields_vecs: Vec<Vec<PickerField>> = built
-                        .iter()
-                        .map(|b| {
-                            b.field_data
-                                .iter()
-                                .map(|(l, v)| PickerField { label: l, value: v })
-                                .collect()
-                        })
-                        .collect();
-                    let current_repo = crate::views::session_picker::repo_name_from_cwd(
-                        &self.session.cwd.to_string_lossy(),
-                    );
-                    let (mut picker_entries, mut non_sel_flags) =
-                        crate::views::session_picker::build_grouped_picker_entries(
-                            entries_data,
-                            &filtered_indices,
-                            &built,
-                            &fields_vecs,
-                            state,
-                            Some(current_repo.as_str()),
-                        );
-
-                    // Append content search result rows (same pattern as welcome).
-                    let content_start = picker_entries.len() + 1;
-                    let content_entry_data = if let Some(hits) = content_results.as_deref()
-                        && !source_filter.is_content_search_disabled()
-                        && !filter_query.is_empty()
-                    {
-                        build_content_entry_data(
-                            hits,
-                            entries_data,
-                            &filtered_indices,
-                            state,
-                            content_start,
-                        )
-                    } else {
-                        Vec::new()
-                    };
-                    let has_content_rows = !content_entry_data.is_empty();
-                    let effective_content_loading =
-                        *content_loading && !source_filter.is_content_search_disabled();
-                    let spinner_label = build_content_header_label(
-                        effective_content_loading,
-                        has_content_rows,
-                        self.scrollback.tick_count(),
-                    );
-                    let show_content_header = has_content_rows
-                        || (effective_content_loading && !filter_query.trim().is_empty());
-                    if show_content_header {
-                        picker_entries.push(PickerEntry::Header {
-                            label: &spinner_label,
-                        });
-                        non_sel_flags.push(true);
-                    }
-                    let content_fields: Vec<Vec<PickerField>> = content_entry_data
-                        .iter()
-                        .map(|b| {
-                            b.field_data
-                                .iter()
-                                .map(|(l, v)| PickerField { label: l, value: v })
-                                .collect()
-                        })
-                        .collect();
-                    let content_snippets: Vec<[&str; 1]> = content_entry_data
-                        .iter()
-                        .map(|b| [b.snippet_preview.as_deref().unwrap_or("")])
-                        .collect();
-
-                    for (i, (b, fields)) in content_entry_data
-                        .iter()
-                        .zip(content_fields.iter())
-                        .enumerate()
-                    {
-                        let has_snippet = b.snippet_preview.is_some();
-                        picker_entries.push(PickerEntry::Row(PickerRow {
-                            label: &b.summary,
-                            right_label: &b.right_text,
-                            selected: b.is_selected,
-                            expanded: b.is_expanded,
-                            fields,
-                            description_lines: if has_snippet {
-                                content_snippets
-                                    .get(i)
-                                    .map_or(&[] as &[_], |s| s.as_slice())
+                        let sep_y = content_area.y + 1;
+                        if sep_y < content_area.y + content_area.height {
+                            picker::render_divider(
+                                buf,
+                                mca.inner_x,
+                                sep_y,
+                                mca.inner_width,
+                                &theme,
+                                Some(theme.bg_base),
+                            );
+                        }
+                        let results_area = Rect {
+                            x: content_area.x,
+                            y: sep_y + 1,
+                            width: content_area.width,
+                            height: content_area
+                                .height
+                                .saturating_sub(sep_y + 1 - content_area.y),
+                        };
+                        // Multi-line rich hits (title + wrapped snippet + short meta).
+                        let hits = content_results.as_deref().unwrap_or(&[]);
+                        if hits.is_empty() && !*content_loading {
+                            let msg = if state.query().trim().is_empty() {
+                                "  Type to search across all session messages…"
                             } else {
-                                &[]
+                                "  No results found"
+                            };
+                            let line = ratatui::text::Line::from(ratatui::text::Span::styled(
+                                msg,
+                                ratatui::style::Style::default().fg(theme.gray_dim),
+                            ));
+                            ratatui::widgets::Paragraph::new(vec![line]).render(results_area, buf);
+                        } else {
+                            let (item_rects, entry_indices) = render_search_result_hits(
+                                buf,
+                                results_area,
+                                hits,
+                                state.selected,
+                                &mut state.scroll_offset,
+                                *content_loading,
+                                &theme,
+                            );
+                            state.hit_areas = Some(picker::PickerHitAreas {
+                                close_button: Rect::default(),
+                                search_bar: Rect::new(
+                                    content_area.x,
+                                    content_area.y,
+                                    content_area.width,
+                                    1,
+                                ),
+                                item_rects,
+                                entry_indices,
+                                tab_rects: vec![],
+                                filter_rect: None,
+                            });
+                        }
+                    }
+                } else {
+                    // Session picker: ModalWindow chrome + picker content.
+                    use crate::app::app_view::filter_session_entries;
+                    use crate::views::picker::PickerField;
+                    use crate::views::session_picker::{
+                        build_content_entry_data, build_content_header_label,
+                    };
+                    // While a delete confirmation is armed, the footer swaps to a
+                    // "y confirm / n cancel" prompt. Otherwise show the normal
+                    // hints plus the `d delete` action. Chat mode drops the
+                    // deep-search / filter / delete hints (local-disk-row actions).
+                    let chat_mode = self.app_chat_mode;
+                    let mut session_shortcuts: Vec<Shortcut> = if pending_delete.is_some() {
+                        vec![
+                            Shortcut {
+                                label: "y confirm delete",
+                                clickable: false,
+                                id: 0,
                             },
-                            summary_lines: &[],
-                            dimmed: false,
-                            indent: 1,
-                            badge: if has_snippet { "match" } else { "" },
-                            badge_color: Some(theme.accent_user),
-                            collapsible: true,
-                            underline_last_desc: false,
-                        }));
-                        non_sel_flags.push(false);
-                    }
-
-                    let hidden_hint = if chat_mode {
-                        None
+                            Shortcut {
+                                label: "n cancel",
+                                clickable: false,
+                                id: 0,
+                            },
+                        ]
                     } else {
-                        crate::views::session_picker::hidden_external_hint(
-                            entries.as_deref(),
-                            *source_filter,
-                        )
+                        let external =
+                            *source_filter == crate::views::session_picker::SourceFilter::External;
+                        let mut shortcuts = vec![
+                            Shortcut {
+                                label: "\u{2191}\u{2193} nav",
+                                clickable: false,
+                                id: 0,
+                            },
+                            Shortcut {
+                                label: "\u{23ce} resume",
+                                clickable: false,
+                                id: 0,
+                            },
+                        ];
+                        if !external {
+                            shortcuts.push(Shortcut {
+                                label: "e expand",
+                                clickable: false,
+                                id: 0,
+                            });
+                        }
+                        shortcuts.extend([
+                            Shortcut {
+                                label: "/ search",
+                                clickable: false,
+                                id: 0,
+                            },
+                            Shortcut {
+                                label: "s sort",
+                                clickable: false,
+                                id: 0,
+                            },
+                        ]);
+                        let psm_on = crate::appearance::cache::load_psm_resume_index();
+                        if external && psm_on {
+                            shortcuts.push(Shortcut {
+                                label: "→ preview",
+                                clickable: false,
+                                id: 0,
+                            });
+                            shortcuts.push(Shortcut {
+                                label: "Ctrl+F full-text",
+                                clickable: false,
+                                id: 0,
+                            });
+                        }
+                        if !chat_mode {
+                            shortcuts.push(Shortcut {
+                                label: "f filter",
+                                clickable: false,
+                                id: 0,
+                            });
+                            if !external {
+                                shortcuts.push(Shortcut {
+                                    label: "y copy",
+                                    clickable: false,
+                                    id: 0,
+                                });
+                                shortcuts.push(Shortcut {
+                                    label: "d delete",
+                                    clickable: false,
+                                    id: 0,
+                                });
+                            }
+                        }
+                        shortcuts.push(Shortcut {
+                            label: "Esc close",
+                            clickable: false,
+                            id: 0,
+                        });
+                        shortcuts
                     };
-
-                    let mut entries_area = Rect {
-                        x: content_area.x,
-                        y: entries_start_y,
-                        width: content_area.width,
-                        height: content_area
-                            .height
-                            .saturating_sub(entries_start_y.saturating_sub(content_area.y)),
-                    };
-                    // Pinned above the list so it stays visible regardless of scroll.
-                    if let Some(hint) = hidden_hint.as_deref()
-                        && entries_area.height > 0
-                    {
-                        buf.set_stringn(
-                            entries_area.x + 1,
-                            entries_area.y,
-                            hint,
-                            entries_area.width.saturating_sub(1) as usize,
-                            ratatui::style::Style::default()
-                                .fg(theme.gray_dim)
-                                .bg(theme.bg_base),
-                        );
-                        entries_area.y += 1;
-                        entries_area.height -= 1;
+                    // Surface `i search` in the footer when vim nav mode is active.
+                    if pending_delete.is_none() {
+                        mw::push_vim_nav_search_hint(&mut session_shortcuts, state.search_active);
                     }
-                    let content_hit = picker::render_picker_content_with_scrollbar_x(
-                        buf,
-                        entries_area,
-                        &theme,
-                        state,
-                        &picker_entries,
-                        &non_sel_flags,
-                        &[],
-                        Some(theme.bg_base),
-                        crate::views::session_picker::loading_spinner_active(
+                    let compact = self.scrollback.appearance().prompt.compact;
+                    let external =
+                        *source_filter == crate::views::session_picker::SourceFilter::External;
+                    let external_tabs = ["Current folder", "All"];
+                    let modal_config = ModalWindowConfig {
+                        title: "Resume session",
+                        tabs: external.then_some(&external_tabs),
+                        shortcuts: &session_shortcuts,
+                        // Keep the welcome picker’s full catalogue controls, but
+                        // leave a modest frame around the in-session surface.
+                        sizing: ModalSizing {
+                            width_pct: 0.85,
+                            max_width: 180,
+                            min_width: 48,
+                            v_margin: 3,
+                            h_pad: 1,
+                            v_pad: 0,
+                            footer_lines: 2,
+                        }
+                        .with_compact(compact),
+                        fold_info: None,
+                    };
+                    if let Some(mca) =
+                        mw::render_modal_window(buf, area, window, &modal_config, &theme)
+                    {
+                        let content_area = mca.content;
+                        picker::render_picker_search_bar(
+                            buf,
+                            content_area.x,
+                            content_area.y,
+                            content_area.width,
+                            &theme,
+                            state,
+                            state.search_active,
+                            true,
+                            Some(theme.bg_base),
+                        );
+                        // Render filter indicator on the search bar row (hidden in
+                        // chat mode — every row is a conversation).
+                        if chat_mode {
+                            state.filter_area = None;
+                        } else {
+                            let filter_rect = picker::render_filter_indicator(
+                                buf,
+                                content_area.x,
+                                content_area.y,
+                                content_area.width,
+                                &theme,
+                                source_filter.label(),
+                                "f",
+                                source_filter.is_active(),
+                                state.filter_hovered,
+                            );
+                            state.filter_area = Some(filter_rect);
+                        }
+                        // Divider — spans full inner width.
+                        let sep_y = content_area.y + 1;
+                        if sep_y < content_area.y + content_area.height {
+                            picker::render_divider(
+                                buf,
+                                mca.inner_x,
+                                sep_y,
+                                mca.inner_width,
+                                &theme,
+                                Some(theme.bg_base),
+                            );
+                        }
+                        let entries_start_y = sep_y + 1;
+                        let search_bar_rect =
+                            Rect::new(content_area.x, content_area.y, content_area.width, 1);
+
+                        // Build session picker entries (shared helper). The same
+                        // effective query must drive filtering AND the content
+                        // header/rows gates below, or this render disagrees with
+                        // the input handler's `build_entry_map` (which receives
+                        // the effective query) on row indices.
+                        let filter_query = crate::views::session_picker::effective_filter_query(
+                            state.query(),
+                            entries_query.as_deref(),
+                        );
+                        let entries_data = entries.as_deref().unwrap_or(&[]);
+                        let filtered_indices = filter_session_entries(
                             entries.as_deref(),
+                            filter_query,
                             *source_filter,
-                            *loading,
-                            lanes,
-                        ),
-                        self.scrollback.tick_count(),
-                        mca.inner_x + mca.inner_width - 1,
-                    );
-                    state.hit_areas = Some(picker::PickerHitAreas {
-                        close_button: Rect::default(),
-                        search_bar: search_bar_rect,
-                        item_rects: content_hit.item_rects,
-                        entry_indices: content_hit.entry_indices,
-                        tab_rects: vec![],
-                        filter_rect: None,
-                    });
-                }
+                        );
+                        let built = crate::views::session_picker::build_session_entry_data(
+                            entries_data,
+                            &filtered_indices,
+                            state,
+                            content_area.width,
+                        );
+                        let fields_vecs: Vec<Vec<PickerField>> = built
+                            .iter()
+                            .map(|b| {
+                                b.field_data
+                                    .iter()
+                                    .map(|(l, v)| PickerField { label: l, value: v })
+                                    .collect()
+                            })
+                            .collect();
+                        let current_repo = crate::views::session_picker::repo_name_from_cwd(
+                            &self.session.cwd.to_string_lossy(),
+                        );
+                        let (mut picker_entries, mut non_sel_flags) =
+                            crate::views::session_picker::build_grouped_picker_entries(
+                                entries_data,
+                                &filtered_indices,
+                                &built,
+                                &fields_vecs,
+                                state,
+                                Some(current_repo.as_str()),
+                            );
+
+                        // Append content search result rows (same pattern as welcome).
+                        let content_start = picker_entries.len() + 1;
+                        let content_entry_data = if let Some(hits) = content_results.as_deref()
+                            && !source_filter.is_content_search_disabled()
+                            && !filter_query.is_empty()
+                        {
+                            build_content_entry_data(
+                                hits,
+                                entries_data,
+                                &filtered_indices,
+                                state,
+                                content_start,
+                            )
+                        } else {
+                            Vec::new()
+                        };
+                        let has_content_rows = !content_entry_data.is_empty();
+                        let effective_content_loading =
+                            *content_loading && !source_filter.is_content_search_disabled();
+                        let spinner_label = build_content_header_label(
+                            effective_content_loading,
+                            has_content_rows,
+                            self.scrollback.tick_count(),
+                        );
+                        let show_content_header = has_content_rows
+                            || (effective_content_loading && !filter_query.trim().is_empty());
+                        if show_content_header {
+                            picker_entries.push(PickerEntry::Header {
+                                label: &spinner_label,
+                            });
+                            non_sel_flags.push(true);
+                        }
+                        let content_fields: Vec<Vec<PickerField>> = content_entry_data
+                            .iter()
+                            .map(|b| {
+                                b.field_data
+                                    .iter()
+                                    .map(|(l, v)| PickerField { label: l, value: v })
+                                    .collect()
+                            })
+                            .collect();
+                        let content_snippets: Vec<[&str; 1]> = content_entry_data
+                            .iter()
+                            .map(|b| [b.snippet_preview.as_deref().unwrap_or("")])
+                            .collect();
+
+                        for (i, (b, fields)) in content_entry_data
+                            .iter()
+                            .zip(content_fields.iter())
+                            .enumerate()
+                        {
+                            let has_snippet = b.snippet_preview.is_some();
+                            picker_entries.push(PickerEntry::Row(PickerRow {
+                                label: &b.summary,
+                                right_label: &b.right_text,
+                                selected: b.is_selected,
+                                expanded: b.is_expanded,
+                                fields,
+                                description_lines: if has_snippet {
+                                    &content_snippets[i]
+                                } else {
+                                    &[]
+                                },
+                                summary_lines: &[],
+                                dimmed: false,
+                                indent: 1,
+                                label_color: None,
+                                badge: if has_snippet { "match" } else { "" },
+                                badge_color: Some(theme.accent_user),
+                                collapsible: true,
+                                underline_last_desc: false,
+                            }));
+                            non_sel_flags.push(false);
+                        }
+
+                        // Split content into list (top ~75%) + preview (bottom ~25%).
+                        let hidden_hint = if chat_mode {
+                            None
+                        } else {
+                            crate::views::session_picker::hidden_external_hint(
+                                entries.as_deref(),
+                                *source_filter,
+                            )
+                        };
+                        let mut entries_start_y = entries_start_y;
+                        let mut total_list_height = content_area
+                            .height
+                            .saturating_sub(entries_start_y.saturating_sub(content_area.y));
+                        if let Some(hint) = hidden_hint.as_deref()
+                            && total_list_height > 0
+                        {
+                            buf.set_stringn(
+                                content_area.x + 1,
+                                entries_start_y,
+                                hint,
+                                content_area.width.saturating_sub(1) as usize,
+                                ratatui::style::Style::default()
+                                    .fg(theme.gray_dim)
+                                    .bg(theme.bg_base),
+                            );
+                            entries_start_y += 1;
+                            total_list_height -= 1;
+                        }
+                        let preview_height = if total_list_height >= 8 {
+                            (total_list_height / 4).max(3).min(12)
+                        } else {
+                            0
+                        };
+                        let list_height = total_list_height.saturating_sub(preview_height);
+                        let entries_area = Rect {
+                            x: content_area.x,
+                            y: entries_start_y,
+                            width: content_area.width,
+                            height: list_height,
+                        };
+                        // Resolve the selected row through the same entry map the
+                        // input handler uses, so group headers / content rows map
+                        // to the correct backing session entry. Computed before the
+                        // mutable render call to avoid a borrow conflict on `state`.
+                        let selected_entry_owned = if preview_height >= 3 {
+                            let entry_map = crate::views::session_picker::build_entry_map(
+                                entries.as_deref(),
+                                content_results.as_deref(),
+                                filter_query,
+                                true,
+                                effective_content_loading,
+                                *source_filter,
+                                Some(current_repo.as_str()),
+                            );
+                            entry_map
+                                .get(state.selected)
+                                .and_then(|item| item.as_ref())
+                                .and_then(|item| match item {
+                                    crate::views::session_picker::PickerItem::Fuzzy {
+                                        original_index,
+                                    } => entries_data.get(*original_index).cloned(),
+                                    crate::views::session_picker::PickerItem::Content {
+                                        ..
+                                    } => None,
+                                })
+                        } else {
+                            None
+                        };
+                        let content_hit = picker::render_picker_content_with_scrollbar_x(
+                            buf,
+                            entries_area,
+                            &theme,
+                            state,
+                            &picker_entries,
+                            &non_sel_flags,
+                            &[],
+                            Some(theme.bg_base),
+                            crate::views::session_picker::loading_spinner_active(
+                                entries.as_deref(),
+                                *source_filter,
+                                *loading,
+                                lanes,
+                            ),
+                            self.scrollback.tick_count(),
+                            mca.inner_x + mca.inner_width - 1,
+                        );
+                        // Render bottom preview pane for the selected session.
+                        if preview_height >= 3 {
+                            let preview_area = Rect {
+                                x: content_area.x,
+                                y: entries_start_y + list_height,
+                                width: content_area.width,
+                                height: preview_height,
+                            };
+                            render_session_preview_pane(
+                                buf,
+                                preview_area,
+                                selected_entry_owned.as_ref(),
+                                *preview_scroll,
+                                &theme,
+                            );
+                        }
+                        state.hit_areas = Some(picker::PickerHitAreas {
+                            close_button: Rect::default(),
+                            search_bar: search_bar_rect,
+                            item_rects: content_hit.item_rects,
+                            entry_indices: content_hit.entry_indices,
+                            tab_rects: vec![],
+                            filter_rect: None,
+                        });
+                    }
+                } // end else (normal picker mode)
             } else if let modal::ActiveModal::DocPicker {
                 entries,
                 state,
@@ -2247,6 +3963,38 @@ impl AgentView {
                 let compact = self.scrollback.appearance().prompt.compact;
                 modal::render_doc_picker_overlay(
                     buf, area, window, entries, state, compact, &theme,
+                );
+            } else if let modal::ActiveModal::ToolTraceViewer {
+                title,
+                input,
+                output,
+                input_scroll,
+                output_scroll,
+                focus,
+                input_area,
+                output_area,
+                window,
+                input_cached_lines,
+                output_cached_lines,
+            } = active_modal
+            {
+                let compact = self.scrollback.appearance().prompt.compact;
+                modal::render_tool_trace_viewer_overlay(
+                    buf,
+                    area,
+                    window,
+                    title,
+                    input,
+                    output,
+                    input_scroll,
+                    output_scroll,
+                    *focus,
+                    input_area,
+                    output_area,
+                    input_cached_lines,
+                    output_cached_lines,
+                    compact,
+                    &theme,
                 );
             } else if let modal::ActiveModal::DocViewer {
                 title,
@@ -2268,6 +4016,36 @@ impl AgentView {
                     cached_lines,
                     compact,
                     &theme,
+                );
+            } else if let modal::ActiveModal::ContextInfo {
+                block,
+                scroll,
+                window,
+                cache_metrics,
+                view,
+                selected_row,
+                detail_open,
+                session_fields,
+                ..
+            } = active_modal
+            {
+                let compact = self.scrollback.appearance().prompt.compact;
+                // F2 gate is applied when metrics are attached (open path).
+                let cache_enabled = cache_metrics.is_some();
+                modal::render_context_info_overlay(
+                    buf,
+                    area,
+                    window,
+                    block,
+                    scroll,
+                    compact,
+                    &theme,
+                    cache_metrics.as_ref(),
+                    *view,
+                    *selected_row,
+                    *detail_open,
+                    session_fields,
+                    cache_enabled,
                 );
             } else if let modal::ActiveModal::RememberNoteReview {
                 ref raw_content,
@@ -2432,6 +4210,18 @@ impl AgentView {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
             } else if let modal::ActiveModal::Traces { state } = active_modal {
                 crate::views::traces_modal::render_traces_modal(buf, area, state, compact);
+            } else if let modal::ActiveModal::PiSettings { state } = active_modal {
+                crate::views::pi_settings::render_pi_settings(buf, area, state, compact);
+            } else if let modal::ActiveModal::PiConfig { state } = active_modal {
+                crate::views::pi_config::render_pi_config_modal(buf, area, state, compact);
+            } else if let modal::ActiveModal::PiModels { state } = active_modal {
+                state.set_current_model(
+                    self.session
+                        .models
+                        .current_model_id_str()
+                        .map(str::to_owned),
+                );
+                crate::views::pi_models::render_pi_models_modal(buf, area, state, compact);
             } else if let modal::ActiveModal::Settings {
                 state: settings_state,
             } = active_modal
@@ -2472,6 +4262,708 @@ impl AgentView {
     }
 }
 
+/// Split the model-list content area into list + bottom detail pane.
+fn split_model_picker_content(content: Rect, detail_line_count: usize) -> (Rect, Option<Rect>) {
+    if detail_line_count == 0 || content.height < 6 {
+        return (content, None);
+    }
+    // Border rows + detail lines (capped so the list keeps breathing room).
+    let detail_h = (detail_line_count as u16).saturating_add(2).min(6);
+    let max_detail = content.height.saturating_sub(4);
+    let detail_h = detail_h.min(max_detail);
+    if detail_h < 2 {
+        return (content, None);
+    }
+    let list = Rect {
+        height: content.height.saturating_sub(detail_h),
+        ..content
+    };
+    let detail = Rect {
+        y: content.y + list.height,
+        height: detail_h,
+        ..content
+    };
+    (list, Some(detail))
+}
+
+fn selected_model_detail_lines(
+    items: &[crate::slash::command::ArgItem],
+    state: &crate::views::picker::PickerState,
+    models: &crate::acp::model_state::ModelState,
+) -> Vec<String> {
+    use crate::slash::commands::model::{model_picker_detail_lines, resolve_model_for_arg_item};
+
+    let idx = state.hovered.unwrap_or(state.selected);
+    let Some(item) = items.get(idx) else {
+        return Vec::new();
+    };
+    let Some(id) = resolve_model_for_arg_item(models, item) else {
+        return Vec::new();
+    };
+    let Some(info) = models.available.get(&id) else {
+        return Vec::new();
+    };
+    model_picker_detail_lines(info)
+}
+
+/// Render the bottom preview pane for the selected session in the resume picker.
+/// Shows session metadata and first message as a quick glance (like the model
+/// picker's detail pane but richer).
+
+/// Render PSM full-text hits as multi-line cards:
+///   title (left) + badge (right)
+///   wrapped snippet (2–3 lines)
+///   short repo · relative meta (no full path waste)
+///
+/// Returns (item_rects, entry_indices) for click hit-testing.
+fn render_search_result_hits(
+    buf: &mut Buffer,
+    area: Rect,
+    hits: &[xai_grok_shell::extensions::session_search::SearchSessionHit],
+    selected: usize,
+    scroll_offset: &mut Option<usize>,
+    content_loading: bool,
+    theme: &Theme,
+) -> (Vec<Rect>, Vec<usize>) {
+    use crate::render::SafeBuf;
+    use crate::render::line_utils::truncate_str;
+    use crate::render::scrollbar::render_scrollbar;
+    use crate::views::session_picker::repo_name_from_cwd;
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line as TuiLine, Span};
+    use unicode_width::UnicodeWidthStr;
+
+    const SNIP_LINES: usize = 2;
+    const CARD_GAP: usize = 1; // blank line between cards
+    // header + snip + meta + gap
+    let card_rows = 1 + SNIP_LINES + 1 + CARD_GAP;
+
+    if area.width == 0 || area.height == 0 {
+        return (Vec::new(), Vec::new());
+    }
+
+    let need_sb = hits.len() * card_rows > area.height as usize && area.width > 4;
+    let paint_w = if need_sb {
+        area.width.saturating_sub(1)
+    } else {
+        area.width
+    };
+    let inner_w = paint_w.saturating_sub(2) as usize; // left pad
+
+    // Keep selected card visible.
+    let mut offset = scroll_offset.unwrap_or(0);
+    let sel_top = selected.saturating_mul(card_rows);
+    let sel_bot = sel_top + card_rows.saturating_sub(1);
+    let view_h = area.height as usize;
+    if sel_top < offset {
+        offset = sel_top;
+    } else if sel_bot >= offset + view_h {
+        offset = sel_bot.saturating_sub(view_h.saturating_sub(1));
+    }
+    *scroll_offset = Some(offset);
+
+    let mut item_rects = Vec::new();
+    let mut entry_indices = Vec::new();
+    for (i, hit) in hits.iter().enumerate() {
+        let card_top = i * card_rows;
+        let card_bottom = card_top + card_rows - CARD_GAP; // exclusive of gap
+        // Skip cards fully above viewport
+        if card_bottom <= offset {
+            continue;
+        }
+        if card_top >= offset + view_h {
+            break;
+        }
+
+        let selected_row = i == selected;
+        let bg = if selected_row {
+            theme.bg_light
+        } else {
+            theme.bg_base
+        };
+        let title_fg = if selected_row {
+            theme.accent_user
+        } else {
+            theme.text_primary
+        };
+        let meta_fg = theme.gray_dim;
+        let snip_fg = theme.text_secondary;
+
+        // Visible start row for this card within area
+        let vis_start = card_top.saturating_sub(offset);
+        let card_y0 = area.y + vis_start as u16;
+
+        // Track hit rect for click (visible portion)
+        let visible_card_h = card_rows
+            .saturating_sub(CARD_GAP)
+            .min(view_h.saturating_sub(vis_start)) as u16;
+        if visible_card_h > 0 {
+            item_rects.push(Rect {
+                x: area.x,
+                y: card_y0,
+                width: paint_w,
+                height: visible_card_h,
+            });
+            entry_indices.push(i);
+        }
+
+        // ── Line 0: title + badge ──
+        if card_top >= offset && card_top < offset + view_h {
+            let y = area.y + (card_top - offset) as u16;
+            let badge = if hit.matched_fields.iter().any(|f| f == "content") {
+                "match"
+            } else if hit
+                .matched_fields
+                .iter()
+                .any(|f| f == "name" || f == "title")
+            {
+                "title"
+            } else {
+                "hit"
+            };
+            let badge_w = badge.width() + 2; // [badge]
+            let title_budget = inner_w.saturating_sub(badge_w + 1);
+            let title = truncate_str(
+                if hit.summary.trim().is_empty() {
+                    "(no title)"
+                } else {
+                    hit.summary.trim()
+                },
+                title_budget,
+            );
+            let title_w = title.width();
+            let mut spans = vec![
+                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(
+                    title,
+                    Style::default()
+                        .fg(title_fg)
+                        .bg(bg)
+                        .add_modifier(if selected_row {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            ];
+            // pad then badge right-aligned
+            let used = 1 + title_w;
+            let pad = inner_w.saturating_sub(used + badge_w);
+            if pad > 0 {
+                spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
+            }
+            spans.push(Span::styled(
+                format!("[{badge}]"),
+                Style::default().fg(theme.accent_user).bg(bg),
+            ));
+            // fill rest of row with bg
+            let line = TuiLine::from(spans);
+            buf.set_line_safe(area.x, y, &line, paint_w);
+            // paint bg for full width
+            if let Some(cell) = buf.cell_mut((area.x, y)) {
+                let _ = cell;
+            }
+            for x in area.x..area.x + paint_w {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    if cell.bg == ratatui::style::Color::Reset {
+                        cell.set_bg(bg);
+                    }
+                }
+            }
+        }
+
+        // ── Snippet lines ──
+        let snip_raw = hit.snippet.as_deref().unwrap_or("").replace('\n', " ");
+        let snip_lines = wrap_search_snippet(&snip_raw, inner_w.saturating_sub(2), SNIP_LINES);
+        for (si, snip_line) in snip_lines.iter().enumerate() {
+            let abs = card_top + 1 + si;
+            if abs < offset || abs >= offset + view_h {
+                continue;
+            }
+            let y = area.y + (abs - offset) as u16;
+            let styled = style_snippet_with_markers(snip_line, snip_fg, theme.accent_user, bg);
+            let mut spans = vec![Span::styled("  ", Style::default().bg(bg))];
+            spans.extend(styled);
+            buf.set_line_safe(area.x, y, &TuiLine::from(spans), paint_w);
+            for x in area.x..area.x + paint_w {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    if cell.bg == ratatui::style::Color::Reset {
+                        cell.set_bg(bg);
+                    }
+                }
+            }
+        }
+        // pad empty snip lines with bg if short
+        for si in snip_lines.len()..SNIP_LINES {
+            let abs = card_top + 1 + si;
+            if abs < offset || abs >= offset + view_h {
+                continue;
+            }
+            let y = area.y + (abs - offset) as u16;
+            for x in area.x..area.x + paint_w {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_bg(bg);
+                    cell.set_symbol(" ");
+                }
+            }
+        }
+
+        // ── Meta: repo · short id ──
+        let meta_abs = card_top + 1 + SNIP_LINES;
+        if meta_abs >= offset && meta_abs < offset + view_h {
+            let y = area.y + (meta_abs - offset) as u16;
+            let repo = repo_name_from_cwd(&hit.cwd);
+            let short_id = if hit.session_id.len() > 8 {
+                format!("{}…", &hit.session_id[..8])
+            } else {
+                hit.session_id.clone()
+            };
+            let meta = if hit.updated_at.is_empty() {
+                format!("{repo}  ·  {short_id}")
+            } else {
+                // Keep ISO date prefix if present (YYYY-MM-DD…)
+                let when = hit.updated_at.get(..10).unwrap_or(hit.updated_at.as_str());
+                format!("{repo}  ·  {when}  ·  {short_id}")
+            };
+            let meta = truncate_str(&meta, inner_w.saturating_sub(2));
+            let line = TuiLine::from(vec![
+                Span::styled("  ", Style::default().bg(bg)),
+                Span::styled(meta, Style::default().fg(meta_fg).bg(bg)),
+            ]);
+            buf.set_line_safe(area.x, y, &line, paint_w);
+            for x in area.x..area.x + paint_w {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    if cell.bg == ratatui::style::Color::Reset {
+                        cell.set_bg(bg);
+                    }
+                }
+            }
+        }
+    }
+
+    if need_sb {
+        let total_rows = hits.len() * card_rows;
+        let sb = Rect {
+            x: area.x + area.width - 1,
+            y: area.y,
+            width: 1,
+            height: area.height,
+        };
+        render_scrollbar(
+            buf,
+            Some(sb),
+            total_rows.min(u16::MAX as usize) as u16,
+            view_h.min(u16::MAX as usize) as u16,
+            offset.min(u16::MAX as usize) as u16,
+            false,
+        );
+    }
+
+    if content_loading && hits.is_empty() {
+        let line = TuiLine::from(Span::styled(
+            "  Searching…",
+            Style::default().fg(theme.gray_dim),
+        ));
+        buf.set_line_safe(area.x, area.y, &line, paint_w);
+    }
+
+    (item_rects, entry_indices)
+}
+
+/// Wrap snippet into up to `max_lines` display lines (char-safe).
+fn wrap_search_snippet(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    if width == 0 || max_lines == 0 || text.is_empty() {
+        return Vec::new();
+    }
+    use unicode_width::UnicodeWidthStr;
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for ch in text.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cur_w + cw > width && !cur.is_empty() {
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0;
+            if lines.len() >= max_lines {
+                break;
+            }
+        }
+        if lines.len() >= max_lines {
+            break;
+        }
+        cur.push(ch);
+        cur_w += cw;
+    }
+    if !cur.is_empty() && lines.len() < max_lines {
+        lines.push(cur);
+    }
+    // Ellipsis on last if truncated
+    if text.width() > width * max_lines
+        && let Some(last) = lines.last_mut()
+    {
+        if last.width() + 1 > width {
+            // trim a char
+            while last.width() + 1 > width && last.pop().is_some() {}
+        }
+        last.push('…');
+    }
+    lines
+}
+
+/// Highlight FTS markers `[term]` with accent color.
+fn style_snippet_with_markers(
+    text: &str,
+    normal_fg: ratatui::style::Color,
+    mark_fg: ratatui::style::Color,
+    bg: ratatui::style::Color,
+) -> Vec<ratatui::text::Span<'static>> {
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::Span;
+    let mut spans = Vec::new();
+    let mut rest = text;
+    loop {
+        if let Some(start) = rest.find('[') {
+            if let Some(end_rel) = rest[start + 1..].find(']') {
+                let end = start + 1 + end_rel;
+                if start > 0 {
+                    spans.push(Span::styled(
+                        rest[..start].to_string(),
+                        Style::default().fg(normal_fg).bg(bg),
+                    ));
+                }
+                // highlight without brackets
+                let inner = &rest[start + 1..end];
+                spans.push(Span::styled(
+                    inner.to_string(),
+                    Style::default()
+                        .fg(mark_fg)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                rest = &rest[end + 1..];
+                continue;
+            }
+        }
+        if !rest.is_empty() {
+            spans.push(Span::styled(
+                rest.to_string(),
+                Style::default().fg(normal_fg).bg(bg),
+            ));
+        }
+        break;
+    }
+    spans
+}
+
+/// Build a plain-text transcript from structured preview messages.
+fn format_preview_transcript(msgs: &[crate::views::modal::SessionPreviewMessage]) -> String {
+    let mut out = String::new();
+    for (i, m) in msgs.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n\n");
+        }
+        let label = match m.role.as_str() {
+            "user" => "You",
+            "assistant" => "Assistant",
+            other => other,
+        };
+        out.push_str(label);
+        out.push_str(":\n");
+        out.push_str(m.content.trim());
+    }
+    out
+}
+
+/// Full-screen session message preview: role headers + MarkdownContent body.
+/// Layout mirrors scrollback: user left gutter, assistant markdown, spacing.
+fn render_session_message_preview(
+    buf: &mut Buffer,
+    area: Rect,
+    messages: Option<&[crate::views::modal::SessionPreviewMessage]>,
+    scroll: &mut u16,
+    theme: &Theme,
+) {
+    use crate::render::SafeBuf;
+    use crate::render::scrollbar::render_scrollbar;
+    use crate::scrollback::blocks::markdown_content::MarkdownContent;
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line as TuiLine, Span};
+    use ratatui::widgets::Widget;
+
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    match messages {
+        None => {
+            let line = TuiLine::from(Span::styled(
+                "  Loading messages…",
+                Style::default().fg(theme.gray_dim),
+            ));
+            ratatui::widgets::Paragraph::new(vec![line]).render(area, buf);
+            return;
+        }
+        Some([]) => {
+            let line = TuiLine::from(Span::styled(
+                "  No messages to preview",
+                Style::default().fg(theme.gray_dim),
+            ));
+            ratatui::widgets::Paragraph::new(vec![line]).render(area, buf);
+            return;
+        }
+        Some(msgs) => {
+            let full_w = area.width as usize;
+            let content_w = full_w.saturating_sub(2).max(8);
+
+            // Flatten to painted lines: header + markdown body + blank separator.
+            let mut painted: Vec<TuiLine> = Vec::new();
+            for (i, msg) in msgs.iter().enumerate() {
+                let is_user = msg.role == "user";
+                let (label, label_fg) = if is_user {
+                    ("You", theme.accent_user)
+                } else {
+                    ("Assistant", theme.accent_assistant)
+                };
+
+                painted.push(TuiLine::from(vec![
+                    Span::styled(
+                        if is_user { "┃ " } else { "  " },
+                        Style::default().fg(theme.accent_user),
+                    ),
+                    Span::styled(
+                        label,
+                        Style::default().fg(label_fg).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+
+                let body_w = content_w.saturating_sub(2).max(1);
+                let md = MarkdownContent::new_with_table_width(msg.content.as_str(), Some(body_w));
+                md.with_wrapped_lines(body_w, |wrapped| {
+                    for line in wrapped.lines.iter() {
+                        let mut spans = vec![Span::styled(
+                            if is_user { "┃ " } else { "  " },
+                            Style::default().fg(if is_user {
+                                theme.accent_user
+                            } else {
+                                theme.gray_dim
+                            }),
+                        )];
+                        for span in line.spans.iter() {
+                            spans.push(span.clone());
+                        }
+                        painted.push(TuiLine::from(spans));
+                    }
+                });
+
+                if i + 1 < msgs.len() {
+                    painted.push(TuiLine::from(Span::raw("")));
+                }
+            }
+
+            let total = painted.len();
+            let visible_h = area.height as usize;
+            let max_scroll = total.saturating_sub(visible_h);
+            *scroll = (*scroll as usize).min(max_scroll) as u16;
+            let scroll = *scroll as usize;
+            let need_sb = total > visible_h && area.width > 4;
+            let paint_w = if need_sb {
+                area.width.saturating_sub(1)
+            } else {
+                area.width
+            };
+
+            for (row, line) in painted.into_iter().skip(scroll).take(visible_h).enumerate() {
+                let y = area.y + row as u16;
+                buf.set_line_safe(area.x, y, &line, paint_w);
+            }
+
+            if need_sb {
+                let sb = Rect {
+                    x: area.x + area.width - 1,
+                    y: area.y,
+                    width: 1,
+                    height: area.height,
+                };
+                render_scrollbar(
+                    buf,
+                    Some(sb),
+                    total.min(u16::MAX as usize) as u16,
+                    visible_h.min(u16::MAX as usize) as u16,
+                    scroll.min(u16::MAX as usize) as u16,
+                    false,
+                );
+            }
+        }
+    }
+}
+
+fn render_session_preview_pane(
+    buf: &mut Buffer,
+    area: Rect,
+    entry: Option<&crate::app::app_view::SessionPickerEntry>,
+    scroll: u16,
+    theme: &Theme,
+) {
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line as TuiLine, Span};
+    use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(theme.selection_border));
+    let inner = block.inner(area);
+    block.render(area, buf);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let Some(entry) = entry else {
+        let placeholder = TuiLine::from(Span::styled(
+            "  No session selected",
+            Style::default().fg(theme.gray_dim),
+        ));
+        Paragraph::new(vec![placeholder]).render(inner, buf);
+        return;
+    };
+
+    let mut tui_lines: Vec<TuiLine> = Vec::new();
+
+    // Title line: session name or summary
+    let title = entry
+        .name
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&entry.summary);
+    tui_lines.push(TuiLine::from(Span::styled(
+        format!("  {title}"),
+        Style::default()
+            .fg(theme.accent_user)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    // Metadata line: model · messages · tokens
+    let mut meta_parts: Vec<String> = Vec::new();
+    if let Some(model) = &entry.model_id {
+        meta_parts.push(model.clone());
+    }
+    if entry.num_messages > 0 {
+        meta_parts.push(format!("{} msgs", entry.num_messages));
+    }
+    if let Some(tokens) = entry.total_tokens {
+        if tokens > 0 {
+            meta_parts.push(format!("{} tok", tokens));
+        }
+    }
+    if let Some(cost) = entry.total_cost {
+        if cost > 0.0 {
+            meta_parts.push(format!("${cost:.2}"));
+        }
+    }
+    if !meta_parts.is_empty() {
+        tui_lines.push(TuiLine::from(Span::styled(
+            format!("  {}", meta_parts.join(" · ")),
+            Style::default().fg(theme.text_secondary),
+        )));
+    }
+
+    // Time line: created · updated
+    let created_str = entry.created_at.format("%Y-%m-%d %H:%M").to_string();
+    let updated_str = entry
+        .last_active_at
+        .unwrap_or(entry.updated_at)
+        .format("%Y-%m-%d %H:%M")
+        .to_string();
+    tui_lines.push(TuiLine::from(vec![
+        Span::styled("  created ", Style::default().fg(theme.gray_dim)),
+        Span::styled(&created_str, Style::default().fg(theme.text_secondary)),
+        Span::styled("  ·  updated ", Style::default().fg(theme.gray_dim)),
+        Span::styled(&updated_str, Style::default().fg(theme.text_secondary)),
+    ]));
+
+    // CWD + branch line
+    if !entry.cwd.is_empty() {
+        let mut cwd_line = vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(&entry.cwd, Style::default().fg(theme.gray_dim)),
+        ];
+        if let Some(branch) = &entry.branch {
+            cwd_line.push(Span::styled(
+                format!("  ({branch})"),
+                Style::default().fg(theme.gray_dim),
+            ));
+        }
+        tui_lines.push(TuiLine::from(cwd_line));
+    }
+
+    // First message preview
+    if let Some(first_msg) = &entry.first_message {
+        let msg = first_msg.trim();
+        if !msg.is_empty() {
+            tui_lines.push(TuiLine::from(Span::raw("")));
+            // Truncate to fit remaining lines (char-safe for CJK/emoji)
+            let max_chars = (inner.width as usize).saturating_sub(2) * 2;
+            let truncated: String = if msg.chars().count() > max_chars {
+                msg.chars().take(max_chars).collect::<String>() + "…"
+            } else {
+                msg.to_string()
+            };
+            tui_lines.push(TuiLine::from(Span::styled(
+                format!("  {truncated}"),
+                Style::default().fg(theme.text_primary),
+            )));
+        }
+    }
+
+    // Apply scroll offset
+    let visible: Vec<TuiLine> = tui_lines
+        .into_iter()
+        .skip(scroll as usize)
+        .take(inner.height as usize)
+        .collect();
+
+    Paragraph::new(visible)
+        .wrap(Wrap { trim: false })
+        .render(inner, buf);
+}
+
+fn render_model_picker_detail(buf: &mut Buffer, area: Rect, lines: &[String], theme: &Theme) {
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line as TuiLine, Span};
+    use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+
+    if area.width == 0 || area.height == 0 || lines.is_empty() {
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Model details ")
+        .border_style(Style::default().fg(theme.selection_border));
+    let inner = block.inner(area);
+    block.render(area, buf);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut tui_lines = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let style = if i == 0 {
+            Style::default()
+                .fg(theme.accent_user)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_secondary)
+        };
+        tui_lines.push(TuiLine::from(Span::styled(format!("  {line}"), style)));
+    }
+    Paragraph::new(tui_lines)
+        .wrap(Wrap { trim: false })
+        .render(inner, buf);
+}
+
 #[cfg(test)]
 #[path = "modals_tests.rs"]
 mod tests;
@@ -2489,6 +4981,11 @@ mod session_picker_delete_tests {
         SessionPickerEntry {
             id: id.into(),
             summary: id.into(),
+            name: None,
+            first_message: None,
+            session_path: None,
+            total_tokens: None,
+            total_cost: None,
             updated_at: chrono::Utc::now(),
             created_at: chrono::Utc::now(),
             cwd: "/repo".into(),
@@ -2500,6 +4997,7 @@ mod session_picker_delete_tests {
             branch: None,
             repo_name: "repo".into(),
             worktree_label: None,
+            parent_session_path: None,
             last_turn_summary: None,
             last_recap: None,
             session_kind: None,
@@ -2523,6 +5021,10 @@ mod session_picker_delete_tests {
             entries_query: None,
             source_filter: crate::views::session_picker::SourceFilter::default(),
             pending_delete: None,
+            preview_scroll: 0,
+            search_mode: false,
+            preview_mode: false,
+            preview_messages: None,
         });
     }
 
@@ -2537,6 +5039,80 @@ mod session_picker_delete_tests {
             }
             _ => None,
         }
+    }
+
+    #[test]
+    fn session_preview_render_clamps_persistent_scroll_to_bottom() {
+        let area = ratatui::layout::Rect::new(0, 0, 24, 4);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let messages = [crate::views::modal::SessionPreviewMessage {
+            role: "user".into(),
+            content: (0..20)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }];
+        let theme = crate::theme::Theme::default();
+        let mut scroll = u16::MAX;
+
+        super::render_session_message_preview(&mut buf, area, Some(&messages), &mut scroll, &theme);
+
+        assert!(
+            scroll < u16::MAX,
+            "render must persist the real bottom offset"
+        );
+        let bottom = scroll;
+        assert!(bottom >= 3, "fixture must produce scrollable content");
+
+        crate::views::modal::apply_doc_mouse_scroll(MouseEventKind::ScrollUp, &mut scroll);
+        super::render_session_message_preview(&mut buf, area, Some(&messages), &mut scroll, &theme);
+
+        assert_eq!(
+            scroll,
+            bottom - 3,
+            "one upward wheel event must leave bottom"
+        );
+    }
+
+    #[test]
+    fn escape_returns_external_preview_to_session_list() {
+        crate::appearance::cache::set_psm_resume_index(true);
+        let mut agent = make_agent();
+        let mut session = entry("pi-session");
+        session.source = "pi".into();
+        open_picker(&mut agent, vec![session]);
+        if let Some(ActiveModal::SessionPicker {
+            source_filter,
+            preview_mode,
+            preview_messages,
+            preview_scroll,
+            ..
+        }) = agent.active_modal.as_mut()
+        {
+            *source_filter = crate::views::session_picker::SourceFilter::External;
+            *preview_mode = true;
+            *preview_messages = Some(vec![crate::views::modal::SessionPreviewMessage {
+                role: "user".into(),
+                content: "preview".into(),
+            }]);
+            *preview_scroll = 2;
+        }
+
+        let outcome = agent.handle_modal_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        let Some(ActiveModal::SessionPicker {
+            preview_mode,
+            preview_messages,
+            preview_scroll,
+            ..
+        }) = agent.active_modal.as_ref()
+        else {
+            panic!("Esc must return to the session list, not close the modal");
+        };
+        assert!(!preview_mode);
+        assert!(preview_messages.is_none());
+        assert_eq!(*preview_scroll, 0);
+        crate::appearance::cache::set_psm_resume_index(false);
     }
 
     #[test]
@@ -3494,5 +6070,104 @@ mod settings_memory_paste_routing_tests {
         };
         assert_eq!(state.query(), "a中b");
         assert_eq!(agent.prompt.text(), "hidden prompt");
+    }
+}
+
+#[cfg(test)]
+mod notifications_modal_input_tests {
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::app_view::ExternalNotification;
+    use crate::views::modal::{ActiveModal, NotificationListState};
+    use crate::views::modal_window::ModalWindowState;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn open_notifications(agent: &mut crate::app::agent_view::AgentView) {
+        agent.active_modal = Some(ActiveModal::Notifications {
+            state: NotificationListState::new(vec![
+                ExternalNotification {
+                    message: "short toast".into(),
+                    kind: Some("info".into()),
+                },
+                ExternalNotification {
+                    message: "line one\nline two full body".into(),
+                    kind: Some("warning".into()),
+                },
+            ]),
+            window: ModalWindowState::new(),
+        });
+    }
+
+    fn picker_state(
+        agent: &crate::app::agent_view::AgentView,
+    ) -> &crate::views::picker::PickerState {
+        match agent.active_modal.as_ref() {
+            Some(ActiveModal::Notifications { state, .. }) => &state.picker,
+            _ => panic!("expected notifications modal"),
+        }
+    }
+
+    #[test]
+    fn opens_nav_first_and_e_expands_not_search() {
+        let mut agent = make_agent();
+        open_notifications(&mut agent);
+        assert!(!picker_state(&agent).search_active);
+
+        let out = agent.handle_modal_key(&key('e'));
+        assert!(matches!(out, crate::app::app_view::InputOutcome::Changed));
+        let st = picker_state(&agent);
+        assert!(st.expanded.contains(&0), "e must expand selected row");
+        assert!(!st.search_active, "e must not enter search");
+        assert!(st.query().is_empty(), "e must not type into query");
+    }
+
+    #[test]
+    fn right_arrow_expands_and_left_collapses() {
+        let mut agent = make_agent();
+        open_notifications(&mut agent);
+
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        agent.handle_modal_key(&right);
+        assert!(picker_state(&agent).expanded.contains(&0));
+
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        agent.handle_modal_key(&left);
+        assert!(!picker_state(&agent).expanded.contains(&0));
+    }
+
+    #[test]
+    fn y_copies_while_nav_and_type_enters_search() {
+        let mut agent = make_agent();
+        open_notifications(&mut agent);
+
+        agent.handle_modal_key(&key('y'));
+        assert!(
+            !picker_state(&agent).search_active,
+            "y is copy in nav, not search"
+        );
+        assert!(picker_state(&agent).query().is_empty());
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some("Copied notification")
+        );
+
+        // Non-reserved printable starts search (type-to-search).
+        agent.handle_modal_key(&key('w'));
+        let st = picker_state(&agent);
+        assert!(st.search_active);
+        assert_eq!(st.query(), "w");
+    }
+
+    #[test]
+    fn slash_focuses_search_without_query_char() {
+        let mut agent = make_agent();
+        open_notifications(&mut agent);
+        agent.handle_modal_key(&key('/'));
+        let st = picker_state(&agent);
+        assert!(st.search_active);
+        assert!(st.query().is_empty());
     }
 }

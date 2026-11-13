@@ -9,9 +9,16 @@ use crate::scrollback::state::ScrollbackState;
 use crate::views::prompt_widget::{PromptWidget, StashedPrompt};
 use crate::views::rewind::{RewindPhase, RewindState};
 
-/// Interjections render as user prompts but the shell never numbers them, so counting them would skew the positional prompt-to-entry mapping.
-/// Known approximation: an interjection the shell converted into its own `interject-fallback-` turn IS shell-numbered.
-/// The positional fallback thus under-counts around it until a resume replays it as an indexed prompt.
+/// User prompt that participates in the shell's prompt numbering.
+/// Interjections render as user prompts but the shell never numbers them,
+/// so counting them would skew the positional prompt↔entry mapping.
+///
+/// Known approximation: an interjection the shell converted into its own
+/// `interject-fallback-` turn IS shell-numbered, but its live block (rendered
+/// from the interjection broadcast) is flagged `is_interjection` and carries
+/// no index, so the positional fallback under-counts around it until a
+/// resume replays it as an indexed prompt. The primary path (explicit
+/// `prompt_index` matches) is unaffected.
 fn is_indexed_user_prompt(block: &RenderBlock) -> bool {
     matches!(block, RenderBlock::UserPrompt(b) if !b.is_interjection)
 }
@@ -53,7 +60,8 @@ pub(in crate::app) fn shell_prompt_index_at(
         if let Some(e) = scrollback.get(idx)
             && let RenderBlock::UserPrompt(ref block) = e.block
         {
-            // A mid-turn interjection belongs to the enclosing turn; keep walking back to that turn's starting prompt
+            // A mid-turn interjection belongs to the enclosing turn — keep
+            // walking back to that turn's starting prompt.
             if block.is_interjection {
                 continue;
             }
@@ -100,6 +108,18 @@ pub(in crate::app) fn find_user_prompt_entry_for_shell_index(
 }
 
 pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
+    // Rewind supersedes the client-side jump preview. Restore its captured
+    // viewport before opening either the native Pi tree or Grok rewind flow.
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        agent.dismiss_jump_picker();
+    }
+    // Pi owns session branching via SessionTree + navigateTree; Grok Shell
+    // rewind (x.ai/rewind/*) is not implemented by pi-grok-adapter.
+    if app.external_agent {
+        return super::session::tree::dispatch_show_session_tree(app);
+    }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -111,9 +131,6 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
         app.show_toast(NO_SESSION_NOTICE);
         return vec![];
     };
-
-    // Rewind takes input priority over the `/jump` picker; close a lingering one first so it can't reappear (stale) after rewind finishes
-    agent.dismiss_jump_picker();
 
     let selected_idx = agent.scrollback.selected();
     let selected_shell_idx =
@@ -153,6 +170,11 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
 }
 
 pub(super) fn dispatch_rewind_show_picker(app: &mut AppView) -> Vec<Effect> {
+    // /rewind, Esc Esc (scrollback), and Action::Rewind must not call
+    // x.ai/rewind/points under external/Pi — remap to native SessionTree.
+    if app.external_agent {
+        return super::session::tree::dispatch_show_session_tree(app);
+    }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -283,7 +305,7 @@ pub(super) fn dispatch_rewind_confirm(app: &mut AppView, target: usize) -> Vec<E
 }
 
 /// "Yes, and don't ask again": quiet-persist confirm-before-rewind off, then execute.
-/// No settings checkmark toast; success/toast comes from the rewind itself.
+/// No settings checkmark toast — success/toast comes from the rewind itself.
 pub(super) fn dispatch_rewind_confirm_never_ask(app: &mut AppView, target: usize) -> Vec<Effect> {
     let mut effects = Vec::new();
     let prev = app.current_ui.confirm_before_rewind_enabled();
@@ -403,6 +425,57 @@ fn begin_rewind(
     enter_executing(agent, agent_id, target, anchor, draft, claude)
 }
 
+pub(super) fn dispatch_inline_edit_submit(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        app.show_toast(NO_SESSION_NOTICE);
+        return vec![];
+    };
+    let Some(edit) = agent.inline_edit.as_ref() else {
+        return vec![];
+    };
+
+    // Unchanged/empty edits have nothing to submit: just close the editor.
+    let text = edit.textarea.text().trim().to_string();
+    if text.is_empty() || text == edit.original.trim() {
+        agent.exit_inline_edit();
+        return vec![];
+    }
+
+    let target = edit.prompt_index;
+    let anchor = agent
+        .scrollback
+        .index_of_id(edit.entry_id)
+        .or_else(|| agent.scrollback.selected())
+        .unwrap_or(0);
+    let draft = stash_prompt(&mut agent.prompt);
+
+    if agent.session.state.is_busy() {
+        // Mid-turn submit: the same cancel-offer `/rewind` raises, over the
+        // still-open editor. Confirm cancels the turn and re-enters the
+        // flow; dismiss returns to the editor.
+        agent.rewind_state = Some(RewindState::new_cancel_offer(anchor, draft, Some(target)));
+        return vec![];
+    }
+
+    agent.rewind_state = Some(RewindState {
+        phase: RewindPhase::Loading,
+        anchor_entry_idx: anchor,
+        stashed_draft: draft,
+        selected_prompt_index: Some(target),
+    });
+
+    vec![Effect::FetchRewindPoints {
+        agent_id: id,
+        session_id,
+    }]
+}
+
 pub(super) fn dispatch_rewind_success(
     app: &mut AppView,
     agent_id: crate::app::agent::AgentId,
@@ -432,14 +505,17 @@ pub(super) fn dispatch_rewind_success(
     let target = response.target_prompt_index;
     let stashed_draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
 
-    // The summary describes turns the rewind just removed (the shell clears its persisted copy on the same branch)
-    // Bump gen so a late SessionMetaFromDisk hydrate cannot restore the pre-rewind summary.json value into the cleared field
+    // The summary describes turns the rewind just removed (the shell
+    // clears its persisted copy on the same branch). Bump gen so a
+    // late SessionMetaFromDisk hydrate cannot restore the pre-rewind
+    // summary.json value into the cleared field.
     agent.set_last_turn_summary(None);
     let target_idx = find_user_prompt_entry_for_shell_index(&agent.scrollback, target);
     if let Some(anchor_idx) = target_idx {
         let removed = agent.scrollback.remove_from(anchor_idx);
-        // Explicit drop BEFORE the purge: the rewound tail must be freed for the release below to return its pages
-        // (Entries and their render caches are potentially most of a long transcript.)
+        // Explicit drop BEFORE the purge: the rewound tail (entries +
+        // their render caches — potentially most of a long transcript)
+        // must be freed for the release below to return its pages.
         drop(removed);
         crate::memory_release::release_retained_memory("rewind-truncate");
     }

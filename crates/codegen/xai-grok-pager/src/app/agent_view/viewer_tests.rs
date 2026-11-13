@@ -8,8 +8,12 @@ use crossterm::event::{
 use ratatui::layout::Rect;
 
 use crate::actions::ActionRegistry;
+use crate::app::actions::Action;
 use crate::app::agent_view::AgentView;
 use crate::app::agent_view::test_fixtures::make_agent;
+use crate::app::app_view::InputOutcome;
+use crate::scrollback::block::RenderBlock;
+use crate::views::block_viewer::BlockViewerPane;
 use crate::views::plan_approval_view::PlanApprovalFocus;
 
 const POPUP: Rect = Rect {
@@ -517,6 +521,54 @@ fn wheel_on_border_column_scrolls_plan() {
         off_after < off,
         "wheel-up on the border column must scroll up ({off} -> {off_after})"
     );
+}
+
+fn open_selected_list_dir_viewer(agent: &mut AgentView) {
+    let idx = agent.scrollback.selected().unwrap();
+    let entry = agent.scrollback.entry(idx).unwrap();
+    agent.block_viewer = BlockViewerPane::for_list_dir(entry.id, entry);
+    assert!(agent.block_viewer.is_some());
+}
+
+#[test]
+fn tool_viewer_arrows_switch_between_adjacent_viewable_tools() {
+    let mut agent = make_agent();
+    let first = agent.scrollback.len();
+    agent
+        .scrollback
+        .push_block(RenderBlock::list_dir_with_output("first", "a.txt"));
+    agent
+        .scrollback
+        .push_block(RenderBlock::agent_message("not a tool viewer"));
+    let second = agent.scrollback.len();
+    agent
+        .scrollback
+        .push_block(RenderBlock::list_dir_with_output("second", "b.txt"));
+
+    agent.scrollback.set_selected(Some(first));
+    open_selected_list_dir_viewer(&mut agent);
+    let outcome = agent.handle_block_viewer_key(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert!(matches!(
+        outcome,
+        InputOutcome::Action(Action::OpenBlockViewer)
+    ));
+    assert_eq!(agent.scrollback.selected(), Some(second));
+    assert!(agent.block_viewer.is_none());
+
+    open_selected_list_dir_viewer(&mut agent);
+    let outcome = agent.handle_block_viewer_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert!(matches!(
+        outcome,
+        InputOutcome::Action(Action::OpenBlockViewer)
+    ));
+    assert_eq!(agent.scrollback.selected(), Some(first));
+    assert!(agent.block_viewer.is_none());
+
+    open_selected_list_dir_viewer(&mut agent);
+    let outcome = agent.handle_block_viewer_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert!(matches!(outcome, InputOutcome::Changed));
+    assert_eq!(agent.scrollback.selected(), Some(first));
+    assert!(agent.block_viewer.is_some());
 }
 
 fn enter_key() -> KeyEvent {

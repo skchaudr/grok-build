@@ -83,11 +83,6 @@ async fn minimal_slash_switches_to_fullscreen() {
     while Instant::now() < deadline {
         harness.update(Duration::from_millis(100));
     }
-    let body = std::fs::read_to_string(&config_path).unwrap_or_default();
-    assert!(
-        !body.contains("screen_mode"),
-        "/fullscreen must not persist [ui] screen_mode; config.toml:\n{body}"
-    );
 
     harness.quit().expect("clean quit");
 }
