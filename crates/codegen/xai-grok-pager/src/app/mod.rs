@@ -42,7 +42,7 @@ mod dashboard_session_picker;
 mod dispatch;
 pub use dispatch::standalone_traces;
 pub mod roster;
-pub(crate) mod pi_remote_tui;
+pub mod pi_remote_tui;
 pub mod extension_shortcuts;
 pub mod session_startup;
 pub(crate) mod session_title_resolve;
