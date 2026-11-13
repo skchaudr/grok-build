@@ -6774,6 +6774,16 @@ fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
         crate::theme::ThemeKind::JetBrainsIslandsLight => crate::theme::Theme::jetbrains_islands_light(),
         crate::theme::ThemeKind::MonosamiLight => crate::theme::Theme::monosami_light(),
         crate::theme::ThemeKind::MonosamiInkLight => crate::theme::Theme::monosami_ink_light(),
+        crate::theme::ThemeKind::Dracula => crate::theme::Theme::dracula(),
+        crate::theme::ThemeKind::AyuDarker => crate::theme::Theme::ayu_darker(),
+        crate::theme::ThemeKind::FleetDark => crate::theme::Theme::fleet_dark(),
+        crate::theme::ThemeKind::Carbonfox => crate::theme::Theme::carbonfox(),
+        crate::theme::ThemeKind::KanagawaDragon => crate::theme::Theme::kanagawa_dragon(),
+        crate::theme::ThemeKind::KansoInk => crate::theme::Theme::kanso_ink(),
+        crate::theme::ThemeKind::FleetLight => crate::theme::Theme::fleet_light(),
+        crate::theme::ThemeKind::Dayfox => crate::theme::Theme::dayfox(),
+        crate::theme::ThemeKind::KanagawaLotus => crate::theme::Theme::kanagawa_lotus(),
+        crate::theme::ThemeKind::KansoPearl => crate::theme::Theme::kanso_pearl(),
         // Both bg tokens are Reset (bandless palette), so the two-tone
         // assertion below does not apply — the preview reads via the
         // underline cue instead.

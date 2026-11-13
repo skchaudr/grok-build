@@ -439,7 +439,7 @@ fn contrast(a: Color, b: Color) -> Option<f64> {
 mod visibility_tests {
     use super::*;
 
-    fn every_theme() -> [Theme; 17] {
+    fn every_theme() -> [Theme; 27] {
         [
             Theme::groknight(),
             Theme::grokday(),
@@ -458,6 +458,16 @@ mod visibility_tests {
             Theme::jetbrains_islands_light(),
             Theme::monosami_light(),
             Theme::monosami_ink_light(),
+            Theme::dracula(),
+            Theme::ayu_darker(),
+            Theme::fleet_dark(),
+            Theme::carbonfox(),
+            Theme::kanagawa_dragon(),
+            Theme::kanso_ink(),
+            Theme::fleet_light(),
+            Theme::dayfox(),
+            Theme::kanagawa_lotus(),
+            Theme::kanso_pearl(),
         ]
     }
 

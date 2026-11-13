@@ -120,6 +120,56 @@ const THEME_CHOICES: &[EnumChoice] = &[
         description: "Zed Monosami Ink Light; needs truecolor.",
     },
     EnumChoice {
+        canonical: "dracula",
+        display: "Dracula",
+        description: "Zed Dracula; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "ayu-darker",
+        display: "Ayu Darker",
+        description: "Zed Ayu Darker; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "fleet-dark",
+        display: "Fleet Dark",
+        description: "Zed Fleet Dark; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "carbonfox",
+        display: "Carbonfox",
+        description: "Zed Carbonfox (Nightfox family); needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "kanagawa-dragon",
+        display: "Kanagawa Dragon",
+        description: "Zed Kanagawa Dragon; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "kanso-ink",
+        display: "Kanso Ink",
+        description: "Zed Kanso Ink (borderless, no italics); needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "fleet-light",
+        display: "Fleet Light",
+        description: "Zed Fleet Light; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "dayfox",
+        display: "Dayfox",
+        description: "Zed Dayfox (Nightfox family); needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "kanagawa-lotus",
+        display: "Kanagawa Lotus",
+        description: "Zed Kanagawa Lotus; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "kanso-pearl",
+        display: "Kanso Pearl",
+        description: "Zed Kanso Pearl (borderless, no italics); needs truecolor.",
+    },
+    EnumChoice {
         canonical: "terminal",
         display: "Terminal",
         description: "Terminal's own background and text colors.",
@@ -565,6 +615,56 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
         canonical: "monosami-ink-light",
         display: "Monosami Ink Light",
         description: "Zed Monosami Ink Light; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "dracula",
+        display: "Dracula",
+        description: "Zed Dracula; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "ayu-darker",
+        display: "Ayu Darker",
+        description: "Zed Ayu Darker; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "fleet-dark",
+        display: "Fleet Dark",
+        description: "Zed Fleet Dark; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "carbonfox",
+        display: "Carbonfox",
+        description: "Zed Carbonfox (Nightfox family); needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "kanagawa-dragon",
+        display: "Kanagawa Dragon",
+        description: "Zed Kanagawa Dragon; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "kanso-ink",
+        display: "Kanso Ink",
+        description: "Zed Kanso Ink (borderless, no italics); needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "fleet-light",
+        display: "Fleet Light",
+        description: "Zed Fleet Light; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "dayfox",
+        display: "Dayfox",
+        description: "Zed Dayfox (Nightfox family); needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "kanagawa-lotus",
+        display: "Kanagawa Lotus",
+        description: "Zed Kanagawa Lotus; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "kanso-pearl",
+        display: "Kanso Pearl",
+        description: "Zed Kanso Pearl (borderless, no italics); needs truecolor.",
     },
     EnumChoice {
         canonical: "terminal",

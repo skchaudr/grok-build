@@ -54,7 +54,7 @@ impl Theme {
             diff_insert_fg: rgb(135, 169, 135),    // #87a987
             diff_equal_fg: rgb(117, 121, 127),     // #75797f
             diff_gutter_fg: rgb(117, 121, 127),    // #75797f
-            bg_visual: rgb(24, 25, 30), // selection must stand apart from bg_light (the prompt band) and bg_base: >= 1.25:1, text >= 4.5:1 (visibility_tests)
+            bg_visual: rgb(24, 25, 30),            // #18191e
             paste_bg: rgb(67, 70, 78),             // #43464e
             paste_fg: rgb(117, 121, 127),          // #75797f
             paste_dim: rgb(117, 121, 127),         // #75797f
@@ -74,7 +74,7 @@ impl Theme {
             md_task_checked: rgb(135, 169, 135),   // #87a987
             md_task_unchecked: rgb(117, 121, 127), // #75797f
             md_muted: rgb(117, 121, 127),          // #75797f
-            md_quote: rgb(220, 165, 97),  // #dca561
+            md_quote: rgb(220, 165, 97),           // #dca561
             md_code_bg: rgb(67, 70, 78),           // #43464e
             md_text: rgb(197, 201, 199),           // #c5c9c7
             link_fg: rgb(158, 155, 147),           // #9e9b93
@@ -145,7 +145,7 @@ impl Theme {
             md_task_checked: rgb(118, 148, 106),   // #76946a
             md_task_unchecked: rgb(114, 113, 105), // #727169
             md_muted: rgb(114, 113, 105),          // #727169
-            md_quote: rgb(210, 126, 153),  // #d27e99
+            md_quote: rgb(210, 126, 153),          // #d27e99
             md_code_bg: rgb(24, 24, 32),           // #181820
             md_text: rgb(220, 215, 186),           // #dcd7ba
             link_fg: rgb(126, 156, 216),           // #7e9cd8
@@ -216,7 +216,7 @@ impl Theme {
             md_task_checked: rgb(138, 154, 123),   // #8a9a7b
             md_task_unchecked: rgb(114, 113, 105), // #727169
             md_muted: rgb(114, 113, 105),          // #727169
-            md_quote: rgb(220, 165, 97),  // #dca561
+            md_quote: rgb(220, 165, 97),           // #dca561
             md_code_bg: rgb(24, 22, 22),           // #181616
             md_text: rgb(197, 201, 197),           // #c5c9c5
             link_fg: rgb(126, 156, 216),           // #7e9cd8
@@ -287,7 +287,7 @@ impl Theme {
             md_task_checked: rgb(115, 189, 122),   // #73bd7a
             md_task_unchecked: rgb(176, 177, 179), // #b0b1b3
             md_muted: rgb(122, 126, 133),          // #7a7e85
-            md_quote: rgb(207, 142, 109),  // #cf8e6d
+            md_quote: rgb(207, 142, 109),          // #cf8e6d
             md_code_bg: rgb(38, 40, 43),           // #26282b
             md_text: rgb(188, 190, 196),           // #bcbec4
             link_fg: rgb(86, 168, 245),            // #56a8f5
@@ -358,7 +358,7 @@ impl Theme {
             md_task_checked: rgb(125, 168, 89),    // #7da859
             md_task_unchecked: rgb(137, 164, 187), // #89a4bb
             md_muted: rgb(99, 119, 119),           // #637777
-            md_quote: rgb(199, 146, 234),  // #c792ea
+            md_quote: rgb(199, 146, 234),          // #c792ea
             md_code_bg: rgb(11, 41, 66),           // #0b2942
             md_text: rgb(214, 222, 235),           // #d6deeb
             link_fg: rgb(130, 170, 255),           // #82aaff
@@ -409,7 +409,7 @@ impl Theme {
             diff_insert_fg: rgb(165, 224, 117),    // #a5e075
             diff_equal_fg: rgb(127, 131, 140),     // #7f838c
             diff_gutter_fg: rgb(73, 81, 98),       // #495162
-            bg_visual: rgb(60, 67, 80), // selection must stand apart from bg_light (the prompt band) and bg_base: >= 1.25:1, text >= 4.5:1 (visibility_tests)
+            bg_visual: rgb(60, 67, 80),            // #3c4350
             paste_bg: rgb(30, 34, 39),             // #1e2227
             paste_fg: rgb(73, 81, 98),             // #495162
             paste_dim: rgb(73, 81, 98),            // #495162
@@ -429,7 +429,7 @@ impl Theme {
             md_task_checked: rgb(165, 224, 117), // #a5e075
             md_task_unchecked: rgb(73, 81, 98),  // #495162
             md_muted: rgb(127, 131, 140),        // #7f838c
-            md_quote: rgb(198, 120, 221),  // #c678dd
+            md_quote: rgb(198, 120, 221),        // #c678dd
             md_code_bg: rgb(30, 34, 39),         // #1e2227
             md_text: rgb(171, 178, 191),         // #abb2bf
             link_fg: rgb(97, 175, 239),          // #61afef
@@ -500,7 +500,7 @@ impl Theme {
             md_task_checked: rgb(165, 224, 117),   // #a5e075
             md_task_unchecked: rgb(186, 194, 222), // #bac2de
             md_muted: rgb(108, 138, 153),          // #6c8a99
-            md_quote: rgb(203, 166, 247),  // #cba6f7
+            md_quote: rgb(203, 166, 247),          // #cba6f7
             md_code_bg: rgb(30, 34, 39),           // #1e2227
             md_text: rgb(255, 255, 255),           // #ffffff
             link_fg: rgb(254, 143, 64),            // #fe8f40
@@ -571,7 +571,7 @@ impl Theme {
             md_task_checked: rgb(92, 255, 212),   // #5cffd4
             md_task_unchecked: rgb(64, 231, 246), // #40e7f6
             md_muted: rgb(0, 107, 134),           // #006b86
-            md_quote: rgb(255, 204, 128),  // #ffcc80
+            md_quote: rgb(255, 204, 128),         // #ffcc80
             md_code_bg: rgb(0, 11, 16),           // #000b10
             md_text: rgb(64, 231, 246),           // #40e7f6
             link_fg: rgb(1, 168, 223),            // #01a8df
@@ -642,7 +642,7 @@ impl Theme {
             md_task_checked: rgb(34, 139, 34),     // #228b22
             md_task_unchecked: rgb(140, 140, 140), // #8c8c8c
             md_muted: rgb(119, 136, 153),          // #778899
-            md_quote: rgb(255, 215, 0),  // #ffd700
+            md_quote: rgb(255, 215, 0),            // #ffd700
             md_code_bg: rgb(26, 26, 26),           // #1a1a1a
             md_text: rgb(255, 255, 255),           // #ffffff
             link_fg: rgb(211, 211, 211),           // #d3d3d3
@@ -713,7 +713,7 @@ impl Theme {
             md_task_checked: rgb(7, 125, 24),   // #077d18
             md_task_unchecked: rgb(64, 64, 64), // #404040
             md_muted: rgb(140, 140, 140),       // #8c8c8c
-            md_quote: rgb(168, 92, 0),  // #a85c00
+            md_quote: rgb(168, 92, 0),          // #a85c00
             md_code_bg: rgb(247, 248, 250),     // #f7f8fa
             md_text: rgb(8, 8, 8),              // #080808
             link_fg: rgb(0, 109, 204),          // #006dcc
@@ -784,7 +784,7 @@ impl Theme {
             md_task_checked: rgb(95, 135, 95),  // #5f875f
             md_task_unchecked: rgb(96, 96, 96), // #606060
             md_muted: rgb(118, 118, 118),       // #767676
-            md_quote: rgb(130, 70, 30),  // #82461e
+            md_quote: rgb(130, 70, 30),         // #82461e
             md_code_bg: rgb(247, 247, 247),     // #f7f7f7
             md_text: rgb(38, 38, 38),           // #262626
             link_fg: rgb(0, 0, 0),              // #000000
@@ -855,10 +855,720 @@ impl Theme {
             md_task_checked: rgb(86, 159, 122),    // #569f7a
             md_task_unchecked: rgb(107, 107, 107), // #6b6b6b
             md_muted: rgb(107, 107, 107),          // #6b6b6b
-            md_quote: rgb(30, 100, 105),  // #1e6469
+            md_quote: rgb(30, 100, 105),           // #1e6469
             md_code_bg: rgb(230, 228, 216),        // #e6e4d8
             md_text: rgb(18, 18, 18),              // #121212
             link_fg: rgb(18, 18, 18),              // #121212
+        }
+    }
+
+    /// Dracula (Zed), ported by scripts/themes/zed_port.py.
+    pub const fn dracula() -> Self {
+        Self {
+            bg_base: rgb(40, 42, 54),                 // #282a36
+            bg_light: rgb(72, 67, 93),                // #48435d
+            bg_dark: rgb(30, 25, 37),                 // #1e1925
+            bg_highlight: rgb(40, 34, 50),            // #282232
+            bg_hover: rgb(60, 50, 75),                // #3c324b
+            bg_terminal: rgb(20, 21, 27),             // #14151b
+            accent_user: rgb(248, 248, 242),          // #f8f8f2
+            accent_assistant: rgb(255, 121, 198),     // #ff79c6
+            accent_thinking: rgb(255, 121, 198),      // #ff79c6
+            accent_tool: rgb(161, 134, 199),          // #a186c7
+            accent_system: rgb(115, 236, 229),        // #73ece5
+            accent_error: rgb(230, 115, 115),         // #e67373
+            accent_success: rgb(121, 233, 109),       // #79e96d
+            accent_running: rgb(255, 121, 198),       // #ff79c6
+            accent_skill: rgb(115, 236, 229),         // #73ece5
+            text_primary: rgb(248, 248, 242),         // #f8f8f2
+            text_secondary: rgb(248, 248, 242),       // #f8f8f2
+            gray_dim: rgb(121, 105, 152),             // #796998
+            gray: rgb(98, 114, 164),                  // #6272a4
+            gray_bright: rgb(161, 134, 199),          // #a186c7
+            command: rgb(241, 250, 140),              // #f1fa8c
+            path: rgb(255, 121, 198),                 // #ff79c6
+            running: rgb(139, 233, 253),              // #8be9fd
+            warning: rgb(230, 227, 115),              // #e6e373
+            fuzzy_accent: rgb(201, 168, 249),         // #c9a8f9
+            accent_plan: rgb(162, 237, 253),          // #a2edfd
+            accent_verify: rgb(255, 121, 198),        // #ff79c6
+            accent_remember: rgb(115, 251, 149),      // #73fb95
+            selection_border: rgb(158, 134, 197),     // #9e86c5
+            hover_border: rgb(72, 67, 93),            // #48435d
+            prompt_border: rgb(56, 48, 71),           // #383047
+            prompt_border_active: rgb(115, 101, 145), // #736591
+            accent_model: rgb(139, 233, 253),         // #8be9fd
+            scrollbar_bg: rgb(20, 17, 25),            // #141119
+            scrollbar_fg: rgb(115, 101, 145),         // #736591
+            diff_delete_bg: rgb(48, 27, 27),          // #301b1b
+            diff_delete_fg: rgb(255, 85, 85),         // #ff5555
+            diff_insert_bg: rgb(34, 46, 29),          // #222e1d
+            diff_insert_fg: rgb(115, 251, 149),       // #73fb95
+            diff_equal_fg: rgb(98, 114, 164),         // #6272a4
+            diff_gutter_fg: rgb(105, 107, 113),       // #696b71
+            bg_visual: rgb(70, 63, 93),               // #463f5d
+            paste_bg: rgb(30, 25, 37),                // #1e1925
+            paste_fg: rgb(161, 134, 199),             // #a186c7
+            paste_dim: rgb(121, 105, 152),            // #796998
+            md_heading_h1: rgb(189, 147, 249),        // #bd93f9
+            md_heading_h1_mod: Modifier::BOLD,
+            md_heading_h2: rgb(189, 147, 249), // #bd93f9
+            md_heading_h2_mod: Modifier::BOLD,
+            md_heading_h3: rgb(189, 147, 249), // #bd93f9
+            md_heading_h3_mod: Modifier::BOLD,
+            md_heading_h4: rgb(189, 147, 249), // #bd93f9
+            md_heading_h4_mod: Modifier::BOLD,
+            md_heading_h5: rgb(161, 134, 199), // #a186c7
+            md_heading_h5_mod: Modifier::BOLD,
+            md_heading_h6: rgb(98, 114, 164), // #6272a4
+            md_heading_h6_mod: Modifier::empty(),
+            md_code: rgb(80, 250, 123),            // #50fa7b
+            md_task_checked: rgb(115, 251, 149),   // #73fb95
+            md_task_unchecked: rgb(161, 134, 199), // #a186c7
+            md_muted: rgb(98, 114, 164),           // #6272a4
+            md_quote: rgb(139, 233, 253),          // #8be9fd
+            md_code_bg: rgb(30, 25, 37),           // #1e1925
+            md_text: rgb(248, 248, 242),           // #f8f8f2
+            link_fg: rgb(255, 121, 198),           // #ff79c6
+        }
+    }
+
+    /// Ayu Darker (Zed), ported by scripts/themes/zed_port.py.
+    pub const fn ayu_darker() -> Self {
+        Self {
+            bg_base: rgb(8, 8, 8),                  // #080808
+            bg_light: rgb(25, 27, 31),              // #191b1f
+            bg_dark: rgb(18, 18, 18),               // #121212
+            bg_highlight: rgb(36, 36, 36),          // #242424
+            bg_hover: rgb(38, 38, 38),              // #262626
+            bg_terminal: rgb(8, 8, 8),              // #080808
+            accent_user: rgb(191, 189, 182),        // #bfbdb6
+            accent_assistant: rgb(255, 119, 51),    // #ff7733
+            accent_thinking: rgb(255, 119, 51),     // #ff7733
+            accent_tool: rgb(138, 137, 134),        // #8a8986
+            accent_system: rgb(90, 193, 254),       // #5ac1fe
+            accent_error: rgb(239, 113, 119),       // #ef7177
+            accent_success: rgb(170, 216, 76),      // #aad84c
+            accent_running: rgb(255, 119, 51),      // #ff7733
+            accent_skill: rgb(90, 193, 254),        // #5ac1fe
+            text_primary: rgb(191, 189, 182),       // #bfbdb6
+            text_secondary: rgb(191, 189, 182),     // #bfbdb6
+            gray_dim: rgb(105, 106, 106),           // #696a6a
+            gray: rgb(54, 60, 67),                  // #363c43
+            gray_bright: rgb(138, 137, 134),        // #8a8986
+            command: rgb(254, 180, 84),             // #feb454
+            path: rgb(210, 166, 255),               // #d2a6ff
+            running: rgb(149, 229, 203),            // #95e5cb
+            warning: rgb(254, 180, 84),             // #feb454
+            fuzzy_accent: rgb(90, 193, 254),        // #5ac1fe
+            accent_plan: rgb(254, 180, 84),         // #feb454
+            accent_verify: rgb(57, 186, 229),       // #39bae5
+            accent_remember: rgb(170, 216, 76),     // #aad84c
+            selection_border: rgb(27, 74, 110),     // #1b4a6e
+            hover_border: rgb(45, 47, 52),          // #2d2f34
+            prompt_border: rgb(28, 28, 28),         // #1c1c1c
+            prompt_border_active: rgb(27, 74, 110), // #1b4a6e
+            accent_model: rgb(89, 180, 194),        // #59b4c2
+            scrollbar_bg: rgb(18, 18, 18),          // #121212
+            scrollbar_fg: rgb(48, 48, 48),          // #303030
+            diff_delete_bg: rgb(72, 22, 27),        // #48161b
+            diff_delete_fg: rgb(239, 113, 119),     // #ef7177
+            diff_insert_bg: rgb(41, 65, 19),        // #294113
+            diff_insert_fg: rgb(170, 216, 76),      // #aad84c
+            diff_equal_fg: rgb(54, 60, 67),         // #363c43
+            diff_gutter_fg: rgb(72, 71, 69),        // #484745
+            bg_visual: rgb(28, 52, 67),             // #1c3443
+            paste_bg: rgb(18, 18, 18),              // #121212
+            paste_fg: rgb(138, 137, 134),           // #8a8986
+            paste_dim: rgb(105, 106, 106),          // #696a6a
+            md_heading_h1: rgb(254, 143, 64),       // #fe8f40
+            md_heading_h1_mod: Modifier::BOLD,
+            md_heading_h2: rgb(254, 143, 64), // #fe8f40
+            md_heading_h2_mod: Modifier::BOLD,
+            md_heading_h3: rgb(254, 143, 64), // #fe8f40
+            md_heading_h3_mod: Modifier::BOLD,
+            md_heading_h4: rgb(254, 143, 64), // #fe8f40
+            md_heading_h4_mod: Modifier::BOLD,
+            md_heading_h5: rgb(138, 137, 134), // #8a8986
+            md_heading_h5_mod: Modifier::BOLD,
+            md_heading_h6: rgb(54, 60, 67), // #363c43
+            md_heading_h6_mod: Modifier::empty(),
+            md_code: rgb(254, 143, 64),            // #fe8f40
+            md_task_checked: rgb(170, 216, 76),    // #aad84c
+            md_task_unchecked: rgb(138, 137, 134), // #8a8986
+            md_muted: rgb(54, 60, 67),             // #363c43
+            md_quote: rgb(90, 193, 254),           // #5ac1fe
+            md_code_bg: rgb(18, 18, 18),           // #121212
+            md_text: rgb(191, 189, 182),           // #bfbdb6
+            link_fg: rgb(254, 143, 64),            // #fe8f40
+        }
+    }
+
+    /// Fleet Dark (Zed), ported by scripts/themes/zed_port.py.
+    pub const fn fleet_dark() -> Self {
+        Self {
+            bg_base: rgb(24, 25, 27),                // #18191b
+            bg_light: rgb(22, 38, 57),               // #162639
+            bg_dark: rgb(37, 38, 41),                // #252629
+            bg_highlight: rgb(54, 55, 57),           // #363739
+            bg_hover: rgb(50, 52, 56),               // #323438
+            bg_terminal: rgb(24, 25, 27),            // #18191b
+            accent_user: rgb(224, 225, 228),         // #e0e1e4
+            accent_assistant: rgb(130, 210, 206),    // #82d2ce
+            accent_thinking: rgb(130, 210, 206),     // #82d2ce
+            accent_tool: rgb(137, 142, 148),         // #898e94
+            accent_system: rgb(75, 141, 236),        // #4b8dec
+            accent_error: rgb(225, 70, 94),          // #e1465e
+            accent_success: rgb(22, 144, 104),       // #169068
+            accent_running: rgb(130, 210, 206),      // #82d2ce
+            accent_skill: rgb(75, 141, 236),         // #4b8dec
+            text_primary: rgb(224, 225, 228),        // #e0e1e4
+            text_secondary: rgb(224, 225, 228),      // #e0e1e4
+            gray_dim: rgb(137, 142, 148),            // #898e94
+            gray: rgb(144, 145, 148),                // #909194
+            gray_bright: rgb(137, 142, 148),         // #898e94
+            command: rgb(250, 208, 117),             // #fad075
+            path: rgb(130, 210, 206),                // #82d2ce
+            running: rgb(44, 204, 230),              // #2ccce6
+            warning: rgb(176, 114, 3),               // #b07203
+            fuzzy_accent: rgb(75, 141, 236),         // #4b8dec
+            accent_plan: rgb(113, 163, 239),         // #71a3ef
+            accent_verify: rgb(235, 131, 226),       // #eb83e2
+            accent_remember: rgb(105, 176, 144),     // #69b090
+            selection_border: rgb(42, 125, 235),     // #2a7deb
+            hover_border: rgb(62, 65, 71),           // #3e4147
+            prompt_border: rgb(62, 65, 71),          // #3e4147
+            prompt_border_active: rgb(42, 125, 235), // #2a7deb
+            accent_model: rgb(135, 195, 255),        // #87c3ff
+            scrollbar_bg: rgb(24, 25, 27),           // #18191b
+            scrollbar_fg: rgb(54, 55, 57),           // #363739
+            diff_delete_bg: rgb(69, 45, 49),         // #452d31
+            diff_delete_fg: rgb(248, 124, 136),      // #f87c88
+            diff_insert_bg: rgb(40, 55, 50),         // #283732
+            diff_insert_fg: rgb(105, 176, 144),      // #69b090
+            diff_equal_fg: rgb(144, 145, 148),       // #909194
+            diff_gutter_fg: rgb(110, 116, 123),      // #6e747b
+            bg_visual: rgb(34, 80, 144),             // #225090
+            paste_bg: rgb(37, 38, 41),               // #252629
+            paste_fg: rgb(137, 142, 148),            // #898e94
+            paste_dim: rgb(137, 142, 148),           // #898e94
+            md_heading_h1: rgb(130, 210, 206),       // #82d2ce
+            md_heading_h1_mod: Modifier::BOLD,
+            md_heading_h2: rgb(130, 210, 206), // #82d2ce
+            md_heading_h2_mod: Modifier::BOLD,
+            md_heading_h3: rgb(130, 210, 206), // #82d2ce
+            md_heading_h3_mod: Modifier::BOLD,
+            md_heading_h4: rgb(130, 210, 206), // #82d2ce
+            md_heading_h4_mod: Modifier::BOLD,
+            md_heading_h5: rgb(137, 142, 148), // #898e94
+            md_heading_h5_mod: Modifier::BOLD,
+            md_heading_h6: rgb(144, 145, 148), // #909194
+            md_heading_h6_mod: Modifier::empty(),
+            md_code: rgb(227, 148, 220),           // #e394dc
+            md_task_checked: rgb(105, 176, 144),   // #69b090
+            md_task_unchecked: rgb(137, 142, 148), // #898e94
+            md_muted: rgb(144, 145, 148),          // #909194
+            md_quote: rgb(235, 200, 141),          // #ebc88d
+            md_code_bg: rgb(37, 38, 41),           // #252629
+            md_text: rgb(224, 225, 228),           // #e0e1e4
+            link_fg: rgb(75, 141, 236),            // #4b8dec
+        }
+    }
+
+    /// Carbonfox - opaque (Zed), ported by scripts/themes/zed_port.py.
+    pub const fn carbonfox() -> Self {
+        Self {
+            bg_base: rgb(22, 22, 22),              // #161616
+            bg_light: rgb(29, 29, 29),             // #1d1d1d
+            bg_dark: rgb(12, 12, 12),              // #0c0c0c
+            bg_highlight: rgb(21, 21, 21),         // #151515
+            bg_hover: rgb(55, 55, 55),             // #373737
+            bg_terminal: rgb(22, 22, 22),          // #161616
+            accent_user: rgb(242, 244, 248),       // #f2f4f8
+            accent_assistant: rgb(190, 149, 255),  // #be95ff
+            accent_thinking: rgb(190, 149, 255),   // #be95ff
+            accent_tool: rgb(242, 244, 248),       // #f2f4f8
+            accent_system: rgb(120, 169, 255),     // #78a9ff
+            accent_error: rgb(238, 83, 150),       // #ee5396
+            accent_success: rgb(37, 190, 106),     // #25be6a
+            accent_running: rgb(190, 149, 255),    // #be95ff
+            accent_skill: rgb(120, 169, 255),      // #78a9ff
+            text_primary: rgb(249, 251, 255),      // #f9fbff
+            text_secondary: rgb(242, 244, 248),    // #f2f4f8
+            gray_dim: rgb(123, 124, 126),          // #7b7c7e
+            gray: rgb(110, 111, 112),              // #6e6f70
+            gray_bright: rgb(242, 244, 248),       // #f2f4f8
+            command: rgb(8, 189, 186),             // #08bdba
+            path: rgb(90, 224, 223),               // #5ae0df
+            running: rgb(51, 177, 255),            // #33b1ff
+            warning: rgb(190, 149, 255),           // #be95ff
+            fuzzy_accent: rgb(61, 219, 217),       // #3ddbd9
+            accent_plan: rgb(8, 189, 186),         // #08bdba
+            accent_verify: rgb(190, 149, 255),     // #be95ff
+            accent_remember: rgb(37, 190, 106),    // #25be6a
+            selection_border: rgb(82, 82, 83),     // #525253
+            hover_border: rgb(83, 83, 83),         // #535353
+            prompt_border: rgb(35, 35, 35),        // #232323
+            prompt_border_active: rgb(42, 42, 42), // #2a2a2a
+            accent_model: rgb(8, 189, 186),        // #08bdba
+            scrollbar_bg: rgb(29, 29, 29),         // #1d1d1d
+            scrollbar_fg: rgb(40, 40, 40),         // #282828
+            diff_delete_bg: rgb(70, 35, 50),       // #462332
+            diff_delete_fg: rgb(238, 83, 150),     // #ee5396
+            diff_insert_bg: rgb(25, 59, 40),       // #193b28
+            diff_insert_fg: rgb(37, 190, 106),     // #25be6a
+            diff_equal_fg: rgb(110, 111, 112),     // #6e6f70
+            diff_gutter_fg: rgb(123, 124, 126),    // #7b7c7e
+            bg_visual: rgb(27, 79, 51),            // #1b4f33
+            paste_bg: rgb(12, 12, 12),             // #0c0c0c
+            paste_fg: rgb(242, 244, 248),          // #f2f4f8
+            paste_dim: rgb(123, 124, 126),         // #7b7c7e
+            md_heading_h1: rgb(140, 182, 255),     // #8cb6ff
+            md_heading_h1_mod: Modifier::BOLD,
+            md_heading_h2: rgb(140, 182, 255), // #8cb6ff
+            md_heading_h2_mod: Modifier::BOLD,
+            md_heading_h3: rgb(140, 182, 255), // #8cb6ff
+            md_heading_h3_mod: Modifier::BOLD,
+            md_heading_h4: rgb(140, 182, 255), // #8cb6ff
+            md_heading_h4_mod: Modifier::BOLD,
+            md_heading_h5: rgb(242, 244, 248), // #f2f4f8
+            md_heading_h5_mod: Modifier::BOLD,
+            md_heading_h6: rgb(110, 111, 112), // #6e6f70
+            md_heading_h6_mod: Modifier::empty(),
+            md_code: rgb(37, 190, 106),            // #25be6a
+            md_task_checked: rgb(37, 190, 106),    // #25be6a
+            md_task_unchecked: rgb(242, 244, 248), // #f2f4f8
+            md_muted: rgb(110, 111, 112),          // #6e6f70
+            md_quote: rgb(61, 219, 217),           // #3ddbd9
+            md_code_bg: rgb(12, 12, 12),           // #0c0c0c
+            md_text: rgb(242, 244, 248),           // #f2f4f8
+            link_fg: rgb(140, 182, 255),           // #8cb6ff
+        }
+    }
+
+    /// Kanagawa Dragon (Zed), ported by scripts/themes/zed_port.py.
+    pub const fn kanagawa_dragon() -> Self {
+        Self {
+            bg_base: rgb(24, 22, 22),                 // #181616
+            bg_light: rgb(33, 31, 31),                // #211f1f
+            bg_dark: rgb(18, 18, 15),                 // #12120f
+            bg_highlight: rgb(44, 42, 41),            // #2c2a29
+            bg_hover: rgb(46, 44, 43),                // #2e2c2b
+            bg_terminal: rgb(24, 22, 22),             // #181616
+            accent_user: rgb(197, 201, 197),          // #c5c9c5
+            accent_assistant: rgb(228, 104, 118),     // #e46876
+            accent_thinking: rgb(228, 104, 118),      // #e46876
+            accent_tool: rgb(122, 131, 130),          // #7a8382
+            accent_system: rgb(139, 164, 176),        // #8ba4b0
+            accent_error: rgb(232, 36, 36),           // #e82424
+            accent_success: rgb(138, 154, 123),       // #8a9a7b
+            accent_running: rgb(228, 104, 118),       // #e46876
+            accent_skill: rgb(139, 164, 176),         // #8ba4b0
+            text_primary: rgb(197, 201, 197),         // #c5c9c5
+            text_secondary: rgb(197, 201, 197),       // #c5c9c5
+            gray_dim: rgb(98, 94, 90),                // #625e5a
+            gray: rgb(122, 131, 130),                 // #7a8382
+            gray_bright: rgb(122, 131, 130),          // #7a8382
+            command: rgb(196, 178, 138),              // #c4b28a
+            path: rgb(255, 158, 59),                  // #ff9e3b
+            running: rgb(142, 164, 162),              // #8ea4a2
+            warning: rgb(255, 158, 59),               // #ff9e3b
+            fuzzy_accent: rgb(137, 146, 167),         // #8992a7
+            accent_plan: rgb(196, 178, 138),          // #c4b28a
+            accent_verify: rgb(162, 146, 163),        // #a292a3
+            accent_remember: rgb(138, 154, 123),      // #8a9a7b
+            selection_border: rgb(137, 146, 167),     // #8992a7
+            hover_border: rgb(137, 146, 167),         // #8992a7
+            prompt_border: rgb(57, 56, 54),           // #393836
+            prompt_border_active: rgb(139, 164, 176), // #8ba4b0
+            accent_model: rgb(142, 164, 162),         // #8ea4a2
+            scrollbar_bg: rgb(24, 22, 22),            // #181616
+            scrollbar_fg: rgb(47, 47, 51),            // #2f2f33
+            diff_delete_bg: rgb(62, 43, 41),          // #3e2b29
+            diff_delete_fg: rgb(196, 116, 110),       // #c4746e
+            diff_insert_bg: rgb(49, 51, 44),          // #31332c
+            diff_insert_fg: rgb(138, 154, 123),       // #8a9a7b
+            diff_equal_fg: rgb(122, 131, 130),        // #7a8382
+            diff_gutter_fg: rgb(142, 164, 162),       // #8ea4a2
+            bg_visual: rgb(61, 58, 56),               // #3d3a38
+            paste_bg: rgb(18, 18, 15),                // #12120f
+            paste_fg: rgb(122, 131, 130),             // #7a8382
+            paste_dim: rgb(98, 94, 90),               // #625e5a
+            md_heading_h1: rgb(197, 201, 197),        // #c5c9c5
+            md_heading_h1_mod: Modifier::BOLD,
+            md_heading_h2: rgb(197, 201, 197), // #c5c9c5
+            md_heading_h2_mod: Modifier::BOLD,
+            md_heading_h3: rgb(197, 201, 197), // #c5c9c5
+            md_heading_h3_mod: Modifier::BOLD,
+            md_heading_h4: rgb(197, 201, 197), // #c5c9c5
+            md_heading_h4_mod: Modifier::BOLD,
+            md_heading_h5: rgb(122, 131, 130), // #7a8382
+            md_heading_h5_mod: Modifier::BOLD,
+            md_heading_h6: rgb(122, 131, 130), // #7a8382
+            md_heading_h6_mod: Modifier::empty(),
+            md_code: rgb(135, 169, 135),           // #87a987
+            md_task_checked: rgb(138, 154, 123),   // #8a9a7b
+            md_task_unchecked: rgb(122, 131, 130), // #7a8382
+            md_muted: rgb(122, 131, 130),          // #7a8382
+            md_quote: rgb(255, 158, 59),           // #ff9e3b
+            md_code_bg: rgb(18, 18, 15),           // #12120f
+            md_text: rgb(197, 201, 197),           // #c5c9c5
+            link_fg: rgb(139, 164, 176),           // #8ba4b0
+        }
+    }
+
+    /// Kanso Ink (Borderless + No italics) (Zed), ported by scripts/themes/zed_port.py.
+    pub const fn kanso_ink() -> Self {
+        Self {
+            bg_base: rgb(20, 23, 29),              // #14171d
+            bg_light: rgb(34, 38, 45),             // #22262d
+            bg_dark: rgb(34, 38, 45),              // #22262d
+            bg_highlight: rgb(57, 59, 68),         // #393b44
+            bg_hover: rgb(57, 59, 68),             // #393b44
+            bg_terminal: rgb(20, 23, 29),          // #14171d
+            accent_user: rgb(197, 201, 199),       // #c5c9c7
+            accent_assistant: rgb(137, 146, 167),  // #8992a7
+            accent_thinking: rgb(137, 146, 167),   // #8992a7
+            accent_tool: rgb(117, 121, 127),       // #75797f
+            accent_system: rgb(148, 159, 181),     // #949fb5
+            accent_error: rgb(196, 116, 110),      // #c4746e
+            accent_success: rgb(135, 169, 135),    // #87a987
+            accent_running: rgb(137, 146, 167),    // #8992a7
+            accent_skill: rgb(148, 159, 181),      // #949fb5
+            text_primary: rgb(197, 201, 199),      // #c5c9c7
+            text_secondary: rgb(197, 201, 199),    // #c5c9c7
+            gray_dim: rgb(92, 96, 102),            // #5c6066
+            gray: rgb(117, 121, 127),              // #75797f
+            gray_bright: rgb(117, 121, 127),       // #75797f
+            command: rgb(196, 178, 138),           // #c4b28a
+            path: rgb(182, 146, 123),              // #b6927b
+            running: rgb(142, 164, 162),           // #8ea4a2
+            warning: rgb(196, 178, 138),           // #c4b28a
+            fuzzy_accent: rgb(196, 116, 110),      // #c4746e
+            accent_plan: rgb(220, 165, 97),        // #dca561
+            accent_verify: rgb(162, 146, 163),     // #a292a3
+            accent_remember: rgb(135, 169, 135),   // #87a987
+            selection_border: rgb(57, 59, 68),     // #393b44
+            hover_border: rgb(57, 59, 68),         // #393b44
+            prompt_border: rgb(57, 59, 68),        // #393b44
+            prompt_border_active: rgb(57, 59, 68), // #393b44
+            accent_model: rgb(142, 164, 162),      // #8ea4a2
+            scrollbar_bg: rgb(20, 23, 29),         // #14171d
+            scrollbar_fg: rgb(35, 38, 44),         // #23262c
+            diff_delete_bg: rgb(58, 32, 37),       // #3a2025
+            diff_delete_fg: rgb(195, 64, 67),      // #c34043
+            diff_insert_bg: rgb(45, 55, 52),       // #2d3734
+            diff_insert_fg: rgb(135, 169, 135),    // #87a987
+            diff_equal_fg: rgb(117, 121, 127),     // #75797f
+            diff_gutter_fg: rgb(92, 96, 102),      // #5c6066
+            bg_visual: rgb(57, 59, 68),            // #393b44
+            paste_bg: rgb(34, 38, 45),             // #22262d
+            paste_fg: rgb(117, 121, 127),          // #75797f
+            paste_dim: rgb(92, 96, 102),           // #5c6066
+            md_heading_h1: rgb(197, 201, 199),     // #c5c9c7
+            md_heading_h1_mod: Modifier::BOLD,
+            md_heading_h2: rgb(197, 201, 199), // #c5c9c7
+            md_heading_h2_mod: Modifier::BOLD,
+            md_heading_h3: rgb(197, 201, 199), // #c5c9c7
+            md_heading_h3_mod: Modifier::BOLD,
+            md_heading_h4: rgb(197, 201, 199), // #c5c9c7
+            md_heading_h4_mod: Modifier::BOLD,
+            md_heading_h5: rgb(117, 121, 127), // #75797f
+            md_heading_h5_mod: Modifier::BOLD,
+            md_heading_h6: rgb(117, 121, 127), // #75797f
+            md_heading_h6_mod: Modifier::empty(),
+            md_code: rgb(197, 201, 199),           // #c5c9c7
+            md_task_checked: rgb(135, 169, 135),   // #87a987
+            md_task_unchecked: rgb(117, 121, 127), // #75797f
+            md_muted: rgb(117, 121, 127),          // #75797f
+            md_quote: rgb(220, 165, 97),           // #dca561
+            md_code_bg: rgb(34, 38, 45),           // #22262d
+            md_text: rgb(197, 201, 199),           // #c5c9c7
+            link_fg: rgb(158, 155, 147),           // #9e9b93
+        }
+    }
+
+    /// Fleet Light (Zed), ported by scripts/themes/zed_port.py.
+    pub const fn fleet_light() -> Self {
+        Self {
+            bg_base: rgb(255, 255, 255),             // #ffffff
+            bg_light: rgb(230, 240, 252),            // #e6f0fc
+            bg_dark: rgb(248, 248, 249),             // #f8f8f9
+            bg_highlight: rgb(221, 221, 221),        // #dddddd
+            bg_hover: rgb(248, 248, 249),            // #f8f8f9
+            bg_terminal: rgb(255, 255, 255),         // #ffffff
+            accent_user: rgb(9, 9, 9),               // #090909
+            accent_assistant: rgb(20, 100, 110),     // #14646e
+            accent_thinking: rgb(20, 100, 110),      // #14646e
+            accent_tool: rgb(110, 116, 123),         // #6e747b
+            accent_system: rgb(75, 141, 236),        // #4b8dec
+            accent_error: rgb(225, 70, 94),          // #e1465e
+            accent_success: rgb(22, 144, 104),       // #169068
+            accent_running: rgb(20, 100, 110),       // #14646e
+            accent_skill: rgb(75, 141, 236),         // #4b8dec
+            text_primary: rgb(9, 9, 9),              // #090909
+            text_secondary: rgb(9, 9, 9),            // #090909
+            gray_dim: rgb(110, 116, 123),            // #6e747b
+            gray: rgb(116, 117, 118),                // #747576
+            gray_bright: rgb(110, 116, 123),         // #6e747b
+            command: rgb(176, 153, 60),              // #b0993c
+            path: rgb(20, 100, 110),                 // #14646e
+            running: rgb(10, 130, 130),              // #0a8282
+            warning: rgb(176, 114, 3),               // #b07203
+            fuzzy_accent: rgb(29, 97, 186),          // #1d61ba
+            accent_plan: rgb(8, 112, 228),           // #0870e4
+            accent_verify: rgb(204, 55, 250),        // #cc37fa
+            accent_remember: rgb(20, 131, 94),       // #14835e
+            selection_border: rgb(42, 125, 235),     // #2a7deb
+            hover_border: rgb(209, 209, 209),        // #d1d1d1
+            prompt_border: rgb(209, 209, 209),       // #d1d1d1
+            prompt_border_active: rgb(42, 125, 235), // #2a7deb
+            accent_model: rgb(23, 73, 189),          // #1749bd
+            scrollbar_bg: rgb(255, 255, 255),        // #ffffff
+            scrollbar_fg: rgb(209, 209, 209),        // #d1d1d1
+            diff_delete_bg: rgb(247, 214, 220),      // #f7d6dc
+            diff_delete_fg: rgb(215, 50, 81),        // #d73251
+            diff_insert_bg: rgb(208, 230, 223),      // #d0e6df
+            diff_insert_fg: rgb(20, 131, 94),        // #14835e
+            diff_equal_fg: rgb(116, 117, 118),       // #747576
+            diff_gutter_fg: rgb(137, 142, 148),      // #898e94
+            bg_visual: rgb(168, 198, 244),           // #a8c6f4
+            paste_bg: rgb(248, 248, 249),            // #f8f8f9
+            paste_fg: rgb(110, 116, 123),            // #6e747b
+            paste_dim: rgb(110, 116, 123),           // #6e747b
+            md_heading_h1: rgb(85, 17, 191),         // #5511bf
+            md_heading_h1_mod: Modifier::BOLD,
+            md_heading_h2: rgb(85, 17, 191), // #5511bf
+            md_heading_h2_mod: Modifier::BOLD,
+            md_heading_h3: rgb(85, 17, 191), // #5511bf
+            md_heading_h3_mod: Modifier::BOLD,
+            md_heading_h4: rgb(85, 17, 191), // #5511bf
+            md_heading_h4_mod: Modifier::BOLD,
+            md_heading_h5: rgb(110, 116, 123), // #6e747b
+            md_heading_h5_mod: Modifier::BOLD,
+            md_heading_h6: rgb(116, 117, 118), // #747576
+            md_heading_h6_mod: Modifier::empty(),
+            md_code: rgb(120, 73, 42),             // #78492a
+            md_task_checked: rgb(20, 131, 94),     // #14835e
+            md_task_unchecked: rgb(110, 116, 123), // #6e747b
+            md_muted: rgb(116, 117, 118),          // #747576
+            md_quote: rgb(163, 29, 141),           // #a31d8d
+            md_code_bg: rgb(248, 248, 249),        // #f8f8f9
+            md_text: rgb(9, 9, 9),                 // #090909
+            link_fg: rgb(29, 97, 186),             // #1d61ba
+        }
+    }
+
+    /// Dayfox - opaque (Zed), ported by scripts/themes/zed_port.py.
+    pub const fn dayfox() -> Self {
+        Self {
+            bg_base: rgb(246, 242, 238),              // #f6f2ee
+            bg_light: rgb(241, 231, 222),             // #f1e7de
+            bg_dark: rgb(228, 220, 212),              // #e4dcd4
+            bg_highlight: rgb(229, 217, 205),         // #e5d9cd
+            bg_hover: rgb(201, 215, 214),             // #c9d7d6
+            bg_terminal: rgb(246, 242, 238),          // #f6f2ee
+            accent_user: rgb(61, 43, 90),             // #3d2b5a
+            accent_assistant: rgb(110, 51, 206),      // #6e33ce
+            accent_thinking: rgb(110, 51, 206),       // #6e33ce
+            accent_tool: rgb(61, 43, 90),             // #3d2b5a
+            accent_system: rgb(40, 72, 169),          // #2848a9
+            accent_error: rgb(165, 34, 47),           // #a5222f
+            accent_success: rgb(57, 104, 71),         // #396847
+            accent_running: rgb(110, 51, 206),        // #6e33ce
+            accent_skill: rgb(40, 72, 169),           // #2848a9
+            text_primary: rgb(48, 43, 93),            // #302b5d
+            text_secondary: rgb(61, 43, 90),          // #3d2b5a
+            gray_dim: rgb(130, 77, 91),               // #824d5b
+            gray: rgb(131, 122, 114),                 // #837a72
+            gray_bright: rgb(61, 43, 90),             // #3d2b5a
+            command: rgb(172, 84, 2),                 // #ac5402
+            path: rgb(127, 81, 82),                   // #7f5152
+            running: rgb(40, 121, 128),               // #287980
+            warning: rgb(172, 84, 2),                 // #ac5402
+            fuzzy_accent: rgb(149, 95, 97),           // #955f61
+            accent_plan: rgb(172, 84, 2),             // #ac5402
+            accent_verify: rgb(110, 51, 206),         // #6e33ce
+            accent_remember: rgb(57, 104, 71),        // #396847
+            selection_border: rgb(164, 193, 194),     // #a4c1c2
+            hover_border: rgb(170, 176, 173),         // #aab0ad
+            prompt_border: rgb(222, 213, 223),        // #ded5df
+            prompt_border_active: rgb(231, 210, 190), // #e7d2be
+            accent_model: rgb(172, 84, 2),            // #ac5402
+            scrollbar_bg: rgb(241, 231, 222),         // #f1e7de
+            scrollbar_fg: rgb(233, 214, 195),         // #e9d6c3
+            diff_delete_bg: rgb(228, 196, 196),       // #e4c4c4
+            diff_delete_fg: rgb(165, 34, 47),         // #a5222f
+            diff_insert_bg: rgb(204, 212, 201),       // #ccd4c9
+            diff_insert_fg: rgb(57, 104, 71),         // #396847
+            diff_equal_fg: rgb(131, 122, 114),        // #837a72
+            diff_gutter_fg: rgb(130, 77, 91),         // #824d5b
+            bg_visual: rgb(182, 195, 181),            // #b6c3b5
+            paste_bg: rgb(228, 220, 212),             // #e4dcd4
+            paste_fg: rgb(61, 43, 90),                // #3d2b5a
+            paste_dim: rgb(130, 77, 91),              // #824d5b
+            md_heading_h1: rgb(34, 61, 144),          // #223d90
+            md_heading_h1_mod: Modifier::BOLD,
+            md_heading_h2: rgb(34, 61, 144), // #223d90
+            md_heading_h2_mod: Modifier::BOLD,
+            md_heading_h3: rgb(34, 61, 144), // #223d90
+            md_heading_h3_mod: Modifier::BOLD,
+            md_heading_h4: rgb(34, 61, 144), // #223d90
+            md_heading_h4_mod: Modifier::BOLD,
+            md_heading_h5: rgb(61, 43, 90), // #3d2b5a
+            md_heading_h5_mod: Modifier::BOLD,
+            md_heading_h6: rgb(131, 122, 114), // #837a72
+            md_heading_h6_mod: Modifier::empty(),
+            md_code: rgb(57, 104, 71),          // #396847
+            md_task_checked: rgb(57, 104, 71),  // #396847
+            md_task_unchecked: rgb(61, 43, 90), // #3d2b5a
+            md_muted: rgb(131, 122, 114),       // #837a72
+            md_quote: rgb(172, 84, 2),          // #ac5402
+            md_code_bg: rgb(228, 220, 212),     // #e4dcd4
+            md_text: rgb(61, 43, 90),           // #3d2b5a
+            link_fg: rgb(34, 61, 144),          // #223d90
+        }
+    }
+
+    /// Kanagawa Lotus (Zed), ported by scripts/themes/zed_port.py.
+    pub const fn kanagawa_lotus() -> Self {
+        Self {
+            bg_base: rgb(242, 236, 188),            // #f2ecbc
+            bg_light: rgb(234, 228, 184),           // #eae4b8
+            bg_dark: rgb(220, 213, 172),            // #dcd5ac
+            bg_highlight: rgb(165, 160, 133),       // #a5a085
+            bg_hover: rgb(211, 206, 170),           // #d3ceaa
+            bg_terminal: rgb(242, 236, 188),        // #f2ecbc
+            accent_user: rgb(84, 84, 100),          // #545464
+            accent_assistant: rgb(118, 107, 144),   // #766b90
+            accent_thinking: rgb(118, 107, 144),    // #766b90
+            accent_tool: rgb(138, 137, 128),        // #8a8980
+            accent_system: rgb(90, 119, 133),       // #5a7785
+            accent_error: rgb(232, 36, 36),         // #e82424
+            accent_success: rgb(110, 145, 95),      // #6e915f
+            accent_running: rgb(118, 107, 144),     // #766b90
+            accent_skill: rgb(90, 119, 133),        // #5a7785
+            text_primary: rgb(84, 84, 100),         // #545464
+            text_secondary: rgb(84, 84, 100),       // #545464
+            gray_dim: rgb(138, 137, 128),           // #8a8980
+            gray: rgb(138, 137, 128),               // #8a8980
+            gray_bright: rgb(138, 137, 128),        // #8a8980
+            command: rgb(222, 152, 0),              // #de9800
+            path: rgb(204, 109, 0),                 // #cc6d00
+            running: rgb(94, 133, 122),             // #5e857a
+            warning: rgb(204, 109, 0),              // #cc6d00
+            fuzzy_accent: rgb(118, 107, 144),       // #766b90
+            accent_plan: rgb(222, 152, 0),          // #de9800
+            accent_verify: rgb(118, 107, 144),      // #766b90
+            accent_remember: rgb(110, 145, 95),     // #6e915f
+            selection_border: rgb(118, 107, 144),   // #766b90
+            hover_border: rgb(118, 107, 144),       // #766b90
+            prompt_border: rgb(113, 110, 97),       // #716e61
+            prompt_border_active: rgb(93, 87, 163), // #5d57a3
+            accent_model: rgb(94, 133, 122),        // #5e857a
+            scrollbar_bg: rgb(242, 236, 188),       // #f2ecbc
+            scrollbar_fg: rgb(217, 210, 179),       // #d9d2b3
+            diff_delete_bg: rgb(233, 198, 165),     // #e9c6a5
+            diff_delete_fg: rgb(200, 64, 83),       // #c84053
+            diff_insert_bg: rgb(213, 216, 168),     // #d5d8a8
+            diff_insert_fg: rgb(110, 145, 95),      // #6e915f
+            diff_equal_fg: rgb(138, 137, 128),      // #8a8980
+            diff_gutter_fg: rgb(118, 107, 144),     // #766b90
+            bg_visual: rgb(190, 186, 158),          // #beba9e
+            paste_bg: rgb(220, 213, 172),           // #dcd5ac
+            paste_fg: rgb(138, 137, 128),           // #8a8980
+            paste_dim: rgb(138, 137, 128),          // #8a8980
+            md_heading_h1: rgb(84, 84, 100),        // #545464
+            md_heading_h1_mod: Modifier::BOLD,
+            md_heading_h2: rgb(84, 84, 100), // #545464
+            md_heading_h2_mod: Modifier::BOLD,
+            md_heading_h3: rgb(84, 84, 100), // #545464
+            md_heading_h3_mod: Modifier::BOLD,
+            md_heading_h4: rgb(84, 84, 100), // #545464
+            md_heading_h4_mod: Modifier::BOLD,
+            md_heading_h5: rgb(138, 137, 128), // #8a8980
+            md_heading_h5_mod: Modifier::BOLD,
+            md_heading_h6: rgb(138, 137, 128), // #8a8980
+            md_heading_h6_mod: Modifier::empty(),
+            md_code: rgb(111, 137, 78),            // #6f894e
+            md_task_checked: rgb(110, 145, 95),    // #6e915f
+            md_task_unchecked: rgb(138, 137, 128), // #8a8980
+            md_muted: rgb(138, 137, 128),          // #8a8980
+            md_quote: rgb(143, 76, 0),             // #8f4c00
+            md_code_bg: rgb(220, 213, 172),        // #dcd5ac
+            md_text: rgb(84, 84, 100),             // #545464
+            link_fg: rgb(77, 105, 155),            // #4d699b
+        }
+    }
+
+    /// Kanso Pearl (Borderless + No italics) (Zed), ported by scripts/themes/zed_port.py.
+    pub const fn kanso_pearl() -> Self {
+        Self {
+            bg_base: rgb(242, 241, 239),              // #f2f1ef
+            bg_light: rgb(226, 225, 223),             // #e2e1df
+            bg_dark: rgb(226, 225, 223),              // #e2e1df
+            bg_highlight: rgb(221, 221, 219),         // #dddddb
+            bg_hover: rgb(221, 221, 219),             // #dddddb
+            bg_terminal: rgb(242, 241, 239),          // #f2f1ef
+            accent_user: rgb(34, 38, 45),             // #22262d
+            accent_assistant: rgb(98, 76, 131),       // #624c83
+            accent_thinking: rgb(98, 76, 131),        // #624c83
+            accent_tool: rgb(109, 109, 105),          // #6d6d69
+            accent_system: rgb(102, 147, 191),        // #6693bf
+            accent_error: rgb(215, 71, 75),           // #d7474b
+            accent_success: rgb(110, 145, 95),        // #6e915f
+            accent_running: rgb(98, 76, 131),         // #624c83
+            accent_skill: rgb(102, 147, 191),         // #6693bf
+            text_primary: rgb(34, 38, 45),            // #22262d
+            text_secondary: rgb(34, 38, 45),          // #22262d
+            gray_dim: rgb(109, 109, 105),             // #6d6d69
+            gray: rgb(109, 109, 105),                 // #6d6d69
+            gray_bright: rgb(109, 109, 105),          // #6d6d69
+            command: rgb(119, 113, 63),               // #77713f
+            path: rgb(204, 109, 0),                   // #cc6d00
+            running: rgb(89, 123, 117),               // #597b75
+            warning: rgb(119, 113, 63),               // #77713f
+            fuzzy_accent: rgb(94, 133, 122),          // #5e857a
+            accent_plan: rgb(222, 152, 0),            // #de9800
+            accent_verify: rgb(118, 107, 144),        // #766b90
+            accent_remember: rgb(110, 145, 95),       // #6e915f
+            selection_border: rgb(221, 221, 219),     // #dddddb
+            hover_border: rgb(221, 221, 219),         // #dddddb
+            prompt_border: rgb(221, 221, 219),        // #dddddb
+            prompt_border_active: rgb(221, 221, 219), // #dddddb
+            accent_model: rgb(89, 123, 117),          // #597b75
+            scrollbar_bg: rgb(242, 241, 239),         // #f2f1ef
+            scrollbar_fg: rgb(215, 214, 212),         // #d7d6d4
+            diff_delete_bg: rgb(237, 224, 219),       // #ede0db
+            diff_delete_fg: rgb(217, 165, 148),       // #d9a594
+            diff_insert_bg: rgb(213, 220, 207),       // #d5dccf
+            diff_insert_fg: rgb(110, 145, 95),        // #6e915f
+            diff_equal_fg: rgb(109, 109, 105),        // #6d6d69
+            diff_gutter_fg: rgb(159, 159, 153),       // #9f9f99
+            bg_visual: rgb(198, 198, 197),            // #c6c6c5
+            paste_bg: rgb(226, 225, 223),             // #e2e1df
+            paste_fg: rgb(109, 109, 105),             // #6d6d69
+            paste_dim: rgb(109, 109, 105),            // #6d6d69
+            md_heading_h1: rgb(34, 38, 45),           // #22262d
+            md_heading_h1_mod: Modifier::BOLD,
+            md_heading_h2: rgb(34, 38, 45), // #22262d
+            md_heading_h2_mod: Modifier::BOLD,
+            md_heading_h3: rgb(34, 38, 45), // #22262d
+            md_heading_h3_mod: Modifier::BOLD,
+            md_heading_h4: rgb(34, 38, 45), // #22262d
+            md_heading_h4_mod: Modifier::BOLD,
+            md_heading_h5: rgb(109, 109, 105), // #6d6d69
+            md_heading_h5_mod: Modifier::BOLD,
+            md_heading_h6: rgb(109, 109, 105), // #6d6d69
+            md_heading_h6_mod: Modifier::empty(),
+            md_code: rgb(34, 38, 45),              // #22262d
+            md_task_checked: rgb(110, 145, 95),    // #6e915f
+            md_task_unchecked: rgb(109, 109, 105), // #6d6d69
+            md_muted: rgb(109, 109, 105),          // #6d6d69
+            md_quote: rgb(194, 64, 68),            // #c24044
+            md_code_bg: rgb(226, 225, 223),        // #e2e1df
+            md_text: rgb(34, 38, 45),              // #22262d
+            link_fg: rgb(109, 109, 105),           // #6d6d69
         }
     }
 }

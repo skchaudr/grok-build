@@ -1598,6 +1598,16 @@ mod tests {
             Theme::jetbrains_islands_light(),
             Theme::monosami_light(),
             Theme::monosami_ink_light(),
+            Theme::dracula(),
+            Theme::ayu_darker(),
+            Theme::fleet_dark(),
+            Theme::carbonfox(),
+            Theme::kanagawa_dragon(),
+            Theme::kanso_ink(),
+            Theme::fleet_light(),
+            Theme::dayfox(),
+            Theme::kanagawa_lotus(),
+            Theme::kanso_pearl(),
             Theme::terminal(),
         ];
         for theme in themes {
