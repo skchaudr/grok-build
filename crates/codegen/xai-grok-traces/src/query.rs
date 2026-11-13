@@ -579,13 +579,15 @@ impl TraceIndex {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Line of the first event of `session_id` whose timestamp is exactly `timestamp_ms` (noise included).
-    pub fn line_at(&self, session_id: &str, timestamp_ms: i64) -> Result<Option<i64>> {
-        Ok(self.conn().query_row(
-            "SELECT MIN(line_number) FROM trace_events WHERE sk = (SELECT sk FROM trace_sessions WHERE id = ?1) AND timestamp = ?2",
-            params![session_id, timestamp_ms],
-            |r| r.get::<_, Option<i64>>(0),
-        )?)
+    /// Lines of the events of `session_id` whose timestamp is exactly `timestamp_ms`, in file order (noise
+    /// included). More than one is common: a tool result and the user message after it often share a stamp.
+    pub fn lines_at(&self, session_id: &str, timestamp_ms: i64) -> Result<Vec<i64>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT line_number FROM trace_events WHERE sk = (SELECT sk FROM trace_sessions WHERE id = ?1) AND timestamp = ?2
+             ORDER BY line_number",
+        )?;
+        let rows = stmt.query_map(params![session_id, timestamp_ms], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Sources that have at least one session, for the ledger tabs.

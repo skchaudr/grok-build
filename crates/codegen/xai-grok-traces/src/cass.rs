@@ -370,12 +370,65 @@ pub fn join(index: &TraceIndex, hits: &[Hit]) -> crate::Result<Vec<Joined>> {
             };
             let Some(row) = local else { return Ok(Joined::bare(hit.clone())) };
             let line = match hit.created_at {
-                Some(ts) => index.line_at(&row.id, ts)?,
+                Some(ts) => pick_line(index, &row.id, &index.lines_at(&row.id, ts)?, hit.content.as_deref()),
                 None => None,
             };
             Ok(Joined { id: Some(row.id), line, source: Some(row.source), session_title: Some(row.title), hit: hit.clone() })
         })
         .collect()
+}
+
+/// The line among `lines` (the events of one session that share the hit's timestamp) that holds the hit's text.
+/// With one candidate, no usable text, or no candidate holding it, the first line stands; a transcript that
+/// cannot be re-read is not an error here, the hit keeps the first line.
+fn pick_line(index: &TraceIndex, id: &str, lines: &[i64], content: Option<&str>) -> Option<i64> {
+    let first = *lines.first()?;
+    if lines.len() == 1 {
+        return Some(first);
+    }
+    let Some(needle) = content.and_then(needle) else { return Some(first) };
+    let holds = |line: &i64| index.raw_line(id, *line).ok().flatten().is_some_and(|raw| haystack(&raw).contains(&needle));
+    Some(lines.iter().copied().find(|l| holds(l)).unwrap_or(first))
+}
+
+/// Shortest text accepted as proof that a line holds a hit; anything shorter could sit in any line.
+const MIN_NEEDLE: usize = 12;
+
+/// The longest run of up to 8 consecutive plain words of a hit's `content`, single-spaced. cass wraps tool calls
+/// and reasoning in its own tags (`[Tool: Bash - …]`, `[thinking] …`, `command=…`), which are not in the
+/// transcript, so words carrying `[`, `]` or `=` end a run.
+fn needle(content: &str) -> Option<String> {
+    let words: Vec<&str> = content.split_whitespace().collect();
+    let mut best = String::new();
+    for run in words.split(|w| w.contains(['[', ']', '='])) {
+        let text = run.iter().take(8).copied().collect::<Vec<_>>().join(" ");
+        if text.len() > best.len() {
+            best = text;
+        }
+    }
+    (best.len() >= MIN_NEEDLE).then_some(best)
+}
+
+/// Every string of a transcript line, single-spaced: the JSON strings decoded, then the line itself with its
+/// escapes loosened, since tool arguments are JSON inside a JSON string.
+fn haystack(raw: &str) -> String {
+    fn strings(v: &Value, out: &mut String) {
+        match v {
+            Value::String(s) => {
+                out.push_str(s);
+                out.push(' ');
+            }
+            Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+            Value::Object(o) => o.values().for_each(|x| strings(x, out)),
+            _ => {}
+        }
+    }
+    let mut text = String::new();
+    if let Ok(v) = serde_json::from_str::<Value>(raw) {
+        strings(&v, &mut text);
+    }
+    text.push_str(&raw.replace("\\n", " ").replace("\\\"", "\"").replace("\\", ""));
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 // ---- output ----

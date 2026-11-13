@@ -255,6 +255,44 @@ fn join_line_is_the_event_with_equal_timestamp() {
     assert_eq!(joined(&idx, vec![hit("/a/b/c.jsonl", Some(ts))])[0].line, None);
 }
 
+// A tool result and the user message after it, written with one timestamp (as pi does).
+const PI_TIED: &str = r#"{"type":"session","version":3,"id":"p","timestamp":"2026-10-01T00:00:00Z","cwd":"/w/pi"}
+{"type":"message","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","model":"pi-model","content":[{"type":"text","text":"sending"}]}}
+{"type":"message","timestamp":"2026-10-01T00:00:02Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"intercom","content":[{"type":"text","text":"Reply sent to the subagent chat"}]}}
+{"type":"message","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":[{"type":"text","text":"Oh no, is there\nan API key missing?"}]}}
+"#;
+
+#[test]
+fn join_line_among_equal_timestamps_is_the_one_holding_the_hit_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    write(&home.join(PI_FILE), PI_TIED);
+    let mut idx = TraceIndex::open(&tmp.path().join("idx/traces.sqlite")).unwrap();
+    assert!(idx.scan(&default_roots(&home, &home.join(".grok"))).unwrap().errors.is_empty());
+    let s = session(&idx, "pi");
+    let evs = idx.list_events(&s.id, &EventFilter { include_noise: true, ..Default::default() }).unwrap();
+    let ts = evs.last().unwrap().timestamp.unwrap();
+    let tied: Vec<i64> = evs.iter().filter(|e| e.timestamp == Some(ts)).map(|e| e.line).collect();
+    assert_eq!(tied.len(), 2, "the fixture has two events on one stamp: {evs:?}");
+    let (result, user) = (tied[0], tied[1]);
+    let line = |content: Option<&str>| {
+        let h = Hit { content: content.map(str::to_string), ..hit(HIT_PI, Some(ts)) };
+        joined(&idx, vec![h])[0].line
+    };
+    // The text decides, across the line break cass keeps and the transcript escapes.
+    assert_eq!(line(Some("Oh no, is there\nan API key missing?")), Some(user));
+    assert_eq!(line(Some("Reply sent to the subagent chat")), Some(result));
+    // cass's own tags are not in the transcript and are skipped.
+    assert_eq!(line(Some("[thinking] Oh no, is there an API key missing?")), Some(user));
+    // No text, text too short to tell lines apart, or text in neither line: the first line stands.
+    assert_eq!(line(None), Some(result));
+    assert_eq!(line(Some("missing?")), Some(result));
+    assert_eq!(line(Some("nothing either line says at all")), Some(result));
+    // A transcript that is gone cannot break the tie and does not fail the join.
+    fs::remove_file(home.join(PI_FILE)).unwrap();
+    assert_eq!(line(Some("Oh no, is there an API key missing?")), Some(result));
+}
+
 #[test]
 fn best_match_prefers_more_shared_components_and_refuses_ties() {
     let row = |id: &str, path: &str| SessionRow { id: id.into(), file_path: PathBuf::from(path), ..Default::default() };
