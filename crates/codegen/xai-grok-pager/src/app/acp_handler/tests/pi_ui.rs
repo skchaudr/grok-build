@@ -159,7 +159,8 @@ fn pi_session_catalog_fills_the_open_resume_picker() {
     };
     assert!(!loading);
     assert_eq!(rows.len(), 1);
-    assert_eq!((rows[0].id.as_str(), rows[0].summary.as_str(), rows[0].source.as_str()), ("pi-1", "refactor", "pi"));
+    // The scoped catalog keeps the session name in `name`; `summary` is the message preview.
+    assert_eq!((rows[0].id.as_str(), rows[0].name.as_deref(), rows[0].source.as_str()), ("pi-1", Some("refactor"), "pi"));
     assert_eq!(rows[0].num_messages, 4);
 }
 

@@ -3449,10 +3449,7 @@ impl AgentView {
                         });
                         shortcuts
                     };
-                    // Surface `i search` in the footer when vim nav mode is active.
-                    if pending_delete.is_none() {
-                        mw::push_vim_nav_search_hint(&mut session_shortcuts, state.search_active);
-                    }
+                    // The `/ search` hint above already covers search; vim nav mode adds no `i search`.
                     let compact = self.scrollback.appearance().prompt.compact;
                     let external =
                         *source_filter == crate::views::session_picker::SourceFilter::External;

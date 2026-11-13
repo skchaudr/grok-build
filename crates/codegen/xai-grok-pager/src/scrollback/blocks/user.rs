@@ -1073,6 +1073,9 @@ mod tests {
 
     #[test]
     fn test_selected_prompt_uses_accent_color() {
+        // Pinned: asserts non-bold prompts, which the ambient terminal
+        // theme (bold fullscreen prompts) legitimately fails.
+        let _guard = crate::theme::cache::pin_theme();
         let block = UserPromptBlock::new("hello");
         let lines = block.wrap_prompt_lines(80, None, true, true);
         let expected = format!("{}hello", crate::glyphs::prompt_arrow());
@@ -1094,6 +1097,8 @@ mod tests {
 
     #[test]
     fn test_unselected_prompt_still_uses_accent_pointer() {
+        // Pinned: see test_selected_prompt_uses_accent_color.
+        let _guard = crate::theme::cache::pin_theme();
         let block = UserPromptBlock::new("hello");
         let lines = block.wrap_prompt_lines(80, None, true, false);
 
@@ -1278,6 +1283,9 @@ mod tests {
 
     #[test]
     fn user_prompt_bold_only_in_minimal() {
+        // Pinned: on the terminal theme fullscreen prompts are bold too
+        // (covered by terminal_theme_prompt_is_bold_and_bandless).
+        let _guard = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let (prefix, body, skill) = UserPromptBlock::prompt_styles(&theme, true);
         assert!(prefix.add_modifier.contains(Modifier::BOLD));

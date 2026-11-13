@@ -337,7 +337,8 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ExpandSessionCard { source, session_id } => {
             let native_source = matches!(source.as_str(), "local" | "remote" | "both");
             let conversation_source = source == "conversation";
-            if crate::app::foreign_sessions::is_foreign_picker_source(&source)
+            if (session_picker_external_filter_active(app) && !app.external_agent)
+                || crate::app::foreign_sessions::is_foreign_picker_source(&source)
                 || (!native_source && !conversation_source && source != "pi")
             {
                 return vec![];

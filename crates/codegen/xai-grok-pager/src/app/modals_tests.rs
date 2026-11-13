@@ -51,10 +51,10 @@ fn arg_picker_effort_phase_opens_on_default_row() {
     else {
         panic!("expected the /model picker to chain into the effort phase");
     };
-    assert_eq!("Reasoning X ", args_query);
+    assert_eq!("reasoning-x ", args_query);
     assert_eq!(1, state.selected);
     assert_eq!(
-        Some("Reasoning X high"),
+        Some("reasoning-x high"),
         items.get(1).map(|item| item.insert_text.as_str())
     );
 }
@@ -93,11 +93,11 @@ fn arg_picker_chains_through_the_window_phase_to_effort() {
     else {
         panic!("expected the /model picker to chain through the window phase");
     };
-    assert_eq!("Grok 4.7 256k ", args_query);
+    assert_eq!("grok-4.7 256k ", args_query);
     assert!(
         items
             .iter()
-            .all(|item| item.insert_text.starts_with("Grok 4.7 256k ")),
+            .all(|item| item.insert_text.starts_with("grok-4.7 256k ")),
         "got {items:?}"
     );
 }

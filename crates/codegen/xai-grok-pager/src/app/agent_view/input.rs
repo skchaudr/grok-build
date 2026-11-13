@@ -1807,7 +1807,12 @@ mod background_and_tasks_shortcut_tests {
         child.set_active_pane(AgentPane::Scrollback, true);
 
         let hints = child.current_shortcut_hints(&registry, true);
-        assert!(!hints.iter().any(|hint| hint.label == "cancel"));
+        // Ctrl+C is the child's cancel key; Esc/q only go back, so no `cancel` hint may carry Esc.
+        assert!(
+            !hints
+                .iter()
+                .any(|hint| hint.label == "cancel" && hint.keys.contains(&crate::key!(Esc)))
+        );
         assert!(hints.iter().any(|hint| hint.label == "back"));
     }
 

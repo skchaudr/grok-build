@@ -1107,10 +1107,6 @@ fn session_picker_entry_source<'a>(app: &'a AppView, session_id: &str) -> Option
 }
 pub(in crate::app::dispatch) fn session_picker_external_filter_active(app: &AppView) -> bool {
     use crate::views::modal::ActiveModal;
-    // Only under an external host (Pi) is the External filter its own session catalog; natively it lists foreign tools' sessions.
-    if !app.external_agent {
-        return false;
-    }
     if let Some(agent) = get_active_agent(app)
         && let Some(ActiveModal::SessionPicker { source_filter, .. }) = agent.active_modal.as_ref()
     {
@@ -1163,7 +1159,10 @@ pub(in crate::app::dispatch) fn dispatch_pick_content_session(
     session_id: String,
     cwd: String,
 ) -> Vec<Effect> {
-    // PSM full-text hits (External filter) are Pi sessions — load by id+cwd.
+    // PSM full-text hits (External filter) are Pi sessions — load by id+cwd. Natively the External filter lists foreign tools, which have no content hits to pick.
+    if session_picker_external_filter_active(app) && !app.external_agent {
+        return vec![];
+    }
     if session_picker_external_filter_active(app) {
         if let Some(agent) = get_active_agent_mut(app) {
             agent.active_modal = None;
