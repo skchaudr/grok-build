@@ -74,6 +74,7 @@ impl Theme {
             md_task_checked: rgb(135, 169, 135),   // #87a987
             md_task_unchecked: rgb(117, 121, 127), // #75797f
             md_muted: rgb(117, 121, 127),          // #75797f
+            md_quote: rgb(220, 165, 97),  // #dca561
             md_code_bg: rgb(67, 70, 78),           // #43464e
             md_text: rgb(197, 201, 199),           // #c5c9c7
             link_fg: rgb(158, 155, 147),           // #9e9b93
@@ -144,6 +145,7 @@ impl Theme {
             md_task_checked: rgb(118, 148, 106),   // #76946a
             md_task_unchecked: rgb(114, 113, 105), // #727169
             md_muted: rgb(114, 113, 105),          // #727169
+            md_quote: rgb(210, 126, 153),  // #d27e99
             md_code_bg: rgb(24, 24, 32),           // #181820
             md_text: rgb(220, 215, 186),           // #dcd7ba
             link_fg: rgb(126, 156, 216),           // #7e9cd8
@@ -214,6 +216,7 @@ impl Theme {
             md_task_checked: rgb(138, 154, 123),   // #8a9a7b
             md_task_unchecked: rgb(114, 113, 105), // #727169
             md_muted: rgb(114, 113, 105),          // #727169
+            md_quote: rgb(220, 165, 97),  // #dca561
             md_code_bg: rgb(24, 22, 22),           // #181616
             md_text: rgb(197, 201, 197),           // #c5c9c5
             link_fg: rgb(126, 156, 216),           // #7e9cd8
@@ -284,6 +287,7 @@ impl Theme {
             md_task_checked: rgb(115, 189, 122),   // #73bd7a
             md_task_unchecked: rgb(176, 177, 179), // #b0b1b3
             md_muted: rgb(122, 126, 133),          // #7a7e85
+            md_quote: rgb(207, 142, 109),  // #cf8e6d
             md_code_bg: rgb(38, 40, 43),           // #26282b
             md_text: rgb(188, 190, 196),           // #bcbec4
             link_fg: rgb(86, 168, 245),            // #56a8f5
@@ -354,6 +358,7 @@ impl Theme {
             md_task_checked: rgb(125, 168, 89),    // #7da859
             md_task_unchecked: rgb(137, 164, 187), // #89a4bb
             md_muted: rgb(99, 119, 119),           // #637777
+            md_quote: rgb(199, 146, 234),  // #c792ea
             md_code_bg: rgb(11, 41, 66),           // #0b2942
             md_text: rgb(214, 222, 235),           // #d6deeb
             link_fg: rgb(130, 170, 255),           // #82aaff
@@ -424,6 +429,7 @@ impl Theme {
             md_task_checked: rgb(165, 224, 117), // #a5e075
             md_task_unchecked: rgb(73, 81, 98),  // #495162
             md_muted: rgb(127, 131, 140),        // #7f838c
+            md_quote: rgb(198, 120, 221),  // #c678dd
             md_code_bg: rgb(30, 34, 39),         // #1e2227
             md_text: rgb(171, 178, 191),         // #abb2bf
             link_fg: rgb(97, 175, 239),          // #61afef
@@ -494,6 +500,7 @@ impl Theme {
             md_task_checked: rgb(165, 224, 117),   // #a5e075
             md_task_unchecked: rgb(186, 194, 222), // #bac2de
             md_muted: rgb(108, 138, 153),          // #6c8a99
+            md_quote: rgb(203, 166, 247),  // #cba6f7
             md_code_bg: rgb(30, 34, 39),           // #1e2227
             md_text: rgb(255, 255, 255),           // #ffffff
             link_fg: rgb(254, 143, 64),            // #fe8f40
@@ -564,6 +571,7 @@ impl Theme {
             md_task_checked: rgb(92, 255, 212),   // #5cffd4
             md_task_unchecked: rgb(64, 231, 246), // #40e7f6
             md_muted: rgb(0, 107, 134),           // #006b86
+            md_quote: rgb(255, 204, 128),  // #ffcc80
             md_code_bg: rgb(0, 11, 16),           // #000b10
             md_text: rgb(64, 231, 246),           // #40e7f6
             link_fg: rgb(1, 168, 223),            // #01a8df
@@ -634,6 +642,7 @@ impl Theme {
             md_task_checked: rgb(34, 139, 34),     // #228b22
             md_task_unchecked: rgb(140, 140, 140), // #8c8c8c
             md_muted: rgb(119, 136, 153),          // #778899
+            md_quote: rgb(255, 215, 0),  // #ffd700
             md_code_bg: rgb(26, 26, 26),           // #1a1a1a
             md_text: rgb(255, 255, 255),           // #ffffff
             link_fg: rgb(211, 211, 211),           // #d3d3d3
@@ -704,6 +713,7 @@ impl Theme {
             md_task_checked: rgb(7, 125, 24),   // #077d18
             md_task_unchecked: rgb(64, 64, 64), // #404040
             md_muted: rgb(140, 140, 140),       // #8c8c8c
+            md_quote: rgb(168, 92, 0),  // #a85c00
             md_code_bg: rgb(247, 248, 250),     // #f7f8fa
             md_text: rgb(8, 8, 8),              // #080808
             link_fg: rgb(0, 109, 204),          // #006dcc
@@ -774,6 +784,7 @@ impl Theme {
             md_task_checked: rgb(95, 135, 95),  // #5f875f
             md_task_unchecked: rgb(96, 96, 96), // #606060
             md_muted: rgb(118, 118, 118),       // #767676
+            md_quote: rgb(130, 70, 30),  // #82461e
             md_code_bg: rgb(247, 247, 247),     // #f7f7f7
             md_text: rgb(38, 38, 38),           // #262626
             link_fg: rgb(0, 0, 0),              // #000000
@@ -844,6 +855,7 @@ impl Theme {
             md_task_checked: rgb(86, 159, 122),    // #569f7a
             md_task_unchecked: rgb(107, 107, 107), // #6b6b6b
             md_muted: rgb(107, 107, 107),          // #6b6b6b
+            md_quote: rgb(30, 100, 105),  // #1e6469
             md_code_bg: rgb(230, 228, 216),        // #e6e4d8
             md_text: rgb(18, 18, 18),              // #121212
             link_fg: rgb(18, 18, 18),              // #121212

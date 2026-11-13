@@ -107,6 +107,7 @@ impl Theme {
             md_task_checked: FOAM,
             md_task_unchecked: SUBTLE,
             md_muted: MUTED,
+            md_quote: GOLD,
             md_code_bg: SURFACE,
             md_text: TEXT,
             link_fg: FOAM, // #9ccfd8, teal/cyan for dark bg

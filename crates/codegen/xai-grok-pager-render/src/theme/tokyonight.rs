@@ -137,7 +137,8 @@ pub struct Theme {
     pub md_code: Color,              // Inline code, code block delimiters
     pub md_task_checked: Color,      // Task checked
     pub md_task_unchecked: Color,    // Task unchecked
-    pub md_muted: Color,             // Blockquotes, list items, rules, links
+    pub md_muted: Color,             // List items, rules, links
+    pub md_quote: Color,             // Blockquote text and bar, set apart from body text
     pub md_code_bg: Color,           // Code block background
     pub md_text: Color,              // Default body text (plain paragraphs, strong, emphasis)
     pub link_fg: Color,              // Clickable link text color
@@ -225,6 +226,7 @@ impl Theme {
             md_task_checked: CYAN,
             md_task_unchecked: BLUE,
             md_muted: COMMENT,
+            md_quote: rgb(224, 175, 104), // #e0af68
             md_code_bg: BG_HIGHLIGHT,
             md_text: FG,
             link_fg: BLUE, // #7aa2f7
@@ -491,6 +493,26 @@ mod visibility_tests {
             assert!(c >= 4.5, "{:?} on {sel:?} is {c:.2}:1", theme.text_primary);
         }
         assert!(Theme::terminal().selection_overlay().add_modifier.contains(Modifier::REVERSED), "bandless selects in reverse video");
+    }
+
+    /// Quote text must read on the page and stand apart from body, code, link and muted text.
+    #[test]
+    fn quote_colour_is_distinct_and_readable_in_every_theme() {
+        let dist = |a: Color, b: Color| match (a, b) {
+            (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+                let d = |x: u8, y: u8| (f64::from(x) - f64::from(y)).powi(2);
+                (d(ar, br) + d(ag, bg) + d(ab, bb)).sqrt()
+            }
+            _ => 255.0,
+        };
+        for theme in every_theme() {
+            let q = theme.md_quote;
+            let c = contrast(q, theme.bg_base).unwrap();
+            assert!(c >= 4.5, "{q:?} on {:?} is {c:.2}:1", theme.bg_base);
+            for other in [theme.md_text, theme.md_code, theme.link_fg, theme.md_muted] {
+                assert!(dist(q, other) >= 60.0, "{q:?} too close to {other:?}");
+            }
+        }
     }
 
     #[test]

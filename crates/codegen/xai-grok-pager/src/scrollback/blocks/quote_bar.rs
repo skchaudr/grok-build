@@ -41,12 +41,12 @@ impl QuoteBarStrip {
 /// `blockquote_outer` in pager-render's theme/md_style.rs, and a comment there points back here. The end-to-end
 /// tests below trip if either side drifts.
 fn quote_bar_style() -> Style {
-    let muted = Theme::current().md_muted;
+    let quote = Theme::current().md_quote;
     let style = Style::default().add_modifier(Modifier::DIM);
-    if muted == Color::Reset {
+    if quote == Color::Reset {
         style
     } else {
-        style.fg(muted)
+        style.fg(quote)
     }
 }
 
@@ -276,6 +276,23 @@ mod tests {
             find_line(&out, "outro").selectable,
             Selectable::All
         ));
+    }
+
+    #[test]
+    fn quote_text_uses_quote_colour() {
+        let md = MarkdownContent::new("intro\n\n> QUOTE alpha\n\noutro");
+        let out = md.output(80);
+        let quote = Theme::current().md_quote;
+        let fg_of = |needle: &str| {
+            find_line(&out, needle)
+                .content
+                .spans
+                .iter()
+                .find(|s| s.content.contains(needle))
+                .and_then(|s| s.style.fg)
+        };
+        assert_eq!(fg_of("QUOTE"), Some(quote));
+        assert_ne!(fg_of("intro"), Some(quote));
     }
 
     #[test]

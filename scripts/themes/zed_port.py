@@ -269,12 +269,22 @@ FIELD_ORDER = [
     "md_heading_h1", "md_heading_h1_mod", "md_heading_h2", "md_heading_h2_mod",
     "md_heading_h3", "md_heading_h3_mod", "md_heading_h4", "md_heading_h4_mod",
     "md_heading_h5", "md_heading_h5_mod", "md_heading_h6", "md_heading_h6_mod",
-    "md_code", "md_task_checked", "md_task_unchecked", "md_muted", "md_code_bg", "md_text", "link_fg",
+    "md_code", "md_task_checked", "md_task_unchecked", "md_muted", "md_quote", "md_code_bg", "md_text", "link_fg",
 ]
+
+
+# Hand-picked blockquote colours (md_quote), one per ported theme: distinct from body, code, link and muted text.
+MD_QUOTE = {
+    "kanso_mist": (220, 165, 97), "kanagawa_wave": (210, 126, 153), "kanagawa": (220, 165, 97),
+    "jetbrains_islands_dark": (207, 142, 109), "night_owl": (199, 146, 234), "one_dark_pro": (198, 120, 221),
+    "nstlgy_dark": (203, 166, 247), "severance_dark": (255, 204, 128), "quasi_monochrome_dark": (255, 215, 0),
+    "jetbrains_islands_light": (168, 92, 0), "monosami_light": (130, 70, 30), "monosami_ink_light": (30, 100, 105),
+}
 
 
 def rust_fn(fn, name, port):
     colors, mods = port.colors(), port.heading_mods()
+    colors["md_quote"] = MD_QUOTE[fn]
     lines = [f"    /// {name} (Zed), ported by scripts/themes/zed_port.py.",
              f"    pub const fn {fn}() -> Self {{", "        Self {"]
     for f in FIELD_ORDER:
