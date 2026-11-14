@@ -482,7 +482,7 @@ fn render_dashboard_banner(
         }
     }
     let agent_word = if total == 1 { "agent" } else { "agents" };
-    let mut title_parts: Vec<String> = vec!["Dashboard".to_string()];
+    let mut title_parts: Vec<String> = vec![crate::views::welcome::logo::dashboard_label().to_string()];
     title_parts.push(format!("{total} {agent_word}"));
     if working > 0 {
         title_parts.push(format!("{working} working"));

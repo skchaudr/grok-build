@@ -741,8 +741,39 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         }
         "x.ai/mcp/elicit_complete" => handle_mcp_elicit_complete(notif, app),
         "x.ai/mcp/servers_updated" => handle_mcp_servers_updated(notif, app),
+        m if m.ends_with("claude/sdkMessage") => handle_claude_sdk_message(notif, app),
         _ => pi_ui::handle(notif, app),
     }
+}
+
+/// `_claude/sdkMessage` from claude-agent-acp, opted into by `to_meta` for `session_state_changed` only.
+/// Claude's SDK runs follow-up cycles after a prompt's result; this is the only signal that it is still working.
+fn handle_claude_sdk_message(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Ok(params) = serde_json::from_str::<serde_json::Value>(notif.params.get()) else {
+        return false;
+    };
+    let message = params.get("message");
+    if message.and_then(|m| m.get("subtype")).and_then(serde_json::Value::as_str)
+        != Some("session_state_changed")
+    {
+        return false;
+    }
+    let Some(running) = message
+        .and_then(|m| m.get("state"))
+        .and_then(serde_json::Value::as_str)
+        .map(|state| state != "idle")
+    else {
+        return false;
+    };
+    let Some(session_id) = params.get("sessionId").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some((_, _, agent)) = routing::resolve_notif_agent(app, &acp::SessionId::new(session_id)) else {
+        return false;
+    };
+    agent.claude_sdk_running = running;
+    agent.reconcile_claude_working();
+    true
 }
 
 fn handle_review_ask_delta(notif: &acp::ExtNotification, app: &mut AppView) -> bool {

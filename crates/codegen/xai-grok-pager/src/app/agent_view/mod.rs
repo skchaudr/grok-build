@@ -874,6 +874,10 @@ pub struct AgentView {
     pub(crate) unidentified_child_turn_closed_prompt: Option<String>,
     /// The wake turn currently streaming, if any. See [`RunningWakeTurn`].
     pub(crate) running_wake_turn: Option<RunningWakeTurn>,
+    /// Claude's SDK reports it is not idle (`session_state_changed`), forwarded by claude-agent-acp. See [`AgentView::reconcile_claude_working`].
+    pub(crate) claude_sdk_running: bool,
+    /// When this pane went idle while `claude_sdk_running`; the working wake turn starts only after [`CLAUDE_WAKE_GRACE`].
+    pub(crate) claude_quiet_since: Option<std::time::Instant>,
     pub active_pane: AgentPane,
     pub dock_cursor: usize,
     pub dock_workflows_expanded: bool,

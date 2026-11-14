@@ -29,6 +29,10 @@ use xai_grok_telemetry::events::{CancellationCompleted, CancellationScope};
 fn post_turn_plan_review_default() -> bool {
     false
 }
+/// Synthetic wake id for Claude's autonomous cycles (see [`AgentView::reconcile_claude_working`]).
+pub(crate) const CLAUDE_AUTONOMOUS_WAKE: &str = "claude-autonomous";
+const CLAUDE_WAKE_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
+
 impl AgentView {
     /// The agent behind this session: its picker command, else the name its backend reports, else `launch`.
     /// shortcut: a session resumed from the dashboard has no picker command; if its backend reports no name it
@@ -169,6 +173,8 @@ impl AgentView {
             replayed_bash_prompts: HashSet::new(),
             failed_wake_marker_for: None,
             running_wake_turn: None,
+            claude_sdk_running: false,
+            claude_quiet_since: None,
             finished_wake_prompts: HashSet::new(),
             ended_child_prompt_ids: HashSet::new(),
             superseded_child_prompt_ids: HashSet::new(),
@@ -1080,6 +1086,30 @@ impl AgentView {
             prompt_id: prompt_id.to_string(),
             cancel_sent: false,
         });
+    }
+    /// Mirror Claude's SDK state as a wake turn. After a prompt's result Claude keeps working (background agents, task-notification
+    /// follow-ups) with no prompt in flight, so the adapter's `session_state_changed` is the only sign. The status row then spins and
+    /// Esc stops it like any wake turn. Returns true when the visible state changed.
+    pub(crate) fn reconcile_claude_working(&mut self) -> bool {
+        let wake = self
+            .running_wake_turn
+            .as_ref()
+            .is_some_and(|wake| wake.prompt_id == CLAUDE_AUTONOMOUS_WAKE);
+        if self.claude_sdk_running && self.session.state.is_idle() {
+            let since = *self.claude_quiet_since.get_or_insert_with(std::time::Instant::now);
+            // The SDK's idle lands a moment after the prompt response; a grace keeps a normal turn end from flashing the spinner.
+            if !wake && since.elapsed() >= CLAUDE_WAKE_GRACE {
+                self.note_streaming_wake_turn(CLAUDE_AUTONOMOUS_WAKE);
+                return self.running_wake_turn.is_some();
+            }
+            return false;
+        }
+        self.claude_quiet_since = None;
+        if wake && !self.claude_sdk_running {
+            self.running_wake_turn = None;
+            return true;
+        }
+        false
     }
     /// True for a local turn, a running `/compact`, or a streaming wake not yet asked to stop.
     pub(crate) fn stoppable_activity_running(&self) -> bool {

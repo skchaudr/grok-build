@@ -104,6 +104,8 @@ const HIDDEN: &[&str] = &[
     "imagine",
     "imagine-video",
     "auto",
+    // Claude calls the Agent Dashboard "Agents": the adapter's `/agents` name opens it (see [`opens_agents_view`]).
+    "dashboard",
 ];
 
 /// Adapter plumbing that only server-launched sessions use.
@@ -128,11 +130,19 @@ pub fn typed_builtin_override(canonical: &str, token: &str, args: &str) -> Optio
     if !hides(canonical, CommandSource::Builtin) {
         return None;
     }
+    if canonical.eq_ignore_ascii_case("dashboard") {
+        return Some(CommandResult::Action(crate::app::actions::Action::OpenDashboard));
+    }
     Some(if canonical.eq_ignore_ascii_case("recap") {
         CommandResult::PassThrough(format!("/recap {args}").trim_end().to_string())
     } else {
         CommandResult::Message(format!("/{token} isn't available in Claude sessions"))
     })
+}
+
+/// Typed `/agents` in a Claude session opens the Agent Dashboard, which Claude calls "Agents"; the adapter's own `/agents` config UI has no ACP surface.
+pub fn opens_agents_view(token: &str) -> bool {
+    token.eq_ignore_ascii_case("agents")
 }
 
 /// Sort rank for a Claude session menu; lower sorts first. `0` outside Claude sessions.
@@ -219,6 +229,11 @@ mod tests {
             Some(CommandResult::PassThrough(t)) if t == "/recap short"
         ));
         assert!(typed_builtin_override("theme", "theme", "").is_none());
+        assert!(matches!(
+            typed_builtin_override("dashboard", "dashboard", ""),
+            Some(CommandResult::Action(crate::app::actions::Action::OpenDashboard))
+        ));
+        assert!(opens_agents_view("Agents") && !opens_agents_view("agent"));
         // Pager-local entries dropped from HIDDEN run normally.
         for name in ["announcements", "tutorial", "docs", "voice"] {
             assert!(typed_builtin_override(name, name, "").is_none(), "{name}");

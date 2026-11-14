@@ -3397,3 +3397,23 @@ async fn hydrate_team_capability_adapter_maps_every_reply_to_the_asking_identity
                 .is_err()
         );
 }
+
+/// Claude hosts ask claude-agent-acp for `session_state_changed` so the pager can see autonomous follow-up cycles; other hosts send nothing.
+#[test]
+fn to_meta_opts_claude_into_session_state_messages_only() {
+    let claude = SessionFlags {
+        external_agent_label: Some("claude-agent".into()),
+        ..Default::default()
+    };
+    let meta = claude.to_meta().expect("meta");
+    assert_eq!(
+        meta["claudeCode"]["emitRawSDKMessages"][0]["subtype"],
+        "session_state_changed"
+    );
+    let pi = SessionFlags {
+        external_agent_label: Some("grok-pi".into()),
+        ..Default::default()
+    };
+    assert!(pi.to_meta().expect("meta").get("claudeCode").is_none());
+    assert!(SessionFlags::default().to_meta().expect("meta").get("claudeCode").is_none());
+}

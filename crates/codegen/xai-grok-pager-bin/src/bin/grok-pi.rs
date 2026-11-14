@@ -1317,6 +1317,7 @@ async fn run(mut args: Args) -> Result<()> {
                 // Grok worktree product flow is not wired for Pi yet.
                 hide_new_worktree: true,
                 changelog_url: Some(PI_CHANGELOG_URL),
+                dashboard_label: None,
                 enable_voice_dictation: true,
                 host_features: host_feature_manifest.clone(),
             },

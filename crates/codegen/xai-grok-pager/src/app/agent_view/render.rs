@@ -873,7 +873,10 @@ impl AgentView {
                     HintItem::paired(key!('[', CONTROL), key!(']', CONTROL), "prev/next agent"),
                 );
             }
-            hints.insert(0, HintItem::new(key!('\\', CONTROL), "dashboard"));
+            hints.insert(0, HintItem::new(
+                    key!('\\', CONTROL),
+                    crate::views::welcome::logo::dashboard_label().to_lowercase(),
+                ));
         }
         hints
     }
@@ -1907,7 +1910,7 @@ impl AgentView {
             status.push(
                 "dashboard",
                 Line::from(Span::styled(
-                    "[Dashboard]",
+                    format!("[{}]", crate::views::welcome::logo::dashboard_label()),
                     hover_or(self.hit_dashboard.hovered, bg.fg(theme.gray)),
                 )),
             );

@@ -1046,7 +1046,9 @@ pub(super) fn dispatch_send_prompt_submission(
                         source,
                     });
                 }
-                if let Some(command) = command {
+                if external_claude && crate::slash::claude_menu::opens_agents_view(invocation.token) {
+                    CommandResult::Action(Action::OpenDashboard)
+                } else if let Some(command) = command {
                     let claude_override = (external_claude && is_builtin)
                         .then(|| {
                             crate::slash::claude_menu::typed_builtin_override(

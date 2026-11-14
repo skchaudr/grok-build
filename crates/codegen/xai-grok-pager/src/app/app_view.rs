@@ -6031,6 +6031,11 @@ impl AppView {
         self.fps_hud.note_tick();
         let mut needs_redraw = false;
         needs_redraw |= self.refresh_external_ui_surface();
+        if self.external_agent {
+            for agent in self.agents.values_mut() {
+                needs_redraw |= agent.reconcile_claude_working();
+            }
+        }
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
         {

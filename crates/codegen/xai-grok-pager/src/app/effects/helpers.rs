@@ -600,6 +600,16 @@ impl SessionFlags {
                 self.auto_mode
             )),
         );
+        // claude-agent-acp forwards the SDK's running/idle state only on request. It is how the pager
+        // sees Claude's autonomous follow-up cycles, which run after a prompt's result with no prompt in flight.
+        if crate::slash::external_common::is_claude_label(self.external_agent_label.as_deref()) {
+            meta.insert(
+                "claudeCode".into(),
+                serde_json::json!({
+                    "emitRawSDKMessages": [{ "type": "system", "subtype": "session_state_changed" }],
+                }),
+            );
+        }
         if meta.is_empty() { None } else { Some(meta) }
     }
 }

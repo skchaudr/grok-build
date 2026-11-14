@@ -113,6 +113,7 @@ fn logo_override() -> Option<ExternalLogoArt> {
 pub struct ExternalWelcomeMenu {
     pub hide_new_worktree: bool,
     pub changelog_url: Option<&'static str>,
+    pub dashboard_label: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +136,13 @@ pub fn set_welcome_menu_override(menu: Option<ExternalWelcomeMenu>) {
 }
 
 /// Current welcome menu override, if any.
+/// What the host calls the Agent Dashboard: "Dashboard" unless its profile names it (Claude: "Agents").
+pub fn dashboard_label() -> &'static str {
+    welcome_menu_override()
+        .and_then(|menu| menu.dashboard_label)
+        .unwrap_or("Dashboard")
+}
+
 pub fn welcome_menu_override() -> Option<ExternalWelcomeMenu> {
     *welcome_menu_cell()
         .read()

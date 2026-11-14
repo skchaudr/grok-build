@@ -2320,6 +2320,7 @@ mod reconnect;
 mod turn_completion;
 mod hooks;
 mod pi_ui;
+mod claude_state;
 mod interjection;
 mod session_routing;
 mod plugins;
