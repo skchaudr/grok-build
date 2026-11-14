@@ -1818,6 +1818,22 @@ fn install_claude_host_ui(args: &PagerArgs) {
     {
         return;
     }
+    // Claude Code's own version (`claude --version` -> "2.1.325 (Claude Code)"), else this build's.
+    let exe = args
+        .effective_agent_cmd()
+        .and_then(|cmd| {
+            cmd.split_whitespace()
+                .find_map(|w| w.strip_prefix("CLAUDE_CODE_EXECUTABLE=").map(str::to_owned))
+        })
+        .unwrap_or_else(|| "claude".to_owned());
+    let version: &'static str = std::process::Command::new(exe)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|text| text.split_whitespace().next().map(str::to_owned))
+        .map_or(env!("VERSION_WITH_COMMIT"), |v| Box::leak(v.into_boxed_str()));
     xai_grok_pager::acp::set_launch_ui_profile(xai_grok_pager::acp::ExternalUiProfile {
         agent_name: "Claude".to_string(),
         logo: Some(xai_grok_pager::acp::ExternalLogoArt {
@@ -1827,7 +1843,7 @@ fn install_claude_host_ui(args: &PagerArgs) {
         welcome_brand: Some(xai_grok_pager::acp::ExternalWelcomeBrand {
             title: "Claude Code",
             subtitle: claude_brand::CLAUDE_WELCOME_SUBTITLE,
-            version: env!("VERSION_WITH_COMMIT"),
+            version,
         }),
         changelog_url: Some(claude_brand::CLAUDE_CHANGELOG_URL),
         ..Default::default()
