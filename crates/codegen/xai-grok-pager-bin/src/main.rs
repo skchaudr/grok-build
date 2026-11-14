@@ -1827,7 +1827,7 @@ fn install_claude_host_ui(args: &PagerArgs) {
         welcome_brand: Some(xai_grok_pager::acp::ExternalWelcomeBrand {
             title: "Claude Code",
             subtitle: claude_brand::CLAUDE_WELCOME_SUBTITLE,
-            version: env!("GROK_PI_VERSION"),
+            version: env!("VERSION_WITH_COMMIT"),
         }),
         changelog_url: Some(claude_brand::CLAUDE_CHANGELOG_URL),
         ..Default::default()

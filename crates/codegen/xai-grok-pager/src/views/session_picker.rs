@@ -219,7 +219,9 @@ pub enum SourceFilter {
 impl SourceFilter {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Grok => "Grok",
+            // Under a branded external host the native list is that host's sessions.
+            Self::Grok => crate::views::welcome::logo::welcome_brand_override()
+                .map_or("Grok", |brand| brand.title),
             Self::Headless => "Headless",
             Self::Local => "Local",
             Self::Remote => "Remote",

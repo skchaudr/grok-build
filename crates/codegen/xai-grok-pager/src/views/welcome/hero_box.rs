@@ -323,7 +323,9 @@ pub(super) fn render_hero_box(
     );
 
     // Subtitle line below the version. The Grok promo only fits a Grok session.
-    if layout.hero_subtitle.height > 0 && identity.is_none() {
+    if layout.hero_subtitle.height > 0
+        && (identity.is_none() || super::logo::welcome_brand_override().is_some())
+    {
         let subtitle_style = Style::default().fg(theme.gray);
         buf.set_span(
             layout.hero_subtitle.x,
