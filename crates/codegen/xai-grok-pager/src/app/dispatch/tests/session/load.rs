@@ -34,6 +34,23 @@ fn claude_host_resume_lists_through_acp_not_the_pi_catalog() {
     ));
 }
 
+/// Welcome-screen Resume (no agent yet) under Claude takes the same ACP path.
+#[test]
+fn claude_host_welcome_resume_lists_through_acp() {
+    let mut app = test_app();
+    app.external_agent = true;
+    app.external_agent_label = Some("claude-agent-acp".into());
+    let effects = dispatch(Action::ShowSessionPicker, &mut app);
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::FetchSessionList { .. })),
+        "welcome resume must fetch the ACP session list, got {effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::FetchExternalSessionCatalog { .. })),
+        "welcome resume must not use the Pi catalog, got {effects:?}"
+    );
+}
+
 #[test]
 fn external_resume_uses_current_tab_then_loads_all_on_refresh() {
     use crate::views::modal::ActiveModal;

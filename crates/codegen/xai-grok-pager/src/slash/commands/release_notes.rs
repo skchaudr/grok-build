@@ -12,6 +12,12 @@ impl SlashCommand for ReleaseNotesCommand {
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
+        // A host with its own changelog link never shows Grok's release notes.
+        if let Some(url) = crate::views::welcome::logo::welcome_menu_override()
+            .and_then(|menu| menu.changelog_url)
+        {
+            return CommandResult::Action(Action::OpenUrl(url.to_string()));
+        }
         let changelog = xai_grok_shell::util::changelog::ChangelogManager::new().fetch();
         match changelog.markdown {
             Some(content) => CommandResult::Action(Action::ShowReleaseNotes {

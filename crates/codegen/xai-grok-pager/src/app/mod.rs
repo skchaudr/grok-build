@@ -2155,10 +2155,13 @@ pub(crate) fn set_terminal_title(title: &str) {
 /// Strips control characters: crossterm's `SetTitle` emits the string raw inside an OSC sequence.
 /// An embedded BEL/ESC would terminate the OSC early and let the remainder inject arbitrary escape sequences into the terminal.
 fn terminal_title_string(title: &str) -> String {
-    let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
     // An external host with its own welcome brand names the window, not Grok.
-    let product = crate::views::welcome::logo::welcome_brand_override()
-        .map_or_else(|| "grok".to_string(), |brand| brand.title.to_lowercase());
+    let brand = crate::views::welcome::logo::welcome_brand_override().map(|brand| brand.title);
+    terminal_title_for(title, brand)
+}
+fn terminal_title_for(title: &str, brand: Option<&str>) -> String {
+    let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
+    let product = brand.map_or_else(|| "grok".to_string(), str::to_lowercase);
     if sanitized.is_empty() {
         product
     } else {
@@ -2229,12 +2232,17 @@ mod tests {
     #[test]
     fn terminal_title_strips_control_characters() {
         assert_eq!(
-            terminal_title_string("evil\x07\x1b]52;c;payload\x07title"),
+            terminal_title_for("evil\x07\x1b]52;c;payload\x07title", None),
             "evil]52;c;payloadtitle - grok"
         );
-        assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok");
-        assert_eq!(terminal_title_string(""), "grok");
-        assert_eq!(terminal_title_string("My chat"), "My chat - grok");
+        assert_eq!(terminal_title_for("\x07\x1b\x00", None), "grok");
+        assert_eq!(terminal_title_for("", None), "grok");
+        assert_eq!(terminal_title_for("My chat", None), "My chat - grok");
+    }
+    #[test]
+    fn terminal_title_names_a_branded_host() {
+        assert_eq!(terminal_title_for("My chat", Some("Claude Code")), "My chat - claude code");
+        assert_eq!(terminal_title_for("", Some("Claude Code")), "claude code");
     }
     #[test]
     fn hunk_tracker_mode_nothing_set_is_none() {

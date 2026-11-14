@@ -218,10 +218,12 @@ pub enum SourceFilter {
 }
 impl SourceFilter {
     pub fn label(self) -> &'static str {
+        self.label_for(crate::views::welcome::logo::welcome_brand_override().map(|b| b.title))
+    }
+    fn label_for(self, brand: Option<&'static str>) -> &'static str {
         match self {
             // Under a branded external host the native list is that host's sessions.
-            Self::Grok => crate::views::welcome::logo::welcome_brand_override()
-                .map_or("Grok", |brand| brand.title),
+            Self::Grok => brand.unwrap_or("Grok"),
             Self::Headless => "Headless",
             Self::Local => "Local",
             Self::Remote => "Remote",
@@ -1163,6 +1165,12 @@ mod tests {
             Some(v) => v,
             None => panic!("index {i} out of {}", xs.len()),
         }
+    }
+    #[test]
+    fn grok_filter_chip_names_a_branded_host() {
+        assert_eq!(SourceFilter::Grok.label_for(None), "Grok");
+        assert_eq!(SourceFilter::Grok.label_for(Some("Claude Code")), "Claude Code");
+        assert_eq!(SourceFilter::External.label_for(Some("Claude Code")), "External");
     }
     #[test]
     fn repo_name_from_cwd_two_components() {

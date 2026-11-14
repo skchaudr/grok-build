@@ -775,7 +775,16 @@ impl WelcomeRenderParams<'_> {
     /// `(title, version)` for the version badge when an external agent reports itself.
     /// A launch-time brand (`ExternalUiProfile.welcome_brand`, e.g. grok-pi) wins over `agentInfo`.
     fn agent_identity(&self) -> Option<(&str, &str)> {
-        external_welcome_brand().or(self.agent_title.zip(self.agent_version))
+        external_welcome_brand()
+            .map(|(title, version)| {
+                let version = if version.is_empty() {
+                    self.agent_version.unwrap_or("")
+                } else {
+                    version
+                };
+                (title, version)
+            })
+            .or(self.agent_title.zip(self.agent_version))
     }
 }
 

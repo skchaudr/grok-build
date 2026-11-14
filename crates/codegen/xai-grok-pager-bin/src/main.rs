@@ -1808,17 +1808,20 @@ fn install_pi_host_ui(args: &PagerArgs) {
     });
     pi_tutorial_profile::install();
 }
-/// `grok claude`: brand the welcome surface when Claude is the only agent on offer.
-fn install_claude_host_ui(args: &PagerArgs) {
+/// True when Claude is the launch agent and no picker choice is anything else: the only case that gets the Claude brand.
+fn claude_only_launch(launch: Option<&str>, choices: &[&str]) -> bool {
     use xai_grok_pager::slash::external_common::{agent_label_from_cmd, is_claude_label};
     let is_claude = |cmd: &str| is_claude_label(agent_label_from_cmd(cmd).as_deref());
+    launch.is_some_and(is_claude) && choices.iter().all(|cmd| is_claude(cmd))
+}
+/// `grok claude`: brand the welcome surface when Claude is the only agent on offer.
+fn install_claude_host_ui(args: &PagerArgs) {
     let choices = args.agent_choices().unwrap_or_default();
-    if !args.effective_agent_cmd().is_some_and(|cmd| is_claude(&cmd))
-        || choices.iter().any(|choice| !is_claude(&choice.cmd))
-    {
+    let choice_cmds: Vec<&str> = choices.iter().map(|choice| choice.cmd.as_str()).collect();
+    if !claude_only_launch(args.effective_agent_cmd().as_deref(), &choice_cmds) {
         return;
     }
-    // Claude Code's own version (`claude --version` -> "2.1.325 (Claude Code)"), else this build's.
+    // Claude Code's own version (`claude --version` -> "2.1.325 (Claude Code)"); empty falls back to the adapter's agentInfo.
     let exe = args
         .effective_agent_cmd()
         .and_then(|cmd| {
@@ -1833,7 +1836,7 @@ fn install_claude_host_ui(args: &PagerArgs) {
         .filter(|out| out.status.success())
         .and_then(|out| String::from_utf8(out.stdout).ok())
         .and_then(|text| text.split_whitespace().next().map(str::to_owned))
-        .map_or(env!("VERSION_WITH_COMMIT"), |v| Box::leak(v.into_boxed_str()));
+        .map_or("", |v| Box::leak(v.into_boxed_str()));
     xai_grok_pager::acp::set_launch_ui_profile(xai_grok_pager::acp::ExternalUiProfile {
         agent_name: "Claude".to_string(),
         logo: Some(xai_grok_pager::acp::ExternalLogoArt {
@@ -3914,5 +3917,25 @@ mod tests {
             elapsed < grace,
             "clean teardown took {elapsed:?}; grace must be a ceiling, not a floor",
         );
+    }
+}
+
+#[cfg(test)]
+mod claude_launch_tests {
+    use super::claude_only_launch;
+
+    const CLAUDE: &str = "env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=/u/claude /u/claude-agent-acp";
+
+    #[test]
+    fn claude_alone_is_branded() {
+        assert!(claude_only_launch(Some(CLAUDE), &[]));
+        assert!(claude_only_launch(Some(CLAUDE), &[CLAUDE]));
+    }
+
+    #[test]
+    fn claude_beside_another_agent_or_alone_pi_is_not() {
+        assert!(!claude_only_launch(Some(CLAUDE), &[CLAUDE, "/opt/grok-pi-acp"]));
+        assert!(!claude_only_launch(Some("/opt/grok-pi-acp"), &[]));
+        assert!(!claude_only_launch(None, &[]));
     }
 }

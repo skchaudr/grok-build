@@ -1160,7 +1160,7 @@ pub(in crate::app::dispatch) fn dispatch_pick_content_session(
     cwd: String,
 ) -> Vec<Effect> {
     // PSM full-text hits (External filter) are Pi sessions — load by id+cwd. Natively the External filter lists foreign tools, which have no content hits to pick.
-    if session_picker_external_filter_active(app) && !app.external_agent {
+    if session_picker_external_filter_active(app) && !app.is_pi_session() {
         return vec![];
     }
     if session_picker_external_filter_active(app) {
