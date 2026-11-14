@@ -100,6 +100,9 @@ pub struct ModelState {
     pub model_config_id: Option<String>,
     /// Config id of the standard agent-level thought-level select, when advertised.
     pub thought_level_config_id: Option<String>,
+    /// Every config option the agent last advertised (create, load, `config_option_update`).
+    /// Claude's settings rows (mode, effort, fast, agent) read these; see `settings::claude`.
+    pub config_options: Vec<acp::SessionConfigOption>,
 }
 
 impl ModelState {
@@ -340,6 +343,7 @@ impl ModelState {
         let changed = self.model_config_id != incoming.model_config_id
             || self.thought_level_config_id != incoming.thought_level_config_id
             || self.reasoning_effort != effort
+            || self.config_options != incoming.config_options
             || !same_selection
             || catalog_names_differ(&self.available, &incoming.available);
         let window_sel = self.context_window_selection;
@@ -630,6 +634,8 @@ impl ModelState {
 /// `session/set_config_option` instead of `session/set_model`.
 const MODEL_CONFIG_ID_META: &str = "x.ai/modelConfigId";
 const THOUGHT_LEVEL_CONFIG_ID_META: &str = "x.ai/thoughtLevelConfigId";
+/// The advertised option list itself, so the settings rows see options the model catalog does not use.
+const CONFIG_OPTIONS_META: &str = "x.ai/configOptions";
 
 /// Standard ACP agents may advertise models only as a `model`-category select config option (Codex, DSH, claude-agent-acp).
 /// Use the explicit `models` state when present; otherwise build one from the first model-category option (id may differ).
@@ -663,6 +669,11 @@ pub fn models_or_config_option(
         MODEL_CONFIG_ID_META.to_string(),
         serde_json::Value::String(option.id.0.to_string()),
     );
+    if let Some(options) = config_options
+        && let Ok(value) = serde_json::to_value(options)
+    {
+        meta.insert(CONFIG_OPTIONS_META.to_string(), value);
+    }
     if let Some(thought) = config_options.and_then(advertised_thought_level_option)
         && let acp::SessionConfigKind::Select(select) = &thought.kind
         && let Some(options) = thought_level_effort_options(select)
@@ -839,6 +850,12 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     config_id_from_meta(state.meta.as_ref(), MODEL_CONFIG_ID_META);
                 let thought_level_config_id =
                     config_id_from_meta(state.meta.as_ref(), THOUGHT_LEVEL_CONFIG_ID_META);
+                let config_options = state
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get(CONFIG_OPTIONS_META))
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+                    .unwrap_or_default();
                 Self {
                     available: models,
                     current: current_model,
@@ -851,6 +868,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     agent_prompt_images: false,
                     model_config_id,
                     thought_level_config_id,
+                    config_options,
                 }
             })
             .unwrap_or_default()

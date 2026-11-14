@@ -108,6 +108,9 @@ pub enum DynamicEnumSource {
     /// Models from the active session's catalog.
     /// Prepends a `"(no override)"` sentinel so the user can clear the setting.
     ActiveModelCatalog,
+    /// Choices the active Claude session advertises (`settings::claude`); the panel resolves them from the session,
+    /// so the snapshot-only resolver below has none.
+    ClaudeSession,
 }
 
 /// Build the owned choice list for a `DynamicEnum` at picker-open time.
@@ -133,6 +136,7 @@ pub fn dynamic_enum_choices(
             }
             out
         }
+        DynamicEnumSource::ClaudeSession => Vec::new(),
     }
 }
 

@@ -122,6 +122,8 @@ fn browse_key(state: &mut PiSettingsState, key: &KeyEvent) -> Outcome {
             // user's to change.
             Some((_, meta)) if matches!(meta.kind, SettingKind::Group { .. }) => Outcome::Unchanged,
             Some((key, _)) if state.lock(key).is_some() => Outcome::Unchanged,
+            // A live Claude option has no default to reset to.
+            Some((key, _)) if crate::settings::claude::is_claude_key(key) => Outcome::Unchanged,
             Some((key, _)) => {
                 state.mode = Mode::ConfirmReset { key };
                 Outcome::Changed

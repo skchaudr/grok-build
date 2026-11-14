@@ -29,6 +29,7 @@ pub fn sections_for(category: SettingCategory) -> &'static [&'static str] {
             "Approval",
             "Built-in tools",
             "Pi features",
+            super::claude::SECTION,
             "Sessions",
             "Review",
         ],
@@ -41,6 +42,9 @@ pub fn sections_for(category: SettingCategory) -> &'static [&'static str] {
 
 /// The sidebar section a setting belongs to, within its category's tab.
 pub fn section_for(key: SettingKey) -> &'static str {
+    if super::claude::is_claude_key(key) {
+        return super::claude::SECTION;
+    }
     if let Some(spec) = xai_grok_shell::host_features::feature_spec_by_setting_key(key) {
         return spec.section;
     }

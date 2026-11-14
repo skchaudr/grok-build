@@ -625,3 +625,249 @@ impl PiSettingsState {
         }
     }
 }
+
+// -- Claude rows --------------------------------------------------------------
+
+mod claude_rows {
+    use super::*;
+    use crate::settings::claude::{self, ClaudeSettings};
+    use crate::views::pi_settings::state::{AgentKind, row_visible};
+    use agent_client_protocol as acp;
+
+    fn options() -> Vec<acp::SessionConfigOption> {
+        use acp::{SessionConfigOption as Opt, SessionConfigSelectOption as Choice};
+        vec![
+            Opt::select(
+                "mode",
+                "Mode",
+                "acceptEdits",
+                vec![
+                    Choice::new("default", "Default"),
+                    Choice::new("acceptEdits", "Accept Edits"),
+                    Choice::new("plan", "Plan Mode"),
+                ],
+            )
+            .category(acp::SessionConfigOptionCategory::Mode),
+            Opt::select(
+                "model",
+                "Model",
+                "opus",
+                vec![Choice::new("opus", "Opus"), Choice::new("sonnet", "Sonnet")],
+            )
+            .category(acp::SessionConfigOptionCategory::Model),
+            Opt::select(
+                "effort",
+                "Effort",
+                "high",
+                vec![Choice::new("low", "Low"), Choice::new("high", "High")],
+            )
+            .category(acp::SessionConfigOptionCategory::ThoughtLevel),
+            Opt::select(
+                "fast",
+                "Fast mode",
+                "off",
+                vec![Choice::new("on", "On"), Choice::new("off", "Off")],
+            ),
+        ]
+    }
+
+    fn state_for(kind: AgentKind, options: &[acp::SessionConfigOption]) -> PiSettingsState {
+        PiSettingsState::new_for(
+            Arc::new(claude::registry_with_claude_rows(
+                &SettingsRegistry::defaults(),
+            )),
+            UiConfig::default(),
+            PagerLocalSnapshot::default(),
+            kind,
+            ClaudeSettings::from_options(options),
+        )
+    }
+
+    fn claude_keys(state: &PiSettingsState) -> Vec<&'static str> {
+        state
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Setting { key, .. } if claude::is_claude_key(key) => Some(*key),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rows_exist_only_for_a_claude_session() {
+        let claude_state = state_for(AgentKind::Claude, &options());
+        assert_eq!(
+            claude_keys(&claude_state),
+            [
+                "claude.mode",
+                "claude.model",
+                "claude.effort",
+                "claude.fast"
+            ],
+            "agent is absent because the session does not list one",
+        );
+        for kind in [AgentKind::Grok, AgentKind::Pi] {
+            let other = state_for(kind, &options());
+            assert!(
+                claude_keys(&other).is_empty(),
+                "{kind:?} must not see Claude rows",
+            );
+        }
+    }
+
+    #[test]
+    fn fast_and_agent_rows_need_the_session_to_offer_them() {
+        let all = options();
+        let state = state_for(AgentKind::Claude, &all[..1]);
+        assert_eq!(claude_keys(&state), ["claude.mode"]);
+        assert!(claude_keys(&state_for(AgentKind::Claude, &[])).is_empty());
+    }
+
+    #[test]
+    fn pi_rows_never_show_for_a_claude_session() {
+        let registry = SettingsRegistry::defaults();
+        let pi_row = registry
+            .all()
+            .iter()
+            .find(|meta| meta.external_only)
+            .expect("the registry has Pi-only rows");
+        assert!(row_visible(pi_row, true, false, true, true, AgentKind::Pi));
+        assert!(row_visible(
+            pi_row,
+            true,
+            false,
+            true,
+            true,
+            AgentKind::Grok
+        ));
+        assert!(!row_visible(
+            pi_row,
+            true,
+            false,
+            true,
+            true,
+            AgentKind::Claude
+        ));
+        assert!(!row_visible(
+            pi_row,
+            true,
+            false,
+            true,
+            false,
+            AgentKind::Pi
+        ));
+    }
+
+    #[test]
+    fn the_section_sits_in_the_agent_tab() {
+        let mut state = state_for(AgentKind::Claude, &options());
+        assert!(state.focus_key(claude::MODE));
+        assert_eq!(state.active_category(), Some(SettingCategory::Agent));
+        assert!(
+            state
+                .sections()
+                .iter()
+                .any(|(name, _)| *name == claude::SECTION),
+            "sections: {:?}",
+            state.sections(),
+        );
+    }
+
+    #[test]
+    fn choosing_a_mode_dispatches_the_option_change() {
+        let mut state = state_for(AgentKind::Claude, &options());
+        assert!(state.focus_key(claude::MODE));
+        assert!(state.open_chooser());
+        // Current is `acceptEdits`; Down lands on `plan`.
+        press(&mut state, KeyCode::Down);
+        match press(&mut state, KeyCode::Enter) {
+            Outcome::Action(Action::SetClaudeOption { key, value }) => {
+                assert_eq!((key, value.as_str()), (claude::MODE, "plan"));
+            }
+            other => panic!("expected SetClaudeOption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choosing_an_effort_dispatches_the_option_change() {
+        let mut state = state_for(AgentKind::Claude, &options());
+        assert!(state.focus_key(claude::EFFORT));
+        assert!(state.open_chooser());
+        press(&mut state, KeyCode::Up);
+        match press(&mut state, KeyCode::Enter) {
+            Outcome::Action(Action::SetClaudeOption { key, value }) => {
+                assert_eq!((key, value.as_str()), (claude::EFFORT, "low"));
+            }
+            other => panic!("expected SetClaudeOption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_fast_toggle_dispatches_on_then_off() {
+        let mut state = state_for(AgentKind::Claude, &options());
+        assert!(state.focus_key(claude::FAST));
+        match press(&mut state, KeyCode::Char(' ')) {
+            Outcome::Action(Action::SetClaudeOption { key, value }) => {
+                assert_eq!((key, value.as_str()), (claude::FAST, "on"));
+            }
+            other => panic!("expected SetClaudeOption, got {other:?}"),
+        }
+        let mut on = options();
+        on[3] = acp::SessionConfigOption::select(
+            "fast",
+            "Fast mode",
+            "on",
+            vec![
+                acp::SessionConfigSelectOption::new("on", "On"),
+                acp::SessionConfigSelectOption::new("off", "Off"),
+            ],
+        );
+        let mut state = state_for(AgentKind::Claude, &on);
+        assert!(state.focus_key(claude::FAST));
+        match press(&mut state, KeyCode::Char(' ')) {
+            Outcome::Action(Action::SetClaudeOption { value, .. }) => assert_eq!(value, "off"),
+            other => panic!("expected SetClaudeOption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reset_is_not_offered_for_a_live_option() {
+        let mut state = state_for(AgentKind::Claude, &options());
+        assert!(state.focus_key(claude::MODE));
+        assert!(matches!(
+            press(&mut state, KeyCode::Char('d')),
+            Outcome::Unchanged
+        ));
+        assert_eq!(state.mode.kind(), ModeKind::Browse);
+    }
+
+    #[test]
+    fn the_section_renders_names_not_ids_and_no_grok_wording() {
+        let mut state = state_for(AgentKind::Claude, &options());
+        assert!(state.focus_key(claude::MODE));
+        let body = render_lines(&mut state, 110, 60).join("\n");
+        for needle in [
+            "Claude",
+            "Claude permission mode",
+            "Accept Edits",
+            "Thinking effort",
+            "Fast mode",
+        ] {
+            assert!(body.contains(needle), "missing `{needle}`:\n{body}");
+        }
+        assert!(
+            !body.contains("acceptEdits"),
+            "the id leaked into the row:\n{body}"
+        );
+        for line in body
+            .lines()
+            .filter(|l| l.contains("Claude permission mode") || l.contains("Fast mode"))
+        {
+            assert!(
+                !line.to_lowercase().contains("grok"),
+                "Grok wording in a Claude row: {line}"
+            );
+        }
+    }
+}

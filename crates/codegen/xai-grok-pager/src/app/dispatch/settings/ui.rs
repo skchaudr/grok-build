@@ -451,8 +451,9 @@ pub(in crate::app::dispatch) fn dispatch_open_pi_settings(
     app: &mut AppView,
     focus_key: Option<&'static str>,
 ) -> Vec<Effect> {
+    use crate::settings::claude::ClaudeSettings;
     use crate::views::modal::ActiveModal;
-    use crate::views::pi_settings::PiSettingsState;
+    use crate::views::pi_settings::{AgentKind, PiSettingsState};
 
     let mut effects = vec![];
     let id = match app.active_view {
@@ -475,13 +476,24 @@ pub(in crate::app::dispatch) fn dispatch_open_pi_settings(
             }
         }
     };
-    let registry = app.settings_registry.clone();
+    // Claude's rows are appended here, never to the shared registry, and shown only for a Claude session.
+    let registry = std::sync::Arc::new(crate::settings::claude::registry_with_claude_rows(
+        &app.settings_registry,
+    ));
+    let agent_kind = if app.is_claude_agent(id) {
+        AgentKind::Claude
+    } else if app.is_pi_agent(id) {
+        AgentKind::Pi
+    } else {
+        AgentKind::Grok
+    };
     let ui_snapshot = app.current_ui.clone();
     let pager_snapshot = build_pager_snapshot(app);
 
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
     };
+    let claude = ClaudeSettings::from_options(&agent.session.models.config_options);
     if matches!(&agent.active_modal, Some(ActiveModal::PiSettings { .. })) {
         if focus_key.is_none() {
             debug_assert!(
@@ -495,7 +507,13 @@ pub(in crate::app::dispatch) fn dispatch_open_pi_settings(
     }
 
     tracing::info!(target: "settings", "opened pi settings panel");
-    let mut state = Box::new(PiSettingsState::new(registry, ui_snapshot, pager_snapshot));
+    let mut state = Box::new(PiSettingsState::new_for(
+        registry,
+        ui_snapshot,
+        pager_snapshot,
+        agent_kind,
+        claude,
+    ));
     if let Some(key) = focus_key
         && state.focus_key(key)
     {
@@ -523,9 +541,13 @@ pub(crate) fn refresh_open_pi_settings(app: &mut AppView) {
     let ui_snapshot = app.current_ui.clone();
     let pager_snapshot = build_pager_snapshot(app);
     for agent in app.agents.values_mut() {
+        let claude = crate::settings::claude::ClaudeSettings::from_options(
+            &agent.session.models.config_options,
+        );
         let Some(ActiveModal::PiSettings { state }) = agent.active_modal.as_mut() else {
             continue;
         };
+        state.claude = claude;
         state.rebuild_rows();
         state.ui_snapshot = ui_snapshot.clone();
         state.pager_snapshot = pager_snapshot.clone();

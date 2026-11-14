@@ -316,6 +316,7 @@ fn render_rows(buf: &mut Buffer, area: Rect, state: &mut PiSettingsState, theme:
                     rect,
                     meta,
                     state.value_of(key).as_ref(),
+                    state.claude_display(key).as_deref(),
                     label_w,
                     style,
                     state.lock(key),
@@ -609,6 +610,8 @@ fn render_setting_row(
     area: Rect,
     meta: &SettingMeta,
     value: Option<&SettingValue>,
+    // Replaces the value column's text where the raw value is an id (Claude options).
+    display: Option<&str>,
     label_w: u16,
     row: RowStyle,
     lock: Option<CodingDataSharingLock>,
@@ -679,7 +682,10 @@ fn render_setting_row(
     let value_floor = label_x + label_w.min(label_avail) + GAP_W;
     let value_avail = chevron_x.saturating_sub(value_floor);
     let text = value
-        .map(|value| truncate_str(&value_text(meta, value, lock), value_avail as usize))
+        .map(|value| match display {
+            Some(text) => truncate_str(text, value_avail as usize),
+            None => truncate_str(&value_text(meta, value, lock), value_avail as usize),
+        })
         .unwrap_or_default();
     let value_w = (text.width() as u16).min(value_avail);
     let value_x = chevron_x.saturating_sub(value_w);
@@ -933,6 +939,7 @@ fn render_group_sheet(buf: &mut Buffer, area: Rect, state: &mut PiSettingsState,
             rect,
             child_meta,
             state.value_of(child_key).as_ref(),
+            None,
             label_w,
             style,
             None,

@@ -1036,6 +1036,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::ClaudeOptionSet { agent_id, key, result } => {
+            super::settings::setters::claude_option_set(app, agent_id, key, result)
+        }
         TaskResult::ConsentPersistFailed { error } => {
             tracing::warn!(%error, "consent answer not persisted; the notice re-arms next launch");
             app.show_toast(

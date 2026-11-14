@@ -25,6 +25,7 @@ use ratatui::layout::Rect;
 use super::layout;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
+use crate::settings::claude::{self, ClaudeSettings};
 use crate::settings::{
     CodingDataSharingLock, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory,
     SettingKey, SettingKind, SettingMeta, SettingValue, SettingsRegistry, StringValidator,
@@ -36,6 +37,16 @@ use xai_grok_shell::agent::config::UiConfig;
 
 /// Panel title, shown on the modal's top border.
 pub const MODAL_TITLE: &str = "Settings";
+
+/// Which agent hosts the session the panel was opened from. Rows are scoped to it:
+/// Claude rows show only for [`Self::Claude`], and Pi's `external_only` rows never show for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentKind {
+    #[default]
+    Grok,
+    Claude,
+    Pi,
+}
 
 /// One entry in the flat row table.
 #[derive(Debug, Clone, PartialEq)]
@@ -187,6 +198,10 @@ pub struct PiSettingsState {
     /// `UiConfig` snapshot, refreshed by the dispatcher on every mutation.
     pub ui_snapshot: UiConfig,
     pub pager_snapshot: PagerLocalSnapshot,
+    /// Agent hosting the focused session; scopes which rows exist.
+    pub agent: AgentKind,
+    /// The focused Claude session's live options, refreshed with the snapshots.
+    pub claude: ClaudeSettings,
 
     /// Every tab's rows, in render order.
     pub rows: Vec<Row>,
@@ -233,13 +248,32 @@ impl PiSettingsState {
         ui_snapshot: UiConfig,
         pager_snapshot: PagerLocalSnapshot,
     ) -> Self {
-        let rows = build_rows(&registry);
+        Self::new_for(
+            registry,
+            ui_snapshot,
+            pager_snapshot,
+            AgentKind::Grok,
+            ClaudeSettings::default(),
+        )
+    }
+
+    /// [`Self::new`] for the session of a known agent kind.
+    pub fn new_for(
+        registry: Arc<SettingsRegistry>,
+        ui_snapshot: UiConfig,
+        pager_snapshot: PagerLocalSnapshot,
+        agent: AgentKind,
+        claude: ClaudeSettings,
+    ) -> Self {
+        let rows = build_rows(&registry, agent, &claude);
         let tabs = build_tabs(&rows);
         let mut state = Self {
             window: ModalWindowState::with_tabs(tabs.len()),
             registry,
             ui_snapshot,
             pager_snapshot,
+            agent,
+            claude,
             rows,
             tabs,
             active_tab: 0,
@@ -313,11 +347,24 @@ impl PiSettingsState {
 
     /// Live value for a key, read from the snapshots.
     pub fn value_of(&self, key: SettingKey) -> Option<SettingValue> {
+        if claude::is_claude_key(key) {
+            return self.claude.value_of(key);
+        }
         current_value_for(key, &self.ui_snapshot, &self.pager_snapshot)
+    }
+
+    /// Display text for a Claude row's value (the option's name rather than its id), `None` for other rows.
+    pub fn claude_display(&self, key: SettingKey) -> Option<String> {
+        let option = self.claude.option(key)?;
+        (key != claude::FAST).then(|| option.current_label())
     }
 
     /// Registered default for a key.
     pub fn default_of(&self, key: SettingKey) -> Option<SettingValue> {
+        // A live session option has no registered default to reset to.
+        if claude::is_claude_key(key) {
+            return None;
+        }
         self.registry.find(key).map(default_value_for)
     }
 
@@ -361,6 +408,9 @@ impl PiSettingsState {
     /// Enum choices for a key, with gated-off options removed. Covers both
     /// static `Enum` catalogs and runtime `DynamicEnum` sources.
     pub fn choices_for(&self, key: SettingKey) -> Vec<OwnedEnumChoice> {
+        if claude::is_claude_key(key) {
+            return self.claude.choices_for(key);
+        }
         match self.registry.find(key).map(|m| &m.kind) {
             Some(SettingKind::Enum { choices, .. }) => self
                 .enabled_choices(key, choices)
@@ -456,7 +506,7 @@ impl PiSettingsState {
         let previous_tab = self.active_category();
         let sub_pane_key = self.mode.subject();
 
-        self.rows = build_rows(&self.registry);
+        self.rows = build_rows(&self.registry, self.agent, &self.claude);
         self.tabs = build_tabs(&self.rows);
         self.window.tab_count = self.tabs.len();
         self.window.tab_rects = vec![None; self.tabs.len()];
@@ -697,7 +747,9 @@ impl PiSettingsState {
         // A DynamicEnum value that no longer resolves (a renamed model, say)
         // must not land on the "(no override)" sentinel, or Enter would
         // silently wipe the user's preference.
-        let unknown_fallback = usize::from(is_dynamic && choices.len() > 1);
+        // Claude's choices carry no "(no override)" sentinel to skip past.
+        let unknown_fallback =
+            usize::from(is_dynamic && !claude::is_claude_key(key) && choices.len() > 1);
         let index = match &current {
             Some(SettingValue::Enum(cur)) => choices
                 .iter()
@@ -872,15 +924,35 @@ pub(super) fn choice_gated_off(
         || (key == "voice_capture_mode" && canonical == "hold" && !kitty_releases)
 }
 
+/// Whose rows a setting belongs to. Claude rows are the `claude.*` keys; Pi's are the `external_only` ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentScope {
+    Any,
+    Pi,
+    Claude,
+}
+
+fn agent_scope(meta: &SettingMeta) -> AgentScope {
+    if claude::is_claude_key(meta.key) {
+        AgentScope::Claude
+    } else if meta.external_only {
+        AgentScope::Pi
+    } else {
+        AgentScope::Any
+    }
+}
+
 /// Whether a row is visible under the current runtime gates: voice rows need
 /// voice mode, Hold-to-talk needs key releases, `hidden_in_minimal` rows drop
-/// out of minimal mode, and `external_only` rows only exist under grok-pi.
+/// out of minimal mode, `external_only` rows only exist under grok-pi, and
+/// each agent's rows show only for a session that agent hosts.
 pub(super) fn row_visible(
     meta: &SettingMeta,
     kitty_releases: bool,
     minimal: bool,
     voice_mode: bool,
     external_agent: bool,
+    agent: AgentKind,
 ) -> bool {
     if !voice_mode
         && matches!(
@@ -896,15 +968,16 @@ pub(super) fn row_visible(
     if minimal && meta.hidden_in_minimal {
         return false;
     }
-    if meta.external_only && !external_agent {
-        return false;
+    match agent_scope(meta) {
+        AgentScope::Any => true,
+        AgentScope::Claude => agent == AgentKind::Claude,
+        AgentScope::Pi => external_agent && agent != AgentKind::Claude,
     }
-    true
 }
 
 /// Build the full row table: per category, a tab heading followed by each
 /// non-empty section's heading and its settings.
-fn build_rows(registry: &SettingsRegistry) -> Vec<Row> {
+fn build_rows(registry: &SettingsRegistry, agent: AgentKind, claude: &ClaudeSettings) -> Vec<Row> {
     let kitty = crate::app::kitty_releases_reported();
     let minimal = crate::app::minimal_mode_active();
     let voice = crate::app::voice_mode_enabled();
@@ -929,7 +1002,9 @@ fn build_rows(registry: &SettingsRegistry) -> Vec<Row> {
             .iter()
             .enumerate()
             .filter(|(_, m)| m.category == *category)
-            .filter(|(_, m)| row_visible(m, kitty, minimal, voice, external))
+            .filter(|(_, m)| row_visible(m, kitty, minimal, voice, external, agent))
+            // Fast mode and Agent exist only when the session lists them.
+            .filter(|(_, m)| !claude::is_claude_key(m.key) || claude.offers(m.key))
             .filter(|(_, m)| !group_children.contains(m.key))
             .collect();
         if members.is_empty() {

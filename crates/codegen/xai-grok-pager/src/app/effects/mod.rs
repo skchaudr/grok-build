@@ -1956,6 +1956,16 @@ pub(crate) fn execute(
                     TaskResult::CancelComplete
                 });
         }
+        Effect::SetClaudeOption { agent_id, key, request } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let result = acp_send(request, &tx)
+                    .await
+                    .map(|resp| resp.config_options)
+                    .map_err(|e| sanitize_user_error(&e.to_string()));
+                TaskResult::ClaudeOptionSet { agent_id, key, result }
+            });
+        }
         Effect::SetModeThenPrompt {
             session_id,
             mode_id,

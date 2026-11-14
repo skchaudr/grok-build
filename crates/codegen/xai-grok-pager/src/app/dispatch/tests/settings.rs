@@ -4020,3 +4020,146 @@ fn mouse_reporting_toggle_enqueues_capture_escapes_on_the_writer_queue() {
         "toggle-on queues exactly one payload"
     );
 }
+
+/// Claude's advertised options as the adapter sends them: mode, model, effort, and Fast mode as an on/off select.
+fn claude_config_options(mode: &str, fast: &str) -> Vec<acp::SessionConfigOption> {
+    use acp::{
+        SessionConfigOption as Opt, SessionConfigOptionCategory as Cat,
+        SessionConfigSelectOption as Choice,
+    };
+    let model_choices = vec![Choice::new("opus", "Opus"), Choice::new("sonnet", "Sonnet")];
+    let mode_choices = vec![
+        Choice::new("default", "Default"),
+        Choice::new("acceptEdits", "Accept Edits"),
+        Choice::new("plan", "Plan Mode"),
+    ];
+    let effort_choices = vec![Choice::new("low", "Low"), Choice::new("high", "High")];
+    let fast_choices = vec![Choice::new("on", "On"), Choice::new("off", "Off")];
+    vec![
+        Opt::select("mode", "Mode", mode.to_owned(), mode_choices).category(Cat::Mode),
+        Opt::select("model", "Model", "opus", model_choices).category(Cat::Model),
+        Opt::select("effort", "Effort", "high", effort_choices).category(Cat::ThoughtLevel),
+        Opt::select("fast", "Fast mode", fast.to_owned(), fast_choices),
+    ]
+}
+
+fn claude_app(mode: &str) -> AppView {
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).expect("agent");
+    agent.session.session_id = Some(acp::SessionId::new("sess-claude"));
+    agent.session.models = crate::acp::model_state::ModelState::from(
+        crate::acp::model_state::models_or_config_option(
+            None,
+            Some(&claude_config_options(mode, "off")),
+        ),
+    );
+    app
+}
+
+#[test]
+fn claude_settings_row_sends_set_config_option_for_the_focused_session() {
+    let mut app = claude_app("default");
+    let cases = [
+        ("claude.mode", "plan", "mode", "plan"),
+        ("claude.effort", "low", "effort", "low"),
+        ("claude.model", "sonnet", "model", "sonnet"),
+        ("claude.fast", "on", "fast", "on"),
+    ];
+    for (key, value, config_id, wire_value) in cases {
+        let effects = dispatch(
+            Action::SetClaudeOption {
+                key,
+                value: value.to_owned(),
+            },
+            &mut app,
+        );
+        let [
+            Effect::SetClaudeOption {
+                agent_id,
+                key: effect_key,
+                request,
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("{key}: expected one SetClaudeOption effect, got {effects:?}");
+        };
+        assert_eq!(*agent_id, AgentId(0));
+        assert_eq!(*effect_key, key);
+        let json = serde_json::to_value(request).expect("request serializes");
+        assert_eq!(json["sessionId"], "sess-claude", "{key}");
+        assert_eq!(json["configId"], config_id, "{key}");
+        assert_eq!(json["value"], wire_value, "{key}");
+    }
+}
+
+#[test]
+fn claude_settings_row_is_a_no_op_for_the_current_value_or_an_unoffered_option() {
+    let mut app = claude_app("plan");
+    let same = dispatch(
+        Action::SetClaudeOption {
+            key: "claude.mode",
+            value: "plan".to_owned(),
+        },
+        &mut app,
+    );
+    assert!(
+        same.is_empty(),
+        "re-selecting the current mode sends nothing: {same:?}"
+    );
+    let unoffered = dispatch(
+        Action::SetClaudeOption {
+            key: "claude.agent",
+            value: "reviewer".to_owned(),
+        },
+        &mut app,
+    );
+    assert!(
+        unoffered.is_empty(),
+        "a session without an agent option sends nothing: {unoffered:?}"
+    );
+}
+
+#[test]
+fn claude_option_reply_moves_the_tracked_value_and_names_it_in_the_toast() {
+    let mut app = claude_app("default");
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ClaudeOptionSet {
+            agent_id: AgentId(0),
+            key: "claude.mode",
+            result: Ok(claude_config_options("plan", "off")),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    let settings = crate::settings::claude::ClaudeSettings::from_options(
+        &expect_agent(&app, AgentId(0)).session.models.config_options,
+    );
+    assert_eq!(
+        settings.value_of("claude.mode"),
+        Some(crate::settings::SettingValue::String("plan".to_owned())),
+        "the row must read the mode the adapter reported",
+    );
+    assert!(read_toast(&app).contains("Claude permission mode: Plan Mode"));
+}
+
+#[test]
+fn claude_option_refusal_toasts_and_keeps_the_tracked_value() {
+    let mut app = claude_app("default");
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::ClaudeOptionSet {
+            agent_id: AgentId(0),
+            key: "claude.effort",
+            result: Err("Invalid value for config option effort: max".to_owned()),
+        }),
+        &mut app,
+    );
+    let settings = crate::settings::claude::ClaudeSettings::from_options(
+        &expect_agent(&app, AgentId(0)).session.models.config_options,
+    );
+    assert_eq!(
+        settings.value_of("claude.effort"),
+        Some(crate::settings::SettingValue::String("high".to_owned())),
+    );
+    let toast = read_toast(&app);
+    assert!(toast.contains("Couldn't change Thinking effort"), "{toast}");
+}

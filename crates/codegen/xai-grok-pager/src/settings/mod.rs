@@ -16,6 +16,7 @@
 //! The registry is built once in `main` and threaded through `AppView::settings_registry: Arc<SettingsRegistry>`.
 //! This mirrors the `ActionRegistry` pattern. No `LazyLock`, no global state.
 
+pub mod claude;
 pub mod defs;
 pub mod layout;
 pub mod registry;

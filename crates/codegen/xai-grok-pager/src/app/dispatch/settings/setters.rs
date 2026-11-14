@@ -2616,6 +2616,81 @@ pub(in crate::app::dispatch) fn set_pi_tree_skip_summary_prompt(
     }]
 }
 
+/// The host's own name for a "restart X to apply" toast, so a Claude session never tells the user to restart grok-pi.
+fn host_restart_name(
+    brand: Option<crate::views::welcome::logo::ExternalWelcomeBrand>,
+) -> &'static str {
+    brand.map_or("grok-pi", |brand| brand.title)
+}
+
+/// A `claude.*` settings row changed: ask the adapter for it on the focused Claude session.
+/// The row repaints from the reply (`claude_option_set`), not from a guess made here.
+pub(in crate::app::dispatch) fn set_claude_option(
+    app: &mut AppView,
+    key: &'static str,
+    value: String,
+) -> Vec<Effect> {
+    use crate::settings::claude::{self, ClaudeSettings};
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get(&id) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return vec![];
+    };
+    let settings = ClaudeSettings::from_options(&agent.session.models.config_options);
+    let Some(option) = settings.option(key) else {
+        tracing::error!(target: "settings", key, "session does not offer this Claude option");
+        return vec![];
+    };
+    if option.current == value {
+        return vec![];
+    }
+    vec![Effect::SetClaudeOption {
+        agent_id: id,
+        key,
+        request: claude::set_option_request(session_id, option, &value),
+    }]
+}
+
+/// The adapter answered a Claude row's `session/set_config_option`.
+pub(in crate::app::dispatch) fn claude_option_set(
+    app: &mut AppView,
+    agent_id: crate::app::agent::AgentId,
+    key: &'static str,
+    result: Result<Vec<acp::SessionConfigOption>, String>,
+) -> Vec<Effect> {
+    use crate::settings::claude::{self, ClaudeSettings};
+    let label = claude::label_of(key);
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    match result {
+        Ok(options) => {
+            agent.session.models.apply_config_options(&options);
+            let value = ClaudeSettings::from_options(&options).option(key).map(|o| {
+                if key == claude::FAST {
+                    o.current.clone()
+                } else {
+                    o.current_label()
+                }
+            });
+            agent.show_toast(&match value {
+                Some(value) => format!("\u{2713} {label}: {value}"),
+                None => format!("\u{2713} {label} updated"),
+            });
+            refresh_open_settings_modals(app);
+        }
+        Err(error) => {
+            tracing::warn!(target: "settings", key, %error, "claude option change refused");
+            agent.show_toast(&format!("\u{2717} Couldn't change {label}: {error}"));
+        }
+    }
+    vec![]
+}
+
 pub(in crate::app::dispatch) fn set_host_feature_bool(
     app: &mut AppView,
     key: xai_grok_shell::host_features::HostFeatureKey,
@@ -2633,8 +2708,9 @@ pub(in crate::app::dispatch) fn set_host_feature_bool(
     refresh_open_settings_modals(app);
     let value = if enabled { "on" } else { "off" };
     if spec.restart_required {
+        let host = host_restart_name(crate::views::welcome::logo::welcome_brand_override());
         app.show_toast(&format!(
-            "\u{2713} {}: {value} \u{2014} restart grok-pi to apply",
+            "\u{2713} {}: {value} \u{2014} restart {host} to apply",
             spec.label
         ));
     } else {
@@ -3175,4 +3251,21 @@ pub(in crate::app::dispatch) fn set_display_refresh_auto_cadence(
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev_effective),
     }]
+}
+
+#[cfg(test)]
+mod host_restart_name_tests {
+    use super::host_restart_name;
+    use crate::views::welcome::logo::ExternalWelcomeBrand;
+
+    #[test]
+    fn restart_toast_names_the_host_and_defaults_to_grok_pi() {
+        let claude = ExternalWelcomeBrand {
+            title: "Claude Code",
+            subtitle: "",
+            version: "",
+        };
+        assert_eq!(host_restart_name(Some(claude)), "Claude Code");
+        assert_eq!(host_restart_name(None), "grok-pi");
+    }
 }

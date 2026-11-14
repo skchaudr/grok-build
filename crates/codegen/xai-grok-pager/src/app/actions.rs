@@ -728,6 +728,12 @@ pub enum Action {
         key: xai_grok_shell::host_features::HostFeatureKey,
         enabled: bool,
     },
+    /// Change one of the focused Claude session's live options (a `claude.*` settings row)
+    /// through `session/set_config_option`. `value` is the option's value id, or `on`/`off` for Fast mode.
+    SetClaudeOption {
+        key: &'static str,
+        value: String,
+    },
     /// Notify when a native Q&A question arrives while grok-pi is unfocused.
     SetPiAskUserQuestionNotifications(bool),
     SetPiCacheGraph(bool),
@@ -2071,6 +2077,13 @@ pub enum Effect {
         session_id: acp::SessionId,
         mode_id: acp::SessionModeId,
     },
+    /// Send a Claude settings row's `session/set_config_option`; the reply carries the options as they now stand.
+    SetClaudeOption {
+        agent_id: AgentId,
+        /// The `claude.*` row, for the result toast.
+        key: &'static str,
+        request: acp::SetSessionConfigOptionRequest,
+    },
     /// Set session mode then send a prompt, sequentially in one task.
     /// Used by `/plan <desc>` to guarantee the mode switch ACP call completes before the prompt is dispatched.
     SetModeThenPrompt {
@@ -3053,6 +3066,12 @@ pub enum TaskResult {
     SetSessionModeFailed {
         session_id: acp::SessionId,
         mode_id: acp::SessionModeId,
+    },
+    /// `session/set_config_option` for a Claude settings row answered. `Ok` carries the options as the agent now reports them.
+    ClaudeOptionSet {
+        agent_id: AgentId,
+        key: &'static str,
+        result: Result<Vec<acp::SessionConfigOption>, String>,
     },
     /// The marker can stop advertising itself as unsent.
     ConsentRecorded {

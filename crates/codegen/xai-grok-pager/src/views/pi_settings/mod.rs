@@ -24,4 +24,4 @@ mod tests;
 
 pub use input::{handle_key, handle_mouse, handle_paste};
 pub use render::render_pi_settings;
-pub use state::{MODAL_TITLE, ModeKind, Outcome, PiSettingsState, Row};
+pub use state::{AgentKind, MODAL_TITLE, ModeKind, Outcome, PiSettingsState, Row};

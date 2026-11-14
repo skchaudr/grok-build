@@ -86,7 +86,7 @@ use super::settings::setters::{
     set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap, set_contextual_hint_undo,
     set_contextual_hint_word_select, set_ctrl_o_tool_expansion, set_default_model,
     set_default_selected_permission, set_display_refresh_auto_cadence, set_follow_up_behavior,
-    set_fork_secondary_model, set_group_tool_verbs, set_host_feature_bool,
+    set_claude_option, set_fork_secondary_model, set_group_tool_verbs, set_host_feature_bool,
     set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection, set_max_thoughts_width,
     set_model_slot, set_multiline_mode, set_page_flip_on_send,
     set_pi_ask_user_question_notifications, set_pi_at_search_hidden, set_pi_bash,
@@ -1433,6 +1433,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             set_pi_tree_skip_summary_prompt(app, enabled)
         }
         Action::SetHostFeatureBool { key, enabled } => set_host_feature_bool(app, key, enabled),
+        Action::SetClaudeOption { key, value } => set_claude_option(app, key, value),
         Action::SetPiAskUserQuestionNotifications(enabled) => {
             set_pi_ask_user_question_notifications(app, enabled)
         }
