@@ -25,6 +25,7 @@ mod jemalloc_malloc_conf {
     #[unsafe(export_name = "_rjem_malloc_conf")]
     static MALLOC_CONF: MallocConfPtr = MallocConfPtr(CONF.as_ptr());
 }
+mod claude_brand;
 #[cfg(feature = "pi-grok")]
 #[path = "bin/grok_pi/brand.rs"]
 mod pi_brand;
@@ -1807,6 +1808,31 @@ fn install_pi_host_ui(args: &PagerArgs) {
     });
     pi_tutorial_profile::install();
 }
+/// `grok claude`: brand the welcome surface when Claude is the only agent on offer.
+fn install_claude_host_ui(args: &PagerArgs) {
+    use xai_grok_pager::slash::external_common::{agent_label_from_cmd, is_claude_label};
+    let is_claude = |cmd: &str| is_claude_label(agent_label_from_cmd(cmd).as_deref());
+    let choices = args.agent_choices().unwrap_or_default();
+    if !args.effective_agent_cmd().is_some_and(|cmd| is_claude(&cmd))
+        || choices.iter().any(|choice| !is_claude(&choice.cmd))
+    {
+        return;
+    }
+    xai_grok_pager::acp::set_launch_ui_profile(xai_grok_pager::acp::ExternalUiProfile {
+        agent_name: "Claude".to_string(),
+        logo: Some(xai_grok_pager::acp::ExternalLogoArt {
+            full: claude_brand::CLAUDE_LOGO,
+            small: claude_brand::CLAUDE_LOGO,
+        }),
+        welcome_brand: Some(xai_grok_pager::acp::ExternalWelcomeBrand {
+            title: "Claude Code",
+            subtitle: claude_brand::CLAUDE_WELCOME_SUBTITLE,
+            version: env!("GROK_PI_VERSION"),
+        }),
+        changelog_url: Some(claude_brand::CLAUDE_CHANGELOG_URL),
+        ..Default::default()
+    });
+}
 fn configure_process_env(mut args: PagerArgs) -> Result<PagerArgs> {
     flag_dashboard_at_startup_if_requested(&mut args)?;
     let args = args.with_config_agent_choices()?.apply_cwd()?;
@@ -2607,6 +2633,7 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
         };
     #[cfg(feature = "pi-grok")]
     install_pi_host_ui(&args);
+    install_claude_host_ui(&args);
     let result = xai_grok_pager::app::run(args, bg_update_rx).await;
     xai_grok_sandbox::flush();
     match result {

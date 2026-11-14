@@ -1110,6 +1110,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             vec![]
         }
         TaskResult::ChangelogFetched { markdown, entries } => {
+            // A host with its own changelog link never shows Grok's release notes.
+            if crate::views::welcome::logo::welcome_menu_override()
+                .is_some_and(|menu| menu.changelog_url.is_some())
+            {
+                return vec![];
+            }
             app.changelog_markdown = markdown;
             app.changelog_bullets =
                 xai_grok_shell::util::changelog::bullets_from_entries(&entries, 3);

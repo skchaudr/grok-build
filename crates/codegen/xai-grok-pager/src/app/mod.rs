@@ -2156,11 +2156,14 @@ pub(crate) fn set_terminal_title(title: &str) {
 /// An embedded BEL/ESC would terminate the OSC early and let the remainder inject arbitrary escape sequences into the terminal.
 fn terminal_title_string(title: &str) -> String {
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
+    // An external host with its own welcome brand names the window, not Grok.
+    let product = crate::views::welcome::logo::welcome_brand_override()
+        .map_or_else(|| "grok".to_string(), |brand| brand.title.to_lowercase());
     if sanitized.is_empty() {
-        "grok".into()
+        product
     } else {
         let truncated: String = sanitized.chars().take(80 - 6).collect();
-        format!("{} - grok", truncated)
+        format!("{truncated} - {product}")
     }
 }
 #[cfg(test)]

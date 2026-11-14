@@ -9,12 +9,38 @@ fn expect_agent(app: &AppView, id: AgentId) -> &AgentView {
 use crate::views::modal::ActiveModal;
 use xai_grok_shell::session::unified_list::ListScope;
 
+/// Only Pi has an external session catalog; `grok claude` lists through ACP `session/list`.
+#[test]
+fn claude_host_resume_lists_through_acp_not_the_pi_catalog() {
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    app.external_agent_label = Some("claude-agent-acp".into());
+    let effects = dispatch(Action::ShowSessionPicker, &mut app);
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::FetchSessionList { .. })),
+        "claude resume must fetch the ACP session list, got {effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::FetchExternalSessionCatalog { .. })),
+        "claude resume must not use the Pi catalog, got {effects:?}"
+    );
+    let agent = expect_agent(&app, AgentId(0));
+    assert!(matches!(
+        agent.active_modal,
+        Some(ActiveModal::SessionPicker {
+            source_filter: crate::views::session_picker::SourceFilter::Grok,
+            ..
+        })
+    ));
+}
+
 #[test]
 fn external_resume_uses_current_tab_then_loads_all_on_refresh() {
     use crate::views::modal::ActiveModal;
 
     let mut app = test_app_with_agent();
     app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
     let effects = dispatch(Action::ShowSessionPicker, &mut app);
     assert!(
         matches!(

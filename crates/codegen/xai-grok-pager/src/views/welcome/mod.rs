@@ -1051,7 +1051,10 @@ fn render_welcome_trust(
         Line::default(),
         // Two lines so the warning never clips at narrow / compact widths (a single ~78-char line would truncate "...posing security risks")
         Line::from(Span::styled(
-            "Grok Build may run or modify contents in this directory,",
+            format!(
+                "{} may run or modify contents in this directory,",
+                logo::welcome_brand_override().map_or("Grok Build", |brand| brand.title)
+            ),
             Style::default().fg(theme.gray),
         ))
         .alignment(Alignment::Center),

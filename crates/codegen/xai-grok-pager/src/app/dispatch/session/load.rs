@@ -1874,10 +1874,15 @@ pub(in crate::app::dispatch) fn handle_session_preview_loaded(
     vec![]
 }
 
+/// Only Pi has an external session catalog; other external hosts (Claude, Codex) list through ACP `session/list`.
+fn pi_catalog_host(app: &AppView) -> bool {
+    app.is_pi_session()
+}
+
 pub(in crate::app::dispatch) fn dispatch_show_session_picker(app: &mut AppView) -> Vec<Effect> {
     use super::lifecycle::discard_welcome_prewarm;
     use crate::views::modal::ActiveModal;
-    let external_agent = app.external_agent;
+    let external_agent = pi_catalog_host(app);
     let has_agent = matches!(app.active_view, crate::app::app_view::ActiveView::Agent(_));
     // Resume replaces the empty prewarmed session; drop it so we do not leak
     // a background Pi session the user never typed into.
@@ -1923,7 +1928,7 @@ pub(in crate::app::dispatch) fn dispatch_show_session_picker(app: &mut AppView) 
 /// Populate the welcome-screen session picker from the external (Pi) catalog.
 /// Used when Resume is opened on Welcome before any agent session exists.
 fn dispatch_refresh_external_session_catalog_welcome(app: &mut AppView) -> Vec<Effect> {
-    if !app.external_agent {
+    if !pi_catalog_host(app) {
         return vec![];
     }
     app.session_picker_detail_generation += 1;
@@ -1945,7 +1950,7 @@ pub(in crate::app::dispatch) fn dispatch_refresh_external_session_catalog(
     app: &mut AppView,
 ) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;
-    if !app.external_agent {
+    if !pi_catalog_host(app) {
         return vec![];
     }
     // Welcome has no agent modal: refresh the welcome picker instead.
