@@ -2562,13 +2562,15 @@ pub(crate) fn render_session_picker_body(
             pinned: false,
         });
     } else if !controls_hidden {
-        default_shortcuts.push(HintItem {
-            keys: vec![],
-            label: "filter".into(),
-            custom_display: Some("f"),
-            description: None,
-            pinned: false,
-        });
+        if !logo::session_filters_hidden() {
+            default_shortcuts.push(HintItem {
+                keys: vec![],
+                label: "filter".into(),
+                custom_display: Some("f"),
+                description: None,
+                pinned: false,
+            });
+        }
         default_shortcuts.push(HintItem {
             keys: vec![],
             label: "delete".into(),
@@ -2590,9 +2592,12 @@ pub(crate) fn render_session_picker_body(
         shortcuts_area: ctx.shortcuts_area,
         tabs: None,
         active_tab: 0,
-        filter_label: (!controls_hidden).then(|| ctx.source_filter.label()),
-        filter_key_hint: (!controls_hidden).then_some("f"),
-        filter_active: !controls_hidden && ctx.source_filter.is_active(),
+        filter_label: (!controls_hidden && !logo::session_filters_hidden())
+            .then(|| ctx.source_filter.label()),
+        filter_key_hint: (!controls_hidden && !logo::session_filters_hidden()).then_some("f"),
+        filter_active: !controls_hidden
+            && !logo::session_filters_hidden()
+            && ctx.source_filter.is_active(),
         header_note: hidden_hint.as_deref(),
         action_keys: if controls_hidden || ctx.pending_delete {
             &[]

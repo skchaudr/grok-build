@@ -128,6 +128,8 @@ pub struct ExternalUiProfile {
     pub changelog_url: Option<&'static str>,
     /// Name this host gives the Agent Dashboard (the header `[Dashboard]` button, its footer hint and its title); `None` keeps "Dashboard".
     pub dashboard_label: Option<&'static str>,
+    /// Hide the `/resume` source filters (chip, `f` hint, page cycling) for a host that lists everything on one page.
+    pub hide_session_filters: bool,
     /// Allow Pager-owned voice dictation while retaining the external agent's
     /// ownership of prompts, sessions, and model selection.
     pub enable_voice_dictation: bool,
@@ -170,6 +172,7 @@ impl Default for ExternalUiProfile {
             hide_new_worktree: false,
             changelog_url: None,
             dashboard_label: None,
+            hide_session_filters: false,
             enable_voice_dictation: false,
             host_features: xai_grok_shell::host_features::HostFeatureManifest::default(),
         }

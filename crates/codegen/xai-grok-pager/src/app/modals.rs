@@ -1459,6 +1459,7 @@ impl AgentView {
                 let chat_mode = self.app_chat_mode;
                 let external_picker =
                     *source_filter == crate::views::session_picker::SourceFilter::External;
+                let filters_hidden = crate::views::welcome::logo::session_filters_hidden();
                 let external_tabs = ["Current folder", "All"];
                 let config = PickerConfig {
                     title: Some("Resume session"),
@@ -1476,9 +1477,13 @@ impl AgentView {
                     } else {
                         0
                     },
-                    filter_label: (!chat_mode && !external_picker).then(|| source_filter.label()),
-                    filter_key_hint: (!chat_mode && !external_picker).then_some("f"),
-                    filter_active: !chat_mode && !external_picker && source_filter.is_active(),
+                    filter_label: (!chat_mode && !external_picker && !filters_hidden)
+                        .then(|| source_filter.label()),
+                    filter_key_hint: (!chat_mode && !external_picker && !filters_hidden).then_some("f"),
+                    filter_active: !chat_mode
+                        && !external_picker
+                        && !filters_hidden
+                        && source_filter.is_active(),
                     header_note: None,
                     action_keys: if external_picker {
                         &[('s', "sort")]
@@ -3424,11 +3429,13 @@ impl AgentView {
                             });
                         }
                         if !chat_mode {
-                            shortcuts.push(Shortcut {
-                                label: "f filter",
-                                clickable: false,
-                                id: 0,
-                            });
+                            if !crate::views::welcome::logo::session_filters_hidden() {
+                                shortcuts.push(Shortcut {
+                                    label: "f filter",
+                                    clickable: false,
+                                    id: 0,
+                                });
+                            }
                             if !external {
                                 shortcuts.push(Shortcut {
                                     label: "y copy",
@@ -3489,7 +3496,7 @@ impl AgentView {
                         );
                         // Render filter indicator on the search bar row (hidden in
                         // chat mode — every row is a conversation).
-                        if chat_mode {
+                        if chat_mode || crate::views::welcome::logo::session_filters_hidden() {
                             state.filter_area = None;
                         } else {
                             let filter_rect = picker::render_filter_indicator(

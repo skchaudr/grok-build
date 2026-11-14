@@ -763,6 +763,10 @@ pub(in crate::app::dispatch) fn dispatch_cycle_session_source_filter(
     app: &mut AppView,
 ) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;
+    // A host that hides the source filters has one page of sessions: `f` and a chip click do nothing.
+    if crate::views::welcome::logo::session_filters_hidden() {
+        return vec![];
+    }
     let chat_mode = app.chat_mode;
     let mut has_crossed_headless = false;
     let mut is_handled_by_modal = false;

@@ -1318,6 +1318,7 @@ async fn run(mut args: Args) -> Result<()> {
                 hide_new_worktree: true,
                 changelog_url: Some(PI_CHANGELOG_URL),
                 dashboard_label: None,
+                hide_session_filters: false,
                 enable_voice_dictation: true,
                 host_features: host_feature_manifest.clone(),
             },

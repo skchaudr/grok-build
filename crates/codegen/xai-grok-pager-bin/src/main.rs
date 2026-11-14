@@ -1850,6 +1850,7 @@ fn install_claude_host_ui(args: &PagerArgs) {
         }),
         changelog_url: Some(claude_brand::CLAUDE_CHANGELOG_URL),
         dashboard_label: Some("Agents"),
+        hide_session_filters: true,
         enable_voice_dictation: true,
         ..Default::default()
     });

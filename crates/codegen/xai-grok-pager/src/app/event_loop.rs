@@ -919,6 +919,7 @@ fn apply_welcome_profile(profile: Option<&crate::acp::ExternalUiProfile>) {
         hide_new_worktree: p.hide_new_worktree,
         changelog_url: p.changelog_url,
         dashboard_label: p.dashboard_label,
+        hide_session_filters: p.hide_session_filters,
     }));
     logo::set_welcome_brand_override(profile.and_then(|p| p.welcome_brand).map(|brand| {
         logo::ExternalWelcomeBrand {

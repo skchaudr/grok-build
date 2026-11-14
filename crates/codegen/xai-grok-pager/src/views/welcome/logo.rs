@@ -114,6 +114,8 @@ pub struct ExternalWelcomeMenu {
     pub hide_new_worktree: bool,
     pub changelog_url: Option<&'static str>,
     pub dashboard_label: Option<&'static str>,
+    /// The host lists all its sessions on one page: no source-filter chip, `f` hint or page cycling in `/resume`.
+    pub hide_session_filters: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +138,11 @@ pub fn set_welcome_menu_override(menu: Option<ExternalWelcomeMenu>) {
 }
 
 /// Current welcome menu override, if any.
+/// Whether the host's `/resume` hides the source filters (Claude: every row is one of its sessions).
+pub fn session_filters_hidden() -> bool {
+    welcome_menu_override().is_some_and(|menu| menu.hide_session_filters)
+}
+
 /// What the host calls the Agent Dashboard: "Dashboard" unless its profile names it (Claude: "Agents").
 pub fn dashboard_label() -> &'static str {
     welcome_menu_override()
