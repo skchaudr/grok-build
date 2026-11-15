@@ -115,3 +115,11 @@ Pi 1.4.0, pi-subagents 0.82.1, pi-workflows 0.17.7, model cliproxy/gemini-3.8-fl
 - A pi-subagents async child can start its own pi-workflows run: with `tools` omitted, child `5b647ca0-b884-43ef-bb59-2be21679cd21` called `workflow list`, started `echo`; `pi-workflows runs` shows run `20261027T050605717Z-echo-662e1b6c` with `originSessionId` `01a17bbe-4416-73a2-bb98-f6e4d9990503` = the child's session id (session header). Output `{"reply":"PONG"}` (sqlite `node_attempts`/`blobs`, queried by the child).
 - A killed parent does not stop a detached async child (runner pid 1293 stayed alive, blocked on `contact_supervisor`); kill the runner pid from `status.json`.
 - Whether any harness runs its hook in a sandbox that blocks Unix-socket `sendto` (the `grok-traces` wake datagram): unknown, not tested. A blocked send is swallowed; viewers fall back to their 2 s timer.
+
+## grok claude: slash commands go through the model (open gap, 2026-11-14)
+
+Sab, 2026-11-14: "grok claude does not handle slash commands intelligently or gracefully. If I want to make a deterministic change like changing effort level, it HAS to go the model first, it gets queued".
+
+- Seen the same day: `/effort high` typed in a `grok claude` session while a turn was running was queued, then delivered to Claude as part of the next turn (a `<command-name>/effort</command-name>` block), not applied on the spot.
+- A direct path already exists for the same setting: the Claude settings rows (`settings/claude.rs`: mode, model, effort, fast, agent) send `session/set_config_option` through `Effect::SetClaudeOption` with no model turn.
+- Not traced yet: where the pager decides to forward a typed `/effort` (and the other Claude commands that only change a setting) as prompt text instead of using that path.
