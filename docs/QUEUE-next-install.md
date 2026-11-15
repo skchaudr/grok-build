@@ -22,11 +22,12 @@ Entry format:
 - Ask: Sab 2026-11-14, "the five hour percentage for Claude should go at that footer right there. Same with Codex and same with Open Code Go Even Grok"
 - Scout: `docs/briefs/scout-usage-footer-areas-2026-11-15.md`, then reviewer `docs/briefs/review-usage-footer-scope-2026-11-15.md`
 
-### grok-fork resume of normal Grok sessions
-- Ask: Sab 2026-11-15, "grok-fork apparently cannot resume normal grok sessions, which is kind of lame, in fact i do not know on sab-air if any sessions are currently resumable"
-- Scout: `docs/briefs/scout-grok-resume-2026-11-15.md`
-
 ## Flagged, not scouted
+
+### Grok sessions in the resume picker
+- Ask: Sab 2026-11-15, "grok-fork apparently cannot resume normal grok sessions, which is kind of lame, in fact i do not know on sab-air if any sessions are currently resumable"
+- Scouted: `docs/SCOUT-grok-resume-2026-11-15.md`. Plain `grok-fork` lists Grok sessions (8 of 21 on the Mini; the 13 hidden ones have 2 lines of history or fewer). `grok claude` lists only Claude sessions, because it asks only the Claude adapter (`app/effects/mod.rs` external branch, `dispatch/session/foreign.rs:65`). sab-air has 21 Grok sessions on disk. Loading a session was not exercised.
+- Open: showing Grok rows under `grok claude` is a listing change, but opening one there means switching the running agent from Claude to Grok; that part is not mapped.
 
 ### Slash commands in grok claude go through the model
 - Ask: Sab 2026-11-14, "If I want to make a deterministic change like changing effort level, it HAS to go the model first, it gets queued"
