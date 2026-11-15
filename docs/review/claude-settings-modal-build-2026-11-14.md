@@ -26,8 +26,8 @@ Mode goes through `set_config_option`, not `Effect::SetSessionMode`: the adapter
 Registry: the Claude rows are appended to the registry when the panel opens (`registry_with_claude_rows`), never to `SettingsRegistry::defaults()`, so the upstream settings modal and its registry-wide invariant tests do not see them. Label is "Claude permission mode" because the Agent tab already has a "Permission mode" row (Grok's own).
 
 ## Not done / for the lead
-- `app/acp_handler/mod.rs` (yours): after `models.apply_config_options(...)` in the `ConfigOptionUpdate` branch, call `crate::app::dispatch::settings::ui::refresh_open_pi_settings(app)` if you want an open panel to repaint on a server-pushed change. A change made from the panel repaints already.
-- Grok's own Approval/Plan-mode rows in the Agent tab still show under `grok claude`. They are not Claude's settings and I left them; hiding them is one more scope value in `agent_scope`.
+- Landed: the `ConfigOptionUpdate` branch in `app/acp_handler/mod.rs` now repaints an open settings panel when `apply_config_options` reports a change (via `refresh_open_settings_modals`, which calls `refresh_open_pi_settings`, after the `agent` borrow ends). Test: `server_pushed_config_option_update_repaints_an_open_claude_panel`.
+- Landed: Grok's `permission_mode`, `remember_tool_approvals` and `plan_mode` rows are hidden for a Claude session in `row_visible`; Grok and Pi sessions keep them. Test: `grok_approval_and_plan_rows_hide_only_for_a_claude_session`.
 - Boolean-typed Fast mode is coded and unit-tested at the request level; the pager does not opt into boolean config options, so the live adapter should send the on/off select. Not seen on a live session.
 - Nothing rendered on a real screen; the panel render test only checks text in a `Buffer`.
 

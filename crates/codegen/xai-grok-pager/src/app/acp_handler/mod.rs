@@ -231,6 +231,7 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     }
                     let mut plan_mode_modal_refresh_needed = false;
                     let mut workflows_modal_refresh = false;
+                    let mut config_options_changed = false;
                     let mutated = if dedup_drop {
                         tracing::debug!(
                             session_id = notif.request.session_id.0.as_ref(),
@@ -277,6 +278,7 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             models.model_changed_during_switch = true;
                         }
                         let changed = models.apply_config_options(&update.config_options);
+                        config_options_changed = changed;
                         advance_reconnect_cursor(agent, &mut meta);
                         changed && is_active
                     } else if let acp::SessionUpdate::ToolCallUpdate(ref tcu) = notif.request.update
@@ -441,7 +443,8 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         advance_reconnect_cursor(agent, &mut meta);
                         !meta.is_replay && !agent.session.loading_replay
                     };
-                    if plan_mode_modal_refresh_needed {
+                    // Repaints an open Claude/grok-pi settings panel after a server-pushed option change.
+                    if plan_mode_modal_refresh_needed || config_options_changed {
                         crate::app::dispatch::refresh_open_settings_modals(app);
                     }
                     if workflows_modal_refresh {

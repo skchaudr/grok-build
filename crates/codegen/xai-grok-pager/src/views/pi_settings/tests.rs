@@ -725,6 +725,28 @@ mod claude_rows {
     }
 
     #[test]
+    fn grok_approval_and_plan_rows_hide_only_for_a_claude_session() {
+        let registry = SettingsRegistry::defaults();
+        for key in ["permission_mode", "remember_tool_approvals", "plan_mode"] {
+            let meta = registry
+                .all()
+                .iter()
+                .find(|meta| meta.key == key)
+                .unwrap_or_else(|| panic!("the registry has {key}"));
+            for kind in [AgentKind::Grok, AgentKind::Pi] {
+                assert!(
+                    row_visible(meta, true, false, true, true, kind),
+                    "{key} stays visible for {kind:?}",
+                );
+            }
+            assert!(
+                !row_visible(meta, true, false, true, true, AgentKind::Claude),
+                "{key} is hidden for a Claude session",
+            );
+        }
+    }
+
+    #[test]
     fn pi_rows_never_show_for_a_claude_session() {
         let registry = SettingsRegistry::defaults();
         let pi_row = registry

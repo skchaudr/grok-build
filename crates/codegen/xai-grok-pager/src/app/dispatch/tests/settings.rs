@@ -4163,3 +4163,48 @@ fn claude_option_refusal_toasts_and_keeps_the_tracked_value() {
     let toast = read_toast(&app);
     assert!(toast.contains("Couldn't change Thinking effort"), "{toast}");
 }
+
+#[test]
+fn server_pushed_config_option_update_repaints_an_open_claude_panel() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::pi_settings::{AgentKind, PiSettingsState};
+    let mut app = claude_app("default");
+    let registry = std::sync::Arc::new(crate::settings::claude::registry_with_claude_rows(
+        &app.settings_registry,
+    ));
+    let state = PiSettingsState::new_for(
+        registry,
+        app.current_ui.clone(),
+        crate::app::dispatch::build_pager_snapshot(&app),
+        AgentKind::Claude,
+        crate::settings::claude::ClaudeSettings::from_options(
+            &expect_agent(&app, AgentId(0)).session.models.config_options,
+        ),
+    );
+    app.agents.get_mut(&AgentId(0)).expect("agent").active_modal =
+        Some(ActiveModal::PiSettings {
+            state: Box::new(state),
+        });
+    let (response_tx, _rx) = tokio::sync::oneshot::channel();
+    crate::app::acp_handler::handle(
+        xai_acp_lib::AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+            request: acp::SessionNotification::new(
+                acp::SessionId::new("sess-claude"),
+                acp::SessionUpdate::ConfigOptionUpdate(acp::ConfigOptionUpdate::new(
+                    claude_config_options("plan", "off"),
+                )),
+            ),
+            response_tx,
+        }),
+        &mut app,
+    );
+    let Some(ActiveModal::PiSettings { state }) = &expect_agent(&app, AgentId(0)).active_modal
+    else {
+        panic!("the panel must stay open");
+    };
+    assert_eq!(
+        state.claude.value_of("claude.mode"),
+        Some(crate::settings::SettingValue::String("plan".to_owned())),
+        "an open panel must read the mode the server pushed",
+    );
+}

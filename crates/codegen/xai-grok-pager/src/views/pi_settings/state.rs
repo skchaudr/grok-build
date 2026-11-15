@@ -968,6 +968,15 @@ pub(super) fn row_visible(
     if minimal && meta.hidden_in_minimal {
         return false;
     }
+    // Grok's own approval/plan rows are not Claude's settings; Claude has its own rows.
+    if agent == AgentKind::Claude
+        && matches!(
+            meta.key,
+            "permission_mode" | "remember_tool_approvals" | "plan_mode"
+        )
+    {
+        return false;
+    }
     match agent_scope(meta) {
         AgentScope::Any => true,
         AgentScope::Claude => agent == AgentKind::Claude,
