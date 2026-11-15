@@ -8,6 +8,8 @@ Investigation only. You change no source code and no config on either machine. R
 
 2026-11-15: "Dispatch a Sonnet 5.5 agent to look into it because I swear there's a major regression on sab-air over the original"
 
+2026-11-15, asked which command gives the worse one: "I was running pig and grok-pi on sab-air; settings, config, slash commands, the agent dashboard - all felt different as fuck and worse"
+
 2026-11-13, on Dwsy's grok-pi: it "absolutely deserve[s] that alias" (`pig`).
 
 ## Known facts (checked 2026-11-15 06:15, do not redo)
@@ -19,10 +21,14 @@ Investigation only. You change no source code and no config on either machine. R
 - On the Mini `pig` is `~/.grok-hub/scripts/hub/pig` and runs the fork's copy (`ab8cfd6d`, 2026-11-10).
 - `docs/HARNESS-FACTS.md` has Pi sections; read them first.
 
+## Premise to settle first (do not assume)
+
+Sab's commands `pig` and `grok-pi` on sab-air have pointed at Dwsy's standalone 0.1.13 since 2026-11-13 10:44. So the version he calls worse may be Dwsy's 0.1.13 itself, compared with whatever `pig` ran before that date (the fork's copy from 2026-11-10, or an earlier Dwsy release before that), and not the fork's copy. Establish what `pig` and `grok-pi` ran on sab-air on each date from 2026-11-01 to now (symlink targets, file dates, backups, hub script history in `~/.grok-hub`, shell history counts), then say which version is "the original" he liked and which is the one he is running now. The four areas he named are the comparison: settings, config, slash commands, the agent dashboard.
+
 ## Find out
 
 A. **What Sab actually runs.** From sab-air's session stores and logs (not by starting sessions): which of the three paths were used in the last 7 days, how many sessions each, newest timestamp each. Counts and timestamps only.
-B. **What the fork's copy lacks or does differently from the original 0.1.13.** Compare by reading: the fork's `pi-grok-adapter`/`grok-pi-acp` and Pi host UI code against Dwsy's release as installed on sab-air (its binary's `--help`/`--version`, any bundled files, its changelog, and its source if a checkout exists on either machine; say where you looked). List concrete differences a user would feel: features missing, behaviours changed, Pi version or extensions loaded, tools, slash commands, resume, models, settings, startup.
+B. **What differs between the version he runs now and the one he liked, in settings, config, slash commands and the agent dashboard first.** Cover all three candidates (Dwsy 0.1.13, any earlier Dwsy release he had, the fork's copy). Compare by reading: the fork's `pi-grok-adapter`/`grok-pi-acp` and Pi host UI code against Dwsy's release as installed on sab-air (its binary's `--help`/`--version`, any bundled files, its changelog, and its source if a checkout exists on either machine; say where you looked). List concrete differences a user would feel: features missing, behaviours changed, Pi version or extensions loaded, tools, slash commands, resume, models, settings, startup.
 C. **Failures on record.** In sab-air's logs for fork-run Pi sessions since 2026-11-09 (grok-fork logs, grok-pi-acp stderr, Pi session files): errors, crashes, hangs, dropped tool calls, with counts and one example line each. Never copy prompt or message text; error lines and field names only.
 D. **Drift.** Is the fork's copy behind the original (what version of Dwsy's code was it taken from, what has Dwsy shipped since)?
 
