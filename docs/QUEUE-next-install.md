@@ -52,6 +52,18 @@ Entry format:
 - Sab 2026-11-15: "I am surprised we are sticking to ONE TUI for grokclaid. Like grok claude could have a full claude talored settings modal, grok pi could have its own, prime agent has its own, which we will get to eventually, recent changes were made for prime"
 - Today: host profiles exist for Pi and Claude (`install_pi_host_ui`, `install_claude_host_ui` in `xai-grok-pager-bin/src/main.rs`; `HostFeatureManifest` in `xai-grok-shell/src/host_features.rs`). They set brand, welcome and changelog; settings are one shared modal with per-host rows shown or hidden. Prime has rendering and resume fixes (`caec749c`, `2f969e3b`) and no host profile.
 
+### grok claude shows nothing while Claude is thinking
+- Ask: Sab 2026-11-15, "grok-claude does this thing where it no longer shows anything while claude is just thining".
+- Not scouted. Related: `7449ac53` (Claude host working state after Worked-for).
+
+### install-fork.sh does not ship grok-pi-acp
+- Sab 2026-11-15, on the fact below: "That s an issue".
+- Fact: `scripts/install-fork.sh` copies `grok-fork` and `grok-traces` only. On sab-air `~/.grok/bin/grok-pi-acp` is from 2026-11-09 while `grok-fork` is from 2026-11-14, so `grok grok-pi` runs a new pager against an old Pi piece.
+
+### Pi on sab-air: what Sab runs is Dwsy's binary
+- Checked on screen 2026-11-15: `pig`, `grok-pi`, `pi-grok` on sab-air are Dwsy's standalone 0.1.13 (own home `~/.grok-pi`); ours runs only as `grok grok-pi`. Report: `docs/INVESTIGATE-grok-pi-regression-2026-11-15.md`.
+- Sab 2026-11-15, in Dwsy's binary: "I'm not able to dispatcher start a new Pi session if Pi is mid turn, which sucks". Not ours to fix unless the same happens in `grok grok-pi`; not checked there.
+
 ## Not queued
 
 - Fresh Claude usage via adapter (`get_usage` at session start and turn end): RESCOPE. Needs Sab's call on where the `~/.dsh` patch lives, a shape conversion (0-100 and ISO vs 0..1 and epoch), and a `usage_update` that does not zero the context meter; conflict with patch 0002 untested. Review: `docs/review/usage-footer-scope-2026-11-15.md` F6.
