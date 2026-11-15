@@ -16,7 +16,7 @@ Entry format:
 
 ### 5h usage in the footer, pager only (Claude)
 - Ask: Sab 2026-11-14, "the five hour percentage for Claude should go at that footer right there ... We're able to abbreviate or use symbols or whatever."
-- Scope: `views/shortcuts_bar.rs` (right-text falls back to a short form by width), `app/agent_view/render.rs` (compose 5h/7d from `agent.rate_limits`, same live filter as the panel), `views/side_panel.rs` (statusline-file read no longer gated on the panel being open). About 40-60 lines. No hint removal: Sab has not named hints to drop.
+- Scope: `views/shortcuts_bar.rs` (right-text falls back to a short form by width), `app/agent_view/render.rs` (compose 5h/7d from `agent.rate_limits`, same live filter as the panel), `views/side_panel.rs` (statusline-file read no longer gated on the panel being open). About 40-60 lines. Hints: Sab 2026-11-14 called them "4 useless keybindings that `?` and `Ctrl-,` easily overrule in terms of value"; on screen 2026-11-15 the four are `Enter:send`, `Opt+Enter:newline`, `Shift+Tab:mode`, `Ctrl+x:shortcuts` (the first two only while typing). The reviewer cut the hint removal as "not in Sab's words" because its brief left that sentence out; usage goes first and wins the width, hints fill what is left.
 - Evidence: `docs/SCOUT-usage-footer-areas-2026-11-15.md` / `docs/review/usage-footer-scope-2026-11-15.md`
 - Needs: footer render test at full and half width in every theme (`GROK_THEME=<name>`), looked at on screen; shortcuts_bar inline tests. Value may be stale before the first turn (file fallback).
 
