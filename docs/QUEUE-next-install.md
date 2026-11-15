@@ -14,13 +14,15 @@ Entry format:
 
 ## Queued
 
-(none yet)
+### 5h usage in the footer, pager only (Claude)
+- Ask: Sab 2026-11-14, "the five hour percentage for Claude should go at that footer right there ... We're able to abbreviate or use symbols or whatever."
+- Scope: `views/shortcuts_bar.rs` (right-text falls back to a short form by width), `app/agent_view/render.rs` (compose 5h/7d from `agent.rate_limits`, same live filter as the panel), `views/side_panel.rs` (statusline-file read no longer gated on the panel being open). About 40-60 lines. No hint removal: Sab has not named hints to drop.
+- Evidence: `docs/SCOUT-usage-footer-areas-2026-11-15.md` / `docs/review/usage-footer-scope-2026-11-15.md`
+- Needs: footer render test at full and half width in every theme (`GROK_THEME=<name>`), looked at on screen; shortcuts_bar inline tests. Value may be stale before the first turn (file fallback).
 
 ## Being scouted
 
-### 5h usage in the footer (Claude, Codex, OpenCode Go, Grok)
-- Ask: Sab 2026-11-14, "the five hour percentage for Claude should go at that footer right there. Same with Codex and same with Open Code Go Even Grok"
-- Scout: `docs/briefs/scout-usage-footer-areas-2026-11-15.md`, then reviewer `docs/briefs/review-usage-footer-scope-2026-11-15.md`
+(none)
 
 ## Flagged, not scouted
 
@@ -44,4 +46,6 @@ Entry format:
 
 ## Not queued
 
-(none yet)
+- Fresh Claude usage via adapter (`get_usage` at session start and turn end): RESCOPE. Needs Sab's call on where the `~/.dsh` patch lives, a shape conversion (0-100 and ISO vs 0..1 and epoch), and a `usage_update` that does not zero the context meter; conflict with patch 0002 untested. Review: `docs/review/usage-footer-scope-2026-11-15.md` F6.
+- Codex 5h/7d in the footer: RESCOPE. Source is real (rollout `token_count` `rate_limits`) but no scout found which process runs Codex under grok or which rollout is the session's; scout the host path first. F7.
+- OpenCode Go and Grok in the footer: DROP. `opencode` is not installed, no usage source; Grok's `usage_pct` is a credit allowance, not 5h, so it needs its own ask and label. F8.
