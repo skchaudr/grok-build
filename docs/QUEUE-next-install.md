@@ -64,6 +64,11 @@ Entry format:
 - Checked on screen 2026-11-15: `pig`, `grok-pi`, `pi-grok` on sab-air are Dwsy's standalone 0.1.13 (own home `~/.grok-pi`); ours runs only as `grok grok-pi`. Report: `docs/INVESTIGATE-grok-pi-regression-2026-11-15.md`.
 - Sab 2026-11-15, in Dwsy's binary: "I'm not able to dispatcher start a new Pi session if Pi is mid turn, which sucks". Not ours to fix unless the same happens in `grok grok-pi`; not checked there.
 
+### Pi notices in the scrollback are out of reach (grok grok-pi)
+- Ask: Sab 2026-11-15, on the lines "Usage cleanup started", "daily-memory: session note dropped", "Switched to GPT-6.1 Sol": "all this changelog and notification stuff, just being out of reach, not expandable, or engaged with, sucks". Same message: "grok grok-pi is coming together well, the one significant complaint as of right now".
+- Fact: `pi/ui/notify` info messages are pushed as plain system lines (`app/acp_handler/pi_ui.rs:29-47`). The same messages are kept in `agent.pi_notifications` and `/notify` already opens a list with search, expand and copy (`app/dispatch/router.rs:1630`, `app/agent_view/pi_tree.rs:574`), but nothing on the line leads there.
+- Not scouted: making the lines themselves selectable/expandable in scrollback navigation; the changelog part.
+
 ## Not queued
 
 - Fresh Claude usage via adapter (`get_usage` at session start and turn end): RESCOPE. Needs Sab's call on where the `~/.dsh` patch lives, a shape conversion (0-100 and ISO vs 0..1 and epoch), and a `usage_update` that does not zero the context meter; conflict with patch 0002 untested. Review: `docs/review/usage-footer-scope-2026-11-15.md` F6.
