@@ -22,6 +22,7 @@ Entry format:
   2. Status slot: delete dead `right_text` in `views/shortcuts_bar.rs`, add `with_status` painted first from the left, pass it from `render.rs:3884-3903` on the Pane path only. About 40 lines + half-width test.
   3. Claude 5h and 7d in the slot, from the live `rate_limits` in `views/side_panel.rs:58`, statusline file only as fallback. About 20 lines.
   4. Cache age ("cache 12m" since the last response with cache read/write, hidden before one): read `response.usage.cached_read_tokens/cached_write_tokens` before the Claude filter at `app/dispatch/prompt.rs:1832-1836`, stamp a new field (not `last_active_at`, which aborted turns also set). About 25 lines. Shows age only, no warm/cold word.
+- Reference Sab pointed at 2026-11-15 ("look at the DSH TUI Claude"), captured from the `dsh-tui` tab on sab-air: under each turn `↑10 · ↓4.7k · cache read 370.9k/write 16.5k · 1m 2s`; footer `claude-fable-5-2 … cache 98.…% … ctx 8.1% (81k/1.0m)` and `? for shortcuts` as the only key hint. Slice 4 should show the cache hit share and the per-turn read/write line the same way, from the counts the pager already receives and drops (`app/dispatch/prompt.rs:1832-1836`), in addition to age.
 - Needs: footer render test at full and half width in every theme (`GROK_THEME=<name>`), looked at on screen, typing and navigation footers both. Sab to answer: status row in shortcuts bar vs existing status-line row; keep `Space:prompt` and `q/Esc:back`; keep history/scrollback search hints; help hint removed entirely (my picks in the review).
 
 ## Being scouted
