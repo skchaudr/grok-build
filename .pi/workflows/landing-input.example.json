@@ -1,0 +1,45 @@
+{
+  "cwd": "/Volumes/Mini-SSD/offload/repos/grok-build",
+  "goal": "Finish and land the Claude host batch, F3 usage panel, and Cass CLI/TUI search together, preserving existing Pi/Grok behaviour; one shared validation/build/install cycle.",
+  "context": [
+    "Inspect actual main, origin/feat/f3-usage-panel, origin/traces-cass-tui and origin/traces-cass-search commit tips and source before making packets.",
+    "Cass TUI includes Cass CLI changes; verify ancestry rather than landing twice.",
+    "Claude settings brief: docs/briefs/claude-settings-modal-2026-11-14.md; builder report: docs/review/claude-settings-modal-build-2026-11-14.md.",
+    "User-requested Claude outcomes include resume, branding/version/changelog, running-state display, Agents naming, voice, single-page resume picker, and live Claude-specific settings.",
+    "F3 has an unconfirmed-test safety commit and snapshot leftovers; preserve original work and inspect before accepting snapshots.",
+    "No feature implementation, Cargo, install, or builder launch before human packet review."
+  ],
+  "planner": {
+    "provider": "cliproxy",
+    "model": "gpt-6.1-sol",
+    "thinking": "high"
+  },
+  "builders": {
+    "f3": {
+      "provider": "opencode-go",
+      "model": "grok-4.7",
+      "thinking": "high"
+    },
+    "cass": {
+      "provider": "opencode-go",
+      "model": "minimax-m3",
+      "thinking": "high"
+    },
+    "claude-settings": {
+      "provider": "opencode-go",
+      "model": "glm-5.3-flash",
+      "thinking": "high"
+    }
+  },
+  "reviewer": {
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "thinking": "high"
+  },
+  "reviewRounds": 5,
+  "evaluator": {
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "thinking": "high"
+  }
+}
