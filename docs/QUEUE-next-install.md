@@ -69,6 +69,12 @@ Entry format:
 - Fact: `pi/ui/notify` info messages are pushed as plain system lines (`app/acp_handler/pi_ui.rs:29-47`). The same messages are kept in `agent.pi_notifications` and `/notify` already opens a list with search, expand and copy (`app/dispatch/router.rs:1630`, `app/agent_view/pi_tree.rs:574`), but nothing on the line leads there.
 - Not scouted: making the lines themselves selectable/expandable in scrollback navigation; the changelog part.
 
+### grok grok-pi dies at startup when the Pi workflows feature is on
+- Seen on sab-air 2026-11-15 07:26: `Error: unable to receive 'initialize' response` and `server shut down unexpectedly`.
+- Cause: `pi_workflows = true` in `~/.grok/config.toml` makes `grok-pi-acp` load its bundled workflows extension, which registers the same `workflow` tool as the installed Pi package `npm:@osolmaz/pi-workflows`; Pi exits 1. Tested against a throwaway copy of the home with the installed (2026-11-09) `grok-pi-acp`: Dwsy's `native-feature-conflicts.toml` and a `[pi.resources] block` both still fail; `pi_workflows = false` starts.
+- Done on sab-air: `pi_workflows = false` (backup `~/.grok/config.toml.bak-20261115-0730`); `grok grok-pi` seen starting in `~/repos/acpx`.
+- To fix in code: the clash must not kill startup (skip the bundled feature or block the package, and say so on screen); the pager must show Pi's error instead of a bare channel failure. Re-test with the 2026-11-14 build, which has the resource policy the installed one lacks.
+
 ## Not queued
 
 - Fresh Claude usage via adapter (`get_usage` at session start and turn end): RESCOPE. Needs Sab's call on where the `~/.dsh` patch lives, a shape conversion (0-100 and ISO vs 0..1 and epoch), and a `usage_update` that does not zero the context meter; conflict with patch 0002 untested. Review: `docs/review/usage-footer-scope-2026-11-15.md` F6.
