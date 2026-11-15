@@ -93,7 +93,7 @@ pub struct EnumChoice {
 
 /// Runtime-built enum choice for `SettingKind::DynamicEnum` settings whose choices come from a `PagerLocalSnapshot` at picker-open time.
 /// The fields are owned `String`s because the values come from runtime catalogs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OwnedEnumChoice {
     pub canonical: String,
     pub display: String,
