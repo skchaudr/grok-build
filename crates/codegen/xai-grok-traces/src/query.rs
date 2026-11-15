@@ -561,6 +561,35 @@ impl TraceIndex {
         Ok(lines::read_line(path.as_ref(), format, line, from_line, from_byte)?)
     }
 
+    /// Sessions whose transcript path ends in `/<suffix>` or `/<suffix>.zst` (`suffix` = `parent-dir/file-name`).
+    /// The join key for `cass` hits. It loses nothing: `cass::best_match` rejects any session sharing fewer than
+    /// `MIN_SHARED` (2) trailing components, so every row it could accept ends in this suffix. No `LIMIT`: a cut
+    /// could drop the best match, or one side of a tie, and a bare file name such as `chat_history.jsonl` is why
+    /// the filter is two components and not one.
+    pub fn sessions_by_path_suffix(&self, suffix: &str) -> Result<Vec<SessionRow>> {
+        let now = now_ms();
+        let esc = suffix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let sql = format!(
+            "SELECT {} FROM trace_sessions s LEFT JOIN trace_files f ON f.path = s.file_path
+             WHERE s.file_path LIKE ?1 ESCAPE '\\' OR s.file_path LIKE ?2 ESCAPE '\\'",
+            session_cols()
+        );
+        let mut stmt = self.conn().prepare(&sql)?;
+        let rows = stmt.query_map([format!("%/{esc}"), format!("%/{esc}.zst")], |r| session_row(r, now))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Lines of the events of `session_id` whose timestamp is exactly `timestamp_ms`, in file order (noise
+    /// included). More than one is common: a tool result and the user message after it often share a stamp.
+    pub fn lines_at(&self, session_id: &str, timestamp_ms: i64) -> Result<Vec<i64>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT line_number FROM trace_events WHERE sk = (SELECT sk FROM trace_sessions WHERE id = ?1) AND timestamp = ?2
+             ORDER BY line_number",
+        )?;
+        let rows = stmt.query_map(params![session_id, timestamp_ms], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Sources that have at least one session, for the ledger tabs.
     pub fn sources(&self) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn().prepare("SELECT source_id, COUNT(*) FROM trace_sessions GROUP BY source_id")?;
