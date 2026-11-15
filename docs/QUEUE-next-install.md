@@ -75,6 +75,11 @@ Entry format:
 - Done on sab-air: `pi_workflows = false` (backup `~/.grok/config.toml.bak-20261115-0730`); `grok grok-pi` seen starting in `~/repos/acpx`.
 - To fix in code: the clash must not kill startup (skip the bundled feature or block the package, and say so on screen); the pager must show Pi's error instead of a bare channel failure. Re-test with the 2026-11-14 build, which has the resource policy the installed one lacks.
 
+### Model picker shows the provider twice per row (grok grok-pi)
+- Ask: Sab 2026-11-15, on rows like "GPT-6.1 Sol · openai · openai": "you don't see the duplication and repetition, OpenAI, OpenAI ... there's just weird duplication".
+- Cause: `crates/codegen/xai-grok-pager/src/slash/commands/model.rs:334-346` builds the label as `"{label} · {provider}"` and then also sets the row description to the provider, so the picker prints it twice.
+- Change: keep the provider once (drop it from the description or from the label); about 2 lines plus the tests near `:856`.
+
 ## Not queued
 
 - Fresh Claude usage via adapter (`get_usage` at session start and turn end): RESCOPE. Needs Sab's call on where the `~/.dsh` patch lives, a shape conversion (0-100 and ISO vs 0..1 and epoch), and a `usage_update` that does not zero the context meter; conflict with patch 0002 untested. Review: `docs/review/usage-footer-scope-2026-11-15.md` F6.
