@@ -123,3 +123,10 @@ Sab, 2026-11-14: "grok claude does not handle slash commands intelligently or gr
 - Seen the same day: `/effort high` typed in a `grok claude` session while a turn was running was queued, then delivered to Claude as part of the next turn (a `<command-name>/effort</command-name>` block), not applied on the spot.
 - A direct path already exists for the same setting: the Claude settings rows (`settings/claude.rs`: mode, model, effort, fast, agent) send `session/set_config_option` through `Effect::SetClaudeOption` with no model turn.
 - Not traced yet: where the pager decides to forward a typed `/effort` (and the other Claude commands that only change a setting) as prompt text instead of using that path.
+
+## Claude plan usage (5h / 7d) without a turn (2026-11-15)
+
+- The Claude Agent SDK `query()` object has `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET()` (control request `get_usage`). Measured on the Mini with no prompt sent: 1.8 s, returns `rate_limits.five_hour` / `seven_day` `{utilization, resets_at}` from `GET /api/oauth/usage`. It does not need interactive Claude Code running.
+- `claude-agent-acp` 0.76.0 never calls it; it only forwards `rate_limit_event` after a turn (`dist/acp-agent.js:4285`). The `~/.cache/claude-status` files come only from the TUI statusline command and can be stale (cstat said 5h 9% while `get_usage` said 12%).
+- `ccusage` reads local transcripts (tokens/cost); it has no plan percent or reset time.
+- Details: `docs/SCOUT-claude-usage-freshness-2026-11-15.md`.
