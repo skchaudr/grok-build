@@ -14,11 +14,12 @@ Entry format:
 
 ## Queued
 
-### 5h usage in the footer, pager only (Claude)
-- Ask: Sab 2026-11-14, "the five hour percentage for Claude should go at that footer right there ... We're able to abbreviate or use symbols or whatever."
-- Scope: `views/shortcuts_bar.rs` (right-text falls back to a short form by width), `app/agent_view/render.rs` (compose 5h/7d from `agent.rate_limits`, same live filter as the panel), `views/side_panel.rs` (statusline-file read no longer gated on the panel being open). About 40-60 lines. Hints: Sab 2026-11-14 called them "4 useless keybindings that `?` and `Ctrl-,` easily overrule in terms of value"; on screen 2026-11-15 the four are `Enter:send`, `Opt+Enter:newline`, `Shift+Tab:mode`, `Ctrl+x:shortcuts` (the first two only while typing). The reviewer cut the hint removal as "not in Sab's words" because its brief left that sentence out; usage goes first and wins the width, hints fill what is left.
-- Evidence: `docs/SCOUT-usage-footer-areas-2026-11-15.md` / `docs/review/usage-footer-scope-2026-11-15.md`
-- Needs: footer render test at full and half width in every theme (`GROK_THEME=<name>`), looked at on screen; shortcuts_bar inline tests. Value may be stale before the first turn (file fallback).
+### Footer shows status, not keybinding hints (cache, Claude usage first)
+- Ask: Sab 2026-11-14, "4 useless keybindings that `?` and `Ctrl-,` easily overrule in terms of value ... the five hour percentage for Claude should go at that footer right there. Same with Codex and same with Open Code Go Even Grok". Sab 2026-11-15, "Its even worse: y : copy Enter: open j/k:nav Shift+l/h:turn Ctrl+x: shortcut. There is the input editr footer and then navigational one where it shows defaults. I already have a command palette, what I do not have is a warm cache signal. Why not include cache, claude usage, code, opencode"
+- Decided by those words: both footers (typing and scrollback navigation) stop showing default-key hints; the command palette and shortcuts help cover them. The row carries cache warmth, then Claude 5h/7d, then Codex and OpenCode as each gets a source.
+- Scope reviewed so far (Claude usage only): `views/shortcuts_bar.rs`, `app/agent_view/render.rs`, `views/side_panel.rs`, about 40-60 lines, pager only. Evidence: `docs/SCOUT-usage-footer-areas-2026-11-15.md` / `docs/review/usage-footer-scope-2026-11-15.md`. That review kept the hints because its brief left out Sab's hint sentence; removing them was not sized (hints are built in `views/agent.rs` around line 1286 for typing, and from `When::ScrollbackFocused` actions in `actions/defaults.rs` for navigation).
+- Not sized yet, cache warmth: interactive Claude Code hands its statusline a `prompt_cache` object (`caching_observed`, `warm`, `expires_at`); `~/.claude/statusline-command.sh:16` and `cstat` print "warm 59m" / "cold" from it. Nothing in the pager holds an equivalent; whether the Claude adapter can report it under `grok claude` is not traced.
+- Needs: footer render test at full and half width in every theme (`GROK_THEME=<name>`), looked at on screen, typing and navigation footers both.
 
 ## Being scouted
 
@@ -44,8 +45,13 @@ Entry format:
 ### Footer snapshot tests depend on the terminal
 - Three side-panel snapshots (`closed`, `narrow_terminal_unfocused_panel_hides`, `open_unfocused_lets_the_chat_type`) expect `Ctrl+.:shortcuts`; run inside Rex they render `Ctrl+x:shortcuts` (`actions/defaults.rs`, `terminal/mod.rs` `kitty_skip_reason`). Will be touched anyway if the footer changes.
 
+### One tailored TUI per host
+- Sab 2026-11-15: "I am surprised we are sticking to ONE TUI for grokclaid. Like grok claude could have a full claude talored settings modal, grok pi could have its own, prime agent has its own, which we will get to eventually, recent changes were made for prime"
+- Today: host profiles exist for Pi and Claude (`install_pi_host_ui`, `install_claude_host_ui` in `xai-grok-pager-bin/src/main.rs`; `HostFeatureManifest` in `xai-grok-shell/src/host_features.rs`). They set brand, welcome and changelog; settings are one shared modal with per-host rows shown or hidden. Prime has rendering and resume fixes (`caec749c`, `2f969e3b`) and no host profile.
+
 ## Not queued
 
 - Fresh Claude usage via adapter (`get_usage` at session start and turn end): RESCOPE. Needs Sab's call on where the `~/.dsh` patch lives, a shape conversion (0-100 and ISO vs 0..1 and epoch), and a `usage_update` that does not zero the context meter; conflict with patch 0002 untested. Review: `docs/review/usage-footer-scope-2026-11-15.md` F6.
 - Codex 5h/7d in the footer: RESCOPE. Source is real (rollout `token_count` `rate_limits`) but no scout found which process runs Codex under grok or which rollout is the session's; scout the host path first. F7.
-- OpenCode Go and Grok in the footer: DROP. `opencode` is not installed, no usage source; Grok's `usage_pct` is a credit allowance, not 5h, so it needs its own ask and label. F8.
+- OpenCode in the footer: reopened 2026-11-15. The DROP was wrong: the reviewer and scout looked only on the Mini. On sab-air `opencode` 1.19.4 is installed (`/opt/homebrew/bin/opencode`), with `~/.local/share/opencode/opencode.db` and an `opencode stats` command (token usage and cost). No 5h percentage found yet; needs a scout on sab-air.
+- Grok in the footer: `usage_pct` (`credit_bar.rs`) is a credit allowance, not a 5h window; needs its own label if shown.
