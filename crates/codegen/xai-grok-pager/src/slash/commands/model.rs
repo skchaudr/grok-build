@@ -308,7 +308,7 @@ fn split_window_effort<'a>(
 }
 
 /// One row per logical model, with a human-readable model name and provider:
-/// - label (`display`) = model name + provider
+/// - label (`display`) = model name; `description` = provider
 /// - value (`insert_text`) = `provider/id`
 /// - search (`match_text`) = Pi `getModelSearchText`
 ///
@@ -331,11 +331,8 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
         } else {
             info.name.as_str()
         };
-        let mut display = if provider.is_empty() {
-            label.to_string()
-        } else {
-            format!("{label} · {provider}")
-        };
+        // Provider goes in `description` only: every row renderer prints both.
+        let mut display = label.to_string();
         if models.is_model_scoped(id) {
             display.push_str(" (scoped)");
         }
@@ -1049,7 +1046,7 @@ mod tests {
             .find(|i| i.insert_text.starts_with("test/reasoning-x"))
             .unwrap();
         assert_eq!(reasoning.insert_text, "test/reasoning-x ");
-        assert_eq!(reasoning.display, "Reasoning X · test");
+        assert_eq!(reasoning.display, "Reasoning X");
         assert_eq!(reasoning.description, "test");
 
         // Plain model has no trailing space -- Enter commits immediately.
@@ -1117,7 +1114,7 @@ mod tests {
 
         // The picker label combines the model name and provider; value stays provider/id.
         let anthropic = items.iter().find(|i| i.description == "anthropic").unwrap();
-        assert_eq!(anthropic.display, "Claude Haiku 4.5 · anthropic");
+        assert_eq!(anthropic.display, "Claude Haiku 4.5");
         assert_eq!(anthropic.description, "anthropic");
         assert_eq!(anthropic.insert_text, "anthropic/claude-haiku-4-5");
 
@@ -1125,7 +1122,7 @@ mod tests {
             .iter()
             .find(|i| i.description == "openrouter")
             .unwrap();
-        assert_eq!(openrouter.display, "Claude Haiku 4.5 · openrouter");
+        assert_eq!(openrouter.display, "Claude Haiku 4.5");
         assert_eq!(openrouter.insert_text, "openrouter/claude-haiku-4-5");
 
         let detail = model_picker_detail_lines(&a_info);
