@@ -1,6 +1,6 @@
 # SCOUT: dsh-tui claude backend side panel (2026-11-13)
 
-Status: PARTIAL. Panel tabs 1-5, `h` help and `z` zoom were not captured. Source findings are complete.
+Status: all eight panels captured 2026-11-15 (section at the end). The 2026-11-13 run was PARTIAL: panel tabs 1-5, `h` help and `z` zoom were not captured. Source findings are complete.
 
 ## Incident
 
@@ -98,3 +98,101 @@ Usage % and reset times: `rate_limit_event` from the Claude CLI (claude-code v2.
 - Help is `?` with an empty chat input; `h` opens the Sessions picker from the launchpad.
 - v0.19.0 built-in panels: todo, jobs, agents, info, trajectory, workspace, btw, companion. Panels 1-4 seen: Todo, Jobs, Agents, Info (Info has a Session section).
 - Sab's pasted layout (`[1 Usage][2 Session][3 Runtime][4 Tools][5 AI-DLC]`, 5h/7d/context bars) is not in this package; no AI-DLC string exists in it. It likely comes from another profile under `~/.dsh/profiles`. Sab's paste of the Usage tab is the reference for the F3 panel.
+
+## All eight panels captured on screen (2026-11-15, sab-air, dsh-tui v0.19.0, `--backend claude`)
+
+A separate fresh session at 170x48, no turn sent, so the panels are empty. Reached with Shift+Enter from the launch screen (opens chat, sends nothing), `Ctrl+B` to focus the panel, then `→` once per panel. Order: Todo, Jobs, Agents, Info, Trajectory, Workspace, btw, Companion, then back to Todo.
+
+```
+│ ◀     ⌗     ?     ♥    Todo   ▸     ◆     ⓘ     ∿▶
+├──────────────────────────────────────────────────────
+│ Esc chat · ←/→ panels · z zoom · +/- width
+```
+
+```
+│ ◀       ?    ♥    ≡   Jobs   ◆    ⓘ    ∿    ⌗  ▶ ⤢
+├──────────────────────────────────────────────────────
+│ 0 running 0 completed
+│                          ○
+│      No background jobs in the current session
+│ Esc chat · ←/→ panels · s to chat · z zoom · +/- wi…
+```
+
+```
+│ ◀       ♥    ≡    ▸  Agents  ⓘ    ∿    ⌗    ?  ▶ ⤢
+├──────────────────────────────────────────────────────
+│ 0 running   0 completed
+│                          ○
+│         No subagents in the current session
+│   Subagents appear here once the main agent starts
+│   Task delegations
+│ Esc chat · ←/→ panels · z zoom · +/- width
+```
+
+```
+│ ◀     ≡     ▸     ◆    Info   ∿     ⌗     ?     ♥▶
+├──────────────────────────────────────────────────────
+│ ──────────────────────Session───────────────────────
+│ Title           —
+│ Session ID      #4cc7ba8d
+│ Agent ID        #4cc7ba8d
+│ Working dir     ~/repos/dsh-superagent-prototype
+│ Branch          —
+│ ───────────────────────Model────────────────────────
+│ Model           fable
+│ Effort          high
+│ Mode            Default
+│ Permissions     —
+│ ──────────────────────Context───────────────────────
+│ Context         —
+│ Window          233k
+│ Tokens          0→0
+│ Cache hit       —
+│ Spend           —
+│ Throughput      —
+│ ──────────────────────Runtime───────────────────────
+│ Status          idle
+│ Activity        —
+│ Background jobs 0/0
+│ Subagents       0
+│ Esc chat · ←/→ panels · z zoom · +/- width
+```
+
+```
+│ ◀     ▸    ◆    ⓘ  Trajectory  ⌗    ?    ♥    ≡▶ ⤢
+├──────────────────────────────────────────────────────
+│ No trajectory yet — the wake band and ledger appear…
+│ ↑/↓ select · Enter expand · Tab hotspots · ⤢ fullsc…
+│ Esc chat · ←/→ panels · z zoom · +/- width
+```
+
+```
+│ ◀     ◆    ⓘ    ∿  Workspace  ?    ♥    ≡    ▸ ▶ ⤢
+├──────────────────────────────────────────────────────
+│ Current workspace
+│  /Users/sab-mini/repos/dsh-superagent-prototype
+│ Registered workspaces ×0
+│  No registered workspaces yet (/workspace open <dir…
+│ ↑/↓ select · Enter opens the workspace home · r ref…
+│ Esc chat · ←/→ panels · z zoom · +/- width
+```
+
+```
+│ ◀       ⓘ    ∿    ⌗   btw    ♥    ≡    ▸    ◆  ▶ ⤢
+├──────────────────────────────────────────────────────
+│ No side questions yet. Type /btw <question>, or cli…
+│ Side questions never derail the main line: answers
+│ stay here, out of the main chat and session log.
+│ Answers use the last 4 Q/A pairs as context
+││ › Enter to ask                                     │
+│ Esc chat · ←/→ panels · z zoom · +/- width
+```
+
+```
+│ ◀      ∿    ⌗    ?  Companion  ≡    ▸    ◆    ⓘ  ▶
+├──────────────────────────────────────────────────────
+│ ● Idle
+│ Now: 鲸娘
+│ click to poke · rapid clicks tickle · drag to carry
+│ Esc chat · ←/→ panels · z zoom · +/- width
+```
