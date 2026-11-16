@@ -5,10 +5,12 @@ use ratatui::layout::Rect;
 use xai_grok_tools::types::SessionMode;
 
 use super::AgentView;
+use crate::app::actions::Action;
 use crate::app::agent::AgentState;
 use crate::app::app_view::InputOutcome;
 use crate::theme::Theme;
-use crate::views::side_panel::{Event, Info};
+use crate::views::modal::ActiveModal;
+use crate::views::side_panel::{Event, Info, Job, JobState};
 
 impl AgentView {
     pub(crate) fn side_panel_info(&self) -> Info {
@@ -38,7 +40,6 @@ impl AgentView {
             Some(rest) if !home.is_empty() => format!("~{rest}"),
             _ => cwd,
         };
-        let row = |r: crate::views::dock::DockRow| (r.description, r.meta);
         Info {
             title: self
                 .display_name
@@ -62,17 +63,65 @@ impl AgentView {
             tool_calls: self.context_state.as_ref().map(|c| c.tool_call_count),
             compactions: self.context_state.as_ref().map(|c| c.compaction_count),
             // end session page
-            jobs: self
-                .dock_task_rows()
-                .into_iter()
-                .map(|(_, r)| row(r))
-                .collect(),
-            subagents: self
-                .dock_subagent_rows()
-                .into_iter()
-                .map(|(_, _, r)| row(r))
-                .collect(),
+            jobs: self.side_panel_jobs(),
+            subagents: self.side_panel_subagents(),
         }
+    }
+
+    /// Background commands (monitors are watchers, not listed), running first then oldest first.
+    fn side_panel_jobs(&self) -> Vec<Job> {
+        use crate::app::agent::BgTaskStatus;
+        let mut tasks: Vec<_> = self.session.bg_tasks.values().filter(|t| !t.is_monitor).collect();
+        tasks.sort_by_key(|t| (t.status != BgTaskStatus::Running, t.start_time));
+        tasks
+            .into_iter()
+            .map(|t| Job {
+                kind: String::new(),
+                description: t
+                    .description
+                    .clone()
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or_else(|| t.command.clone()),
+                state: match t.status {
+                    BgTaskStatus::Running => JobState::Running,
+                    BgTaskStatus::Done => JobState::Done,
+                    BgTaskStatus::Failed => JobState::Failed,
+                },
+                model: None,
+                elapsed: crate::views::dock::fmt_elapsed(t.elapsed().as_secs()),
+            })
+            .collect()
+    }
+
+    /// Non-workflow subagents, finished ones included, running first then oldest first.
+    fn side_panel_subagents(&self) -> Vec<Job> {
+        let mut infos: Vec<_> = self
+            .subagent_sessions
+            .values()
+            .filter(|i| i.attempt.workflow_run_id.is_none())
+            .collect();
+        infos.sort_by_key(|i| (!i.is_running(), i.attempt.started_at));
+        infos
+            .into_iter()
+            .map(|i| {
+                let (kind, description) = crate::app::subagent::format_subagent_label(i);
+                Job {
+                    kind,
+                    description,
+                    state: if i.is_running() {
+                        JobState::Running
+                    } else {
+                        match i.attempt.status.as_deref() {
+                            Some("failed") => JobState::Failed,
+                            Some("cancelled") => JobState::Cancelled,
+                            _ => JobState::Done,
+                        }
+                    },
+                    model: i.attempt.model.as_deref().filter(|m| !m.is_empty()).map(str::to_owned),
+                    elapsed: crate::views::dock::fmt_elapsed(i.display_elapsed().as_secs()),
+                }
+            })
+            .collect()
     }
 
     /// A copy or open the focused panel asked for (`y`, Enter on a row that stands for a session).
@@ -88,8 +137,21 @@ impl AgentView {
                 };
                 self.side_panel.set_note(note);
             }
-            // Wired by the Recent page.
-            Event::Open(_) => self.side_panel.set_note("open: not wired".to_string()),
+            // The /traces modal on that session's trajectory: read-only, no model turn, no harness resume.
+            Event::Open(id) => {
+                let index = xai_grok_traces::TraceIndex::open(&xai_grok_traces::default_db_path())
+                    .map_err(|e| tracing::warn!(%e, "side panel: traces index open failed"))
+                    .ok();
+                let mut state = crate::views::traces_modal::TracesModalState::open(index);
+                if let Err(msg) = state.open_by_prefix(&id) {
+                    state.status = Some(msg);
+                }
+                self.active_modal = Some(ActiveModal::Traces {
+                    state: Box::new(state),
+                });
+                // The same index scan `/traces` starts.
+                return InputOutcome::Action(Action::TracesRescan);
+            }
         }
         InputOutcome::Changed
     }

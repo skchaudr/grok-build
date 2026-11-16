@@ -11,6 +11,8 @@ mod recent;
 mod session;
 mod steps;
 
+pub use jobs::{Job, JobState};
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -147,9 +149,9 @@ pub struct Info {
     pub cache_read: Option<u64>,
     pub cache_write: Option<u64>,
     // end session page
-    /// (description, meta) per running background command.
-    pub jobs: Vec<(String, String)>,
-    pub subagents: Vec<(String, String)>,
+    /// Background commands and subagents, running first; the Agents page lists both.
+    pub jobs: Vec<Job>,
+    pub subagents: Vec<Job>,
 }
 
 /// One Claude rate-limit window: percent used and when it resets (epoch seconds).

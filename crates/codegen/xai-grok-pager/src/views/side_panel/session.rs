@@ -220,6 +220,11 @@ mod tests {
     use super::super::paint;
     use super::*;
     use crate::theme::Theme;
+    use super::super::{Job, JobState};
+
+    fn job(kind: &str, description: &str) -> Job {
+        Job { kind: kind.into(), description: description.into(), state: JobState::Running, model: None, elapsed: "1m".into() }
+    }
 
     const NOW: i64 = 1_800_000_000_000;
 
@@ -252,8 +257,8 @@ mod tests {
             tokens_out: Some(30_000),
             cache_read: Some(800_000),
             cache_write: Some(80_000),
-            jobs: vec![("sleep 60".into(), "12s".into())],
-            subagents: vec![("explore".into(), "grok 3m".into()), ("review".into(), "claude 1m".into())],
+            jobs: vec![job("", "sleep 60")],
+            subagents: vec![job("Explore", "explore"), job("Reviewer", "review")],
             ..Info::default()
         }
     }
