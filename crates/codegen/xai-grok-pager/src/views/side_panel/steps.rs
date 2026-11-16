@@ -21,8 +21,19 @@ struct Turn<'a> {
     calls: Vec<&'a Call>,
 }
 
-fn running(c: &Call) -> bool {
-    c.result.is_none() && !c.no_result
+/// A session counts as live when something happened in it within this long of now; an idle one has no running calls.
+const LIVE_MS: i64 = 10 * 60 * 1000;
+
+/// A call with no result is running only in a live session: an old transcript's open call just never got one.
+fn running(c: &Call, live: bool) -> bool {
+    live && c.result.is_none() && !c.no_result
+}
+
+/// The newest sign of life: the index row's times (a snapshot from when the panel opened) or any item that arrived since.
+fn live_at(follow: &Follow) -> i64 {
+    let r = &follow.root;
+    let items = follow.rows().iter().flat_map(|r| [r.ts, match &r.body { Body::Call(c) => Some(c.started_ms), _ => None }]);
+    [r.last_event_at, r.updated_at, r.mtime_ms].into_iter().chain(items).flatten().max().unwrap_or(0)
 }
 
 fn turns(follow: &Follow) -> Vec<Turn<'_>> {
@@ -75,9 +86,10 @@ pub(super) fn rows(follow: &Follow, c: &Ctx) -> Vec<Row> {
     let th = c.theme;
     let fg = |color| Style::default().fg(color);
     let turns = turns(follow);
+    let live_session = c.now_ms - live_at(follow) <= LIVE_MS;
     let mut out = Vec::new();
     for (n, t) in turns.iter().enumerate() {
-        let live = n + 1 == turns.len() && t.calls.iter().any(|c| running(c));
+        let live = n + 1 == turns.len() && t.calls.iter().any(|c| running(c, live_session));
         let dur = match t.start {
             Some(s) if live => took((c.now_ms - s).max(0)),
             Some(s) => took((t.end - s).max(0)),
@@ -95,16 +107,17 @@ pub(super) fn rows(follow: &Follow, c: &Ctx) -> Vec<Row> {
             t.prompt.trim_end(),
         ));
         for (i, call) in t.calls.iter().enumerate() {
-            let what = first_line(&call.what);
+            // shortcut: the index's tool title is all there is (the generic `Tool` is what some transcripts record); a better name needs the raw line.
+            let head = format!("{} {}", call.tool, first_line(&call.what)).trim_end().to_string();
             let (mark, color, state, dur) = match &call.result {
                 Some(r) if !r.ok => ("✗", th.accent_error, format!("failed {}", first_line(&r.error)), r.ms),
                 Some(r) => ("✓", th.accent_success, "ok".to_string(), r.ms),
-                None if call.no_result => ("–", th.gray_dim, "no result".to_string(), None),
+                None if !running(call, live_session) => ("–", th.gray_dim, "no result".to_string(), None),
                 None => ("▸", th.accent_running, "running".to_string(), None),
             };
             let shown = match &call.result {
                 Some(_) => dur.map(took).unwrap_or_default(),
-                None if call.no_result => String::new(),
+                None if !running(call, live_session) => String::new(),
                 None => took((c.now_ms - call.started_ms).max(0)),
             };
             let text = if mark == "✗" { fg(th.accent_error) } else { fg(th.text_primary) };
@@ -114,11 +127,11 @@ pub(super) fn rows(follow: &Follow, c: &Ctx) -> Vec<Row> {
                         Span::styled(format!("{:>3} ", i + 1), fg(th.gray_dim)),
                         Span::styled(format!("{mark} "), fg(color)),
                     ],
-                    Span::styled(format!("{} {what}", call.tool), text),
+                    Span::styled(head.clone(), text),
                     Span::styled(shown.clone(), fg(if mark == "▸" { th.accent_running } else { th.gray })),
                     c.width,
                 ),
-                format!("{} {what}  {state}  {shown}", call.tool).trim_end(),
+                format!("{head}  {state}  {shown}").trim_end(),
             ));
         }
     }
@@ -236,5 +249,32 @@ mod tests {
         assert_eq!(r[2].copy, "Read src/lib.rs  failed no such file or directory  0.1s");
         assert!(text(&r[1]).contains('…'), "the line is cut, the copy is not");
         assert!(r.last().unwrap().copy.ends_with("running  39s"), "{}", r.last().unwrap().copy);
+    }
+
+    #[test]
+    fn an_idle_session_has_no_running_step_and_its_turn_ends_at_its_last_item() {
+        let mut f = filled();
+        f.root.updated_at = Some(61_000);
+        let info = Info::default();
+        let stale = NOW + 28 * 24 * 3600 * 1000;
+        let r = rows(&f, &Ctx { info: &info, theme: &Theme::current(), width: 43, now_ms: stale });
+        let last = r.last().unwrap();
+        assert!(text(last).contains('–') && !text(last).contains('▸'), "{}", text(last));
+        assert_eq!(last.copy, "Bash cargo test --release  no result");
+        assert!(text(&r[r.len() - 2]).trim_end().ends_with("1.0s"), "turn 2 header: {}", text(&r[r.len() - 2]));
+        let live = rows(&f, &Ctx { info: &info, theme: &Theme::current(), width: 43, now_ms: 61_000 + 5_000 });
+        assert!(text(live.last().unwrap()).contains('▸'), "a recent session still shows its running step");
+    }
+
+    #[test]
+    fn a_call_with_no_target_shows_the_tool_name_alone() {
+        let f = follow(&[
+            item("user", "root", 0, 10_000, json!({"text": "go"})),
+            call("root", 10_100, "a", "Tool", ""),
+            done("root", 10_200, "a", true, "", 100),
+        ]);
+        let r = at(&f, 43);
+        assert_eq!(r[1].copy, "Tool  ok  0.1s");
+        assert!(text(&r[1]).contains("✓ Tool "), "{}", text(&r[1]));
     }
 }
