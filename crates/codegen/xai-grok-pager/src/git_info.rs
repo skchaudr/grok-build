@@ -327,7 +327,7 @@ fn lookup_worktree_record(cwd: &Path) -> (Option<String>, Option<PathBuf>) {
     (None, None)
 }
 
-fn collapse_home(path: &Path) -> String {
+pub(crate) fn collapse_home(path: &Path) -> String {
     collapse_home_path(path, home_dir().as_deref().map(Path::new))
 }
 

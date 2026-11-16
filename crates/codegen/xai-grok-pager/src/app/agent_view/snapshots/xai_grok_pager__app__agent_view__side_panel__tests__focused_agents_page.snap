@@ -31,4 +31,4 @@ expression: "draw(&mut agent, 110, 30)"
   ╰─────────────────────────────────────────────── Grok 4.5 ─╯  │
                                                                 │
                                                                 │
-                                                                │ Esc chat · ←/→ page · y copy · z zoom
+                                                                │ Esc chat · h/l page · j/k row · y copy

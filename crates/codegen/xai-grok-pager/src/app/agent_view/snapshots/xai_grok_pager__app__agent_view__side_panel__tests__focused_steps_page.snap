@@ -4,9 +4,9 @@ expression: "draw(&mut agent, 110, 24)"
 ---
                                                                 │ ◀  Session   Steps   Agents   Recent  ▸
   /work/grok-build                    84K / 200K │ [Dashboard]  │ ───────────────────────────────────────────
-                                                                │ #1 add the side panel                  0.4s
-                                                                │   1 ✓ Bash cargo test                  0.4s
-                                                                │   2 ✗ Read src/views/side_panel.rs     0.1s
+                                                                │ #1 › add the side panel                0.4s
+                                                                │  1 ◆ Bash  cargo test                  0.4s
+                                                                │  2 ◆ Read  src/views/side_panel.rs   ✗ 0.1s
                                                                 │
                                                                 │
                                                                 │
@@ -25,4 +25,4 @@ expression: "draw(&mut agent, 110, 24)"
   ╰─────────────────────────────────────────────── Grok 4.5 ─╯  │
                                                                 │
                                                                 │
-                                                                │ Esc chat · ←/→ page · y copy · z zoom
+                                                                │ Esc chat · h/l page · j/k row · y copy

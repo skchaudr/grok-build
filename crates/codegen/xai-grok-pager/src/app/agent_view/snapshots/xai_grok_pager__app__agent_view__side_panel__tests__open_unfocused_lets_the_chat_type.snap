@@ -30,5 +30,5 @@ expression: "draw(&mut agent, 110, 30)"
   │ ❯                                                        │  │   5h usage     ██░░░░░ 22%
   ╰─────────────────────────────────────────────── Grok 4.5 ─╯  │   7d usage     not reported
                                                                 │
-  Shift+Tab:mode  │  Ctrl+.:shortcuts                           │ Runtime
+  Shift+Tab:mode  │  Ctrl+x:shortcuts                           │ Runtime
                                                                 │ F3 focus panel

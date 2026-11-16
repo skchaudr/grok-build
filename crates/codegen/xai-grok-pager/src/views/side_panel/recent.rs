@@ -3,7 +3,7 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 use xai_grok_traces::{SessionFilter, SessionRow, TraceIndex};
@@ -11,7 +11,7 @@ use xai_grok_traces::{SessionFilter, SessionRow, TraceIndex};
 use super::{Ctx, Row, note_rows};
 use crate::render::line_utils::truncate_str;
 
-const LIMIT: usize = 30;
+const LIMIT: usize = 60;
 const REFRESH_MS: i64 = 5_000;
 /// Widest `source` column; a longer harness name is cut.
 const MAX_SOURCE: usize = 6;
@@ -87,32 +87,63 @@ fn age(then_ms: i64, now_ms: i64) -> String {
     }
 }
 
-/// The index's title is whatever the harness recorded: one line of it, or the dispatch label, or the folder.
+/// The index's title is whatever the harness recorded: one line of it, or the dispatch label. The folder is the
+/// group heading, so it is not a fallback here.
 fn title(s: &SessionRow) -> String {
     let one_line = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
     let t = one_line(&s.title);
     if !t.is_empty() {
         return t;
     }
-    let fallback = s.label.as_deref().map(one_line).filter(|l| !l.is_empty());
-    let folder = || s.cwd.as_deref().and_then(|c| c.rsplit('/').next()).filter(|f| !f.is_empty()).map(str::to_owned);
-    fallback.or_else(folder).unwrap_or_else(|| "(untitled)".into())
+    s.label.as_deref().map(one_line).filter(|l| !l.is_empty()).unwrap_or_else(|| "(untitled)".into())
 }
 
-/// One row per session, in the order given (newest first).
+/// A path cut from the left so its last folders stay readable: `…/repos/grok-build`.
+fn tail(path: &str, width: usize) -> String {
+    let n = path.chars().count();
+    if n <= width {
+        return path.to_string();
+    }
+    let keep: String = path.chars().skip(n + 1 - width.max(1)).collect();
+    format!("…{keep}")
+}
+
+/// Sessions under their workspace folder. Workspaces come in order of their newest session (the input is newest
+/// first), with this session's own folder on top.
 fn rows_from(sessions: &[SessionRow], c: &Ctx) -> Vec<Row> {
     if sessions.is_empty() {
         return note_rows("no recent sessions", c);
     }
+    let place = |s: &SessionRow| match s.cwd.as_deref().filter(|p| !p.is_empty()) {
+        Some(p) => crate::git_info::collapse_home(std::path::Path::new(p)),
+        None => "(no folder)".to_string(),
+    };
+    let mut groups: Vec<(String, Vec<&SessionRow>)> = Vec::new();
+    for s in sessions {
+        let p = place(s);
+        match groups.iter_mut().find(|(g, _)| *g == p) {
+            Some((_, list)) => list.push(s),
+            None => groups.push((p, vec![s])),
+        }
+    }
+    groups.sort_by_key(|(g, _)| *g != c.info.cwd);
     let source_w = sessions.iter().map(|s| s.source.width()).max().unwrap_or(0).min(MAX_SOURCE);
-    sessions
-        .iter()
-        .map(|s| {
+    let muted = Style::default().fg(c.theme.text_secondary);
+    let head = Style::default().fg(c.theme.accent_user).add_modifier(Modifier::BOLD);
+    let mut out = Vec::new();
+    for (place, list) in groups {
+        let count = list.len().to_string();
+        let name = tail(&place, c.width.saturating_sub(count.width() + 1));
+        let pad = c.width.saturating_sub(name.width() + count.width());
+        out.push(Row::new(
+            Line::from(vec![Span::styled(name, head), Span::raw(" ".repeat(pad)), Span::styled(count, muted)]),
+            place,
+        ));
+        for s in list {
             let when = age(s.updated_at.or(s.mtime_ms).or(s.started_at).unwrap_or(0), c.now_ms);
             let source = truncate_str(&s.source, source_w);
-            let lead = format!("{when:>3} {source:<source_w$} ");
+            let lead = format!("  {when:>3} {source:<source_w$} ");
             let title = title(s);
-            let muted = Style::default().fg(c.theme.text_secondary);
             let line = Line::from(vec![
                 Span::styled(lead.clone(), muted),
                 Span::styled(
@@ -120,9 +151,10 @@ fn rows_from(sessions: &[SessionRow], c: &Ctx) -> Vec<Row> {
                     Style::default().fg(c.theme.text_primary),
                 ),
             ]);
-            Row::new(line, format!("{title} · {} · {when} · {}", s.source, s.id)).opens(s.id.clone())
-        })
-        .collect()
+            out.push(Row::new(line, format!("{title} · {} · {when} · {}", s.source, s.id)).opens(s.id.clone()));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -135,6 +167,7 @@ mod tests {
 
     fn session(id: &str, source: &str, title: &str, ago_min: i64) -> SessionRow {
         SessionRow {
+            cwd: Some(if source == "codex" { "/work/other-repo" } else { "/work/grok-build" }.into()),
             id: id.into(),
             source: source.into(),
             title: title.into(),
@@ -180,9 +213,19 @@ mod tests {
     #[test]
     fn a_row_copies_the_whole_title_and_opens_its_id() {
         let rows = at(&filled(), 21);
-        assert_eq!(rows[2].copy, "fix the flaky traces test · codex · 2h · codex:c3");
-        assert_eq!(rows[2].open.as_deref(), Some("codex:c3"));
+        assert_eq!(rows[5].copy, "fix the flaky traces test · codex · 2h · codex:c3");
+        assert_eq!(rows[5].open.as_deref(), Some("codex:c3"));
         assert_eq!(rows[3].copy, "(untitled) · pi · 5d · pi:d4");
+    }
+
+    #[test]
+    fn sessions_sit_under_their_workspace_and_this_one_leads() {
+        let info = Info { cwd: "/work/other-repo".into(), ..Info::default() };
+        let rows = rows_from(&filled(), &Ctx { info: &info, theme: &Theme::current(), width: 43, now_ms: NOW });
+        let heads: Vec<&str> = rows.iter().filter(|r| r.open.is_none()).map(|r| r.copy.as_str()).collect();
+        assert_eq!(heads, ["/work/other-repo", "/work/grok-build"], "this session's folder first, then by newest");
+        assert_eq!(at(&filled(), 43)[0].copy, "/work/grok-build");
+        assert_eq!(tail("/a/long/path/to/grok-build", 12), "…/grok-build");
     }
 
     #[test]

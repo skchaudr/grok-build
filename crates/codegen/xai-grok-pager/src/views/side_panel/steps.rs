@@ -1,16 +1,18 @@
 //! Steps page: this session by turn, one line per step.
 //!
-//! A turn starts at each prompt. Its header is `#turn prompt … duration`; under it one row per tool call of the
-//! root agent, numbered from 1 within the turn: `n mark tool target … duration`. Nothing expands. A subagent shows
-//! only as the `Agent` call that spawned it.
+//! A turn starts at each prompt. Its header is `#turn › prompt … duration`; under it one row per tool call of the
+//! root agent, numbered from 1 within the turn and drawn as the traces follow view draws a call: `n ◆ Tool  target …
+//! duration`, the diamond carrying the state. Nothing expands. A subagent shows only as the `Agent` call that
+//! spawned it.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::{Ctx, Row};
+use crate::render::color::blend_color;
 use crate::render::line_utils::truncate_str;
-use crate::views::traces_follow::{Body, Call, Follow, took};
+use crate::views::traces_follow::{Body, Call, DIM_ACCENT, Follow, took};
 
 /// One prompt and the root agent's calls after it.
 struct Turn<'a> {
@@ -45,6 +47,8 @@ fn turns(follow: &Follow) -> Vec<Turn<'_>> {
                 let start = r.ts;
                 out.push(Turn { prompt: t, start, end: start.unwrap_or(0), calls: Vec::new() });
             }
+            // Some transcripts record a bare `Tool` marker beside the real call: no target and never a result.
+            Body::Call(c) if c.tool == "Tool" && c.what.is_empty() && c.result.is_none() => {}
             Body::Call(c) => {
                 // The backlog can begin mid-turn: its calls get a turn with no prompt.
                 if out.is_empty() {
@@ -55,7 +59,7 @@ fn turns(follow: &Follow) -> Vec<Turn<'_>> {
                 t.end = t.end.max(c.started_ms + c.result.as_ref().and_then(|r| r.ms).unwrap_or(0));
                 t.calls.push(c);
             }
-            Body::Text(_) | Body::Reasoning(_) | Body::End => {
+            Body::Text(_) | Body::Reasoning(_) => {
                 if let (Some(t), Some(ts)) = (out.last_mut(), r.ts) {
                     t.end = t.end.max(ts);
                 }
@@ -100,37 +104,48 @@ pub(super) fn rows(follow: &Follow, c: &Ctx) -> Vec<Row> {
         let head = Style::default().fg(th.accent_user).add_modifier(Modifier::BOLD);
         out.push(Row::new(
             line(
-                vec![Span::styled(format!("#{} ", n + 1), head)],
+                vec![Span::styled(format!("#{} ", n + 1), fg(th.text_secondary)), Span::styled("› ", head)],
                 Span::styled(prompt.to_string(), head),
                 Span::styled(dur, fg(th.text_secondary)),
                 c.width,
             ),
             t.prompt.trim_end(),
         ));
+        // A finished call's diamond is dimmed toward the page, as the follow view and grok's collapsed rows do.
+        let done = blend_color(th.bg_base, th.accent_success, DIM_ACCENT).unwrap_or(th.accent_success);
+        // One name column per turn so the targets line up; a long tool name is cut, not allowed to push them out.
+        let name_w = t.calls.iter().map(|c| c.tool.width()).max().unwrap_or(0).min(8);
         for (i, call) in t.calls.iter().enumerate() {
             // shortcut: the index's tool title is all there is (the generic `Tool` is what some transcripts record); a better name needs the raw line.
-            let head = format!("{} {}", call.tool, first_line(&call.what)).trim_end().to_string();
-            let (mark, color, state, dur) = match &call.result {
-                Some(r) if !r.ok => ("✗", th.accent_error, format!("failed {}", first_line(&r.error)), r.ms),
-                Some(r) => ("✓", th.accent_success, "ok".to_string(), r.ms),
-                None if !running(call, live_session) => ("–", th.text_secondary, "no result".to_string(), None),
-                None => ("▸", th.accent_running, "running".to_string(), None),
+            let what = first_line(&call.what);
+            let head = format!("{} {what}", call.tool).trim_end().to_string();
+            // A resumed transcript restamps every item with one time, so its durations come out as 0: show none.
+            let ms = call.result.as_ref().and_then(|r| r.ms).filter(|&ms| ms > 0).map(took).unwrap_or_default();
+            let (diamond, state, shown, tail) = match &call.result {
+                Some(r) if !r.ok => {
+                    (th.accent_error, format!("failed {}", first_line(&r.error)), ms.clone(), format!("✗ {ms}"))
+                }
+                Some(_) => (done, "ok".to_string(), ms.clone(), ms),
+                None if !running(call, live_session) => {
+                    (th.gray_dim, "no result".to_string(), String::new(), String::new())
+                }
+                None => {
+                    let t = took((c.now_ms - call.started_ms).max(0));
+                    (th.accent_running, "running".to_string(), t.clone(), format!("… {t}"))
+                }
             };
-            let shown = match &call.result {
-                Some(_) => dur.map(took).unwrap_or_default(),
-                None if !running(call, live_session) => String::new(),
-                None => took((c.now_ms - call.started_ms).max(0)),
-            };
-            // Only the mark is error-coloured: some themes' error red is under 3:1 on their page, too faint for text.
-            let text = fg(th.text_primary);
+            let live = state == "running";
+            // Only the diamond and the `✗` are error-coloured: some themes' error red is under 3:1 on their page, too faint for text.
+            let name = truncate_str(&call.tool, name_w);
             out.push(Row::new(
                 line(
                     vec![
-                        Span::styled(format!("{:>3} ", i + 1), fg(th.text_secondary)),
-                        Span::styled(format!("{mark} "), fg(color)),
+                        Span::styled(format!("{:>2} ", i + 1), fg(th.text_secondary)),
+                        Span::styled("◆ ", fg(diamond)),
+                        Span::styled(format!("{name:<name_w$}  "), fg(th.text_primary).add_modifier(Modifier::BOLD)),
                     ],
-                    Span::styled(head.clone(), text),
-                    Span::styled(shown.clone(), fg(if mark == "▸" { th.accent_running } else { th.text_secondary })),
+                    Span::styled(what.to_string(), fg(th.text_secondary)),
+                    Span::styled(tail.trim_end().to_string(), fg(if live { th.accent_running } else { th.text_secondary })),
                     c.width,
                 ),
                 format!("{head}  {state}  {shown}").trim_end(),
@@ -262,13 +277,13 @@ mod tests {
         (f.root.updated_at, f.root.mtime_ms) = (Some(stale), Some(stale));
         let r = rows(&f, &Ctx { info: &info, theme: &Theme::current(), width: 43, now_ms: stale });
         let last = r.last().unwrap();
-        assert!(text(last).contains('–') && !text(last).contains('▸'), "{}", text(last));
+        assert!(!text(last).contains("… "), "no running timer: {}", text(last));
         assert_eq!(last.copy, "Bash cargo test --release  no result");
         assert!(text(&r[r.len() - 2]).trim_end().ends_with("1.0s"), "turn 2 header: {}", text(&r[r.len() - 2]));
         assert_eq!((took(47 * 3600 * 1000), took(28 * 86_400 * 1000)), ("47h00m".into(), "28d".into()));
         f.root.last_event_at = Some(stale);
         let live = rows(&f, &Ctx { info: &info, theme: &Theme::current(), width: 43, now_ms: stale + 5_000 });
-        assert!(text(live.last().unwrap()).contains('▸'), "a recent session still shows its running step");
+        assert!(text(live.last().unwrap()).contains("… "), "a recent session still shows its running step");
     }
 
     #[test]
@@ -280,6 +295,21 @@ mod tests {
         ]);
         let r = at(&f, 43);
         assert_eq!(r[1].copy, "Tool  ok  0.1s");
-        assert!(text(&r[1]).contains("✓ Tool "), "{}", text(&r[1]));
+        assert!(text(&r[1]).contains("◆ Tool "), "{}", text(&r[1]));
+    }
+
+    #[test]
+    fn a_zero_duration_and_a_bare_tool_marker_are_not_shown() {
+        let f = follow(&[
+            item("user", "root", 0, 10_000, json!({"text": "go"})),
+            call("root", 10_000, "a", "Bash", "ls"),
+            done("root", 10_000, "a", true, "", 0),
+            call("root", 10_000, "m", "Tool", ""),
+            item("agent_end", "root", 0, 90_000_000, json!({})),
+        ]);
+        let r = at(&f, 43);
+        assert_eq!(r.len(), 2, "the marker is not a step");
+        assert_eq!(r[1].copy, "Bash ls  ok");
+        assert!(!text(&r[1]).contains("0.0s") && !text(&r[0]).contains("h"), "{} | {}", text(&r[0]), text(&r[1]));
     }
 }

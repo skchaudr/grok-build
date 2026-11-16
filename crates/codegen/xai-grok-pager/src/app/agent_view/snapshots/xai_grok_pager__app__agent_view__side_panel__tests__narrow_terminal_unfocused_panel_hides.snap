@@ -23,4 +23,4 @@ expression: "draw(&mut agent, 50, 24)"
   │ ❯                                          │
   ╰───────────────────────────────── Grok 4.5 ─╯
 
-  Shift+Tab:mode  │  Ctrl+.:shortcuts
+  Shift+Tab:mode  │  Ctrl+x:shortcuts

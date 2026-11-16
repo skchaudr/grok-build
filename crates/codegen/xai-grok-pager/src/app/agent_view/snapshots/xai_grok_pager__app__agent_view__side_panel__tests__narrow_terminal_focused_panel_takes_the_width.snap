@@ -31,4 +31,4 @@ expression: "draw(&mut agent, 50, 30)"
 │   7d usage     not reported
 │
 │ Runtime
-│ Esc chat · ←/→ page · y copy · z zoom
+│ Esc chat · h/l page · j/k row · y copy

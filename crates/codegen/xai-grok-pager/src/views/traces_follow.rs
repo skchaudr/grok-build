@@ -37,7 +37,7 @@ const USER_LINES: usize = 3;
 const TEXT_LINES: usize = 6;
 /// How far a finished call's diamond is dimmed toward the background, as grok's collapsed tool rows do
 /// (`scrollback.display.dim_accent` default).
-const DIM_ACCENT: f32 = 0.5;
+pub(super) const DIM_ACCENT: f32 = 0.5;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Res {
