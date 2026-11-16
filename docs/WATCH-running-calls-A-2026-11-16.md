@@ -35,6 +35,21 @@ Measured: 11 s, zero tool calls. The `#15` header read `0.0s` while the status r
 
 A model-only turn draws a status row with a spinner and timer, and no card or row. That is the only visible signal of work in that turn.
 
+## Turn 3: multi-call turn, 14:35:03 to 14:35:50
+
+First turn where a tool was visibly running at a snapshot.
+
+- 14:35:05 (snap-143505): status row `⠹ Waiting for response… 1.8s`, right side `1.8s ⇣75.7k [stop]`. No card. Model wait.
+- 14:35:20 (snap-143520): status row `⠼ Run Write docs/briefs/restore-traces-page-2026-11-16.md 3.0s`, right side `16s ⇣78.1k [stop]`. Card `┃  ◆ Edit docs/briefs/restore-traces-page-2026-11-16.md` with a heavy left bar `┃`. The card header says `Edit`; the status row says `Run Write`.
+- 14:35:35 (snap-143535): status row `⠸ Run rex api call session.set_layer_state '{"session_id":"'$REX_SESSION'","… 0.4s`, right side `31s ⇣81.3k [↓][stop]`. Cards visible: `◆ Run git add docs/briefs/restore-traces-page-2026-11-16.md && git commit -qm "brief: restore Trace…`, `◆ Run rex api call session.new_layer '{…`, and `┃ ◆ Run rex api call session.set_layer_state '{…` (heavy bar, running). The call's own timer restarted at `0.4s`, separate from the turn's `31s`.
+- 14:35:50 (snap-143550): no status row. `Worked for 44s`. Three `◆ Run` cards, no `┃` bar, no ✓ or ✗ on any card. The Write/Edit card was out of view.
+
+Read from this turn:
+- A running card has a heavy left bar `┃`. Completed cards in turns 1 and 2 had none. The bar is the only per-card running mark on the chat.
+- The status row names the running tool and shows its own timer, reset per call. Turn 1 and turn 2 cards were all finished when sampled, so turn 1 never showed a running name or per-call timer.
+- The status row can name a different tool than the card header (`Run Write` against `◆ Edit`). Which one is the call actually executing is not settled from the screen.
+- Completed cards show no result mark in the chat. Results appear only on the grouped list (earlier turn: `✗` on one row).
+
 ## Other observations
 
 - Tab bar: the first line showed `[Agents]` in every snapshot from 14:31:04 to 14:34:05, while the body was the Session page (14:31 to 14:31:34) and the grouped list (14:33). The bracket does not follow the body, so it cannot be used to tell which page is open.
@@ -52,6 +67,7 @@ Seen:
 - No elapsed time or status mark on any running card header.
 - Grouped list in the panel: turn headers `#N › <text>` with turn time; call rows `N ◆ Bash <desc> <dur>` with per-call duration and `✗` on a failed call. Completed calls show real durations (0.4 to 2.9 s here).
 - Model-only turn: status row only, no card, no row, header `0.0s`.
+- Running card: heavy left bar `┃` on the card, and the status row names the running call with its own timer (`Run rex api call session.set_layer_state … 0.4s`).
 
 Not seen:
 - The grouped list during a running call. The rows appeared only after their turn finished.
