@@ -1,6 +1,15 @@
-//! F3 side panel, after dsh-tui's: a column beside the chat (a real layout split, not an overlay) with a small Traces
-//! tail of this session and an Info page. Esc hands the keyboard back to the chat, ←/→ switch pages, `z` swaps the
-//! panel and chat widths, `+`/`-` resize. The full-screen `/traces` modal is separate and unchanged.
+//! F3 side panel, after dsh-tui's: a column beside the chat (a real layout split, not an overlay) with four pages:
+//! Session, Steps, Agents, Recent. Every page is a list of one-line [`Row`]s; ↑/↓ (j/k) move a row cursor and `y`
+//! copies the highlighted row. Esc hands the keyboard back to the chat, ←/→ switch pages, `z` swaps the panel and chat
+//! widths, `+`/`-` resize. The full-screen `/traces` modal is separate and unchanged.
+//!
+//! Shared parts live here (page enum, cursor, copy, scrolling, drawing). Each page owns its module and exposes
+//! `rows(&Ctx) -> Vec<Row>`; nothing else in a page module may touch the cursor or the key handling.
+
+mod jobs;
+mod recent;
+mod session;
+mod steps;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,7 +21,6 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 use xai_grok_traces::{SessionRow, TraceIndex};
 
 use crate::render::line_utils::truncate_str;
@@ -27,20 +35,85 @@ const STEP: u16 = 4;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
+    Session,
     #[default]
-    Traces,
-    Info,
+    Steps,
+    Agents,
+    Recent,
 }
 
 impl Page {
-    const ALL: [Page; 2] = [Page::Traces, Page::Info];
+    const ALL: [Page; 4] = [Page::Session, Page::Steps, Page::Agents, Page::Recent];
 
     fn tab(self) -> &'static str {
         match self {
-            Page::Traces => "∿ Traces",
-            Page::Info => "◆ Info",
+            Page::Session => "Session",
+            Page::Steps => "Steps",
+            Page::Agents => "Agents",
+            Page::Recent => "Recent",
         }
     }
+
+    fn idx(self) -> usize {
+        Self::ALL.iter().position(|p| *p == self).unwrap_or(0)
+    }
+
+    /// A live log: the cursor sits on the newest row until the user moves off it.
+    fn tails(self) -> bool {
+        self == Page::Steps
+    }
+}
+
+/// One line of a page. `copy` is what `y` puts on the clipboard (full text, not the truncated line); `open` is the
+/// trace-index session id Enter opens, when the row stands for one.
+#[derive(Clone, Debug)]
+pub struct Row {
+    pub line: Line<'static>,
+    pub copy: String,
+    pub open: Option<String>,
+}
+
+impl Row {
+    pub fn new(line: Line<'static>, copy: impl Into<String>) -> Self {
+        Self { line, copy: copy.into(), open: None }
+    }
+
+    /// A row that copies its own text.
+    pub fn plain(line: Line<'static>) -> Self {
+        let copy = line.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        Self::new(line, copy.trim_end())
+    }
+
+    pub fn opens(mut self, session_id: impl Into<String>) -> Self {
+        self.open = Some(session_id.into());
+        self
+    }
+}
+
+/// What a page needs to build its rows.
+pub struct Ctx<'a> {
+    pub info: &'a Info,
+    pub theme: &'a Theme,
+    /// Drawable columns of a row; rows longer than this are cut by the drawing, so truncate with a `…` yourself.
+    pub width: usize,
+    pub now_ms: i64,
+}
+
+/// What a key asked of the agent view; taken by its glue after `handle_key`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    Copy(String),
+    /// Open this trace-index session id.
+    Open(String),
+}
+
+/// Cursor and scroll of one page.
+#[derive(Clone, Copy, Debug, Default)]
+struct View {
+    cursor: usize,
+    top: usize,
+    /// The user moved off the tail of a [`Page::tails`] page.
+    free: bool,
 }
 
 /// What the Info page shows, gathered from the agent view each frame.
@@ -109,8 +182,19 @@ pub struct SidePanel {
     pub page: Page,
     width: u16,
     traces: Traces,
+    recent: recent::Recent,
     /// Claude's 5-hour limit, from the statusline snapshots `ocq` reads.
     pub five_hour_pct: Option<u8>,
+    view: [View; 4],
+    /// Rows on each page as of the last frame.
+    len: [usize; 4],
+    /// Body height as of the last frame, for PgUp/PgDn.
+    page_h: usize,
+    /// (copy text, open id) of the highlighted row as of the last frame.
+    selected: Option<(String, Option<String>)>,
+    event: Option<Event>,
+    /// A line for the footer (`copied`), cleared by the next key.
+    note: Option<String>,
 }
 
 impl Default for SidePanel {
@@ -122,7 +206,14 @@ impl Default for SidePanel {
             page: Page::default(),
             width: DEFAULT_WIDTH,
             traces: Traces::Idle,
+            recent: recent::Recent::default(),
             five_hour_pct: None,
+            view: [View::default(); 4],
+            len: [0; 4],
+            page_h: 10,
+            selected: None,
+            event: None,
+            note: None,
         }
     }
 }
@@ -148,41 +239,61 @@ impl SidePanel {
     /// Keys while focused. False lets the key fall through to the chat (unhandled Ctrl chords such as Ctrl+C).
     pub fn handle_key(&mut self, key: &KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        self.note = None;
         match key.code {
             _ if ctrl => return false,
             KeyCode::Esc => self.focused = false,
             KeyCode::Left | KeyCode::Right => {
-                let at = Page::ALL.iter().position(|p| *p == self.page).unwrap_or(0);
                 let n = Page::ALL.len();
-                let next = if key.code == KeyCode::Right {
-                    at + 1
-                } else {
-                    at + n - 1
-                };
+                let at = self.page.idx();
+                let next = if key.code == KeyCode::Right { at + 1 } else { at + n - 1 };
                 self.page = Page::ALL[next % n];
             }
             KeyCode::Char('z') => self.zoomed = !self.zoomed,
             // Zoomed, `width` is the chat's, so wider panel means a narrower chat.
             KeyCode::Char('+' | '=') => self.resize(!self.zoomed),
             KeyCode::Char('-' | '_') => self.resize(self.zoomed),
-            KeyCode::Char('j' | 'k' | 'g' | 'G' | 'e' | 'h' | 'l')
-            | KeyCode::Up
-            | KeyCode::Down
-            | KeyCode::PageUp
-            | KeyCode::PageDown
-            | KeyCode::Home
-            | KeyCode::End
-            | KeyCode::Tab
-            | KeyCode::BackTab => {
-                if self.page == Page::Traces
-                    && let Traces::Following(f, _) = &mut self.traces
-                {
-                    f.key(key.code);
-                }
+            KeyCode::Up | KeyCode::Char('k') => self.step(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.step(1),
+            KeyCode::PageUp => self.step(-(self.page_h.max(1) as isize)),
+            KeyCode::PageDown => self.step(self.page_h.max(1) as isize),
+            KeyCode::Home | KeyCode::Char('g') => self.jump(false),
+            KeyCode::End | KeyCode::Char('G') => self.jump(true),
+            KeyCode::Char('y') => {
+                self.event = self.selected.as_ref().map(|(copy, _)| Event::Copy(copy.clone()));
+            }
+            KeyCode::Enter => {
+                self.event = self.selected.as_ref().and_then(|(_, open)| open.clone()).map(Event::Open);
             }
             _ => {}
         }
         true
+    }
+
+    /// The copy or open a key asked for, once.
+    pub fn take_event(&mut self) -> Option<Event> {
+        self.event.take()
+    }
+
+    pub fn set_note(&mut self, note: String) {
+        self.note = Some(note);
+    }
+
+    fn step(&mut self, delta: isize) {
+        let i = self.page.idx();
+        let last = self.len[i].saturating_sub(1);
+        let v = &mut self.view[i];
+        v.cursor = (v.cursor as isize + delta).clamp(0, last as isize) as usize;
+        v.free = !(self.page.tails() && v.cursor >= last);
+    }
+
+    /// `g` / `G`: first or last row. The last row of a tailing page pins it again.
+    fn jump(&mut self, end: bool) {
+        let i = self.page.idx();
+        let last = self.len[i].saturating_sub(1);
+        let v = &mut self.view[i];
+        v.cursor = if end { last } else { 0 };
+        v.free = !(self.page.tails() && end);
     }
 
     fn resize(&mut self, grow: bool) {
@@ -233,7 +344,8 @@ impl SidePanel {
         let home = std::env::var("HOME").unwrap_or_default();
         let five_hour = claude_five_hour_pct(&Path::new(&home).join(".cache/claude-status"));
         let usage_moved = std::mem::replace(&mut self.five_hour_pct, five_hour) != five_hour;
-        usage_moved | self.poll_traces(native, now_ms)
+        let recent = self.page == Page::Recent && self.recent.poll(now_ms);
+        usage_moved | self.poll_traces(native, now_ms) | recent
     }
 
     fn poll_traces(&mut self, native: Option<&str>, now_ms: i64) -> bool {
@@ -315,16 +427,16 @@ impl SidePanel {
             Style::default().fg(theme.gray_dim),
         );
 
-        let footer = if self.focused {
-            "Esc chat · ←/→ panels · z zoom · +/- width"
-        } else {
-            "F3 focus panel"
+        let footer = match (&self.note, self.focused) {
+            (Some(note), _) => note.clone(),
+            (None, true) => "Esc chat · ←/→ page · j/k move · y copy · z zoom".to_string(),
+            (None, false) => "F3 focus panel".to_string(),
         };
         let footer_y = inner.y + inner.height - 1;
         buf.set_string(
             inner.x,
             footer_y,
-            truncate_str(footer, w),
+            truncate_str(&footer, w),
             Style::default().fg(theme.gray),
         );
 
@@ -333,37 +445,63 @@ impl SidePanel {
             height: inner.height - 3,
             ..inner
         };
-        match self.page {
-            Page::Info => {
-                for (i, line) in info_lines(info, w, theme, now_ms / 1000)
-                    .into_iter()
-                    .take(body.height as usize)
-                    .enumerate()
-                {
-                    buf.set_line(body.x, body.y + i as u16, &line, body.width);
+        let ctx = Ctx { info, theme, width: w, now_ms };
+        let rows = match self.page {
+            Page::Session => session::rows(&ctx),
+            Page::Steps => match &self.traces {
+                Traces::Following(f, _) => steps::rows(f, &ctx),
+                Traces::Idle if info.session_id.is_none() => note_rows("no session yet", &ctx),
+                Traces::Idle | Traces::Looking(_) => {
+                    note_rows("waiting for this session in the traces index…", &ctx)
                 }
-            }
-            Page::Traces => {
-                let note = match &mut self.traces {
-                    Traces::Following(f, index) => {
-                        f.render(buf, body, index.as_ref(), theme, now_ms);
-                        return;
-                    }
-                    Traces::Idle if info.session_id.is_none() => "no session yet".to_string(),
-                    Traces::Idle | Traces::Looking(_) => {
-                        "waiting for this session in the traces index…".to_string()
-                    }
-                    Traces::Failed(e) => e.clone(),
-                };
-                buf.set_string(
-                    body.x,
-                    body.y,
-                    truncate_str(&note, w),
-                    Style::default().fg(theme.gray),
+                Traces::Failed(e) => note_rows(e, &ctx),
+            },
+            Page::Agents => jobs::rows(&ctx),
+            Page::Recent => self.recent.rows(&ctx),
+        };
+        self.draw_rows(buf, body, rows, theme);
+    }
+
+    /// Clamps the page's cursor to its rows, scrolls it into view, and draws.
+    fn draw_rows(&mut self, buf: &mut Buffer, body: Rect, rows: Vec<Row>, theme: &Theme) {
+        let i = self.page.idx();
+        let n = rows.len();
+        let h = body.height as usize;
+        self.len[i] = n;
+        self.page_h = h;
+        let tails = self.page.tails();
+        let v = &mut self.view[i];
+        if tails && !v.free {
+            v.cursor = n.saturating_sub(1);
+        }
+        v.cursor = v.cursor.min(n.saturating_sub(1));
+        if v.cursor < v.top {
+            v.top = v.cursor;
+        } else if v.cursor >= v.top + h {
+            v.top = v.cursor + 1 - h;
+        }
+        v.top = v.top.min(n.saturating_sub(h));
+        let (cursor, top) = (v.cursor, v.top);
+        self.selected = rows.get(cursor).map(|r| (r.copy.clone(), r.open.clone()));
+        for (k, row) in rows.iter().skip(top).take(h).enumerate() {
+            let y = body.y + k as u16;
+            buf.set_line(body.x, y, &row.line, body.width);
+            if self.focused && top + k == cursor {
+                buf.set_style(
+                    Rect { y, height: 1, ..body },
+                    Style::default().bg(theme.bg_visual).add_modifier(Modifier::BOLD),
                 );
             }
         }
     }
+}
+
+/// A page that has nothing to list yet says why on its first row.
+fn note_rows(note: &str, ctx: &Ctx) -> Vec<Row> {
+    vec![Row::plain(Line::from(Span::styled(
+        truncate_str(note, ctx.width),
+        Style::default().fg(ctx.theme.gray),
+    )))]
 }
 
 #[cfg(test)]
@@ -435,117 +573,6 @@ fn look_up(db: PathBuf, native: String) -> mpsc::Receiver<Option<SessionRow>> {
         }
     });
     rx
-}
-
-/// `██████░░░░`, `pct` of `width` filled.
-fn bar(pct: u8, width: usize) -> String {
-    let filled = (pct.min(100) as usize * width + 50) / 100;
-    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
-}
-
-fn tokens(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1e6)
-    } else if n >= 1_000 {
-        format!("{}k", n / 1000)
-    } else {
-        n.to_string()
-    }
-}
-
-fn info_lines(info: &Info, width: usize, theme: &Theme, now_secs: i64) -> Vec<Line<'static>> {
-    let head = |s: &str| {
-        Line::from(Span::styled(
-            s.to_string(),
-            Style::default()
-                .fg(theme.accent_user)
-                .add_modifier(Modifier::BOLD),
-        ))
-    };
-    let row = |k: &str, v: &str| {
-        let v = truncate_str(v, width.saturating_sub(12));
-        Line::from(vec![
-            Span::styled(format!("  {k:<9} "), Style::default().fg(theme.gray)),
-            Span::styled(v, Style::default().fg(theme.text_primary)),
-        ])
-    };
-    let meter = |label: &str, pct: u8, tail: String| {
-        // One bar width for every meter, leaving room for the longest tail (`100% resets 130h42m`).
-        let bar_w = width.saturating_sub(12 + 21).clamp(4, 24);
-        let color = match pct {
-            90.. => theme.accent_error,
-            70.. => theme.accent_plan,
-            _ => theme.accent_success,
-        };
-        Line::from(vec![
-            Span::styled(format!("  {label:<9} "), Style::default().fg(theme.gray)),
-            Span::styled(bar(pct, bar_w), Style::default().fg(color)),
-            Span::styled(format!(" {tail}"), Style::default().fg(theme.text_primary)),
-        ])
-    };
-    let mut out = vec![head("Session")];
-    if let Some(t) = info.title.as_deref().filter(|t| !t.is_empty()) {
-        out.push(row("title", t));
-    }
-    out.push(row("id", info.session_id.as_deref().unwrap_or("—")));
-    out.push(row("cwd", &info.cwd));
-    out.push(Line::default());
-    out.push(head("Model"));
-    out.push(row("model", info.model.as_deref().unwrap_or("—")));
-    out.push(row("effort", info.effort.as_deref().unwrap_or("—")));
-    out.push(row("mode", &info.mode));
-    out.push(Line::default());
-    out.push(head("Context"));
-    match info.context {
-        Some((used, total)) if total > 0 => {
-            let pct = (used.saturating_mul(100) / total).min(100) as u8;
-            out.push(meter(
-                "context",
-                pct,
-                format!("{pct}% {}/{}", tokens(used), tokens(total)),
-            ));
-        }
-        _ => out.push(row("context", "not reported")),
-    }
-    for (label, key, file_pct) in [
-        ("5h usage", "five_hour", info.five_hour_pct),
-        ("7d usage", "seven_day", None),
-    ] {
-        // A window past its reset is stale: show nothing for it rather than `resets 0h00m` beside an old percent.
-        let live = info
-            .rate_limits
-            .get(key)
-            .filter(|w| w.resets_at.is_none_or(|r| r > now_secs));
-        out.push(match (live, file_pct) {
-            (Some(w), _) => {
-                let resets = w
-                    .resets_at
-                    .map(|r| format!(" resets {}", reset_in(r, now_secs)))
-                    .unwrap_or_default();
-                meter(label, w.pct, format!("{}%{resets}", w.pct))
-            }
-            (None, Some(pct)) => meter(label, pct, format!("{pct}%")),
-            (None, None) => row(label, "not reported"),
-        });
-    }
-    out.push(Line::default());
-    out.push(head("Runtime"));
-    out.push(row("status", &info.status));
-    for (label, items) in [("bg jobs", &info.jobs), ("subagents", &info.subagents)] {
-        out.push(row(label, &items.len().to_string()));
-        for (desc, meta) in items {
-            let meta = truncate_str(meta, width / 3);
-            let desc = truncate_str(desc, width.saturating_sub(meta.width() + 6));
-            out.push(Line::from(vec![
-                Span::styled(
-                    format!("    · {desc}"),
-                    Style::default().fg(theme.text_primary),
-                ),
-                Span::styled(format!("  {meta}"), Style::default().fg(theme.gray)),
-            ]));
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -686,10 +713,15 @@ mod tests {
         let mut p = SidePanel::default();
         p.toggle();
         assert!(p.has_keys());
+        assert_eq!(p.page, Page::Steps);
         assert!(p.handle_key(&key(KeyCode::Right)));
-        assert_eq!(p.page, Page::Info);
-        p.handle_key(&key(KeyCode::Right));
-        assert_eq!(p.page, Page::Traces, "pages wrap");
+        assert_eq!(p.page, Page::Agents);
+        for _ in 0..3 {
+            p.handle_key(&key(KeyCode::Right));
+        }
+        assert_eq!(p.page, Page::Agents, "four pages wrap");
+        p.handle_key(&key(KeyCode::Left));
+        assert_eq!(p.page, Page::Steps);
         p.handle_key(&key(KeyCode::Char('+')));
         assert_eq!(p.width, DEFAULT_WIDTH + STEP);
         p.handle_key(&key(KeyCode::Char('z')));
@@ -708,5 +740,62 @@ mod tests {
         assert!(p.focused, "F3 on an unfocused panel focuses it");
         p.toggle();
         assert!(!p.open, "F3 on a focused panel closes it");
+    }
+
+    fn lines(rows: &[&str]) -> Vec<Row> {
+        rows.iter().map(|t| Row::plain(Line::from(t.to_string()))).collect()
+    }
+
+    fn draw(p: &mut SidePanel, rows: &[&str], h: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, 30, h);
+        let mut buf = Buffer::empty(area);
+        p.draw_rows(&mut buf, area, lines(rows), &Theme::current());
+        (0..h)
+            .map(|y| (0..30).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn cursor_moves_scrolls_and_y_copies_the_highlighted_row() {
+        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        let rows = ["a", "b", "c", "d", "e"];
+        let mut p = SidePanel { open: true, focused: true, page: Page::Agents, ..SidePanel::default() };
+        assert_eq!(draw(&mut p, &rows, 3), ["a", "b", "c"]);
+        p.handle_key(&key(KeyCode::Char('y')));
+        assert_eq!(p.take_event(), Some(Event::Copy("a".into())));
+        assert_eq!(p.take_event(), None, "an event is taken once");
+        for _ in 0..4 {
+            p.handle_key(&key(KeyCode::Char('j')));
+        }
+        assert_eq!(draw(&mut p, &rows, 3), ["c", "d", "e"], "the cursor row stays on screen");
+        p.handle_key(&key(KeyCode::Char('y')));
+        assert_eq!(p.take_event(), Some(Event::Copy("e".into())));
+        p.handle_key(&key(KeyCode::Char('g')));
+        assert_eq!(draw(&mut p, &rows, 3), ["a", "b", "c"]);
+        p.handle_key(&key(KeyCode::Enter));
+        assert_eq!(p.take_event(), None, "a row with no session to open does nothing on Enter");
+    }
+
+    #[test]
+    fn enter_opens_a_row_that_stands_for_a_session() {
+        let mut p = SidePanel { open: true, focused: true, page: Page::Recent, ..SidePanel::default() };
+        let area = Rect::new(0, 0, 30, 3);
+        let mut buf = Buffer::empty(area);
+        let row = Row::plain(Line::from("session")).opens("grok:abc");
+        p.draw_rows(&mut buf, area, vec![row], &Theme::current());
+        p.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(p.take_event(), Some(Event::Open("grok:abc".into())));
+    }
+
+    #[test]
+    fn the_steps_page_tails_until_the_cursor_moves_off_the_newest_row() {
+        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        let mut p = SidePanel { open: true, focused: true, page: Page::Steps, ..SidePanel::default() };
+        assert_eq!(draw(&mut p, &["a", "b", "c", "d"], 2), ["c", "d"]);
+        assert_eq!(draw(&mut p, &["a", "b", "c", "d", "e"], 2), ["d", "e"], "pinned, a new row scrolls in");
+        p.handle_key(&key(KeyCode::Char('k')));
+        assert_eq!(draw(&mut p, &["a", "b", "c", "d", "e", "f"], 2), ["d", "e"], "moved off the tail, the view holds");
+        p.handle_key(&key(KeyCode::Char('G')));
+        assert_eq!(draw(&mut p, &["a", "b", "c", "d", "e", "f", "g"], 2), ["f", "g"], "G pins the tail again");
     }
 }

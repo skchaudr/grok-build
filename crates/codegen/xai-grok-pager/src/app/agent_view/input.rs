@@ -422,7 +422,10 @@ impl AgentView {
                 return InputOutcome::Changed;
             }
             if self.key_owner() == KeyOwner::SidePanel && self.side_panel.handle_key(key) {
-                return InputOutcome::Changed;
+                return match self.side_panel.take_event() {
+                    Some(event) => self.side_panel_event(event),
+                    None => InputOutcome::Changed,
+                };
             }
         }
         if self.dismiss_jump_picker_if_suppressed()

@@ -6,8 +6,9 @@ use xai_grok_tools::types::SessionMode;
 
 use super::AgentView;
 use crate::app::agent::AgentState;
+use crate::app::app_view::InputOutcome;
 use crate::theme::Theme;
-use crate::views::side_panel::Info;
+use crate::views::side_panel::{Event, Info};
 
 impl AgentView {
     pub(crate) fn side_panel_info(&self) -> Info {
@@ -63,6 +64,25 @@ impl AgentView {
                 .map(|(_, _, r)| row(r))
                 .collect(),
         }
+    }
+
+    /// A copy or open the focused panel asked for (`y`, Enter on a row that stands for a session).
+    pub(super) fn side_panel_event(&mut self, event: Event) -> InputOutcome {
+        match event {
+            Event::Copy(text) => {
+                let note = match crate::clipboard::copy_text_or_file(&text) {
+                    crate::clipboard::CopyDelivery::Clipboard { .. } => "copied".to_string(),
+                    crate::clipboard::CopyDelivery::File { path } => {
+                        format!("saved to {}", path.display())
+                    }
+                    crate::clipboard::CopyDelivery::Failed { .. } => "copy failed".to_string(),
+                };
+                self.side_panel.set_note(note);
+            }
+            // Wired by the Recent page.
+            Event::Open(_) => self.side_panel.set_note("open: not wired".to_string()),
+        }
+        InputOutcome::Changed
     }
 
     pub(super) fn draw_side_panel(&mut self, area: Rect, buf: &mut Buffer) {
