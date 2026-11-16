@@ -1,6 +1,6 @@
 # Build: F3 side panel pages (2026-11-16)
 
-Status: DRAFT, not dispatched. Sab confirms the page list before launch.
+Status: dispatched 2026-11-16 as Rex tab `side-panel-lead`.
 
 ## Intent (Sab's words, 2026-11-16)
 
@@ -35,7 +35,7 @@ Status: DRAFT, not dispatched. Sab confirms the page list before launch.
 - Keys: read the pager's key handling and `docs/TOOL-traces-modal.md` first. Reuse existing keys; `y` already
   copies a line in the scrollback and modals already have visual select. Find that code and reuse it.
 
-## Pages (lead's proposal, Sab to confirm)
+## Pages (drawn from Sab's list above)
 
 1. Session: everything known about this session (id, start time, cwd, branch, model, effort, mode, context,
    tokens, cache read/write and hit share, rate limits, status).
@@ -48,13 +48,20 @@ Every row on every page can be moved to with the arrow keys and copied with `y`.
 
 ## How the run is shaped
 
-- One Sonnet 5.5 lead in a visible Rex tab. It reads this brief, splits the pages across three Sonnet 5.5 builders,
-  each in its own named visible Rex tab with a short committed brief of its own. No hidden subagents.
-- The lead owns the shared parts (page enum, navigation, row cursor, copy) and lands them first so the builders
-  do not collide.
-- Builders run no cargo. The lead runs one targeted `cargo test --release` for the pager crate at the end.
+Sab, 2026-11-16: "I don't want those three sub agents all testing and building ... the one Sonnet agent is going to
+be the only one who tests and builds, and it can resume and send work back to those agents. They must be resumable"
+
+- You are the one Sonnet 5.5 lead. You are responsible for three Sonnet 5.5 builders and for everything they write.
+- Builders must be resumable: start each once and keep sending work and fixes back to that same agent (SendMessage,
+  or a named interactive Rex tab you type into). Never replace a builder with a fresh one to deliver a fix.
+- Builders run no cargo at all: no build, test or check. They review their change from code and write tests without
+  running them. Only you run cargo.
+- You own the shared parts (page enum, navigation, row cursor, copy) and land them first so builders do not collide.
 - Each page gets a render snapshot test at half width, for its empty and filled states.
-- Each agent commits and pushes its own work with the trailer `Co-authored-by: claude-code sonnet-5.5`.
-- No model turns inside any grok TUI, no process kills by name, `ps -o pid,comm` only, nothing CPU-heavy on sab-air.
-- The lead does not install. It reports to `docs/BUILD-side-panel-pages-2026-11-16.md` with what landed and what
-  did not; install and the on-screen check in every theme follow from the main session.
+- One cycle at the end, in the existing `target` folder: targeted `cargo test --release` for the pager crate, send
+  failures back to the builder that owns them, then `scripts/install-fork.sh` once.
+- After install, open the panel in `grok claude` on sab-air through Rex, capture each page, and look at it in every
+  shipped theme (`GROK_THEME=<name>`). Send no model turn.
+- Everyone commits and pushes their own work to main with the trailer `Co-authored-by: claude-code sonnet-5.5`.
+- No process kills by name, `ps -o pid,comm` only, nothing CPU-heavy on sab-air, never tmux.
+- Report to `docs/BUILD-side-panel-pages-2026-11-16.md`: each page's real capture, what landed, what did not.
