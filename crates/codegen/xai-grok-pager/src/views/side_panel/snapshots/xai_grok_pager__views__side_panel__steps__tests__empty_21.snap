@@ -1,5 +1,0 @@
----
-source: crates/codegen/xai-grok-pager/src/views/side_panel/steps.rs
-expression: "paint(&at(&follow(&[]), 21), 21)"
----
-no steps yet

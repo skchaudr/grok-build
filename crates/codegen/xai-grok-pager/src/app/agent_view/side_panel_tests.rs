@@ -102,7 +102,7 @@ fn closed() {
 }
 
 #[test]
-fn focused_steps_page() {
+fn focused_traces_page() {
     let mut agent = agent();
     assert!(matches!(
         press(&mut agent, KeyCode::F(3)),
@@ -114,7 +114,7 @@ fn focused_steps_page() {
 }
 
 #[test]
-fn steps_page_before_the_index_has_the_session() {
+fn traces_page_before_the_index_has_the_session() {
     let mut agent = agent();
     press(&mut agent, KeyCode::F(3));
     insta::assert_snapshot!(draw(&mut agent, 110, 24));
@@ -124,7 +124,7 @@ fn steps_page_before_the_index_has_the_session() {
 fn focused_session_page() {
     let mut agent = agent();
     press(&mut agent, KeyCode::F(3));
-    press(&mut agent, KeyCode::Left);
+    press(&mut agent, KeyCode::BackTab);
     assert_eq!(agent.side_panel.page, Page::Session);
     insta::assert_snapshot!(draw(&mut agent, 110, 30));
 }
@@ -133,7 +133,7 @@ fn focused_session_page() {
 fn focused_agents_page() {
     let mut agent = agent();
     press(&mut agent, KeyCode::F(3));
-    press(&mut agent, KeyCode::Right);
+    press(&mut agent, KeyCode::Tab);
     assert_eq!(agent.side_panel.page, Page::Agents);
     insta::assert_snapshot!(draw(&mut agent, 110, 30));
 }
@@ -142,8 +142,8 @@ fn focused_agents_page() {
 fn focused_recent_page() {
     let mut agent = agent();
     press(&mut agent, KeyCode::F(3));
-    press(&mut agent, KeyCode::Left);
-    press(&mut agent, KeyCode::Left);
+    press(&mut agent, KeyCode::BackTab);
+    press(&mut agent, KeyCode::BackTab);
     assert_eq!(agent.side_panel.page, Page::Recent);
     insta::assert_snapshot!(draw(&mut agent, 110, 30));
 }
@@ -152,7 +152,7 @@ fn focused_recent_page() {
 fn open_unfocused_lets_the_chat_type() {
     let mut agent = agent();
     press(&mut agent, KeyCode::F(3));
-    press(&mut agent, KeyCode::Left);
+    press(&mut agent, KeyCode::BackTab);
     press(&mut agent, KeyCode::Esc);
     assert!(agent.side_panel.open && agent.key_owner() != KeyOwner::SidePanel);
     insta::assert_snapshot!(draw(&mut agent, 110, 30));
@@ -162,7 +162,7 @@ fn open_unfocused_lets_the_chat_type() {
 fn zoomed_swaps_the_sizes() {
     let mut agent = agent();
     press(&mut agent, KeyCode::F(3));
-    press(&mut agent, KeyCode::Left);
+    press(&mut agent, KeyCode::BackTab);
     press(&mut agent, KeyCode::Char('z'));
     insta::assert_snapshot!(draw(&mut agent, 110, 30));
 }
@@ -171,7 +171,7 @@ fn zoomed_swaps_the_sizes() {
 fn narrow_terminal_focused_panel_takes_the_width() {
     let mut agent = agent();
     press(&mut agent, KeyCode::F(3));
-    press(&mut agent, KeyCode::Left);
+    press(&mut agent, KeyCode::BackTab);
     insta::assert_snapshot!(draw(&mut agent, 50, 30));
 }
 

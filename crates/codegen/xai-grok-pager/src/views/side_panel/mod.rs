@@ -1,15 +1,16 @@
 //! F3 side panel, after dsh-tui's: a column beside the chat (a real layout split, not an overlay) with four pages:
-//! Session, Steps, Agents, Recent. Every page is a list of one-line [`Row`]s; ↑/↓ (j/k) move a row cursor and `y`
-//! copies the highlighted row. Esc hands the keyboard back to the chat, ←/→ switch pages, `z` swaps the panel and chat
-//! widths, `+`/`-` resize. The full-screen `/traces` modal is separate and unchanged.
+//! Session, Traces, Agents, Recent. Traces is the `/traces` follow view ([`Follow`]) drawn in the column, with its own
+//! cursor and folding. The other pages are lists of one-line [`Row`]s; ↑/↓ (j/k) move a row cursor and `y` copies the
+//! highlighted row. Esc hands the keyboard back to the chat, `z` swaps the panel and chat widths, `+`/`-` resize.
+//! Tab/Shift+Tab switch pages everywhere; on the other pages ←/→ and h/l do too, but on Traces they fold and unfold.
+//! The full-screen `/traces` modal is separate and unchanged.
 //!
-//! Shared parts live here (page enum, cursor, copy, scrolling, drawing). Each page owns its module and exposes
+//! Shared parts live here (page enum, cursor, copy, scrolling, drawing). Each row page owns its module and exposes
 //! `rows(&Ctx) -> Vec<Row>`; nothing else in a page module may touch the cursor or the key handling.
 
 mod jobs;
 mod recent;
 mod session;
-mod steps;
 
 pub use jobs::{Job, JobState};
 
@@ -39,18 +40,18 @@ const STEP: u16 = 4;
 pub enum Page {
     Session,
     #[default]
-    Steps,
+    Traces,
     Agents,
     Recent,
 }
 
 impl Page {
-    const ALL: [Page; 4] = [Page::Session, Page::Steps, Page::Agents, Page::Recent];
+    const ALL: [Page; 4] = [Page::Session, Page::Traces, Page::Agents, Page::Recent];
 
     fn tab(self) -> &'static str {
         match self {
             Page::Session => "Session",
-            Page::Steps => "Steps",
+            Page::Traces => "Traces",
             Page::Agents => "Agents",
             Page::Recent => "Recent",
         }
@@ -58,11 +59,6 @@ impl Page {
 
     fn idx(self) -> usize {
         Self::ALL.iter().position(|p| *p == self).unwrap_or(0)
-    }
-
-    /// A live log: the cursor sits on the newest row until the user moves off it.
-    fn tails(self) -> bool {
-        self == Page::Steps
     }
 }
 
@@ -114,8 +110,6 @@ pub enum Event {
 struct View {
     cursor: usize,
     top: usize,
-    /// The user moved off the tail of a [`Page::tails`] page.
-    free: bool,
 }
 
 /// What the Info page shows, gathered from the agent view each frame.
@@ -256,22 +250,30 @@ impl SidePanel {
     /// Keys while focused. False lets the key fall through to the chat (unhandled Ctrl chords such as Ctrl+C).
     pub fn handle_key(&mut self, key: &KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let traces = self.page == Page::Traces;
         self.note = None;
         match key.code {
             _ if ctrl => return false,
             KeyCode::Esc => self.focused = false,
-            // h/l and Tab/Shift+Tab switch pages as the arrows do, the way the rest of the pager pairs them.
-            KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') | KeyCode::Tab | KeyCode::BackTab => {
-                let n = Page::ALL.len();
-                let at = self.page.idx();
-                let forward = matches!(key.code, KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab);
-                let next = if forward { at + 1 } else { at + n - 1 };
-                self.page = Page::ALL[next % n];
-            }
+            // Tab/Shift+Tab switch pages everywhere. Traces keeps h/l/Left/Right for folding, as the follow view does.
+            KeyCode::Tab => self.turn_page(true),
+            KeyCode::BackTab => self.turn_page(false),
+            KeyCode::Right | KeyCode::Char('l') if !traces => self.turn_page(true),
+            KeyCode::Left | KeyCode::Char('h') if !traces => self.turn_page(false),
             KeyCode::Char('z') => self.zoomed = !self.zoomed,
             // Zoomed, `width` is the chat's, so wider panel means a narrower chat.
             KeyCode::Char('+' | '=') => self.resize(!self.zoomed),
             KeyCode::Char('-' | '_') => self.resize(self.zoomed),
+            // The follow view owns its cursor, so its keys never touch the row cursor below.
+            _ if traces => {
+                if let Traces::Following(f, _) = &mut self.traces {
+                    if key.code == KeyCode::Char('y') {
+                        self.event = copy_text(f).map(Event::Copy);
+                    } else {
+                        f.key(key.code);
+                    }
+                }
+            }
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
             KeyCode::Down | KeyCode::Char('j') => self.step(1),
             KeyCode::PageUp => self.step(-(self.page_h.max(1) as isize)),
@@ -298,21 +300,24 @@ impl SidePanel {
         self.note = Some(note);
     }
 
+    fn turn_page(&mut self, forward: bool) {
+        let n = Page::ALL.len();
+        let at = self.page.idx();
+        self.page = Page::ALL[(if forward { at + 1 } else { at + n - 1 }) % n];
+    }
+
     fn step(&mut self, delta: isize) {
         let i = self.page.idx();
         let last = self.len[i].saturating_sub(1);
         let v = &mut self.view[i];
         v.cursor = (v.cursor as isize + delta).clamp(0, last as isize) as usize;
-        v.free = !(self.page.tails() && v.cursor >= last);
     }
 
-    /// `g` / `G`: first or last row. The last row of a tailing page pins it again.
+    /// `g` / `G`: first or last row.
     fn jump(&mut self, end: bool) {
         let i = self.page.idx();
         let last = self.len[i].saturating_sub(1);
-        let v = &mut self.view[i];
-        v.cursor = if end { last } else { 0 };
-        v.free = !(self.page.tails() && end);
+        self.view[i].cursor = if end { last } else { 0 };
     }
 
     fn resize(&mut self, grow: bool) {
@@ -435,6 +440,7 @@ impl SidePanel {
 
         let footer = match (&self.note, self.focused) {
             (Some(note), _) => note.clone(),
+            (None, true) if self.page == Page::Traces => "Esc chat · Tab page · h/l fold · y copy".to_string(),
             (None, true) => "Esc chat · h/l page · j/k row · y copy".to_string(),
             (None, false) => "F3 focus panel".to_string(),
         };
@@ -454,14 +460,19 @@ impl SidePanel {
         let ctx = Ctx { info, theme, width: w, now_ms };
         let rows = match self.page {
             Page::Session => session::rows(&ctx),
-            Page::Steps => match &self.traces {
-                Traces::Following(f, _) => steps::rows(f, &ctx),
-                Traces::Idle if info.session_id.is_none() => note_rows("no session yet", &ctx),
-                Traces::Idle | Traces::Looking(_) => {
-                    note_rows("waiting for this session in the traces index…", &ctx)
-                }
-                Traces::Failed(e) => note_rows(e, &ctx),
-            },
+            Page::Traces => {
+                let note = match &mut self.traces {
+                    Traces::Following(f, index) => {
+                        f.render(buf, body, index.as_ref(), theme, now_ms);
+                        return;
+                    }
+                    Traces::Idle if info.session_id.is_none() => "no session yet".to_string(),
+                    Traces::Idle | Traces::Looking(_) => "waiting for this session in the traces index…".to_string(),
+                    Traces::Failed(e) => e.clone(),
+                };
+                buf.set_string(body.x, body.y, truncate_str(&note, w), Style::default().fg(theme.text_secondary));
+                return;
+            }
             Page::Agents => jobs::rows(&ctx),
             Page::Recent => self.recent.rows(&ctx),
         };
@@ -475,11 +486,7 @@ impl SidePanel {
         let h = body.height as usize;
         self.len[i] = n;
         self.page_h = h;
-        let tails = self.page.tails();
         let v = &mut self.view[i];
-        if tails && !v.free {
-            v.cursor = n.saturating_sub(1);
-        }
         v.cursor = v.cursor.min(n.saturating_sub(1));
         if v.cursor < v.top {
             v.top = v.cursor;
@@ -550,6 +557,15 @@ fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
     };
     let (hi, lo) = (lum(a).max(lum(b)), lum(a).min(lum(b)));
     (hi + 0.05) / (lo + 0.05)
+}
+
+/// What `y` copies on the Traces page: the highlighted call as `Tool target`, or the highlighted prompt.
+fn copy_text(f: &Follow) -> Option<String> {
+    match (f.selected_call(), f.selected_prompt()) {
+        (Some((_, c)), _) => Some(format!("{} {}", c.tool, c.what).trim_end().to_string()),
+        (None, Some((text, _))) => Some(text.to_string()),
+        _ => None,
+    }
 }
 
 /// A page that has nothing to list yet says why on its first row.
@@ -783,21 +799,21 @@ mod tests {
         let mut p = SidePanel::default();
         p.toggle();
         assert!(p.has_keys());
-        assert_eq!(p.page, Page::Steps);
-        assert!(p.handle_key(&key(KeyCode::Right)));
+        assert_eq!(p.page, Page::Traces);
+        p.handle_key(&key(KeyCode::Tab));
         assert_eq!(p.page, Page::Agents);
         for _ in 0..3 {
             p.handle_key(&key(KeyCode::Right));
         }
-        assert_eq!(p.page, Page::Steps, "four pages wrap");
-        let pages: Vec<Page> = [KeyCode::Char('l'), KeyCode::Tab, KeyCode::Char('h'), KeyCode::BackTab]
+        assert_eq!(p.page, Page::Traces, "off Traces, Right turns a page and four pages wrap");
+        let pages: Vec<Page> = [KeyCode::Tab, KeyCode::Char('l'), KeyCode::Char('h'), KeyCode::BackTab]
             .into_iter()
             .map(|k| {
                 p.handle_key(&key(k));
                 p.page
             })
             .collect();
-        assert_eq!(pages, [Page::Agents, Page::Recent, Page::Agents, Page::Steps], "l/Tab forward, h/Shift+Tab back");
+        assert_eq!(pages, [Page::Agents, Page::Recent, Page::Agents, Page::Traces], "l/Tab forward, h/Shift+Tab back");
         p.handle_key(&key(KeyCode::Char('+')));
         assert_eq!(p.width, DEFAULT_WIDTH + STEP);
         p.handle_key(&key(KeyCode::Char('z')));
@@ -863,27 +879,60 @@ mod tests {
         assert_eq!(p.take_event(), Some(Event::Open("grok:abc".into())));
     }
 
+    fn follow_items() -> Vec<serde_json::Value> {
+        let item = |kind: &str, extra: serde_json::Value| {
+            let mut v = serde_json::json!({"v": 1, "kind": kind, "agent": "root", "depth": 0, "line": 0, "ts": 1_000});
+            v.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap());
+            v
+        };
+        vec![
+            item("user", serde_json::json!({"text": "one\ntwo\nthree\nfour\nfive"})),
+            item("call", serde_json::json!({"line": 3, "call_id": "t1", "tool": "Bash", "what": "cargo test"})),
+            item("result", serde_json::json!({"line": 4, "call_id": "t1", "ok": true, "error": "", "ms": 400})),
+            item("call", serde_json::json!({"line": 5, "call_id": "t2", "tool": "Read", "what": "src/main.rs"})),
+            item("result", serde_json::json!({"line": 6, "call_id": "t2", "ok": true, "error": "", "ms": 100})),
+        ]
+    }
+
     #[test]
-    fn the_steps_page_tails_until_the_cursor_moves_off_the_newest_row() {
+    fn on_traces_tab_turns_the_page_while_l_folds_and_leaves_the_page() {
         let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
-        let mut p = SidePanel { open: true, focused: true, page: Page::Steps, ..SidePanel::default() };
-        assert_eq!(draw(&mut p, &["a", "b", "c", "d"], 2), ["c", "d"]);
-        assert_eq!(draw(&mut p, &["a", "b", "c", "d", "e"], 2), ["d", "e"], "pinned, a new row scrolls in");
-        p.handle_key(&key(KeyCode::Char('k')));
-        assert_eq!(draw(&mut p, &["a", "b", "c", "d", "e", "f"], 2), ["d", "e"], "moved off the tail, the view holds");
-        p.handle_key(&key(KeyCode::Char('G')));
-        assert_eq!(draw(&mut p, &["a", "b", "c", "d", "e", "f", "g"], 2), ["f", "g"], "G pins the tail again");
+        let mut p = SidePanel { open: true, focused: true, ..SidePanel::default() };
+        p.follow_for_test(SessionRow { id: "root".into(), ..Default::default() }, &follow_items(), 2_000);
+        for k in [KeyCode::Char('l'), KeyCode::Right, KeyCode::Char('h'), KeyCode::Left] {
+            p.handle_key(&key(k));
+            assert_eq!(p.page, Page::Traces, "{k:?} folds on Traces, it does not turn the page");
+        }
+        p.handle_key(&key(KeyCode::Tab));
+        assert_eq!(p.page, Page::Agents);
+        p.handle_key(&key(KeyCode::BackTab));
+        assert_eq!(p.page, Page::Traces);
+    }
+
+    #[test]
+    fn the_traces_page_draws_grouped_calls_and_folds_a_long_prompt() {
+        let mut p = SidePanel { open: true, focused: true, ..SidePanel::default() };
+        p.follow_for_test(SessionRow { id: "root".into(), ..Default::default() }, &follow_items(), 2_000);
+        let area = Rect::new(0, 0, 46, 14);
+        let mut buf = Buffer::empty(area);
+        p.render(&mut buf, area, &Info::default(), &Theme::current(), 2_000);
+        let text = (0..14)
+            .map(|y| (0..46).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string())
+            .collect::<Vec<_>>();
+        let at = |needle: &str| text.iter().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("{needle}: {text:#?}"));
+        assert!(text[at("+2 lines")].contains("…"), "a 5-line prompt folds to 3 lines: {text:#?}");
+        assert_eq!(at("Read"), at("Bash") + 1, "calls sit on consecutive rows: {text:#?}");
     }
 
     #[test]
     fn the_tab_bar_fits_every_panel_width_and_keeps_the_current_page_named() {
-        let text = |w| tab_bar(Page::Steps, w, &Theme::current()).spans.iter().map(|s| s.content.to_string()).collect::<String>();
-        for w in [21, 29, 30, 37, 38, 39, 43] {
+        let text = |w| tab_bar(Page::Traces, w, &Theme::current()).spans.iter().map(|s| s.content.to_string()).collect::<String>();
+        for w in [21, 29, 30, 31, 37, 38, 39, 43] {
             assert!(text(w).chars().count() <= w, "{w}: {:?}", text(w));
-            assert!(text(w).contains("Steps"));
+            assert!(text(w).contains("Traces"));
         }
-        assert_eq!(text(21), "S Steps A R");
+        assert_eq!(text(21), "S Traces A R");
         assert!(text(43).starts_with("◀ ") && text(43).ends_with('▸'));
-        assert!(text(30).contains("Session  Steps  Agents  Recent"));
+        assert!(text(31).contains("Session  Traces  Agents  Recent"));
     }
 }

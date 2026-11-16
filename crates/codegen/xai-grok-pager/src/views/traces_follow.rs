@@ -37,7 +37,7 @@ const USER_LINES: usize = 3;
 const TEXT_LINES: usize = 6;
 /// How far a finished call's diamond is dimmed toward the background, as grok's collapsed tool rows do
 /// (`scrollback.display.dim_accent` default).
-pub(super) const DIM_ACCENT: f32 = 0.5;
+const DIM_ACCENT: f32 = 0.5;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Res {
@@ -141,7 +141,7 @@ pub(super) struct Follow {
 }
 
 /// `0.4s`, `12s`, `2m05s`.
-pub(super) fn took(ms: i64) -> String {
+fn took(ms: i64) -> String {
     if ms < 10_000 { format!("{:.1}s", ms as f64 / 1000.0) } else { span_text(ms / 1000) }
 }
 
@@ -151,10 +151,8 @@ fn span_text(s: i64) -> String {
         format!("{s}s")
     } else if s < 3600 {
         format!("{}m{:02}s", s / 60, s % 60)
-    } else if s < 48 * 3600 {
-        format!("{}h{:02}m", s / 3600, s / 60 % 60)
     } else {
-        format!("{}d", s / 86_400)
+        format!("{}h{:02}m", s / 3600, s / 60 % 60)
     }
 }
 
@@ -374,11 +372,6 @@ impl Follow {
             }
             self.rows.push(Row { agent, depth, body, ts: v["ts"].as_i64() });
         }
-    }
-
-    /// Every row in arrival order, whatever the agent filter says (the side panel's Steps page reads these).
-    pub fn rows(&self) -> &[Row] {
-        &self.rows
     }
 
     /// Indices of the rows the current agent filter shows.
