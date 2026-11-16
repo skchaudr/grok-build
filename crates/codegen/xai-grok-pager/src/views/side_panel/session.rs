@@ -10,8 +10,8 @@ use super::{Ctx, Info, Row, SidePanel, Traces, reset_in};
 use crate::render::line_utils::truncate_str;
 use crate::views::traces_modal::fmt_age;
 
-/// Columns of a row's `  key ` prefix (two indent, ten for the key, one gap).
-const KEY: usize = 10;
+/// Columns of a row's `  key ` prefix (two indent, twelve for the longest key `cache write`, one gap).
+const KEY: usize = 12;
 const PREFIX: usize = KEY + 3;
 const MISSING: &str = "—";
 
