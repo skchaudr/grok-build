@@ -44,6 +44,7 @@ Chat cards for these calls appeared when each call started, with header text suc
 
 - 14:45:20 to 14:48:38 (3 min 18 s, no frames saved): the screen was static, with no spinner and no status row. At 14:48:38 only the input box changed (`❯ T`), which someone typed. Nothing in the frames shows background work in this interval.
 - 14:49:27 to 15:16:32: `status idle` in the Session panel, no status row, and no frames changed.
+- 15:28:39: `⠦ Run Compact conversation 1.0s … 1.0s ⇣208k [stop]` appears in the status row. A chat card `◆ Compact conversation  think` was already on screen. At 15:28:47 the row reads `⠴ Run Compact conversation 23s 24s ⇣208k [stop]`, and `status running` is shown in the Session panel. The last frame saved is 15:29:00 and the call had not ended, so its total duration is not known yet. Steps, Agents and Recent did not render during this call.
 - 15:16:32 to 15:19:42: no frames saved. From 15:19:42 the frames show interface notices with `status idle` and no status row:
   - `◆ Compact conversation  think` (a card in the chat area)
   - `Notice: delta: Delta 0.26.1 is available (installed: 0.24.1). Run /delta-update or /delta update to update the installation.`
