@@ -193,7 +193,7 @@ fn branch(b: Option<&str>) -> String {
     }
 }
 
-/// `2026-11-16 14:03 · 2h ago`, in `tz`.
+/// `2h ago · 2026-11-16 14:03`, in `tz`.
 fn started<Tz: TimeZone>(started_ms: Option<i64>, now_ms: i64, tz: &Tz) -> String
 where
     Tz::Offset: std::fmt::Display,
@@ -205,7 +205,7 @@ where
         "now" => "just now".to_string(),
         age => format!("{age} ago"),
     };
-    format!("{} · {ago}", at.format("%Y-%m-%d %H:%M"))
+    format!("{ago} · {}", at.format("%Y-%m-%d %H:%M"))
 }
 
 /// Share of prompt tokens served from cache, as `/session-info` counts it: read over input + read + write.
@@ -271,8 +271,8 @@ mod tests {
     #[test]
     fn started_reads_date_time_and_age() {
         let two_h = NOW - 2 * 3600 * 1000 - 5 * 60 * 1000;
-        assert_eq!(started(Some(two_h), NOW, &chrono::Utc), "2027-01-15 05:55 · 2h ago");
-        assert_eq!(started(Some(NOW - 2000), NOW, &chrono::Utc), "2027-01-15 07:59 · just now");
+        assert_eq!(started(Some(two_h), NOW, &chrono::Utc), "2h ago · 2027-01-15 05:55");
+        assert_eq!(started(Some(NOW - 2000), NOW, &chrono::Utc), "just now · 2027-01-15 07:59");
         assert_eq!(started(None, NOW, &chrono::Utc), "—");
     }
 
