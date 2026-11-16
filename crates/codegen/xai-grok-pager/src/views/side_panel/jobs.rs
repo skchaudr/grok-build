@@ -63,29 +63,29 @@ impl Job {
         parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" · ")
     }
 
-    /// `running grok-4.5 2m14s`, shortened to `running 2m14s` and then `2m14s` (the mark still says the state) until
-    /// it takes at most three fifths of the row.
-    fn meta(&self, width: usize) -> String {
+    /// Level 0 is `running grok-4.5 2m14s`, 1 drops the model, 2 is the elapsed time alone (the mark still says the state).
+    fn meta(&self, level: usize) -> String {
         let model = self.model.as_deref().unwrap_or_default();
-        let word = self.state.word();
-        let join = |p: &[&str]| p.iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ");
-        let el = self.elapsed.as_str();
-        let tries = [join(&[word, model, el]), join(&[word, el]), self.elapsed.clone()];
-        let last = tries[2].clone();
-        tries.into_iter().find(|m| m.width() * 5 <= width * 3).unwrap_or(last)
+        let parts: Vec<&str> = match level {
+            0 => vec![self.state.word(), model, &self.elapsed],
+            1 => vec![self.state.word(), &self.elapsed],
+            _ => vec![&self.elapsed],
+        };
+        parts.iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(" ")
     }
 
-    fn row(&self, c: &Ctx) -> Row {
+    /// `meta` is right-aligned in a `col`-wide column, so every row ends at the row width and the metas start together.
+    fn row(&self, c: &Ctx, level: usize, col: usize) -> Row {
         let color = match self.state {
             JobState::Running => c.theme.accent_user,
             JobState::Done => c.theme.accent_success,
             JobState::Failed => c.theme.accent_error,
             JobState::Cancelled => c.theme.gray,
         };
-        let meta = self.meta(c.width);
-        // mark + space, then the label, then at least two spaces before the meta.
-        let label = truncate_str(&self.label(), c.width.saturating_sub(meta.width() + 4));
-        let pad = c.width.saturating_sub(2 + label.width() + meta.width()).max(2);
+        let meta = format!("{:>col$}", self.meta(level));
+        // mark + space, the label, two spaces, then the meta column.
+        let label = truncate_str(&self.label(), c.width.saturating_sub(col + 4));
+        let pad = c.width.saturating_sub(2 + label.width() + col).max(2);
         let line = Line::from(vec![
             Span::styled(format!("{} ", self.state.mark()), Style::default().fg(color)),
             Span::styled(label, Style::default().fg(c.theme.text_primary)),
@@ -96,7 +96,14 @@ impl Job {
     }
 }
 
-fn section(title: &str, items: &[Job], c: &Ctx, out: &mut Vec<Row>) {
+/// The first meta level whose widest meta takes at most three fifths of the row; every row uses it so the column lines up.
+fn meta_level(items: &[&Job], width: usize) -> (usize, usize) {
+    let col = |level| items.iter().map(|j| j.meta(level).width()).max().unwrap_or(0);
+    let level = (0..2).find(|l| col(*l) * 5 <= width * 3).unwrap_or(2);
+    (level, col(level))
+}
+
+fn section(title: &str, items: &[Job], c: &Ctx, (level, col): (usize, usize), out: &mut Vec<Row>) {
     let head = Style::default().fg(c.theme.accent_user).add_modifier(Modifier::BOLD);
     out.push(Row::plain(Line::from(Span::styled(format!("{title} ({})", items.len()), head))));
     if items.is_empty() {
@@ -105,13 +112,15 @@ fn section(title: &str, items: &[Job], c: &Ctx, out: &mut Vec<Row>) {
             format!("{title}: none"),
         ));
     }
-    out.extend(items.iter().map(|j| j.row(c)));
+    out.extend(items.iter().map(|j| j.row(c, level, col)));
 }
 
 pub(super) fn rows(c: &Ctx) -> Vec<Row> {
     let mut out = Vec::new();
-    section("Background jobs", &c.info.jobs, c, &mut out);
-    section("Subagents", &c.info.subagents, c, &mut out);
+    let all: Vec<&Job> = c.info.jobs.iter().chain(&c.info.subagents).collect();
+    let fit = meta_level(&all, c.width);
+    section("Background jobs", &c.info.jobs, c, fit, &mut out);
+    section("Subagents", &c.info.subagents, c, fit, &mut out);
     out
 }
 
@@ -182,8 +191,23 @@ mod tests {
     #[test]
     fn meta_sheds_the_model_then_the_word_to_fit() {
         let j = job("Explore", "x", JobState::Running, Some("grok-4.5"), "1m05s");
-        assert_eq!(j.meta(43), "running grok-4.5 1m05s");
-        assert_eq!(j.meta(30), "running 1m05s");
-        assert_eq!(j.meta(21), "1m05s");
+        assert_eq!(j.meta(0), "running grok-4.5 1m05s");
+        assert_eq!(j.meta(1), "running 1m05s");
+        assert_eq!(j.meta(2), "1m05s");
+        assert_eq!(meta_level(&[&j], 43), (0, 22));
+        assert_eq!(meta_level(&[&j], 30), (1, 13));
+        assert_eq!(meta_level(&[&j], 21), (2, 5));
+    }
+
+    #[test]
+    fn every_row_ends_at_the_row_width_and_the_metas_start_together() {
+        let info = filled();
+        let rows = at(&info, 43);
+        let w = |r: &Row| r.line.spans.iter().map(|s| s.content.width()).sum::<usize>();
+        let meta_at = |r: &Row| w(r) - r.line.spans.last().unwrap().content.width();
+        let listed: Vec<&Row> = rows.iter().filter(|r| r.line.spans.len() == 4).collect();
+        assert_eq!(listed.len(), 5);
+        assert!(listed.iter().all(|r| w(r) == 43));
+        assert!(listed.iter().all(|r| meta_at(r) == meta_at(listed[0])));
     }
 }
