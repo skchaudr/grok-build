@@ -282,14 +282,16 @@ function watchTasks(signal) {
 
 // ---- proactive-demo deploy approvals: ops service -> confirm dialog -> decide ------
 // Env: DPI_OPS_URL or OPS_URL (default http://127.0.0.1:4790), DPI_OPS_POLL_MS (default 3000),
-// DPI_OPS_REPROMPT_MS (default 600000: how long a dismissed prompt stays quiet).
+// DPI_OPS_REPROMPT_MS (default 600000: how long a dismissed prompt stays quiet),
+// DPI_OPS_DIALOG_MS (default 300000: a dialog retracts itself after this and is shown again if still pending).
 // An unreachable ops service is silent: most sessions never have one.
 
 const OPS_URL = (process.env.DPI_OPS_URL || process.env.OPS_URL || "http://127.0.0.1:4790").replace(/\/$/, "");
 const OPS_POLL_MS = Number(process.env.DPI_OPS_POLL_MS) || 3000;
 const OPS_REPROMPT_MS = Number(process.env.DPI_OPS_REPROMPT_MS) || 600_000;
 const asked = new Set(); // deploy ids already prompted: one dialog per deploy, across re-attaches
-const dialogs = new Map(); // confirm request id -> deploy id, while that deploy still awaits
+const OPS_DIALOG_MS = Number(process.env.DPI_OPS_DIALOG_MS) || 300_000;
+const dialogs = new Map(); // confirm request id -> {deployId, at, gone?}; gone = {how, at} once decided elsewhere
 let awaiting = new Set(); // deploy ids awaiting approval at the last poll
 
 async function ops(method, path, body) {
@@ -303,6 +305,11 @@ async function ops(method, path, body) {
   return res.json();
 }
 
+const notify = (message) => out({ type: "extension_ui_request", id: randomUUID(), method: "notify", message, notifyType: "info" });
+const hhmm = (ms) => new Date(ms).toLocaleTimeString("sv").slice(0, 5);
+// How a deploy left awaiting_approval, from its row: "approved", "declined", ... and the local HH:MM it was decided.
+const outcome = (d) => ({ how: { declined: "declined", cancelled: "cancelled" }[d?.status] ?? (d ? "approved" : "resolved"), at: d?.decidedAt ? ` at ${hhmm(d.decidedAt)}` : "" });
+
 function watchDeploys(signal, show) {
   (async () => {
     while (!signal.aborted) {
@@ -313,16 +320,18 @@ function watchDeploys(signal, show) {
           if (!awaiting.has(d.id) || asked.has(d.id)) continue;
           asked.add(d.id);
           const id = randomUUID();
-          dialogs.set(id, d.id);
+          dialogs.set(id, { deployId: d.id, at: Date.now() });
           // The adapter shows `message` (not `title`) as a confirm's question, so the title leads it.
           const title = `Deploy ${d.incidentId}: ${d.summary}`;
-          out({ type: "extension_ui_request", id, method: "confirm", title, message: [title, `commit ${d.commit}`, `branch ${d.branch}`, d.diffStat].join("\n") });
+          const message = [title, `commit ${d.commit}`, `branch ${d.branch}`, d.diffStat, "If this was already decided elsewhere (hub, another device) you can dismiss this; dismissing records nothing."].join("\n");
+          // timeout: the adapter retracts the dialog itself after it, the only retraction it offers.
+          out({ type: "extension_ui_request", id, method: "confirm", title, message, timeout: OPS_DIALOG_MS });
         }
-        for (const [id, deployId] of dialogs) {
-          if (awaiting.has(deployId)) continue;
-          // Decided elsewhere. The adapter has no way to retract an open dialog, so its answer is ignored.
-          dialogs.delete(id);
-          out({ type: "extension_ui_request", id: randomUUID(), method: "notify", message: `Deploy ${deployId} was decided elsewhere`, notifyType: "info" });
+        for (const dlg of dialogs.values()) {
+          if (awaiting.has(dlg.deployId) || dlg.gone) continue;
+          // Decided elsewhere. The adapter cannot retract an open dialog early: caption it, ignore its answer.
+          dlg.gone = outcome(deploys.find((d) => d.id === dlg.deployId));
+          notify(`Deploy ${dlg.deployId} was ${dlg.gone.how} elsewhere${dlg.gone.at}. You can dismiss the open dialog; nothing was recorded from it.`);
         }
         show("ops-deploy", awaiting.size ? `${awaiting.size} deploy${awaiting.size > 1 ? "s" : ""} awaiting approval` : undefined);
       } catch {}
@@ -334,11 +343,15 @@ function watchDeploys(signal, show) {
 // The TUI's answer to a confirm. Only an explicit confirmed true/false is a decision; a dismissed
 // dialog records nothing and the deploy is offered again after the cooldown.
 function onUiResponse(r) {
-  const deployId = dialogs.get(r.id);
-  if (deployId === undefined) return;
+  const dlg = dialogs.get(r.id);
+  if (dlg === undefined) return;
   dialogs.delete(r.id);
+  const { deployId } = dlg;
+  if (typeof r.confirmed === "boolean" && dlg.gone) return notify(`Deploy ${deployId} was already ${dlg.gone.how}${dlg.gone.at}; your ${r.confirmed ? "Yes" : "No"} was not sent.`);
+  if (dlg.gone) return; // timed out or dismissed after it went stale: nothing to say
   if (typeof r.confirmed !== "boolean") {
-    out({ type: "extension_ui_request", id: randomUUID(), method: "notify", message: `No decision recorded for deploy ${deployId}; it is still awaiting approval`, notifyType: "info" });
+    if (Date.now() - dlg.at >= OPS_DIALOG_MS) return asked.delete(deployId); // the adapter's timeout retracted it: show it again
+    notify(`No decision recorded for deploy ${deployId}; it is still awaiting approval`);
     setTimeout(() => asked.delete(deployId), OPS_REPROMPT_MS).unref();
     return;
   }

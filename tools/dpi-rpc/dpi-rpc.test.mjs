@@ -223,7 +223,8 @@ test("an awaiting deploy gets one confirm dialog and an ops-deploy status line; 
   try {
     const q = await s.until(isConfirm);
     assert.equal(q.title, "Deploy INC-0001: retry fix");
-    assert.equal(q.message, "Deploy INC-0001: retry fix\ncommit abc123\nbranch fix/x\n1 file changed");
+    assert.equal(q.message, "Deploy INC-0001: retry fix\ncommit abc123\nbranch fix/x\n1 file changed\nIf this was already decided elsewhere (hub, another device) you can dismiss this; dismissing records nothing.");
+    assert.equal(q.timeout, 300000); // the adapter retracts the dialog itself after this
     await s.status("ops-deploy", "1 deploy awaiting approval");
     await settle();
     assert.equal(s.lines.filter(isConfirm).length, 1); // polling again does not re-prompt
@@ -276,15 +277,49 @@ test("no dialog and no noise when ops is down", async () => {
   } finally { s.close(); }
 });
 
-test("a deploy decided elsewhere withdraws the prompt: the late answer is ignored", async () => {
-  Object.assign(ops, { deploys: [deploy({ id: 3 })], decisions: [] });
+test("a deploy decided elsewhere is captioned with how and when; a late Yes or No is ignored and says so", async () => {
+  const decidedAt = Date.parse("2026-11-15T20:24:00");
+  const at = "20:24";
+  for (const [answer, word] of [[true, "Yes"], [false, "No"]]) {
+    Object.assign(ops, { deploys: [deploy({ id: 15 })], decisions: [] });
+    const s = await shim({ DPI_OPS_URL: opsUrl });
+    try {
+      const q = await s.until(isConfirm);
+      ops.deploys = [deploy({ id: 15, status: "deploying", decidedAt })];
+      await s.until((l) => l.method === "notify" && l.message === `Deploy 15 was approved elsewhere at ${at}. You can dismiss the open dialog; nothing was recorded from it.`);
+      s.send({ type: "extension_ui_response", id: q.id, confirmed: answer });
+      await s.until((l) => l.method === "notify" && l.message === `Deploy 15 was already approved at ${at}; your ${word} was not sent.`);
+      await settle();
+      assert.deepEqual(ops.decisions, []);
+    } finally { s.close(); }
+  }
+});
+
+test("a deploy declined elsewhere is captioned as declined; a stale dialog that times out stays silent", async () => {
+  Object.assign(ops, { deploys: [deploy({ id: 16 })], decisions: [] });
   const s = await shim({ DPI_OPS_URL: opsUrl });
   try {
     const q = await s.until(isConfirm);
-    ops.deploys = [deploy({ id: 3, status: "approved" })];
-    await s.until((l) => l.method === "notify" && /decided elsewhere/.test(l.message));
-    s.send({ type: "extension_ui_response", id: q.id, confirmed: true });
+    ops.deploys = [deploy({ id: 16, status: "declined", decidedAt: null })];
+    await s.until((l) => l.method === "notify" && l.message.startsWith("Deploy 16 was declined elsewhere. You can dismiss"));
+    const notifies = s.lines.filter((l) => l.method === "notify").length;
+    s.send({ type: "extension_ui_response", id: q.id, cancelled: true });
     await settle();
+    assert.equal(s.lines.filter((l) => l.method === "notify").length, notifies);
+    assert.deepEqual(ops.decisions, []);
+  } finally { s.close(); }
+});
+
+test("a dialog the adapter retracted on its timeout is shown again at once, not after the cooldown", async () => {
+  Object.assign(ops, { deploys: [deploy({ id: 5 })], decisions: [] });
+  const s = await shim({ DPI_OPS_URL: opsUrl, DPI_OPS_DIALOG_MS: "300", DPI_OPS_REPROMPT_MS: "600000" });
+  try {
+    const first = await s.until(isConfirm);
+    assert.equal(first.timeout, 300);
+    await new Promise((r) => setTimeout(r, 350));
+    s.send({ type: "extension_ui_response", id: first.id, cancelled: true }); // what the adapter sends after retracting
+    await s.until((l) => isConfirm(l) && l.id !== first.id);
+    assert.equal(s.lines.some((l) => l.method === "notify"), false); // a timeout is not a dismissal
     assert.deepEqual(ops.decisions, []);
   } finally { s.close(); }
 });
