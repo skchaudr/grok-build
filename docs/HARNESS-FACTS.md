@@ -2,7 +2,7 @@
 
 One place for per-harness facts that agents keep rediscovering. Check here before researching; update here when you learn something. Every row names its source and whether it was **live**-tested, read from **code/schema**, or only **documented**.
 
-Last updated 2026-11-09.
+Last updated 2026-11-16.
 
 ## Session logs
 
@@ -130,3 +130,12 @@ Sab, 2026-11-14: "grok claude does not handle slash commands intelligently or gr
 - `claude-agent-acp` 0.76.0 never calls it; it only forwards `rate_limit_event` after a turn (`dist/acp-agent.js:4285`). The `~/.cache/claude-status` files come only from the TUI statusline command and can be stale (cstat said 5h 9% while `get_usage` said 12%).
 - `ccusage` reads local transcripts (tokens/cost); it has no plan percent or reset time.
 - Details: `docs/SCOUT-claude-usage-freshness-2026-11-15.md`.
+
+## Claude running and background tool calls (2026-11-16)
+
+Read from code, live receipts and transcripts on the Mini; no `grok claude` screen was driven. Details: `docs/INVESTIGATE-running-tool-visibility-2026-11-16.md`.
+
+- **Transcript timing.** A Claude `tool_use` line is on disk while the call runs (live test: a 7 s Bash call found its own command in the session jsonl mid-call). The `tool_result` line comes at the end.
+- **Hook payloads.** `PreToolUse` fires at call start with `tool_name`, `tool_input` (`command`, `description`, `timeout`), `tool_use_id`. `PostToolUse` carries `duration_ms` and `tool_response`. An interrupted call can leave a `Pre` with no `Post` and no `PostToolUseFailure` (specimen calls at 13:24:47 and 13:28:42).
+- **Backgrounded Bash.** `tool_response` has `backgroundTaskId` (explicit `run_in_background` and the harness's auto-background after the call's `timeout`; auto adds `timedOutAfterMs`). `grok-traces` `hook.rs::extract` drops it when stdout/stderr are empty. Output: `/private/tmp/claude-501/<project slug>/<session id>/tasks/<task id>.output`. Completion: a transcript `queue-operation` `enqueue` line whose content is `<task-notification>` with `<task-id>`, `<tool-use-id>`, `<output-file>`.
+- **Adapter (`claude-agent-acp` 0.76.0).** Pending `tool_call` at stream start; `tool_progress` heartbeats become `tool_call_update` `in_progress` with `_meta.claudeCode.toolResponse.elapsedTimeSeconds`. Background lifecycle (`async_task_spawned`, `async_task_progress`, `async_task_state_update`) and `terminal_output` streaming are sent only to clients that advertise the JetBrains AIR `asyncTasks` capability / `_meta.terminal_output`. The grok pager advertises neither.
