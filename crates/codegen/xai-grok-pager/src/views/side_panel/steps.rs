@@ -29,11 +29,12 @@ fn running(c: &Call, live: bool) -> bool {
     live && c.result.is_none() && !c.no_result
 }
 
-/// The newest sign of life: the index row's times (a snapshot from when the panel opened) or any item that arrived since.
-fn live_at(follow: &Follow) -> i64 {
+/// The newest event time: the index row's `last_event_at` or any item Follow received. Not mtime/`updated_at`: resuming
+/// an old session touches its file without anything happening in it. None means not live.
+fn live_at(follow: &Follow) -> Option<i64> {
     let r = &follow.root;
     let items = follow.rows().iter().flat_map(|r| [r.ts, match &r.body { Body::Call(c) => Some(c.started_ms), _ => None }]);
-    [r.last_event_at, r.updated_at, r.mtime_ms].into_iter().chain(items).flatten().max().unwrap_or(0)
+    [r.last_event_at].into_iter().chain(items).flatten().max()
 }
 
 fn turns(follow: &Follow) -> Vec<Turn<'_>> {
@@ -86,7 +87,7 @@ pub(super) fn rows(follow: &Follow, c: &Ctx) -> Vec<Row> {
     let th = c.theme;
     let fg = |color| Style::default().fg(color);
     let turns = turns(follow);
-    let live_session = c.now_ms - live_at(follow) <= LIVE_MS;
+    let live_session = live_at(follow).is_some_and(|at| c.now_ms - at <= LIVE_MS);
     let mut out = Vec::new();
     for (n, t) in turns.iter().enumerate() {
         let live = n + 1 == turns.len() && t.calls.iter().any(|c| running(c, live_session));
@@ -101,7 +102,7 @@ pub(super) fn rows(follow: &Follow, c: &Ctx) -> Vec<Row> {
             line(
                 vec![Span::styled(format!("#{} ", n + 1), head)],
                 Span::styled(prompt.to_string(), head),
-                Span::styled(dur, fg(th.gray)),
+                Span::styled(dur, fg(th.text_secondary)),
                 c.width,
             ),
             t.prompt.trim_end(),
@@ -112,7 +113,7 @@ pub(super) fn rows(follow: &Follow, c: &Ctx) -> Vec<Row> {
             let (mark, color, state, dur) = match &call.result {
                 Some(r) if !r.ok => ("✗", th.accent_error, format!("failed {}", first_line(&r.error)), r.ms),
                 Some(r) => ("✓", th.accent_success, "ok".to_string(), r.ms),
-                None if !running(call, live_session) => ("–", th.gray_dim, "no result".to_string(), None),
+                None if !running(call, live_session) => ("–", th.text_secondary, "no result".to_string(), None),
                 None => ("▸", th.accent_running, "running".to_string(), None),
             };
             let shown = match &call.result {
@@ -124,11 +125,11 @@ pub(super) fn rows(follow: &Follow, c: &Ctx) -> Vec<Row> {
             out.push(Row::new(
                 line(
                     vec![
-                        Span::styled(format!("{:>3} ", i + 1), fg(th.gray_dim)),
+                        Span::styled(format!("{:>3} ", i + 1), fg(th.text_secondary)),
                         Span::styled(format!("{mark} "), fg(color)),
                     ],
                     Span::styled(head.clone(), text),
-                    Span::styled(shown.clone(), fg(if mark == "▸" { th.accent_running } else { th.gray })),
+                    Span::styled(shown.clone(), fg(if mark == "▸" { th.accent_running } else { th.text_secondary })),
                     c.width,
                 ),
                 format!("{head}  {state}  {shown}").trim_end(),
@@ -136,7 +137,7 @@ pub(super) fn rows(follow: &Follow, c: &Ctx) -> Vec<Row> {
         }
     }
     if out.is_empty() {
-        out.push(Row::plain(Line::from(Span::styled("no steps yet", fg(th.gray)))));
+        out.push(Row::plain(Line::from(Span::styled("no steps yet", fg(th.text_secondary)))));
     }
     out
 }
@@ -254,15 +255,18 @@ mod tests {
     #[test]
     fn an_idle_session_has_no_running_step_and_its_turn_ends_at_its_last_item() {
         let mut f = filled();
-        f.root.updated_at = Some(61_000);
         let info = Info::default();
         let stale = NOW + 28 * 24 * 3600 * 1000;
+        // Resuming touched the file: fresh mtime and updated_at, old events.
+        (f.root.updated_at, f.root.mtime_ms) = (Some(stale), Some(stale));
         let r = rows(&f, &Ctx { info: &info, theme: &Theme::current(), width: 43, now_ms: stale });
         let last = r.last().unwrap();
         assert!(text(last).contains('–') && !text(last).contains('▸'), "{}", text(last));
         assert_eq!(last.copy, "Bash cargo test --release  no result");
         assert!(text(&r[r.len() - 2]).trim_end().ends_with("1.0s"), "turn 2 header: {}", text(&r[r.len() - 2]));
-        let live = rows(&f, &Ctx { info: &info, theme: &Theme::current(), width: 43, now_ms: 61_000 + 5_000 });
+        assert_eq!((took(47 * 3600 * 1000), took(28 * 86_400 * 1000)), ("47h00m".into(), "28d".into()));
+        f.root.last_event_at = Some(stale);
+        let live = rows(&f, &Ctx { info: &info, theme: &Theme::current(), width: 43, now_ms: stale + 5_000 });
         assert!(text(live.last().unwrap()).contains('▸'), "a recent session still shows its running step");
     }
 

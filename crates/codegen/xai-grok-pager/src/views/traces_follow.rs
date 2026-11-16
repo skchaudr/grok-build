@@ -151,8 +151,10 @@ fn span_text(s: i64) -> String {
         format!("{s}s")
     } else if s < 3600 {
         format!("{}m{:02}s", s / 60, s % 60)
-    } else {
+    } else if s < 48 * 3600 {
         format!("{}h{:02}m", s / 3600, s / 60 % 60)
+    } else {
+        format!("{}d", s / 86_400)
     }
 }
 
