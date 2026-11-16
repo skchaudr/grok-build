@@ -1,0 +1,10 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/side_panel/steps.rs
+expression: "paint(&at(&filled(), 21), 21)"
+---
+#1 fix the parse… 10s
+  1 ✓ Bash carg… 2.4s
+  2 ✗ Read src/… 0.1s
+  3 ✓ Agent rev… 7.0s
+#2 now run the w… 40s
+  1 ▸ Bash cargo… 39s

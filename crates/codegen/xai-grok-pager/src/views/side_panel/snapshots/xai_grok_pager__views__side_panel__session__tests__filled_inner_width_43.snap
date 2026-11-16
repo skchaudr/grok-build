@@ -1,0 +1,37 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/side_panel/session.rs
+expression: "snap(&filled(), 43)"
+---
+Session
+  title        Fix the side panel session …
+  id           019a8c3e-7b1d-7c40-9a52-0d3…
+  started      2027-01-15 05:55 · 2h ago
+  cwd          ~/repos/grok-build
+  branch       main
+
+Model
+  model        grok-build
+  effort       high
+  mode         agent · auto
+  status       running
+
+Context
+  context      ███░░░░ 42% 84k/200k
+  turns        12
+  tool calls   87
+  compacted    1
+
+Tokens
+  input        120k
+  output       30k
+  cache read   800k
+  cache write  80k
+  cache hit    80%
+
+Rate limits
+  5h usage     ███░░░░ 42% resets 2h10m
+  7d usage     ██████░ 91% resets 130h00m
+
+Runtime
+  subagents    2
+  bg jobs      1

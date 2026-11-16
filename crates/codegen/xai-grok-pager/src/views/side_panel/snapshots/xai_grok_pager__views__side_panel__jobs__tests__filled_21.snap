@@ -1,0 +1,11 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/side_panel/jobs.rs
+expression: "paint(&at(&filled(), 21), 21)"
+---
+Background jobs (2)
+● cargo test …  2m14s
+✗ npm run bui…    41s
+Subagents (3)
+● Explore: fi…  1m05s
+✓ Reviewer: r…  6m30s
+■ Explore: sc…     9s

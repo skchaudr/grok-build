@@ -1,0 +1,10 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/side_panel/steps.rs
+expression: "paint(&at(&filled(), 43), 43)"
+---
+#1 fix the parser in src/lib.rs         10s
+  1 ✓ Bash cargo test -p parser -- --… 2.4s
+  2 ✗ Read src/lib.rs                  0.1s
+  3 ✓ Agent review the fix             7.0s
+#2 now run the whole suite              40s
+  1 ▸ Bash cargo test --release         39s

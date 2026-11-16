@@ -1,0 +1,8 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/side_panel/recent.rs
+expression: "paint(&at(&filled(), 43), 43)"
+---
+now claude side panel: recent page and job…
+ 3m grok   why does the dock hide finished…
+ 2h codex  fix the flaky traces test
+ 5d pi     (untitled)

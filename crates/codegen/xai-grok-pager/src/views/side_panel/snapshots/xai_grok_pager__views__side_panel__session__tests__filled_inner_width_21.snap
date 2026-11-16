@@ -1,0 +1,37 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/side_panel/session.rs
+expression: "snap(&filled(), 21)"
+---
+Session
+  title        Fix t…
+  id           019a8…
+  started      2027-…
+  cwd          ~/rep…
+  branch       main
+
+Model
+  model        grok-…
+  effort       high
+  mode         agent…
+  status       runni…
+
+Context
+  context      42% 8…
+  turns        12
+  tool calls   87
+  compacted    1
+
+Tokens
+  input        120k
+  output       30k
+  cache read   800k
+  cache write  80k
+  cache hit    80%
+
+Rate limits
+  5h usage     42% r…
+  7d usage     91% r…
+
+Runtime
+  subagents    2
+  bg jobs      1

@@ -1,0 +1,5 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/side_panel/recent.rs
+expression: "paint(&at(&[], 21), 21)"
+---
+no recent sessions

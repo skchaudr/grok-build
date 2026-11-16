@@ -1,0 +1,32 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/side_panel/session.rs
+expression: "snap(&Info::default(), 43)"
+---
+Session
+  id           —
+  started      —
+  cwd          —
+  branch       —
+
+Model
+  model        —
+  effort       —
+  mode         —
+  status       —
+
+Context
+  context      not reported
+  turns        —
+  tool calls   —
+  compacted    —
+
+Tokens
+  tokens       not reported
+
+Rate limits
+  5h usage     not reported
+  7d usage     not reported
+
+Runtime
+  subagents    0
+  bg jobs      0

@@ -1,0 +1,8 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/side_panel/jobs.rs
+expression: "paint(&at(&Info::default(), 43), 43)"
+---
+Background jobs (0)
+  none
+Subagents (0)
+  none

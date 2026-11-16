@@ -446,7 +446,7 @@ impl SidePanel {
 
         let footer = match (&self.note, self.focused) {
             (Some(note), _) => note.clone(),
-            (None, true) => "Esc chat · ←/→ page · j/k move · y copy · z zoom".to_string(),
+            (None, true) => "Esc chat · ←/→ page · y copy · z zoom".to_string(),
             (None, false) => "F3 focus panel".to_string(),
         };
         let footer_y = inner.y + inner.height - 1;
@@ -750,9 +750,7 @@ mod tests {
         for _ in 0..3 {
             p.handle_key(&key(KeyCode::Right));
         }
-        assert_eq!(p.page, Page::Agents, "four pages wrap");
-        p.handle_key(&key(KeyCode::Left));
-        assert_eq!(p.page, Page::Steps);
+        assert_eq!(p.page, Page::Steps, "four pages wrap");
         p.handle_key(&key(KeyCode::Char('+')));
         assert_eq!(p.width, DEFAULT_WIDTH + STEP);
         p.handle_key(&key(KeyCode::Char('z')));

@@ -1,0 +1,34 @@
+---
+source: crates/codegen/xai-grok-pager/src/app/agent_view/side_panel_tests.rs
+expression: "draw(&mut agent, 110, 30)"
+---
+                                                                │ ◀  Session   Steps   Agents   Recent  ▸
+  /work/grok-build                    84K / 200K │ [Dashboard]  │ ───────────────────────────────────────────
+                                                                │ Session
+                                                                │   title        side panel
+                                                                │   id           01a1be7d-f425-7ca2-aed9-909…
+                                                                │   started      —
+                                                                │   cwd          /work/grok-build
+                                                                │   branch       —
+                                                                │
+                                                                │ Model
+                                                                │   model        Grok 4.5
+                                                                │   effort       —
+                                                                │   mode         agent
+                                                                │   status       idle
+                                                                │
+                                                                │ Context
+                                                                │   context      ███░░░░ 42% 84k/200k
+                                                                │   turns        —
+                                                                │   tool calls   —
+                                                                │   compacted    —
+                                                                │
+                                                                │ Tokens
+                                                                │   tokens       not reported
+                                                                │
+  ╭──────────────────────────────────────────────────────────╮  │ Rate limits
+  │ ❯                                                        │  │   5h usage     ██░░░░░ 22%
+  ╰─────────────────────────────────────────────── Grok 4.5 ─╯  │   7d usage     not reported
+                                                                │
+                                                                │ Runtime
+                                                                │ Esc chat · ←/→ page · y copy · z zoom
