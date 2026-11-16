@@ -141,7 +141,7 @@ pub(super) struct Follow {
 }
 
 /// `0.4s`, `12s`, `2m05s`.
-fn took(ms: i64) -> String {
+pub(super) fn took(ms: i64) -> String {
     if ms < 10_000 { format!("{:.1}s", ms as f64 / 1000.0) } else { span_text(ms / 1000) }
 }
 
@@ -372,6 +372,11 @@ impl Follow {
             }
             self.rows.push(Row { agent, depth, body, ts: v["ts"].as_i64() });
         }
+    }
+
+    /// Every row in arrival order, whatever the agent filter says (the side panel's Steps page reads these).
+    pub fn rows(&self) -> &[Row] {
+        &self.rows
     }
 
     /// Indices of the rows the current agent filter shows.
