@@ -21,7 +21,7 @@ use std::time::{Duration, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use xai_grok_traces::{SessionRow, TraceIndex};
 
@@ -441,7 +441,7 @@ impl SidePanel {
             inner.x,
             footer_y,
             truncate_str(&footer, w),
-            Style::default().fg(theme.gray),
+            Style::default().fg(theme.text_secondary),
         );
 
         let body = Rect {
@@ -498,7 +498,11 @@ impl SidePanel {
                 // Muted text is unreadable on the selection band; lift it the way grok's own selection does.
                 for x in body.x..body.x + body.width {
                     let cell = &mut buf[(x, y)];
-                    if cell.fg == theme.gray || cell.fg == theme.gray_dim {
+                    let faint = match (cell.fg, theme.bg_visual) {
+                        (Color::Rgb(r, g, b), Color::Rgb(br, bg, bb)) => contrast((r, g, b), (br, bg, bb)) < 4.5,
+                        (fg, _) => fg == theme.gray || fg == theme.gray_dim,
+                    };
+                    if faint {
                         cell.set_fg(theme.text_primary);
                     }
                 }
@@ -510,8 +514,9 @@ impl SidePanel {
 /// The page tabs in `w` columns: arrows and padded names when they fit, then bare names two apart, then only the
 /// current page spelled out with the others as their first letters.
 fn tab_bar(page: Page, w: usize, theme: &Theme) -> Line<'static> {
-    let on = Style::default().fg(theme.text_primary).bg(theme.bg_highlight).add_modifier(Modifier::BOLD);
-    let off = Style::default().fg(theme.gray);
+    // Inverse, so the current page reads in every theme whatever its highlight colour is.
+    let on = Style::default().fg(theme.bg_base).bg(theme.text_primary).add_modifier(Modifier::BOLD);
+    let off = Style::default().fg(theme.text_secondary);
     let names: usize = Page::ALL.iter().map(|p| p.tab().len()).sum();
     let (wide, short) = (w >= names + 15, w < names + 6);
     let mut spans = Vec::new();
@@ -533,11 +538,23 @@ fn tab_bar(page: Page, w: usize, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
+fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+    let lum = |(r, g, b): (u8, u8, u8)| {
+        let f = |v: u8| {
+            let v = v as f64 / 255.0;
+            if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+    };
+    let (hi, lo) = (lum(a).max(lum(b)), lum(a).min(lum(b)));
+    (hi + 0.05) / (lo + 0.05)
+}
+
 /// A page that has nothing to list yet says why on its first row.
 fn note_rows(note: &str, ctx: &Ctx) -> Vec<Row> {
     vec![Row::plain(Line::from(Span::styled(
         truncate_str(note, ctx.width),
-        Style::default().fg(ctx.theme.gray),
+        Style::default().fg(ctx.theme.text_secondary),
     )))]
 }
 

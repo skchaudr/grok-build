@@ -131,7 +131,7 @@ impl Builder<'_, '_> {
     }
 
     fn key(&self, k: &str) -> Span<'static> {
-        Span::styled(format!("  {k:<w$} ", w = KEY), Style::default().fg(self.c.theme.gray))
+        Span::styled(format!("  {k:<w$} ", w = KEY), Style::default().fg(self.c.theme.text_secondary))
     }
 
     /// `  key value`; `y` copies `key: value` in full.

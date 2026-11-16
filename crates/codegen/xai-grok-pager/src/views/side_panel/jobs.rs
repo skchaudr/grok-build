@@ -80,7 +80,7 @@ impl Job {
             JobState::Running => c.theme.accent_user,
             JobState::Done => c.theme.accent_success,
             JobState::Failed => c.theme.accent_error,
-            JobState::Cancelled => c.theme.gray,
+            JobState::Cancelled => c.theme.text_secondary,
         };
         let meta = format!("{:>col$}", self.meta(level));
         // mark + space, the label, two spaces, then the meta column.
@@ -90,7 +90,7 @@ impl Job {
             Span::styled(format!("{} ", self.state.mark()), Style::default().fg(color)),
             Span::styled(label, Style::default().fg(c.theme.text_primary)),
             Span::raw(" ".repeat(pad)),
-            Span::styled(meta, Style::default().fg(c.theme.gray)),
+            Span::styled(meta, Style::default().fg(c.theme.text_secondary)),
         ]);
         Row::new(line, self.copy())
     }
@@ -108,7 +108,7 @@ fn section(title: &str, items: &[Job], c: &Ctx, (level, col): (usize, usize), ou
     out.push(Row::plain(Line::from(Span::styled(format!("{title} ({})", items.len()), head))));
     if items.is_empty() {
         out.push(Row::new(
-            Line::from(Span::styled("  none", Style::default().fg(c.theme.gray))),
+            Line::from(Span::styled("  none", Style::default().fg(c.theme.text_secondary))),
             format!("{title}: none"),
         ));
     }

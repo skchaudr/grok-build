@@ -112,7 +112,7 @@ fn rows_from(sessions: &[SessionRow], c: &Ctx) -> Vec<Row> {
             let source = truncate_str(&s.source, source_w);
             let lead = format!("{when:>3} {source:<source_w$} ");
             let title = title(s);
-            let muted = Style::default().fg(c.theme.gray);
+            let muted = Style::default().fg(c.theme.text_secondary);
             let line = Line::from(vec![
                 Span::styled(lead.clone(), muted),
                 Span::styled(
