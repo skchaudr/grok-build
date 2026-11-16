@@ -504,6 +504,20 @@ fn note_rows(note: &str, ctx: &Ctx) -> Vec<Row> {
     )))]
 }
 
+/// Page rows as text, one drawn line each, for the pages' snapshot tests.
+#[cfg(test)]
+pub(crate) fn paint(rows: &[Row], width: u16) -> String {
+    let area = Rect::new(0, 0, width, rows.len().max(1) as u16);
+    let mut buf = Buffer::empty(area);
+    for (y, row) in rows.iter().enumerate() {
+        buf.set_line(0, y as u16, &row.line, width);
+    }
+    (0..area.height)
+        .map(|y| (0..width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 impl SidePanel {
     /// A Traces page already following `root`, fed `items` with no worker behind it.
