@@ -5,7 +5,7 @@ expression: "snap(&filled(), 43)"
 Session
   title        Fix the side panel session …
   id           019a8c3e-7b1d-7c40-9a52-0d3…
-  started      2027-01-15 05:55 · 2h ago
+  started      2h ago · 2027-01-15 05:55
   cwd          ~/repos/grok-build
   branch       main
 

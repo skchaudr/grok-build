@@ -422,21 +422,8 @@ impl SidePanel {
         };
         let w = inner.width as usize;
 
-        let mut tabs = vec![Span::styled("◀ ", Style::default().fg(theme.gray))];
-        for page in Page::ALL {
-            let style = if page == self.page {
-                Style::default()
-                    .fg(theme.text_primary)
-                    .bg(theme.bg_highlight)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.gray)
-            };
-            tabs.push(Span::styled(format!(" {} ", page.tab()), style));
-            tabs.push(Span::raw(" "));
-        }
-        tabs.push(Span::styled("▸", Style::default().fg(theme.gray)));
-        buf.set_line(inner.x, inner.y, &Line::from(tabs), inner.width);
+        let tabs = tab_bar(self.page, w, theme);
+        buf.set_line(inner.x, inner.y, &tabs, inner.width);
         buf.set_string(
             inner.x,
             inner.y + 1,
@@ -508,9 +495,42 @@ impl SidePanel {
                     Rect { y, height: 1, ..body },
                     Style::default().bg(theme.bg_visual).add_modifier(Modifier::BOLD),
                 );
+                // Muted text is unreadable on the selection band; lift it the way grok's own selection does.
+                for x in body.x..body.x + body.width {
+                    let cell = &mut buf[(x, y)];
+                    if cell.fg == theme.gray || cell.fg == theme.gray_dim {
+                        cell.set_fg(theme.text_primary);
+                    }
+                }
             }
         }
     }
+}
+
+/// The page tabs in `w` columns: arrows and padded names when they fit, then bare names two apart, then only the
+/// current page spelled out with the others as their first letters.
+fn tab_bar(page: Page, w: usize, theme: &Theme) -> Line<'static> {
+    let on = Style::default().fg(theme.text_primary).bg(theme.bg_highlight).add_modifier(Modifier::BOLD);
+    let off = Style::default().fg(theme.gray);
+    let names: usize = Page::ALL.iter().map(|p| p.tab().len()).sum();
+    let (wide, short) = (w >= names + 15, w < names + 6);
+    let mut spans = Vec::new();
+    if wide {
+        spans.push(Span::styled("◀ ", off));
+    }
+    for (i, p) in Page::ALL.into_iter().enumerate() {
+        let sel = p == page;
+        if i > 0 {
+            spans.push(Span::raw(if short { " " } else if wide { " " } else { "  " }));
+        }
+        let name = if short && !sel { &p.tab()[..1] } else { p.tab() };
+        let label = if wide { format!(" {name} ") } else { name.to_string() };
+        spans.push(Span::styled(label, if sel { on } else { off }));
+    }
+    if wide {
+        spans.push(Span::styled(" ▸", off));
+    }
+    Line::from(spans)
 }
 
 /// A page that has nothing to list yet says why on its first row.
@@ -826,5 +846,17 @@ mod tests {
         assert_eq!(draw(&mut p, &["a", "b", "c", "d", "e", "f"], 2), ["d", "e"], "moved off the tail, the view holds");
         p.handle_key(&key(KeyCode::Char('G')));
         assert_eq!(draw(&mut p, &["a", "b", "c", "d", "e", "f", "g"], 2), ["f", "g"], "G pins the tail again");
+    }
+
+    #[test]
+    fn the_tab_bar_fits_every_panel_width_and_keeps_the_current_page_named() {
+        let text = |w| tab_bar(Page::Steps, w, &Theme::current()).spans.iter().map(|s| s.content.to_string()).collect::<String>();
+        for w in [21, 29, 30, 37, 38, 39, 43] {
+            assert!(text(w).chars().count() <= w, "{w}: {:?}", text(w));
+            assert!(text(w).contains("Steps"));
+        }
+        assert_eq!(text(21), "S Steps A R");
+        assert!(text(43).starts_with("◀ ") && text(43).ends_with('▸'));
+        assert!(text(30).contains("Session  Steps  Agents  Recent"));
     }
 }
