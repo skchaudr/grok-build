@@ -949,6 +949,8 @@ pub struct AgentView {
     pub context_state: Option<xai_grok_shell::session::ContextInfo>,
     /// Claude rate-limit windows merged from `usage_update` metas, keyed by `rateLimitType`.
     pub rate_limits: std::collections::BTreeMap<String, crate::views::side_panel::RateWindow>,
+    /// Session-lifetime token totals summed from each Claude turn's `PromptResponse.usage`; feeds the F3 Session page.
+    pub(crate) token_totals: side_panel::TokenTotals,
     pub status_context: Option<xai_grok_status_line::StatusLineContext>,
     /// Held across a frame that clamps the row away, so a script keeps the size
     /// it last painted at.

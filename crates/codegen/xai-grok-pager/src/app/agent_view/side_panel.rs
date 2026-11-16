@@ -12,6 +12,29 @@ use crate::theme::Theme;
 use crate::views::modal::ActiveModal;
 use crate::views::side_panel::{Event, Info, Job, JobState};
 
+/// Token totals for the session, summed from each turn's `acp::Usage`. A figure stays `None` until a turn reports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct TokenTotals {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+}
+
+impl TokenTotals {
+    pub(crate) fn add(&mut self, u: &agent_client_protocol::Usage) {
+        fn sum(total: &mut Option<u64>, n: Option<u64>) {
+            if let Some(n) = n {
+                *total = Some(total.unwrap_or(0).saturating_add(n));
+            }
+        }
+        sum(&mut self.input, Some(u.input_tokens));
+        sum(&mut self.output, Some(u.output_tokens));
+        sum(&mut self.cache_read, u.cached_read_tokens);
+        sum(&mut self.cache_write, u.cached_write_tokens);
+    }
+}
+
 impl AgentView {
     pub(crate) fn side_panel_info(&self) -> Info {
         let s = &self.session;
@@ -62,6 +85,10 @@ impl AgentView {
             turns: self.context_state.as_ref().map(|c| c.turn_count),
             tool_calls: self.context_state.as_ref().map(|c| c.tool_call_count),
             compactions: self.context_state.as_ref().map(|c| c.compaction_count),
+            tokens_in: self.token_totals.input,
+            tokens_out: self.token_totals.output,
+            cache_read: self.token_totals.cache_read,
+            cache_write: self.token_totals.cache_write,
             // end session page
             jobs: self.side_panel_jobs(),
             subagents: self.side_panel_subagents(),
@@ -174,3 +201,27 @@ impl AgentView {
 #[cfg(test)]
 #[path = "side_panel_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod token_totals_tests {
+    use super::TokenTotals;
+    use agent_client_protocol as acp;
+
+    #[test]
+    fn add_sums_turns_and_keeps_unreported_figures_unknown() {
+        let mut t = TokenTotals::default();
+        assert_eq!(t, TokenTotals::default());
+        let mut turn = acp::Usage::new(150, 100, 50);
+        t.add(&turn);
+        // The adapter sent no cache figures yet: they stay unknown rather than 0.
+        assert_eq!((t.input, t.output, t.cache_read, t.cache_write), (Some(100), Some(50), None, None));
+        turn.cached_read_tokens = Some(800);
+        turn.cached_write_tokens = Some(0);
+        t.add(&turn);
+        t.add(&turn);
+        assert_eq!(
+            (t.input, t.output, t.cache_read, t.cache_write),
+            (Some(300), Some(150), Some(1600), Some(0))
+        );
+    }
+}

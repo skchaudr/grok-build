@@ -1840,6 +1840,13 @@ pub(super) fn handle_prompt_response(
                 .or_else(|| agent.session.models.get_context_window());
             agent.apply_context_used(reported.used, window.unwrap_or(0));
         }
+        // Claude's usage is the turn's own tally (reset per turn by the adapter), so the session total is their sum.
+        if usage_is_tally
+            && let Ok(response) = result.as_ref()
+            && let Some(usage) = response.usage.as_ref()
+        {
+            agent.token_totals.add(usage);
+        }
         let rate_limited = agent.session.rate_limited;
         // Fallback mirroring the credit-limit race guard below
         // If the retry notification lost the race with (or never reached) this PromptResponse, detect the free-usage code from the prompt error itself

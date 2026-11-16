@@ -215,6 +215,7 @@ impl AgentView {
             modal_hovered_key: None,
             context_state: None,
             rate_limits: Default::default(),
+            token_totals: Default::default(),
             status_context: None,
             last_status_line_size: None,
             chat_kind: false,
