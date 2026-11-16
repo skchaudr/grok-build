@@ -267,6 +267,7 @@ function watchTasks(signal) {
     shown.set(statusKey, statusText);
     out({ type: "extension_ui_request", id: randomUUID(), method: "setStatus", statusKey, statusText });
   };
+  watchDeploys(signal, show);
   (async () => {
     while (!signal.aborted) {
       const base = `/sessions/${encodeURIComponent(session)}`;
@@ -277,6 +278,63 @@ function watchTasks(signal) {
       await new Promise((r) => setTimeout(r, TASK_POLL_MS));
     }
   })();
+}
+
+// ---- proactive-demo deploy approvals: ops service -> confirm dialog -> decide ------
+// Env: DPI_OPS_URL or OPS_URL (default http://127.0.0.1:4790), DPI_OPS_POLL_MS (default 3000).
+// An unreachable ops service is silent: most sessions never have one.
+
+const OPS_URL = (process.env.DPI_OPS_URL || process.env.OPS_URL || "http://127.0.0.1:4790").replace(/\/$/, "");
+const OPS_POLL_MS = Number(process.env.DPI_OPS_POLL_MS) || 3000;
+const asked = new Set(); // deploy ids already prompted: one dialog per deploy, across re-attaches
+const dialogs = new Map(); // confirm request id -> deploy id, while that deploy still awaits
+let awaiting = new Set(); // deploy ids awaiting approval at the last poll
+
+async function ops(method, path, body) {
+  const res = await fetch(OPS_URL + "/api" + path, {
+    method,
+    headers: body === undefined ? {} : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error(`${method} ${path}: HTTP ${res.status}`);
+  return res.json();
+}
+
+function watchDeploys(signal, show) {
+  (async () => {
+    while (!signal.aborted) {
+      try {
+        const deploys = await ops("GET", "/deploys");
+        awaiting = new Set(deploys.filter((d) => d.status === "awaiting_approval").map((d) => d.id));
+        for (const d of deploys) {
+          if (!awaiting.has(d.id) || asked.has(d.id)) continue;
+          asked.add(d.id);
+          const id = randomUUID();
+          dialogs.set(id, d.id);
+          // The adapter shows `message` (not `title`) as a confirm's question, so the title leads it.
+          const title = `Deploy ${d.incidentId}: ${d.summary}`;
+          out({ type: "extension_ui_request", id, method: "confirm", title, message: [title, `commit ${d.commit}`, `branch ${d.branch}`, d.diffStat].join("\n") });
+        }
+        for (const [id, deployId] of dialogs) {
+          if (awaiting.has(deployId)) continue;
+          // Decided elsewhere. The adapter has no way to retract an open dialog, so its answer is ignored.
+          dialogs.delete(id);
+          out({ type: "extension_ui_request", id: randomUUID(), method: "notify", message: `Deploy ${deployId} was decided elsewhere`, notifyType: "info" });
+        }
+        show("ops-deploy", awaiting.size ? `${awaiting.size} deploy${awaiting.size > 1 ? "s" : ""} awaiting approval` : undefined);
+      } catch {}
+      await new Promise((r) => setTimeout(r, OPS_POLL_MS));
+    }
+  })();
+}
+
+// The TUI's answer to a confirm: {confirmed} or {cancelled}. Cancel declines.
+function onUiResponse(r) {
+  const deployId = dialogs.get(r.id);
+  if (deployId === undefined) return;
+  dialogs.delete(r.id);
+  ops("POST", `/deploys/${deployId}/decide`, { approved: r.confirmed === true }).catch((err) => log(`deploy ${deployId}: ${err.message}`));
 }
 
 // Pi's /fork picker rows: one per user turn, keyed by the dpi entry id.
@@ -439,6 +497,7 @@ async function main() {
     if (!line.trim()) return;
     let cmd;
     try { cmd = JSON.parse(line); } catch { return log(`bad json: ${line.slice(0, 200)}`); }
+    if (cmd.type === "extension_ui_response") return onUiResponse(cmd);
     handle(cmd);
   });
   rl.on("close", () => process.exit(0));

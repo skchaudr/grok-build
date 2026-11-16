@@ -71,7 +71,7 @@ after(() => { server.closeAllConnections(); server.close(); });
 // Spawn the shim attached to s1; returns call(cmd) and the extension_ui_request frames seen so far.
 async function shim(env = {}, target = "s1") {
   const child = spawn("node", [SHIM, "--session", target], {
-    env: { PATH: process.env.PATH, HOME: mkdtempSync(join(tmpdir(), "dpi-rpc-")), DPI_URL: base, DPI_TOKEN: TOKEN, DPI_TASK_POLL_MS: "50", ...env },
+    env: { PATH: process.env.PATH, HOME: mkdtempSync(join(tmpdir(), "dpi-rpc-")), DPI_URL: base, DPI_TOKEN: TOKEN, DPI_TASK_POLL_MS: "50", DPI_OPS_POLL_MS: "50", DPI_OPS_URL: "http://127.0.0.1:1", ...env },
   });
   const lines = [];
   const waiters = [];
@@ -95,7 +95,8 @@ async function shim(env = {}, target = "s1") {
     return until((l) => l.type === "response" && l.id === id);
   };
   const status = (key, text) => until((l) => l.method === "setStatus" && l.statusKey === key && l.statusText === text);
-  return { call, status, until, lines, close: () => child.kill() };
+  const send = (obj) => child.stdin.write(JSON.stringify(obj) + "\n");
+  return { call, status, until, lines, send, close: () => child.kill() };
 }
 
 test("dpi_list_sessions fills parent, message count and activity time", async () => {
@@ -195,4 +196,78 @@ test("DPI_URL/DPI_TOKEN from env win: the right token attaches, a wrong one exit
   const bad = spawn("node", [SHIM, "--session", "s1"], { env: { PATH: process.env.PATH, HOME: mkdtempSync(join(tmpdir(), "dpi-rpc-")), DPI_URL: base, DPI_TOKEN: "wrong" } });
   const code = await new Promise((r) => bad.on("exit", r));
   assert.equal(code, 1);
+});
+
+// ---- deploy approvals over a fake ops service ----
+const deploy = (over = {}) => ({ id: 1, incidentId: "INC-0001", status: "awaiting_approval", commit: "abc123", branch: "fix/x", summary: "retry fix", diffStat: "1 file changed", ...over });
+const ops = { deploys: [], decisions: [] };
+const opsServer = createServer((req, res) => {
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    if (req.method === "GET" && req.url === "/api/deploys") return json(res, 200, ops.deploys);
+    const m = req.url.match(/^\/api\/deploys\/(\d+)\/decide$/);
+    if (req.method === "POST" && m) { ops.decisions.push([Number(m[1]), JSON.parse(body)]); return json(res, 200, { ok: true }); }
+    json(res, 404, {});
+  });
+});
+let opsUrl;
+before(async () => { await new Promise((r) => opsServer.listen(0, "127.0.0.1", r)); opsUrl = `http://127.0.0.1:${opsServer.address().port}`; });
+after(() => { opsServer.closeAllConnections(); opsServer.close(); });
+const settle = () => new Promise((r) => setTimeout(r, 300));
+const isConfirm = (l) => l.method === "confirm";
+
+test("an awaiting deploy gets one confirm dialog and an ops-deploy status line; approve posts approved:true", async () => {
+  Object.assign(ops, { deploys: [deploy()], decisions: [] });
+  const s = await shim({ DPI_OPS_URL: opsUrl });
+  try {
+    const q = await s.until(isConfirm);
+    assert.equal(q.title, "Deploy INC-0001: retry fix");
+    assert.equal(q.message, "Deploy INC-0001: retry fix\ncommit abc123\nbranch fix/x\n1 file changed");
+    await s.status("ops-deploy", "1 deploy awaiting approval");
+    await settle();
+    assert.equal(s.lines.filter(isConfirm).length, 1); // polling again does not re-prompt
+    s.send({ type: "extension_ui_response", id: q.id, confirmed: true });
+    await s.until(() => ops.decisions.length > 0);
+    assert.deepEqual(ops.decisions, [[1, { approved: true }]]);
+    ops.deploys = [deploy({ status: "deploying" })];
+    await s.status("ops-deploy", undefined);
+    await settle();
+    assert.equal(s.lines.filter(isConfirm).length, 1); // no re-prompt after the decision
+    assert.equal(ops.decisions.length, 1);
+  } finally { s.close(); }
+});
+
+test("declining, or cancelling the dialog, posts approved:false", async () => {
+  for (const answer of [{ confirmed: false }, { cancelled: true }]) {
+    Object.assign(ops, { deploys: [deploy({ id: 2 })], decisions: [] });
+    const s = await shim({ DPI_OPS_URL: opsUrl });
+    try {
+      s.send({ type: "extension_ui_response", id: (await s.until(isConfirm)).id, ...answer });
+      await s.until(() => ops.decisions.length > 0);
+      assert.deepEqual(ops.decisions, [[2, { approved: false }]]);
+    } finally { s.close(); }
+  }
+});
+
+test("no dialog and no noise when ops is down", async () => {
+  const s = await shim({ DPI_OPS_URL: "http://127.0.0.1:1" });
+  try {
+    await s.call({ type: "get_state" });
+    await settle();
+    assert.equal(s.lines.filter((l) => isConfirm(l) || l.statusKey === "ops-deploy").length, 0);
+  } finally { s.close(); }
+});
+
+test("a deploy decided elsewhere withdraws the prompt: the late answer is ignored", async () => {
+  Object.assign(ops, { deploys: [deploy({ id: 3 })], decisions: [] });
+  const s = await shim({ DPI_OPS_URL: opsUrl });
+  try {
+    const q = await s.until(isConfirm);
+    ops.deploys = [deploy({ id: 3, status: "approved" })];
+    await s.until((l) => l.method === "notify" && /decided elsewhere/.test(l.message));
+    s.send({ type: "extension_ui_response", id: q.id, confirmed: true });
+    await settle();
+    assert.deepEqual(ops.decisions, []);
+  } finally { s.close(); }
 });
