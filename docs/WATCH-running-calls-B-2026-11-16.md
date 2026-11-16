@@ -44,6 +44,11 @@ Chat cards for these calls appeared when each call started, with header text suc
 
 - 14:45:20 to 14:48:38 (3 min 18 s, no frames saved): the screen was static, with no spinner and no status row. At 14:48:38 only the input box changed (`❯ T`), which someone typed. Nothing in the frames shows background work in this interval.
 - 14:49:27 to 15:16:32: `status idle` in the Session panel, no status row, and no frames changed.
+- 15:16:32 to 15:19:42: no frames saved. From 15:19:42 the frames show interface notices with `status idle` and no status row:
+  - `◆ Compact conversation  think` (a card in the chat area)
+  - `Notice: delta: Delta 0.26.1 is available (installed: 0.24.1). Run /delta-update or /delta update to update the installation.`
+  - `Notice: jev-prune: Stubbed 8 tool outputs, 36112 of 304212 characters (12%), 25 judged by Jev.`
+  - No tool call is running in these frames. The monitor that woke at 15:19:43 matched the word `Run` in the notice text, not a running call.
 
 ## Seen / not seen
 
