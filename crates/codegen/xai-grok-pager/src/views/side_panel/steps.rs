@@ -121,7 +121,8 @@ pub(super) fn rows(follow: &Follow, c: &Ctx) -> Vec<Row> {
                 None if !running(call, live_session) => String::new(),
                 None => took((c.now_ms - call.started_ms).max(0)),
             };
-            let text = if mark == "✗" { fg(th.accent_error) } else { fg(th.text_primary) };
+            // Only the mark is error-coloured: some themes' error red is under 3:1 on their page, too faint for text.
+            let text = fg(th.text_primary);
             out.push(Row::new(
                 line(
                     vec![
