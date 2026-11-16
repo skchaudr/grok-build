@@ -281,11 +281,13 @@ function watchTasks(signal) {
 }
 
 // ---- proactive-demo deploy approvals: ops service -> confirm dialog -> decide ------
-// Env: DPI_OPS_URL or OPS_URL (default http://127.0.0.1:4790), DPI_OPS_POLL_MS (default 3000).
+// Env: DPI_OPS_URL or OPS_URL (default http://127.0.0.1:4790), DPI_OPS_POLL_MS (default 3000),
+// DPI_OPS_REPROMPT_MS (default 600000: how long a dismissed prompt stays quiet).
 // An unreachable ops service is silent: most sessions never have one.
 
 const OPS_URL = (process.env.DPI_OPS_URL || process.env.OPS_URL || "http://127.0.0.1:4790").replace(/\/$/, "");
 const OPS_POLL_MS = Number(process.env.DPI_OPS_POLL_MS) || 3000;
+const OPS_REPROMPT_MS = Number(process.env.DPI_OPS_REPROMPT_MS) || 600_000;
 const asked = new Set(); // deploy ids already prompted: one dialog per deploy, across re-attaches
 const dialogs = new Map(); // confirm request id -> deploy id, while that deploy still awaits
 let awaiting = new Set(); // deploy ids awaiting approval at the last poll
@@ -329,12 +331,18 @@ function watchDeploys(signal, show) {
   })();
 }
 
-// The TUI's answer to a confirm: {confirmed} or {cancelled}. Cancel declines.
+// The TUI's answer to a confirm. Only an explicit confirmed true/false is a decision; a dismissed
+// dialog records nothing and the deploy is offered again after the cooldown.
 function onUiResponse(r) {
   const deployId = dialogs.get(r.id);
   if (deployId === undefined) return;
   dialogs.delete(r.id);
-  ops("POST", `/deploys/${deployId}/decide`, { approved: r.confirmed === true }).catch((err) => log(`deploy ${deployId}: ${err.message}`));
+  if (typeof r.confirmed !== "boolean") {
+    out({ type: "extension_ui_request", id: randomUUID(), method: "notify", message: `No decision recorded for deploy ${deployId}; it is still awaiting approval`, notifyType: "info" });
+    setTimeout(() => asked.delete(deployId), OPS_REPROMPT_MS).unref();
+    return;
+  }
+  ops("POST", `/deploys/${deployId}/decide`, { approved: r.confirmed }).catch((err) => log(`deploy ${deployId}: ${err.message}`));
 }
 
 // Pi's /fork picker rows: one per user turn, keyed by the dpi entry id.

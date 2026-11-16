@@ -238,16 +238,33 @@ test("an awaiting deploy gets one confirm dialog and an ops-deploy status line; 
   } finally { s.close(); }
 });
 
-test("declining, or cancelling the dialog, posts approved:false", async () => {
-  for (const answer of [{ confirmed: false }, { cancelled: true }]) {
-    Object.assign(ops, { deploys: [deploy({ id: 2 })], decisions: [] });
-    const s = await shim({ DPI_OPS_URL: opsUrl });
-    try {
-      s.send({ type: "extension_ui_response", id: (await s.until(isConfirm)).id, ...answer });
-      await s.until(() => ops.decisions.length > 0);
-      assert.deepEqual(ops.decisions, [[2, { approved: false }]]);
-    } finally { s.close(); }
-  }
+test("an explicit No posts approved:false", async () => {
+  Object.assign(ops, { deploys: [deploy({ id: 2 })], decisions: [] });
+  const s = await shim({ DPI_OPS_URL: opsUrl });
+  try {
+    s.send({ type: "extension_ui_response", id: (await s.until(isConfirm)).id, confirmed: false });
+    await s.until(() => ops.decisions.length > 0);
+    assert.deepEqual(ops.decisions, [[2, { approved: false }]]);
+  } finally { s.close(); }
+});
+
+test("a dismissed dialog records nothing, notifies, stays pending, and re-prompts only after the cooldown", async () => {
+  Object.assign(ops, { deploys: [deploy({ id: 4 })], decisions: [] });
+  const s = await shim({ DPI_OPS_URL: opsUrl, DPI_OPS_REPROMPT_MS: "700" });
+  try {
+    const first = await s.until(isConfirm);
+    const t0 = Date.now();
+    s.send({ type: "extension_ui_response", id: first.id, cancelled: true });
+    await s.until((l) => l.method === "notify" && l.message === "No decision recorded for deploy 4; it is still awaiting approval");
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(s.lines.filter(isConfirm).length, 1); // inside the cooldown: no prompt loop
+    const second = await s.until((l) => isConfirm(l) && l.id !== first.id);
+    assert.ok(Date.now() - t0 >= 650, "re-prompted before the cooldown");
+    s.send({ type: "extension_ui_response", id: second.id }); // no confirmed at all: still no decision
+    await new Promise((r) => setTimeout(r, 200));
+    assert.deepEqual(ops.decisions, []);
+    assert.equal(s.lines.filter((l) => l.statusKey === "ops-deploy").at(-1).statusText, "1 deploy awaiting approval");
+  } finally { s.close(); }
 });
 
 test("no dialog and no noise when ops is down", async () => {
