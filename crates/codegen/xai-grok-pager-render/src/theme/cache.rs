@@ -361,6 +361,13 @@ fn load_from_disk() -> Option<ThemeKind> {
 /// built-in kind. Callers that only need kind-based state may ignore the
 /// return when [`has_custom`] is true.
 pub fn resolve_and_apply_initial_theme(osc11_fallback: bool) -> ThemeKind {
+    // `GROK_THEME` / `LC_GROK_THEME` beat the config file, as `resolve_initial_theme` documents.
+    if let Some(kind) = env_theme_name().as_deref().and_then(ThemeKind::from_name) {
+        clear_custom();
+        let kind = resolve_from_config(Some(kind), osc11_fallback);
+        set(kind);
+        return kind;
+    }
     if let Some(raw) = load_theme_string_from_disk() {
         if super::pi::is_pi_theme_id(&raw) {
             // Ensure builtins exist even if discovery was not run yet.
