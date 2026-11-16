@@ -199,14 +199,15 @@ test("DPI_URL/DPI_TOKEN from env win: the right token attaches, a wrong one exit
 });
 
 // ---- deploy approvals over a fake ops service ----
-const deploy = (over = {}) => ({ id: 1, incidentId: "INC-0001", status: "awaiting_approval", commit: "abc123", branch: "fix/x", summary: "retry fix", diffStat: "1 file changed", ...over });
-const ops = { deploys: [], decisions: [] };
+const deploy = (over = {}) => ({ id: 1, requestedAt: 1000, incidentId: "INC-0001", status: "awaiting_approval", commit: "abc123", branch: "fix/x", summary: "retry fix", diffStat: "1 file changed", ...over });
+const ops = { deploys: [], decisions: [], failDecide: false };
 const opsServer = createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
   req.on("end", () => {
     if (req.method === "GET" && req.url === "/api/deploys") return json(res, 200, ops.deploys);
     const m = req.url.match(/^\/api\/deploys\/(\d+)\/decide$/);
+    if (req.method === "POST" && m && ops.failDecide) return json(res, 409, { error: "already decided" });
     if (req.method === "POST" && m) { ops.decisions.push([Number(m[1]), JSON.parse(body)]); return json(res, 200, { ok: true }); }
     json(res, 404, {});
   });
@@ -231,6 +232,7 @@ test("an awaiting deploy gets one confirm dialog and an ops-deploy status line; 
     s.send({ type: "extension_ui_response", id: q.id, confirmed: true });
     await s.until(() => ops.decisions.length > 0);
     assert.deepEqual(ops.decisions, [[1, { approved: true }]]);
+    await s.until((l) => l.method === "notify" && l.message === "Deploy 1 approved."); // only after decide returned ok
     ops.deploys = [deploy({ status: "deploying" })];
     await s.status("ops-deploy", undefined);
     await settle();
@@ -246,6 +248,30 @@ test("an explicit No posts approved:false", async () => {
     s.send({ type: "extension_ui_response", id: (await s.until(isConfirm)).id, confirmed: false });
     await s.until(() => ops.decisions.length > 0);
     assert.deepEqual(ops.decisions, [[2, { approved: false }]]);
+    await s.until((l) => l.method === "notify" && l.message === "Deploy 2 declined.");
+  } finally { s.close(); }
+});
+
+test("a decide that fails is reported as not recorded, never as approved", async () => {
+  Object.assign(ops, { deploys: [deploy({ id: 6 })], decisions: [], failDecide: true });
+  const s = await shim({ DPI_OPS_URL: opsUrl });
+  try {
+    s.send({ type: "extension_ui_response", id: (await s.until(isConfirm)).id, confirmed: true });
+    await s.until((l) => l.method === "notify" && l.message === "Deploy 6: could not record your answer: POST /deploys/6/decide: HTTP 409");
+    assert.equal(s.lines.some((l) => l.method === "notify" && /approved/.test(l.message)), false);
+  } finally { s.close(); ops.failDecide = false; }
+});
+
+test("a deploy id reused after a demo reset is prompted again", async () => {
+  Object.assign(ops, { deploys: [deploy({ id: 15, requestedAt: 1 })], decisions: [] });
+  const s = await shim({ DPI_OPS_URL: opsUrl });
+  try {
+    const first = await s.until(isConfirm);
+    s.send({ type: "extension_ui_response", id: first.id, confirmed: true });
+    await s.until(() => ops.decisions.length > 0);
+    ops.deploys = [deploy({ id: 15, requestedAt: 2 })]; // reset: same id, a new request
+    const second = await s.until((l) => isConfirm(l) && l.id !== first.id);
+    assert.equal(second.title, "Deploy INC-0001: retry fix");
   } finally { s.close(); }
 });
 
@@ -322,4 +348,21 @@ test("a dialog the adapter retracted on its timeout is shown again at once, not 
     assert.equal(s.lines.some((l) => l.method === "notify"), false); // a timeout is not a dismissal
     assert.deepEqual(ops.decisions, []);
   } finally { s.close(); }
+});
+
+// ---- dpi-grok's pre-check ----
+function runShim(args) {
+  const child = spawn("node", [SHIM, ...args], { env: { PATH: process.env.PATH, HOME: mkdtempSync(join(tmpdir(), "dpi-rpc-")), DPI_URL: base, DPI_TOKEN: TOKEN } });
+  let stdout = "", stderr = "";
+  child.stdout.on("data", (c) => (stdout += c));
+  child.stderr.on("data", (c) => (stderr += c));
+  return new Promise((r) => child.on("exit", (code) => r({ code, stdout, stderr })));
+}
+
+test("--resolve prints session:agent for a known name, and names the cause for an unknown one", async () => {
+  const ok = await runShim(["--resolve", "--session", "s1"]);
+  assert.deepEqual([ok.code, ok.stdout], [0, "s1:1\n"]);
+  const bad = await runShim(["--resolve", "--session", "zzz"]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /no dpi session named zzz on http:\/\/127\.0\.0\.1:\d+/);
 });

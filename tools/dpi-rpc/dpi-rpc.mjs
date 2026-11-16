@@ -289,10 +289,12 @@ function watchTasks(signal) {
 const OPS_URL = (process.env.DPI_OPS_URL || process.env.OPS_URL || "http://127.0.0.1:4790").replace(/\/$/, "");
 const OPS_POLL_MS = Number(process.env.DPI_OPS_POLL_MS) || 3000;
 const OPS_REPROMPT_MS = Number(process.env.DPI_OPS_REPROMPT_MS) || 600_000;
-const asked = new Set(); // deploy ids already prompted: one dialog per deploy, across re-attaches
+const asked = new Set(); // deploy keys already prompted: one dialog per request, across re-attaches
 const OPS_DIALOG_MS = Number(process.env.DPI_OPS_DIALOG_MS) || 300_000;
-const dialogs = new Map(); // confirm request id -> {deployId, at, gone?}; gone = {how, at} once decided elsewhere
-let awaiting = new Set(); // deploy ids awaiting approval at the last poll
+const dialogs = new Map(); // confirm request id -> {deployId, key, at, gone?}; gone = {how, at} once decided elsewhere
+let awaiting = new Set(); // deploy keys awaiting approval at the last poll
+// An id alone is not unique: a demo reset restarts ids, so a request is its id plus when it was made.
+const deployKey = (d) => `${d.id}:${d.requestedAt}`;
 
 async function ops(method, path, body) {
   const res = await fetch(OPS_URL + "/api" + path, {
@@ -315,12 +317,13 @@ function watchDeploys(signal, show) {
     while (!signal.aborted) {
       try {
         const deploys = await ops("GET", "/deploys");
-        awaiting = new Set(deploys.filter((d) => d.status === "awaiting_approval").map((d) => d.id));
+        awaiting = new Set(deploys.filter((d) => d.status === "awaiting_approval").map(deployKey));
         for (const d of deploys) {
-          if (!awaiting.has(d.id) || asked.has(d.id)) continue;
-          asked.add(d.id);
+          const key = deployKey(d);
+          if (!awaiting.has(key) || asked.has(key)) continue;
+          asked.add(key);
           const id = randomUUID();
-          dialogs.set(id, { deployId: d.id, at: Date.now() });
+          dialogs.set(id, { deployId: d.id, key, at: Date.now() });
           // The adapter shows `message` (not `title`) as a confirm's question, so the title leads it.
           const title = `Deploy ${d.incidentId}: ${d.summary}`;
           const message = [title, `commit ${d.commit}`, `branch ${d.branch}`, d.diffStat, "If this was already decided elsewhere (hub, another device) you can dismiss this; dismissing records nothing."].join("\n");
@@ -328,9 +331,9 @@ function watchDeploys(signal, show) {
           out({ type: "extension_ui_request", id, method: "confirm", title, message, timeout: OPS_DIALOG_MS });
         }
         for (const dlg of dialogs.values()) {
-          if (awaiting.has(dlg.deployId) || dlg.gone) continue;
+          if (awaiting.has(dlg.key) || dlg.gone) continue;
           // Decided elsewhere. The adapter cannot retract an open dialog early: caption it, ignore its answer.
-          dlg.gone = outcome(deploys.find((d) => d.id === dlg.deployId));
+          dlg.gone = outcome(deploys.find((d) => deployKey(d) === dlg.key));
           notify(`Deploy ${dlg.deployId} was ${dlg.gone.how} elsewhere${dlg.gone.at}. You can dismiss the open dialog; nothing was recorded from it.`);
         }
         show("ops-deploy", awaiting.size ? `${awaiting.size} deploy${awaiting.size > 1 ? "s" : ""} awaiting approval` : undefined);
@@ -350,12 +353,16 @@ function onUiResponse(r) {
   if (typeof r.confirmed === "boolean" && dlg.gone) return notify(`Deploy ${deployId} was already ${dlg.gone.how}${dlg.gone.at}; your ${r.confirmed ? "Yes" : "No"} was not sent.`);
   if (dlg.gone) return; // timed out or dismissed after it went stale: nothing to say
   if (typeof r.confirmed !== "boolean") {
-    if (Date.now() - dlg.at >= OPS_DIALOG_MS) return asked.delete(deployId); // the adapter's timeout retracted it: show it again
+    if (Date.now() - dlg.at >= OPS_DIALOG_MS) return asked.delete(dlg.key); // the adapter's timeout retracted it: show it again
     notify(`No decision recorded for deploy ${deployId}; it is still awaiting approval`);
-    setTimeout(() => asked.delete(deployId), OPS_REPROMPT_MS).unref();
+    setTimeout(() => asked.delete(dlg.key), OPS_REPROMPT_MS).unref();
     return;
   }
-  ops("POST", `/deploys/${deployId}/decide`, { approved: r.confirmed }).catch((err) => log(`deploy ${deployId}: ${err.message}`));
+  // Only a decide that returned ok is reported as recorded; the answer is the user's, so the wording follows it.
+  ops("POST", `/deploys/${deployId}/decide`, { approved: r.confirmed }).then(
+    () => notify(`Deploy ${deployId} ${r.confirmed ? "approved" : "declined"}.`),
+    (err) => { log(`deploy ${deployId}: ${err.message}`); notify(`Deploy ${deployId}: could not record your answer: ${err.message}`); },
+  );
 }
 
 // Pi's /fork picker rows: one per user turn, keyed by the dpi entry id.
@@ -509,9 +516,14 @@ async function main() {
   device = await api("GET", "/device");
   [session, agent] = await pickTarget();
   // Resolve names to ids so the remembered target survives renames.
-  const a = await api("GET", agentPath());
+  let a;
+  try { a = await api("GET", agentPath()); } catch (err) {
+    // The pager buries this line under its own bootstrap text, so say the cause plainly.
+    throw err.status === 404 ? new Error(`no dpi session named ${argValue("--session") ?? session} on ${BASE}`) : err;
+  }
   session = a.sessionId;
   agent = String(a.id);
+  if (process.argv.includes("--resolve")) return console.log(`${session}:${agent}`); // for dpi-grok's pre-check and --resume
   attach();
   const rl = createInterface({ input: process.stdin });
   rl.on("line", (line) => {
