@@ -53,6 +53,15 @@ impl AgentView {
             rate_limits: self.rate_limits.clone(),
             five_hour_pct: self.side_panel.five_hour_pct,
             status,
+            // session page
+            branch: self.current_branch.clone().or_else(|| {
+                crate::git_info::cwd_git_info_lazy(&s.cwd).and_then(|g| g.branch)
+            }),
+            started_ms: self.side_panel.session_row().and_then(|r| r.started_at),
+            turns: self.context_state.as_ref().map(|c| c.turn_count),
+            tool_calls: self.context_state.as_ref().map(|c| c.tool_call_count),
+            compactions: self.context_state.as_ref().map(|c| c.compaction_count),
+            // end session page
             jobs: self
                 .dock_task_rows()
                 .into_iter()

@@ -132,6 +132,21 @@ pub struct Info {
     /// The statusline-file 5h figure, shown only while `rate_limits` has no `five_hour`.
     pub five_hour_pct: Option<u8>,
     pub status: String,
+    // session page
+    /// Git branch of the cwd; `Some("")` is a detached HEAD.
+    pub branch: Option<String>,
+    /// Session start, epoch ms, from the trace index row.
+    pub started_ms: Option<i64>,
+    /// Conversation turns / tool calls / compactions as the harness counted them (zero = not reported yet).
+    pub turns: Option<u64>,
+    pub tool_calls: Option<u64>,
+    pub compactions: Option<u64>,
+    /// Session token totals; none of the live pager state carries them, so these stay `None` until fed.
+    pub tokens_in: Option<u64>,
+    pub tokens_out: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    // end session page
     /// (description, meta) per running background command.
     pub jobs: Vec<(String, String)>,
     pub subagents: Vec<(String, String)>,
