@@ -11,7 +11,7 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 function fileEnv(name) {
   try {
@@ -55,7 +55,7 @@ async function api(method, path, body) {
   });
   const text = await res.text();
   const json = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new Error(json?.error?.message || `${method} ${path}: HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(json?.error?.message || `${method} ${path}: HTTP ${res.status}`), { status: res.status });
   return json;
 }
 const agentPath = () => `/sessions/${encodeURIComponent(session)}/agents/${encodeURIComponent(agent)}`;
@@ -232,14 +232,58 @@ function attach() {
   running = false;
   awaitingRun = false;
   runStream(stream.signal);
+  watchTasks(stream.signal);
 }
 
 // ---- commands: Pi RPC -> /v1 ---------------------------------------------
 
-async function activeMessages() {
-  const { items } = await api("GET", agentPath() + "/entries?scope=active");
-  return items.flatMap((i) => i.model ?? []).filter((m) => m.role !== "system");
+const activeEntries = async (path = agentPath()) => (await api("GET", path + "/entries?scope=active")).items;
+const modelMessages = (entries) => entries.flatMap((i) => i.model ?? []).filter((m) => m.role !== "system");
+const activeMessages = async () => modelMessages(await activeEntries());
+
+// ---- live tasks (and Prime's goal/heartbeat) as one status line each ----------
+
+const TASK_POLL_MS = Number(process.env.DPI_TASK_POLL_MS) || 3000;
+const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+let primeWork = true; // false once a backend answers 404 for prime/work: only prime-backend serves it
+
+const taskText = (tasks) => {
+  // A foreground tool call already shows as a tool event; only background and job tasks are news.
+  const live = tasks.filter((t) => t.background || t.kind !== "pi.tool");
+  return live.length ? `${live.length} task${live.length > 1 ? "s" : ""}: ${live.slice(0, 3).map((t) => t.label ?? t.kind).join(", ")}` : undefined;
+};
+
+const primeText = (w) => {
+  const parts = [];
+  if (w.goal) parts.push(`goal ${w.goal.status}: ${clip(w.goal.objective, 60)}`);
+  if (w.heartbeat) parts.push(`heartbeat ${w.heartbeat.status} ${w.heartbeat.schedule}`);
+  return parts.length ? parts.join(" | ") : undefined;
+};
+
+function watchTasks(signal) {
+  const shown = new Map(); // statusKey -> last text, so only changes reach the TUI
+  const show = (statusKey, statusText) => {
+    if (shown.get(statusKey) === statusText) return;
+    shown.set(statusKey, statusText);
+    out({ type: "extension_ui_request", id: randomUUID(), method: "setStatus", statusKey, statusText });
+  };
+  (async () => {
+    while (!signal.aborted) {
+      const base = `/sessions/${encodeURIComponent(session)}`;
+      try { show("dpi-tasks", taskText(await api("GET", base + "/tasks?status=live"))); } catch (err) { log(`tasks: ${err.message}`); }
+      if (primeWork) {
+        try { show("prime-work", primeText(await api("GET", base + "/prime/work"))); } catch (err) { if (err.status === 404) primeWork = false; else log(`prime work: ${err.message}`); }
+      }
+      await new Promise((r) => setTimeout(r, TASK_POLL_MS));
+    }
+  })();
 }
+
+// Pi's /fork picker rows: one per user turn, keyed by the dpi entry id.
+const textOf = (content) => (typeof content === "string" ? content : (content ?? []).filter((p) => p.type === "text").map((p) => p.text).join(""));
+const forkMessages = (items) => items
+  .filter((e) => e.kind === "pi.user")
+  .map((e) => ({ entryId: String(e.id), text: textOf(e.model?.[0]?.content) }));
 
 async function getState() {
   const [a, s] = await Promise.all([api("GET", agentPath()), api("GET", `/sessions/${encodeURIComponent(session)}`)]);
@@ -293,8 +337,31 @@ const handlers = {
     return { entries, leafId: entries.at(-1)?.id ?? null };
   },
   get_session_stats: sessionStats,
-  // The durable agent is the session; a fresh TUI attaches instead of resetting it.
-  new_session: async () => ({ cancelled: false }),
+  get_fork_messages: async () => ({ messages: forkMessages(await activeEntries()) }),
+  // Like Pi, fork before the picked user turn and hand its text back for the editor, then follow the fork.
+  // dpi keeps the entry it forks at, so fork at the one before; the first turn has none: start a fresh agent.
+  fork: async (c) => {
+    const items = await activeEntries();
+    const text = forkMessages(items).find((m) => m.entryId === String(c.entryId))?.text;
+    if (text === undefined) throw new Error(`entryId is not a user turn of this agent: ${c.entryId}`);
+    const before = items[items.findIndex((e) => String(e.id) === String(c.entryId)) - 1];
+    const forked = before
+      ? await api("POST", agentPath() + "/fork", { entryId: before.id })
+      : await api("POST", `/sessions/${encodeURIComponent(session)}/agents`, { from: agent });
+    agent = String(forked.id);
+    attach();
+    return { cancelled: false, text };
+  },
+  // A new durable session in the current one's cwd with its model, then attach to it.
+  new_session: async () => {
+    const a = await api("GET", agentPath());
+    const cwd = a.config.cwd ?? (await api("GET", `/sessions/${encodeURIComponent(session)}`)).cwd;
+    const stamp = new Date().toLocaleString("sv").slice(5, 16);
+    const created = await api("POST", "/sessions", { name: `${basename(cwd)} ${stamp}`, cwd, model: a.config.model, thinkingLevel: a.config.thinkingLevel });
+    [session, agent] = [created.id, "main"];
+    attach();
+    return { cancelled: false };
+  },
   prompt: async (c) => send(c.message, c.streamingBehavior === "steer" ? "steer" : "followUp"),
   steer: async (c) => send(c.message, "steer"),
   follow_up: async (c) => send(c.message, "followUp"),
@@ -311,20 +378,28 @@ const handlers = {
   set_auto_compaction: async () => {},
   set_auto_retry: async () => {},
   // grok-pi's /resume picker (GROK_PI_DPI=1): one row per durable agent.
+  // The tree has no activity time or counts, so each row reads its agent's active transcript.
+  // shortcut: one fetch per agent on every picker open; add a backend field or cache if sessions grow.
   dpi_list_sessions: async () => {
-    const sessions = await api("GET", "/sessions");
+    const rows = (await api("GET", "/sessions")).flatMap((s) => (s.agents ?? []).map((a) => [s, a]));
+    const active = await Promise.all(rows.map(([s, a]) => activeEntries(`/sessions/${s.id}/agents/${a.id}`).catch(() => [])));
     return {
-      sessions: sessions.flatMap((s) => (s.agents ?? []).map((a) => ({
-        id: `${s.id}:${a.id}`,
-        path: `dpi://${s.id}/${a.id}`,
-        name: a.kind === "root" ? s.name : `${s.name} / ${a.name}`,
-        cwd: s.cwd,
-        createdAt: new Date(s.createdAt).toISOString(),
-        modifiedAt: new Date(s.createdAt).toISOString(),
-        firstMessage: a.busy ? "(running)" : "",
-        modelId: s.model,
-        parentSessionPath: a.kind === "root" ? undefined : `dpi://${s.id}/main`,
-      }))),
+      sessions: rows.map(([s, a], i) => {
+        const messages = modelMessages(active[i]);
+        const last = Math.max(s.createdAt, ...messages.map((m) => m.timestamp ?? 0));
+        return {
+          id: `${s.id}:${a.id}`,
+          path: `dpi://${s.id}/${a.id}`,
+          name: a.kind === "root" ? s.name : `${s.name} / ${a.name}`,
+          cwd: s.cwd,
+          createdAt: new Date(s.createdAt).toISOString(),
+          modifiedAt: new Date(last).toISOString(),
+          messageCount: messages.length,
+          firstMessage: a.busy ? "(running)" : "",
+          modelId: s.model,
+          parentSessionPath: a.kind === "root" ? undefined : `dpi://${s.id}/${a.parentId ?? a.ownerAgentId ?? "main"}`,
+        };
+      }),
     };
   },
   // sessionPath: dpi://<session>[/<agent>]
