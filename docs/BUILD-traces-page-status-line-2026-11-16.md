@@ -27,3 +27,5 @@ turn_status: `zero_min_width_keeps_the_phase_timer_on_a_narrow_row`.
 - "Snapshot test": the tests assert exact row text instead of `insta` snapshots, because no cargo run means no `.snap` files could be generated and the spinner frame and timer depend on the clock. They pin the same widths.
 - Every-shipped-theme check (`GROK_THEME`) and the live half-width screen check are the lead's; I did not build or look at a screen.
 - `arm_activity_clock` runs every frame, so `last_activity` now returns to `None` when a turn ends (it used to stay stale until the next shown row), and the debug log `turn.phase_transition` can now record `to: "idle"`.
+
+FIX1 done
