@@ -1533,11 +1533,12 @@ mod tests {
         let mut args = idle_args(Watchers::default());
         args.state = &AgentState::TurnRunning;
         args.activity = &activity;
-        args.activity_started_at = Some(Instant::now() - Duration::from_secs(6));
+        args.activity_started_at = Some(Instant::now() - Duration::from_secs(125));
         args.buttons = None;
         args.phase_timer_min_width = 0;
         let text = render_row_text(args, 43);
-        assert!(text.trim_end().ends_with("Waiting for response… 6s"), "got: {text:?}");
+        let expected = format!("Waiting for response… {}", format_turn_timer(Duration::from_secs(125)));
+        assert!(text.trim_end().ends_with(&expected), "got: {text:?}");
     }
     #[test]
     fn still_running_label_lists_only_nonzero_kinds() {

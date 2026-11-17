@@ -1073,7 +1073,7 @@ mod tests {
     fn narrow_row_cuts_the_label_with_an_ellipsis_and_never_the_timer() {
         let lines = traces_lines(&mut following(), Some(model_wait()), 21, 14);
         let row = status_row(&lines);
-        assert!(row.starts_with(&format!("{} Waiting")), "{row:?}");
+        assert!(row.starts_with(&format!("{} Waiting", spinner())), "{row:?}");
         assert!(row.contains('…') && !row.contains("response…"), "the label is cut: {row:?}");
         assert!(row.ends_with(&timer()), "the timer is whole: {row:?}");
         assert!(lines[12].chars().count() <= 24, "inside the panel: {:?}", lines[12]);
@@ -1152,9 +1152,9 @@ mod tests {
 
     #[test]
     fn the_note_and_failed_states_keep_the_status_row() {
-        for (traces, note) in [
-            (Traces::Idle, "waiting for this session in the traces index…"),
-            (Traces::Failed("traces index unavailable".into()), "traces index unavailable"),
+        for (traces, note_start) in [
+            (Traces::Idle, "wait"),
+            (Traces::Failed("traces index unavailable".into()), "trac"),
         ] {
             for inner in [43, 21] {
                 let mut p = SidePanel { open: true, focused: true, ..SidePanel::default() };
@@ -1169,7 +1169,7 @@ mod tests {
                 let lines: Vec<String> = (0..10)
                     .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string())
                     .collect();
-                assert!(lines[2].contains(&truncate_str(note, inner as usize)[..4]), "{lines:#?}");
+                assert!(lines[2].contains(note_start), "{lines:#?}");
                 assert!(status_row(&lines).starts_with(&spinner()) && status_row(&lines).ends_with(&timer()), "{lines:#?}");
             }
         }
