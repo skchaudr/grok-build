@@ -10,7 +10,7 @@ use crate::app::agent::AgentState;
 use crate::app::app_view::InputOutcome;
 use crate::theme::Theme;
 use crate::views::modal::ActiveModal;
-use crate::views::side_panel::{Event, Info, Job, JobState};
+use crate::views::side_panel::{Event, Info, Job, JobState, TurnRow};
 
 /// Token totals for the session, summed from each turn's `acp::Usage`. A figure stays `None` until a turn reports it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -92,7 +92,26 @@ impl AgentView {
             // end session page
             jobs: self.side_panel_jobs(),
             subagents: self.side_panel_subagents(),
+            turn: self.side_panel_turn_row(),
         }
+    }
+
+    /// The chat's status row, when the chat shows an activity label for it: not idle, and not the parked or idle cues.
+    fn side_panel_turn_row(&self) -> Option<TurnRow> {
+        let (state, activity) = self.turn_status_activity();
+        let parked = self.renders_parked() && !self.dock_covers_idle_cues(self.dock_on);
+        if state.is_idle() || parked {
+            return None;
+        }
+        Some(TurnRow {
+            state,
+            activity,
+            activity_started_at: self.activity_started_at,
+            tick: self.scrollback.animation_tick(),
+            is_bash_turn: self.bash_turn,
+            is_pending_user_input: self.is_awaiting_user_answer(),
+            goal_verifying: self.goal_state.as_ref().is_some_and(|g| g.verifying_completion),
+        })
     }
 
     /// Background commands (monitors are watchers, not listed), running first then oldest first.

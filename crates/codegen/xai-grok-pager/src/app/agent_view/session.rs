@@ -1307,6 +1307,62 @@ impl AgentView {
         self.resolve_turn_activity_unenriched()
             .map(|activity| self.enrich_waiting_activity(activity))
     }
+    /// The state and activity the chat's status row and the side panel's activity row both draw: the wake-turn display
+    /// state, and during the send-now gap a running turn with no activity yet.
+    pub(crate) fn turn_status_activity(
+        &self,
+    ) -> (
+        crate::app::agent::AgentState,
+        Option<crate::acp::tracker::TurnActivity>,
+    ) {
+        use crate::app::agent::AgentState;
+        let display_state = self.wake_display_state().unwrap_or(&self.session.state);
+        if self.send_now_awaiting_current() && display_state.is_idle() {
+            (AgentState::TurnRunning, None)
+        } else {
+            (display_state.clone(), self.resolve_turn_activity())
+        }
+    }
+
+    /// Re-arms the per-activity clock (`activity_started_at`) when the activity changes phase. Runs every frame ahead of
+    /// both the chat and the side panel, so the two rows read one clock even when the chat is not drawn (narrow, panel focused).
+    pub(crate) fn arm_activity_clock(&mut self) {
+        let (_, activity) = self.turn_status_activity();
+        if crate::acp::tracker::is_phase_transition(self.last_activity.as_ref(), activity.as_ref()) {
+            if let Some(prev) = &self.last_activity {
+                let phase_ms = self
+                    .activity_started_at
+                    .map(|t| t.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
+                let prev_label = prev.as_label();
+                let next_label = activity.as_ref().map(|a| a.as_label()).unwrap_or("idle");
+                let sid = self.session.session_id.as_ref().map(|s| s.0.as_ref());
+                crate::unified_log::debug(
+                    "turn.phase_transition",
+                    sid,
+                    Some(serde_json::json!({
+                        "from": prev_label,
+                        "to": next_label,
+                        "phase_elapsed_ms": phase_ms,
+                    })),
+                );
+            }
+            let hook_wait_started = matches!(
+                activity,
+                Some(crate::acp::tracker::TurnActivity::Waiting(
+                    crate::acp::tracker::WaitingReason::Hooks { .. }
+                ))
+            )
+            .then(|| self.session.tracker.hooks_running_since())
+            .flatten();
+            self.activity_started_at =
+                Some(hook_wait_started.unwrap_or_else(std::time::Instant::now));
+        }
+        if activity != self.last_activity {
+            self.last_activity = activity;
+        }
+    }
+
     /// Wait detection without display enrichment, for predicates that need the wait's identity and must not churn with view-resolved display state.
     /// [`Self::resolve_turn_activity`] adds the display subject on top.
     pub(crate) fn resolve_turn_activity_unenriched(

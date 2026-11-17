@@ -37,7 +37,7 @@ pub(crate) const MONITOR_PULSE_DIVISOR: u64 = 4;
 
 /// Rows narrower than this hide the phase timer so it cannot visually merge
 /// with the right-aligned turn timer. The turn timer remains visible.
-pub(crate) const PHASE_TIMER_MIN_WIDTH: u16 = 60;
+pub const PHASE_TIMER_MIN_WIDTH: u16 = 60;
 
 /// Pulse speed for every "waiting on you" diamond — the drain-blocked
 /// status, the pending-user-input status, and the plan-approval status
@@ -222,6 +222,9 @@ pub struct TurnStatusArgs<'a> {
     pub flat_background: bool,
     pub held_queue: usize,
     pub held_queue_top_sendable: bool,
+    /// Rows narrower than this hide the phase timer ([`PHASE_TIMER_MIN_WIDTH`] in the chat; `0` in the side panel,
+    /// which draws no turn timer for it to merge with).
+    pub phase_timer_min_width: u16,
 }
 /// Render the turn status line into the given area.
 ///
@@ -252,6 +255,7 @@ pub fn render_turn_status(
         flat_background,
         held_queue,
         held_queue_top_sendable,
+        phase_timer_min_width,
     } = args;
     // Resolve the mouse affordances: a keyboard-only host (`None`) suppresses
     // both buttons and reports no hover.
@@ -428,7 +432,7 @@ pub fn render_turn_status(
             Some(TurnActivity::ToolRunning { title, .. })
                 if title.starts_with("Ask: ") || title.starts_with("Ask ")
         );
-    let phase_timer_str = if is_asking || area.width < PHASE_TIMER_MIN_WIDTH {
+    let phase_timer_str = if is_asking || area.width < phase_timer_min_width {
         String::new()
     } else {
         activity_started_at
@@ -1040,6 +1044,7 @@ mod tests {
                 flat_background: false,
                 held_queue: 0,
                 held_queue_top_sendable: false,
+                phase_timer_min_width: PHASE_TIMER_MIN_WIDTH,
             },
         );
         assert!(
@@ -1149,6 +1154,7 @@ mod tests {
             flat_background: false,
             held_queue: 0,
             held_queue_top_sendable: false,
+            phase_timer_min_width: PHASE_TIMER_MIN_WIDTH,
         }
     }
     /// Render `args` into a `width`×1 row.
@@ -1519,6 +1525,19 @@ mod tests {
             !narrow.contains("4m0s"),
             "the narrow row must drop the phase timer, got: {narrow:?}"
         );
+    }
+    /// The side panel passes `0`: its row has no turn timer to merge with, so the phase timer shows at any width.
+    #[test]
+    fn zero_min_width_keeps_the_phase_timer_on_a_narrow_row() {
+        let activity = Some(TurnActivity::Waiting(WaitingReason::Model));
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.activity_started_at = Some(Instant::now() - Duration::from_secs(6));
+        args.buttons = None;
+        args.phase_timer_min_width = 0;
+        let text = render_row_text(args, 43);
+        assert!(text.trim_end().ends_with("Waiting for response… 6s"), "got: {text:?}");
     }
     #[test]
     fn still_running_label_lists_only_nonzero_kinds() {

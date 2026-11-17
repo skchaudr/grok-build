@@ -606,6 +606,7 @@ fn render_minimal_status(
             ),
             held_queue: minimal_api::held_queue_count(agent),
             held_queue_top_sendable: minimal_api::held_queue_top_sendable(agent),
+            phase_timer_min_width: turn_status::PHASE_TIMER_MIN_WIDTH,
         },
     );
 }

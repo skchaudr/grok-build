@@ -182,3 +182,62 @@ fn narrow_terminal_unfocused_panel_hides() {
     press(&mut agent, KeyCode::Esc);
     insta::assert_snapshot!(draw(&mut agent, 50, 24));
 }
+
+#[test]
+fn panel_turn_row_follows_the_chats_status_row() {
+    use crate::app::agent::AgentState;
+    let mut agent = agent();
+    assert!(agent.side_panel_info().turn.is_none(), "idle: no row");
+    agent.session.state = AgentState::TurnRunning;
+    let turn = agent.side_panel_info().turn.expect("a running turn shows a row");
+    assert!(matches!(
+        turn.activity,
+        Some(crate::acp::tracker::TurnActivity::Waiting(
+            crate::acp::tracker::WaitingReason::Model
+        ))
+    ));
+    assert_eq!(
+        turn.activity,
+        agent.resolve_turn_activity(),
+        "one source: the activity the chat resolves"
+    );
+    agent.session.state = AgentState::TurnCancelling;
+    assert!(matches!(
+        agent.side_panel_info().turn.map(|t| t.state),
+        Some(AgentState::TurnCancelling)
+    ));
+}
+
+#[test]
+fn traces_page_draws_the_live_status_row_beside_the_chats() {
+    let mut agent = agent();
+    press(&mut agent, KeyCode::F(3));
+    follow(&mut agent);
+    agent.session.state = crate::app::agent::AgentState::TurnRunning;
+    let screen = draw(&mut agent, 110, 24);
+    let rows = screen
+        .lines()
+        .filter(|l| l.contains("Waiting for response…"))
+        .count();
+    assert_eq!(rows, 2, "the chat's row and the panel's row:\n{screen}");
+    assert!(agent.activity_started_at.is_some(), "the clock is armed");
+}
+
+/// Narrow and panel focused: the chat is not drawn, the panel still has a label and a clock.
+#[test]
+fn panel_row_has_its_clock_when_the_chat_is_not_drawn() {
+    let mut agent = agent();
+    press(&mut agent, KeyCode::F(3));
+    follow(&mut agent);
+    agent.session.state = crate::app::agent::AgentState::TurnRunning;
+    assert!(agent.activity_started_at.is_none());
+    let screen = draw(&mut agent, 60, 20);
+    assert!(
+        screen.contains("Waiting for response…"),
+        "the panel row is drawn without the chat:\n{screen}"
+    );
+    assert!(
+        agent.activity_started_at.is_some(),
+        "armed outside the chat's draw"
+    );
+}

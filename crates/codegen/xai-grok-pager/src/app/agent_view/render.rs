@@ -984,6 +984,8 @@ impl AgentView {
         Option<(u16, u16)>,
         Option<crate::terminal::overlay::PostFlush>,
     ) {
+        // The activity clock is armed here, not in the chat's draw, so the panel's row has it when the chat is not drawn.
+        self.arm_activity_clock();
         // The side panel is split off first, so no early return in the chat's draw (modals, subagent takeover) can drop it.
         let (chat, panel) = self.side_panel.split(area);
         let out = if chat.width > 0 {
@@ -1558,13 +1560,7 @@ impl AgentView {
         };
         let turn_status_parked = if dock_covers_cues { false } else { parked };
         let wake_display_state = self.wake_display_state();
-        let display_state = wake_display_state.unwrap_or(&self.session.state);
-        let send_now_gap = self.send_now_awaiting_current() && display_state.is_idle();
-        let status_state = if send_now_gap {
-            crate::app::agent::AgentState::TurnRunning
-        } else {
-            display_state.clone()
-        };
+        let (status_state, turn_activity) = self.turn_status_activity();
         let turn_status_height = if turn_status::should_show(
             &status_state,
             turn_status_drain_blocked,
@@ -2606,43 +2602,7 @@ impl AgentView {
                 height: layout.turn_status.height,
             };
             let tick = self.scrollback.animation_tick();
-            let live = self.resolve_turn_activity();
-            let activity = if send_now_gap { None } else { live };
-            if crate::acp::tracker::is_phase_transition(
-                self.last_activity.as_ref(),
-                activity.as_ref(),
-            ) {
-                if let Some(prev) = &self.last_activity {
-                    let phase_ms = self
-                        .activity_started_at
-                        .map(|t| t.elapsed().as_millis() as u64)
-                        .unwrap_or(0);
-                    let prev_label = prev.as_label();
-                    let next_label = activity.as_ref().map(|a| a.as_label()).unwrap_or("idle");
-                    let sid = self.session.session_id.as_ref().map(|s| s.0.as_ref());
-                    crate::unified_log::debug(
-                        "turn.phase_transition",
-                        sid,
-                        Some(serde_json::json!({
-                            "from": prev_label,
-                            "to": next_label,
-                            "phase_elapsed_ms": phase_ms,
-                        })),
-                    );
-                }
-                let hook_wait_started = matches!(
-                    activity,
-                    Some(crate::acp::tracker::TurnActivity::Waiting(
-                        crate::acp::tracker::WaitingReason::Hooks { .. }
-                    ))
-                )
-                .then(|| self.session.tracker.hooks_running_since())
-                .flatten();
-                self.activity_started_at = Some(hook_wait_started.unwrap_or_else(Instant::now));
-            }
-            if activity != self.last_activity {
-                self.last_activity = activity.clone();
-            }
+            let activity = turn_activity;
             self.hit_plan_approval_status.clear();
             if let Some(ref pav) = self.plan_approval_view {
                 let diamond_color = crate::views::turn_status::pending_diamond_color(
@@ -2724,6 +2684,7 @@ impl AgentView {
                         flat_background: false,
                         held_queue,
                         held_queue_top_sendable,
+                        phase_timer_min_width: turn_status::PHASE_TIMER_MIN_WIDTH,
                     },
                 );
                 self.hit_cancel_button

@@ -146,6 +146,55 @@ pub struct Info {
     /// Background commands and subagents, running first; the Agents page lists both.
     pub jobs: Vec<Job>,
     pub subagents: Vec<Job>,
+    /// The chat's status row, when it shows an activity: the Traces page draws it as its last row.
+    pub turn: Option<TurnRow>,
+}
+
+/// What the chat's turn-status row draws from ([`crate::views::turn_status::TurnStatusArgs`]), so the panel's row
+/// shows the same spinner, label and per-activity timer.
+#[derive(Clone, Debug)]
+pub struct TurnRow {
+    pub state: crate::app::agent::AgentState,
+    pub activity: Option<crate::acp::tracker::TurnActivity>,
+    pub activity_started_at: Option<std::time::Instant>,
+    pub tick: u64,
+    pub is_bash_turn: bool,
+    pub is_pending_user_input: bool,
+    pub goal_verifying: bool,
+}
+
+impl TurnRow {
+    /// One row at `area`: spinner, label and per-activity timer. Not the turn timer, token count, `[stop]`, `[↓]`,
+    /// the interrupt hint or the queued suffix, and no mouse area is reported.
+    fn draw(&self, buf: &mut Buffer, area: Rect) {
+        use crate::views::turn_status::{render_turn_status, TurnStatusArgs, Watchers};
+        render_turn_status(
+            buf,
+            area,
+            TurnStatusArgs {
+                state: &self.state,
+                activity: &self.activity,
+                turn_elapsed: None,
+                activity_started_at: self.activity_started_at,
+                tick: self.tick,
+                drain_blocked: false,
+                buttons: None,
+                has_running_execute: false,
+                message_interruptible_tool: false,
+                total_tokens: None,
+                session_starting_since: None,
+                is_bash_turn: self.is_bash_turn,
+                is_pending_user_input: self.is_pending_user_input,
+                goal_verifying: self.goal_verifying,
+                watchers: Watchers::default(),
+                parked: false,
+                flat_background: false,
+                held_queue: 0,
+                held_queue_top_sendable: false,
+                phase_timer_min_width: 0,
+            },
+        );
+    }
 }
 
 /// One Claude rate-limit window: percent used and when it resets (epoch seconds).
@@ -461,16 +510,26 @@ impl SidePanel {
         let rows = match self.page {
             Page::Session => session::rows(&ctx),
             Page::Traces => {
+                // The chat's status row is the lowest row, above the footer; at tiny heights it keeps the row and the page gives it up.
+                let mut body = body;
+                if let Some(turn) = &info.turn {
+                    body.height -= 1;
+                    turn.draw(buf, Rect { y: body.y + body.height, height: 1, ..body });
+                }
                 let note = match &mut self.traces {
                     Traces::Following(f, index) => {
-                        f.render(buf, body, index.as_ref(), theme, now_ms);
+                        if body.height > 0 {
+                            f.render(buf, body, index.as_ref(), theme, now_ms);
+                        }
                         return;
                     }
                     Traces::Idle if info.session_id.is_none() => "no session yet".to_string(),
                     Traces::Idle | Traces::Looking(_) => "waiting for this session in the traces index…".to_string(),
                     Traces::Failed(e) => e.clone(),
                 };
-                buf.set_string(body.x, body.y, truncate_str(&note, w), Style::default().fg(theme.text_secondary));
+                if body.height > 0 {
+                    buf.set_string(body.x, body.y, truncate_str(&note, w), Style::default().fg(theme.text_secondary));
+                }
                 return;
             }
             Page::Agents => jobs::rows(&ctx),
@@ -934,5 +993,201 @@ mod tests {
         assert_eq!(text(21), "S Traces A R");
         assert!(text(43).starts_with("◀ ") && text(43).ends_with('▸'));
         assert!(text(31).contains("Session  Traces  Agents  Recent"));
+    }
+
+    // ---- the chat's status row as the Traces page's last row ----
+
+    use crate::acp::tracker::{TurnActivity, WaitingReason};
+    use crate::app::agent::AgentState;
+    use crate::views::turn_status::format_turn_timer;
+
+    const PHASE_SECS: u64 = 125;
+
+    fn running(activity: Option<TurnActivity>) -> TurnRow {
+        TurnRow {
+            state: AgentState::TurnRunning,
+            activity,
+            activity_started_at: Some(std::time::Instant::now() - Duration::from_secs(PHASE_SECS)),
+            tick: 0,
+            is_bash_turn: false,
+            is_pending_user_input: false,
+            goal_verifying: false,
+        }
+    }
+
+    fn model_wait() -> TurnRow {
+        running(Some(TurnActivity::Waiting(WaitingReason::Model)))
+    }
+
+    fn following() -> SidePanel {
+        let mut p = SidePanel { open: true, focused: true, ..SidePanel::default() };
+        p.follow_for_test(SessionRow { id: "root".into(), ..Default::default() }, &follow_items(), 2_000);
+        p
+    }
+
+    /// The panel drawn `inner` columns wide and `h` rows tall, one string per row.
+    fn traces_lines(p: &mut SidePanel, turn: Option<TurnRow>, inner: u16, h: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, inner + 3, h);
+        let mut buf = Buffer::empty(area);
+        let info = Info { turn, ..Info::default() };
+        p.render(&mut buf, area, &info, &Theme::current(), 2_000);
+        (0..h)
+            .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string())
+            .collect()
+    }
+
+    /// The row above the footer, without the panel's left edge.
+    fn status_row(lines: &[String]) -> String {
+        lines[lines.len() - 2].trim_start_matches('│').trim_start().to_string()
+    }
+
+    fn spinner() -> String {
+        crate::glyphs::braille_spinner_frames()[0].to_string()
+    }
+
+    fn timer() -> String {
+        format_turn_timer(Duration::from_secs(PHASE_SECS))
+    }
+
+    #[test]
+    fn no_turn_no_status_row_and_the_follow_view_keeps_the_height() {
+        for inner in [43, 21] {
+            let lines = traces_lines(&mut following(), None, inner, 14);
+            assert_eq!(status_row(&lines), "", "inner {inner}: {lines:#?}");
+            assert!(lines.iter().all(|l| !l.contains("Waiting")), "inner {inner}: {lines:#?}");
+        }
+        // The same follow view with a turn gives up exactly one row, the one above the footer.
+        let without = traces_lines(&mut following(), None, 43, 14);
+        let with = traces_lines(&mut following(), Some(model_wait()), 43, 14);
+        assert_eq!(without[..12], with[..12], "rows above the status row do not move");
+        assert_eq!(without[13], with[13], "the footer does not move");
+    }
+
+    #[test]
+    fn model_wait_shows_spinner_label_and_timer() {
+        let lines = traces_lines(&mut following(), Some(model_wait()), 43, 14);
+        assert_eq!(status_row(&lines), format!("{} Waiting for response… {}", spinner(), timer()), "{lines:#?}");
+    }
+
+    #[test]
+    fn narrow_row_cuts_the_label_with_an_ellipsis_and_never_the_timer() {
+        let lines = traces_lines(&mut following(), Some(model_wait()), 21, 14);
+        let row = status_row(&lines);
+        assert!(row.starts_with(&format!("{} Waiting")), "{row:?}");
+        assert!(row.contains('…') && !row.contains("response…"), "the label is cut: {row:?}");
+        assert!(row.ends_with(&timer()), "the timer is whole: {row:?}");
+        assert!(lines[12].chars().count() <= 24, "inside the panel: {:?}", lines[12]);
+    }
+
+    #[test]
+    fn running_tool_shows_its_description_as_the_chat_does() {
+        let tool = |description: Option<&str>| {
+            running(Some(TurnActivity::ToolRunning {
+                title: "Bash: rex capture".into(),
+                description: description.map(str::to_string),
+            }))
+        };
+        let lines = traces_lines(&mut following(), Some(tool(Some("Capture this pane"))), 43, 14);
+        assert_eq!(status_row(&lines), format!("{} Capture this pane… {}", spinner(), timer()), "{lines:#?}");
+        let lines = traces_lines(&mut following(), Some(tool(None)), 43, 14);
+        let row = status_row(&lines);
+        assert!(row.starts_with(&format!("{} Run ", spinner())) && row.ends_with(&timer()), "{row:?}");
+        let long = "Capture this pane while a call is running and read the screen back";
+        let lines = traces_lines(&mut following(), Some(tool(Some(long))), 21, 14);
+        let row = status_row(&lines);
+        assert!(row.contains('…') && row.ends_with(&timer()), "{row:?}");
+    }
+
+    #[test]
+    fn replying_thinking_and_cancelling_use_the_chat_labels() {
+        for (activity, state, label) in [
+            (Some(TurnActivity::Thinking), AgentState::TurnRunning, "Thinking…"),
+            (Some(TurnActivity::Responding), AgentState::TurnRunning, "Responding…"),
+            (Some(TurnActivity::AutoCompacting), AgentState::TurnRunning, "Compacting…"),
+            (None, AgentState::TurnCancelling, "Cancelling…"),
+        ] {
+            let mut turn = running(activity);
+            turn.state = state;
+            let lines = traces_lines(&mut following(), Some(turn), 43, 14);
+            assert_eq!(status_row(&lines), format!("{} {label} {}", spinner(), timer()), "{lines:#?}");
+        }
+    }
+
+    #[test]
+    fn asking_the_user_hides_the_timer_as_the_chat_does() {
+        let turn = running(Some(TurnActivity::ToolRunning { title: "Ask: which file".into(), description: None }));
+        let lines = traces_lines(&mut following(), Some(turn), 43, 14);
+        let row = status_row(&lines);
+        assert!(row.contains("Waiting on answers") && !row.contains(&timer()), "{row:?}");
+    }
+
+    #[test]
+    fn a_paused_follow_view_keeps_its_line_above_the_status_row_and_stays_paused() {
+        let mut p = following();
+        traces_lines(&mut p, Some(model_wait()), 43, 8);
+        p.handle_key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        for _ in 0..2 {
+            let lines = traces_lines(&mut p, Some(model_wait()), 43, 8);
+            assert!(lines[5].contains("paused"), "the follow view's own line is just above: {lines:#?}");
+            assert_eq!(status_row(&lines), format!("{} Waiting for response… {}", spinner(), timer()), "{lines:#?}");
+        }
+        let Traces::Following(f, _) = &p.traces else { panic!("following") };
+        assert!(f.paused(), "drawing the status row does not resume following");
+    }
+
+    #[test]
+    fn the_status_row_is_drawn_unfocused_and_zoomed_too() {
+        let focused = traces_lines(&mut following(), Some(model_wait()), 43, 14);
+        let mut p = following();
+        p.focused = false;
+        let unfocused = traces_lines(&mut p, Some(model_wait()), 43, 14);
+        assert_eq!(status_row(&focused), status_row(&unfocused));
+        assert_eq!(unfocused[13].trim_start_matches('│').trim_start(), "F3 focus panel");
+        // Zoomed, the panel is wider (inner 70 here); the same row at that width.
+        let mut z = following();
+        z.zoomed = true;
+        let lines = traces_lines(&mut z, Some(model_wait()), 70, 14);
+        assert_eq!(status_row(&lines), format!("{} Waiting for response… {}", spinner(), timer()));
+    }
+
+    #[test]
+    fn the_note_and_failed_states_keep_the_status_row() {
+        for (traces, note) in [
+            (Traces::Idle, "waiting for this session in the traces index…"),
+            (Traces::Failed("traces index unavailable".into()), "traces index unavailable"),
+        ] {
+            for inner in [43, 21] {
+                let mut p = SidePanel { open: true, focused: true, ..SidePanel::default() };
+                p.traces = match &traces {
+                    Traces::Failed(e) => Traces::Failed(e.clone()),
+                    _ => Traces::Idle,
+                };
+                let info = Info { session_id: Some("s".into()), turn: Some(model_wait()), ..Info::default() };
+                let area = Rect::new(0, 0, inner + 3, 10);
+                let mut buf = Buffer::empty(area);
+                p.render(&mut buf, area, &info, &Theme::current(), 2_000);
+                let lines: Vec<String> = (0..10)
+                    .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string())
+                    .collect();
+                assert!(lines[2].contains(&truncate_str(note, inner as usize)[..4]), "{lines:#?}");
+                assert!(status_row(&lines).starts_with(&spinner()) && status_row(&lines).ends_with(&timer()), "{lines:#?}");
+            }
+        }
+    }
+
+    #[test]
+    fn at_tiny_heights_the_status_row_wins_over_the_follow_view() {
+        // 4 rows: tab bar, rule, one body row, footer. The one body row goes to the status row.
+        let lines = traces_lines(&mut following(), Some(model_wait()), 43, 4);
+        assert!(status_row(&lines).starts_with(&spinner()), "{lines:#?}");
+        assert!(!lines.iter().any(|l| l.contains("cargo test") || l.contains("one")), "{lines:#?}");
+    }
+
+    #[test]
+    fn other_pages_do_not_draw_the_status_row() {
+        let mut p = following();
+        p.page = Page::Recent;
+        let lines = traces_lines(&mut p, Some(model_wait()), 43, 14);
+        assert!(lines.iter().all(|l| !l.contains("Waiting for response")), "{lines:#?}");
     }
 }
