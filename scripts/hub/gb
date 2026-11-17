@@ -158,7 +158,9 @@ if grok.is_dir():
         if not proj.is_dir():
             continue
         for path in proj.iterdir():
-            if path.is_dir():
+            # The pager also keeps a folder (images/ only) for external-agent sessions under
+            # the same id; only a folder with a transcript is a native session.
+            if (path / "chat_history.jsonl").is_file():
                 hit("native", path.name, path)
 
 pi_map = home / ".pi/pi-acp/session-map.json"
