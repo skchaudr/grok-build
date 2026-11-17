@@ -2287,7 +2287,7 @@ impl AppView {
         if matches!(self.active_view, ActiveView::Welcome)
             && self.session_picker_source_filter
                 == crate::views::session_picker::SourceFilter::External
-            && scope == "current"
+            && scope == "all"
         {
             let picker_changed = self.session_picker_entries.as_ref() != Some(&entries)
                 || self.session_picker_loading;

@@ -1943,9 +1943,10 @@ fn dispatch_refresh_external_session_catalog_welcome(app: &mut AppView) -> Vec<E
     app.session_picker_content_loading = false;
     app.session_picker_entries_query = None;
     app.session_picker_source_filter = crate::views::session_picker::SourceFilter::External;
+    // Every folder: the welcome picker has no current/all tabs, groups rows by cwd, and a row loads in its own cwd.
     vec![Effect::FetchExternalSessionCatalog {
         cwd: app.cwd.clone(),
-        all: false,
+        all: true,
         use_psm_index: app.current_ui.psm_resume_index,
     }]
 }

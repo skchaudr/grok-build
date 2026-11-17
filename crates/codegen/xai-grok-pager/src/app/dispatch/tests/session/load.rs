@@ -51,6 +51,24 @@ fn claude_host_welcome_resume_lists_through_acp() {
     );
 }
 
+/// Welcome-screen Resume under Pi has no current/all tabs, so it asks for every folder and shows what comes back.
+#[test]
+fn pi_welcome_resume_lists_every_folder() {
+    let mut app = test_app();
+    app.external_agent = true;
+    app.external_agent_label = Some("grok-pi".into());
+    let effects = dispatch(Action::ShowSessionPicker, &mut app);
+    assert!(
+        matches!(&effects[..], [Effect::FetchExternalSessionCatalog { all: true, .. }]),
+        "welcome Pi resume must request every folder, got {effects:?}"
+    );
+    assert!(!app.set_external_session_catalog(vec![], "current"), "a current-folder reply is not the welcome list");
+    assert!(app.session_picker_loading);
+    assert!(app.set_external_session_catalog(vec![], "all"));
+    assert!(!app.session_picker_loading);
+    assert_eq!(app.session_picker_entries.as_deref(), Some(&[][..]));
+}
+
 #[test]
 fn external_resume_uses_current_tab_then_loads_all_on_refresh() {
     use crate::views::modal::ActiveModal;
