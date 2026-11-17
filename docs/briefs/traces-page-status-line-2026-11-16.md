@@ -40,3 +40,15 @@ The row takes one line from the follow view's height only while a turn is in pro
 ## Spec reviewer (runs before the builder; a different agent)
 
 Read this brief and the code it names. Do not edit code. Write `docs/REVIEW-brief-traces-page-status-line-2026-11-16.md`: states missing or ambiguous, whether the panel can reach the turn activity without a second source (file and line), anything here that contradicts Sab's quoted words or grok-build's existing behaviour. Per `.pi/agents/delivery-policy.md`: evidence, not a veto; zero findings is a valid result. Commit and push with the same trailer.
+
+## Decisions after the spec review (`docs/REVIEW-brief-traces-page-status-line-2026-11-16.md`; read it, its file and line references are your map)
+
+These settle its findings. They override anything above that disagrees.
+
+1. Source is `resolve_turn_activity()` (`app/agent_view/session.rs:1306`), not the tracker alone; route it, `activity_started_at` and the animation tick to the panel through `Info` (`app/agent_view/side_panel.rs`).
+2. Draw only the spinner, the label and the per-activity timer. Not drawn: turn timer, token count, `[stop]`, `[↓]`, interrupt hint, queued suffix, watcher cue. The chat's mouse hit rects are not touched.
+3. The timer shows at every panel width: make the 60-column threshold a parameter of the shared code, do not copy the code. Widths in this brief are inner panel widths.
+4. Show/hide follows the chat: the row shows whenever the chat row shows an activity label, with the same label (including `Cancelling…`, `Verifying…`, `Compacting…`, `Retrying…`, `Run <command>` with the chat's highlighting, `Search`, `Fetch`). When the chat suppresses the timer (ask tools), so does the panel.
+5. Position: the lowest row, directly above the page footer, below the follow view's own `paused · N new · G live` line when both are present. At tiny heights the status row wins and the follow view gives up the row. Add it in all three Traces branches (note, Following, Failed).
+6. The timer must be right when the chat is not drawn (narrow, panel focused): move the arming of `activity_started_at` out of the chat's draw so it runs every frame for both.
+7. Tests use the existing helpers the review names (`snap(&Info, width)`, the `Follow` builders in `traces_follow.rs` tests).
