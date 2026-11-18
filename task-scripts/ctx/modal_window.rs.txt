@@ -1,0 +1,256 @@
+// ---- crates/codegen/xai-grok-pager/src/views/modal_window.rs (lines 60,240)
+    }
+}
+
+/// Embedded (minimal) list-row styling, or `None` in the full TUI, where the caller keeps its own selected / hovered / normal styling.
+/// See [`embedded`] and [`EmbeddedRowStyle`].
+pub fn embedded_row_style(theme: &Theme, is_selected: bool) -> Option<EmbeddedRowStyle> {
+    embedded().then_some(EmbeddedRowStyle {
+        bg: Color::Reset,
+        selected: is_selected,
+        selected_fg: theme.fuzzy_accent,
+    })
+}
+
+/// Per-render configuration for a modal window (rebuilt each frame).
+pub struct ModalWindowConfig<'a> {
+    /// Title displayed bold on the top border.
+    pub title: &'a str,
+    /// Tab labels. `None` means no tab bar.
+    pub tabs: Option<&'a [&'a str]>,
+    /// Footer shortcuts to render inline at the bottom.
+    pub shortcuts: &'a [Shortcut<'a>],
+    /// Sizing parameters.
+    pub sizing: ModalSizing,
+    /// Fold state of the currently focused entry.
+    /// When provided, Left/Right/h/l return specific fold outcomes instead of [`ModalWindowOutcome::Unhandled`].
+    pub fold_info: Option<FoldInfo>,
+}
+
+/// Sizing parameters for the modal popup.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModalSizing {
+    /// Fraction of screen width to use (0.0..=1.0). Default: 0.9.
+    pub width_pct: f32,
+    /// Maximum width in columns. Default: 140.
+    pub max_width: u16,
+    /// Minimum width in columns. Default: 60.
+    pub min_width: u16,
+    /// Vertical margin (top and bottom) in rows. Default: 7.
+    pub v_margin: u16,
+    /// Horizontal inner padding in columns (applied on both sides). Default: 2.
+    pub h_pad: u16,
+    /// Vertical inner padding above the content area (below the tab bar, if present).
+    /// It is not applied at the bottom: the footer occupies that space. Default: 2.
+    pub v_pad: u16,
+    /// Lines reserved at the bottom for footer shortcuts. Default: 2.
+    pub footer_lines: u16,
+}
+
+impl Default for ModalSizing {
+    fn default() -> Self {
+        Self {
+            width_pct: 0.9,
+            max_width: 140,
+            min_width: 60,
+            v_margin: 7,
+            h_pad: 2,
+            v_pad: 2,
+            footer_lines: 2,
+        }
+    }
+}
+
+impl ModalSizing {
+    /// Medium popup: ~60% width, standard padding. Good for picker lists.
+    /// Used by: cloud_modal and other pickers.
+    pub fn medium() -> Self {
+        Self {
+            width_pct: 0.60,
+            max_width: 120,
+            min_width: 44,
+            v_margin: 4,
+            h_pad: 2,
+            v_pad: 1,
+            footer_lines: 2,
+        }
+    }
+
+    /// Large popup: ~90% width, generous padding. Good for forms/detail views.
+    /// Used by: import_claude_modal. Same as Default.
+    pub fn large() -> Self {
+        Self::default()
+    }
+
+    /// Returns adjusted sizing for compact mode with *very little margins*.
+    ///
+    /// Goal: maximize usable content area inside every popup (command palette, /resume sessions, plugins/hooks/mcps, import-claude, docs, etc.).
+    pub fn with_compact(mut self, compact: bool) -> Self {
+        if compact {
+            // Almost no outer centering margin: the popup can nearly touch the top and bottom of the terminal
+            self.v_margin = 0;
+            // Keep 1 column so the left accent line and selection border have room
+            self.h_pad = 1;
+            // No extra vertical breathing room above the first content row (search bar, tab content, or first picker row)
+            self.v_pad = 0;
+        }
+        self
+    }
+}
+
+/// Without it they return the default [`ModalWindowOutcome::Unhandled`].
+#[derive(Debug, Clone, Copy)]
+pub struct FoldInfo {
+    /// Whether the focused entry is a collapsible group header.
+    pub collapsible: bool,
+    /// Whether the focused entry is currently expanded (children visible).
+    pub expanded: bool,
+    /// Whether the focused entry has expandable detail fields (e.g. leaf items with description lines or config fields).
+    pub has_details: bool,
+    /// Whether detail fields are currently shown.
+    pub details_expanded: bool,
+    /// Index of the parent group header. `None` for top-level entries.
+    pub parent_index: Option<usize>,
+}
+
+/// A single footer shortcut definition.
+pub struct Shortcut<'a> {
+    /// Display label (e.g. "Enter import 3" or "Esc cancel").
+    pub label: &'a str,
+    /// Whether clicking this shortcut dispatches `ShortcutActivated`.
+    /// All shortcuts get the same visual style and hover highlights regardless of this flag.
+    pub clickable: bool,
+    /// Caller-defined identifier, returned in `ModalWindowOutcome::ShortcutActivated`.
+    pub id: usize,
+}
+
+/// Append an `i search` footer hint when a vim-nav picker is in NAV mode (vim-mode on and search not yet active).
+/// The hint is how users discover they can start typing.
+/// No-op otherwise. Shared by the picker modals' footer builders.
+pub fn push_vim_nav_search_hint<'a>(shortcuts: &mut Vec<Shortcut<'a>>, search_active: bool) {
+    if !search_active && crate::appearance::cache::load_vim_mode() {
+        shortcuts.push(Shortcut {
+            label: "i search",
+            clickable: false,
+            id: 0,
+        });
+    }
+}
+
+/// The content area returned by [`render_modal_window`] so the caller knows where to draw their domain-specific content.
+pub struct ModalContentArea {
+    /// Rect for the main content (between top padding and footer), inset by `h_pad` on each side.
+    pub content: Rect,
+    /// Rect for the footer shortcut row.
+    pub footer: Rect,
+    /// Full inner width (border to border, no h_pad).
+    /// Use this for rendering full-width dividers.
+    pub inner_x: u16,
+    pub inner_width: u16,
+}
+
+/// Outcome of a modal window processing an input event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModalWindowOutcome {
+    /// Chrome consumed the event (hover update, etc.).
+    Handled,
+    /// Close requested (Esc, click `[✗]`, or click outside).
+    CloseRequested,
+    /// Tab changed to the given index.
+    TabChanged(usize),
+    /// A clickable footer shortcut was activated (by caller-defined ID).
+    ShortcutActivated(usize),
+    /// Collapse the focused group header (Left on expanded collapsible header).
+    CollapseGroup,
+    /// Expand the focused group header (Right on collapsed collapsible header).
+    ExpandGroup,
+    /// Collapse detail fields on the focused leaf (Left on expanded details).
+    CollapseDetails,
+    /// Expand detail fields on the focused leaf (Right on collapsed details).
+    ExpandDetails,
+    /// Jump focus to the parent group header at the given index (Left on collapsed header or leaf without expanded details).
+    JumpToParent(usize),
+    /// Event not consumed by the chrome; the caller should handle content interaction (row clicks, scroll, key navigation, etc.).
+    Unhandled,
+}
+
+/// Render the modal window chrome and return the content area for the caller to render into.
+pub fn render_modal_window(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &mut ModalWindowState,
+    config: &ModalWindowConfig<'_>,
+
+// ---- crates/codegen/xai-grok-pager/src/views/modal_window.rs (lines 620,632)
+        Some(i) => label.split_at(i),
+        None => (label, ""),
+    }
+}
+
+/// Returns hit-test areas for all rendered shortcuts (both clickable and hint-only). When shortcuts
+/// don't fit on a single row, they wrap onto additional rows within the `area` height.
+pub fn render_modal_shortcuts(
+    buf: &mut Buffer,
+    area: Rect,
+    shortcuts: &[Shortcut<'_>],
+    hovered: Option<usize>,
+    theme: &Theme,
+
+// ---- crates/codegen/xai-grok-pager/src/views/modal_window.rs (lines 895,950)
+    buf.set_span(x, y, &span, width);
+    width
+}
+
+/// Process a key event against the modal chrome. Otherwise `Unhandled` for Left/Right etc so the
+/// caller can handle.
+pub fn handle_modal_key(
+    state: &mut ModalWindowState,
+    key: &KeyEvent,
+    config: &ModalWindowConfig<'_>,
+) -> ModalWindowOutcome {
+    match key.code {
+        KeyCode::Esc => ModalWindowOutcome::CloseRequested,
+        KeyCode::Left | KeyCode::Char('h') => {
+            if state.tabs_focused {
+                ModalWindowOutcome::Unhandled
+            } else if let Some(ref fold) = config.fold_info {
+                if fold.collapsible && fold.expanded {
+                    ModalWindowOutcome::CollapseGroup
+                } else if fold.has_details && fold.details_expanded {
+                    ModalWindowOutcome::CollapseDetails
+                } else if let Some(parent) = fold.parent_index {
+                    ModalWindowOutcome::JumpToParent(parent)
+                } else {
+                    ModalWindowOutcome::Unhandled
+                }
+            } else {
+                ModalWindowOutcome::Unhandled
+            }
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            if state.tabs_focused {
+                ModalWindowOutcome::Unhandled
+            } else if let Some(ref fold) = config.fold_info {
+                if fold.collapsible && !fold.expanded {
+                    ModalWindowOutcome::ExpandGroup
+                } else if fold.has_details && !fold.details_expanded {
+                    ModalWindowOutcome::ExpandDetails
+                } else {
+                    ModalWindowOutcome::Unhandled
+                }
+            } else {
+                ModalWindowOutcome::Unhandled
+            }
+        }
+        _ => ModalWindowOutcome::Unhandled,
+    }
+}
+
+/// Process a mouse event against the modal chrome.
+/// Returns `Unhandled` if the event should be passed to the caller's content handler.
+pub fn handle_modal_mouse(
+    state: &mut ModalWindowState,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+

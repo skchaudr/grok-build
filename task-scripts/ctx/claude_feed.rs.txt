@@ -1,0 +1,161 @@
+// ---- crates/codegen/xai-grok-pager/src/acp/claude_feed.rs (lines 1,40)
+//! A Claude Code transcript turned into the events grok's session-event handler receives: session updates, plans and subagent spawns.
+//! Content only. A call's start and end, and its parent, come from the transcript's own timestamps, the call ids and the sibling `subagents/` files.
+//! Neither traces' normalizer nor the Claude import is used.
+
+use std::collections::HashMap;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use agent_client_protocol as acp;
+use serde_json::{Map, Value, json};
+use xai_grok_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
+use xai_grok_traces::{ClaudeChild, claude_children};
+
+/// One update for the handler. `Acp` goes in as `session/update`, `Xai` as `x.ai/session/update`.
+pub(crate) enum Event {
+    Acp(acp::SessionUpdate),
+    Xai(XaiSessionUpdate),
+}
+
+/// An update and the `_meta` the handler reads: replay flag, event id, prompt id, timestamps.
+pub(crate) struct Fed {
+    pub event: Event,
+    pub meta: Map<String, Value>,
+}
+
+/// What a tool call got back.
+struct Res {
+    text: String,
+    is_error: bool,
+    ts: Option<i64>,
+    /// The line's `toolUseResult`: extra structure Claude keeps beside the text.
+    tur: Value,
+}
+
+/// The session's events, in transcript order. `session_id` is the id the view is bound to.
+pub(crate) fn convert(transcript: &Path, session_id: &str) -> io::Result<Vec<Fed>> {
+    let raw = fs::read(transcript)?;
+    let dir = transcript.with_extension("");
+
+// ---- crates/codegen/xai-grok-pager/src/acp/claude_feed.rs (lines 150,170)
+    }
+}
+
+pub(super) fn chunk(text: &str) -> acp::ContentChunk {
+    acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+        text.to_string(),
+    )))
+}
+
+pub(super) fn text_content(text: &str) -> acp::ToolCallContent {
+    acp::ToolCallContent::Content(acp::Content::new(acp::ContentBlock::Text(
+        acp::TextContent::new(text.to_string()),
+    )))
+}
+
+/// `Name: input` on one line, so a tool with no block of its own still shows what it was given.
+pub(super) fn one_line(name: &str, input: &Value) -> String {
+    let arg = match input {
+        Value::Object(o) => o
+            .values()
+            .find_map(|v| v.as_str().filter(|s| !s.trim().is_empty()))
+
+// ---- crates/codegen/xai-grok-pager/src/acp/claude_feed.rs (lines 278,305)
+        }
+    }
+
+    fn meta(&mut self, ts: Option<i64>, stream_start: Option<i64>) -> Map<String, Value> {
+        self.seq += 1;
+        let mut m = Map::new();
+        m.insert("isReplay".into(), json!(true));
+        m.insert(
+            "eventId".into(),
+            json!(format!("{}-{}", self.sid, self.seq)),
+        );
+        if !self.prompt_id.is_empty() {
+            m.insert("promptId".into(), json!(self.prompt_id));
+        }
+        if let Some(ts) = ts {
+            m.insert("agentTimestampMs".into(), json!(ts));
+        }
+        if let Some(s) = stream_start {
+            m.insert("streamStartMs".into(), json!(s));
+        }
+        m
+    }
+
+    fn push(&mut self, event: Event, meta: Map<String, Value>) {
+        self.out.push(Fed { event, meta });
+    }
+
+    fn tool(
+
+// ---- crates/codegen/xai-grok-pager/src/acp/claude_feed.rs (lines 636,668)
+        self.push(Event::Xai(finished), m);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn tool_call(
+    id: &str,
+    kind: acp::ToolKind,
+    title: String,
+    raw_input: Value,
+    status: acp::ToolCallStatus,
+    content: Vec<acp::ToolCallContent>,
+    raw_output: Option<Value>,
+    duration_ms: Option<i64>,
+) -> acp::ToolCall {
+    let meta = duration_ms.map(|d| {
+        let mut m = Map::new();
+        m.insert("durationMs".into(), json!(d));
+        m
+    });
+    acp::ToolCall::new(acp::ToolCallId::new(Arc::from(id)), title)
+        .kind(kind)
+        .status(status)
+        .content(content)
+        .raw_input(Some(raw_input))
+        .raw_output(raw_output)
+        .locations(vec![])
+        .meta(meta)
+}
+
+pub(super) fn bash_raw(command: &str, output: &str, exit_code: i32) -> Value {
+    json!({ "type": "Bash", "output": output.as_bytes(), "exit_code": exit_code, "command": command, "truncated": false, "signal": null, "timed_out": false, "description": null, "current_dir": "", "output_file": "", "total_bytes": output.len() })
+}
+
+// ---- crates/codegen/xai-grok-pager/src/acp/live_feed.rs (lines 250,278)
+        return Ok(Vec::new());
+    }
+    // Today's Pi emitter may stamp session.id as pi-<epoch>, so this key can miss. Receipts still open the rows.
+    phoenix::fetch_session_spans(phoenix::DEFAULT_BASE, source, &sid, PHOENIX_WAIT).map_err(|_| ())
+}
+
+pub(crate) fn to_feds(session_id: &str, pieces: &[Piece]) -> Vec<Fed> {
+    let mut out = Vec::new();
+    for (n, piece) in pieces.iter().enumerate() {
+        let mut stream_start = None;
+        let (event, ts, dur) = match piece {
+            Piece::User(t) => (Event::Acp(acp::SessionUpdate::UserMessageChunk(claude_feed::chunk(t))), None, None),
+            Piece::Text(t) => (Event::Acp(acp::SessionUpdate::AgentMessageChunk(claude_feed::chunk(t))), None, None),
+            Piece::Thinking { text, at_ms, dur_ms } => {
+                // A new stream start splits it from the thought before; durationMs on the chunk times it (a live thought
+                // otherwise runs its own wall-clock timer, which reads 0.0s for a thought that arrives whole).
+                stream_start = dur_ms.map(|d| at_ms - d);
+                let ts = stream_start.map(|_| *at_ms);
+                // Always present: a null durationMs (Pi and dpi record none) still marks the thought as arriving whole.
+                let chunk = claude_feed::chunk(text).meta(Some(Map::from_iter([("durationMs".to_string(), json!(dur_ms))])));
+                (Event::Acp(acp::SessionUpdate::AgentThoughtChunk(chunk)), ts, None)
+            }
+            Piece::Open { id, tool, start_ms, input, label, .. } => {
+                let raw = input_value(input.as_deref());
+                let title = title(tool, &raw, label.as_deref());
+                let tc = claude_feed::tool_call(id, kind_of(tool), title, raw, acp::ToolCallStatus::InProgress, Vec::new(), None, None);
+                (Event::Acp(acp::SessionUpdate::ToolCall(tc)), Some(*start_ms), None)
+            }
+            Piece::Fill { id, tool, input, output } => {
+

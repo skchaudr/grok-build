@@ -1,0 +1,74 @@
+// ---- crates/codegen/xai-grok-pager/src/views/traces_modal.rs (lines 4452,4500)
+pub fn render_traces_modal(buf: &mut Buffer, full_area: Rect, state: &mut TracesModalState, compact: bool) {
+    state.hit_list = None;
+    if cass_search::shown(state) {
+        return cass_search::render(buf, full_area, state);
+    }
+    if state.mode == Mode::List && state.board.is_some() {
+        return board::render(buf, full_area, state);
+    }
+    if state.mode == Mode::Follow && state.board.is_some() {
+        return deck::render(buf, full_area, state);
+    }
+    let theme = Theme::current();
+    let sizing = ModalSizing { width_pct: 1.0, max_width: u16::MAX, min_width: 44, v_margin: 0, h_pad: 2, v_pad: 0, footer_lines: 2 }
+        .with_compact(compact);
+    let shortcuts = shortcuts(state, footer_hint_width(full_area, &sizing));
+    let config = ModalWindowConfig {
+        title: TITLE,
+        tabs: None,
+        shortcuts: &shortcuts,
+        sizing,
+        fold_info: None,
+    };
+    let Some(ModalContentArea { content, .. }) = modal_window::render_modal_window(buf, full_area, &mut state.window, &config, &theme)
+    else {
+        return;
+    };
+    if content.height < 4 || content.width < 20 {
+        return;
+    }
+    match state.mode {
+        Mode::List => render_ledger(buf, content, state, &theme),
+        Mode::Trajectory => render_trajectory(buf, content, state, &theme),
+        Mode::Inspector => render_inspector(buf, content, state, &theme),
+        Mode::Live => render_live(buf, content, state, &theme),
+        Mode::Follow => {
+            let now = now_ms();
+            if let Some(f) = state.follow_view.as_mut() {
+                f.render(buf, content, state.index.as_ref(), &theme, now);
+            }
+        }
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+/// "now", "42s", "3m", "2h", "5d".
+pub fn fmt_age(ago_ms: i64) -> String {
+
+// ---- crates/codegen/xai-grok-pager/src/views/traces_modal.rs (lines 4540,4560)
+        let dir = s.cwd.as_deref().and_then(|c| c.trim_end_matches('/').rsplit('/').next()).filter(|d| !d.is_empty());
+        t = format!("{} session", dir.unwrap_or(source_label(&s.source)));
+    }
+    t
+}
+
+/// ● running, ✗ failed, ✓ done, ○ idle.
+fn status_symbol(s: &SessionRow) -> &'static str {
+    match s.status {
+        Status::Active => "●",
+        _ if s.failed => "✗",
+        Status::Completed => "✓",
+        _ => "○",
+    }
+}
+
+fn status_glyph(s: &SessionRow, theme: &Theme) -> (&'static str, Color) {
+    let color = match s.status {
+        Status::Active => theme.accent_running,
+        _ if s.failed => theme.accent_error,
+        Status::Completed => theme.gray,
+
