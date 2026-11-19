@@ -1410,7 +1410,11 @@ impl RunViewState {
         {
             return Self::first_line(err);
         }
-        Self::first_line(&value_text(&step.output))
+        // An object on one row reads better compact than as the `{` its pretty form starts with.
+        match &step.output {
+            serde_json::Value::Object(_) | serde_json::Value::Array(_) => step.output.to_string(),
+            other => Self::first_line(&value_text(other)),
+        }
     }
 
     fn first_line(s: &str) -> String {
