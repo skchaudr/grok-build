@@ -16,7 +16,7 @@ Files land in task-scripts/acpx-tui_out/<output_file>; every raw return is kept 
 MODEL = "google/gemini-4-argon"  # OpenRouter id. Override with --model
 CTX = "task-scripts/ctx"
 SRC = "crates/codegen/xai-grok-pager/src"
-MAX_TOKENS = 32000  # per slice; a return cut off at this is marked failed, not written
+MAX_TOKENS = 64000  # per slice; a return cut off at this is marked failed, not written
 
 # ── Contract 1: the data types. Slice `bundle` implements this file; every other slice imports from it. ──────────
 BUNDLE_API = """
@@ -189,6 +189,8 @@ impl LedgerState {
     pub fn set_sessions(&mut self, sessions: Vec<SessionSummary>);
     pub fn tab(&self) -> LedgerTab;
     pub fn any_live(&self) -> bool;                                // some run is Running
+    pub fn captures_text(&self) -> bool;                           // the filter input is open: every key belongs to it
+    pub fn esc_closes(&self) -> bool;                              // no input open and the active tab's filter is empty
     pub fn handle_key(&mut self, key: &KeyEvent) -> LedgerOutcome;
     pub fn scroll(&mut self, delta: isize) -> bool;                // mouse wheel; true when the selection moved
     pub fn render(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme, now_ms: i64);
@@ -239,7 +241,7 @@ pub struct LaunchSpec {
 }
 /// The single JSON line acpx prints on stdout when the run ends or stops at a checkpoint.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FlowRunResult { pub run_id: String, pub run_dir: std::path::PathBuf, pub status: RunStatus, pub waiting_on: Option<String>, pub status_detail: Option<String>, pub error: Option<String> }
+pub struct FlowRunResult { pub run_id: String, pub run_dir: std::path::PathBuf, pub status: RunStatus, pub waiting_on: Option<String>, pub status_detail: Option<String>, pub error: Option<String> /* acpx never sets it today; parse tolerantly */ }
 #[derive(Debug, Clone, PartialEq)]
 pub enum LaunchState { Starting, Running { run_dir: std::path::PathBuf }, Finished(FlowRunResult), Failed(String), Cancelled }
 pub struct Launch { /* private: the child, reader threads, the set of run dirs that existed before spawn */ }
@@ -281,9 +283,11 @@ ModalWindowConfig, ModalWindowOutcome, ModalWindowState, Shortcut}`.
 Drawing: write straight into the `Buffer` (`buf.set_line(x, y, &line, width)`, `buf.set_stringn`, `buf.set_style`);
 never draw outside `area`; every row is cut to the area width. Status is never shown by colour alone: a glyph or a
 word always carries it (28 themes ship).
+`truncate_str` appends `…` when it cuts. Edition 2024: `gen` is a reserved word and `std::env::set_var` is unsafe (do
+not use it).
 Tests: a `#[cfg(test)] mod tests` at the bottom, no terminal, no network, no snapshot files. Render tests draw into
-`Buffer::empty(Rect::new(0, 0, w, h))` and assert on the row text. Tests that need files create them under
-`std::env::temp_dir()` in a uniquely named directory and remove it afterwards.
+`Buffer::empty(Rect::new(0, 0, w, h))` and assert on the row text. Tests get a theme from `Theme::default()`; never
+write a `Theme` struct literal. Tests that need files use `tempfile::tempdir()` (a dev-dependency of this crate).
 Return the complete file in ONE ```rust block and nothing else: no prose before or after.
 """
 
@@ -319,7 +323,8 @@ Details:
 - `load_run`: summary as above; `flow.json` -> FlowDef (an edge with a `switch` object is `Switch`; node `summary`
   only exists on checkpoints); `projections/steps.json` (a JSON array) -> steps; `trace.ndjson` -> events;
   `projections/run.json` -> input; `manifest.json` `sessions[]` -> SessionRef (events_path = dir joined with
-  `eventsPath`); a session's agent_name comes from the `sessionBindings` value whose `bundleId` equals the session id.
+  `eventsPath`); a session's agent_name comes from the `sessionBindings` value (in live.json, else run.json; NOT in
+  the manifest) whose `bundleId` equals the session id.
   Only a missing/unreadable run directory is an `Err`; any single missing file yields empty data for that part.
 - ndjson: skip blank lines and lines that do not parse; a final line without a trailing newline that does not parse
   is a write in progress and is skipped silently.
@@ -330,7 +335,7 @@ Details:
   "response · <bytes> B"; session_bound -> "session <handle>"; node_outcome -> "<outcome> · <dur>" plus " · <error>"
   when error is non-null; run_started/run_completed/run_failed -> flow name or error. Anything else -> "".
 - Timestamps look like "2026-11-18T19:12:14.893Z".
-Tests (at least 14): build a bundle directory in the temp dir from string literals modelled on the sample and cover:
+Tests (at least 14): build a bundle directory in a tempdir from string literals modelled on the sample and cover:
 waiting run (waiting_on, node_state Waiting, no current node); running run (currentNode -> Running); failed step;
 switch edge parsing and BFS node order with an unreachable node; taken_path / edge_taken for the branch not taken;
 progress; torn last ndjson line; refresh keeping old steps when steps.json is half-written and returning true when
@@ -353,7 +358,8 @@ Details:
 - Fields are snake_case here, but accept the camelCase spelling of each as a fallback (the same schema appears in
   camelCase inside flow bundles).
 - `tokens`: `cumulative_token_usage` may be a number or an object; for an object use its `total` (or `total_tokens`),
-  else the sum of its numeric values. `cost_usd`: `cumulative_cost` as a number, or its `usd` / `total` field.
+  else the sum of its numeric values. `cost_usd`: `cumulative_cost` as a number, or an object's `amount` field (real shape:
+  `{{"amount": 0.29, "currency": "USD"}}`; also accept `usd` / `total`).
 - `messages` = length of the `messages` array.
 - `agent_label("env -u CLAUDECODE CLAUDE_CODE_EXECUTABLE=/x/claude /Users/me/.local/bin/claude-agent-acp")` is
   "claude": drop a leading `env` with its `-u NAME` pairs and `NAME=value` words, take the file name of the first
@@ -382,10 +388,11 @@ Rules for the output:
 - Node ids in the source are `n0`, `n1`, ... in `run.flow.nodes` order (real ids may contain any character).
 - Label = `<NodeState::glyph()> <node id>`, in double quotes, with `"` replaced by `'` and `[`, `]`, `{{`, `}}`, `|`,
   `<`, `>` and backticks replaced by spaces. Shape by kind: Acp `n0("…")` (rounded), Action and Compute `n0["…"]`,
-  Checkpoint `n0{{{{"…"}}}}` (hexagon), Unknown `n0["…"]`.
-- One line per edge. Simple: arrow only. Switch: one arrow per case, labelled with the case value (same escaping).
+  Checkpoint `n0{{{{"…"}}}}` (drawn as a diamond), Unknown `n0["…"]`.
+- One line per edge. Simple: arrow only. Switch: one arrow per case, labelled with the case value (same escaping), in double
+  quotes because `;` and `%%` outside quotes end a statement.
 - Arrow: `==>` when `run.edge_taken(from, to)`; `-.->` when `from` has a step but this edge was not taken;
-  `-->` when `from` has not run yet. With a label: `==>|small|`, `-.->|large|`, `-->|x|`.
+  `-->` when `from` has not run yet. With a label: `==>|"small"|`, `-.->|"large"|`, `-->|"x"|`.
 - Edges whose endpoints are not in `flow.nodes` are skipped. Deterministic output for identical input.
 Tests (at least 9): build `Run` values by hand (write a small private test helper that fills every field) and assert
 exact lines: linear flow all done; a switch with one case taken; a node currently Running; a waiting checkpoint;
@@ -445,16 +452,21 @@ Facts about acpx 0.22 (measured):
 - Command line: `acpx [--approve-all] --format json flow run <file> [--input-json <json>] [--default-agent <name>]`.
 - stdout stays empty until the run ends or stops at a checkpoint, then carries ONE line:
   `{{"action":"flow_run_result","runId":"…","flowName":"…","status":"waiting","statusDetail":"…","waitingOn":"review","runDir":"/Users/x/.acpx/flows/runs/<runId>","outputs":{{…}},"sessionBindings":{{…}}}}`
-  (`error` appears on failures). stderr carries progress lines such as `[acpx] tokens: input=2 output=37 …`.
-- The run directory appears under `runs_base` shortly after start; its `manifest.json` has `flowPath`, which acpx
-  stores canonicalised (`/private/tmp/x.flow.ts` for `/tmp/x.flow.ts`). So the run dir cannot be read from stdout
-  while the run is live: it is found by listing `runs_base`.
+  This line is printed ONLY for completed and waiting runs. A failed or timed-out run prints no result line and
+  exits non-zero. stderr carries progress lines such as `[acpx] tokens: input=2 output=37 …`.
+- The run directory appears under `runs_base` shortly after start; its `manifest.json` has `flowPath` = the flow file
+  made absolute against the child's working directory (symlinks not resolved). The run dir cannot be read from
+  stdout while the run is live: it is found by listing `runs_base`. `start` therefore joins a relative `flow_file`
+  onto `spec.cwd` (else the current directory) before building `argv` and before `find_new_run`.
 Behaviour:
 - `start`: record the set of directories currently in `runs_base` (missing base = empty set), spawn with stdin null
   and stdout/stderr piped, and drain both pipes on two threads into channels so the child never blocks on a full
   pipe. A spawn error is returned as the `Err`.
-- `poll`: drain the channels; if the run dir is not known yet, `find_new_run`; `try_wait` the child. Exited with a
-  parsable result line -> `Finished`. Exited without one -> `Failed("acpx exited with <status>: <last stderr line>")`.
+- `poll`: drain the channels; if the run dir is not known yet, `find_new_run`; `try_wait` the child. After the child has
+  exited, keep receiving from both channels until they disconnect (bounded at 500 ms) BEFORE deciding, so a result
+  line still in the pipe is not missed. Exited with a parsable result line -> `Finished`. Exited without one ->
+  `Failed(msg)` where msg is the `error` string of `<run_dir>/projections/live.json` when the dir is known and has
+  one, else `acpx exited with <status>: <last stderr line>`.
   Still alive -> `Running {{ run_dir }}` once the dir is known, else `Starting`. After `cancel` -> `Cancelled`.
   Once a terminal state is reached every later poll returns the same value.
 - `find_new_run`: directories in `runs_base` not in `before` whose manifest `flowPath` equals `flow_file` after
@@ -466,7 +478,7 @@ Behaviour:
   not valid JSON -> Err naming the problem.
 - Dropping a `Launch` does NOT kill the child (a run outlives the view); only `cancel` does.
 Tests (at least 12): argv for every option combination incl. `--approve-all` placed before `flow`; parse_result on
-the sample line, on output with noise lines around it, on a failure line with `error`, and on garbage; find_new_run
+the sample line, on output with noise lines around it, on a line without the optional fields, and on garbage; find_new_run
 with a temp runs dir (ignores dirs in `before`, ignores other flows, picks the newest, tolerates a missing
 manifest); parse_run_args cases above; and process tests that use `acpx_bin: Some("/bin/sh")`-style stand-ins only
 through a private `start_command(std::process::Command, …)` helper that `start` also uses: a child that prints a
@@ -529,7 +541,7 @@ write another fold model) `use crate::scrollback::blocks::markdown_content::Mark
 {BUNDLE_API}
 {GRAPH_API}
 Public surface:
-{VIEW_API.split('// ==== crate::views::acpx_modal::run')[1].split('// ==== crate::views::acpx_modal::inspector')[0]}
+{'// ==== crate::views::acpx_modal::run' + VIEW_API.split('// ==== crate::views::acpx_modal::run')[1].split('// ==== crate::views::acpx_modal::inspector')[0]}
 Layout, top to bottom inside `area`:
 1. Header (1 row): run status glyph + title (bold), then dim ` · `-joined facts: flow name, `<done>/<total> nodes`,
    duration (`run.duration_ms(now_ms)`), age when not live.
@@ -550,7 +562,9 @@ Layout, top to bottom inside `area`:
    `▾|▸ <glyph> <node id>  <kind label or agent name>  <duration>  <one-line result>` where the result is the error
    for failures, `→ <route>` when the output object has a string `route`, the exit code for shell actions, else the
    first line of `value_text(&step.output)`, cut to fit. Event row (indented, dim): `+<ms since step start>  <kind>
-   <detail>`; `node_heartbeat` rows are hidden unless `n` (noise) is toggled on. Steps start collapsed.
+   <detail>`; `node_heartbeat` rows are hidden unless `n` (noise) is toggled on. Steps start collapsed:
+   `FoldState` only stores collapsed keys, so keep a `HashSet<String>` of the root keys the user has expanded and,
+   after every rebuild, `collapse` each root that has children and is not in that set.
 Keys: movement per the house style over visible rows; Left/h collapse (on a child or collapsed root, jump to the
 parent, as `FoldState::collapse` reports); Right/l expand; Space toggles; `E` toggles all; `n` noise; `v` graph;
 `!` jumps to the next failed step (wrapping); `c` jumps to the current/waiting step; `[` / `]` previous/next step
@@ -577,7 +591,7 @@ Types you import (`use crate::acpx::bundle::{{self, ArtifactRef, FlowNode, NodeK
 value_text}};`):
 {BUNDLE_API}
 Public surface:
-{VIEW_API.split('// ==== crate::views::acpx_modal::inspector')[1]}
+{'// ==== crate::views::acpx_modal::inspector' + VIEW_API.split('// ==== crate::views::acpx_modal::inspector')[1]}
 Layout:
 - Row 0: `<outcome glyph> <node id>` bold, then dim ` · ` facts: kind label, agent name, attempt id, duration, and
   right-aligned `step 3/5`.
@@ -648,7 +662,8 @@ Behaviour:
 - Title: `acpx` in Ledger; `acpx › <run title>` in Run; `acpx › <run title> › <node id>` in Step (cut to fit).
 - Footer shortcuts: the active screen's `shortcuts()` turned into `Shortcut {{ label, clickable: false, id: 0 }}`,
   followed by `? keys`.
-- `?` toggles a key reference drawn over the content (a plain list of every key for the active screen, taken from a
+- `wants_esc()` = help open, or mode is not Ledger, or `!ledger.esc_closes()`.
+- `?` (except in Ledger while `captures_text()`) toggles a key reference drawn over the content (a plain list of every key for the active screen, taken from a
   static table in this file); any key closes it.
 - Ledger outcomes: OpenRun(dir) -> `bundle::load_run`, on Ok switch to Run, on Err stay and set the notice
   (`cannot open run: <err>`); OpenSession(s) -> `AcpxOutcome::Replay` with `events_path: s.stream_path`,
@@ -730,11 +745,8 @@ def make_http_request(url: str, headers: dict, data: dict = None, method: str = 
 
 def extract_code_from_markdown(content: str) -> str:
     content = re.sub(r"^<think>[\s\S]*?</think>\s*", "", (content or "").replace("\r\n", "\n"))
-    pattern = r"```[a-zA-Z0-9_-]*[ \t]*\r?\n([\s\S]*?)```"
-    matches = re.findall(pattern, content, flags=re.IGNORECASE)
-    if matches:
-        return "\n\n".join(matches).strip()
-    return content.strip()
+    m = re.search(r"```[a-zA-Z0-9_-]*[ \t]*\n([\s\S]*)\n```", content)  # greedy: generated code may itself contain ``` fences
+    return m.group(1).strip() if m else content.strip()
 
 def resolve_api_config(cli_key=None, cli_endpoint=None):
     key = cli_key or os.environ.get("OPENROUTER_API_KEY") or os.environ.get("CHEAPERINFERENCE_API_KEY") or os.environ.get("CHEAPER_INFERENCE_API_KEY")

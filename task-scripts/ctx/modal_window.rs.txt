@@ -180,6 +180,8 @@ pub fn render_modal_window(
     area: Rect,
     state: &mut ModalWindowState,
     config: &ModalWindowConfig<'_>,
+    theme: &Theme,
+) -> Option<ModalContentArea>;
 
 // ---- crates/codegen/xai-grok-pager/src/views/modal_window.rs (lines 620,632)
         Some(i) => label.split_at(i),
@@ -253,4 +255,4 @@ pub fn handle_modal_mouse(
     kind: MouseEventKind,
     column: u16,
     row: u16,
-
+) -> ModalWindowOutcome;
