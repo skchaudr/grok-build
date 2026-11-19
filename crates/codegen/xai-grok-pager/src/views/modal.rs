@@ -589,6 +589,10 @@ pub enum ActiveModal {
     Traces {
         state: Box<crate::views::traces_modal::TracesModalState>,
     },
+    /// acpx flow runs and sessions (/acpx).
+    Acpx {
+        state: Box<crate::views::acpx_modal::AcpxModalState>,
+    },
     /// Settings modal (F2, /settings, palette). Boxed because the state is large.
     Settings {
         state: Box<crate::views::settings_modal::SettingsModalState>,
@@ -1106,6 +1110,7 @@ impl ActiveModal {
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Traces { .. }
+            | ActiveModal::Acpx { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::PiSettings { .. }
             | ActiveModal::PiConfig { .. }
@@ -1146,6 +1151,7 @@ impl ActiveModal {
             ActiveModal::ShortcutsHelp { .. } => "Keyboard Shortcuts",
             ActiveModal::MemoryBrowser { .. } => "Memory",
             ActiveModal::Traces { .. } => crate::views::traces_modal::TITLE,
+            ActiveModal::Acpx { .. } => "acpx",
             ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
             ActiveModal::PiSettings { .. } => crate::views::pi_settings::MODAL_TITLE,
             ActiveModal::PiConfig { .. } => "Pi resources",

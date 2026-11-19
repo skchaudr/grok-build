@@ -574,6 +574,15 @@ impl AgentView {
             return crate::views::traces_modal::handle_traces_key(state, key);
         }
 
+        // Acpx: the screens own Esc until the ledger has nothing left to clear.
+        if let ActiveModal::Acpx { state } = modal {
+            if key.code == KeyCode::Esc && !state.wants_esc() {
+                self.active_modal = None;
+                return InputOutcome::Changed;
+            }
+            return acpx_outcome(state.handle_key(key), &mut self.active_modal);
+        }
+
         // MemoryBrowser: route through ModalWindow chrome, then delegate.
         if let ActiveModal::MemoryBrowser { state } = modal {
             // While the filter or the preview has focus, Esc leaves that mode instead of closing
@@ -772,6 +781,7 @@ impl AgentView {
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Traces { .. }
+            | ActiveModal::Acpx { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::PiSettings { .. }
             | ActiveModal::PiConfig { .. }
@@ -2462,6 +2472,11 @@ impl AgentView {
             };
         }
 
+        if let Some(ActiveModal::Acpx { state }) = &mut self.active_modal {
+            let outcome = state.handle_mouse(mouse);
+            return acpx_outcome(outcome, &mut self.active_modal);
+        }
+
         // MemoryBrowser: route through ModalWindow chrome, then delegate.
         if let Some(ActiveModal::MemoryBrowser { state }) = &mut self.active_modal {
             let outcome =
@@ -4015,6 +4030,8 @@ impl AgentView {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
             } else if let modal::ActiveModal::Traces { state } = active_modal {
                 crate::views::traces_modal::render_traces_modal(buf, area, state, compact);
+            } else if let modal::ActiveModal::Acpx { state } = active_modal {
+                crate::views::acpx_modal::render_acpx_modal(buf, area, state, compact);
             } else if let modal::ActiveModal::PiSettings { state } = active_modal {
                 crate::views::pi_settings::render_pi_settings(buf, area, state, compact);
             } else if let modal::ActiveModal::PiConfig { state } = active_modal {
@@ -5973,5 +5990,20 @@ mod notifications_modal_input_tests {
         let st = picker_state(&agent);
         assert!(st.search_active);
         assert!(st.query().is_empty());
+    }
+}
+
+/// What the `/acpx` modal asked for, as the pager's own outcome.
+fn acpx_outcome(outcome: crate::views::acpx_modal::AcpxOutcome, active_modal: &mut Option<ActiveModal>) -> InputOutcome {
+    use crate::views::acpx_modal::AcpxOutcome;
+    match outcome {
+        AcpxOutcome::Unchanged => InputOutcome::Unchanged,
+        AcpxOutcome::Changed => InputOutcome::Changed,
+        AcpxOutcome::Close => {
+            *active_modal = None;
+            InputOutcome::Changed
+        }
+        AcpxOutcome::Copy(text) => InputOutcome::Action(Action::AcpxCopy { text }),
+        AcpxOutcome::Replay(request) => InputOutcome::Action(Action::AcpxReplay(Box::new(request))),
     }
 }

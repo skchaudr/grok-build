@@ -29,6 +29,7 @@ pub mod mcps_modal;
 pub mod memory_modal;
 pub mod side_panel;
 pub mod traces_modal;
+pub mod acpx_modal;
 pub(crate) mod traces_body;
 pub(crate) mod traces_fold;
 pub(crate) mod traces_follow;

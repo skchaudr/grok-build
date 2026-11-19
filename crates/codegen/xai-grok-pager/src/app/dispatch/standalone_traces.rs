@@ -104,6 +104,25 @@ pub(crate) fn feed_for(row: &xai_grok_traces::SessionRow, path: &Path) -> io::Re
     }
 }
 
+/// A flow step's conversation, or a whole acpx session, from the `/acpx` modal: same read-only view, in its own agent view.
+pub(crate) fn open_acpx(app: &mut AppView, request: crate::views::acpx_modal::ReplayRequest) {
+    // Its own id space: a tab with the real session open must not get the replay.
+    let id = match request.range {
+        Some((start, end)) => format!("acpx:{}:{start}-{end}", request.session_id),
+        None => format!("acpx:{}", request.session_id),
+    };
+    let row = xai_grok_traces::SessionRow {
+        id: id.clone(),
+        source: "acpx".into(),
+        title: request.title,
+        file_path: request.events_path,
+        status: xai_grok_traces::Status::Completed,
+        ..Default::default()
+    };
+    let feed = crate::acp::acpx_feed::convert(&row.file_path, request.range, &id);
+    open_feed_in(app, id, row, feed, false);
+}
+
 /// Enter on a past grok session: same read-only view as Claude.
 pub(crate) fn open_grok(app: &mut AppView, row: xai_grok_traces::SessionRow) {
     open_grok_in(app, row, is_standalone());
@@ -166,13 +185,16 @@ fn open_feed_in(
     let events = match feed {
         Ok(events) => events,
         Err(e) => {
-            if let Some(ActiveModal::Traces { state }) = agent.active_modal.as_mut() {
-                state.status = Some(format!("can't read {}: {e}", row.file_path.display()));
+            let text = format!("can't read {}: {e}", row.file_path.display());
+            match agent.active_modal.as_mut() {
+                Some(ActiveModal::Traces { state }) => state.status = Some(text),
+                Some(ActiveModal::Acpx { state }) => state.set_notice(text),
+                _ => {}
             }
             return;
         }
     };
-    let Some(ActiveModal::Traces { state }) = agent.active_modal.take() else { return };
+    let Some(state @ (ActiveModal::Traces { .. } | ActiveModal::Acpx { .. })) = agent.active_modal.take() else { return };
     let agent = if standalone {
         agent.clear_trace_content();
         agent
@@ -241,7 +263,7 @@ fn open_live_in(app: &mut AppView, row: xai_grok_traces::SessionRow, standalone:
         agent.trace_origin = Some(origin);
         agent
     };
-    agent.trace_return = Some(state);
+    agent.trace_return = Some(ActiveModal::Traces { state });
     agent.set_active_pane(crate::app::agent_view::AgentPane::Scrollback, true);
     agent.bind_session_id(acp::SessionId::new(row.id.clone()));
     if let Some(cwd) = row.cwd.as_deref() {
@@ -378,7 +400,7 @@ pub(crate) fn leave_view(app: &mut AppView) {
             .or_else(|| app.agents.keys().copied().find(|k| *k != id));
         match back {
             Some(back) => {
-                app.agents[&back].active_modal = Some(ActiveModal::Traces { state });
+                app.agents[&back].active_modal = Some(state);
                 super::ctx::switch_to_agent(app, back, super::ctx::SwitchCause::Picker);
             }
             None => super::ctx::show_welcome(app),
@@ -388,7 +410,7 @@ pub(crate) fn leave_view(app: &mut AppView) {
     }
     let Some(agent) = super::ctx::get_active_agent_mut(app) else { return };
     agent.clear_trace_content();
-    agent.active_modal = Some(ActiveModal::Traces { state });
+    agent.active_modal = Some(state);
 }
 
 /// A blank top-level view for a past session; nothing is sent for it, and it has no session until the replay binds one.

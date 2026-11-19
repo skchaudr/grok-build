@@ -2745,7 +2745,8 @@ pub(crate) async fn run(
                 let tailed = super::dispatch::traces_live::tick(&mut app);
                 let live_dirty = super::dispatch::standalone_traces::drain_live(&mut app);
                 let panel_dirty = side_panel_agent_mut(&mut app).is_some_and(|agent| agent.poll_side_panel());
-                if live_dirty || tailed || panel_dirty || traces_state_mut(&mut app).is_some_and(|state| state.poll_live()) {
+                let acpx_dirty = acpx_state_mut(&mut app).is_some_and(|state| state.poll());
+                if live_dirty || tailed || panel_dirty || acpx_dirty || traces_state_mut(&mut app).is_some_and(|state| state.poll_live()) {
                     presenter.request(false);
                 }
             }
@@ -4304,13 +4305,26 @@ fn process_effects(
 fn traces_poll_wanted(app: &AppView) -> bool {
     let ActiveView::Agent(id) = app.active_view else { return false };
     let Some(agent) = app.agents.get(&id) else { return false };
-    matches!(agent.active_modal, Some(crate::views::modal::ActiveModal::Traces { .. })) || agent.trace_live.is_some() || agent.side_panel.open
+    matches!(
+        agent.active_modal,
+        Some(crate::views::modal::ActiveModal::Traces { .. } | crate::views::modal::ActiveModal::Acpx { .. })
+    ) || agent.trace_live.is_some()
+        || agent.side_panel.open
 }
 
 /// The active agent while its side panel is open.
 fn side_panel_agent_mut(app: &mut AppView) -> Option<&mut super::agent_view::AgentView> {
     let ActiveView::Agent(id) = app.active_view else { return None };
     app.agents.get_mut(&id).filter(|agent| agent.side_panel.open)
+}
+
+/// The open `/acpx` modal of the active agent, if any. It is re-read every second: runs are started outside the pager.
+fn acpx_state_mut(app: &mut AppView) -> Option<&mut crate::views::acpx_modal::AcpxModalState> {
+    let ActiveView::Agent(id) = app.active_view else { return None };
+    match app.agents.get_mut(&id)?.active_modal.as_mut()? {
+        crate::views::modal::ActiveModal::Acpx { state } => Some(state.as_mut()),
+        _ => None,
+    }
 }
 
 /// The open `/traces` modal of the active agent, if any.
