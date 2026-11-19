@@ -226,6 +226,37 @@ impl InspectorState {
 }
 """
 
+LAUNCH_API = """
+// ==== crate::acpx::launch  (file: src/acpx/launch.rs) ====
+#[derive(Debug, Clone, PartialEq)]
+pub struct LaunchSpec {
+    pub flow_file: std::path::PathBuf,
+    pub input_json: Option<String>,        // passed as --input-json
+    pub default_agent: Option<String>,     // --default-agent
+    pub approve_all: bool,                 // --approve-all (a global option: goes before `flow`)
+    pub cwd: Option<std::path::PathBuf>,   // child working directory
+    pub acpx_bin: Option<String>,          // default "acpx"
+}
+/// The single JSON line acpx prints on stdout when the run ends or stops at a checkpoint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlowRunResult { pub run_id: String, pub run_dir: std::path::PathBuf, pub status: RunStatus, pub waiting_on: Option<String>, pub status_detail: Option<String>, pub error: Option<String> }
+#[derive(Debug, Clone, PartialEq)]
+pub enum LaunchState { Starting, Running { run_dir: std::path::PathBuf }, Finished(FlowRunResult), Failed(String), Cancelled }
+pub struct Launch { /* private: the child, reader threads, the set of run dirs that existed before spawn */ }
+impl Launch {
+    pub fn start(spec: &LaunchSpec, runs_base: &std::path::Path) -> std::io::Result<Launch>;
+    pub fn poll(&mut self) -> LaunchState;      // non-blocking; call about once a second
+    pub fn run_dir(&self) -> Option<&std::path::Path>;
+    pub fn cancel(&mut self);                   // kill the child; later polls return Cancelled
+    pub fn stderr_tail(&self) -> String;        // last 20 lines of the child's stderr
+}
+pub fn argv(spec: &LaunchSpec) -> Vec<String>;                       // without the binary
+pub fn parse_result(stdout: &str) -> Option<FlowRunResult>;
+pub fn find_new_run(runs_base: &std::path::Path, before: &std::collections::HashSet<std::path::PathBuf>, flow_file: &std::path::Path) -> Option<std::path::PathBuf>;
+/// Splits `/acpx run <file> [json]` arguments: first word (or quoted string) is the file, the rest is the input JSON.
+pub fn parse_run_args(args: &str) -> Result<(std::path::PathBuf, Option<String>), String>;
+"""
+
 FEED_API = """
 // ==== crate::acp::acpx_feed  (file: src/acp/acpx_feed.rs) ====
 /// `range` = inclusive (start_seq, end_seq) for a flow step; None = the whole file.
@@ -397,6 +428,51 @@ session_info_update dropped; `_auth/status_update` dropped; range keeps only seq
 bare-format input with the journal header; meta has isReplay true, increasing unique eventId values and
 agentTimestampMs for the wrapped format; an unparseable line in the middle is skipped. `Fed` and `Event` do not
 implement Debug or PartialEq: assert with `matches!` and by reading fields.
+{RULES}""",
+    },
+    {
+        "custom_id": "launch",
+        "output_file": f"{SRC}/acpx/launch.rs",
+        "context_files": [f"{CTX}/bundle_sample.md"],
+        "prompt": f"""
+Write `launch.rs`: start an acpx flow run as a child process, find the run directory it creates, report its state,
+and cancel it. Plain std (std::process, std::thread, std::sync::mpsc); no tokio, no ratatui.
+`use crate::acpx::bundle::RunStatus;` (variants: Running, Waiting, Completed, Failed, TimedOut, Unknown).
+
+Public surface:
+{LAUNCH_API}
+Facts about acpx 0.22 (measured):
+- Command line: `acpx [--approve-all] --format json flow run <file> [--input-json <json>] [--default-agent <name>]`.
+- stdout stays empty until the run ends or stops at a checkpoint, then carries ONE line:
+  `{{"action":"flow_run_result","runId":"…","flowName":"…","status":"waiting","statusDetail":"…","waitingOn":"review","runDir":"/Users/x/.acpx/flows/runs/<runId>","outputs":{{…}},"sessionBindings":{{…}}}}`
+  (`error` appears on failures). stderr carries progress lines such as `[acpx] tokens: input=2 output=37 …`.
+- The run directory appears under `runs_base` shortly after start; its `manifest.json` has `flowPath`, which acpx
+  stores canonicalised (`/private/tmp/x.flow.ts` for `/tmp/x.flow.ts`). So the run dir cannot be read from stdout
+  while the run is live: it is found by listing `runs_base`.
+Behaviour:
+- `start`: record the set of directories currently in `runs_base` (missing base = empty set), spawn with stdin null
+  and stdout/stderr piped, and drain both pipes on two threads into channels so the child never blocks on a full
+  pipe. A spawn error is returned as the `Err`.
+- `poll`: drain the channels; if the run dir is not known yet, `find_new_run`; `try_wait` the child. Exited with a
+  parsable result line -> `Finished`. Exited without one -> `Failed("acpx exited with <status>: <last stderr line>")`.
+  Still alive -> `Running {{ run_dir }}` once the dir is known, else `Starting`. After `cancel` -> `Cancelled`.
+  Once a terminal state is reached every later poll returns the same value.
+- `find_new_run`: directories in `runs_base` not in `before` whose manifest `flowPath` equals `flow_file` after
+  canonicalising both (fall back to comparing as given when canonicalising fails); the newest by name when several
+  match (run ids start with a timestamp). A manifest that is missing or half-written is not a match yet.
+- `parse_result`: the last line of `stdout` that parses as JSON with `"action":"flow_run_result"`; other lines ignored.
+- `parse_run_args`: `my.flow.ts` -> (path, None); `my.flow.ts {{"a":1}}` -> input kept verbatim; a file in double or
+  single quotes may contain spaces; empty args -> Err("usage: /acpx run <flow file> [input json]"); input that is
+  not valid JSON -> Err naming the problem.
+- Dropping a `Launch` does NOT kill the child (a run outlives the view); only `cancel` does.
+Tests (at least 12): argv for every option combination incl. `--approve-all` placed before `flow`; parse_result on
+the sample line, on output with noise lines around it, on a failure line with `error`, and on garbage; find_new_run
+with a temp runs dir (ignores dirs in `before`, ignores other flows, picks the newest, tolerates a missing
+manifest); parse_run_args cases above; and process tests that use `acpx_bin: Some("/bin/sh")`-style stand-ins only
+through a private `start_command(std::process::Command, …)` helper that `start` also uses: a child that prints a
+result line and exits -> Finished; a child that exits 3 with stderr text -> Failed containing that text; a child
+that sleeps -> Starting, then cancel -> Cancelled, and the same on the next poll. Guard the process tests with
+`#[cfg(unix)]` and poll in a loop with a 5 second deadline, never a fixed sleep.
 {RULES}""",
     },
     {
