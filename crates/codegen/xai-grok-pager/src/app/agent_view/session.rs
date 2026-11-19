@@ -452,6 +452,7 @@ impl AgentView {
             active_subagent: None,
             is_subagent_view: false,
             role: AgentRole::Root,
+            acpx_run: None,
             trace_return: None,
             trace_origin: None,
             trace_live: None,

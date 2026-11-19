@@ -1,3 +1,4 @@
+mod acpx_flow;
 mod agent;
 mod bg_task;
 mod btw;
@@ -34,4 +35,5 @@ pub use tool::{
     discovered_tool_action, render_diff_hunk_highlighted, render_diff_hunks_highlighted,
 };
 pub use user::UserPromptBlock;
+pub use acpx_flow::{AcpxFlowBlock, AcpxFlowRow, AcpxFlowStatus};
 pub use workflow::{WorkflowBlock, WorkflowBlockPhase, WorkflowBlockStatus};

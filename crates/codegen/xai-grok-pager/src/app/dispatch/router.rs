@@ -1798,6 +1798,14 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             });
             vec![]
         }
+        Action::AcpxRun { flow_file, input_json } => {
+            super::acpx_run::start(app, flow_file, input_json);
+            vec![]
+        }
+        Action::AcpxCancel => {
+            super::acpx_run::cancel(app);
+            vec![]
+        }
         Action::AcpxReplay(request) => {
             super::standalone_traces::open_acpx(app, *request);
             vec![]

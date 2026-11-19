@@ -2745,7 +2745,7 @@ pub(crate) async fn run(
                 let tailed = super::dispatch::traces_live::tick(&mut app);
                 let live_dirty = super::dispatch::standalone_traces::drain_live(&mut app);
                 let panel_dirty = side_panel_agent_mut(&mut app).is_some_and(|agent| agent.poll_side_panel());
-                let acpx_dirty = acpx_state_mut(&mut app).is_some_and(|state| state.poll());
+                let acpx_dirty = acpx_state_mut(&mut app).is_some_and(|state| state.poll()) | super::dispatch::acpx_run::tick(&mut app);
                 if live_dirty || tailed || panel_dirty || acpx_dirty || traces_state_mut(&mut app).is_some_and(|state| state.poll_live()) {
                     presenter.request(false);
                 }
@@ -4303,6 +4303,9 @@ fn process_effects(
 }
 /// The traces list, or a live Claude/Pi session view, both of which wake on the one-second poll.
 fn traces_poll_wanted(app: &AppView) -> bool {
+    if super::dispatch::acpx_run::any_running(app) {
+        return true;
+    }
     let ActiveView::Agent(id) = app.active_view else { return false };
     let Some(agent) = app.agents.get(&id) else { return false };
     matches!(

@@ -1157,6 +1157,13 @@ pub enum Action {
     AcpxCopy {
         text: String,
     },
+    /// `/acpx run <file> [json]`: start a flow and follow it in a transcript card.
+    AcpxRun {
+        flow_file: std::path::PathBuf,
+        input_json: Option<String>,
+    },
+    /// `/acpx cancel`: stop the flow this view started.
+    AcpxCancel,
     /// Re-scan trace roots while `/traces` is open.
     TracesRescan,
     /// Enter on a Claude session in `/traces`: open it read-only in the session view.

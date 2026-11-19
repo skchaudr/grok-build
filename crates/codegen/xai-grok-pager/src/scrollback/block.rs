@@ -16,6 +16,7 @@ use super::blocks::{
     SessionEventBlock, SubagentBlock, SubagentBlockKind, SystemMessageBlock, ThinkingBlock,
     ToolCallBlock, UserPromptBlock, WorkflowBlock,
 };
+use super::blocks::AcpxFlowBlock;
 use super::types::{
     AccentStyle, BlockBackground, BlockContext, BlockOutput, DisplayMode, RenderedBlockOutput,
     Selectable, SelectionBoundaries, derive_selection_text,
@@ -326,6 +327,8 @@ pub enum RenderBlock {
     /// Subagent lifecycle (started / completed / failed).
     Subagent(SubagentBlock),
     Workflow(WorkflowBlock),
+    /// An acpx flow run started with `/acpx run`.
+    AcpxFlow(AcpxFlowBlock),
     /// /btw side-question response (golden accent).
     Btw(BtwBlock),
     /// `/context` snapshot with categorical bar and breakdown.
@@ -350,6 +353,7 @@ macro_rules! delegate_block {
             RenderBlock::BgTask(b) => b.$method($($arg),*),
             RenderBlock::Subagent(b) => b.$method($($arg),*),
             RenderBlock::Workflow(b) => b.$method($($arg),*),
+            RenderBlock::AcpxFlow(b) => b.$method($($arg),*),
             RenderBlock::Btw(b) => b.$method($($arg),*),
             RenderBlock::ContextInfo(b) => b.$method($($arg),*),
             RenderBlock::CreditLimit(b) => b.$method($($arg),*),
@@ -906,6 +910,7 @@ impl RenderBlock {
             RenderBlock::UserPrompt(_) => Some(theme.text_primary),
             RenderBlock::AgentMessage(_) => None,
             RenderBlock::Workflow(_) => None,
+            RenderBlock::AcpxFlow(_) => None,
             RenderBlock::ToolCall(block) => {
                 // Execute: Green for success, red for failure
                 // Read/Edit/ListDir/Search: No accent
@@ -1090,6 +1095,9 @@ impl RenderBlock {
             RenderBlock::Workflow(b) => {
                 join_searchable([Some(b.name.clone()), Some(b.objective.clone())])
             }
+            RenderBlock::AcpxFlow(b) => join_searchable(
+                [Some(b.title.clone()), Some(b.flow_file.clone())].into_iter().chain(b.rows.iter().map(|r| Some(format!("{} {}", r.node_id, r.result)))),
+            ),
             RenderBlock::Subagent(b) => {
                 // Only the failed variant carries an error string worth indexing.
                 let error = match &b.kind {

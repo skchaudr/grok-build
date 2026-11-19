@@ -438,6 +438,7 @@ mod tests {
             "dream",
             "session",
             "traces",
+            "acpx",
             "hotkeys",
             "shortcuts",
             "keys",

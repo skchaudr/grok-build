@@ -1,9 +1,8 @@
 ---
 source: crates/codegen/xai-grok-pager/src/app/agent_view/side_panel_tests.rs
-assertion_line: 158
 expression: "draw(&mut agent, 110, 30)"
 ---
-                                                                │ ◀  Session   Traces   Agents   Recent  ▸
+                                                                │ Session  Traces  Agents  Recent  Flows
   /work/grok-build                    84K / 200K │ [Dashboard]  │ ───────────────────────────────────────────
                                                                 │ Session
                                                                 │   title        side panel

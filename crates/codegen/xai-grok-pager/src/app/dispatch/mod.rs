@@ -8,6 +8,7 @@
 //! - This makes dispatch fully testable without tokio or a terminal.
 //!
 //! Imports in this tree use at most one `super::` hop (absolute `crate::` paths otherwise); tests/ shares a fixture prelude via `use super::*;`.
+pub(crate) mod acpx_run;
 mod auth;
 mod billing;
 mod cta;
