@@ -1035,12 +1035,25 @@ impl RunViewState {
             return (Vec::new(), false);
         };
 
+        // When a diagram does not fit, the markdown renderer draws its source in a box instead; that is not a graph.
+        let is_source = |lines: &[Line<'static>]| {
+            lines.iter().any(|l| {
+                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                text.contains("mermaid: flowchart") || text.contains("too wide to display")
+            })
+        };
         let lr_too_tall = cache.lr_lines.len() > half_height;
         let lr_too_wide = cache.lr_lines.iter().any(|l| l.width() > width);
-        let chosen = if lr_too_tall || lr_too_wide {
+        let chosen = if !(lr_too_tall || lr_too_wide || is_source(&cache.lr_lines)) {
+            &cache.lr_lines
+        } else if !is_source(&cache.td_lines) {
             &cache.td_lines
         } else {
-            &cache.lr_lines
+            let note = Line::from(Span::styled(
+                "graph does not fit at this width (v hides this line)",
+                Style::default().add_modifier(ratatui::style::Modifier::DIM),
+            ));
+            return (vec![note], false);
         };
 
         let limit = half_height.min(budget);

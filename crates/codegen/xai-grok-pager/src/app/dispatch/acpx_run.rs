@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::acpx::bundle::{self, Run, RunStatus};
+use crate::acpx::bundle::{self, NodeState, Outcome, Run, RunStatus};
 use crate::acpx::launch::{Launch, LaunchSpec, LaunchState};
 use crate::app::app_view::AppView;
 use crate::scrollback::block::RenderBlock;
@@ -89,7 +89,15 @@ pub(crate) fn tick(app: &mut AppView) -> bool {
             }
             match state {
                 LaunchState::Starting | LaunchState::Running { .. } => {}
-                LaunchState::Cancelled => block.set_status(AcpxFlowStatus::Cancelled),
+                LaunchState::Cancelled => {
+                    // The bundle still says the killed node is running.
+                    for row in &mut block.rows {
+                        if row.state == NodeState::Running {
+                            row.state = NodeState::Done(Outcome::Cancelled);
+                        }
+                    }
+                    block.set_status(AcpxFlowStatus::Cancelled);
+                }
                 LaunchState::Failed(message) => {
                     block.note = running.launch.stderr_tail().lines().last().map(str::to_string).filter(|l| !message.contains(l.as_str()));
                     block.set_status(AcpxFlowStatus::Failed(message));
