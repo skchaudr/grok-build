@@ -259,6 +259,58 @@ pub fn find_new_run(runs_base: &std::path::Path, before: &std::collections::Hash
 pub fn parse_run_args(args: &str) -> Result<(std::path::PathBuf, Option<String>), String>;
 """
 
+CARD_API = """
+// ==== crate::scrollback::blocks::acpx_flow  (file: src/scrollback/blocks/acpx_flow.rs) ====
+#[derive(Debug, Clone, PartialEq)]
+pub enum AcpxFlowStatus {
+    Starting,                                  // child spawned, run directory not seen yet
+    Running,
+    Waiting { node: String, detail: String },  // stopped at a checkpoint
+    Completed,
+    Failed(String),
+    Cancelled,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcpxFlowRow {
+    pub node_id: String,
+    pub label: String,              // agent name for acp nodes, else the kind label
+    pub state: NodeState,
+    pub duration_ms: Option<u64>,   // None until the node has a finished step
+    pub result: String,             // one line: error, "→ route", "exit 0", or the output's first line; "" when none
+}
+#[derive(Debug, Clone)]
+pub struct AcpxFlowBlock {
+    pub flow_file: String,          // as the user typed it
+    pub title: String,              // run title once known, else the flow file name
+    pub run_id: Option<String>,
+    pub status: AcpxFlowStatus,
+    pub rows: Vec<AcpxFlowRow>,     // one per flow node, in flow order
+    pub elapsed: std::time::Duration,
+    pub note: Option<String>,       // e.g. the last stderr line of a failed start
+}
+impl AcpxFlowBlock {
+    pub fn started(flow_file: impl Into<String>) -> Self;                  // Starting, no rows, title = file name of flow_file
+    /// Refresh from a loaded run (called about once a second by the wiring). Does not touch a Cancelled status.
+    pub fn update_from_run(&mut self, run: &crate::acpx::bundle::Run, now_ms: i64);
+    pub fn set_status(&mut self, status: AcpxFlowStatus);
+    pub fn is_running(&self) -> bool;                                      // Starting or Running
+}
+// plus `impl crate::scrollback::block::BlockContent for AcpxFlowBlock`
+"""
+
+FLOWS_API = """
+// ==== crate::views::side_panel::flows  (file: src/views/side_panel/flows.rs) ====
+/// Prefix of `Row::open` for a row that opens a run in the /acpx modal: "acpx-run:<absolute run dir>".
+pub(crate) const OPEN_PREFIX: &str = "acpx-run:";
+#[derive(Default)]
+pub(super) struct Flows { /* private */ }
+impl Flows {
+    /// The 1 s tick while this page is showing. True when the rows changed.
+    pub(super) fn poll(&mut self, now_ms: i64) -> bool;
+    pub(super) fn rows(&self, c: &Ctx) -> Vec<Row>;
+}
+"""
+
 FEED_API = """
 // ==== crate::acp::acpx_feed  (file: src/acp/acpx_feed.rs) ====
 /// `range` = inclusive (start_seq, end_seq) for a flow step; None = the whole file.
@@ -693,6 +745,91 @@ session returns Replay with range None; `]` in Step moves to the next step and E
 a missing dir returns false and sets the notice, and the next key clears it; poll returns true after live.json's
 status changes on disk; wants_poll false for a waiting run; `?` help toggles; render at 120x30 draws the title
 `acpx`; render at 10x3 and 0x0 does not panic.
+{RULES}""",
+    },
+    {
+        "custom_id": "card",
+        "output_file": f"{SRC}/scrollback/blocks/acpx_flow.rs",
+        "context_files": [f"{CTX}/workflow_block.rs.txt"],
+        "prompt": f"""
+Write `acpx_flow.rs`: the transcript card for an acpx flow run started from the pager with `/acpx run <file>`. It is
+a sibling of `WorkflowBlock` (shown whole in workflow_block.rs.txt, followed by the `BlockContent` trait): same
+imports, same way of building `BlockOutput` from `Line`s (`Line::from(spans).into()`), same `Theme::current()`
+helpers (`theme.primary()`, `theme.muted()`, `theme.dim()` return a `Style`; colours such as `theme.accent_success`,
+`theme.accent_error`, `theme.accent_running`, `theme.warning` are `Color` fields), same accent/fold methods. Unlike
+it, this card has several lines.
+
+Types you import (`use crate::acpx::bundle::{{NodeKind, NodeState, Outcome, Run, RunStatus, fmt_duration,
+value_text}};`):
+{BUNDLE_API}
+Public surface:
+{CARD_API}
+Output lines:
+1. Header: `acpx ` bold, then `<title>`, then by status: Starting `starting…`; Running `running · <done>/<total> ·
+   <elapsed>`; Waiting `waiting at <node> · <elapsed>`; Completed `done in <elapsed>`; Failed `failed after
+   <elapsed>`; Cancelled `◌ cancelled after <elapsed>` (dim, like the workflow card). Elapsed via
+   `crate::util::format_duration(self.elapsed)`.
+2. One line per row: two spaces, the `NodeState::glyph()` coloured by state (Running accent_running, Waiting warning,
+   Done(Ok) accent_success, Done(Failed|TimedOut) accent_error, others muted), the node id padded to the longest id,
+   the label (muted), the duration (`fmt_duration`, muted, blank when None), the result (muted; error results in
+   accent_error). No width is known here: do not truncate, the scrollback wraps.
+3. Waiting: a line `  ◐ <detail>` in warning, then a dim line `  acpx cannot resume a run; re-run the flow to continue`.
+   Failed: a line `  ✗ <message>` in accent_error. `note`, when Some, as a last dim line.
+4. A last dim line `  /acpx <run id> opens this run` once `run_id` is known.
+In `DisplayMode` terms: when the fold mode in `ctx` is the collapsed one the workflow card uses for its single line,
+show only the header; follow the workflow card for `is_foldable`, `default_display_mode`, accent colour by status
+(running animated like the workflow card's running state, failed error colour, otherwise as the workflow card does).
+`update_from_run`: title = run.summary.title; run_id; rows from `run.flow.nodes` in order with
+`run.node_state(id)`, the node's LAST step for duration/result/agent (result rules: step.error; else output object
+with a string `route` -> `→ <route>`; else action exit code -> `exit <code>`; else first line of
+`value_text(&step.output)`; objects and arrays as compact JSON); status from `run.summary.status` (Running ->
+Running, Waiting -> Waiting {{ node: waiting_on, detail: status_detail }}, Completed -> Completed, Failed/TimedOut ->
+Failed(error or "failed"), Unknown -> unchanged); elapsed = `run.duration_ms(now_ms)`.
+Tests (at least 10), building `Run` by hand with a private helper and reading the text of
+`output(&BlockContext::default())` lines (if `BlockContext` has no `Default` in the excerpt, build it the way the
+workflow card's own tests do; if those are not shown, test `update_from_run`, `set_status`, `is_running` and a
+private `fn lines(&self, selected: bool, collapsed: bool) -> Vec<Line<'static>>` that `output` calls, and assert on
+that instead): started state; rows in flow order with glyphs; waiting lines; failed line; completed header;
+cancelled survives update_from_run; route result; exit-code result; untaken branch row is `○` with no duration;
+run id hint line; collapsed shows one line.
+{RULES}""",
+    },
+    {
+        "custom_id": "flows_page",
+        "output_file": f"{SRC}/views/side_panel/flows.rs",
+        "context_files": [f"{CTX}/side_panel.rs.txt"],
+        "prompt": f"""
+Write `flows.rs`: the "Flows" page of the pager's F3 side panel: the step rail of the newest acpx flow run, then the
+recent runs. side_panel.rs.txt shows the panel's `Row`, `Ctx`, `note_rows`, and the whole sibling page `recent.rs`;
+match its style exactly (`use super::{{Ctx, Row, note_rows}};`, rows built from `Line`/`Span`, `truncate_str` to
+`c.width`, colours from `c.theme`). The panel is narrow (about 30-50 columns): every row is cut to `c.width`.
+
+Types you import (`use crate::acpx::bundle::{{self, NodeState, Outcome, Run, RunStatus, RunSummary, fmt_duration}};`):
+{BUNDLE_API}
+Public surface:
+{FLOWS_API}
+`poll`: `bundle::runs_base()` then `bundle::list_runs` (cheap: one small file per run) on every call; the featured
+run is the newest Running run, else the newest Waiting run, else the newest run; `bundle::load_run` it when it
+changes and `bundle::refresh` it on later polls while it is Running. Return true when the list or the featured run
+changed. Keep at most 30 runs. Provide a private `fn poll_at(&mut self, base: &std::path::Path, now_ms: i64) -> bool`
+that `poll` calls, so tests can use a tempdir.
+`rows`:
+- No runs base or no runs: `note_rows("no acpx flow runs yet", c)`.
+- Featured run: a bold title row `<glyph> <title>`; a dim row `<flow name> · <done>/<total> · <duration> · <age>`
+  (`crate::views::traces_modal::fmt_age`); when Waiting a `theme.warning` row `◐ waiting at <node>` and a dim row with
+  the status detail; when Failed a `theme.accent_error` row `✗ <error>`. All of these rows open the featured run.
+- Step rail: one row per flow node in flow order: `<state glyph> <node id>` then right-aligned duration of its last
+  step; glyph coloured by state (Running accent_running, Waiting warning, Done(Ok) accent_success, failures
+  accent_error, NotRun gray_dim). Each opens the featured run. `copy` is `<node id>: <one-line result>`.
+- A blank row, a dim `recent` header, then the other runs: `<glyph> <title>` with right-aligned age; each opens its
+  own run; `copy` is the run directory.
+A row "opens a run" by `Row::new(line, copy).opens(format!("{{OPEN_PREFIX}}{{}}", dir.display()))`.
+Tests (at least 9) with bundles written into a `tempfile::tempdir()` by a private helper, a `Ctx` built the way
+`recent.rs` tests build theirs if shown (otherwise test a private `fn rows_for(&self, theme: &Theme, width: usize,
+now_ms: i64) -> Vec<Row>` that `rows` calls): empty base; featured prefers running over waiting over newest; rail
+order and glyphs; waiting rows; failed row; recent list excludes the featured run and carries its own open target;
+every row fits the width at 28 columns (display width); poll_at returns true on first load, false when nothing
+changed, true after live.json changes; open target starts with OPEN_PREFIX.
 {RULES}""",
     },
 ]
