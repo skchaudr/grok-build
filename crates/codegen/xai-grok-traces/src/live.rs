@@ -585,6 +585,8 @@ const WARN_MS: i64 = 30_000;
 const QUIET_MS: i64 = 120_000;
 const IDLE_DEBOUNCE_MS: i64 = 2_000;
 const BG_QUIET_MS: i64 = 600_000;
+/// An open child silent this long never got its stop (killed, interrupted, rolled over): not running.
+const CHILD_DEAD_MS: i64 = 3_600_000;
 
 fn join(parts: &[String]) -> String {
     parts.iter().filter(|p| !p.is_empty()).cloned().collect::<Vec<_>>().join(" · ")
@@ -822,7 +824,13 @@ pub fn fold_session(source: &str, row: &SessionRow, receipts: &[LiveReceipt], ki
     let items = prepare(source, receipts, None);
     let s = run(&items, strict);
     let open_tools = s.open_tools.clone();
-    let open_children = s.open_children.clone();
+    let child_age = |a: &str| {
+        let kid = kids.iter().find(|k| agent_of(k.native_id.as_deref()) == Some(a));
+        let mut times: Vec<Option<i64>> = receipts.iter().filter(|r| r.agent_id.as_deref() == Some(a)).map(|r| Some(r.at_ms)).collect();
+        times.extend([kid.and_then(|k| k.last_event_at), kid.and_then(|k| k.mtime_ms)]);
+        age_of(now, &times)
+    };
+    let open_children: Vec<String> = s.open_children.iter().filter(|a| child_age(a) < CHILD_DEAD_MS).cloned().collect();
     if s.ended {
         return Folded { open_tools, open_children, row: None };
     }
@@ -879,15 +887,19 @@ pub fn fold_children(source: &str, parent: &SessionRow, receipts: &[LiveReceipt]
             continue;
         }
         let items = agent.map(|a| prepare(source, receipts, Some(a))).unwrap_or_default();
+        let age = age_of(now, &[run(&items, strict).last.map(|(_, at)| at), kid.last_event_at, kid.mtime_ms]);
         if items.is_empty() {
             let known = agent.is_some_and(|a| started(a) || stopped(a));
             if (known && !is_open) || kid.status == Status::Completed {
                 continue;
             }
         }
+        // Not open and silent for BG_QUIET_MS: an earlier turn's subagent (or one whose stop never landed), not a running one.
+        if !is_open && age >= BG_QUIET_MS {
+            continue;
+        }
         let s = run(&items, strict);
         let (state, text, since_ms, extra_tools) = state_of(&s, now, kid.now.as_deref().unwrap_or(""));
-        let age = age_of(now, &[s.last.map(|(_, at)| at), kid.last_event_at, kid.mtime_ms]);
         out.push(LiveRow {
             session_id: kid.id.clone(),
             parent_id: Some(parent.id.clone()),
@@ -955,6 +967,47 @@ pub fn arrange(groups: Vec<Vec<LiveRow>>) -> Vec<LiveRow> {
     rows
 }
 
+/// Claude writes no `Stop` when the user interrupts (Esc), so receipts alone leave the session
+/// "working". True when the newest user/assistant entry in the transcript tail is the interrupt marker.
+pub fn interrupted(source: &str, path: &std::path::Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    if source != "claude" {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let Ok(len) = f.metadata().map(|m| m.len()) else { return false };
+    let start = len.saturating_sub(65_536);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return false;
+    }
+    let mut buf = String::new();
+    if f.read_to_string(&mut buf).is_err() {
+        // a tail cut inside a multi-byte char: retry lossy
+        let mut raw = Vec::new();
+        if f.seek(SeekFrom::Start(start)).is_err() || f.read_to_end(&mut raw).is_err() {
+            return false;
+        }
+        buf = String::from_utf8_lossy(&raw).into_owned();
+    }
+    for line in buf.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("user") => {
+                let c = v.pointer("/message/content");
+                let text = match c {
+                    Some(serde_json::Value::String(t)) => t.clone(),
+                    Some(serde_json::Value::Array(a)) => a.iter().filter_map(|b| b.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join(" "),
+                    _ => String::new(),
+                };
+                return text.trim_start().starts_with("[Request interrupted by user");
+            }
+            Some("assistant") => return false,
+            _ => continue,
+        }
+    }
+    false
+}
+
 /// The live screen's rows: `live_sessions` → not-alive dropped (a missing pid stays; a pid without a start gets a pid-only check) → same-process supersede
 /// for claude/pi/codex → `turn_receipts` → fold → children attached → ordered.
 pub fn fold_all(index: &TraceIndex, now_ms: i64, alive: impl Fn(i64, Option<i64>) -> bool) -> Result<Vec<LiveRow>> {
@@ -984,7 +1037,13 @@ pub fn fold_all(index: &TraceIndex, now_ms: i64, alive: impl Fn(i64, Option<i64>
         let kids = if matches!(s.source.as_str(), "claude" | "cursor") && !s.id.starts_with(crate::receipts::RECEIPT_ONLY_PREFIX) { index.children(&s.id)? } else { Vec::new() };
         let strict = strict_ids(&s.source);
         let folded = fold_session(&s.source, s, &receipts, &kids, now_ms, strict);
-        let Some(root) = folded.row else { continue };
+        let Some(mut root) = folded.row else { continue };
+        if matches!(root.state, LiveState::Working | LiveState::Tool) && (folded.open_children.is_empty() || root.bg_quiet) && interrupted(&s.source, &s.file_path) {
+            root.state = LiveState::Prompt;
+            root.text.clear();
+            root.since_ms = None;
+            root.extra_tools = 0;
+        }
         let mut group = vec![root];
         group.extend(fold_children(&s.source, s, &receipts, &kids, &folded.open_children, now_ms, strict));
         groups.push(group);
@@ -1960,5 +2019,24 @@ mod seq {
         assert_eq!(rows[0].session_id, "p");
         assert_eq!(rows[1].state, LiveState::Waiting);
         assert_eq!(rows[2].state, LiveState::Tool);
+    }
+
+    #[test]
+    fn interrupted_reads_the_last_turn_entry() {
+        use std::io::Write;
+        let write = |lines: &[&str]| {
+            let mut f = tempfile::NamedTempFile::new().unwrap();
+            for l in lines {
+                writeln!(f, "{l}").unwrap();
+            }
+            f
+        };
+        let asst = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
+        let int = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
+        let noise = r#"{"type":"queue-operation","operation":"dequeue"}"#;
+        assert!(interrupted("claude", write(&[asst, int, noise, noise]).path()));
+        assert!(!interrupted("claude", write(&[int, asst, noise]).path()));
+        assert!(!interrupted("grok", write(&[asst, int]).path()));
+        assert!(!interrupted("claude", std::path::Path::new("/nonexistent/x.jsonl")));
     }
 }
