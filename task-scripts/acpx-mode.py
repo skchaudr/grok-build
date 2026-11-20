@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepKind { Acp, Shell, Compute, Checkpoint, Decision, Other }   // flow.json node "nodeType": acp|action|compute|checkpoint|decision; an action node is Shell
+pub enum StepKind { Acp, Shell, Compute, Checkpoint, Other }   // flow.json node "nodeType": acp|action|compute|checkpoint. Shell = nodeType "action" with "actionExecution" "shell"; an action with actionExecution "function" is Compute; anything else Other
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SketchNode {
@@ -65,16 +65,17 @@ pub enum DriverEvent {
     ShellPrepared { node: String, attempt: String, command_line: String, cwd: Option<String>, at_ms: i64 },
     StepFinished {
         node: String, attempt: String, kind: StepKind,
-        outcome: String,              // "ok" | "failed" | "timed_out" | "cancelled" | other acpx strings verbatim
+        outcome: String,              // "ok" | "failed" | "timed_out" | other acpx strings verbatim
         duration_ms: u64, error: Option<String>,
         output: Value,                // node_outcome payload.outputInline, or Value::Null
         stdout: Option<String>,       // shell: stdout artifact text (first 64 KiB, lossy UTF-8); None otherwise
+        stderr: Option<String>,       // shell: stderr artifact text (first 16 KiB); None otherwise
         exit_code: Option<i64>,       // shell: payload.action.exitCode
         at_ms: i64,
     },
     /// A checkpoint the run now waits on. `question` = the flow node summary, else the node id.
     Waiting { node: String, attempt: String, question: String, choices: Vec<GateChoice>, at_ms: i64 },
-    RunFinished { status: String, error: Option<String>, at_ms: i64 },   // projections/live.json status: completed|failed|waiting|timed_out|cancelled
+    RunFinished { status: String, error: Option<String>, at_ms: i64 },   // completed|failed|timed_out|waiting (see the RunFinished rule)
 }
 
 #[derive(Debug, Clone)]
@@ -89,11 +90,12 @@ pub struct DriverConfig {
 /// A live run started by `start`. Dropping it does not stop the run.
 pub struct RunHandle { /* private fields */ }
 impl RunHandle {
-    pub fn cancel(&self);                       // SIGTERM to the acpx child (and its process group); idempotent
+    pub fn cancel(&self);                       // SIGTERM to the acpx child pid (acpx then stops its agents/shells and writes run_failed); SIGKILL the process group 5 s later if it is still alive; idempotent
     pub fn run_dir(&self) -> Option<PathBuf>;   // known once RunStarted was sent
 }
 
-/// Spawn `acpx --approve-all --format json flow run <flow_file> --input-json <input_json>` in cfg.cwd and follow
+/// Write input_json to a temp file and spawn `acpx --approve-all --format json flow run <flow_file> --input-file <tmp>`
+/// in cfg.cwd (a relative flow_file resolves against cfg.cwd), and follow
 /// its run folder, sending every DriverEvent in order on `tx`. Must be called inside a tokio LocalSet (uses
 /// tokio::task::spawn_local). The last event is always RunFinished (also when acpx exits early or fails to start,
 /// with status "failed" and the error / stderr tail).
@@ -107,8 +109,8 @@ pub fn replay(run_dir: &Path) -> anyhow::Result<Vec<DriverEvent>>;
 /// Newest-first run folders: (run_id, flow name, title, status, started_ms). Reads manifest.json / projections/live.json.
 pub fn list_runs(runs_dir: &Path, limit: usize) -> Vec<(String, String, String, String, i64)>;
 
-pub fn parse_ts(s: &str) -> Option<i64>;        // "2026-11-20T01:14:34.620Z" -> unix ms
-pub fn fmt_duration(ms: u64) -> String;         // 0.4s, 27.1s, 2m14s, 1h03m
+pub use xai_grok_pager::acpx::bundle::{parse_ts, fmt_duration};   // re-export, do not reimplement:
+// parse_ts("2026-11-20T01:14:34.620Z") -> Some(unix ms); fmt_duration(ms) -> "400ms", "27.1s", "2m14s", ...
 """
 
 # ── Contract B: project.rs (implemented by slice `project`, used by `agent`) ──────────────────────────────────────
@@ -171,12 +173,13 @@ impl SubagentPreview {
 """
 
 RULES = """
-Hard rules: Rust 2024 edition, toolchain 1.94. No `unsafe`, except the single `libc::kill` call allowed in driver.rs
-if you use libc (prefer `nix`-free std/tokio APIs; `tokio::process::Child::start_kill` is acceptable for cancel).
+Hard rules: Rust 2024 edition, toolchain 1.94. No `unsafe`, except `libc::kill` calls in driver.rs under
+`#[cfg(unix)]` (libc is available on unix only).
 No `unwrap()` / `expect()` / indexing that can panic on anything read from disk, the network or the user.
 `use agent_client_protocol as acp;` (version 0.10.4, feature "unstable"); only use acp types and builder methods that
-appear in the context files. Crates available: agent_client_protocol, xai_acp_lib, tokio (rt, macros, process, sync,
-time, io-util, fs), serde_json, serde, anyhow, async_trait, tracing, chrono 0.4. Nothing else.
+appear in the context files. Crates available: agent_client_protocol, xai_acp_lib, xai_grok_pager (the pager library: only the
+items named in these prompts), tokio (full), serde_json, anyhow, async_trait, tracing, libc (cfg(unix)), tempfile
+(dev-dependency only). No serde derive, no chrono, nothing else.
 Names in the "Public surface" block are fixed: other files are being written against them right now. You may add
 private helpers and extra public items. Do not redefine types owned by another contract; import them by path.
 Tests: a `#[cfg(test)] mod tests` at the bottom; no network, no real acpx, no real agent. File fixtures go in
@@ -186,10 +189,13 @@ Return the complete file in ONE ```rust block and nothing else.
 
 RUN_FOLDER = """
 acpx run folder facts (verified on acpx 0.22; field names exact):
-- `~/.acpx/flows/runs/<runId>/` holds manifest.json {runId, flowName, runTitle, flowPath, startedAt, status},
-  flow.json {name, startAt, nodes:{<id>:{nodeType, profile?, modelId?, configOptions?:[{configId,value}], summary?}},
+- `~/.acpx/flows/runs/<runId>/` holds manifest.json {runId, flowName, runTitle?, flowPath, startedAt, status}
+  (runTitle is optional: title = manifest.runTitle, else live.json runTitle, else flowName),
+  flow.json {name, startAt, nodes:{<id>:{nodeType, actionExecution?, profile?, modelId?,
+  configOptions?:[{configId,value}], summary?}},
   edges:[{from,to} | {from, switch:{on, cases:{<label>:<to>}}}]}, trace.ndjson, projections/live.json
-  {status, statusDetail, waitingOn, currentNode, updatedAt}, sessions/<sessionId>/events.ndjson, artifacts/.
+  {status, statusDetail, waitingOn, currentNode, updatedAt, finishedAt?, error?}, sessions/<sessionId>/events.ndjson,
+  artifacts/. Skip a new run folder until its manifest.json exists and parses.
 - acpx prints NOTHING until the run ends (then one JSON object with runId). The run folder appears within ~1 s.
   Discover it: snapshot the folder names in runs_dir before spawning; poll every poll_ms for a NEW folder whose
   manifest.json `flowPath` equals the canonicalized flow file path (compare canonicalized; macOS /tmp is /private/tmp).
@@ -202,12 +208,16 @@ acpx run folder facts (verified on acpx 0.22; field names exact):
   node_outcome {nodeType, outcome, durationMs, error, outputInline?}. A checkpoint's node_outcome carries
   outputInline; when outputInline.next is an object {label: flowFile}, those are the gate choices (sorted by label).
   A waiting checkpoint is recorded as node_outcome outcome "ok" and then live.json status becomes "waiting" with
-  waitingOn = node id; acpx then exits. There is no run_completed trace event: the final status is live.json.
+  waitingOn = node id; acpx then exits. A completed run ends with trace `run_completed {status}`; a failed one with
+  `run_failed {status:"failed"|"timed_out", error}`; a waiting run has neither. A shell that exits non-zero fails the
+  node (node_outcome outcome "failed", error set, possibly no action_completed). An action node with actionExecution
+  "function" emits no action_prepared and its node_outcome payload.action.actionType is "function".
 - sessions/<sessionId>/events.ndjson lines: {"seq","at","direction":"outbound"|"inbound","message":<JSON-RPC>}.
   A session (handle) can serve several steps. Attribution rule: the k-th outbound message with method
   "session/prompt" in a session file belongs to the k-th acp_prompt_prepared trace event with that sessionId; every
   inbound message with method "session/update" after that prompt and before the inbound response with the same
-  JSON-RPC id (a message with "result" or "error" and that id) belongs to that attempt. Lines may arrive in the
+  JSON-RPC id (a message with direction "inbound", "result" or "error", that id, and seq after the prompt line)
+  belongs to that attempt. JSON-RPC ids repeat across prompts, so only match the response AFTER its prompt. Lines may arrive in the
   session file before the matching trace line: buffer them until attribution is known.
   NEVER forward or log messages whose method starts with "_auth" (they carry the account email). Ignore every
   other method (fs/*, _x.ai/*, results) except session/prompt and session/update.
@@ -230,23 +240,30 @@ Public surface (implement exactly):
 {RUN_FOLDER}
 Design:
 - One private `Tailer` that consumes run-folder lines and emits DriverEvents; `start` feeds it incrementally from a
-  polling task, `replay` feeds it everything at once (all trace lines first, then each session file, then a final
-  flush), so both paths produce identical events. Emission order inside a tick: trace-derived events in seq order,
-  with AgentPrompt/AgentUpdate for an attempt emitted after its StepStarted and before its StepFinished (buffer
-  StepFinished of an acp attempt until the session file showed the prompt's response, or until the run ended).
+  polling task, `replay` feeds it everything at once, so both paths produce identical events. Each tick reads every session
+  file BEFORE the trace file (acpx writes an agent's response before the trace's node_outcome). Trace-derived events
+  are emitted in seq order. Session lines are buffered per session until attributed; AgentPrompt/AgentUpdate of an
+  attempt are emitted after its StepStarted (and after acp_prompt_prepared). On node_outcome of an acp attempt, first
+  flush every AgentUpdate already attributed to it, then emit StepFinished immediately; never wait for a response
+  line (a failed or timed-out step has none). Later lines for a finished attempt are dropped.
 - RunStarted comes first: built from manifest.json + flow.json (FlowSketch: nodes in BFS order from startAt,
   unreachable nodes appended in key order; edges in file order) and the run_started `at`.
 - StepStarted on node_started. ShellPrepared on action_prepared (command_line = command + args, args containing
   spaces or quotes shell-quoted with single quotes). StepFinished on node_outcome (kind from payload.nodeType;
   for shell, read stdout from the action_completed stdoutArtifact, first 64 KiB, path must stay inside the run
-  folder: reject absolute paths and `..`). Waiting right after the StepFinished of a checkpoint when
-  outputInline.next is an object, or when the run ends with live.json status "waiting" (then choices may be empty).
-  Never emit Waiting twice for the same attempt.
-- RunFinished last: after the acpx child exited (start) or at the end of replay, read projections/live.json status
-  and error. In `start`, if no run folder appears within 15 s, or acpx exits before one appears, send RunFinished
+  folder: reject absolute paths and `..`; same for stderr, first 16 KiB). A Compute/Shell StepFinished may arrive
+  without a prior ShellPrepared. Waiting right after the StepFinished of a checkpoint when outputInline.next is an
+  object, or when the run ends with live.json status "waiting" (then choices may be empty and the attempt is the
+  node_outcome attempt of live.json waitingOn). Never emit Waiting twice for the same attempt.
+- RunFinished last: after the acpx child exited (start) or at the end of replay. status/error: the run_completed /
+  run_failed trace event if present, else live.json status and error; "waiting" when live.json says waiting; if
+  live.json is still "running" or missing after the child exited, status "failed", error "acpx exited without
+  finishing" (in start, acpx's final stdout JSON {{status, error}} is a fallback before that). In replay of a folder
+  whose live.json says "running", the last event is RunFinished {{status:"running"}} (still live). In `start`, if no run folder appears within 15 s, or acpx exits before one appears, send RunFinished
   {{status:"failed", error: stderr tail (last 2 KiB) or "acpx did not create a run folder"}}.
 - start: tokio::process::Command, stdin null, stdout/stderr piped and drained (stderr tail kept), PATH = extra_path
-  joined before the inherited PATH, process_group(0) so cancel can signal the group. Keep polling 300 ms after the
+  joined before the inherited PATH, process_group(0) so cancel can signal the group. Never
+  kill with SIGKILL first: a SIGKILLed acpx leaves live.json "running" forever. Keep polling 300 ms after the
   child exits to catch the last lines, then finish.
 - list_runs: newest first by startedAt, at most `limit`.
 Tests (at least 12), using a run folder written into a tempdir from string literals that follow the facts above:
@@ -255,7 +272,9 @@ is skipped); a session used by two steps (attribution by order); session lines t
 (feed in two halves through the Tailer and check identical events to one-shot replay); shell step with stdout
 artifact and exit code; an artifact path with `..` is not read; checkpoint with next -> Waiting with sorted choices;
 waiting run without next; torn last line ignored then completed on the next feed; switch edges -> one SketchEdge per
-case with labels; BFS order with an unreachable node; list_runs order; fmt_duration and parse_ts.
+case with labels; BFS order with an unreachable node; list_runs order; a failed acp step (no response line)
+  still yields StepFinished right after its updates; repeated JSON-RPC ids across two prompts; run title fallback to
+  flowName; an action node with actionExecution "function" is Compute; run_failed gives status/error.
 {RULES}""",
     },
     {
@@ -279,29 +298,37 @@ How a run must look in the pager (the user's spec):
   pending. Every later step change re-sends the whole Plan with updated statuses (in_progress / completed; a failed
   step is completed and its content gets " ✗"). Plan priority: medium for all entries.
 - An acp step is a SUBAGENT so it is one capped live block in the parent with a full view behind Enter. Follow the
-  exact order and JSON shapes in subagents.md: parent ToolCall (title = the step
-  label "<id> · <model> · <effort>", kind Other, status in_progress) with tool call id "acpx-tool:<run_id>:
-  <attempt>", then parent ToolCallUpdate raw_input {{"variant":"Task","task_id":<subagent id>,"run_in_background":
-  false,"reconcile":false}}, then XaiUpdate subagent_spawned with subagent_id "acpx-sub:<run_id>:<attempt>",
+  exact order and JSON shapes in subagents.md: parent ToolCall with tool call id "acpx-tool:<run_id>:<attempt>",
+  title exactly "Task", kind Other, status in_progress, and raw_input {{"variant":"Task","task_id":<subagent id>,
+  "run_in_background":false,"reconcile":false}} set ON CREATION (the pager hides a Task card only when it is created
+  with title "Task" or raw_input.variant "Task"), then XaiUpdate subagent_spawned with subagent_id "acpx-sub:<run_id>:<attempt>",
   parent_session_id, child_session_id (Projector::child_session_id), subagent_type "acpx step", description = the
   step label, model = the model if known. AgentPrompt -> child UserMessageChunk with the prompt text. AgentUpdate ->
   deserialize `update` with `serde_json::from_value::<acp::SessionUpdate>(update.clone())`; on success send it as
-  Out::Update for the child session; on failure (unknown variant) drop it. Keep the concatenated agent message text
-  per attempt for `final_message`. StepFinished (acp) -> XaiUpdate subagent_finished (status "completed" for ok,
-  "failed" otherwise; output = final message text, cut to 4000 chars; error when failed; duration_ms) and parent
-  ToolCallUpdate status completed / failed.
+  Out::Update for the child session, except AvailableCommandsUpdate, SessionInfoUpdate, CurrentModeUpdate and any
+  usage/config update, which are dropped; on failure (unknown variant) drop it. Keep the concatenated agent message text
+  per attempt for `final_message`. StepFinished (acp) -> XaiUpdate subagent_finished with EXACTLY these keys:
+  "sessionUpdate":"subagent_finished", subagent_id, parent_session_id, child_session_id, status ("completed" for ok,
+  else "failed"), error (only when failed), tool_calls (u32: ToolCall updates forwarded for this attempt), turns (1),
+  duration_ms (u64), tokens_used (0), output (final message cut to 4000 chars; omitted when empty), will_wake (false).
+  tool_calls and turns are REQUIRED by the pager (no serde default: without them the update is dropped). Then a parent
+  ToolCallUpdate status completed (also for a failed step: failure shows through subagent_finished; a Failed update
+  makes the pager push a red generic card).
 - A shell step is an execute tool call in the parent, shown like the pager's bash card (see tool_calls.md for the
   fields the execute card reads): ShellPrepared -> ToolCall id "acpx-tool:<run_id>:<attempt>", kind Execute, title
   = command line, status in_progress, raw_input {{"command": command_line, "cwd": cwd}}. StepFinished -> ToolCallUpdate
-  status completed when outcome is "ok" (failed otherwise), content = one text block with stdout (or "(no output)"),
-  raw_output {{"output": stdout, "exit_code": exit_code}}.
-- Compute and decision steps: one parent ToolCall kind Think, title "<id>", created completed at StepFinished with
+  status completed when outcome is "ok" (failed otherwise), content = one text block with stdout (or the error and
+  stderr for a failed step, or "(no output)"), raw_output = the pager's Bash output shape: {{"type":"Bash",
+  "output":<stdout bytes as a JSON array of numbers>, "output_for_prompt":<stdout>, "exit_code":<exit code or
+  null>, "command":<command line>, "truncated":false, "signal":null, "timed_out":<outcome == "timed_out">,
+  "description":null, "current_dir":"", "output_file":"", "total_bytes":<stdout byte length>}}.
+- Compute steps (and Other): one parent ToolCall kind Think, title "<id>", created completed at StepFinished with
   content = a short text of `output` (a string as is; an object as compact JSON cut to 300 chars).
 - Checkpoint: StepStarted/StepFinished show nothing by themselves. Waiting -> parent AgentMessageChunk
   "\\n**◐ <node>** · <question>\\n" plus, when choices exist, one line per choice "`<n>` **<label>** → `<flow_file>`"
   (n from 1). (The agent asks the actual question; do not emit the question request here.) Plan entry in_progress.
 - RunFinished -> parent AgentMessageChunk on its own paragraph: "✓ **<title>** finished in <duration>" (completed),
-  "✗ **<title>** failed: <error>" (failed / timed_out / cancelled show the status word), nothing for "waiting".
+  "✗ **<title>** failed: <error>" (failed / timed_out show the status word), nothing for "waiting".
   Duration = RunFinished.at_ms - RunStarted.at_ms via crate::driver::fmt_duration.
 - Before any parent AgentMessageChunk that follows a tool call or subagent block, start with "\\n" so it renders as a
   new paragraph.
@@ -311,6 +338,10 @@ How a run must look in the pager (the user's spec):
   If a builder you need is not shown, build the value with serde_json::from_value from its wire JSON instead
   (wire names: "sessionUpdate":"tool_call", "toolCallId", "title", "kind", "status", "rawInput", "rawOutput",
   "content":[{{"type":"content","content":{{"type":"text","text":...}}}}]).
+- acp 0.10 names (verified): acp::PlanEntryPriority::Medium; acp::PlanEntryStatus::{{Pending, InProgress,
+  Completed}}; acp::ToolKind::{{Other, Think, Execute}}; acp::ToolCallStatus::{{InProgress, Completed, Failed}};
+  acp::SessionUpdate::{{Plan, ToolCall, ToolCallUpdate, AgentMessageChunk, UserMessageChunk, AgentThoughtChunk,
+  AvailableCommandsUpdate, SessionInfoUpdate, CurrentModeUpdate}}. SessionUpdate is non_exhaustive: matches need `_`.
 - mermaid(): `flowchart LR`, node ids sanitized to [A-Za-z0-9_], labels quoted ["✓ implement"], edges `a --> b` or
   `a -->|label| b`.
 Tests (at least 12): RunStarted gives a message containing a mermaid fence and a Plan with one entry per node;
@@ -339,7 +370,7 @@ Public surface (implement exactly; main.rs is written by hand against it):
 pub struct AgentConfig {{
     pub driver: crate::driver::DriverConfig,
     pub default_flow: Option<std::path::PathBuf>,   // runs for a plain message when no gate is waiting
-    pub flows_dir: std::path::PathBuf,               // relative /flow paths resolve here (default: cwd)
+    // relative /flow paths and the acpx working directory are the session's cwd (NewSessionRequest.cwd)
 }}
 pub struct AcpxAgent {{ /* private: client_tx, Rc<RefCell<State>> */ }}
 impl AcpxAgent {{
@@ -352,36 +383,50 @@ impl acp::Agent for AcpxAgent {{ /* initialize, authenticate, new_session, load_
 /// What a user message means. Pure; tested.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {{
-    Flow {{ file: String, input: serde_json::Value }},  // "/flow <file> [rest]": rest parsed as a JSON object if it is one, else {{"task": rest}} ({{}} when empty)
+    Flow {{ file: String, input: serde_json::Value }},  // "/flow <file> [rest]": <file> may be double-quoted (spaces); rest parsed as a JSON object if it is one, else {{"task": rest}} ({{}} when empty)
     Runs,                                            // "/runs"
     Open {{ run_id: String }},                        // "/open <run id>"
     Answer {{ label: String }},                       // "/answer <label>", or a plain message equal (case-insensitive, trimmed) to a waiting gate label
     Task {{ text: String }},                          // any other plain message
-    Help,                                            // "/help" or an unknown "/..." command
+    Help,                                            // "/acpx-help" or an unknown "/..." command (the pager owns "/help")
 }}
 pub fn parse_command(text: &str, waiting_labels: &[String]) -> Command;
 ```
 Behaviour:
-- initialize: protocol V1, load_session(true), agent_info Implementation::new("acpx", env!("CARGO_PKG_VERSION"))
+- initialize: protocol V1, load_session(true), session_capabilities(acp::SessionCapabilities::new()
+  .list(acp::SessionListCapabilities::new())), agent_info Implementation::new("acpx", env!("CARGO_PKG_VERSION"))
   .title("acpx"). authenticate: Ok. set_session_mode: Ok with no change. ext_method: Err MethodNotFound.
   ext_notification: Ok(()).
-- new_session: a fresh session id "acpx-<unix ms>"; remember it as the current session; after responding, send an
-  AvailableCommandsUpdate with commands flow (input hint "<flow file> [task or JSON input]"), runs, open (hint
-  "<run id>"), answer (hint "<choice>"), help. Send that update from a spawn_local task so it follows the response.
+- Sessions: the pager creates several (a prewarmed one, /new, ...). State is a HashMap<session id, SessionState
+  {{cwd, waiting gate, running RunHandle, cancelled flag}}>; every notification and run uses the PromptRequest's
+  session_id. new_session: id "acpx-<unix ms>-<counter>", stores NewSessionRequest.cwd (the DriverConfig for its runs
+  is cfg.driver cloned with cwd = that cwd); after responding, send an AvailableCommandsUpdate built as
+  `acp::SessionUpdate::AvailableCommandsUpdate(acp::AvailableCommandsUpdate::new(vec![acp::AvailableCommand::new(name,
+  description).input(acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(hint)))]))` with
+  commands flow (hint "<flow file> [task or JSON input]"), runs, open (hint "<run id>"), answer (hint "<choice>"),
+  acpx-help (no input). Send it from a spawn_local task so it follows the response.
+- list_sessions (ACP session/list; the pager's resume picker uses it): one
+  `acp::SessionInfo::new(run_id, cwd).title(title).updated_at(<ISO 8601 of started_ms>)` per run from
+  driver::list_runs(runs_dir, 50) (cwd = the session request's cwd if given, else cfg.driver.cwd);
+  return `acp::ListSessionsResponse::new(infos)`.
 - prompt (one turn = one user message): join the text blocks of the prompt; parse_command with the labels of the
   waiting gate (if any); then:
-  * Flow / Task: resolve the flow file (Task uses default_flow; if none, reply with the help text and end). Start
+  * Flow / Task: resolve the flow file against the session cwd (Task uses default_flow; if none, reply with the
+    help text and end). Start
     the run with driver::start, create a Projector for this session, and for every DriverEvent: send each Out
     (Update -> acp::SessionNotification via acp_send with _meta as below; XaiUpdate -> ext notification
     "x.ai/session_notification" with params {{"sessionId","update","_meta"}}). When a Waiting event with choices
-    arrives, ask the question (below). The prompt call returns only when the run chain ends: RunFinished not followed
+    arrives, remember it, and ask the question (below) only after that run's RunFinished (status "waiting") has been
+    drained (acpx must have finished writing the run folder before load_run/gate_input). The prompt call returns only when the run chain ends: RunFinished not followed
     by a chained run, the user cancelled, or a Waiting the user did not answer. Return
     PromptResponse::new(StopReason::EndTurn) (Cancelled after cancel), stamped with the request's promptId as in
     prompt_response() in the skeleton.
   * Gate question: send `x.ai/ask_user_question` exactly as ask_user_question.md shows (an acp::ExtRequest via
-    acp_send, awaiting the response): one question (the Waiting question), options = the choices (label = choice
-    label, description = "starts <flow_file>", id = label), multiSelect false, noFreeform true, toolCallId =
-    "acpx-gate:<run_id>:<attempt>". Accepted answer -> chain: the next flow file resolves relative to the directory
+    acp_send, awaiting the response): params include "sessionId" (the session) and "mode":"default", one question (the
+    Waiting question), options = the choices (label = choice label, description = "starts <flow_file>", id = label),
+    multiSelect false, noFreeform true, toolCallId = "acpx-gate:<run_id>:<attempt>". The chosen label is the first
+    string of the first value of the response's "answers" object (unwrap an outer "result" key if present);
+    outcome "cancelled" or anything unparsable means not answered. Accepted answer -> chain: the next flow file resolves relative to the directory
     of the current run's flow_path (RunStarted.flow_path); its input is
     `xai_grok_pager::acpx::bundle::gate_input(&run, label)` where `run = xai_grok_pager::acpx::bundle::load_run(&run_dir)?`
     (signatures: `pub fn load_run(dir: &Path) -> io::Result<Run>`, `pub fn gate_input(run: &Run, choice: &str) -> Value`);
@@ -391,27 +436,33 @@ Behaviour:
   * Answer: if a gate is remembered and the label matches one of its choices, chain as above in this turn; else reply
     "No gate is waiting." / "Choices: a, b".
   * Runs: reply with a markdown table of driver::list_runs(runs_dir, 20): | run | flow | status | started |.
-  * Open: replay that run into the current session in this turn: driver::replay + a new Projector; send the Outs as
-    live updates (not isReplay) so they render normally; remember a waiting gate if the run is waiting.
+  * Open: replay that run into this session in this turn: driver::replay + a new Projector; send the Outs as
+    live updates (not isReplay) so they render normally; remember a waiting gate if the run is waiting. Opening
+    the same run twice in one session reuses child session ids: reply "Already shown above." instead.
   * Help: a short markdown list of the commands and what a plain message does.
   Replies are parent AgentMessageChunk text.
 - _meta on every parent/child session/update during a turn: turnStartMs (prompt start), streamStartMs (prompt start),
   promptId (from the PromptRequest _meta "promptId" when present), agentTimestampMs (now). Child updates also carry
   eventId = "<child session id>:<counter>". See send_update / send_update_for_session in notifications.md.
-- cancel: cancel the running RunHandle (if any), mark the turn cancelled so the event loop stops after RunFinished,
-  and let any pending question resolve (if the pager does not answer it, treat the cancel as "not answered").
-- load_session: the session id is a run id (folder name under runs_dir): set it as the current session, run
+- cancel (for the session id, or a child "acpx-step:" session id of its run): cancel the running RunHandle (if
+  any), mark the session cancelled so the event loop stops after RunFinished; if a gate question is pending, send ext
+  notification "pi/ui/cancel_interaction" {{"toolCallId":"acpx-gate:<run_id>:<attempt>"}} and treat it as not
+  answered. The prompt then returns StopReason::Cancelled.
+- load_session: register the session (cwd from the request). If the id is a run folder under runs_dir: run
   driver::replay, project every event with Projector::new(session id), and send each Out with _meta.isReplay = true
-  (XaiUpdate via method "x.ai/session/update"); then return LoadSessionResponse::new(). Unknown run id ->
-  acp::Error::invalid_params with a message.
-- One run at a time: a prompt that arrives while a run is streaming is answered "A run is in progress; press Esc to
+  (XaiUpdate via method "x.ai/session/update"), all BEFORE returning LoadSessionResponse::new() (the pager expects
+  replay, then the response); remember a waiting gate. Any other id (e.g. an "acpx-..." session the pager created)
+  returns LoadSessionResponse::new() with no replay, not an error.
+- One run at a time per session: a prompt that arrives while that session's run is streaming is answered "A run is in progress; press Esc to
   cancel it." and ends immediately (EndTurn).
 - State lives in Rc<RefCell<..>>; never hold a borrow across an .await.
 Tests (at least 10): parse_command for every variant, including "/flow ship.flow.ts" (empty object input),
 "/flow ship.flow.ts {{\\"name\\":\\"x\\"}}" (object input), "/flow f.ts fix the bug" ({{"task":"fix the bug"}}), a plain
-message equal to a waiting label with different case and spaces -> Answer, an unknown slash command -> Help; flow
-path resolution relative to flows_dir and absolute paths; next-flow resolution relative to the declaring flow's
-directory; the AvailableCommands list contents; _meta building (pure helper) includes promptId only when present.
+message equal to a waiting label with different case and spaces -> Answer, an unknown slash command -> Help; a double-quoted
+flow path with spaces; flow path resolution relative to the session cwd and absolute paths; next-flow resolution relative to the declaring flow's
+directory; the AvailableCommands list contents; _meta building (pure helper) includes promptId only when present;
+answer-label extraction from {{"outcome":"accepted","answers":{{"q":["approve"]}}}}, from the same wrapped in
+{{"result": ...}}, and from {{"outcome":"cancelled"}}.
 {RULES}""",
     },
     {
