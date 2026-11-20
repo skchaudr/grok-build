@@ -23,15 +23,24 @@ pub(super) fn feed_subagent_preview(parent: &mut AgentView, child_key: &str, upd
     let Some(info) = parent.subagent_sessions.get(child_key) else {
         return;
     };
-    if let Some(eid) = info.attempt.scrollback_entry_id
-        && let Some(entry) = parent.scrollback.get_by_id_mut(eid)
+    let Some(eid) = info.attempt.scrollback_entry_id else {
+        return;
+    };
+    let mut changed = false;
+    if let Some(entry) = parent.scrollback.get_by_id_mut(eid)
         && let RenderBlock::Subagent(ref mut sb) = entry.block
     {
         let before = sb.preview.revision();
         sb.preview.ingest(update);
         if sb.preview.revision() != before {
             entry.invalidate_cache();
+            changed = true;
         }
+    }
+    // The block grows with its preview and leaves the "N subagents" fold once it has one: re-measure and re-fold.
+    if changed {
+        parent.scrollback.mark_structurally_dirty(eid);
+        parent.scrollback.mark_height_dirty(eid);
     }
 }
 

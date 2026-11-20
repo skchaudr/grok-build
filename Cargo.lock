@@ -14372,6 +14372,7 @@ version = "1.0.45"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "async-trait",
  "clap",
  "crossterm",
  "cryptify",

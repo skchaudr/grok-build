@@ -1056,7 +1056,18 @@ impl Tailer {
                         .and_then(Value::as_u64)
                         .unwrap_or(0);
                     let error = extract_error_string(payload.get("error"));
-                    let output = payload.get("outputInline").cloned().unwrap_or(Value::Null);
+                    // A large output is stored as an artifact instead of inline (e.g. a checkpoint carrying long review
+                    // findings); read it so gate choices are never lost.
+                    let output = match payload.get("outputInline") {
+                        Some(v) if !v.is_null() => v.clone(),
+                        _ => payload
+                            .get("outputArtifact")
+                            .and_then(|a| a.get("path"))
+                            .and_then(Value::as_str)
+                            .and_then(|p| read_artifact_bounded(&self.run_dir, p, 1 << 20))
+                            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                            .unwrap_or(Value::Null),
+                    };
 
                     let (stdout, stderr, exit_code) = if kind == StepKind::Shell {
                         let ac = self.action_completed.get(&key);
@@ -1933,6 +1944,74 @@ mod tests {
         .join("\n")
             + "\n";
         write_file(root, "trace.ndjson", &trace_lines);
+
+        let events = replay(root).unwrap_or_default();
+        let waiting_events: Vec<&DriverEvent> = events
+            .iter()
+            .filter(|e| matches!(e, DriverEvent::Waiting { .. }))
+            .collect();
+        assert_eq!(waiting_events.len(), 1);
+        assert!(matches!(
+            waiting_events[0],
+            DriverEvent::Waiting { node, attempt, question, choices, .. }
+            if node == "gate"
+                && attempt == "a1"
+                && question == "Proceed with deploy?"
+                && choices == &vec![
+                    GateChoice { label: "alpha".to_string(), flow_file: "a.json".to_string() },
+                    GateChoice { label: "zelda".to_string(), flow_file: "z.json".to_string() },
+                ]
+        ));
+        assert!(
+            matches!(events.last(), Some(DriverEvent::RunFinished { status, .. }) if status == "waiting")
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_output_in_artifact_still_gives_choices() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let root = tmp.path();
+
+        write_file(root, "manifest.json", &base_manifest("run-6", "cp", None));
+        write_file(
+            root,
+            "flow.json",
+            &json!({
+                "name": "cp",
+                "startAt": "gate",
+                "nodes": {"gate": {"nodeType": "checkpoint", "summary": "Proceed with deploy?"}},
+                "edges": []
+            })
+            .to_string(),
+        );
+        write_file(
+            root,
+            "projections/live.json",
+            &json!({"status": "waiting", "waitingOn": "gate"}).to_string(),
+        );
+
+        let trace_lines = [
+            json!({"seq": 1, "at": "2026-11-20T01:14:34.000Z", "type": "run_started", "payload": {}}),
+            json!({"seq": 2, "at": "2026-11-20T01:14:34.100Z", "type": "node_started", "nodeId": "gate", "attemptId": "a1", "payload": {"nodeType": "checkpoint"}}),
+            json!({"seq": 3, "at": "2026-11-20T01:14:34.200Z", "type": "node_outcome", "nodeId": "gate", "attemptId": "a1", "payload": {
+                "nodeType": "checkpoint",
+                "outcome": "ok",
+                "durationMs": 5,
+                "outputArtifact": {"path": "artifacts/out.json", "mediaType": "application/json"}
+            }}),
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n";
+        write_file(root, "trace.ndjson", &trace_lines);
+        // acpx stores a large output (e.g. long review findings) as an artifact instead of inline.
+        write_file(
+            root,
+            "artifacts/out.json",
+            &json!({"review": {"findings": ["x"]}, "next": {"zelda": "z.json", "alpha": "a.json"}}).to_string(),
+        );
 
         let events = replay(root).unwrap_or_default();
         let waiting_events: Vec<&DriverEvent> = events

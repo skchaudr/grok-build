@@ -366,7 +366,7 @@ impl AcpxAgent {
                         self.send_parent_text(
                             session_id,
                             format!(
-                                "\n◐ Waiting at {node_name}. Answer later with `/answer <label>`.\n"
+                                "\n\n◐ Waiting at {node_name}. Answer later with `/answer <label>`.\n\n"
                             ),
                             timing,
                         )
@@ -409,7 +409,7 @@ impl AcpxAgent {
 
         self.send_parent_text(
             session_id,
-            format!("\n→ **{canonical_label}**: starting `{next_flow_file}`\n"),
+            format!("\n\n→ **{canonical_label}**: starting `{next_flow_file}`\n\n"),
             timing,
         )
         .await;

@@ -13,3 +13,6 @@ target-*/
 # Local TokenEconomizer state
 TokenEconomizer/
 TokenEconomizer/
+
+# Python bytecode from task-scripts
+__pycache__/

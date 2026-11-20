@@ -102,7 +102,7 @@ impl Projector {
                 let states = HashMap::new();
                 let chart = mermaid(flow, &states);
                 let text = format!(
-                    "**▶ {title}**\n`{flow_file_name}` · {run_id}\n```mermaid\n{chart}\n```\n\n"
+                    "\n**▶ {title}**\n\n`{flow_file_name}` · {run_id}\n\n```mermaid\n{chart}\n```\n\n"
                 );
 
                 let mut outs = vec![self.parent_message(&text)];
@@ -464,17 +464,11 @@ impl Projector {
                 choices,
                 ..
             } => {
-                let mut text = format!("\n**◐ {node}** · {question}\n");
-                for (idx, choice) in choices.iter().enumerate() {
-                    let n = idx + 1;
-                    text.push_str(&format!(
-                        "`{n}` **{}** → `{}`\n",
-                        choice.label, choice.flow_file
-                    ));
-                }
-
+                let _ = choices;
+                let state_changed = self.set_node_state(node, PlanNodeState::InProgress);
+                let text = format!("\n\n{}\n\n**◐ {node}** · {question}\n\n", self.taken_path());
                 let mut outs = vec![self.parent_message(&text)];
-                if self.set_node_state(node, PlanNodeState::InProgress)
+                if state_changed
                     && let Some(plan_out) = self.build_plan_out()
                 {
                     outs.push(plan_out);
@@ -493,14 +487,14 @@ impl Projector {
                 let text = if status == "completed" {
                     let dur_ms = (*at_ms - self.started_at_ms).max(0) as u64;
                     let dur = fmt_duration(dur_ms);
-                    format!("✓ **{}** finished in {dur}\n", self.title)
+                    format!("\n\n{}\n\n✓ **{}** finished in {dur}\n", self.taken_path(), self.title)
                 } else {
                     let detail = match error.as_deref().filter(|s| !s.is_empty()) {
                         Some(err) if status != "failed" => format!("{status} ({err})"),
                         Some(err) => err.to_string(),
                         None => status.clone(),
                     };
-                    format!("✗ **{}** failed: {detail}\n", self.title)
+                    format!("\n\n{}\n\n✗ **{}** failed: {detail}\n", self.taken_path(), self.title)
                 };
                 vec![self.parent_message(&text)]
             }
@@ -536,6 +530,26 @@ impl Projector {
             },
         );
         child_sid
+    }
+
+    /// The steps that ran so far, in flow order: "✓ implement → ✓ test → ◐ accept".
+    fn taken_path(&self) -> String {
+        let Some(flow) = self.flow.as_ref() else {
+            return String::new();
+        };
+        flow.nodes
+            .iter()
+            .filter_map(|n| {
+                let glyph = match self.plan_states.get(&n.id)? {
+                    PlanNodeState::Pending => return None,
+                    PlanNodeState::InProgress => '◐',
+                    PlanNodeState::Completed => '✓',
+                    PlanNodeState::Failed => '✗',
+                };
+                Some(format!("{glyph} {}", n.id))
+            })
+            .collect::<Vec<_>>()
+            .join(" → ")
     }
 
     fn set_node_state(&mut self, node: &str, state: PlanNodeState) -> bool {
@@ -1278,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_waiting_lists_numbered_choices_and_marks_plan_in_progress() {
+    fn checkpoint_waiting_shows_question_once_and_marks_plan_in_progress() {
         let mut proj = Projector::new("parent-1");
         proj.on_event(&DriverEvent::RunStarted {
             run_id: "r1".to_string(),
@@ -1311,8 +1325,9 @@ mod tests {
             Out::Update { update, .. } => {
                 let text = chunk_text(update).unwrap_or_default();
                 assert!(text.contains("**◐ human_gate** · Approve changes?"));
-                assert!(text.contains("`1` **Approve** → `deploy.flow.json`"));
-                assert!(text.contains("`2` **Rework** → `rework.flow.json`"));
+                // The choices live in the question pop-up only; the transcript shows the question once.
+                assert!(!text.contains("deploy.flow.json"));
+                assert!(text.contains("◐ human_gate"));
             }
             _ => panic!("expected AgentMessageChunk"),
         }

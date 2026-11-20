@@ -50,8 +50,12 @@ pub(crate) fn run_step(entry: &ScrollbackEntry, show_thinking: bool) -> RunStep 
             // Toggling a member of an expanded group therefore never dissolves the group
             RunStep::Transparent
         }
-    } else if matches!(entry.block, RenderBlock::Subagent(_)) {
-        if entry.display_mode == DisplayMode::Collapsed && !entry.is_pending_user_input {
+    } else if let RenderBlock::Subagent(sb) = &entry.block {
+        // A row showing a live preview of its child transcript stays standalone: it is a step to read
+        if entry.display_mode == DisplayMode::Collapsed
+            && !entry.is_pending_user_input
+            && sb.preview.is_empty()
+        {
             RunStep::Member(VerbGroupKind::Subagent)
         } else {
             // Subagent rows are always collapsed single-row entries; prompt chrome keeps them standalone and breaks the run
