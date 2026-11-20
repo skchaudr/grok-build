@@ -144,6 +144,21 @@ pub fn fmt_duration(ms: u64) -> String;                        // "7ms" "3.9s" "
 pub fn value_text(v: &Value) -> String;                        // a JSON string as-is; anything else pretty-printed; Null -> ""
 """
 
+# Hand-written additions to bundle.rs that the second-round slices call. Same module: `crate::acpx::bundle`.
+BUNDLE_EXTRA_API = """
+// ==== also in crate::acpx::bundle (already written; import what you use) ====
+/// Who ran (or will run) an agent node. Every field is None for non-agent nodes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AgentSettings { pub agent: Option<String>, pub model: Option<String>, pub effort: Option<String>, pub handle: Option<String>, pub acp_session_id: Option<String> }
+impl AgentSettings { pub fn label(&self) -> String; }          // the Some parts of agent, model, effort joined by " · ", e.g. "grok-build · grok-4.7 · low"; "" when none
+pub fn node_settings(run_dir: &Path) -> std::collections::HashMap<String, AgentSettings>;   // key = node id (from flow.json); empty on any error
+pub fn step_settings(run_dir: &Path) -> std::collections::HashMap<String, AgentSettings>;   // key = attempt id (from projections/steps.json); empty on any error
+pub fn is_stalled(summary: &RunSummary, now_ms: i64) -> bool;  // status Running but not updated for 90 s: the acpx process is gone
+/// A waiting run's gate choices: the waiting checkpoint step's output object `next` ({ "<label>": "<flow file>" }),
+/// as (label, flow file) in key order. Empty when the run is not waiting or the checkpoint declares none.
+pub fn gate_choices(run: &Run) -> Vec<(String, String)>;
+"""
+
 SESSIONS_API = """
 // ==== crate::acpx::sessions  (file: src/acpx/sessions.rs) ====
 #[derive(Debug, Clone, PartialEq)]
@@ -175,6 +190,23 @@ pub enum Direction { LeftRight, TopDown }
 pub fn mermaid_source(run: &crate::acpx::bundle::Run, direction: Direction) -> String;
 """
 
+DETAIL_API = """
+// ==== crate::views::acpx_modal::detail  (file: src/views/acpx_modal/detail.rs) ====
+/// What the right-hand panel shows.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DetailTarget {
+    Run,             // overview of the whole run
+    Step(usize),     // index into run.steps: one finished attempt
+    Node(String),    // a node id that has no step record yet (running, waiting, or not run)
+}
+pub struct DetailPanel { /* private */ }
+impl DetailPanel {
+    pub fn new() -> Self;
+    pub fn scroll(&mut self, delta: isize) -> bool;   // true when the offset moved. Scrolling up turns tail-following off; reaching the bottom turns it on
+    pub fn render(&mut self, buf: &mut Buffer, area: Rect, run: &Run, target: &DetailTarget, theme: &Theme, now_ms: i64);
+}
+"""
+
 # ── Contract 2: the view surface. Slices ledger/run_view/inspector implement it; slice `modal` drives it. ─────────
 VIEW_API = """
 // ==== crate::views::acpx_modal::ledger  (file: src/views/acpx_modal/ledger.rs) ====
@@ -182,10 +214,20 @@ VIEW_API = """
 pub enum LedgerTab { Flows, Sessions }
 #[derive(Debug, Clone, PartialEq)]
 pub enum LedgerOutcome { Unchanged, Changed, OpenRun(std::path::PathBuf), OpenSession(SessionSummary), Copy(String), Rescan, Close }
+/// Per-run facts the parent loads (cached) so the ledger does no I/O.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RowExtra {
+    pub rail: Vec<NodeState>,        // one per flow node, in flow order; empty when unknown
+    pub agents: String,              // e.g. "grok-build · grok-4.7 · low"; "" when no agent node
+    pub stalled: bool,               // bundle::is_stalled
+    pub question: Option<String>,    // what a waiting run is asking (the checkpoint summary)
+}
 pub struct LedgerState { /* private */ }
 impl LedgerState {
     pub fn new() -> Self;
     pub fn set_runs(&mut self, runs: Vec<RunSummary>);            // keeps the selected run_id selected when still present
+    pub fn set_extras(&mut self, extras: std::collections::HashMap<String, RowExtra>);   // key = run_id; a run without an entry draws without rail/agents
+    pub fn selected_run(&self) -> Option<&RunSummary>;            // the selected row of the Flows tab; None on the Sessions tab or an empty list
     pub fn set_sessions(&mut self, sessions: Vec<SessionSummary>);
     pub fn tab(&self) -> LedgerTab;
     pub fn any_live(&self) -> bool;                                // some run is Running
@@ -199,10 +241,18 @@ impl LedgerState {
 
 // ==== crate::views::acpx_modal::run  (file: src/views/acpx_modal/run.rs) ====
 #[derive(Debug, Clone, PartialEq)]
-pub enum RunOutcome { Unchanged, Changed, Back, OpenStep(usize), Replay(usize), Copy(String) }   // usize = index into run.steps
+pub enum RunOutcome {
+    Unchanged, Changed, Back, OpenStep(usize), Replay(usize), Copy(String),   // usize = index into run.steps
+    ScrollDetail(isize),                                 // the parent scrolls its DetailPanel by this many rows
+    Gate { choice: String, flow_file: String },          // the user confirmed a gate choice
+}
 pub struct RunViewState { /* private */ }
 impl RunViewState {
-    pub fn new(run: Run) -> Self;                                  // selection starts on the waiting/current step, else the last step
+    pub fn new(run: Run) -> Self;                                  // selection starts on the waiting/current stage, else the last stage that ran
+    pub fn set_settings(&mut self, nodes: std::collections::HashMap<String, AgentSettings>, steps: std::collections::HashMap<String, AgentSettings>);   // from bundle::node_settings / step_settings
+    pub fn detail_target(&self) -> DetailTarget;                   // what the selected row is about (see slice prompt)
+    pub fn detail_area(&self) -> Option<Rect>;                     // where the parent draws the DetailPanel, from the last render; None when the area is too narrow for two panes
+    pub fn captures_keys(&self) -> bool;                           // the gate confirmation box is open
     pub fn run(&self) -> &Run;
     pub fn run_mut(&mut self) -> &mut Run;                         // for bundle::refresh
     pub fn sync(&mut self);                                        // call after the run changed: rebuild rows, keep selection (by attempt id) and folds
@@ -545,9 +595,11 @@ that sleeps -> Starting, then cancel -> Cancelled, and the same on the next poll
         "context_files": view_ctx(),
         "prompt": f"""
 Write `ledger.rs`: the first screen of the `/acpx` modal, a two-tab list of flow runs and plain acpx sessions.
-It draws inside a content Rect the modal chrome already framed; the parent draws the title and the footer.
+It draws inside a content Rect the modal chrome already framed; the parent draws the title, the footer, and (to the
+right of this list, in its own Rect) a preview of the selected run. So `area` is often only 50-80 columns wide on a
+200-column terminal: the list must read well at 50 columns and use the room when it has 120.
 
-Types you import (`use crate::acpx::bundle::{{RunStatus, RunSummary, fmt_duration}};`
+Types you import (`use crate::acpx::bundle::{{NodeState, Outcome, RunStatus, RunSummary, fmt_duration}};`
 `use crate::acpx::sessions::SessionSummary;`):
 {BUNDLE_API}
 {SESSIONS_API}
@@ -555,28 +607,42 @@ Public surface:
 {VIEW_API.split('// ==== crate::views::acpx_modal::run')[0]}
 Layout:
 - Row 0: the tabs, ` Flows 12 │ Sessions 40 `, active tab bold + `theme.accent_assistant`, the other `theme.gray`;
-  right-aligned on the same row a summary such as `2 running · 1 waiting` and, when filtering, `/text`  `active`.
-- Row 1: column header in `theme.gray_dim`. Rows from 2: the list.
-- Flows columns: status glyph (coloured), title (flexible width), flow name, state text, age of last update
-  (`fmt_age(now_ms - updated_ms)`), duration. State text: Waiting -> `waiting: <waiting_on>`; Running ->
-  `<current_node>` plus status_detail when it fits; Failed/TimedOut -> the error cut to fit; Completed -> `done`.
-  Drop columns from the right as the width shrinks: duration below 100 columns, flow name below 80, age below 60.
-- Sessions columns: `●` open / `○` closed, title, agent, last path component of cwd, message count, tokens
-  (`12.3k`, `1.2M`), cost (`$0.12`, blank when None), age of last use. Same shrinking idea.
+  right-aligned on the same row a summary such as `1 needs you · 2 running` and, when filtering, `/text`  `active`.
+- Flows tab, default order `grouped`: three sections, each introduced by a header row that is NOT selectable
+  (movement skips it): `NEEDS YOU 2` in `theme.warning` (status Waiting), `RUNNING 1` in `theme.accent_running`
+  (Running and not stalled), `FINISHED 9` in `theme.gray_dim` (everything else, stalled runs included). Header text is
+  bold and followed by a `─` rule to the right edge in `theme.gray_dim`. Empty sections are omitted. Inside a section:
+  most recently updated first. A blank row separates sections when the list is shorter than the area.
+- A flow row is ONE line: status glyph (coloured; a stalled run shows `⊘` in `theme.gray`), title (flexible width,
+  cut with `truncate_str`), the rail, state text, agents, age of last update (`fmt_age(now_ms - updated_ms)`),
+  duration. The rail is `RowExtra.rail` drawn as its glyphs with no spaces, each coloured by state (Running
+  accent_running, Waiting warning, Done(Ok) accent_success, Done(Failed|TimedOut) accent_error, others gray_dim),
+  followed by ` <done>/<total>` in `theme.gray` where done = entries that are `Done(_)`; nothing when the rail is
+  empty. State text: Waiting -> the `question` when Some, else `waiting: <waiting_on>`; stalled -> `stalled at
+  <current_node>`; Running -> `<current_node>` plus status_detail when it fits; Failed/TimedOut -> the error cut to
+  fit; Completed -> `done`. Drop columns as the width shrinks: agents below 120 columns, duration below 96, the
+  `<done>/<total>` count below 80, age below 64, the rail below 48. Title and state text share what is left, title
+  first (at least 16 columns), state text cut to fit.
+- Sessions tab (unchanged idea): a column header row in `theme.gray_dim`, then rows: `●` open / `○` closed, title,
+  agent, last path component of cwd, message count, tokens (`12.3k`, `1.2M`), cost (`$0.12`, blank when None), age of
+  last use; drop columns from the right as the width shrinks.
 Keys: movement per the house style; Tab / BackTab / Left / Right / h / l switch tab; `/` opens an inline filter
 (typed characters and Backspace edit it, Enter keeps it, Esc clears it and closes the input; matching is
-case-insensitive substring over title, flow name, status label, run id — or title, agent, cwd, name for sessions);
-`a` toggles active-only (Running or Waiting; for sessions: not closed); `s` cycles the sort (recent, status, name)
-and the header shows the active one; Enter -> OpenRun(dir) / OpenSession(row); `y` -> Copy(run dir as a string, or
-the session record id); `R` -> Rescan; Esc -> clears a non-empty filter first (Changed), otherwise Close. While the
-filter input is open every printable key goes to it.
-Each tab keeps its own selection, scroll, and filter. `set_runs` / `set_sessions` re-apply filter and sort.
+case-insensitive substring over title, flow name, status label, run id, agents — or title, agent, cwd, name for
+sessions); `a` toggles active-only (Running or Waiting; for sessions: not closed); `s` cycles the order (grouped,
+recent, name — the flat orders have no section headers; show the active one right-aligned on the tab row as
+`[grouped]`); Enter -> OpenRun(dir) / OpenSession(row); `y` -> Copy(run dir as a string, or the session record id);
+`R` -> Rescan; Esc -> clears a non-empty filter first (Changed), otherwise Close. While the filter input is open
+every printable key goes to it.
+Each tab keeps its own selection, scroll, and filter. `set_runs` / `set_sessions` / `set_extras` re-apply filter and
+order and keep the selected run_id / session selected when it is still present.
 {VIEW_STYLE}
-Tests (at least 12): navigation and clamping; tab switching keeps per-tab selection; filter typing, Enter, Esc
-ordering (clear, then Close); active-only; sort cycling changes order; Enter outcomes on both tabs; `y`; `R`;
-set_runs keeps the selected run_id; any_live; render at 120x12 shows the tab row, a waiting row containing
-`waiting: review` and its glyph; render at 50x6 does not panic and keeps the title; render at 0x0 does not panic;
-empty state line.
+Tests (at least 14): navigation skips section headers and clamps; grouped order puts a Waiting run above a newer
+Completed one; a stalled Running run is listed under FINISHED with `stalled at`; tab switching keeps per-tab
+selection; filter typing, Enter, Esc ordering (clear, then Close); active-only; order cycling; Enter outcomes on both
+tabs; `y`; `R`; set_runs keeps the selected run_id; selected_run on both tabs; any_live; render at 120x14 shows the
+tab row, the `NEEDS YOU` header, a waiting row containing its question text, its rail glyphs and `4/6`; render at
+50x8 keeps the title and does not panic; render at 0x0 does not panic; empty state line.
 {RULES}""",
     },
     {
@@ -584,52 +650,94 @@ empty state line.
         "output_file": f"{SRC}/views/acpx_modal/run.rs",
         "context_files": view_ctx(f"{CTX}/traces_fold.rs.txt", f"{CTX}/markdown_content.rs.txt"),
         "prompt": f"""
-Write `run.rs`: the screen for one flow run: the flow graph on top, a foldable outline of its steps below.
+Write `run.rs`: the screen for one flow run. Full width on top: header, banner, flow graph. Below, two panes: on the
+left the STAGES of the run, each stage a delineated group with every substep visible; on the right a detail panel
+that the PARENT draws (you only reserve its Rect and say what it should show).
 
-Types you import (`use crate::acpx::bundle::{{NodeKind, NodeState, Outcome, Run, RunStatus, Step, TraceEvent,
-fmt_duration, value_text}};` `use crate::acpx::graph::{{Direction, mermaid_source}};`
+Types you import (`use crate::acpx::bundle::{{self, AgentSettings, NodeKind, NodeState, Outcome, Run, RunStatus, Step,
+TraceEvent, fmt_duration, value_text}};` `use crate::acpx::graph::{{Direction, mermaid_source}};`
+`use crate::views::acpx_modal::detail::DetailTarget;`
 `use crate::views::traces_fold::{{FoldNode, FoldState, FoldTree}};` (shown in traces_fold.rs.txt; reuse it, do not
 write another fold model) `use crate::scrollback::blocks::markdown_content::MarkdownContent;`):
 {BUNDLE_API}
+{BUNDLE_EXTRA_API}
 {GRAPH_API}
+{DETAIL_API}
 Public surface:
 {'// ==== crate::views::acpx_modal::run' + VIEW_API.split('// ==== crate::views::acpx_modal::run')[1].split('// ==== crate::views::acpx_modal::inspector')[0]}
 Layout, top to bottom inside `area`:
-1. Header (1 row): run status glyph + title (bold), then dim ` · `-joined facts: flow name, `<done>/<total> nodes`,
-   duration (`run.duration_ms(now_ms)`), age when not live.
-2. Banner (1 row, only when needed): Waiting -> `◐ WAITING at <node>: <status_detail>` in `theme.warning`, followed by
-   dim `acpx cannot resume a run; re-run the flow to continue`; Failed/TimedOut -> `✗ <error>` in
-   `theme.accent_error`; Running -> `● <current_node> · <status_detail>` in `theme.accent_running`.
-3. Graph (toggle with `v`, on by default): render
-   `MarkdownContent::new_with_table_width(format!("```mermaid\\n{{src}}\\n```"), Some(width)).output(width)` and
-   paint each `BlockLine.content` (a `Line<'static>`) with `buf.set_line`. Use `Direction::LeftRight`; if that
-   produces more than `area.height / 2` lines or any line wider than the area, use `Direction::TopDown`; if that is
-   still too tall, show the first rows that fit and a dim `… graph cut (v hides it)` last row. Cache the rendered
-   lines keyed on (width, mermaid source) so it is not re-rendered every frame. Hidden automatically when the area
-   has fewer than 12 rows.
+1. Header (1 row): run status glyph + title (bold), then dim ` · `-joined facts: flow name (omit it when the title
+   already starts with it), `<done>/<total> nodes`, duration (`run.duration_ms(now_ms)`), age when not live.
+2. Banner (1 row, only when needed): Waiting -> `◐ NEEDS YOU at <node>: <status_detail>` in `theme.warning`;
+   Failed/TimedOut -> `✗ <error>` in `theme.accent_error`; Running -> `● <current_node> · <status_detail>` in
+   `theme.accent_running`; `bundle::is_stalled(&run.summary, now_ms)` -> `⊘ stalled at <current_node>: the acpx
+   process is gone` in `theme.gray` instead of the Running banner.
+3. Graph (toggle with `v`, on by default), full width: render
+   `MarkdownContent::new_with_table_width(format!("```mermaid\n{{src}}\n```"), Some(width)).output(width)` and
+   paint each `BlockLine.content` (a `Line<'static>`) with `buf.set_line`. When a diagram does not fit, that renderer
+   returns a boxed SOURCE LISTING instead of a drawing: detect it by any line whose text contains
+   `mermaid: flowchart` or `too wide to display`. Use `Direction::LeftRight`; if that is a source listing, or has
+   more than `area.height / 3` lines, or any line wider than the area, use `Direction::TopDown`; if TopDown is a
+   source listing show one dim row `graph does not fit at this width (v hides this line)`; if it is only too tall,
+   show the first rows that fit and a dim `… graph cut (v hides it)` last row. Cache the rendered lines keyed on
+   (width, mermaid source). Hidden automatically when the area has fewer than 16 rows.
 4. Separator row in `theme.gray_dim`.
-5. Outline (the rest): a `FoldTree<String>` whose roots are the steps (key = attempt id) and whose children are that
-   attempt's trace events (key = `"<attempt>/<seq>"`), from `run.step_events`. A node that is Running or Waiting but
-   has no step record yet gets a root row too (key = `"live/<node id>"`). Step row:
-   `▾|▸ <glyph> <node id>  <kind label or agent name>  <duration>  <one-line result>` where the result is the error
-   for failures, `→ <route>` when the output object has a string `route`, the exit code for shell actions, else the
-   first line of `value_text(&step.output)`, cut to fit. Event row (indented, dim): `+<ms since step start>  <kind>
-   <detail>`; `node_heartbeat` rows are hidden unless `n` (noise) is toggled on. Steps start collapsed:
-   `FoldState` only stores collapsed keys, so keep a `HashSet<String>` of the root keys the user has expanded and,
-   after every rebuild, `collapse` each root that has children and is not in that set.
-Keys: movement per the house style over visible rows; Left/h collapse (on a child or collapsed root, jump to the
-parent, as `FoldState::collapse` reports); Right/l expand; Space toggles; `E` toggles all; `n` noise; `v` graph;
-`!` jumps to the next failed step (wrapping); `c` jumps to the current/waiting step; `[` / `]` previous/next step
-root; Enter -> OpenStep(step index) (on an event row: its parent step); `r` -> Replay(step index) only for a step
-with `conversation` Some, otherwise Unchanged; `y` -> Copy(value_text of the selected step's output); Esc -> Back.
+5. The rest is split when `area.width >= 110`: stages pane on the left, width `(area.width * 2 / 5).clamp(46, 76)`,
+   then one column holding a `│` rule in `theme.gray_dim`, then the detail Rect (everything to the right), which you
+   leave untouched and return from `detail_area()`. Below 110 columns the stages pane takes the full width and
+   `detail_area()` is None.
+Stages pane: a `FoldTree<String>`. Roots, in this order:
+   a. one root per step in `run.steps` order (key = attempt id);
+   b. a root for a node that is Running or Waiting but has no step record yet (key = `"live/<node id>"`);
+   c. when any flow node has `NodeState::NotRun`: a root `"skipped"` drawn as a dim rule row `── not run ──` whose
+      children are those nodes, one per row (key = `"skip/<node id>"`), `○ <node id>  <kind label>` in gray_dim.
+   Stage header row: `▾|▸ <n> <glyph> <node id>` bold, then in `theme.gray` the agent label
+   (`AgentSettings::label()` from the step settings by attempt id, else the node settings by node id, else the kind
+   label; a shell action shows `shell`), then right-aligned the duration (`fmt_duration`; for a Running stage the
+   time since its `node_started` event). `<n>` is the 1-based position among a+b. The glyph is coloured by state.
+   Children of a stage (indented two columns, a `│` guide in gray_dim, `╰` on the last child):
+   - its trace events from `run.step_events`, as `+<ms since stage start>  <kind>  <detail>` in `theme.gray`;
+     `node_heartbeat` events are hidden unless `n` (noise) is on (key = `"<attempt>/<seq>"`);
+   - a result row (key = `"<attempt>/result"`): the error in accent_error for failures; `→ <route>` when the output
+     object has a string `route`; `exit <code>` for shell actions; else the first line of the output, where a JSON
+     string is shown as is and objects/arrays as compact one-line JSON (`serde_json::to_string`); cut to fit;
+   - for the Waiting stage, the GATE: one row per `bundle::gate_choices(run)` entry, `[<i>] <label> → <flow file>`
+     in `theme.warning` (key = `"gate/<i>"`, i from 1); when there are no choices one dim row `no next step declared:
+     re-run the flow to continue`.
+   Stages are EXPANDED by default (`FoldState` stores collapsed keys, so do nothing special). A blank row separates
+   one stage from the next when the pane is taller than the content; never inside a stage.
+`detail_target()`: selected row is a step header or one of its children -> `Step(index)`; a `live/…` root or its
+children (gate rows included) -> `Node(node id)`; a `skip/…` row -> `Node(node id)`; the `skipped` root or nothing
+selected -> `Run`.
+Keys (ignored while the confirmation box is open, see below): movement per the house style over visible rows;
+Left/h collapse (on a child or collapsed root, jump to the parent, as `FoldState::collapse` reports); Right/l expand;
+Space toggles; `E` toggles all; `n` noise; `v` graph; `!` jumps to the next failed step (wrapping); `c` jumps to the
+current/waiting stage; `[` / `]` previous/next stage header; `J` / `K` -> ScrollDetail(3) / ScrollDetail(-3) and
+`D` / `U` -> ScrollDetail(15) / ScrollDetail(-15); Enter on a gate row opens the confirmation box for that choice,
+Enter elsewhere -> OpenStep(step index) (on a child row: its stage; Unchanged for rows with no step); digits `1`-`9`
+while the run is Waiting open the confirmation box for that gate choice from anywhere; `F5` (`KeyCode::F(5)`) jumps
+the selection to the first gate row; `r` -> Replay(step index) only
+for a step with `conversation` Some, otherwise Unchanged; `y` -> Copy(value_text of the selected stage's output);
+Esc -> Back.
+Confirmation box: a small centred box drawn over the stages pane, `Start <flow file>?` bold, a dim line `choice
+"<label>" · runs with approve-all`, and `Enter start · Esc cancel`. While it is open `captures_keys()` is true and
+only Enter (-> `Gate {{ choice, flow_file }}` and close the box) and Esc (close, Changed) do anything.
 `sync()` rebuilds the tree after `bundle::refresh` changed the run and keeps selection by key, falling back to the
 nearest earlier root; fold state is kept (`FoldState::retain`).
+`shortcuts()`: `Enter step`, `r replay`, `1-9 gate` (only when the run is waiting and has choices), `Space fold`,
+`J/K detail`, `v graph`, `n noise`, `y copy`, `Esc back`, `? keys`.
 {VIEW_STYLE}
-Tests (at least 12), building `Run` values by hand with a private helper: initial selection on the waiting step;
-expand shows events and hides heartbeats until `n`; collapse on a child jumps to the parent; `E`; `!` wraps; `c`;
-`[` `]`; Enter and `r` outcomes including `r` on a non-acp step; `y`; Esc; sync keeps selection when a step is
-appended; render at 120x30 contains the title, the WAITING banner and a step row with its glyph; render with `v`
-off has no graph rows; render at 40x8 and 0x0 does not panic.
+Tests (at least 16), building `Run` values by hand with a private helper: initial selection on the waiting stage;
+stages start expanded and show events but hide heartbeats until `n`; collapse on a child jumps to the parent; `E`;
+`!` wraps; `c`; `[` `]`; Enter and `r` outcomes including `r` on a non-acp step; `y`; Esc; `J` and `U` outcomes;
+detail_target for a step child, a live root and a skipped node; a waiting run whose checkpoint output is
+`{{"next":{{"approve":"land.flow.ts","reject":"fix.flow.ts"}}}}` shows two gate rows, `2` opens the box
+(`captures_keys()`), Esc closes it, `2` then Enter yields `Gate {{ choice: "reject", flow_file: "fix.flow.ts" }}`;
+a waiting run without `next` shows the `no next step declared` row; sync keeps selection when a step is appended;
+render at 160x40 contains the title, the NEEDS YOU banner, a stage header with its glyph, the `│` pane rule, and
+`detail_area()` is Some with x greater than 46 and nothing drawn inside it; render at 100x30 has `detail_area()`
+None; the skipped section lists a NotRun node; render with `v` off has no graph rows; render at 40x8 and 0x0 does
+not panic.
 {RULES}""",
     },
     {
@@ -831,6 +939,182 @@ order and glyphs; waiting rows; failed row; recent list excludes the featured ru
 every row fits the width at 28 columns (display width); poll_at returns true on first load, false when nothing
 changed, true after live.json changes; open target starts with OPEN_PREFIX.
 {RULES}""",
+    },
+    {
+        "custom_id": "detail",
+        "output_file": f"{SRC}/views/acpx_modal/detail.rs",
+        "context_files": view_ctx(f"{CTX}/bundle_sample.md"),
+        "prompt": f"""
+Write `detail.rs`: the right-hand detail panel of the `/acpx` modal. Beside the runs list it shows an overview of the
+selected run; beside a run's stages it shows everything about the selected stage, including the agent's conversation
+(thinking, tool calls, messages), and follows a running stage live. It is a scrollable column of wrapped text drawn
+into the Rect it is given (often 80-120 columns, 30-50 rows). Legibility is the point: clear section rules, generous
+use of the height, nothing truncated that could wrap.
+
+Types you import (`use crate::acpx::bundle::{{self, AgentSettings, NodeKind, NodeState, Outcome, Run, RunStatus,
+Step, fmt_duration, value_text}};`):
+{BUNDLE_API}
+{BUNDLE_EXTRA_API}
+Public surface:
+{DETAIL_API}
+Content (build a `Vec<Line<'static>>` wrapped to the width, cache it, draw the visible window):
+- A section rule is a row `── <Name> ─────…` to the right edge, name bold in `theme.gray`, rule in `theme.gray_dim`,
+  with one blank row above it.
+- `DetailTarget::Step(i)`:
+  title row `<glyph> <node id>` bold (glyph coloured by outcome) and right-aligned `<duration>`; a `theme.gray` facts
+  row: the agent label (`bundle::step_settings(&run.summary.dir)` by attempt id, `AgentSettings::label()`), the kind
+  label, the attempt id, `exit <code>` for actions; an error row in `theme.accent_error` when `step.error` is Some.
+  Sections, each only when it has content: `Prompt` (`prompt_text`; at most 14 wrapped rows then a dim
+  `… +N more rows`); `Command` for actions (`command` + args on one wrapped paragraph, then `cwd`); `Conversation`
+  (see below) for steps with `conversation` Some; `Result` (`value_text(&step.output)`, wrapped, at most 40 rows then
+  `… +N more rows`); `stdout` / `stderr` for actions (`bundle::read_artifact(&run.summary.dir, artifact, 64 * 1024)`,
+  last 30 lines, a read error shown as one dim row); `Events` (the step's trace events, `+<ms>  <kind>  <detail>`,
+  heartbeats left out).
+- `DetailTarget::Node(id)`: title row with the node's state glyph and id; facts row from
+  `bundle::node_settings(&run.summary.dir)`; then by `run.node_state(id)`:
+  Running -> section `Conversation (live)` (see below) and `Events` (events whose node_id is this node and that
+  belong to no finished step); Waiting -> the run's `status_detail` in `theme.warning`, then section `Gate` listing
+  `bundle::gate_choices(run)` as `[<i>] <label> → <flow file>` or the dim row `no next step declared: re-run the flow
+  to continue`; NotRun -> one dim row `not run` (when the run is Running or Waiting: `not run yet`).
+- `DetailTarget::Run`: title row `<status glyph> <title>` bold; facts row: flow name, `<done>/<total> nodes`,
+  duration, age (`fmt_age`) when not live, `stalled` when `bundle::is_stalled`; for Waiting the `status_detail` in
+  `theme.warning` and the gate choices as above; for Failed/TimedOut the error in `theme.accent_error`. Section
+  `Stages`: one row per flow node in `run.flow.nodes` order: coloured state glyph, node id padded to the longest id,
+  agent label or kind label in `theme.gray`, the duration of its last step, then its one-line result (error; `→
+  <route>`; `exit <code>`; else first line of the output, objects as compact JSON) cut to the width. Section
+  `Last result`: `value_text` of the last step's output, wrapped, at most 20 rows. Section `Input`: `value_text` of
+  `run.input`, at most 12 rows.
+Conversation: the session's events file is `events.ndjson` (format in bundle_sample.md): one JSON object per line,
+`{{"seq", "at", "direction", "message"}}`, `message` being raw ACP JSON-RPC. Read at most the LAST 512 KiB of the
+file (seek; drop the first partial line). Lines whose `message.method` is `_auth/status_update` carry account data:
+skip them and never display any part of them. Turn the rest into items:
+  outbound `session/prompt` -> the prompt's text parts (shown dim, cut to 3 rows: the Prompt section has it in full);
+  inbound `session/update` by `params.update.sessionUpdate`: `agent_thought_chunk` and `agent_message_chunk`
+  (`content.text`; concatenate consecutive chunks of the same kind into one paragraph), `tool_call` (`toolCallId`,
+  `title`, `kind`, `status`), `tool_call_update` (same `toolCallId`: update its status and title; do not add a row);
+  everything else is ignored. Draw: thought as `∴ ` + italic `theme.gray` text; a tool call as one row
+  `▸ <title>  <status>` with the status word coloured (completed accent_success, failed accent_error, otherwise
+  accent_running); a message as plain `theme.fg`-coloured wrapped text (use the primary text colour shown in
+  theme.rs.txt). A blank row between items of different kinds.
+  For `Step(i)`: the file is `run.session_events_path(&conversation.session_id)`, and only lines with
+  `event_start_seq <= seq <= event_end_seq` count. For a Running `Node(id)`: the session is the `run.sessions` entry
+  whose `handle` equals the node's `AgentSettings.handle`; only lines with `seq` greater than the largest
+  `event_end_seq` of finished steps on that session id count. A missing or unreadable file is one dim row saying so.
+Caching and following: rebuild the lines only when (run dir, target, width, `run.summary.updated_ms`,
+`run.steps.len()`, `run.events.len()`, and the events file length for a target that has a conversation) changed.
+When the target changes, reset the scroll: to the top, except a Running `Node` starts tail-following (pinned to the
+bottom, and stays pinned as content grows until the user scrolls up). Draw a `theme.gray_dim` scroll marker in the
+last column (`█` over the visible fraction) when the content is taller than the area.
+Wrapping: write a private `wrap(text: &str, width: usize) -> Vec<String>` that breaks on spaces, hard-breaks words
+longer than the width, measures by display width (`unicode_width`), keeps blank lines, expands tabs to 4 spaces and
+drops other control characters. A width under 10 or a height of 0 draws nothing.
+{VIEW_STYLE}
+Tests (at least 14), building `Run` by hand with a private helper and writing files into a `tempfile::tempdir()`
+used as the run dir: wrap breaks on spaces, hard-breaks a long word, keeps blank lines, handles wide characters;
+Step shows Prompt, Result and Events sections in that order; an action step shows Command with its exit code and the
+stdout artifact's text; a conversation with two thought chunks, a tool call updated to completed, and two message
+chunks renders one thought paragraph, one `▸` row containing `completed`, and one message paragraph; lines outside
+the seq range are left out; an `_auth/status_update` line's text never appears; a missing events file renders the
+dim row; Run target lists the stages with glyphs and shows the gate choices of a waiting run; Node target for a
+NotRun node; scroll clamps at both ends and returns false at the limit; target change resets scroll; a Running node
+tail-follows as the events file grows and stops after scrolling up; render at 8x3 and 0x0 does not panic; nothing is
+drawn outside `area` (render into a sub-rect of a larger buffer and check the cells outside).
+{RULES}""",
+    },
+    {
+        "custom_id": "piw_adapter",
+        "output_file": "scripts/acpx-piw.py",
+        "context_files": [f"{CTX}/piw_protocol.md", f"{CTX}/bundle_sample.md"],
+        "prompt": f"""
+Write `acpx-piw.py`: a single-file Python 3 program (standard library only, Python 3.11+, asyncio) that lets the
+UNMODIFIED terminal viewer `piw` browse and live-follow acpx flow runs. piw is a client of a socket protocol;
+piw_protocol.md is the exact contract, worked out from piw's source: follow it to the letter, especially the
+canonical-JSON rule, the hello version gate, and the required keys. bundle_sample.md shows what an acpx run folder
+holds (`~/.acpx/flows/runs/<runId>/`: manifest.json, flow.json, trace.ndjson, projections/live.json, run.json,
+steps.json, sessions/<bundleId>/events.ndjson). acpx rewrites its projection files non-atomically: a file that fails
+to parse keeps its previous value for this poll.
+
+Command line (argparse):
+  acpx-piw.py serve [--socket PATH]      serve until interrupted; default socket /tmp/acpx-piw-<uid>.sock
+  acpx-piw.py open [RUN_ID] [--once]     start the server on /tmp/acpx-piw-<pid>.sock in this process, run
+                                         `piw [RUN_ID] [--once]` as a child with PIW_SOCKET=<that path> and
+                                         PIW_NO_AUTOSTART=1 in its environment (stdin/stdout/stderr inherited), exit
+                                         with piw's exit status, remove the socket file
+  acpx-piw.py selftest                   build the run list and every run's snapshot, assert each message is
+                                         canonical (parse then re-serialise gives identical bytes) and under
+                                         1 MiB, print one line per run and `selftest ok`; exit 1 on any failure
+  common: --runs-dir DIR (default: $ACPX_RUNS_DIR, else ~/.acpx/flows/runs), --piw PATH (default `piw`),
+          --piw-version X (default: parsed from `<piw> --version`, whose output is like `piw 0.17.7`)
+A socket file left behind by a dead server is removed before binding (try to connect first; only remove when the
+connect fails). A connection that closes without sending anything is normal (piw probes).
+
+Server behaviour (one asyncio task per connection, NDJSON lines both ways):
+- On accept, write the hello line at once.
+- `view.runs.watch`: respond accepted with receipt {{"subscribed": true}}; send a `runs` event with ALL runs in one
+  page (newest first, at most 200); poll the runs dir every second and send a new `runs` event when the page changed
+  (revision is a decimal string of a counter).
+- `view.run.watch`: respond accepted (or notFound with an error text when the run folder does not exist), send a
+  `run_snapshot` event, then re-read the run every 500 ms and send a new snapshot when its content changed
+  (integer `revision` in the payload and the event, incremented on change). `view.run.unwatch`: respond accepted,
+  stop that poll.
+- `view.page`: kinds `steps` and `trace_at_step` as section 3 / section 8 item 5 of the contract describe (window
+  start 0; all steps; `graphSteps` = for each node its latest step at or before the cursor, with prompt and output
+  null; `takenTransitions` for steps up to the cursor; trace items for `trace_at_step` = the trace items whose
+  attemptId is that step's); `session_entries` / `session_events` return the same pages the snapshot holds; any other
+  kind returns an empty page. Always echo `cursor`, and use the snapshot's current `revision`.
+- `run.pause` / `run.resume` / `run.cancel` and every other operation: respond rejected with error
+  "acpx runs are read-only here".
+Mapping an acpx run to piw's snapshot (keys exactly as the contract requires; acpx timestamps are already RFC 3339):
+- status: acpx `running|waiting|completed|failed|timed_out` map to the same strings; anything else `ambiguous`.
+- manifest: schema "pi-workflows.run-manifest.v1", runId, workflowName = flowName, runTitle, workflowSource
+  {{"kind":"file","path": flowPath, "hash": ""}}, startedAt, finishedAt (null while running; for every other status
+  the run's `finishedAt` when present, else its `updatedAt`), status, traceSchema "pi-workflows.trace-event.v1",
+  paths {{"workflow":"acpx","state":"acpx","trace":"acpx"}}.
+- display: status; activity "supervised_runner" when running else null; controls []; reason = statusDetail or null.
+- row extras: live = status running and updated within 90 s; possiblyInterrupted = running and not updated for 90 s.
+- workflow: schema "pi-workflows.definition-snapshot.v1", name, startAt, nodes as an object in flow.json order with
+  nodeType mapped (`acp` -> `agent`; `action`, `compute`, `checkpoint` unchanged), `actionExecution` and `summary`
+  copied when present; edges copied from flow.json keeping only `from`, `to`, `switch` ({{on, cases}}).
+- state: schema "pi-workflows.run-state.v1", traceSeq = the last trace seq (0 when none), runId, workflowName,
+  runTitle, startedAt, updatedAt, finishedAt, status, input (run.json `input`, else null), outputs and results
+  (run.json objects, else {{}}), steps, and when present currentNode, waitingOn, statusDetail, error.
+- steps (StepRecord) from projections/steps.json in order: attemptId, nodeId, nodeType (mapped as above), outcome,
+  startedAt, finishedAt, prompt = promptText (null when absent), output (null when absent), error when present,
+  action = the step's `trace.action` restricted to actionType, command, args, cwd, exitCode, signal, durationMs
+  (drop null values), conversation {{firstEntryId, lastEntryId}} when the step has session entries.
+- graphSteps omitted (defaults to the steps); takenTransitions = distinct "a->b" for consecutive steps;
+  stepStart 0, stepTotal = number of steps; live / possiblyInterrupted as for the row.
+- tracePage: every trace.ndjson line except type `node_heartbeat`, as {{seq, type, nodeId, attemptId, payload, at}}
+  (omit nodeId / attemptId when absent; payload {{}} when absent).
+- session: {{"binding": null, "capture": null, "integrity": null, "eventPage": {{"start":0,"total":0,"items":[]}},
+  "entryPage": {{start 0, total = len, items}}}} — "entries mode" of section 5. Build entries from each agent step's
+  slice of its session's events.ndjson (the step's `trace.conversation` gives `sessionId` (the folder name under
+  sessions/), `eventStartSeq`, `eventEndSeq`), in step order: one `user` message entry with the prompt text; then
+  the agent's turn as `assistant` message entries whose content is an array of parts — consecutive
+  `agent_thought_chunk` text joined into one {{"type":"thinking","thinking":…}} part, consecutive
+  `agent_message_chunk` text joined into one {{"type":"text","text":…}} part, each `tool_call` a
+  {{"type":"toolCall","id":toolCallId,"name":title,"arguments":rawInput or {{}}}} part; and for each tool call that
+  finished (a later `tool_call_update` with status completed or failed) a `toolResult`-role message with one text
+  part (the update's text content when it has any, else the status). Entry shape: {{"seq": n (1-based, contiguous
+  over the whole list), "at": the event's `at`, "entry": {{"type":"message","id":"<attemptId>:<k>","message":
+  {{"role", "content"}}}}}}. Lines whose `message.method` is `_auth/status_update` carry account data: skip them and
+  never copy any part of them. Other sessionUpdate kinds are ignored.
+- Size: one line must stay under 1 MiB. Cut any single text to 4000 characters (append "…"), any trace payload whose
+  JSON is over 2000 characters to {{"truncated": true}}, and if the snapshot line is still over 900 000 bytes drop the
+  session entries of the oldest steps (and their `conversation` ranges) until it fits.
+Canonical JSON: write your own serialiser (do not rely on `sort_keys`: keys sort by UTF-16 code units): no
+whitespace; strings via `json.dumps(s, ensure_ascii=False)` after replacing lone surrogates; ints as ints; a float
+that is integral as an int, any other float via `repr` (and never emit NaN/Infinity: use null); bools and null.
+Incoming lines are parsed with `json.loads`; a line that does not parse closes that connection.
+Robustness: nothing read from disk may crash the server: every per-run failure becomes a skipped run (list) or a
+`notFound` response (watch), logged to stderr as one line. Never print the contents of events files. Handle SIGINT /
+SIGTERM by closing the server and removing the socket file.
+Structure the file so the mapping is testable without sockets: pure functions `canon(obj) -> str`,
+`run_row(run_dir) -> dict | None`, `run_snapshot(run_dir, revision) -> dict | None`,
+`page_receipt(snapshot, kind, cursor) -> dict`, `session_entries(run_dir, steps) -> list`. No tests in the file
+beyond `selftest`.
+Return the complete file in ONE ```python block and nothing else: no prose before or after.
+""",
     },
 ]
 

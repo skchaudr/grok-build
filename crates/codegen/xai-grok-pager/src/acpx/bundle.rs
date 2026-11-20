@@ -1144,6 +1144,118 @@ fn parse_sessions(
     result
 }
 
+/// Who ran (or will run) an agent node. Every field is None for non-agent nodes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AgentSettings {
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub handle: Option<String>,
+    pub acp_session_id: Option<String>,
+}
+
+impl AgentSettings {
+    /// "grok-build · grok-4.7 · low" from the parts that are known; "" when none.
+    pub fn label(&self) -> String {
+        [&self.agent, &self.model, &self.effort].into_iter().flatten().map(String::as_str).collect::<Vec<_>>().join(" · ")
+    }
+}
+
+/// A run that says Running but has not been written for this long has lost its acpx process (it heartbeats every 5 s).
+const STALLED_AFTER_MS: i64 = 90_000;
+
+fn effort_of(options: Option<&Value>) -> Option<String> {
+    options?.as_array()?.iter().find(|o| str_field(o, "configId") == Some("reasoning_effort")).and_then(|o| {
+        string_field(o, "acceptedValue").or_else(|| string_field(o, "value"))
+    })
+}
+
+/// Per node id, what the flow file asked for (flow.json). Empty on any error.
+pub fn node_settings(run_dir: &Path) -> HashMap<String, AgentSettings> {
+    let Some(flow) = read_json_file(&run_dir.join("flow.json")) else { return HashMap::new() };
+    let Some(nodes) = flow.get("nodes").and_then(Value::as_object) else { return HashMap::new() };
+    nodes
+        .iter()
+        .map(|(id, node)| {
+            let settings = AgentSettings {
+                agent: string_field(node, "profile"),
+                model: string_field(node, "modelId"),
+                effort: effort_of(node.get("configOptions")),
+                handle: node.get("session").and_then(|s| string_field(s, "handle")),
+                acp_session_id: None,
+            };
+            (id.clone(), settings)
+        })
+        .collect()
+}
+
+/// Per attempt id, what the step actually ran with (projections/steps.json). Empty on any error.
+pub fn step_settings(run_dir: &Path) -> HashMap<String, AgentSettings> {
+    let Some(steps) = read_json_file(&run_dir.join("projections").join("steps.json")) else { return HashMap::new() };
+    let Some(steps) = steps.as_array().or_else(|| steps.get("steps").and_then(Value::as_array)) else {
+        return HashMap::new();
+    };
+    steps
+        .iter()
+        .filter_map(|step| {
+            let attempt = string_field(step, "attemptId")?;
+            let session = step.get("session").filter(|s| s.is_object());
+            let requested = session.and_then(|s| s.get("requestedSettings"));
+            let accepted = session.and_then(|s| s.get("acceptedSettings"));
+            let settings = AgentSettings {
+                agent: session
+                    .and_then(|s| string_field(s, "agentName"))
+                    .or_else(|| step.get("agent").and_then(|a| string_field(a, "agentName"))),
+                model: requested.and_then(|r| string_field(r, "model")),
+                effort: effort_of(accepted.and_then(|a| a.get("configOptions")))
+                    .or_else(|| effort_of(requested.and_then(|r| r.get("configOptions")))),
+                handle: session.and_then(|s| string_field(s, "handle")),
+                acp_session_id: session.and_then(|s| string_field(s, "acpSessionId")),
+            };
+            Some((attempt, settings))
+        })
+        .collect()
+}
+
+/// Running on paper, but nothing has written the run for 90 s: the acpx process is gone.
+pub fn is_stalled(summary: &RunSummary, now_ms: i64) -> bool {
+    summary.status == RunStatus::Running && now_ms.saturating_sub(summary.updated_ms) > STALLED_AFTER_MS
+}
+
+/// The flow file a run was started from (manifest.json, else projections/live.json).
+pub fn flow_path(run_dir: &Path) -> Option<PathBuf> {
+    [run_dir.join("manifest.json"), run_dir.join("projections").join("live.json")]
+        .iter()
+        .find_map(|file| read_json_file(file).and_then(|v| string_field(&v, "flowPath")))
+        .map(PathBuf::from)
+}
+
+/// A waiting run's gate choices: the waiting checkpoint step's output `next` object (`{ "<label>": "<flow file>" }`),
+/// as (label, flow file) in key order. Empty when the run is not waiting or the checkpoint declares none.
+pub fn gate_choices(run: &Run) -> Vec<(String, String)> {
+    if run.summary.status != RunStatus::Waiting {
+        return Vec::new();
+    }
+    let Some(node) = run.summary.waiting_on.as_deref() else { return Vec::new() };
+    let Some(step) = run.steps.iter().rev().find(|s| s.node_id == node) else { return Vec::new() };
+    let Some(next) = step.output.get("next").and_then(Value::as_object) else { return Vec::new() };
+    let mut choices: Vec<(String, String)> =
+        next.iter().filter_map(|(label, file)| Some((label.clone(), file.as_str()?.to_string()))).collect();
+    choices.sort();
+    choices
+}
+
+/// What a gate hands the next flow: the first run's input and every node's last output, plus which gate was answered.
+pub fn gate_input(run: &Run, choice: &str) -> Value {
+    let outputs: serde_json::Map<String, Value> =
+        run.steps.iter().map(|step| (step.node_id.clone(), step.output.clone())).collect();
+    serde_json::json!({
+        "input": run.input,
+        "outputs": outputs,
+        "gate": { "runId": run.summary.run_id, "node": run.summary.waiting_on, "choice": choice },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
