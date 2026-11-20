@@ -10,6 +10,7 @@ pub mod mermaid_content;
 mod quote_bar;
 mod session_event;
 mod subagent;
+pub(crate) mod subagent_preview;
 mod system;
 mod thinking;
 pub mod tool;

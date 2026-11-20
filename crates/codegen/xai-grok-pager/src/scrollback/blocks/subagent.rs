@@ -19,6 +19,7 @@ use crate::app::subagent::format_subagent_meta;
 use crate::appearance::AppearanceConfig;
 use crate::render::line_utils::truncate_str;
 use crate::scrollback::block::BlockContent;
+use crate::scrollback::blocks::subagent_preview::SubagentPreview;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockOutput, DisplayMode};
 use crate::theme::Theme;
 use crate::util::format_duration;
@@ -68,7 +69,13 @@ pub struct SubagentBlock {
     /// Cumulative tokens used by the child session, updated on each
     /// `SubagentProgress` tick and stamped at `SubagentFinished`.
     pub tokens_used: Option<u64>,
+    /// Live tail of the child's transcript, drawn under the header (capped at [`PREVIEW_ROWS`]). Empty for agents
+    /// that send no child updates, so those blocks stay one line.
+    pub preview: SubagentPreview,
 }
+
+/// Rows of the child's transcript shown inside the block. Enter still opens the full subagent view.
+pub const PREVIEW_ROWS: usize = 24;
 
 impl SubagentBlock {
     /// Create a "Subagent started" block (for both sync and async).
@@ -93,6 +100,7 @@ impl SubagentBlock {
             activity_label: None,
             turn_count: None,
             tokens_used: None,
+            preview: SubagentPreview::default(),
         }
     }
 
@@ -114,6 +122,7 @@ impl SubagentBlock {
             activity_label: None,
             turn_count: None,
             tokens_used: None,
+            preview: SubagentPreview::default(),
         }
     }
 
@@ -136,6 +145,7 @@ impl SubagentBlock {
             activity_label: None,
             turn_count: None,
             tokens_used: None,
+            preview: SubagentPreview::default(),
         }
     }
 
@@ -157,6 +167,7 @@ impl SubagentBlock {
             activity_label: None,
             turn_count: None,
             tokens_used: None,
+            preview: SubagentPreview::default(),
         }
     }
 
@@ -315,9 +326,19 @@ impl BlockContent for SubagentBlock {
             }
         };
 
-        BlockOutput {
-            lines: vec![line.into()],
+        let mut lines = vec![line.into()];
+        if !self.preview.is_empty() {
+            let rail = Span::styled("\u{2502} ", theme.muted());
+            let rows = self
+                .preview
+                .render(ctx.width.saturating_sub(2), PREVIEW_ROWS, &theme);
+            lines.extend(rows.into_iter().map(|row| {
+                let mut spans = vec![rail.clone()];
+                spans.extend(row.spans);
+                Line::from(spans).into()
+            }));
         }
+        BlockOutput { lines }
     }
 
     fn accent(&self, ctx: &BlockContext) -> Option<AccentStyle> {
@@ -375,7 +396,8 @@ impl BlockContent for SubagentBlock {
     }
 
     fn is_groupable(&self) -> bool {
-        true
+        // A block showing a live preview is a step to read, not a row to fold into a group.
+        self.preview.is_empty()
     }
 }
 

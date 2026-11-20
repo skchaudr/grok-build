@@ -483,6 +483,8 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         .expect("find_session_match returned an existing AgentId");
                     let child_key: &str = notif.request.session_id.0.as_ref();
                     record_child_usage_update(parent, child_key, &notif.request.update);
+                    // The child view consumes the update; keep a copy for the step block's live preview.
+                    let preview_update = notif.request.update.clone();
                     let activity_label = {
                         let child_view = parent
                             .descendant_view_for_live_update_mut(child_key)
@@ -574,6 +576,7 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
 
                     if let Some(owner) = parent.descendant_parent_view_mut(child_key) {
                         sync_subagent_activity(owner, child_key, activity_label);
+                        subagent_activity::feed_subagent_preview(owner, child_key, &preview_update);
                     }
 
                     is_active

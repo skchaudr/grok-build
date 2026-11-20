@@ -18,6 +18,23 @@ pub(super) fn sync_activity_label(
     }
 }
 
+/// Feed one child session update into the live preview of the child's block in its parent transcript.
+pub(super) fn feed_subagent_preview(parent: &mut AgentView, child_key: &str, update: &acp::SessionUpdate) {
+    let Some(info) = parent.subagent_sessions.get(child_key) else {
+        return;
+    };
+    if let Some(eid) = info.attempt.scrollback_entry_id
+        && let Some(entry) = parent.scrollback.get_by_id_mut(eid)
+        && let RenderBlock::Subagent(ref mut sb) = entry.block
+    {
+        let before = sb.preview.revision();
+        sb.preview.ingest(update);
+        if sb.preview.revision() != before {
+            entry.invalidate_cache();
+        }
+    }
+}
+
 /// Fan a subagent's computed activity label out to both places that show it, so the two can't drift.
 /// Those are the collapsed scrollback block and the [`SubagentInfo`] backing the tasks pane and dashboard rows.
 /// Once `finished` is set, only a clear (`None`) lands: buffered updates from the child race `SubagentFinished` and must not re-stamp the label.
