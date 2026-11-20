@@ -1262,8 +1262,11 @@ pub fn gate_choices(run: &Run) -> Vec<(String, String)> {
 pub fn gate_input(run: &Run, choice: &str) -> Value {
     let outputs: serde_json::Map<String, Value> =
         run.steps.iter().map(|step| (step.node_id.clone(), step.output.clone())).collect();
+    // A run that itself came from a gate carries the first run's input one level down: keep handing that on.
+    let came_from_gate = run.input.get("gate").is_some() && run.input.get("input").is_some();
+    let input = if came_from_gate { &run.input["input"] } else { &run.input };
     serde_json::json!({
-        "input": run.input,
+        "input": input,
         "outputs": outputs,
         "gate": { "runId": run.summary.run_id, "node": run.summary.waiting_on, "choice": choice },
     })
