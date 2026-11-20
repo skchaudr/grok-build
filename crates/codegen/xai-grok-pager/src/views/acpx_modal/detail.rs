@@ -131,7 +131,7 @@ impl DetailPanel {
         };
 
         if self.cache_key.as_ref() != Some(&key) {
-            self.lines = build_lines(run, target, area.width as usize, theme, now_ms);
+            self.lines = build_lines(run, target, (area.width as usize).saturating_sub(2), theme, now_ms);
             self.cache_key = Some(key);
         }
 

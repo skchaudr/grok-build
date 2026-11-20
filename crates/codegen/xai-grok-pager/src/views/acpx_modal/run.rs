@@ -707,7 +707,7 @@ impl RunViewState {
                 evs.first().map_or(0, |e| e.at_ms)
             };
             for ev in evs {
-                if !self.show_noise && ev.kind == "node_heartbeat" {
+                if !self.show_noise && matches!(ev.kind.as_str(), "node_heartbeat" | "artifact_written") {
                     continue;
                 }
                 let rel_ms = (ev.at_ms - start_ms).max(0);
@@ -784,7 +784,7 @@ impl RunViewState {
                 .map_or(self.run.summary.started_ms, |e| e.at_ms);
 
             for ev in live_evs {
-                if !self.show_noise && ev.kind == "node_heartbeat" {
+                if !self.show_noise && matches!(ev.kind.as_str(), "node_heartbeat" | "artifact_written") {
                     continue;
                 }
                 let rel_ms = (ev.at_ms - start_ms).max(0);

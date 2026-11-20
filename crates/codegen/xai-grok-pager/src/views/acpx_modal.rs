@@ -374,6 +374,10 @@ impl AcpxModalState {
                     _ => declared,
                 };
                 let input_json = bundle::gate_input(run, &choice).to_string();
+                // Back to the list, where the new run appears.
+                self.notice = Some(format!("{choice}: started {}", flow_file.display()));
+                self.mode = Mode::Ledger;
+                self.run_view = None;
                 AcpxOutcome::RunFlow { flow_file, input_json }
             }
         }
@@ -506,7 +510,9 @@ impl AcpxModalState {
                 .as_ref()
                 .map_or_else(Vec::new, |(_, ins)| ins.shortcuts()),
         };
-        labels.push("? keys");
+        if !labels.contains(&"? keys") {
+            labels.push("? keys");
+        }
         labels
     }
 }
@@ -530,7 +536,7 @@ fn row_extra(summary: &RunSummary) -> RowExtra {
         rail: run.flow.nodes.iter().map(|node| run.node_state(&node.id)).collect(),
         agents,
         stalled: false,
-        question: (summary.status == bundle::RunStatus::Waiting).then(|| summary.status_detail.clone()).flatten(),
+        question: (run.summary.status == bundle::RunStatus::Waiting).then(|| run.summary.status_detail.clone()).flatten(),
     }
 }
 
@@ -583,6 +589,11 @@ pub fn render_acpx_modal(
         fold_info: None,
     };
 
+    // Nothing of the screen behind may show around the frame.
+    let blank = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+    for y in full_area.y..full_area.y + full_area.height {
+        buf.set_stringn(full_area.x, y, " ".repeat(full_area.width as usize), full_area.width as usize, blank);
+    }
     let Some(ModalContentArea { content, .. }) =
         modal_window::render_modal_window(buf, full_area, &mut state.window, &config, &theme)
     else {

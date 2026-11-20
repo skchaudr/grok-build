@@ -1258,6 +1258,21 @@ impl LedgerState {
             }
         }
 
+        // Pad the rail to the longest one shown, so the state text starts in one column.
+        if show_rail {
+            let count_w = |n: usize| if show_rail_count { format!(" {n}/{n}").width() } else { 0 };
+            let widest = self
+                .extras
+                .values()
+                .map(|e| if e.rail.is_empty() { 0 } else { e.rail.len() + count_w(e.rail.len()) })
+                .max()
+                .unwrap_or(0);
+            if widest > rail_width {
+                rail_spans.push(Span::raw(" ".repeat(widest - rail_width)));
+                rail_width = widest;
+            }
+        }
+
         let agents_str = if show_agents {
             extra
                 .map(|e| e.agents.as_str())
@@ -1312,41 +1327,18 @@ impl LedgerState {
         let fixed_w = prefix_w + rail_col_w + agents_col_w + age_col_w + dur_col_w;
         let flex_budget = w.saturating_sub(fixed_w);
 
-        // Title and state text share what is left, title first (at least 16 columns), state text cut to fit.
-        let title_str;
-        let state_str;
-        if flex_budget == 0 {
-            title_str = String::new();
-            state_str = String::new();
-        } else if raw_state_text.is_empty() || flex_budget <= 17 {
-            title_str = truncate_str(&run.title, flex_budget);
-            state_str = String::new();
+        // Title and state text share what is left. Every row uses the same title width, so the columns line up.
+        let longest_title = self.runs.iter().map(|r| r.title.width()).max().unwrap_or(0);
+        let (title_str, state_str) = if flex_budget <= 17 || raw_state_text.is_empty() && rail_width == 0 {
+            (truncate_str(&run.title, flex_budget), String::new())
         } else {
-            // Need 1 space separator between title and state
-            let avail_pair = flex_budget - 1;
-            let raw_title_w = run.title.width();
-            let raw_state_w = raw_state_text.width();
-            if raw_title_w + raw_state_w <= avail_pair {
-                title_str = run.title.clone();
-                state_str = raw_state_text;
-            } else {
-                // Title gets at least 16 columns (or half of avail_pair if larger, capped at raw_title_w)
-                let half = (avail_pair / 2).max(16).min(avail_pair);
-                let title_max = if raw_state_w < avail_pair.saturating_sub(half) {
-                    avail_pair.saturating_sub(raw_state_w)
-                } else {
-                    half.min(raw_title_w.max(16)).min(avail_pair)
-                };
-                title_str = truncate_str(&run.title, title_max);
-                let used_title = title_str.width();
-                let state_budget = avail_pair.saturating_sub(used_title);
-                state_str = if state_budget > 0 {
-                    truncate_str(&raw_state_text, state_budget)
-                } else {
-                    String::new()
-                };
-            }
-        }
+            let half = (flex_budget - 1).div_euclid(2);
+            let title_col = longest_title.clamp(16, half.max(16));
+            let title = truncate_str(&run.title, title_col);
+            let pad = title_col.saturating_sub(title.width());
+            let state = truncate_str(&raw_state_text, flex_budget - 1 - title_col);
+            (format!("{title}{}", " ".repeat(pad)), state)
+        };
 
         let mut spans: Vec<Span<'static>> = Vec::new();
         spans.push(Span::styled(

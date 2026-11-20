@@ -397,6 +397,8 @@ pub fn load_run(dir: &Path) -> io::Result<Run> {
         run_proj_val.as_ref(),
     );
 
+    let mut summary = summary;
+    restore_question(&mut summary, &flow);
     Ok(Run {
         summary,
         flow,
@@ -405,6 +407,17 @@ pub fn load_run(dir: &Path) -> io::Result<Run> {
         input,
         sessions,
     })
+}
+
+/// acpx reports a checkpoint that has its own `run` with only its node id as the detail. Show the checkpoint's summary.
+fn restore_question(summary: &mut RunSummary, flow: &FlowDef) {
+    if summary.status != RunStatus::Waiting || summary.status_detail.as_deref() != summary.waiting_on.as_deref() {
+        return;
+    }
+    let node = flow.nodes.iter().find(|n| Some(n.id.as_str()) == summary.waiting_on.as_deref());
+    if let Some(question) = node.and_then(|n| n.summary.clone()) {
+        summary.status_detail = Some(question);
+    }
 }
 
 /// Re-read a run in place. Each file that fails to parse (acpx rewrites them non-atomically) keeps its previous value.
