@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -7,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::acpx::bundle::{RunStatus, RunSummary, fmt_duration};
+use crate::acpx::bundle::{NodeState, Outcome, RunStatus, RunSummary, fmt_duration};
 use crate::acpx::sessions::SessionSummary;
 use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
@@ -17,15 +18,6 @@ use crate::views::traces_modal::fmt_age;
 pub enum LedgerTab {
     Flows,
     Sessions,
-}
-
-impl LedgerTab {
-    fn toggle(self) -> Self {
-        match self {
-            LedgerTab::Flows => LedgerTab::Sessions,
-            LedgerTab::Sessions => LedgerTab::Flows,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,88 +31,122 @@ pub enum LedgerOutcome {
     Close,
 }
 
+/// Per-run facts the parent loads (cached) so the ledger does no I/O.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RowExtra {
+    pub rail: Vec<NodeState>,
+    pub agents: String,
+    pub stalled: bool,
+    pub question: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SortOrder {
+enum FlowOrder {
+    Grouped,
     Recent,
-    Status,
     Name,
 }
 
-impl SortOrder {
-    fn next(self) -> Self {
+impl FlowOrder {
+    fn label(self) -> &'static str {
         match self {
-            SortOrder::Recent => SortOrder::Status,
-            SortOrder::Status => SortOrder::Name,
-            SortOrder::Name => SortOrder::Recent,
+            Self::Grouped => "grouped",
+            Self::Recent => "recent",
+            Self::Name => "name",
         }
     }
 
+    fn next(self) -> Self {
+        match self {
+            Self::Grouped => Self::Recent,
+            Self::Recent => Self::Name,
+            Self::Name => Self::Grouped,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionOrder {
+    Recent,
+    Name,
+}
+
+impl SessionOrder {
     fn label(self) -> &'static str {
         match self {
-            SortOrder::Recent => "recent",
-            SortOrder::Status => "status",
-            SortOrder::Name => "name",
+            Self::Recent => "recent",
+            Self::Name => "name",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Recent => Self::Name,
+            Self::Name => Self::Recent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SectionKind {
+    NeedsYou,
+    Running,
+    Finished,
+}
+
+impl SectionKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "NEEDS YOU",
+            Self::Running => "RUNNING",
+            Self::Finished => "FINISHED",
+        }
+    }
+
+    fn color(self, theme: &Theme) -> Color {
+        match self {
+            Self::NeedsYou => theme.warning,
+            Self::Running => theme.accent_running,
+            Self::Finished => theme.gray_dim,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-struct TabState {
-    selected: usize,
-    scroll: usize,
-    filter: String,
-    active_only: bool,
-    sort: SortOrder,
-    visible_indices: Vec<usize>,
+enum FlowListRow {
+    Header { kind: SectionKind, count: usize },
+    Blank,
+    Run(usize), // index in `runs`
 }
 
-impl TabState {
-    fn new() -> Self {
-        Self {
-            selected: 0,
-            scroll: 0,
-            filter: String::new(),
-            active_only: false,
-            sort: SortOrder::Recent,
-            visible_indices: Vec::new(),
-        }
-    }
-
-    fn clamp(&mut self) {
-        if self.visible_indices.is_empty() {
-            self.selected = 0;
-            self.scroll = 0;
-        } else if self.selected >= self.visible_indices.len() {
-            self.selected = self.visible_indices.len() - 1;
-        }
-    }
-
-    fn adjust_scroll(&mut self, height: usize) {
-        self.clamp();
-        if height == 0 || self.visible_indices.is_empty() {
-            self.scroll = 0;
-            return;
-        }
-        if self.selected < self.scroll {
-            self.scroll = self.selected;
-        } else if self.selected >= self.scroll + height {
-            self.scroll = self.selected + 1 - height;
-        }
-        let max_scroll = self.visible_indices.len().saturating_sub(height);
-        if self.scroll > max_scroll {
-            self.scroll = max_scroll;
-        }
+impl FlowListRow {
+    fn is_selectable(&self) -> bool {
+        matches!(self, Self::Run(_))
     }
 }
 
 pub struct LedgerState {
     tab: LedgerTab,
     runs: Vec<RunSummary>,
+    extras: HashMap<String, RowExtra>,
     sessions: Vec<SessionSummary>,
-    flows_tab: TabState,
-    sessions_tab: TabState,
+
+    // Per-tab filter, order, active-only, selection & scroll
+    flow_filter: String,
+    flow_active_only: bool,
+    flow_order: FlowOrder,
+    flow_selected_run_id: Option<String>,
+    flow_scroll: usize,
+
+    session_filter: String,
+    session_active_only: bool,
+    session_order: SessionOrder,
+    session_selected_id: Option<String>,
+    session_scroll: usize,
+
     filter_open: bool,
-    last_list_height: usize,
+    last_render_height: usize,
+    last_render_width: usize,
 }
 
 impl Default for LedgerState {
@@ -134,24 +160,51 @@ impl LedgerState {
         Self {
             tab: LedgerTab::Flows,
             runs: Vec::new(),
+            extras: HashMap::new(),
             sessions: Vec::new(),
-            flows_tab: TabState::new(),
-            sessions_tab: TabState::new(),
+
+            flow_filter: String::new(),
+            flow_active_only: false,
+            flow_order: FlowOrder::Grouped,
+            flow_selected_run_id: None,
+            flow_scroll: 0,
+
+            session_filter: String::new(),
+            session_active_only: false,
+            session_order: SessionOrder::Recent,
+            session_selected_id: None,
+            session_scroll: 0,
+
             filter_open: false,
-            last_list_height: 10,
+            last_render_height: 14,
+            last_render_width: 100,
         }
     }
 
     pub fn set_runs(&mut self, runs: Vec<RunSummary>) {
-        let prev_id = self.selected_run().map(|r| r.run_id.clone());
         self.runs = runs;
-        self.recompute_flows(prev_id.as_deref());
+        self.reconcile_flow_selection();
+    }
+
+    pub fn set_extras(&mut self, extras: HashMap<String, RowExtra>) {
+        self.extras = extras;
+        self.reconcile_flow_selection();
+    }
+
+    pub fn selected_run(&self) -> Option<&RunSummary> {
+        if self.tab != LedgerTab::Flows {
+            return None;
+        }
+        let id = self.flow_selected_run_id.as_deref()?;
+        let indices = self.filtered_flow_indices();
+        indices
+            .into_iter()
+            .find_map(|idx| self.runs.get(idx).filter(|r| r.run_id == id))
     }
 
     pub fn set_sessions(&mut self, sessions: Vec<SessionSummary>) {
-        let prev_id = self.selected_session().map(|s| s.record_id.clone());
         self.sessions = sessions;
-        self.recompute_sessions(prev_id.as_deref());
+        self.reconcile_session_selection();
     }
 
     pub fn tab(&self) -> LedgerTab {
@@ -159,7 +212,9 @@ impl LedgerState {
     }
 
     pub fn any_live(&self) -> bool {
-        self.runs.iter().any(|r| r.status.is_live())
+        self.runs
+            .iter()
+            .any(|r| r.status.is_live() && !self.is_stalled(r))
     }
 
     pub fn captures_text(&self) -> bool {
@@ -167,7 +222,7 @@ impl LedgerState {
     }
 
     pub fn esc_closes(&self) -> bool {
-        !self.filter_open && self.active_tab_state().filter.is_empty()
+        !self.filter_open && self.active_filter().is_empty()
     }
 
     pub fn shortcuts(&self) -> Vec<&'static str> {
@@ -187,8 +242,382 @@ impl LedgerState {
         }
     }
 
+    fn is_stalled(&self, run: &RunSummary) -> bool {
+        self.extras
+            .get(&run.run_id)
+            .map(|e| e.stalled)
+            .unwrap_or(false)
+    }
+
+    fn active_filter(&self) -> &str {
+        match self.tab {
+            LedgerTab::Flows => &self.flow_filter,
+            LedgerTab::Sessions => &self.session_filter,
+        }
+    }
+
+    fn active_filter_mut(&mut self) -> &mut String {
+        match self.tab {
+            LedgerTab::Flows => &mut self.flow_filter,
+            LedgerTab::Sessions => &mut self.session_filter,
+        }
+    }
+
+    fn is_run_active(&self, run: &RunSummary) -> bool {
+        matches!(run.status, RunStatus::Running | RunStatus::Waiting) && !self.is_stalled(run)
+    }
+
+    fn matches_flow_filter(&self, run: &RunSummary) -> bool {
+        if self.flow_active_only && !self.is_run_active(run) {
+            return false;
+        }
+        let q = self.flow_filter.trim();
+        if q.is_empty() {
+            return true;
+        }
+        let q_lower = q.to_lowercase();
+        let agents = self
+            .extras
+            .get(&run.run_id)
+            .map(|e| e.agents.as_str())
+            .unwrap_or("");
+        run.title.to_lowercase().contains(&q_lower)
+            || run.flow_name.to_lowercase().contains(&q_lower)
+            || run.status.label().to_lowercase().contains(&q_lower)
+            || run.run_id.to_lowercase().contains(&q_lower)
+            || agents.to_lowercase().contains(&q_lower)
+    }
+
+    fn matches_session_filter(&self, s: &SessionSummary) -> bool {
+        if self.session_active_only && s.closed {
+            return false;
+        }
+        let q = self.session_filter.trim();
+        if q.is_empty() {
+            return true;
+        }
+        let q_lower = q.to_lowercase();
+        s.title.to_lowercase().contains(&q_lower)
+            || s.agent.to_lowercase().contains(&q_lower)
+            || s.cwd.to_lowercase().contains(&q_lower)
+            || s.name.to_lowercase().contains(&q_lower)
+    }
+
+    fn run_section(&self, run: &RunSummary) -> SectionKind {
+        let stalled = self.is_stalled(run);
+        if run.status == RunStatus::Waiting {
+            SectionKind::NeedsYou
+        } else if run.status == RunStatus::Running && !stalled {
+            SectionKind::Running
+        } else {
+            SectionKind::Finished
+        }
+    }
+
+    /// Returns indices into `self.runs` in display order.
+    fn filtered_flow_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = self
+            .runs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| self.matches_flow_filter(r).then_some(i))
+            .collect();
+
+        match self.flow_order {
+            FlowOrder::Grouped => {
+                indices.sort_by(|&a, &b| {
+                    let ra = &self.runs[a];
+                    let rb = &self.runs[b];
+                    let sa = match self.run_section(ra) {
+                        SectionKind::NeedsYou => 0,
+                        SectionKind::Running => 1,
+                        SectionKind::Finished => 2,
+                    };
+                    let sb = match self.run_section(rb) {
+                        SectionKind::NeedsYou => 0,
+                        SectionKind::Running => 1,
+                        SectionKind::Finished => 2,
+                    };
+                    sa.cmp(&sb)
+                        .then_with(|| rb.updated_ms.cmp(&ra.updated_ms))
+                        .then_with(|| rb.started_ms.cmp(&ra.started_ms))
+                        .then_with(|| ra.run_id.cmp(&rb.run_id))
+                });
+            }
+            FlowOrder::Recent => {
+                indices.sort_by(|&a, &b| {
+                    let ra = &self.runs[a];
+                    let rb = &self.runs[b];
+                    rb.updated_ms
+                        .cmp(&ra.updated_ms)
+                        .then_with(|| rb.started_ms.cmp(&ra.started_ms))
+                        .then_with(|| ra.run_id.cmp(&rb.run_id))
+                });
+            }
+            FlowOrder::Name => {
+                indices.sort_by(|&a, &b| {
+                    let ra = &self.runs[a];
+                    let rb = &self.runs[b];
+                    ra.title
+                        .to_lowercase()
+                        .cmp(&rb.title.to_lowercase())
+                        .then_with(|| rb.updated_ms.cmp(&ra.updated_ms))
+                        .then_with(|| ra.run_id.cmp(&rb.run_id))
+                });
+            }
+        }
+        indices
+    }
+
+    /// Build visual rows for the Flows tab. `list_height` is used to decide whether blank rows
+    /// separate sections when the list is shorter than the area.
+    fn build_flow_rows(&self, list_height: usize) -> Vec<FlowListRow> {
+        let indices = self.filtered_flow_indices();
+        if indices.is_empty() {
+            return Vec::new();
+        }
+        if self.flow_order != FlowOrder::Grouped {
+            return indices.into_iter().map(FlowListRow::Run).collect();
+        }
+
+        let mut needs_you = Vec::new();
+        let mut running = Vec::new();
+        let mut finished = Vec::new();
+        for idx in indices {
+            if let Some(r) = self.runs.get(idx) {
+                match self.run_section(r) {
+                    SectionKind::NeedsYou => needs_you.push(idx),
+                    SectionKind::Running => running.push(idx),
+                    SectionKind::Finished => finished.push(idx),
+                }
+            }
+        }
+
+        let sections: Vec<(SectionKind, Vec<usize>)> = [
+            (SectionKind::NeedsYou, needs_you),
+            (SectionKind::Running, running),
+            (SectionKind::Finished, finished),
+        ]
+        .into_iter()
+        .filter(|(_, items)| !items.is_empty())
+        .collect();
+
+        let non_blank_rows: usize = sections.iter().map(|(_, items)| 1 + items.len()).sum();
+        let blank_count = sections.len().saturating_sub(1);
+        let insert_blanks = non_blank_rows + blank_count <= list_height;
+
+        let mut out = Vec::with_capacity(non_blank_rows + blank_count);
+        for (i, (kind, items)) in sections.into_iter().enumerate() {
+            if i > 0 && insert_blanks {
+                out.push(FlowListRow::Blank);
+            }
+            out.push(FlowListRow::Header {
+                kind,
+                count: items.len(),
+            });
+            for idx in items {
+                out.push(FlowListRow::Run(idx));
+            }
+        }
+        out
+    }
+
+    fn filtered_session_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| self.matches_session_filter(s).then_some(i))
+            .collect();
+
+        match self.session_order {
+            SessionOrder::Recent => {
+                indices.sort_by(|&a, &b| {
+                    let sa = &self.sessions[a];
+                    let sb = &self.sessions[b];
+                    sb.last_used_ms
+                        .cmp(&sa.last_used_ms)
+                        .then_with(|| sb.created_ms.cmp(&sa.created_ms))
+                        .then_with(|| sa.record_id.cmp(&sb.record_id))
+                });
+            }
+            SessionOrder::Name => {
+                indices.sort_by(|&a, &b| {
+                    let sa = &self.sessions[a];
+                    let sb = &self.sessions[b];
+                    sa.title
+                        .to_lowercase()
+                        .cmp(&sb.title.to_lowercase())
+                        .then_with(|| sb.last_used_ms.cmp(&sa.last_used_ms))
+                        .then_with(|| sa.record_id.cmp(&sb.record_id))
+                });
+            }
+        }
+        indices
+    }
+
+    fn reconcile_flow_selection(&mut self) {
+        let indices = self.filtered_flow_indices();
+        if indices.is_empty() {
+            self.flow_selected_run_id = None;
+            self.flow_scroll = 0;
+            return;
+        }
+        if let Some(ref cur_id) = self.flow_selected_run_id
+            && indices
+                .iter()
+                .any(|&i| self.runs.get(i).map(|r| &r.run_id) == Some(cur_id))
+        {
+            return;
+        }
+        if let Some(&first_idx) = indices.first()
+            && let Some(r) = self.runs.get(first_idx)
+        {
+            self.flow_selected_run_id = Some(r.run_id.clone());
+        }
+    }
+
+    fn reconcile_session_selection(&mut self) {
+        let indices = self.filtered_session_indices();
+        if indices.is_empty() {
+            self.session_selected_id = None;
+            self.session_scroll = 0;
+            return;
+        }
+        if let Some(ref cur_id) = self.session_selected_id
+            && indices
+                .iter()
+                .any(|&i| self.sessions.get(i).map(|s| &s.record_id) == Some(cur_id))
+        {
+            return;
+        }
+        if let Some(&first_idx) = indices.first()
+            && let Some(s) = self.sessions.get(first_idx)
+        {
+            self.session_selected_id = Some(s.record_id.clone());
+        }
+    }
+
+    fn move_selection(&mut self, delta: isize) -> bool {
+        match self.tab {
+            LedgerTab::Flows => {
+                let indices = self.filtered_flow_indices();
+                if indices.is_empty() {
+                    return false;
+                }
+                let cur_pos = self
+                    .flow_selected_run_id
+                    .as_ref()
+                    .and_then(|id| {
+                        indices
+                            .iter()
+                            .position(|&i| self.runs.get(i).map(|r| &r.run_id) == Some(id))
+                    })
+                    .unwrap_or(0);
+                let max_pos = indices.len().saturating_sub(1);
+                let new_pos = (cur_pos as isize + delta).clamp(0, max_pos as isize) as usize;
+                let new_id = self.runs.get(indices[new_pos]).map(|r| r.run_id.clone());
+                if new_id != self.flow_selected_run_id {
+                    self.flow_selected_run_id = new_id;
+                    true
+                } else {
+                    false
+                }
+            }
+            LedgerTab::Sessions => {
+                let indices = self.filtered_session_indices();
+                if indices.is_empty() {
+                    return false;
+                }
+                let cur_pos = self
+                    .session_selected_id
+                    .as_ref()
+                    .and_then(|id| {
+                        indices
+                            .iter()
+                            .position(|&i| self.sessions.get(i).map(|s| &s.record_id) == Some(id))
+                    })
+                    .unwrap_or(0);
+                let max_pos = indices.len().saturating_sub(1);
+                let new_pos = (cur_pos as isize + delta).clamp(0, max_pos as isize) as usize;
+                let new_id = self
+                    .sessions
+                    .get(indices[new_pos])
+                    .map(|s| s.record_id.clone());
+                if new_id != self.session_selected_id {
+                    self.session_selected_id = new_id;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    fn jump_start(&mut self) -> bool {
+        match self.tab {
+            LedgerTab::Flows => {
+                let indices = self.filtered_flow_indices();
+                let first_id = indices
+                    .first()
+                    .and_then(|&i| self.runs.get(i))
+                    .map(|r| r.run_id.clone());
+                if first_id.is_some() && first_id != self.flow_selected_run_id {
+                    self.flow_selected_run_id = first_id;
+                    true
+                } else {
+                    false
+                }
+            }
+            LedgerTab::Sessions => {
+                let indices = self.filtered_session_indices();
+                let first_id = indices
+                    .first()
+                    .and_then(|&i| self.sessions.get(i))
+                    .map(|s| s.record_id.clone());
+                if first_id.is_some() && first_id != self.session_selected_id {
+                    self.session_selected_id = first_id;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    fn jump_end(&mut self) -> bool {
+        match self.tab {
+            LedgerTab::Flows => {
+                let indices = self.filtered_flow_indices();
+                let last_id = indices
+                    .last()
+                    .and_then(|&i| self.runs.get(i))
+                    .map(|r| r.run_id.clone());
+                if last_id.is_some() && last_id != self.flow_selected_run_id {
+                    self.flow_selected_run_id = last_id;
+                    true
+                } else {
+                    false
+                }
+            }
+            LedgerTab::Sessions => {
+                let indices = self.filtered_session_indices();
+                let last_id = indices
+                    .last()
+                    .and_then(|&i| self.sessions.get(i))
+                    .map(|s| s.record_id.clone());
+                if last_id.is_some() && last_id != self.session_selected_id {
+                    self.session_selected_id = last_id;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     pub fn scroll(&mut self, delta: isize) -> bool {
-        self.move_by(delta)
+        self.move_selection(delta)
     }
 
     pub fn handle_key(&mut self, key: &KeyEvent) -> LedgerOutcome {
@@ -201,72 +630,64 @@ impl LedgerState {
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let half_page = (self.last_render_height.saturating_sub(1) / 2).max(1) as isize;
+
         match key.code {
-            KeyCode::Char('d') if ctrl => {
-                let step = (self.last_list_height.max(2) / 2) as isize;
-                if self.move_by(step) {
+            KeyCode::Char('u') if ctrl => {
+                if self.move_selection(-half_page) {
                     LedgerOutcome::Changed
                 } else {
                     LedgerOutcome::Unchanged
                 }
             }
-            KeyCode::Char('u') if ctrl => {
-                let step = (self.last_list_height.max(2) / 2) as isize;
-                if self.move_by(-step) {
+            KeyCode::Char('d') if ctrl => {
+                if self.move_selection(half_page) {
                     LedgerOutcome::Changed
                 } else {
                     LedgerOutcome::Unchanged
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.move_by(1) {
+                if self.move_selection(1) {
                     LedgerOutcome::Changed
                 } else {
                     LedgerOutcome::Unchanged
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.move_by(-1) {
+                if self.move_selection(-1) {
                     LedgerOutcome::Changed
                 } else {
                     LedgerOutcome::Unchanged
                 }
             }
             KeyCode::PageDown => {
-                let step = (self.last_list_height.max(2) / 2) as isize;
-                if self.move_by(step) {
+                if self.move_selection(half_page) {
                     LedgerOutcome::Changed
                 } else {
                     LedgerOutcome::Unchanged
                 }
             }
             KeyCode::PageUp => {
-                let step = (self.last_list_height.max(2) / 2) as isize;
-                if self.move_by(-step) {
+                if self.move_selection(-half_page) {
                     LedgerOutcome::Changed
                 } else {
                     LedgerOutcome::Unchanged
                 }
             }
             KeyCode::Home | KeyCode::Char('g') => {
-                let state = self.active_tab_state_mut();
-                if !state.visible_indices.is_empty() && state.selected != 0 {
-                    state.selected = 0;
+                if self.jump_start() {
                     LedgerOutcome::Changed
                 } else {
                     LedgerOutcome::Unchanged
                 }
             }
             KeyCode::End | KeyCode::Char('G') => {
-                let state = self.active_tab_state_mut();
-                if !state.visible_indices.is_empty() {
-                    let last = state.visible_indices.len() - 1;
-                    if state.selected != last {
-                        state.selected = last;
-                        return LedgerOutcome::Changed;
-                    }
+                if self.jump_end() {
+                    LedgerOutcome::Changed
+                } else {
+                    LedgerOutcome::Unchanged
                 }
-                LedgerOutcome::Unchanged
             }
             KeyCode::Tab
             | KeyCode::BackTab
@@ -274,7 +695,14 @@ impl LedgerState {
             | KeyCode::Right
             | KeyCode::Char('h')
             | KeyCode::Char('l') => {
-                self.tab = self.tab.toggle();
+                self.tab = match self.tab {
+                    LedgerTab::Flows => LedgerTab::Sessions,
+                    LedgerTab::Sessions => LedgerTab::Flows,
+                };
+                match self.tab {
+                    LedgerTab::Flows => self.reconcile_flow_selection(),
+                    LedgerTab::Sessions => self.reconcile_session_selection(),
+                }
                 LedgerOutcome::Changed
             }
             KeyCode::Char('/') => {
@@ -284,14 +712,12 @@ impl LedgerState {
             KeyCode::Char('a') => {
                 match self.tab {
                     LedgerTab::Flows => {
-                        let prev = self.selected_run().map(|r| r.run_id.clone());
-                        self.flows_tab.active_only = !self.flows_tab.active_only;
-                        self.recompute_flows(prev.as_deref());
+                        self.flow_active_only = !self.flow_active_only;
+                        self.reconcile_flow_selection();
                     }
                     LedgerTab::Sessions => {
-                        let prev = self.selected_session().map(|s| s.record_id.clone());
-                        self.sessions_tab.active_only = !self.sessions_tab.active_only;
-                        self.recompute_sessions(prev.as_deref());
+                        self.session_active_only = !self.session_active_only;
+                        self.reconcile_session_selection();
                     }
                 }
                 LedgerOutcome::Changed
@@ -299,14 +725,12 @@ impl LedgerState {
             KeyCode::Char('s') => {
                 match self.tab {
                     LedgerTab::Flows => {
-                        let prev = self.selected_run().map(|r| r.run_id.clone());
-                        self.flows_tab.sort = self.flows_tab.sort.next();
-                        self.recompute_flows(prev.as_deref());
+                        self.flow_order = self.flow_order.next();
+                        self.reconcile_flow_selection();
                     }
                     LedgerTab::Sessions => {
-                        let prev = self.selected_session().map(|s| s.record_id.clone());
-                        self.sessions_tab.sort = self.sessions_tab.sort.next();
-                        self.recompute_sessions(prev.as_deref());
+                        self.session_order = self.session_order.next();
+                        self.reconcile_session_selection();
                     }
                 }
                 LedgerOutcome::Changed
@@ -320,8 +744,8 @@ impl LedgerState {
                     }
                 }
                 LedgerTab::Sessions => {
-                    if let Some(session) = self.selected_session() {
-                        LedgerOutcome::OpenSession(session.clone())
+                    if let Some(sess) = self.selected_session() {
+                        LedgerOutcome::OpenSession(sess.clone())
                     } else {
                         LedgerOutcome::Unchanged
                     }
@@ -336,8 +760,8 @@ impl LedgerState {
                     }
                 }
                 LedgerTab::Sessions => {
-                    if let Some(session) = self.selected_session() {
-                        LedgerOutcome::Copy(session.record_id.clone())
+                    if let Some(sess) = self.selected_session() {
+                        LedgerOutcome::Copy(sess.record_id.clone())
                     } else {
                         LedgerOutcome::Unchanged
                     }
@@ -345,8 +769,12 @@ impl LedgerState {
             },
             KeyCode::Char('R') => LedgerOutcome::Rescan,
             KeyCode::Esc => {
-                if !self.active_tab_state().filter.is_empty() {
-                    self.clear_active_filter();
+                if !self.active_filter().is_empty() {
+                    self.active_filter_mut().clear();
+                    match self.tab {
+                        LedgerTab::Flows => self.reconcile_flow_selection(),
+                        LedgerTab::Sessions => self.reconcile_session_selection(),
+                    }
                     LedgerOutcome::Changed
                 } else {
                     LedgerOutcome::Close
@@ -364,286 +792,157 @@ impl LedgerState {
             }
             KeyCode::Esc => {
                 self.filter_open = false;
-                self.clear_active_filter();
+                self.active_filter_mut().clear();
+                match self.tab {
+                    LedgerTab::Flows => self.reconcile_flow_selection(),
+                    LedgerTab::Sessions => self.reconcile_session_selection(),
+                }
                 LedgerOutcome::Changed
             }
             KeyCode::Backspace => {
+                self.active_filter_mut().pop();
                 match self.tab {
-                    LedgerTab::Flows => {
-                        let prev = self.selected_run().map(|r| r.run_id.clone());
-                        self.flows_tab.filter.pop();
-                        self.recompute_flows(prev.as_deref());
-                    }
-                    LedgerTab::Sessions => {
-                        let prev = self.selected_session().map(|s| s.record_id.clone());
-                        self.sessions_tab.filter.pop();
-                        self.recompute_sessions(prev.as_deref());
-                    }
+                    LedgerTab::Flows => self.reconcile_flow_selection(),
+                    LedgerTab::Sessions => self.reconcile_session_selection(),
                 }
                 LedgerOutcome::Changed
             }
             KeyCode::Char(c) => {
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    || key.modifiers.contains(KeyModifiers::ALT)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
                 {
-                    return LedgerOutcome::Unchanged;
-                }
-                match self.tab {
-                    LedgerTab::Flows => {
-                        let prev = self.selected_run().map(|r| r.run_id.clone());
-                        self.flows_tab.filter.push(c);
-                        self.recompute_flows(prev.as_deref());
+                    self.active_filter_mut().push(c);
+                    match self.tab {
+                        LedgerTab::Flows => self.reconcile_flow_selection(),
+                        LedgerTab::Sessions => self.reconcile_session_selection(),
                     }
-                    LedgerTab::Sessions => {
-                        let prev = self.selected_session().map(|s| s.record_id.clone());
-                        self.sessions_tab.filter.push(c);
-                        self.recompute_sessions(prev.as_deref());
-                    }
+                    LedgerOutcome::Changed
+                } else {
+                    LedgerOutcome::Unchanged
                 }
-                LedgerOutcome::Changed
             }
             _ => LedgerOutcome::Unchanged,
         }
     }
 
-    fn clear_active_filter(&mut self) {
-        match self.tab {
-            LedgerTab::Flows => {
-                let prev = self.selected_run().map(|r| r.run_id.clone());
-                self.flows_tab.filter.clear();
-                self.recompute_flows(prev.as_deref());
-            }
-            LedgerTab::Sessions => {
-                let prev = self.selected_session().map(|s| s.record_id.clone());
-                self.sessions_tab.filter.clear();
-                self.recompute_sessions(prev.as_deref());
-            }
-        }
-    }
-
-    fn active_tab_state(&self) -> &TabState {
-        match self.tab {
-            LedgerTab::Flows => &self.flows_tab,
-            LedgerTab::Sessions => &self.sessions_tab,
-        }
-    }
-
-    fn active_tab_state_mut(&mut self) -> &mut TabState {
-        match self.tab {
-            LedgerTab::Flows => &mut self.flows_tab,
-            LedgerTab::Sessions => &mut self.sessions_tab,
-        }
-    }
-
-    fn selected_run(&self) -> Option<&RunSummary> {
-        let idx = *self.flows_tab.visible_indices.get(self.flows_tab.selected)?;
-        self.runs.get(idx)
-    }
-
     fn selected_session(&self) -> Option<&SessionSummary> {
-        let idx = *self
-            .sessions_tab
-            .visible_indices
-            .get(self.sessions_tab.selected)?;
-        self.sessions.get(idx)
-    }
-
-    fn move_by(&mut self, delta: isize) -> bool {
-        let state = self.active_tab_state_mut();
-        let len = state.visible_indices.len();
-        if len == 0 || delta == 0 {
-            return false;
+        if self.tab != LedgerTab::Sessions {
+            return None;
         }
-        let cur = state.selected as isize;
-        let next = (cur + delta).clamp(0, (len - 1) as isize) as usize;
-        if next != state.selected {
-            state.selected = next;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn recompute_flows(&mut self, keep_run_id: Option<&str>) {
-        let q = self.flows_tab.filter.to_lowercase();
-        let active_only = self.flows_tab.active_only;
-        let sort = self.flows_tab.sort;
-
-        let mut indices: Vec<usize> = self
-            .runs
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| {
-                if active_only && !matches!(r.status, RunStatus::Running | RunStatus::Waiting) {
-                    return false;
-                }
-                if !q.is_empty() {
-                    let matched = r.title.to_lowercase().contains(&q)
-                        || r.flow_name.to_lowercase().contains(&q)
-                        || r.status.label().to_lowercase().contains(&q)
-                        || r.run_id.to_lowercase().contains(&q);
-                    if !matched {
-                        return false;
-                    }
-                }
-                true
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        indices.sort_by(|&a, &b| {
-            let ra = &self.runs[a];
-            let rb = &self.runs[b];
-            match sort {
-                SortOrder::Recent => rb
-                    .updated_ms
-                    .cmp(&ra.updated_ms)
-                    .then_with(|| rb.started_ms.cmp(&ra.started_ms))
-                    .then_with(|| ra.run_id.cmp(&rb.run_id)),
-                SortOrder::Status => status_rank(ra.status)
-                    .cmp(&status_rank(rb.status))
-                    .then_with(|| rb.updated_ms.cmp(&ra.updated_ms))
-                    .then_with(|| ra.run_id.cmp(&rb.run_id)),
-                SortOrder::Name => ra
-                    .title
-                    .to_lowercase()
-                    .cmp(&rb.title.to_lowercase())
-                    .then_with(|| rb.updated_ms.cmp(&ra.updated_ms))
-                    .then_with(|| ra.run_id.cmp(&rb.run_id)),
-            }
-        });
-
-        self.flows_tab.visible_indices = indices;
-        if let Some(id) = keep_run_id {
-            if let Some(pos) = self
-                .flows_tab
-                .visible_indices
-                .iter()
-                .position(|&i| self.runs.get(i).is_some_and(|r| r.run_id == id))
-            {
-                self.flows_tab.selected = pos;
-            }
-        }
-        self.flows_tab.clamp();
-    }
-
-    fn recompute_sessions(&mut self, keep_record_id: Option<&str>) {
-        let q = self.sessions_tab.filter.to_lowercase();
-        let active_only = self.sessions_tab.active_only;
-        let sort = self.sessions_tab.sort;
-
-        let mut indices: Vec<usize> = self
-            .sessions
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| {
-                if active_only && s.closed {
-                    return false;
-                }
-                if !q.is_empty() {
-                    let matched = s.title.to_lowercase().contains(&q)
-                        || s.agent.to_lowercase().contains(&q)
-                        || s.cwd.to_lowercase().contains(&q)
-                        || s.name.to_lowercase().contains(&q);
-                    if !matched {
-                        return false;
-                    }
-                }
-                true
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        indices.sort_by(|&a, &b| {
-            let sa = &self.sessions[a];
-            let sb = &self.sessions[b];
-            match sort {
-                SortOrder::Recent => sb
-                    .last_used_ms
-                    .cmp(&sa.last_used_ms)
-                    .then_with(|| sb.created_ms.cmp(&sa.created_ms))
-                    .then_with(|| sa.record_id.cmp(&sb.record_id)),
-                SortOrder::Status => sa
-                    .closed
-                    .cmp(&sb.closed)
-                    .then_with(|| sb.last_used_ms.cmp(&sa.last_used_ms))
-                    .then_with(|| sa.record_id.cmp(&sb.record_id)),
-                SortOrder::Name => sa
-                    .title
-                    .to_lowercase()
-                    .cmp(&sb.title.to_lowercase())
-                    .then_with(|| sb.last_used_ms.cmp(&sa.last_used_ms))
-                    .then_with(|| sa.record_id.cmp(&sb.record_id)),
-            }
-        });
-
-        self.sessions_tab.visible_indices = indices;
-        if let Some(id) = keep_record_id {
-            if let Some(pos) = self
-                .sessions_tab
-                .visible_indices
-                .iter()
-                .position(|&i| self.sessions.get(i).is_some_and(|s| s.record_id == id))
-            {
-                self.sessions_tab.selected = pos;
-            }
-        }
-        self.sessions_tab.clamp();
+        let id = self.session_selected_id.as_deref()?;
+        let indices = self.filtered_session_indices();
+        indices
+            .into_iter()
+            .find_map(|idx| self.sessions.get(idx).filter(|s| s.record_id == id))
     }
 
     pub fn render(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme, now_ms: i64) {
         if area.width == 0 || area.height == 0 {
             return;
         }
+        self.last_render_height = area.height as usize;
+        self.last_render_width = area.width as usize;
 
-        // Row 0: Tab bar + right summary
-        self.render_tab_row(buf, area.x, area.y, area.width, theme);
-        if area.height == 1 {
+        // Row 0: Tab header
+        let list_area = Rect {
+            x: area.x,
+            y: area.y.saturating_add(1),
+            width: area.width,
+            height: area.height.saturating_sub(1),
+        };
+
+        let overflow_counter = self.compute_overflow_counter(list_area.height as usize);
+        self.render_tab_row(
+            buf,
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: 1,
+            },
+            theme,
+            overflow_counter.as_deref(),
+        );
+
+        if list_area.height == 0 {
             return;
         }
 
-        let list_height = area.height.saturating_sub(2) as usize;
-        self.last_list_height = list_height.max(1);
+        match self.tab {
+            LedgerTab::Flows => self.render_flows(buf, list_area, theme, now_ms),
+            LedgerTab::Sessions => self.render_sessions(buf, list_area, theme, now_ms),
+        }
+    }
 
+    fn compute_overflow_counter(&self, list_height: usize) -> Option<String> {
+        if list_height == 0 {
+            return None;
+        }
         match self.tab {
             LedgerTab::Flows => {
-                self.flows_tab.adjust_scroll(list_height);
-                self.render_flows_header(buf, area.x, area.y + 1, area.width, list_height, theme);
-                if area.height > 2 {
-                    let list_area = Rect::new(
-                        area.x,
-                        area.y + 2,
-                        area.width,
-                        area.height.saturating_sub(2),
-                    );
-                    self.render_flows_list(buf, list_area, theme, now_ms);
+                let rows = self.build_flow_rows(list_height);
+                if rows.len() <= list_height {
+                    return None;
                 }
+                let indices = self.filtered_flow_indices();
+                let total = indices.len();
+                if total == 0 {
+                    return None;
+                }
+                let pos = self
+                    .flow_selected_run_id
+                    .as_ref()
+                    .and_then(|id| {
+                        indices
+                            .iter()
+                            .position(|&i| self.runs.get(i).map(|r| &r.run_id) == Some(id))
+                    })
+                    .unwrap_or(0)
+                    + 1;
+                Some(format!("{pos}/{total}"))
             }
             LedgerTab::Sessions => {
-                self.sessions_tab.adjust_scroll(list_height);
-                self.render_sessions_header(
-                    buf,
-                    area.x,
-                    area.y + 1,
-                    area.width,
-                    list_height,
-                    theme,
-                );
-                if area.height > 2 {
-                    let list_area = Rect::new(
-                        area.x,
-                        area.y + 2,
-                        area.width,
-                        area.height.saturating_sub(2),
-                    );
-                    self.render_sessions_list(buf, list_area, theme, now_ms);
+                let indices = self.filtered_session_indices();
+                // 1 header row + indices.len() rows
+                let total_rows = if indices.is_empty() {
+                    0
+                } else {
+                    1 + indices.len()
+                };
+                if total_rows <= list_height {
+                    return None;
                 }
+                let total = indices.len();
+                let pos = self
+                    .session_selected_id
+                    .as_ref()
+                    .and_then(|id| {
+                        indices
+                            .iter()
+                            .position(|&i| self.sessions.get(i).map(|s| &s.record_id) == Some(id))
+                    })
+                    .unwrap_or(0)
+                    + 1;
+                Some(format!("{pos}/{total}"))
             }
         }
     }
 
-    fn render_tab_row(&self, buf: &mut Buffer, x: u16, y: u16, width: u16, theme: &Theme) {
-        let w = width as usize;
+    fn render_tab_row(
+        &self,
+        buf: &mut Buffer,
+        row: Rect,
+        theme: &Theme,
+        overflow_counter: Option<&str>,
+    ) {
+        let w = row.width as usize;
+        if w == 0 {
+            return;
+        }
+
+        let flow_count = self.runs.len();
+        let sess_count = self.sessions.len();
+
         let flows_style = if self.tab == LedgerTab::Flows {
             Style::default()
                 .fg(theme.accent_assistant)
@@ -651,7 +950,7 @@ impl LedgerState {
         } else {
             Style::default().fg(theme.gray)
         };
-        let sessions_style = if self.tab == LedgerTab::Sessions {
+        let sess_style = if self.tab == LedgerTab::Sessions {
             Style::default()
                 .fg(theme.accent_assistant)
                 .add_modifier(Modifier::BOLD)
@@ -660,661 +959,841 @@ impl LedgerState {
         };
         let sep_style = Style::default().fg(theme.gray_dim);
 
-        let flows_text = format!(" Flows {} ", self.runs.len());
-        let sep_text = "│";
-        let sessions_text = format!(" Sessions {} ", self.sessions.len());
+        let left_flows = format!(" Flows {flow_count} ");
+        let left_sep = "│";
+        let left_sess = format!(" Sessions {sess_count} ");
+        let left_width = left_flows.width() + left_sep.width() + left_sess.width();
 
         let left_line = Line::from(vec![
-            Span::styled(flows_text.clone(), flows_style),
-            Span::styled(sep_text, sep_style),
-            Span::styled(sessions_text.clone(), sessions_style),
+            Span::styled(left_flows, flows_style),
+            Span::styled(left_sep, sep_style),
+            Span::styled(left_sess, sess_style),
         ]);
-        buf.set_line(x, y, &left_line, width);
+        buf.set_line(row.x, row.y, &left_line, row.width);
 
-        let left_w = flows_text.width() + sep_text.width() + sessions_text.width();
+        // Build right-aligned components:
+        // Summary, Filter/active, [order], overflow_counter
+        // Drop order when overlapping tabs: [order], then filter text, then summary.
+        let summary_spans = self.build_summary_spans(theme);
+        let filter_spans = self.build_filter_spans(theme);
+        let order_label = match self.tab {
+            LedgerTab::Flows => self.flow_order.label(),
+            LedgerTab::Sessions => self.session_order.label(),
+        };
+        let order_spans = vec![Span::styled(
+            format!("[{order_label}]"),
+            Style::default().fg(theme.gray_dim),
+        )];
+        let counter_spans: Vec<Span<'static>> = overflow_counter
+            .map(|c| vec![Span::styled(c.to_string(), Style::default().fg(theme.gray))])
+            .unwrap_or_default();
 
-        // Build right-aligned summary + filter / active badge
-        let mut right_spans: Vec<Span> = Vec::new();
-        let state = self.active_tab_state();
+        // Try combinations in priority order:
+        // 1. summary + filter + order + counter
+        // 2. summary + filter + counter (drop [order])
+        // 3. summary + counter (drop filter)
+        // 4. counter only (drop summary)
+        let candidates: [&[&Vec<Span<'static>>]; 4] = [
+            &[&summary_spans, &filter_spans, &order_spans, &counter_spans],
+            &[&summary_spans, &filter_spans, &counter_spans],
+            &[&summary_spans, &counter_spans],
+            &[&counter_spans],
+        ];
 
-        if self.filter_open || !state.filter.is_empty() {
-            let filter_display = if self.filter_open {
-                format!("/{}_", state.filter)
-            } else {
-                format!("/{}", state.filter)
-            };
-            right_spans.push(Span::styled(
-                filter_display,
-                Style::default()
-                    .fg(theme.fuzzy_accent)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-
-        if state.active_only {
-            if !right_spans.is_empty() {
-                right_spans.push(Span::styled("  ", Style::default()));
+        let avail = w.saturating_sub(left_width + 1);
+        for group in candidates {
+            let joined = join_span_groups(group, theme);
+            let jw: usize = joined.iter().map(|s| s.content.width()).sum();
+            if jw > 0 && jw <= avail {
+                let rx = row.x.saturating_add((w - jw) as u16);
+                let line = Line::from(joined);
+                buf.set_line(rx, row.y, &line, jw as u16);
+                break;
             }
-            right_spans.push(Span::styled(
-                "active",
-                Style::default()
-                    .fg(theme.accent_running)
-                    .add_modifier(Modifier::BOLD),
-            ));
         }
+    }
 
-        let running_count = self
-            .runs
-            .iter()
-            .filter(|r| r.status == RunStatus::Running)
-            .count();
-        let waiting_count = self
+    fn build_summary_spans(&self, theme: &Theme) -> Vec<Span<'static>> {
+        let waiting = self
             .runs
             .iter()
             .filter(|r| r.status == RunStatus::Waiting)
             .count();
+        let running = self
+            .runs
+            .iter()
+            .filter(|r| r.status == RunStatus::Running && !self.is_stalled(r))
+            .count();
 
-        let mut summary_parts = Vec::new();
-        if running_count > 0 {
-            summary_parts.push((
-                format!("{running_count} running"),
-                Style::default().fg(theme.accent_running),
-            ));
-        }
-        if waiting_count > 0 {
-            summary_parts.push((
-                format!("{waiting_count} waiting"),
+        let mut spans = Vec::new();
+        if waiting > 0 {
+            spans.push(Span::styled(
+                format!("{waiting} needs you"),
                 Style::default().fg(theme.warning),
             ));
         }
-
-        if !summary_parts.is_empty() {
-            if !right_spans.is_empty() {
-                right_spans.push(Span::styled("  ", Style::default().fg(theme.gray_dim)));
+        if running > 0 {
+            if !spans.is_empty() {
+                spans.push(Span::styled(" · ", Style::default().fg(theme.gray_dim)));
             }
-            for (i, (text, style)) in summary_parts.into_iter().enumerate() {
-                if i > 0 {
-                    right_spans.push(Span::styled(" · ", Style::default().fg(theme.gray_dim)));
-                }
-                right_spans.push(Span::styled(text, style));
-            }
+            spans.push(Span::styled(
+                format!("{running} running"),
+                Style::default().fg(theme.accent_running),
+            ));
         }
-
-        if !right_spans.is_empty() {
-            right_spans.push(Span::raw(" "));
-            let right_line = Line::from(right_spans);
-            let right_w = right_line.width();
-            if left_w + 1 + right_w <= w {
-                let rx = x + (w - right_w) as u16;
-                buf.set_line(rx, y, &right_line, right_w as u16);
-            }
-        }
+        spans
     }
 
-    fn render_flows_header(
-        &self,
-        buf: &mut Buffer,
-        x: u16,
-        y: u16,
-        width: u16,
-        list_height: usize,
-        theme: &Theme,
-    ) {
-        let w = width as usize;
-        let cols = FlowsColumns::compute(w);
-        let hdr_style = Style::default().fg(theme.gray_dim);
-
-        let title_hdr = format!("Title [sort: {}]", self.flows_tab.sort.label());
-        let mut cells: Vec<(&str, usize, bool)> = vec![
-            ("St", 2, false),
-            (&title_hdr, cols.title_w, false),
-        ];
-        if cols.flow_w > 0 {
-            cells.push(("Flow", cols.flow_w, false));
+    fn build_filter_spans(&self, theme: &Theme) -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        let filter = self.active_filter();
+        if self.filter_open || !filter.is_empty() {
+            let text = if self.filter_open {
+                format!("/{filter}▏")
+            } else {
+                format!("/{filter}")
+            };
+            spans.push(Span::styled(text, Style::default().fg(theme.command)));
         }
-        if cols.state_w > 0 {
-            cells.push(("State", cols.state_w, false));
-        }
-        if cols.age_w > 0 {
-            cells.push(("Age", cols.age_w, true));
-        }
-        if cols.dur_w > 0 {
-            cells.push(("Dur", cols.dur_w, true));
-        }
-
-        let line_str = format_columns(&cells, w);
-        buf.set_stringn(x, y, &line_str, w, hdr_style);
-
-        self.render_overflow_counter(
-            buf,
-            x,
-            y,
-            width,
-            &self.flows_tab,
-            list_height,
-            theme,
-        );
-    }
-
-    fn render_sessions_header(
-        &self,
-        buf: &mut Buffer,
-        x: u16,
-        y: u16,
-        width: u16,
-        list_height: usize,
-        theme: &Theme,
-    ) {
-        let w = width as usize;
-        let cols = SessionsColumns::compute(w);
-        let hdr_style = Style::default().fg(theme.gray_dim);
-
-        let title_hdr = format!("Title [sort: {}]", self.sessions_tab.sort.label());
-        let mut cells: Vec<(&str, usize, bool)> = vec![
-            ("St", 2, false),
-            (&title_hdr, cols.title_w, false),
-        ];
-        if cols.agent_w > 0 {
-            cells.push(("Agent", cols.agent_w, false));
-        }
-        if cols.cwd_w > 0 {
-            cells.push(("Dir", cols.cwd_w, false));
-        }
-        if cols.msgs_w > 0 {
-            cells.push(("Msgs", cols.msgs_w, true));
-        }
-        if cols.tokens_w > 0 {
-            cells.push(("Tokens", cols.tokens_w, true));
-        }
-        if cols.cost_w > 0 {
-            cells.push(("Cost", cols.cost_w, true));
-        }
-        if cols.age_w > 0 {
-            cells.push(("Age", cols.age_w, true));
-        }
-
-        let line_str = format_columns(&cells, w);
-        buf.set_stringn(x, y, &line_str, w, hdr_style);
-
-        self.render_overflow_counter(
-            buf,
-            x,
-            y,
-            width,
-            &self.sessions_tab,
-            list_height,
-            theme,
-        );
-    }
-
-    fn render_overflow_counter(
-        &self,
-        buf: &mut Buffer,
-        x: u16,
-        y: u16,
-        width: u16,
-        state: &TabState,
-        list_height: usize,
-        theme: &Theme,
-    ) {
-        let total = state.visible_indices.len();
-        if total > list_height && list_height > 0 {
-            let counter = format!(" {}/{} ", state.selected + 1, total);
-            let cw = counter.width();
-            if cw <= width as usize {
-                let cx = x + width - cw as u16;
-                buf.set_stringn(
-                    cx,
-                    y,
-                    &counter,
-                    cw,
-                    Style::default().fg(theme.gray_dim),
-                );
+        let active_only = match self.tab {
+            LedgerTab::Flows => self.flow_active_only,
+            LedgerTab::Sessions => self.session_active_only,
+        };
+        if active_only {
+            if !spans.is_empty() {
+                spans.push(Span::raw(" "));
             }
+            spans.push(Span::styled(
+                "active",
+                Style::default().fg(theme.accent_running),
+            ));
         }
+        spans
     }
 
-    fn render_flows_list(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now_ms: i64) {
-        if self.flows_tab.visible_indices.is_empty() {
-            let msg = if !self.flows_tab.filter.is_empty() || self.flows_tab.active_only {
-                "No flow runs match the current filter"
+    fn render_flows(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme, now_ms: i64) {
+        let list_h = area.height as usize;
+        let rows = self.build_flow_rows(list_h);
+
+        if rows.is_empty() {
+            let msg = if !self.flow_filter.is_empty() || self.flow_active_only {
+                "No matching flow runs"
             } else {
                 "No acpx flow runs found"
             };
-            render_empty_line(buf, area, msg, theme);
+            render_empty_centered(buf, area, msg, theme);
             return;
         }
 
-        let w = area.width as usize;
-        let cols = FlowsColumns::compute(w);
-        let start = self.flows_tab.scroll;
-        let end = (start + area.height as usize).min(self.flows_tab.visible_indices.len());
+        // Find visual row index of the selected run
+        let selected_visual_idx = self.flow_selected_run_id.as_ref().and_then(|sel_id| {
+            rows.iter().position(|row| match row {
+                FlowListRow::Run(idx) => self.runs.get(*idx).map(|r| &r.run_id) == Some(sel_id),
+                _ => false,
+            })
+        });
 
-        for (row_offset, vis_idx) in (start..end).enumerate() {
-            let y = area.y + row_offset as u16;
-            let run_idx = self.flows_tab.visible_indices[vis_idx];
-            let Some(run) = self.runs.get(run_idx) else {
-                continue;
-            };
-            let is_selected = vis_idx == self.flows_tab.selected;
-
-            if is_selected {
-                buf.set_style(
-                    Rect::new(area.x, y, area.width, 1),
-                    Style::default()
-                        .bg(theme.bg_highlight)
-                        .add_modifier(Modifier::BOLD),
-                );
+        // Adjust scroll to keep selection visible (and include header row immediately above if at top)
+        if let Some(sel_v) = selected_visual_idx {
+            if sel_v < self.flow_scroll {
+                self.flow_scroll = sel_v;
+                // If the row right above `sel_v` is a section header, show it too when possible
+                if sel_v > 0
+                    && matches!(rows.get(sel_v - 1), Some(FlowListRow::Header { .. }))
+                    && list_h > 1
+                {
+                    self.flow_scroll = sel_v - 1;
+                }
+            } else if sel_v >= self.flow_scroll + list_h {
+                self.flow_scroll = (sel_v + 1).saturating_sub(list_h);
             }
+        }
+        let max_scroll = rows.len().saturating_sub(list_h);
+        if self.flow_scroll > max_scroll {
+            self.flow_scroll = max_scroll;
+        }
 
-            let row_mod = if is_selected {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
+        for (line_offset, row) in rows
+            .iter()
+            .skip(self.flow_scroll)
+            .take(list_h)
+            .enumerate()
+        {
+            let y = area.y.saturating_add(line_offset as u16);
+            let row_rect = Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: 1,
             };
-            let bg = if is_selected {
-                Some(theme.bg_highlight)
-            } else {
-                None
-            };
+            match row {
+                FlowListRow::Blank => {}
+                FlowListRow::Header { kind, count } => {
+                    self.render_section_header(buf, row_rect, *kind, *count, theme);
+                }
+                FlowListRow::Run(idx) => {
+                    if let Some(run) = self.runs.get(*idx) {
+                        let is_selected =
+                            self.flow_selected_run_id.as_deref() == Some(run.run_id.as_str());
+                        self.render_flow_row(buf, row_rect, run, is_selected, theme, now_ms);
+                    }
+                }
+            }
+        }
+    }
 
-            let status_color = run_status_color(run.status, theme);
-            let status_style = with_bg(Style::default().fg(status_color).add_modifier(row_mod), bg);
-            let primary_style = with_bg(
-                Style::default().fg(theme.text_primary).add_modifier(row_mod),
-                bg,
-            );
-            let secondary_style =
-                with_bg(Style::default().fg(theme.gray).add_modifier(row_mod), bg);
-            let state_style = with_bg(
+    fn render_section_header(
+        &self,
+        buf: &mut Buffer,
+        row: Rect,
+        kind: SectionKind,
+        count: usize,
+        theme: &Theme,
+    ) {
+        let w = row.width as usize;
+        if w == 0 {
+            return;
+        }
+        let label = format!("{} {} ", kind.label(), count);
+        let label_cut = truncate_str(&label, w);
+        let lw = label_cut.width();
+        let rule_len = w.saturating_sub(lw);
+        let rule = "─".repeat(rule_len);
+
+        let line = Line::from(vec![
+            Span::styled(
+                label_cut,
                 Style::default()
-                    .fg(run_state_color(run.status, theme))
-                    .add_modifier(row_mod),
-                bg,
-            );
-
-            let mut spans: Vec<Span> = Vec::new();
-            let glyph_cell = pad_cell(run.status.glyph(), 2, false);
-            spans.push(Span::styled(format!(" {glyph_cell}"), status_style));
-
-            spans.push(Span::styled(" ", secondary_style));
-            spans.push(Span::styled(
-                pad_cell(&run.title, cols.title_w, false),
-                primary_style,
-            ));
-
-            if cols.flow_w > 0 {
-                spans.push(Span::styled(" ", secondary_style));
-                spans.push(Span::styled(
-                    pad_cell(&run.flow_name, cols.flow_w, false),
-                    secondary_style,
-                ));
-            }
-
-            if cols.state_w > 0 {
-                let st_text = format_run_state(run, cols.state_w);
-                spans.push(Span::styled(" ", secondary_style));
-                spans.push(Span::styled(
-                    pad_cell(&st_text, cols.state_w, false),
-                    state_style,
-                ));
-            }
-
-            if cols.age_w > 0 {
-                let ago = now_ms.saturating_sub(run.updated_ms).max(0);
-                let age_str = fmt_age(ago);
-                spans.push(Span::styled(" ", secondary_style));
-                spans.push(Span::styled(
-                    pad_cell(&age_str, cols.age_w, true),
-                    secondary_style,
-                ));
-            }
-
-            if cols.dur_w > 0 {
-                let end_ms = if run.status.is_live() {
-                    now_ms
-                } else {
-                    run.finished_ms.unwrap_or(run.updated_ms)
-                };
-                let dur_ms = end_ms.saturating_sub(run.started_ms).max(0) as u64;
-                let dur_str = fmt_duration(dur_ms);
-                spans.push(Span::styled(" ", secondary_style));
-                spans.push(Span::styled(
-                    pad_cell(&dur_str, cols.dur_w, true),
-                    secondary_style,
-                ));
-            }
-
-            let line = Line::from(spans);
-            buf.set_line(area.x, y, &line, area.width);
-        }
+                    .fg(kind.color(theme))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(rule, Style::default().fg(theme.gray_dim)),
+        ]);
+        buf.set_line(row.x, row.y, &line, row.width);
     }
 
-    fn render_sessions_list(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now_ms: i64) {
-        if self.sessions_tab.visible_indices.is_empty() {
-            let msg = if !self.sessions_tab.filter.is_empty() || self.sessions_tab.active_only {
-                "No sessions match the current filter"
-            } else {
-                "No acpx sessions found"
-            };
-            render_empty_line(buf, area, msg, theme);
+    fn render_flow_row(
+        &self,
+        buf: &mut Buffer,
+        row: Rect,
+        run: &RunSummary,
+        selected: bool,
+        theme: &Theme,
+        now_ms: i64,
+    ) {
+        let w = row.width as usize;
+        if w == 0 {
             return;
         }
 
-        let w = area.width as usize;
-        let cols = SessionsColumns::compute(w);
-        let start = self.sessions_tab.scroll;
-        let end = (start + area.height as usize).min(self.sessions_tab.visible_indices.len());
-
-        for (row_offset, vis_idx) in (start..end).enumerate() {
-            let y = area.y + row_offset as u16;
-            let sess_idx = self.sessions_tab.visible_indices[vis_idx];
-            let Some(sess) = self.sessions.get(sess_idx) else {
-                continue;
-            };
-            let is_selected = vis_idx == self.sessions_tab.selected;
-
-            if is_selected {
-                buf.set_style(
-                    Rect::new(area.x, y, area.width, 1),
-                    Style::default()
-                        .bg(theme.bg_highlight)
-                        .add_modifier(Modifier::BOLD),
-                );
-            }
-
-            let row_mod = if is_selected {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            };
-            let bg = if is_selected {
-                Some(theme.bg_highlight)
-            } else {
-                None
-            };
-
-            let (glyph, glyph_color) = if sess.closed {
-                ("○", theme.gray)
-            } else {
-                ("●", theme.accent_success)
-            };
-            let status_style = with_bg(Style::default().fg(glyph_color).add_modifier(row_mod), bg);
-            let primary_style = with_bg(
-                Style::default().fg(theme.text_primary).add_modifier(row_mod),
-                bg,
-            );
-            let secondary_style =
-                with_bg(Style::default().fg(theme.gray).add_modifier(row_mod), bg);
-
-            let mut spans: Vec<Span> = Vec::new();
-            let glyph_cell = pad_cell(glyph, 2, false);
-            spans.push(Span::styled(format!(" {glyph_cell}"), status_style));
-
-            spans.push(Span::styled(" ", secondary_style));
-            spans.push(Span::styled(
-                pad_cell(&sess.title, cols.title_w, false),
-                primary_style,
-            ));
-
-            if cols.agent_w > 0 {
-                spans.push(Span::styled(" ", secondary_style));
-                spans.push(Span::styled(
-                    pad_cell(&sess.agent, cols.agent_w, false),
-                    secondary_style,
-                ));
-            }
-
-            if cols.cwd_w > 0 {
-                let cwd_short = last_path_component(&sess.cwd);
-                spans.push(Span::styled(" ", secondary_style));
-                spans.push(Span::styled(
-                    pad_cell(cwd_short, cols.cwd_w, false),
-                    secondary_style,
-                ));
-            }
-
-            if cols.msgs_w > 0 {
-                let msgs_str = sess.messages.to_string();
-                spans.push(Span::styled(" ", secondary_style));
-                spans.push(Span::styled(
-                    pad_cell(&msgs_str, cols.msgs_w, true),
-                    secondary_style,
-                ));
-            }
-
-            if cols.tokens_w > 0 {
-                let tok_str = fmt_tokens(sess.tokens);
-                spans.push(Span::styled(" ", secondary_style));
-                spans.push(Span::styled(
-                    pad_cell(&tok_str, cols.tokens_w, true),
-                    secondary_style,
-                ));
-            }
-
-            if cols.cost_w > 0 {
-                let cost_str = sess
-                    .cost_usd
-                    .map(|c| format!("${c:.2}"))
-                    .unwrap_or_default();
-                spans.push(Span::styled(" ", secondary_style));
-                spans.push(Span::styled(
-                    pad_cell(&cost_str, cols.cost_w, true),
-                    secondary_style,
-                ));
-            }
-
-            if cols.age_w > 0 {
-                let ago = now_ms.saturating_sub(sess.last_used_ms).max(0);
-                let age_str = fmt_age(ago);
-                spans.push(Span::styled(" ", secondary_style));
-                spans.push(Span::styled(
-                    pad_cell(&age_str, cols.age_w, true),
-                    secondary_style,
-                ));
-            }
-
-            let line = Line::from(spans);
-            buf.set_line(area.x, y, &line, area.width);
+        let base_mod = if selected {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        };
+        if selected {
+            buf.set_style(row, Style::default().bg(theme.bg_highlight));
         }
-    }
-}
 
-struct FlowsColumns {
-    title_w: usize,
-    flow_w: usize,
-    state_w: usize,
-    age_w: usize,
-    dur_w: usize,
-}
+        let extra = self.extras.get(&run.run_id);
+        let stalled = extra.map(|e| e.stalled).unwrap_or(false);
 
-impl FlowsColumns {
-    fn compute(total_w: usize) -> Self {
-        // Drop duration below 100, flow name below 80, age below 60
-        let dur_w = if total_w >= 100 { 8 } else { 0 };
-        let flow_w = if total_w >= 80 { 16 } else { 0 };
-        let age_w = if total_w >= 60 { 6 } else { 0 };
-        let state_w = if total_w >= 45 {
-            if total_w >= 90 { 26 } else { 18 }
+        // Status glyph
+        let (glyph, glyph_color) = if stalled {
+            ("⊘", theme.gray)
+        } else {
+            let c = match run.status {
+                RunStatus::Running => theme.accent_running,
+                RunStatus::Waiting => theme.warning,
+                RunStatus::Completed => theme.accent_success,
+                RunStatus::Failed | RunStatus::TimedOut => theme.accent_error,
+                RunStatus::Unknown => theme.gray_dim,
+            };
+            (run.status.glyph(), c)
+        };
+
+        // Optional right/middle columns dropped by width thresholds:
+        // agents below 120, duration below 96, <done>/<total> below 80, age below 64, rail below 48.
+        let show_rail = w >= 48;
+        let show_age = w >= 64;
+        let show_rail_count = w >= 80;
+        let show_duration = w >= 96;
+        let show_agents = w >= 120;
+
+        // Build rail spans + width
+        let mut rail_spans: Vec<Span<'static>> = Vec::new();
+        let mut rail_width: usize = 0;
+        if show_rail
+            && let Some(ex) = extra
+            && !ex.rail.is_empty()
+        {
+            for &ns in &ex.rail {
+                let g = ns.glyph();
+                let color = match ns {
+                    NodeState::Running => theme.accent_running,
+                    NodeState::Waiting => theme.warning,
+                    NodeState::Done(Outcome::Ok) => theme.accent_success,
+                    NodeState::Done(Outcome::Failed | Outcome::TimedOut) => theme.accent_error,
+                    _ => theme.gray_dim,
+                };
+                rail_width += g.width();
+                rail_spans.push(Span::styled(
+                    g.to_string(),
+                    Style::default().fg(color).add_modifier(base_mod),
+                ));
+            }
+            if show_rail_count {
+                let done = ex
+                    .rail
+                    .iter()
+                    .filter(|s| matches!(s, NodeState::Done(_)))
+                    .count();
+                let total = ex.rail.len();
+                let cnt = format!(" {done}/{total}");
+                rail_width += cnt.width();
+                rail_spans.push(Span::styled(
+                    cnt,
+                    Style::default().fg(theme.gray).add_modifier(base_mod),
+                ));
+            }
+        }
+
+        let agents_str = if show_agents {
+            extra
+                .map(|e| e.agents.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| truncate_str(s, 26))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let age_str = if show_age {
+            fmt_age(now_ms.saturating_sub(run.updated_ms))
+        } else {
+            String::new()
+        };
+
+        let dur_str = if show_duration {
+            let end_ms = if run.status.is_live() && !stalled {
+                now_ms
+            } else {
+                run.finished_ms.unwrap_or(run.updated_ms)
+            };
+            let dur_ms = (end_ms - run.started_ms).max(0) as u64;
+            fmt_duration(dur_ms)
+        } else {
+            String::new()
+        };
+
+        // Raw state text before cutting
+        let (raw_state_text, state_color) = self.flow_state_text(run, extra, stalled, theme);
+
+        // Calculate fixed columns width:
+        // "<glyph> " (2 cols) + optional gaps & columns
+        let prefix_w = glyph.width() + 1;
+        let rail_col_w = if rail_width > 0 { 1 + rail_width } else { 0 };
+        let agents_col_w = if !agents_str.is_empty() {
+            1 + agents_str.width()
+        } else {
+            0
+        };
+        let age_col_w = if !age_str.is_empty() {
+            1 + age_str.width()
+        } else {
+            0
+        };
+        let dur_col_w = if !dur_str.is_empty() {
+            1 + dur_str.width()
         } else {
             0
         };
 
-        // Fixed overhead: leading 1 + glyph 2 + space 1 = 4, plus 1 space per optional column + trailing 1
-        let mut used = 4;
-        for &w in &[flow_w, state_w, age_w, dur_w] {
-            if w > 0 {
-                used += 1 + w;
-            }
-        }
-        used += 1; // right padding
-        let title_w = total_w.saturating_sub(used).max(1);
+        let fixed_w = prefix_w + rail_col_w + agents_col_w + age_col_w + dur_col_w;
+        let flex_budget = w.saturating_sub(fixed_w);
 
-        Self {
-            title_w,
-            flow_w,
-            state_w,
-            age_w,
-            dur_w,
-        }
-    }
-}
-
-struct SessionsColumns {
-    title_w: usize,
-    agent_w: usize,
-    cwd_w: usize,
-    msgs_w: usize,
-    tokens_w: usize,
-    cost_w: usize,
-    age_w: usize,
-}
-
-impl SessionsColumns {
-    fn compute(total_w: usize) -> Self {
-        let age_w = if total_w >= 60 { 6 } else { 0 };
-        let cost_w = if total_w >= 105 { 7 } else { 0 };
-        let tokens_w = if total_w >= 92 { 7 } else { 0 };
-        let msgs_w = if total_w >= 80 { 5 } else { 0 };
-        let cwd_w = if total_w >= 68 { 14 } else { 0 };
-        let agent_w = if total_w >= 48 { 12 } else { 0 };
-
-        let mut used = 4;
-        for &w in &[agent_w, cwd_w, msgs_w, tokens_w, cost_w, age_w] {
-            if w > 0 {
-                used += 1 + w;
-            }
-        }
-        used += 1;
-        let title_w = total_w.saturating_sub(used).max(1);
-
-        Self {
-            title_w,
-            agent_w,
-            cwd_w,
-            msgs_w,
-            tokens_w,
-            cost_w,
-            age_w,
-        }
-    }
-}
-
-fn format_run_state(run: &RunSummary, max_w: usize) -> String {
-    match run.status {
-        RunStatus::Waiting => {
-            let target = run.waiting_on.as_deref().unwrap_or("input");
-            truncate_str(&format!("waiting: {target}"), max_w)
-        }
-        RunStatus::Running => {
-            let node = run.current_node.as_deref().unwrap_or("running");
-            if let Some(detail) = run.status_detail.as_deref() {
-                if !detail.is_empty() {
-                    let combined = format!("{node} · {detail}");
-                    if combined.width() <= max_w {
-                        return combined;
-                    }
-                }
-            }
-            truncate_str(node, max_w)
-        }
-        RunStatus::Failed | RunStatus::TimedOut => {
-            let err = run
-                .error
-                .as_deref()
-                .or(run.status_detail.as_deref())
-                .unwrap_or(run.status.label());
-            let single_line = err.lines().next().unwrap_or(err);
-            truncate_str(single_line, max_w)
-        }
-        RunStatus::Completed => truncate_str("done", max_w),
-        RunStatus::Unknown => truncate_str(run.status.label(), max_w),
-    }
-}
-
-fn status_rank(status: RunStatus) -> u8 {
-    match status {
-        RunStatus::Running => 0,
-        RunStatus::Waiting => 1,
-        RunStatus::Failed => 2,
-        RunStatus::TimedOut => 3,
-        RunStatus::Completed => 4,
-        RunStatus::Unknown => 5,
-    }
-}
-
-fn run_status_color(status: RunStatus, theme: &Theme) -> Color {
-    match status {
-        RunStatus::Running => theme.accent_running,
-        RunStatus::Waiting => theme.warning,
-        RunStatus::Completed => theme.accent_success,
-        RunStatus::Failed | RunStatus::TimedOut => theme.accent_error,
-        RunStatus::Unknown => theme.gray,
-    }
-}
-
-fn run_state_color(status: RunStatus, theme: &Theme) -> Color {
-    match status {
-        RunStatus::Running => theme.accent_running,
-        RunStatus::Waiting => theme.warning,
-        RunStatus::Completed => theme.gray,
-        RunStatus::Failed | RunStatus::TimedOut => theme.accent_error,
-        RunStatus::Unknown => theme.gray,
-    }
-}
-
-fn with_bg(style: Style, bg: Option<Color>) -> Style {
-    match bg {
-        Some(c) => style.bg(c),
-        None => style,
-    }
-}
-
-fn pad_cell(s: &str, width: usize, right_align: bool) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let truncated = truncate_str(s, width);
-    let w = truncated.width();
-    if w >= width {
-        truncated
-    } else {
-        let pad = " ".repeat(width - w);
-        if right_align {
-            format!("{pad}{truncated}")
+        // Title and state text share what is left, title first (at least 16 columns), state text cut to fit.
+        let title_str;
+        let state_str;
+        if flex_budget == 0 {
+            title_str = String::new();
+            state_str = String::new();
+        } else if raw_state_text.is_empty() || flex_budget <= 17 {
+            title_str = truncate_str(&run.title, flex_budget);
+            state_str = String::new();
         } else {
-            format!("{truncated}{pad}")
+            // Need 1 space separator between title and state
+            let avail_pair = flex_budget - 1;
+            let raw_title_w = run.title.width();
+            let raw_state_w = raw_state_text.width();
+            if raw_title_w + raw_state_w <= avail_pair {
+                title_str = run.title.clone();
+                state_str = raw_state_text;
+            } else {
+                // Title gets at least 16 columns (or half of avail_pair if larger, capped at raw_title_w)
+                let half = (avail_pair / 2).max(16).min(avail_pair);
+                let title_max = if raw_state_w < avail_pair.saturating_sub(half) {
+                    avail_pair.saturating_sub(raw_state_w)
+                } else {
+                    half.min(raw_title_w.max(16)).min(avail_pair)
+                };
+                title_str = truncate_str(&run.title, title_max);
+                let used_title = title_str.width();
+                let state_budget = avail_pair.saturating_sub(used_title);
+                state_str = if state_budget > 0 {
+                    truncate_str(&raw_state_text, state_budget)
+                } else {
+                    String::new()
+                };
+            }
         }
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.push(Span::styled(
+            format!("{glyph} "),
+            Style::default().fg(glyph_color).add_modifier(base_mod),
+        ));
+        if !title_str.is_empty() {
+            spans.push(Span::styled(
+                title_str.clone(),
+                Style::default()
+                    .fg(theme.text_primary)
+                    .add_modifier(base_mod),
+            ));
+        }
+        if ! rail_spans.is_empty() {
+            spans.push(Span::raw(" "));
+            spans.extend(rail_spans);
+        }
+        if !state_str.is_empty() {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                state_str,
+                Style::default().fg(state_color).add_modifier(base_mod),
+            ));
+        }
+
+        // Right-aligned metadata columns (agents, age, duration) so rows align cleanly
+        let mut right_spans: Vec<Span<'static>> = Vec::new();
+        if !agents_str.is_empty() {
+            right_spans.push(Span::raw(" "));
+            right_spans.push(Span::styled(
+                agents_str,
+                Style::default().fg(theme.gray).add_modifier(base_mod),
+            ));
+        }
+        if !age_str.is_empty() {
+            right_spans.push(Span::raw(" "));
+            right_spans.push(Span::styled(
+                age_str,
+                Style::default().fg(theme.gray).add_modifier(base_mod),
+            ));
+        }
+        if !dur_str.is_empty() {
+            right_spans.push(Span::raw(" "));
+            right_spans.push(Span::styled(
+                dur_str,
+                Style::default().fg(theme.gray_dim).add_modifier(base_mod),
+            ));
+        }
+
+        let left_w: usize = spans.iter().map(|s| s.content.width()).sum();
+        let right_w: usize = right_spans.iter().map(|s| s.content.width()).sum();
+        if right_w > 0 && left_w + right_w < w {
+            spans.push(Span::raw(" ".repeat(w - left_w - right_w)));
+        }
+        spans.extend(right_spans);
+
+        let line = Line::from(spans);
+        buf.set_line(row.x, row.y, &line, row.width);
+    }
+
+    fn flow_state_text(
+        &self,
+        run: &RunSummary,
+        extra: Option<&RowExtra>,
+        stalled: bool,
+        theme: &Theme,
+    ) -> (String, Color) {
+        if run.status == RunStatus::Waiting {
+            if let Some(q) = extra.and_then(|e| e.question.as_deref()).filter(|q| !q.is_empty()) {
+                return (q.to_string(), theme.warning);
+            }
+            let wait_target = run.waiting_on.as_deref().unwrap_or("checkpoint");
+            return (format!("waiting: {wait_target}"), theme.warning);
+        }
+        if stalled {
+            let node = run.current_node.as_deref().unwrap_or("unknown");
+            return (format!("stalled at {node}"), theme.gray);
+        }
+        match run.status {
+            RunStatus::Running => {
+                let node = run.current_node.as_deref().unwrap_or("running");
+                let text = match run.status_detail.as_deref().filter(|d| !d.is_empty()) {
+                    Some(detail) => format!("{node} · {detail}"),
+                    None => node.to_string(),
+                };
+                (text, theme.accent_running)
+            }
+            RunStatus::Failed | RunStatus::TimedOut => {
+                let err = run
+                    .error
+                    .as_deref()
+                    .or(run.status_detail.as_deref())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| run.status.label());
+                (err.to_string(), theme.accent_error)
+            }
+            RunStatus::Completed => ("done".to_string(), theme.gray),
+            RunStatus::Waiting => unreachable!(),
+            RunStatus::Unknown => (run.status.label().to_string(), theme.gray_dim),
+        }
+    }
+
+    fn render_sessions(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme, now_ms: i64) {
+        let indices = self.filtered_session_indices();
+        if indices.is_empty() {
+            let msg = if !self.session_filter.is_empty() || self.session_active_only {
+                "No matching sessions"
+            } else {
+                "No acpx sessions found"
+            };
+            render_empty_centered(buf, area, msg, theme);
+            return;
+        }
+
+        // Row 0 of `area` is the column header row in `theme.gray_dim`
+        self.render_session_header(
+            buf,
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: 1,
+            },
+            theme,
+        );
+
+        let rows_h = area.height.saturating_sub(1) as usize;
+        if rows_h == 0 {
+            return;
+        }
+
+        let selected_pos = self
+            .session_selected_id
+            .as_ref()
+            .and_then(|id| {
+                indices
+                    .iter()
+                    .position(|&i| self.sessions.get(i).map(|s| &s.record_id) == Some(id))
+            })
+            .unwrap_or(0);
+
+        if selected_pos < self.session_scroll {
+            self.session_scroll = selected_pos;
+        } else if selected_pos >= self.session_scroll + rows_h {
+            self.session_scroll = (selected_pos + 1).saturating_sub(rows_h);
+        }
+        let max_scroll = indices.len().saturating_sub(rows_h);
+        if self.session_scroll > max_scroll {
+            self.session_scroll = max_scroll;
+        }
+
+        for (line_offset, &sess_idx) in indices
+            .iter()
+            .skip(self.session_scroll)
+            .take(rows_h)
+            .enumerate()
+        {
+            if let Some(sess) = self.sessions.get(sess_idx) {
+                let y = area.y.saturating_add(1 + line_offset as u16);
+                let row_rect = Rect {
+                    x: area.x,
+                    y,
+                    width: area.width,
+                    height: 1,
+                };
+                let is_selected =
+                    self.session_selected_id.as_deref() == Some(sess.record_id.as_str());
+                self.render_session_row(buf, row_rect, sess, is_selected, theme, now_ms);
+            }
+        }
+    }
+
+    fn render_session_header(&self, buf: &mut Buffer, row: Rect, theme: &Theme) {
+        let w = row.width as usize;
+        if w == 0 {
+            return;
+        }
+        let layout = SessionColumns::for_width(w);
+        let style = Style::default().fg(theme.gray_dim);
+        let line_str = layout.format_row(" ", "SESSION", "AGENT", "CWD", "MSGS", "TOKENS", "COST", "AGE");
+        let line = Line::from(Span::styled(truncate_str(&line_str, w), style));
+        buf.set_line(row.x, row.y, &line, row.width);
+    }
+
+    fn render_session_row(
+        &self,
+        buf: &mut Buffer,
+        row: Rect,
+        sess: &SessionSummary,
+        selected: bool,
+        theme: &Theme,
+        now_ms: i64,
+    ) {
+        let w = row.width as usize;
+        if w == 0 {
+            return;
+        }
+        let base_mod = if selected {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        };
+        if selected {
+            buf.set_style(row, Style::default().bg(theme.bg_highlight));
+        }
+
+        let layout = SessionColumns::for_width(w);
+        let (glyph, glyph_color) = if sess.closed {
+            ("○", theme.gray_dim)
+        } else {
+            ("●", theme.accent_running)
+        };
+
+        let cwd_last = last_path_component(&sess.cwd);
+        let msgs = sess.messages.to_string();
+        let tokens = fmt_tokens(sess.tokens);
+        let cost = sess
+            .cost_usd
+            .map(|c| format!("${c:.2}"))
+            .unwrap_or_default();
+        let age = fmt_age(now_ms.saturating_sub(sess.last_used_ms));
+
+        let spans = layout.build_spans(
+            glyph,
+            glyph_color,
+            &sess.title,
+            &sess.agent,
+            cwd_last,
+            &msgs,
+            &tokens,
+            &cost,
+            &age,
+            base_mod,
+            theme,
+        );
+        let line = Line::from(spans);
+        buf.set_line(row.x, row.y, &line, row.width);
     }
 }
 
-fn format_columns(cells: &[(&str, usize, bool)], max_w: usize) -> String {
-    let mut out = String::from(" ");
-    for (i, &(text, width, right_align)) in cells.iter().enumerate() {
-        if i > 0 {
+struct SessionColumns {
+    width: usize,
+    show_agent: bool,
+    show_cwd: bool,
+    show_msgs: bool,
+    show_tokens: bool,
+    show_cost: bool,
+    show_age: bool,
+}
+
+impl SessionColumns {
+    const AGENT_W: usize = 12;
+    const CWD_W: usize = 14;
+    const MSGS_W: usize = 5;
+    const TOKENS_W: usize = 7;
+    const COST_W: usize = 7;
+    const AGE_W: usize = 5;
+
+    fn for_width(width: usize) -> Self {
+        // Drop columns from the right as width shrinks:
+        // Order from left to right: glyph(2) + title + agent + cwd + msgs + tokens + cost + age
+        // Drop from right: age (<56), cost (<110), tokens (<96), msgs (<84), cwd (<70), agent (<54)
+        let show_agent = width >= 46;
+        let show_cwd = width >= 64;
+        let show_msgs = width >= 74;
+        let show_tokens = width >= 86;
+        let show_cost = width >= 98;
+        let show_age = width >= 108;
+        Self {
+            width,
+            show_agent,
+            show_cwd,
+            show_msgs,
+            show_tokens,
+            show_cost,
+            show_age,
+        }
+    }
+
+    fn title_width(&self) -> usize {
+        let mut fixed = 2; // glyph + space
+        if self.show_agent {
+            fixed += 1 + Self::AGENT_W;
+        }
+        if self.show_cwd {
+            fixed += 1 + Self::CWD_W;
+        }
+        if self.show_msgs {
+            fixed += 1 + Self::MSGS_W;
+        }
+        if self.show_tokens {
+            fixed += 1 + Self::TOKENS_W;
+        }
+        if self.show_cost {
+            fixed += 1 + Self::COST_W;
+        }
+        if self.show_age {
+            fixed += 1 + Self::AGE_W;
+        }
+        self.width.saturating_sub(fixed).max(1)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn format_row(
+        &self,
+        glyph: &str,
+        title: &str,
+        agent: &str,
+        cwd: &str,
+        msgs: &str,
+        tokens: &str,
+        cost: &str,
+        age: &str,
+    ) -> String {
+        let tw = self.title_width();
+        let mut out = format!("{} {}", glyph, pad_right(&truncate_str(title, tw), tw));
+        if self.show_agent {
             out.push(' ');
+            out.push_str(&pad_right(&truncate_str(agent, Self::AGENT_W), Self::AGENT_W));
         }
-        out.push_str(&pad_cell(text, width, right_align));
+        if self.show_cwd {
+            out.push(' ');
+            out.push_str(&pad_right(&truncate_str(cwd, Self::CWD_W), Self::CWD_W));
+        }
+        if self.show_msgs {
+            out.push(' ');
+            out.push_str(&pad_left(&truncate_str(msgs, Self::MSGS_W), Self::MSGS_W));
+        }
+        if self.show_tokens {
+            out.push(' ');
+            out.push_str(&pad_left(&truncate_str(tokens, Self::TOKENS_W), Self::TOKENS_W));
+        }
+        if self.show_cost {
+            out.push(' ');
+            out.push_str(&pad_left(&truncate_str(cost, Self::COST_W), Self::COST_W));
+        }
+        if self.show_age {
+            out.push(' ');
+            out.push_str(&pad_left(&truncate_str(age, Self::AGE_W), Self::AGE_W));
+        }
+        out
     }
-    truncate_str(&out, max_w)
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_spans(
+        &self,
+        glyph: &str,
+        glyph_color: Color,
+        title: &str,
+        agent: &str,
+        cwd: &str,
+        msgs: &str,
+        tokens: &str,
+        cost: &str,
+        age: &str,
+        base_mod: Modifier,
+        theme: &Theme,
+    ) -> Vec<Span<'static>> {
+        let tw = self.title_width();
+        let mut spans = Vec::new();
+        spans.push(Span::styled(
+            format!("{glyph} "),
+            Style::default().fg(glyph_color).add_modifier(base_mod),
+        ));
+        spans.push(Span::styled(
+            pad_right(&truncate_str(title, tw), tw),
+            Style::default()
+                .fg(theme.text_primary)
+                .add_modifier(base_mod),
+        ));
+        let sec_style = Style::default().fg(theme.gray).add_modifier(base_mod);
+        if self.show_agent {
+            spans.push(Span::styled(
+                format!(" {}", pad_right(&truncate_str(agent, Self::AGENT_W), Self::AGENT_W)),
+                sec_style,
+            ));
+        }
+        if self.show_cwd {
+            spans.push(Span::styled(
+                format!(" {}", pad_right(&truncate_str(cwd, Self::CWD_W), Self::CWD_W)),
+                sec_style,
+            ));
+        }
+        if self.show_msgs {
+            spans.push(Span::styled(
+                format!(" {}", pad_left(&truncate_str(msgs, Self::MSGS_W), Self::MSGS_W)),
+                sec_style,
+            ));
+        }
+        if self.show_tokens {
+            spans.push(Span::styled(
+                format!(" {}", pad_left(&truncate_str(tokens, Self::TOKENS_W), Self::TOKENS_W)),
+                sec_style,
+            ));
+        }
+        if self.show_cost {
+            spans.push(Span::styled(
+                format!(" {}", pad_left(&truncate_str(cost, Self::COST_W), Self::COST_W)),
+                sec_style,
+            ));
+        }
+        if self.show_age {
+            spans.push(Span::styled(
+                format!(" {}", pad_left(&truncate_str(age, Self::AGE_W), Self::AGE_W)),
+                sec_style,
+            ));
+        }
+        spans
+    }
 }
 
-fn last_path_component(cwd: &str) -> &str {
-    let trimmed = cwd.trim_end_matches(['/', '\\']);
+fn pad_right(s: &str, width: usize) -> String {
+    let w = s.width();
+    if w >= width {
+        s.to_string()
+    } else {
+        format!("{s}{}", " ".repeat(width - w))
+    }
+}
+
+fn pad_left(s: &str, width: usize) -> String {
+    let w = s.width();
+    if w >= width {
+        s.to_string()
+    } else {
+        format!("{}{s}", " ".repeat(width - w))
+    }
+}
+
+fn last_path_component(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['/', '\\']);
     if trimmed.is_empty() {
-        return cwd;
+        return path;
     }
     trimmed
         .rsplit(['/', '\\'])
         .next()
         .filter(|s| !s.is_empty())
-        .unwrap_or(cwd)
+        .unwrap_or(trimmed)
 }
 
 fn fmt_tokens(tokens: u64) -> String {
     if tokens == 0 {
-        "0".to_string()
-    } else if tokens >= 1_000_000 {
+        return "0".to_string();
+    }
+    if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
     } else if tokens >= 1_000 {
         format!("{:.1}k", tokens as f64 / 1_000.0)
@@ -1323,21 +1802,30 @@ fn fmt_tokens(tokens: u64) -> String {
     }
 }
 
-fn render_empty_line(buf: &mut Buffer, area: Rect, msg: &str, theme: &Theme) {
+fn join_span_groups(groups: &[&Vec<Span<'static>>], theme: &Theme) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    for g in groups {
+        if g.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(Span::styled("  ", Style::default().fg(theme.gray_dim)));
+        }
+        out.extend((*g).iter().cloned());
+    }
+    out
+}
+
+fn render_empty_centered(buf: &mut Buffer, area: Rect, msg: &str, theme: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let y = area.y + area.height / 2;
-    let text = truncate_str(msg, area.width as usize);
-    let tw = text.width();
-    let x = area.x + (area.width.saturating_sub(tw as u16)) / 2;
-    buf.set_stringn(
-        x,
-        y,
-        &text,
-        area.width as usize,
-        Style::default().fg(theme.gray_dim),
-    );
+    let y = area.y.saturating_add(area.height / 2);
+    let cut = truncate_str(msg, area.width as usize);
+    let mw = cut.width() as u16;
+    let x = area.x.saturating_add(area.width.saturating_sub(mw) / 2);
+    let line = Line::from(Span::styled(cut, Style::default().fg(theme.gray_dim)));
+    buf.set_line(x, y, &line, area.width.saturating_sub(x - area.x));
 }
 
 #[cfg(test)]
@@ -1348,60 +1836,35 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn make_run(
-        id: &str,
-        title: &str,
-        flow: &str,
-        status: RunStatus,
-        updated_ms: i64,
-    ) -> RunSummary {
+    fn make_run(id: &str, title: &str, status: RunStatus, updated_ms: i64) -> RunSummary {
         RunSummary {
             run_id: id.to_string(),
             dir: PathBuf::from(format!("/tmp/runs/{id}")),
-            flow_name: flow.to_string(),
+            flow_name: format!("flow-{id}"),
             title: title.to_string(),
             status,
             started_ms: updated_ms - 5_000,
             updated_ms,
-            finished_ms: if status.is_live() {
-                None
-            } else {
-                Some(updated_ms)
-            },
-            current_node: if status == RunStatus::Running {
-                Some("implement".to_string())
-            } else {
-                None
-            },
-            waiting_on: if status == RunStatus::Waiting {
-                Some("review".to_string())
-            } else {
-                None
-            },
+            finished_ms: matches!(
+                status,
+                RunStatus::Completed | RunStatus::Failed | RunStatus::TimedOut
+            )
+            .then_some(updated_ms),
+            current_node: Some("build_node".to_string()),
+            waiting_on: (status == RunStatus::Waiting).then(|| "approve_step".to_string()),
             status_detail: None,
-            error: if status == RunStatus::Failed {
-                Some("exit code 1".to_string())
-            } else {
-                None
-            },
+            error: (status == RunStatus::Failed).then(|| "exit code 1".to_string()),
         }
     }
 
-    fn make_session(
-        id: &str,
-        title: &str,
-        agent: &str,
-        cwd: &str,
-        closed: bool,
-        last_used_ms: i64,
-    ) -> SessionSummary {
+    fn make_session(id: &str, title: &str, closed: bool, last_used_ms: i64) -> SessionSummary {
         SessionSummary {
             record_id: id.to_string(),
             acp_session_id: format!("acp-{id}"),
             name: format!("name-{id}"),
             title: title.to_string(),
-            agent: agent.to_string(),
-            cwd: cwd.to_string(),
+            agent: "grok".to_string(),
+            cwd: "/workspace/my-repo".to_string(),
             created_ms: last_used_ms - 10_000,
             last_used_ms,
             closed,
@@ -1418,194 +1881,295 @@ mod tests {
         for x in 0..w {
             s.push_str(buf[(x, y)].symbol());
         }
-        s
+        s.trim_end().to_string()
+    }
+
+    fn all_text(buf: &Buffer) -> String {
+        (0..buf.area.height)
+            .map(|y| row_text(buf, y))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
-    fn navigation_and_clamping() {
+    fn grouped_order_and_navigation_skips_headers_and_clamps() {
         let mut state = LedgerState::new();
         state.set_runs(vec![
-            make_run("r1", "First", "pr-triage", RunStatus::Completed, 3000),
-            make_run("r2", "Second", "pr-triage", RunStatus::Completed, 2000),
-            make_run("r3", "Third", "pr-triage", RunStatus::Completed, 1000),
+            make_run("r-done", "Done Run", RunStatus::Completed, 3000),
+            make_run("r-wait", "Waiting Run", RunStatus::Waiting, 1000),
+            make_run("r-live", "Running Run", RunStatus::Running, 2000),
         ]);
 
+        // Waiting run is selected first even though Completed is newer
+        assert_eq!(
+            state.selected_run().map(|r| r.run_id.as_str()),
+            Some("r-wait")
+        );
+
+        // Moving up at top clamps
         assert_eq!(state.handle_key(&key(KeyCode::Up)), LedgerOutcome::Unchanged);
-        assert_eq!(state.handle_key(&key(KeyCode::Char('j'))), LedgerOutcome::Changed);
-        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r2"));
+        assert_eq!(
+            state.selected_run().map(|r| r.run_id.as_str()),
+            Some("r-wait")
+        );
 
-        assert_eq!(state.handle_key(&key(KeyCode::Char('G'))), LedgerOutcome::Changed);
-        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r3"));
-        assert_eq!(state.handle_key(&key(KeyCode::Down)), LedgerOutcome::Unchanged);
+        // Moving down skips RUNNING header and lands on r-live
+        assert_eq!(
+            state.handle_key(&key(KeyCode::Char('j'))),
+            LedgerOutcome::Changed
+        );
+        assert_eq!(
+            state.selected_run().map(|r| r.run_id.as_str()),
+            Some("r-live")
+        );
 
-        assert_eq!(state.handle_key(&key(KeyCode::Char('g'))), LedgerOutcome::Changed);
-        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r1"));
+        // Moving down again skips FINISHED header and lands on r-done
+        assert_eq!(
+            state.handle_key(&key(KeyCode::Down)),
+            LedgerOutcome::Changed
+        );
+        assert_eq!(
+            state.selected_run().map(|r| r.run_id.as_str()),
+            Some("r-done")
+        );
+
+        // Clamps at bottom
+        assert_eq!(
+            state.handle_key(&key(KeyCode::Char('j'))),
+            LedgerOutcome::Unchanged
+        );
+
+        // Jump start and end
+        assert_eq!(
+            state.handle_key(&key(KeyCode::Char('g'))),
+            LedgerOutcome::Changed
+        );
+        assert_eq!(
+            state.selected_run().map(|r| r.run_id.as_str()),
+            Some("r-wait")
+        );
+        assert_eq!(
+            state.handle_key(&key(KeyCode::Char('G'))),
+            LedgerOutcome::Changed
+        );
+        assert_eq!(
+            state.selected_run().map(|r| r.run_id.as_str()),
+            Some("r-done")
+        );
     }
 
     #[test]
-    fn tab_switching_preserves_per_tab_selection() {
+    fn stalled_running_run_is_placed_under_finished_with_stalled_at() {
+        let mut state = LedgerState::new();
+        let mut stalled_run = make_run("r-stalled", "Stalled Run", RunStatus::Running, 5000);
+        stalled_run.current_node = Some("deploy_step".to_string());
+        let done_run = make_run("r-done", "Older Done", RunStatus::Completed, 2000);
+        state.set_runs(vec![done_run, stalled_run]);
+
+        let mut extras = HashMap::new();
+        extras.insert(
+            "r-stalled".to_string(),
+            RowExtra {
+                rail: vec![],
+                agents: String::new(),
+                stalled: true,
+                question: None,
+            },
+        );
+        state.set_extras(extras);
+
+        // Stalled run is not considered live
+        assert!(!state.any_live());
+
+        let theme = Theme::default();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 100, 10));
+        state.render(&mut buf, buf.area, &theme, 10_000);
+        let text = all_text(&buf);
+        assert!(!text.contains("RUNNING 1"));
+        assert!(text.contains("FINISHED 2"));
+        assert!(text.contains("⊘ Stalled Run"));
+        assert!(text.contains("stalled at deploy_step"));
+    }
+
+    #[test]
+    fn tab_switching_keeps_per_tab_selection_and_selected_run_behavior() {
         let mut state = LedgerState::new();
         state.set_runs(vec![
-            make_run("r1", "Run 1", "flow", RunStatus::Completed, 2000),
-            make_run("r2", "Run 2", "flow", RunStatus::Completed, 1000),
+            make_run("r1", "First Run", RunStatus::Completed, 2000),
+            make_run("r2", "Second Run", RunStatus::Completed, 1000),
         ]);
         state.set_sessions(vec![
-            make_session("s1", "Sess 1", "claude", "/a/b", false, 2000),
-            make_session("s2", "Sess 2", "codex", "/a/c", false, 1000),
+            make_session("s1", "First Session", false, 2000),
+            make_session("s2", "Second Session", false, 1000),
         ]);
 
-        state.handle_key(&key(KeyCode::Char('j')));
+        // Select second run on Flows tab
+        state.handle_key(&key(KeyCode::Down));
         assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r2"));
 
-        state.handle_key(&key(KeyCode::Tab));
+        // Switch to Sessions tab
+        assert_eq!(state.handle_key(&key(KeyCode::Tab)), LedgerOutcome::Changed);
         assert_eq!(state.tab(), LedgerTab::Sessions);
-        assert_eq!(
-            state.selected_session().map(|s| s.record_id.as_str()),
-            Some("s1")
-        );
+        assert!(state.selected_run().is_none());
 
-        state.handle_key(&key(KeyCode::Char('j')));
-        assert_eq!(
-            state.selected_session().map(|s| s.record_id.as_str()),
-            Some("s2")
-        );
+        // Move to second session
+        state.handle_key(&key(KeyCode::Down));
 
+        // Switch back to Flows tab: r2 is still selected
         state.handle_key(&key(KeyCode::Char('h')));
         assert_eq!(state.tab(), LedgerTab::Flows);
         assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r2"));
+
+        // Switch back to Sessions tab: s2 is still selected
+        state.handle_key(&key(KeyCode::Right));
+        assert_eq!(
+            state.handle_key(&key(KeyCode::Enter)),
+            LedgerOutcome::OpenSession(make_session("s2", "Second Session", false, 1000))
+        );
     }
 
     #[test]
     fn filter_typing_enter_and_esc_ordering() {
         let mut state = LedgerState::new();
         state.set_runs(vec![
-            make_run("r1", "Deploy prod", "release", RunStatus::Completed, 2000),
-            make_run("r2", "Triage bug", "triage", RunStatus::Failed, 1000),
+            make_run("r1", "Alpha deploy", RunStatus::Completed, 2000),
+            make_run("r2", "Beta test", RunStatus::Completed, 1000),
         ]);
 
         assert!(state.esc_closes());
         assert!(!state.captures_text());
 
-        state.handle_key(&key(KeyCode::Char('/')));
+        // Open filter with `/`
+        assert_eq!(
+            state.handle_key(&key(KeyCode::Char('/'))),
+            LedgerOutcome::Changed
+        );
         assert!(state.captures_text());
         assert!(!state.esc_closes());
 
-        // Printable keys including 'a' and 's' go into filter
-        state.handle_key(&key(KeyCode::Char('t')));
-        state.handle_key(&key(KeyCode::Char('r')));
-        state.handle_key(&key(KeyCode::Char('i')));
-        assert_eq!(state.flows_tab.visible_indices.len(), 1);
+        // Type "beta" (note: 'a' would toggle active-only if filter weren't capturing)
+        for ch in ['b', 'e', 't', 'a', 'x'] {
+            state.handle_key(&key(KeyCode::Char(ch)));
+        }
+        state.handle_key(&key(KeyCode::Backspace));
         assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r2"));
 
-        // Enter closes the input but keeps the filter
-        state.handle_key(&key(KeyCode::Enter));
+        // Enter closes input but keeps filter
+        assert_eq!(
+            state.handle_key(&key(KeyCode::Enter)),
+            LedgerOutcome::Changed
+        );
         assert!(!state.captures_text());
         assert!(!state.esc_closes());
-        assert_eq!(state.flows_tab.visible_indices.len(), 1);
+        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r2"));
 
-        // First Esc clears the filter and returns Changed
+        // First Esc clears the non-empty filter (Changed)
         assert_eq!(state.handle_key(&key(KeyCode::Esc)), LedgerOutcome::Changed);
-        assert_eq!(state.flows_tab.visible_indices.len(), 2);
         assert!(state.esc_closes());
+        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r1"));
 
-        // Second Esc closes the modal
+        // Second Esc returns Close
         assert_eq!(state.handle_key(&key(KeyCode::Esc)), LedgerOutcome::Close);
     }
 
     #[test]
-    fn active_only_filters_both_tabs() {
+    fn active_only_toggle_filters_runs_and_sessions() {
         let mut state = LedgerState::new();
         state.set_runs(vec![
-            make_run("r1", "Done run", "f", RunStatus::Completed, 3000),
-            make_run("r2", "Wait run", "f", RunStatus::Waiting, 2000),
-            make_run("r3", "Live run", "f", RunStatus::Running, 1000),
+            make_run("r-done", "Done", RunStatus::Completed, 3000),
+            make_run("r-live", "Live", RunStatus::Running, 1000),
         ]);
         state.set_sessions(vec![
-            make_session("s1", "Closed sess", "claude", "/tmp", true, 2000),
-            make_session("s2", "Open sess", "claude", "/tmp", false, 1000),
+            make_session("s-closed", "Closed Sess", true, 3000),
+            make_session("s-open", "Open Sess", false, 1000),
         ]);
 
-        state.handle_key(&key(KeyCode::Char('a')));
-        assert_eq!(state.flows_tab.visible_indices.len(), 2);
+        // Toggle active-only on Flows
+        assert_eq!(
+            state.handle_key(&key(KeyCode::Char('a'))),
+            LedgerOutcome::Changed
+        );
+        assert_eq!(
+            state.selected_run().map(|r| r.run_id.as_str()),
+            Some("r-live")
+        );
+        // Moving down clamps because r-done is filtered out
+        assert_eq!(
+            state.handle_key(&key(KeyCode::Down)),
+            LedgerOutcome::Unchanged
+        );
 
+        // Switch to Sessions and toggle active-only
         state.handle_key(&key(KeyCode::Tab));
         state.handle_key(&key(KeyCode::Char('a')));
-        assert_eq!(state.sessions_tab.visible_indices.len(), 1);
         assert_eq!(
-            state.selected_session().map(|s| s.record_id.as_str()),
-            Some("s2")
+            state.handle_key(&key(KeyCode::Enter)),
+            LedgerOutcome::OpenSession(make_session("s-open", "Open Sess", false, 1000))
         );
     }
 
     #[test]
-    fn sort_cycling_changes_order() {
+    fn order_cycling_on_flows_and_sessions() {
         let mut state = LedgerState::new();
         state.set_runs(vec![
-            make_run("r1", "Zebra", "f", RunStatus::Completed, 3000),
-            make_run("r2", "Alpha", "f", RunStatus::Running, 1000),
-            make_run("r3", "Middle", "f", RunStatus::Waiting, 2000),
+            make_run("r-wait", "Zeta Waiting", RunStatus::Waiting, 1000),
+            make_run("r-done", "Alpha Done", RunStatus::Completed, 3000),
+        ]);
+        state.set_sessions(vec![
+            make_session("s1", "Zeta Session", false, 3000),
+            make_session("s2", "Alpha Session", false, 1000),
         ]);
 
-        // Initial sort: recent (r1, r3, r2)
-        assert_eq!(state.flows_tab.visible_indices, vec![0, 2, 1]);
+        // Grouped: Waiting first
+        assert_eq!(
+            state.selected_run().map(|r| r.run_id.as_str()),
+            Some("r-wait")
+        );
 
-        // Cycle to status: Running (r2), Waiting (r3), Completed (r1)
+        // Cycle to Recent: r-done (3000) is above r-wait (1000), jump_start selects r-done
         state.handle_key(&key(KeyCode::Char('s')));
-        assert_eq!(state.flows_tab.visible_indices, vec![1, 2, 0]);
+        state.handle_key(&key(KeyCode::Home));
+        assert_eq!(
+            state.selected_run().map(|r| r.run_id.as_str()),
+            Some("r-done")
+        );
 
-        // Cycle to name: Alpha (r2), Middle (r3), Zebra (r1)
+        // Cycle to Name: Alpha Done first
         state.handle_key(&key(KeyCode::Char('s')));
-        assert_eq!(state.flows_tab.visible_indices, vec![1, 2, 0]);
+        state.handle_key(&key(KeyCode::Home));
+        assert_eq!(
+            state.selected_run().map(|r| r.run_id.as_str()),
+            Some("r-done")
+        );
 
-        // Cycle back to recent
+        // Cycle back to Grouped: Waiting first
         state.handle_key(&key(KeyCode::Char('s')));
-        assert_eq!(state.flows_tab.visible_indices, vec![0, 2, 1]);
+        state.handle_key(&key(KeyCode::Home));
+        assert_eq!(
+            state.selected_run().map(|r| r.run_id.as_str()),
+            Some("r-wait")
+        );
+
+        // Sessions tab cycles Recent -> Name -> Recent
+        state.handle_key(&key(KeyCode::Tab));
+        state.handle_key(&key(KeyCode::Char('s'))); // Name
+        state.handle_key(&key(KeyCode::Home));
+        assert_eq!(
+            state.handle_key(&key(KeyCode::Enter)),
+            LedgerOutcome::OpenSession(make_session("s2", "Alpha Session", false, 1000))
+        );
     }
 
     #[test]
-    fn enter_outcomes_on_both_tabs() {
+    fn enter_y_and_rescan_outcomes_on_both_tabs() {
         let mut state = LedgerState::new();
-        state.set_runs(vec![make_run(
-            "r1",
-            "Run 1",
-            "flow",
-            RunStatus::Completed,
-            1000,
-        )]);
-        let sess = make_session("s1", "Sess 1", "claude", "/repo", false, 1000);
-        state.set_sessions(vec![sess.clone()]);
+        state.set_runs(vec![make_run("r1", "Run 1", RunStatus::Completed, 1000)]);
+        state.set_sessions(vec![make_session("s1", "Sess 1", false, 1000)]);
 
         assert_eq!(
             state.handle_key(&key(KeyCode::Enter)),
             LedgerOutcome::OpenRun(PathBuf::from("/tmp/runs/r1"))
         );
-
-        state.handle_key(&key(KeyCode::Tab));
-        assert_eq!(
-            state.handle_key(&key(KeyCode::Enter)),
-            LedgerOutcome::OpenSession(sess)
-        );
-    }
-
-    #[test]
-    fn copy_and_rescan_keys() {
-        let mut state = LedgerState::new();
-        state.set_runs(vec![make_run(
-            "r1",
-            "Run 1",
-            "flow",
-            RunStatus::Completed,
-            1000,
-        )]);
-        state.set_sessions(vec![make_session(
-            "s-rec-42",
-            "Sess 1",
-            "claude",
-            "/repo",
-            false,
-            1000,
-        )]);
-
         assert_eq!(
             state.handle_key(&key(KeyCode::Char('y'))),
             LedgerOutcome::Copy("/tmp/runs/r1".to_string())
@@ -1617,112 +2181,124 @@ mod tests {
 
         state.handle_key(&key(KeyCode::Tab));
         assert_eq!(
+            state.handle_key(&key(KeyCode::Enter)),
+            LedgerOutcome::OpenSession(make_session("s1", "Sess 1", false, 1000))
+        );
+        assert_eq!(
             state.handle_key(&key(KeyCode::Char('y'))),
-            LedgerOutcome::Copy("s-rec-42".to_string())
+            LedgerOutcome::Copy("s1".to_string())
         );
     }
 
     #[test]
-    fn set_runs_keeps_selected_run_id() {
+    fn set_runs_preserves_selected_run_id_and_any_live() {
         let mut state = LedgerState::new();
         state.set_runs(vec![
-            make_run("r1", "One", "f", RunStatus::Completed, 3000),
-            make_run("r2", "Two", "f", RunStatus::Completed, 2000),
+            make_run("r1", "Run 1", RunStatus::Completed, 2000),
+            make_run("r2", "Run 2", RunStatus::Completed, 1000),
         ]);
-        state.handle_key(&key(KeyCode::Char('j')));
-        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r2"));
-
-        // Now r2 is updated more recently and moves to index 0
-        state.set_runs(vec![
-            make_run("r1", "One", "f", RunStatus::Completed, 3000),
-            make_run("r2", "Two", "f", RunStatus::Running, 5000),
-        ]);
-        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r2"));
-        assert_eq!(state.flows_tab.selected, 0);
-    }
-
-    #[test]
-    fn any_live_tracks_running_runs() {
-        let mut state = LedgerState::new();
-        state.set_runs(vec![make_run("r1", "One", "f", RunStatus::Waiting, 1000)]);
         assert!(!state.any_live());
 
-        state.set_runs(vec![make_run("r1", "One", "f", RunStatus::Running, 1000)]);
+        state.handle_key(&key(KeyCode::Down));
+        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r2"));
+
+        // Refresh runs with a new live run at the top; r2 stays selected
+        state.set_runs(vec![
+            make_run("r3", "Run 3", RunStatus::Running, 3000),
+            make_run("r1", "Run 1", RunStatus::Completed, 2000),
+            make_run("r2", "Run 2", RunStatus::Completed, 1000),
+        ]);
         assert!(state.any_live());
+        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r2"));
     }
 
     #[test]
-    fn render_120x12_shows_tabs_and_waiting_row() {
+    fn render_at_120x14_shows_tabs_needs_you_question_rail_and_count() {
         let mut state = LedgerState::new();
         state.set_runs(vec![
-            make_run("r1", "PR Triage #42", "pr-triage", RunStatus::Waiting, 9_000),
-            make_run("r2", "Active Build", "ci-flow", RunStatus::Running, 8_000),
+            make_run("r-wait", "Release pipeline", RunStatus::Waiting, 9_000),
+            make_run("r-run", "Nightly bench", RunStatus::Running, 8_000),
+            make_run("r-done", "Unit suite", RunStatus::Completed, 5_000),
         ]);
+        let mut extras = HashMap::new();
+        extras.insert(
+            "r-wait".to_string(),
+            RowExtra {
+                rail: vec![
+                    NodeState::Done(Outcome::Ok),
+                    NodeState::Done(Outcome::Ok),
+                    NodeState::Done(Outcome::Ok),
+                    NodeState::Done(Outcome::Failed),
+                    NodeState::Waiting,
+                    NodeState::NotRun,
+                ],
+                agents: "grok-build · grok-4".to_string(),
+                stalled: false,
+                question: Some("Ship to prod?".to_string()),
+            },
+        );
+        state.set_extras(extras);
 
-        let area = Rect::new(0, 0, 120, 12);
-        let mut buf = Buffer::empty(area);
         let theme = Theme::default();
-        state.render(&mut buf, area, &theme, 10_000);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 14));
+        state.render(&mut buf, buf.area, &theme, 10_000);
 
         let r0 = row_text(&buf, 0);
-        assert!(r0.contains("Flows 2"));
+        assert!(r0.contains("Flows 3"));
         assert!(r0.contains("Sessions 0"));
-        assert!(r0.contains("1 running · 1 waiting"));
+        assert!(r0.contains("1 needs you · 1 running"));
+        assert!(r0.contains("[grouped]"));
 
-        let r2 = row_text(&buf, 2);
-        assert!(r2.contains("◐"));
-        assert!(r2.contains("PR Triage #42"));
-        assert!(r2.contains("waiting: review"));
+        let full = all_text(&buf);
+        assert!(full.contains("NEEDS YOU 1"));
+        assert!(full.contains("Release pipeline"));
+        assert!(full.contains("✓✓✓✗◐○ 4/6"));
+        assert!(full.contains("Ship to prod?"));
+        assert!(full.contains("grok-build · grok-4"));
     }
 
     #[test]
-    fn render_50x6_keeps_title_and_does_not_panic() {
+    fn render_at_50x8_keeps_title_and_does_not_panic() {
         let mut state = LedgerState::new();
         state.set_runs(vec![make_run(
-            "r1",
-            "CompactTitle",
-            "pr-triage",
-            RunStatus::Completed,
+            "r-wait",
+            "Compact Title Check",
+            RunStatus::Waiting,
             9_000,
         )]);
+        let mut extras = HashMap::new();
+        extras.insert(
+            "r-wait".to_string(),
+            RowExtra {
+                rail: vec![NodeState::Done(Outcome::Ok), NodeState::Waiting],
+                agents: "grok-agent".to_string(),
+                stalled: false,
+                question: Some("Approve?".to_string()),
+            },
+        );
+        state.set_extras(extras);
 
-        let area = Rect::new(0, 0, 50, 6);
-        let mut buf = Buffer::empty(area);
         let theme = Theme::default();
-        state.render(&mut buf, area, &theme, 10_000);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 8));
+        state.render(&mut buf, buf.area, &theme, 10_000);
 
-        let r2 = row_text(&buf, 2);
-        assert!(r2.contains("CompactTitle"));
+        let full = all_text(&buf);
+        assert!(full.contains("Compact Title"));
+        // Below 80 columns, <done>/<total> is dropped
+        assert!(!full.contains("1/2"));
     }
 
     #[test]
-    fn render_0x0_does_not_panic() {
+    fn render_at_0x0_and_empty_state_do_not_panic() {
         let mut state = LedgerState::new();
-        state.set_runs(vec![make_run(
-            "r1",
-            "Title",
-            "flow",
-            RunStatus::Completed,
-            1000,
-        )]);
-        let area = Rect::new(0, 0, 0, 0);
-        let mut buf = Buffer::empty(area);
         let theme = Theme::default();
-        state.render(&mut buf, area, &theme, 10_000);
-    }
 
-    #[test]
-    fn render_empty_state_shows_explanatory_line() {
-        let mut state = LedgerState::new();
-        let area = Rect::new(0, 0, 80, 10);
-        let mut buf = Buffer::empty(area);
-        let theme = Theme::default();
-        state.render(&mut buf, area, &theme, 10_000);
+        let mut zero_buf = Buffer::empty(Rect::new(0, 0, 0, 0));
+        state.render(&mut zero_buf, zero_buf.area, &theme, 10_000);
 
-        let mut all_text = String::new();
-        for y in 0..area.height {
-            all_text.push_str(&row_text(&buf, y));
-        }
-        assert!(all_text.contains("No acpx flow runs found"));
+        let mut empty_buf = Buffer::empty(Rect::new(0, 0, 80, 10));
+        state.render(&mut empty_buf, empty_buf.area, &theme, 10_000);
+        let full = all_text(&empty_buf);
+        assert!(full.contains("No acpx flow runs found"));
     }
 }

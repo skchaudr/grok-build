@@ -155,7 +155,7 @@ pub fn node_settings(run_dir: &Path) -> std::collections::HashMap<String, AgentS
 pub fn step_settings(run_dir: &Path) -> std::collections::HashMap<String, AgentSettings>;   // key = attempt id (from projections/steps.json); empty on any error
 pub fn is_stalled(summary: &RunSummary, now_ms: i64) -> bool;  // status Running but not updated for 90 s: the acpx process is gone
 /// A waiting run's gate choices: the waiting checkpoint step's output object `next` ({ "<label>": "<flow file>" }),
-/// as (label, flow file) in key order. Empty when the run is not waiting or the checkpoint declares none.
+/// as (label, flow file) sorted by label. Empty when the run is not waiting or the checkpoint declares none.
 pub fn gate_choices(run: &Run) -> Vec<(String, String)>;
 """
 
@@ -197,7 +197,7 @@ DETAIL_API = """
 pub enum DetailTarget {
     Run,             // overview of the whole run
     Step(usize),     // index into run.steps: one finished attempt
-    Node(String),    // a node id that has no step record yet (running, waiting, or not run)
+    Node(String),    // a node id with no step record: running, or not run (rarely: waiting without a step)
 }
 pub struct DetailPanel { /* private */ }
 impl DetailPanel {
@@ -634,6 +634,9 @@ recent, name — the flat orders have no section headers; show the active one ri
 `[grouped]`); Enter -> OpenRun(dir) / OpenSession(row); `y` -> Copy(run dir as a string, or the session record id);
 `R` -> Rescan; Esc -> clears a non-empty filter first (Changed), otherwise Close. While the filter input is open
 every printable key goes to it.
+Selection never rests on a header: after set_runs / set_sessions with no previous selection, the first selectable row
+is selected. On the Sessions tab `s` cycles recent, name only. On the tab row, drop right-aligned items when they
+would overlap the tabs, in this order: `[order]`, then the filter text, then the summary.
 Each tab keeps its own selection, scroll, and filter. `set_runs` / `set_sessions` / `set_extras` re-apply filter and
 order and keep the selected run_id / session selected when it is still present.
 {VIEW_STYLE}
@@ -673,8 +676,9 @@ Layout, top to bottom inside `area`:
    `theme.accent_running`; `bundle::is_stalled(&run.summary, now_ms)` -> `⊘ stalled at <current_node>: the acpx
    process is gone` in `theme.gray` instead of the Running banner.
 3. Graph (toggle with `v`, on by default), full width: render
-   `MarkdownContent::new_with_table_width(format!("```mermaid\n{{src}}\n```"), Some(width)).output(width)` and
-   paint each `BlockLine.content` (a `Line<'static>`) with `buf.set_line`. When a diagram does not fit, that renderer
+   `MarkdownContent::new_with_table_width(format!("```mermaid\\n{{src}}\\n```"), Some(width)).output(width)` (a
+   `BlockOutput`; its `.lines` are `BlockLine`s) and paint each `BlockLine.content` (a `Line<'static>`) with
+   `buf.set_line`. When a diagram does not fit, that renderer
    returns a boxed SOURCE LISTING instead of a drawing: detect it by any line whose text contains
    `mermaid: flowchart` or `too wide to display`. Use `Direction::LeftRight`; if that is a source listing, or has
    more than `area.height / 3` lines, or any line wider than the area, use `Direction::TopDown`; if TopDown is a
@@ -688,15 +692,20 @@ Layout, top to bottom inside `area`:
    `detail_area()` is None.
 Stages pane: a `FoldTree<String>`. Roots, in this order:
    a. one root per step in `run.steps` order (key = attempt id);
-   b. a root for a node that is Running or Waiting but has no step record yet (key = `"live/<node id>"`);
+   b. a root for a node that is Running but has no step record (key = `"live/<node id>"`). The WAITING stage is
+      the last root whose node id equals `run.summary.waiting_on`: acpx records the checkpoint step BEFORE the run
+      goes waiting, so it is normally a step root; use a `live/…` root for it only when no such step exists;
    c. when any flow node has `NodeState::NotRun`: a root `"skipped"` drawn as a dim rule row `── not run ──` whose
       children are those nodes, one per row (key = `"skip/<node id>"`), `○ <node id>  <kind label>` in gray_dim.
    Stage header row: `▾|▸ <n> <glyph> <node id>` bold, then in `theme.gray` the agent label
    (`AgentSettings::label()` from the step settings by attempt id, else the node settings by node id, else the kind
    label; a shell action shows `shell`), then right-aligned the duration (`fmt_duration`; for a Running stage the
-   time since its `node_started` event). `<n>` is the 1-based position among a+b. The glyph is coloured by state.
+   time since its `node_started` event). `<n>` is the 1-based position among a+b. The glyph is coloured by state. A step root's state is
+   `NodeState::Done(step.outcome)`, except the last step of the node named by `waiting_on` while the run is Waiting,
+   which is `NodeState::Waiting`; a `live/` root uses `run.node_state(node)`.
    Children of a stage (indented two columns, a `│` guide in gray_dim, `╰` on the last child):
-   - its trace events from `run.step_events`, as `+<ms since stage start>  <kind>  <detail>` in `theme.gray`;
+   - its trace events from `run.step_events` (for a `live/<node>` root: the events of `run.events` whose `node_id`
+     is the node and whose `attempt_id` is not the attempt id of any `run.steps` entry; key = `"live/<node>/<seq>"`), as `+<ms since stage start>  <kind>  <detail>` in `theme.gray`;
      `node_heartbeat` events are hidden unless `n` (noise) is on (key = `"<attempt>/<seq>"`);
    - a result row (key = `"<attempt>/result"`): the error in accent_error for failures; `→ <route>` when the output
      object has a string `route`; `exit <code>` for shell actions; else the first line of the output, where a JSON
@@ -706,8 +715,8 @@ Stages pane: a `FoldTree<String>`. Roots, in this order:
      re-run the flow to continue`.
    Stages are EXPANDED by default (`FoldState` stores collapsed keys, so do nothing special). A blank row separates
    one stage from the next when the pane is taller than the content; never inside a stage.
-`detail_target()`: selected row is a step header or one of its children -> `Step(index)`; a `live/…` root or its
-children (gate rows included) -> `Node(node id)`; a `skip/…` row -> `Node(node id)`; the `skipped` root or nothing
+`detail_target()`: selected row is a step header or one of its children, gate rows included -> `Step(index)` (the
+gate belongs to the waiting step); a `live/…` root or its children -> `Node(node id)`; a `skip/…` row -> `Node(node id)`; the `skipped` root or nothing
 selected -> `Run`.
 Keys (ignored while the confirmation box is open, see below): movement per the house style over visible rows;
 Left/h collapse (on a child or collapsed root, jump to the parent, as `FoldState::collapse` reports); Right/l expand;
@@ -961,14 +970,19 @@ Content (build a `Vec<Line<'static>>` wrapped to the width, cache it, draw the v
 - A section rule is a row `── <Name> ─────…` to the right edge, name bold in `theme.gray`, rule in `theme.gray_dim`,
   with one blank row above it.
 - `DetailTarget::Step(i)`:
-  title row `<glyph> <node id>` bold (glyph coloured by outcome) and right-aligned `<duration>`; a `theme.gray` facts
-  row: the agent label (`bundle::step_settings(&run.summary.dir)` by attempt id, `AgentSettings::label()`), the kind
-  label, the attempt id, `exit <code>` for actions; an error row in `theme.accent_error` when `step.error` is Some.
+  title row `<glyph> <node id>` bold and right-aligned `<duration>`. The glyph is by outcome, EXCEPT for the gate:
+  when the run is Waiting, `step.node_id` equals `waiting_on` and this is the last step of that node, the glyph is
+  `NodeState::Waiting.glyph()` in `theme.warning` (acpx records the checkpoint step before the run goes waiting).
+  A `theme.gray` facts row: the agent label (`bundle::step_settings(&run.summary.dir)` by attempt id,
+  `AgentSettings::label()`), the kind label, the attempt id, `exit <code>` for actions; an error row in
+  `theme.accent_error` when `step.error` is Some. For the gate step add, right after the facts row, the run's
+  `status_detail` in `theme.warning` and a `Gate` section (as described under the Node target).
   Sections, each only when it has content: `Prompt` (`prompt_text`; at most 14 wrapped rows then a dim
   `… +N more rows`); `Command` for actions (`command` + args on one wrapped paragraph, then `cwd`); `Conversation`
   (see below) for steps with `conversation` Some; `Result` (`value_text(&step.output)`, wrapped, at most 40 rows then
-  `… +N more rows`); `stdout` / `stderr` for actions (`bundle::read_artifact(&run.summary.dir, artifact, 64 * 1024)`,
-  last 30 lines, a read error shown as one dim row); `Events` (the step's trace events, `+<ms>  <kind>  <detail>`,
+  `… +N more rows`); `stdout` / `stderr` for actions (`bundle::read_artifact(&run.summary.dir, artifact, 64 * 1024)`
+  reads the FIRST 64 KiB: show the last 30 lines of what it returned, with a dim `… output cut at 64 KiB` row when
+  `artifact.bytes` exceeds that; a read error is one dim row); `Events` (the step's trace events, `+<ms>  <kind>  <detail>`,
   heartbeats left out).
 - `DetailTarget::Node(id)`: title row with the node's state glyph and id; facts row from
   `bundle::node_settings(&run.summary.dir)`; then by `run.node_state(id)`:
@@ -992,13 +1006,13 @@ skip them and never display any part of them. Turn the rest into items:
   inbound `session/update` by `params.update.sessionUpdate`: `agent_thought_chunk` and `agent_message_chunk`
   (`content.text`; concatenate consecutive chunks of the same kind into one paragraph), `tool_call` (`toolCallId`,
   `title`, `kind`, `status`), `tool_call_update` (same `toolCallId`: update its status and title; do not add a row);
-  everything else is ignored. Draw: thought as `∴ ` + italic `theme.gray` text; a tool call as one row
+  everything else is ignored. A `tool_call` often has NO `status`: show a missing status as `running`; a field absent
+  from an update keeps its previous value. Draw: thought as `∴ ` + italic `theme.gray` text; a tool call as one row
   `▸ <title>  <status>` with the status word coloured (completed accent_success, failed accent_error, otherwise
-  accent_running); a message as plain `theme.fg`-coloured wrapped text (use the primary text colour shown in
-  theme.rs.txt). A blank row between items of different kinds.
+  accent_running); a message as plain `theme.text_primary` wrapped text. A blank row between items of different kinds.
   For `Step(i)`: the file is `run.session_events_path(&conversation.session_id)`, and only lines with
   `event_start_seq <= seq <= event_end_seq` count. For a Running `Node(id)`: the session is the `run.sessions` entry
-  whose `handle` equals the node's `AgentSettings.handle`; only lines with `seq` greater than the largest
+  whose `handle` equals the node's `AgentSettings.handle` (or `"main"` when that is None); only lines with `seq` greater than the largest
   `event_end_seq` of finished steps on that session id count. A missing or unreadable file is one dim row saying so.
 Caching and following: rebuild the lines only when (run dir, target, width, `run.summary.updated_ms`,
 `run.steps.len()`, `run.events.len()`, and the events file length for a target that has a conversation) changed.
@@ -1032,27 +1046,36 @@ piw_protocol.md is the exact contract, worked out from piw's source: follow it t
 canonical-JSON rule, the hello version gate, and the required keys. bundle_sample.md shows what an acpx run folder
 holds (`~/.acpx/flows/runs/<runId>/`: manifest.json, flow.json, trace.ndjson, projections/live.json, run.json,
 steps.json, sessions/<bundleId>/events.ndjson). acpx rewrites its projection files non-atomically: a file that fails
-to parse keeps its previous value for this poll.
+to parse keeps its previous value. Implement that in ONE helper `read_json(path)` that keeps a module-level dict
+cache and returns the cached value when a parse fails (None if it never parsed); a trailing partial line of an
+`.ndjson` file is dropped. The mapping functions below call it and otherwise stay stateless.
 
 Command line (argparse):
   acpx-piw.py serve [--socket PATH]      serve until interrupted; default socket /tmp/acpx-piw-<uid>.sock
   acpx-piw.py open [RUN_ID] [--once]     start the server on /tmp/acpx-piw-<pid>.sock in this process, run
                                          `piw [RUN_ID] [--once]` as a child with PIW_SOCKET=<that path> and
-                                         PIW_NO_AUTOSTART=1 in its environment (stdin/stdout/stderr inherited), exit
+                                         PIW_NO_AUTOSTART=1 in its environment (stdin/stdout/stderr inherited; use
+                                         `asyncio.create_subprocess_exec` so the server keeps serving while piw
+                                         runs; `--once` requires RUN_ID), exit
                                          with piw's exit status, remove the socket file
   acpx-piw.py selftest                   build the run list and every run's snapshot, assert each message is
-                                         canonical (parse then re-serialise gives identical bytes) and under
-                                         1 MiB, print one line per run and `selftest ok`; exit 1 on any failure
+                                         canonical (parse then re-serialise gives identical bytes; this does not
+                                         prove piw's rules) and under 1 MiB, check `canon` on the float examples
+                                         given below, print one line per run; then, when the piw binary exists and
+                                         there is at least one run, run `piw <newest run id> --once` against an
+                                         in-process server (as `open` does) with stdout captured and require exit
+                                         status 0; print `selftest ok`; exit 1 on any failure
   common: --runs-dir DIR (default: $ACPX_RUNS_DIR, else ~/.acpx/flows/runs), --piw PATH (default `piw`),
           --piw-version X (default: parsed from `<piw> --version`, whose output is like `piw 0.17.7`)
 A socket file left behind by a dead server is removed before binding (try to connect first; only remove when the
-connect fails). A connection that closes without sending anything is normal (piw probes).
+connect fails; when it succeeds print `already serving on PATH` to stderr and exit 1). A connection that closes without sending anything is normal (piw probes).
 
 Server behaviour (one asyncio task per connection, NDJSON lines both ways):
 - On accept, write the hello line at once.
 - `view.runs.watch`: respond accepted with receipt {{"subscribed": true}}; send a `runs` event with ALL runs in one
   page (newest first, at most 200); poll the runs dir every second and send a new `runs` event when the page changed
-  (revision is a decimal string of a counter).
+  (`payload.revision` is a decimal STRING of a counter; `total` = `len(items)`; `start` 0; the event envelope
+  carries NO `revision` field for `runs`: there it would have to be an integer).
 - `view.run.watch`: respond accepted (or notFound with an error text when the run folder does not exist), send a
   `run_snapshot` event, then re-read the run every 500 ms and send a new snapshot when its content changed
   (integer `revision` in the payload and the event, incremented on change). `view.run.unwatch`: respond accepted,
@@ -1072,12 +1095,14 @@ Mapping an acpx run to piw's snapshot (keys exactly as the contract requires; ac
   paths {{"workflow":"acpx","state":"acpx","trace":"acpx"}}.
 - display: status; activity "supervised_runner" when running else null; controls []; reason = statusDetail or null.
 - row extras: live = status running and updated within 90 s; possiblyInterrupted = running and not updated for 90 s.
-- workflow: schema "pi-workflows.definition-snapshot.v1", name, startAt, nodes as an object in flow.json order with
-  nodeType mapped (`acp` -> `agent`; `action`, `compute`, `checkpoint` unchanged), `actionExecution` and `summary`
+- workflow: schema "pi-workflows.definition-snapshot.v1", name, startAt, nodes as an object keyed by node id (canonical JSON sorts
+  the keys; piw lays the graph out from `startAt` and the edges) with nodeType mapped (`acp` -> `agent`; `action`, `compute`, `checkpoint` unchanged), `actionExecution` and `summary`
   copied when present; edges copied from flow.json keeping only `from`, `to`, `switch` ({{on, cases}}).
 - state: schema "pi-workflows.run-state.v1", traceSeq = the last trace seq (0 when none), runId, workflowName,
   runTitle, startedAt, updatedAt, finishedAt, status, input (run.json `input`, else null), outputs and results
   (run.json objects, else {{}}), steps, and when present currentNode, waitingOn, statusDetail, error.
+- An `outcome` outside ok|timed_out|failed|cancelled becomes `failed`. Every `error` (step or state) must be a
+  string: a string as is, an object with a string `message` -> that, anything else non-null -> its canonical JSON.
 - steps (StepRecord) from projections/steps.json in order: attemptId, nodeId, nodeType (mapped as above), outcome,
   startedAt, finishedAt, prompt = promptText (null when absent), output (null when absent), error when present,
   action = the step's `trace.action` restricted to actionType, command, args, cwd, exitCode, signal, durationMs
@@ -1093,7 +1118,8 @@ Mapping an acpx run to piw's snapshot (keys exactly as the contract requires; ac
   the agent's turn as `assistant` message entries whose content is an array of parts — consecutive
   `agent_thought_chunk` text joined into one {{"type":"thinking","thinking":…}} part, consecutive
   `agent_message_chunk` text joined into one {{"type":"text","text":…}} part, each `tool_call` a
-  {{"type":"toolCall","id":toolCallId,"name":title,"arguments":rawInput or {{}}}} part; and for each tool call that
+  {{"type":"toolCall","id":toolCallId,"name":title,"arguments": the last non-empty `rawInput` seen on the call or
+  its updates, else {{}}}} part (a `tool_call` often has no `status`; updates may omit fields); and for each tool call that
   finished (a later `tool_call_update` with status completed or failed) a `toolResult`-role message with one text
   part (the update's text content when it has any, else the status). Entry shape: {{"seq": n (1-based, contiguous
   over the whole list), "at": the event's `at`, "entry": {{"type":"message","id":"<attemptId>:<k>","message":
@@ -1101,10 +1127,17 @@ Mapping an acpx run to piw's snapshot (keys exactly as the contract requires; ac
   never copy any part of them. Other sessionUpdate kinds are ignored.
 - Size: one line must stay under 1 MiB. Cut any single text to 4000 characters (append "…"), any trace payload whose
   JSON is over 2000 characters to {{"truncated": true}}, and if the snapshot line is still over 900 000 bytes drop the
-  session entries of the oldest steps (and their `conversation` ranges) until it fits.
+  session entries of the oldest steps (and their `conversation` ranges) until it fits, then the oldest `tracePage`
+  items (keeping `total` = the number of items kept).
 Canonical JSON: write your own serialiser (do not rely on `sort_keys`: keys sort by UTF-16 code units): no
-whitespace; strings via `json.dumps(s, ensure_ascii=False)` after replacing lone surrogates; ints as ints; a float
-that is integral as an int, any other float via `repr` (and never emit NaN/Infinity: use null); bools and null.
+whitespace; strings via `json.dumps(s, ensure_ascii=False)` after replacing lone surrogates; bools and null (test
+`bool` before `int`); ints via `str()` (an int outside the i64/u64 range is written as a float). Floats must be
+ECMAScript Number::toString, NOT Python `repr`: NaN and ±Infinity -> null; zero (including -0.0) -> `0`; otherwise
+let `d = Decimal(repr(abs(x)))`, `s` = its digits with trailing zeros stripped, `k = len(s)`, and `n` such that
+abs(x) = 0.s × 10^n (from `d.as_tuple()`: `n = len(digits) + exponent`, computed before stripping). If k <= n <= 21
+write `s` + '0'*(n-k). Else if 0 < n <= 21 write `s[:n]` + '.' + `s[n:]`. Else if -6 < n <= 0 write '0.' + '0'*(-n) +
+`s`. Otherwise write `s[0]` (+ '.' + `s[1:]` when k > 1) + 'e' + ('+' if n-1 > 0 else '-') + `str(abs(n-1))`. Prefix
+'-' for negatives. (So 1.0 -> `1`, 1e-5 -> `0.00001`, 1e21 -> `1e+21`, 1.5e-7 -> `1.5e-7`.)
 Incoming lines are parsed with `json.loads`; a line that does not parse closes that connection.
 Robustness: nothing read from disk may crash the server: every per-run failure becomes a skipped run (list) or a
 `notFound` response (watch), logged to stderr as one line. Never print the contents of events files. Handle SIGINT /
