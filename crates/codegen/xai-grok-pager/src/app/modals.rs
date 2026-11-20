@@ -6005,5 +6005,8 @@ fn acpx_outcome(outcome: crate::views::acpx_modal::AcpxOutcome, active_modal: &m
         }
         AcpxOutcome::Copy(text) => InputOutcome::Action(Action::AcpxCopy { text }),
         AcpxOutcome::Replay(request) => InputOutcome::Action(Action::AcpxReplay(Box::new(request))),
+        AcpxOutcome::RunFlow { flow_file, input_json } => {
+            InputOutcome::Action(Action::AcpxRun { flow_file, input_json: Some(input_json) })
+        }
     }
 }

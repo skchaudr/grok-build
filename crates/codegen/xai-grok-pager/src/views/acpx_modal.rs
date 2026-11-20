@@ -1,7 +1,9 @@
+pub(crate) mod detail;
 pub(crate) mod inspector;
 pub(crate) mod ledger;
 pub(crate) mod run;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
@@ -20,11 +22,16 @@ use crate::views::modal_window::{
     Shortcut,
 };
 
+use self::detail::{DetailPanel, DetailTarget};
 use self::inspector::{InspectorOutcome, InspectorState};
-use self::ledger::{LedgerOutcome, LedgerState};
+use self::ledger::{LedgerOutcome, LedgerState, RowExtra};
 use self::run::{RunOutcome, RunViewState};
 
 const MAX_TITLE_WIDTH: usize = 72;
+/// Below this content width the runs list has no room for a preview beside it.
+const PREVIEW_MIN_WIDTH: u16 = 120;
+/// Rails and agents are loaded for this many of the newest runs.
+const EXTRAS_LIMIT: usize = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -49,6 +56,8 @@ pub enum AcpxOutcome {
     Close,
     Copy(String),
     Replay(ReplayRequest),
+    /// A gate was answered: start this flow with this input.
+    RunFlow { flow_file: PathBuf, input_json: String },
 }
 
 pub struct AcpxModalState {
@@ -62,6 +71,14 @@ pub struct AcpxModalState {
     mode: Mode,
     help_open: bool,
     notice: Option<String>,
+    /// The right-hand panel: the selected run beside the list, the selected stage beside a run.
+    detail: DetailPanel,
+    /// The run selected in the list, loaded for the preview.
+    preview: Option<Run>,
+    /// Rail and agents per run id, with the `updated_ms` they were read at.
+    extras: HashMap<String, (i64, RowExtra)>,
+    /// Where the detail panel was last drawn, for the mouse wheel.
+    detail_rect: Option<Rect>,
 }
 
 impl AcpxModalState {
@@ -81,6 +98,10 @@ impl AcpxModalState {
             mode: Mode::Ledger,
             help_open: false,
             notice: None,
+            detail: DetailPanel::new(),
+            preview: None,
+            extras: HashMap::new(),
+            detail_rect: None,
         };
         state.rescan_runs();
         state.rescan_sessions();
@@ -90,7 +111,9 @@ impl AcpxModalState {
     pub fn open_run(&mut self, dir: &Path) -> bool {
         match bundle::load_run(dir) {
             Ok(run) => {
-                self.run_view = Some(RunViewState::new(run));
+                let mut view = RunViewState::new(run);
+                view.set_settings(bundle::node_settings(dir), bundle::step_settings(dir));
+                self.run_view = Some(view);
                 self.inspector = None;
                 self.mode = Mode::Run;
                 self.help_open = false;
@@ -110,7 +133,8 @@ impl AcpxModalState {
 
     pub fn wants_poll(&self) -> bool {
         match self.mode {
-            Mode::Ledger => self.ledger.any_live(),
+            // Runs are started outside the pager, so the list is always re-read.
+            Mode::Ledger => true,
             Mode::Run | Mode::Step => self
                 .run_view
                 .as_ref()
@@ -126,6 +150,8 @@ impl AcpxModalState {
                     return false;
                 };
                 if bundle::refresh(rv.run_mut()) {
+                    let dir = rv.run().summary.dir.clone();
+                    rv.set_settings(bundle::node_settings(&dir), bundle::step_settings(&dir));
                     rv.sync();
                     true
                 } else {
@@ -156,10 +182,25 @@ impl AcpxModalState {
             return AcpxOutcome::Changed;
         }
 
-        let captures = self.mode == Mode::Ledger && self.ledger.captures_text();
+        let captures = match self.mode {
+            Mode::Ledger => self.ledger.captures_text(),
+            Mode::Run => self.run_view.as_ref().is_some_and(|rv| rv.captures_keys()),
+            Mode::Step => false,
+        };
         if !captures && matches!(key.code, KeyCode::Char('?')) {
             self.help_open = true;
             return AcpxOutcome::Changed;
+        }
+        // Beside the list, J / K scroll the preview (the list itself owns j / k).
+        if !captures && self.mode == Mode::Ledger {
+            let delta = match key.code {
+                KeyCode::Char('J') => 3,
+                KeyCode::Char('K') => -3,
+                _ => 0,
+            };
+            if delta != 0 {
+                return if self.detail.scroll(delta) { AcpxOutcome::Changed } else { AcpxOutcome::Unchanged };
+            }
         }
 
         let outcome = match self.mode {
@@ -200,6 +241,12 @@ impl AcpxModalState {
                     MouseEventKind::ScrollDown => 3,
                     _ => return AcpxOutcome::Unchanged,
                 };
+                let over_detail = self.detail_rect.is_some_and(|r| {
+                    mouse.column >= r.x && mouse.column < r.x + r.width && mouse.row >= r.y && mouse.row < r.y + r.height
+                });
+                if over_detail && self.mode != Mode::Step {
+                    return if self.detail.scroll(delta) { AcpxOutcome::Changed } else { AcpxOutcome::Unchanged };
+                }
                 let moved = match self.mode {
                     Mode::Ledger => self.ledger.scroll(delta),
                     Mode::Run => self.run_view.as_mut().is_some_and(|rv| rv.scroll(delta)),
@@ -225,8 +272,38 @@ impl AcpxModalState {
             .unwrap_or_default();
         let changed = runs != self.runs_snapshot;
         self.runs_snapshot = runs.clone();
+        self.load_extras(&runs);
         self.ledger.set_runs(runs);
         changed
+    }
+
+    /// Rail, agents and question for the newest runs. A run is re-read only when acpx has written it since.
+    fn load_extras(&mut self, runs: &[RunSummary]) {
+        let now = now_ms();
+        let mut kept = HashMap::new();
+        for summary in runs.iter().take(EXTRAS_LIMIT) {
+            let cached = self.extras.remove(&summary.run_id).filter(|(at, _)| *at == summary.updated_ms);
+            let (at, mut extra) = cached.unwrap_or_else(|| (summary.updated_ms, row_extra(summary)));
+            extra.stalled = bundle::is_stalled(summary, now);
+            kept.insert(summary.run_id.clone(), (at, extra));
+        }
+        self.ledger.set_extras(kept.iter().map(|(id, (_, extra))| (id.clone(), extra.clone())).collect());
+        self.extras = kept;
+    }
+
+    /// Keep `preview` on the run selected in the list.
+    fn sync_preview(&mut self) {
+        let Some(selected) = self.ledger.selected_run() else {
+            self.preview = None;
+            return;
+        };
+        let fresh = self
+            .preview
+            .as_ref()
+            .is_some_and(|p| p.summary.dir == selected.dir && p.summary.updated_ms == selected.updated_ms);
+        if !fresh {
+            self.preview = bundle::load_run(&selected.dir).ok();
+        }
     }
 
     fn rescan_sessions(&mut self) {
@@ -281,6 +358,24 @@ impl AcpxModalState {
             }
             RunOutcome::Replay(idx) => self.replay_step(idx),
             RunOutcome::Copy(text) => AcpxOutcome::Copy(text),
+            RunOutcome::ScrollDetail(delta) => {
+                if self.detail.scroll(delta) {
+                    AcpxOutcome::Changed
+                } else {
+                    AcpxOutcome::Unchanged
+                }
+            }
+            RunOutcome::Gate { choice, flow_file } => {
+                let run = rv.run();
+                // A relative flow file is beside the flow that declared it.
+                let declared = PathBuf::from(&flow_file);
+                let flow_file = match bundle::flow_path(&run.summary.dir).as_deref().and_then(Path::parent) {
+                    Some(dir) if declared.is_relative() => dir.join(declared),
+                    _ => declared,
+                };
+                let input_json = bundle::gate_input(run, &choice).to_string();
+                AcpxOutcome::RunFlow { flow_file, input_json }
+            }
         }
     }
 
@@ -416,6 +511,29 @@ impl AcpxModalState {
     }
 }
 
+/// What the list shows for one run beyond its summary. Reads the run folder.
+fn row_extra(summary: &RunSummary) -> RowExtra {
+    let Ok(run) = bundle::load_run(&summary.dir) else { return RowExtra::default() };
+    let steps = bundle::step_settings(&summary.dir);
+    let nodes = bundle::node_settings(&summary.dir);
+    // The agent that did the most recent agent step, else the first one the flow declares.
+    let agents = run
+        .steps
+        .iter()
+        .rev()
+        .filter_map(|step| steps.get(&step.attempt_id))
+        .chain(run.flow.nodes.iter().filter_map(|node| nodes.get(&node.id)))
+        .map(bundle::AgentSettings::label)
+        .find(|label| !label.is_empty())
+        .unwrap_or_default();
+    RowExtra {
+        rail: run.flow.nodes.iter().map(|node| run.node_state(&node.id)).collect(),
+        agents,
+        stalled: false,
+        question: (summary.status == bundle::RunStatus::Waiting).then(|| summary.status_detail.clone()).flatten(),
+    }
+}
+
 fn session_replay(s: SessionSummary) -> ReplayRequest {
     ReplayRequest {
         events_path: s.stream_path,
@@ -477,14 +595,38 @@ pub fn render_acpx_modal(
 
     let now = now_ms();
 
+    state.detail_rect = None;
     if state.help_open {
         render_help_overlay(buf, content, state.mode, &theme);
     } else {
         match state.mode {
-            Mode::Ledger => state.ledger.render(buf, content, &theme, now),
+            Mode::Ledger => {
+                state.sync_preview();
+                match (state.preview.as_ref(), content.width >= PREVIEW_MIN_WIDTH) {
+                    (Some(run), true) => {
+                        // List on the left, the selected run on the right, a rule between.
+                        let list_w = (content.width * 9 / 20).clamp(56, 110);
+                        let list = Rect::new(content.x, content.y, list_w, content.height);
+                        let right = Rect::new(content.x + list_w + 2, content.y, content.width - list_w - 2, content.height);
+                        state.ledger.render(buf, list, &theme, now);
+                        let rule = Style::default().fg(theme.gray_dim);
+                        for y in content.y..content.y + content.height {
+                            buf.set_stringn(content.x + list_w, y, "│", 1, rule);
+                        }
+                        state.detail.render(buf, right, run, &DetailTarget::Run, &theme, now);
+                        state.detail_rect = Some(right);
+                    }
+                    _ => state.ledger.render(buf, content, &theme, now),
+                }
+            }
             Mode::Run => {
                 if let Some(rv) = state.run_view.as_mut() {
                     rv.render(buf, content, &theme, now);
+                    if let Some(area) = rv.detail_area() {
+                        let area = area.intersection(content);
+                        state.detail.render(buf, area, rv.run(), &rv.detail_target(), &theme, now);
+                        state.detail_rect = Some(area);
+                    }
                 }
             }
             Mode::Step => {
@@ -517,12 +659,14 @@ fn render_notice_row(buf: &mut Buffer, content: Rect, notice: &str, theme: &Them
 }
 
 const LEDGER_KEYS: &[(&str, &str)] = &[
-    ("Tab / 1 / 2", "Switch between Flows and Sessions"),
+    ("Tab / h / l", "Switch between Flows and Sessions"),
     ("j / k / ↑ / ↓", "Move selection"),
     ("g / G", "Jump to first / last row"),
+    ("J / K", "Scroll the preview of the selected run"),
     ("Enter", "Open selected flow run or replay session"),
-    ("/ or f", "Filter rows by text"),
-    ("s", "Cycle status filter"),
+    ("/", "Filter rows by text"),
+    ("a", "Only running and waiting runs"),
+    ("s", "Cycle order: grouped, recent, name"),
     ("y", "Copy selected id or path"),
     ("R", "Rescan flows and sessions on disk"),
     ("?", "Toggle this key reference"),
@@ -530,14 +674,19 @@ const LEDGER_KEYS: &[(&str, &str)] = &[
 ];
 
 const RUN_KEYS: &[(&str, &str)] = &[
-    ("j / k / ↑ / ↓", "Move step selection"),
-    ("g / G", "Jump to first / last step"),
-    ("Enter", "Inspect selected step"),
-    ("Space / z", "Fold or unfold step details"),
-    ("r", "Replay ACP session transcript for step"),
-    ("y", "Copy attempt or run id"),
+    ("j / k / ↑ / ↓", "Move through stages and their substeps"),
+    ("[ / ]", "Previous / next stage"),
+    ("J / K, D / U", "Scroll the detail panel by a few rows / by a page"),
+    ("Enter", "Inspect the selected stage; on a gate row, answer it"),
+    ("1-9", "Answer the gate with that choice (asks first)"),
+    ("F5", "Jump to the gate"),
+    ("Space, h / l, E", "Fold or unfold a stage; E folds all"),
+    ("c / !", "Jump to the current stage / the next failed one"),
+    ("v / n", "Show or hide the graph / heartbeat noise"),
+    ("r", "Replay the stage's conversation as a transcript"),
+    ("y", "Copy the stage's output"),
     ("?", "Toggle this key reference"),
-    ("Esc / Backspace", "Back to ledger"),
+    ("Esc", "Back to the list"),
 ];
 
 const STEP_KEYS: &[(&str, &str)] = &[
@@ -980,7 +1129,8 @@ mod tests {
         let fx = write_fixture("waiting");
         let mut state =
             AcpxModalState::open_at(Some(fx.runs_base.clone()), Some(fx.sessions_base.clone()));
-        assert!(!state.wants_poll());
+        // The list is always re-read: new runs appear from outside.
+        assert!(state.wants_poll());
 
         state.handle_key(&key(KeyCode::Enter));
         assert_eq!(state.mode(), Mode::Run);
