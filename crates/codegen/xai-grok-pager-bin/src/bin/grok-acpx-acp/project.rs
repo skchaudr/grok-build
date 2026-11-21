@@ -1340,6 +1340,67 @@ mod tests {
     }
 
     #[test]
+    fn shell_step_update_carries_stdout_text_and_exit_status() {
+        let mut proj = Projector::new("parent-1");
+        proj.on_event(&DriverEvent::RunStarted {
+            run_id: "r1".to_string(),
+            run_dir: PathBuf::from("/tmp/r1"),
+            title: "T".to_string(),
+            flow_path: "f.json".to_string(),
+            flow: sample_flow(),
+            at_ms: 0,
+        });
+        let finish = |proj: &mut Projector, attempt: &str, outcome: &str, stdout: &str, stderr: &str, code: i64| {
+            let outs = proj.on_event(&DriverEvent::StepFinished {
+                node: "extract".to_string(),
+                attempt: attempt.to_string(),
+                kind: StepKind::Shell,
+                outcome: outcome.to_string(),
+                duration_ms: 5,
+                error: None,
+                output: Value::Null,
+                stdout: Some(stdout.to_string()),
+                stderr: Some(stderr.to_string()),
+                exit_code: Some(code),
+                at_ms: 9,
+            });
+            let Some(Out::Update {
+                update: acp::SessionUpdate::ToolCallUpdate(tcu),
+                ..
+            }) = outs.iter().find(|o| {
+                matches!(
+                    o,
+                    Out::Update {
+                        update: acp::SessionUpdate::ToolCallUpdate(_),
+                        ..
+                    }
+                )
+            })
+            else {
+                panic!("expected a ToolCallUpdate");
+            };
+            serde_json::to_value(tcu).unwrap_or(Value::Null)
+        };
+
+        let ok = finish(&mut proj, "extract#1", "ok", "M src/lib.rs\n", "", 0);
+        assert_eq!(ok.pointer("/content/0/content/text").and_then(Value::as_str), Some("M src/lib.rs\n"));
+        assert_eq!(
+            ok.pointer("/rawOutput/output_for_prompt").and_then(Value::as_str),
+            Some("M src/lib.rs\n")
+        );
+        assert_eq!(ok.pointer("/rawOutput/exit_code").and_then(Value::as_i64), Some(0));
+        assert_eq!(ok.get("status").and_then(Value::as_str), Some("completed"));
+
+        let bad = finish(&mut proj, "extract#2", "failed", "", "no such file", 2);
+        assert_eq!(bad.get("status").and_then(Value::as_str), Some("failed"));
+        assert_eq!(bad.pointer("/rawOutput/exit_code").and_then(Value::as_i64), Some(2));
+        assert_eq!(
+            bad.pointer("/content/0/content/text").and_then(Value::as_str),
+            Some("no such file")
+        );
+    }
+
+    #[test]
     fn checkpoint_waiting_shows_question_once_and_marks_plan_in_progress() {
         let mut proj = Projector::new("parent-1");
         proj.on_event(&DriverEvent::RunStarted {
