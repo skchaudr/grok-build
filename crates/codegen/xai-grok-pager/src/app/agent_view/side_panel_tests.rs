@@ -241,3 +241,13 @@ fn panel_row_has_its_clock_when_the_chat_is_not_drawn() {
         "armed outside the chat's draw"
     );
 }
+
+/// F4 opens the `/acpx` pop-up: the same `Action::OpenAcpx { run: None }` the slash command returns.
+#[test]
+fn f4_asks_for_the_acpx_popup() {
+    let mut agent = agent();
+    assert!(matches!(
+        press(&mut agent, KeyCode::F(4)),
+        InputOutcome::Action(crate::app::actions::Action::OpenAcpx { run: None })
+    ));
+}

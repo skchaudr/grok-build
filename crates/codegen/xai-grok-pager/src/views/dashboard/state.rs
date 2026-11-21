@@ -4241,6 +4241,7 @@ fn dashboard_action_for_id(
         | ActionId::ModelPicker
         | ActionId::ShortcutsHelp
         | ActionId::OpenSettings
+        | ActionId::OpenAcpx
         | ActionId::OpenDashboard
         | ActionId::EnableVoiceMode
         | ActionId::VoiceToggle

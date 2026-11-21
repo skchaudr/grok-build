@@ -12,7 +12,7 @@ pub struct AcpxCommand;
 impl SlashCommand for AcpxCommand {
     slash_meta! {
         name: "acpx",
-        description: "Browse acpx flow runs and sessions, or run a flow",
+        description: "Browse acpx flow runs and sessions, or run a flow (F4)",
         usage: "/acpx [run id] | /acpx run <flow file> [input json] | /acpx cancel",
         session_scoped: true,
     }

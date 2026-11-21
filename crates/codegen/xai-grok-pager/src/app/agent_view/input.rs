@@ -1456,6 +1456,7 @@ impl AgentView {
             // F2 opens the grok-pi panel; upstream's modal stays reachable via
             // `Action::OpenSettings` for stock Grok code paths and its tests.
             ActionId::OpenSettings => InputOutcome::Action(Action::OpenPiSettings),
+            ActionId::OpenAcpx => InputOutcome::Action(Action::OpenAcpx { run: None }),
             ActionId::OpenSessions => self.open_session_picker(),
             ActionId::ToggleMouseCapture => {
                 crate::unified_log::info(

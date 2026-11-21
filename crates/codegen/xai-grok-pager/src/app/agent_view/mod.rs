@@ -2143,6 +2143,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         }
         ActionId::ShortcutsHelp => return None,
         ActionId::OpenSettings => return None,
+        ActionId::OpenAcpx => return None,
         ActionId::ToggleTodos
         | ActionId::ToggleTasks
         | ActionId::EditPromptExternal

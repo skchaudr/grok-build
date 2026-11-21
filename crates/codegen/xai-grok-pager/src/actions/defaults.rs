@@ -902,6 +902,21 @@ pub(super) fn default_actions(
             requires_confirmation: false,
             long_help: None,
         },
+        ActionDef {
+            id: ActionId::OpenAcpx,
+            label: "acpx",
+            description: "Browse acpx flow runs and sessions",
+            default_key: key!(F(4)),
+            alt_keys: vec![],
+            category: Category::GettingStarted,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: None,
+            requires_confirmation: false,
+            long_help: Some(
+                "Opens the /acpx pop-up: the ledger of acpx flow runs, their steps, and their sessions.\nBound to F4; the same as typing /acpx.",
+            ),
+        },
     ];
 
     // Toggle terminal mouse reporting (mouse capture). Single binding: Ctrl+R on scrollback only, which takes that
