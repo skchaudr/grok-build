@@ -1345,12 +1345,19 @@ impl LedgerState {
             && let Some(ex) = extra
             && !ex.rail.is_empty()
         {
-            for &ns in &ex.rail {
-                let ns = if answered && ns == NodeState::Waiting {
-                    NodeState::Done(Outcome::Ok)
-                } else {
-                    ns
-                };
+            // An answered gate is done, so the ticks and the count below read the same states.
+            let rail: Vec<NodeState> = ex
+                .rail
+                .iter()
+                .map(|&ns| {
+                    if answered && ns == NodeState::Waiting {
+                        NodeState::Done(Outcome::Ok)
+                    } else {
+                        ns
+                    }
+                })
+                .collect();
+            for &ns in &rail {
                 let g = ns.glyph();
                 let color = match ns {
                     NodeState::Running => theme.accent_running,
@@ -1366,12 +1373,11 @@ impl LedgerState {
                 ));
             }
             if show_rail_count {
-                let done = ex
-                    .rail
+                let done = rail
                     .iter()
                     .filter(|s| matches!(s, NodeState::Done(_)))
                     .count();
-                let total = ex.rail.len();
+                let total = rail.len();
                 let cnt = format!(" {done}/{total}");
                 rail_width += cnt.width();
                 rail_spans.push(Span::styled(
@@ -2539,6 +2545,63 @@ mod tests {
         assert!(full.contains("✓✓✓✗◐○ 4/6"));
         assert!(full.contains("Ship to prod?"));
         assert!(full.contains("grok-build · grok-4"));
+    }
+
+    #[test]
+    fn answered_gate_row_count_includes_the_answered_gate_and_matches_the_rail() {
+        let rail = vec![
+            NodeState::Done(Outcome::Ok),
+            NodeState::Done(Outcome::Ok),
+            NodeState::Done(Outcome::Ok),
+            NodeState::Waiting,
+            NodeState::NotRun,
+            NodeState::NotRun,
+        ];
+        let render = |answered: bool| {
+            let mut state = LedgerState::new();
+            state.set_runs(vec![
+                make_run("r-wait", "Ship flow", RunStatus::Waiting, 9_000),
+                make_run("r-next", "Fix flow", RunStatus::Completed, 8_000),
+            ]);
+            let mut extras = HashMap::new();
+            extras.insert(
+                "r-wait".to_string(),
+                RowExtra {
+                    rail: rail.clone(),
+                    agents: String::new(),
+                    stalled: false,
+                    question: Some("Ship it?".to_string()),
+                    answers: None,
+                },
+            );
+            if answered {
+                extras.insert(
+                    "r-next".to_string(),
+                    RowExtra {
+                        rail: vec![],
+                        agents: String::new(),
+                        stalled: false,
+                        question: None,
+                        answers: Some(GateAnswer {
+                            run_id: "r-wait".to_string(),
+                            choice: "Accept".to_string(),
+                        }),
+                    },
+                );
+            }
+            state.set_extras(extras);
+            let mut buf = Buffer::empty(Rect::new(0, 0, 120, 14));
+            let area_ = buf.area;
+            state.render(&mut buf, area_, &Theme::default(), 10_000);
+            all_text(&buf)
+        };
+
+        let answered = render(true);
+        assert!(answered.contains("✓✓✓✓○○ 4/6"), "answered row: {answered}");
+        assert!(!answered.contains("3/6"));
+
+        let waiting = render(false);
+        assert!(waiting.contains("✓✓✓◐○○ 3/6"), "waiting row: {waiting}");
     }
 
     #[test]
