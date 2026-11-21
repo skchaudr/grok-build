@@ -874,6 +874,11 @@ pub(super) fn handle_session_notification_with_origin(
             let is_background = info_ref.is_some_and(|s| s.attempt.is_background);
             let description = info_ref.map(|s| s.description.clone()).unwrap_or_default();
             let existing_terminal = info_ref.and_then(|info| info.attempt.terminal_entry_id);
+            if is_background {
+                // The agent's follow-up to a finished background subagent is a new message, below this block:
+                // text after it must not be appended to the reply that came before it.
+                agent.session.tracker.close_open_streams(&mut agent.scrollback);
+            }
             if let Some(eid) = entry_id {
                 agent.scrollback.finish_running(eid);
             }

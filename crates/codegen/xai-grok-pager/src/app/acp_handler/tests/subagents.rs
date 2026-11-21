@@ -3102,6 +3102,41 @@
         }
     }
 
+    /// The reported glue: after a background subagent finished, the agent's follow-up ("1. Cats ...") was appended to the reply
+    /// before it ("begun"). The finished subagent is a message boundary.
+    #[test]
+    fn text_after_a_finished_background_subagent_is_a_new_entry() {
+        let mut app = make_app_with_agent("sess-parent");
+        spawn_subagent_with_optional_updates(&mut app, "child-bg", None);
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_sessions
+            .get_mut("child-bg")
+            .unwrap()
+            .attempt
+            .is_background = true;
+        push_agent_text(&mut app, "sess-parent", "begun");
+        let _ = handle(
+            make_ext_session_notification_with_method(
+                "sess-parent",
+                "x.ai/session/update",
+                test_subagent_finished("child-bg"),
+            ),
+            &mut app,
+        );
+        push_agent_text(&mut app, "sess-parent", "1. Cats");
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let texts: Vec<String> = (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.entry(i))
+            .filter_map(|e| match &e.block {
+                crate::scrollback::block::RenderBlock::AgentMessage(m) => Some(m.text()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["begun".to_string(), "1. Cats".to_string()]);
+    }
+
     #[test]
     fn first_preview_row_opens_the_subagent_block_unfolded_unless_pinned() {
         use crate::scrollback::types::DisplayMode;
