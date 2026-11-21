@@ -153,7 +153,12 @@ impl RunViewState {
         if choice.is_some() {
             self.gate_confirm = None;
         }
+        let changed = self.answered != choice;
         self.answered = choice;
+        if changed {
+            // Stage glyphs and the graph are drawn from the answer.
+            self.sync();
+        }
     }
 
     pub fn answered(&self) -> Option<&str> {
@@ -702,8 +707,10 @@ impl RunViewState {
         for (step_idx, step) in self.run.steps.iter().enumerate() {
             stage_num += 1;
             let is_waiting_stage = waiting_step_idx == Some(step_idx);
-            let state = if is_waiting_stage {
+            let state = if is_waiting_stage && self.answered.is_none() {
                 NodeState::Waiting
+            } else if is_waiting_stage {
+                NodeState::Done(Outcome::Ok)
             } else {
                 NodeState::Done(step.outcome)
             };
@@ -777,7 +784,11 @@ impl RunViewState {
             payloads.push(NodePayload::LiveStage {
                 node_id: live_node_id.clone(),
                 stage_num,
-                state,
+                state: if state == NodeState::Waiting && self.answered.is_some() {
+                    NodeState::Done(Outcome::Ok)
+                } else {
+                    state
+                },
             });
 
             let step_attempts: HashSet<&str> = self
@@ -1219,8 +1230,8 @@ impl RunViewState {
         theme: &Theme,
     ) -> Vec<Line<'static>> {
         let w = width as usize;
-        let lr_src = mermaid_source(&self.run, Direction::LeftRight);
-        let td_src = mermaid_source(&self.run, Direction::TopDown);
+        let lr_src = mermaid_source(&self.run, Direction::LeftRight, self.answered.is_some());
+        let td_src = mermaid_source(&self.run, Direction::TopDown, self.answered.is_some());
 
         let cache_valid = self.graph_cache.as_ref().is_some_and(|c| {
             c.width == width && c.lr_src == lr_src && c.td_src == td_src
@@ -2569,6 +2580,27 @@ mod tests {
         assert!(!text.contains("NEEDS YOU"));
         assert!(text.contains("✓ approve → land.flow.ts"));
         assert!(text.contains("reject → fix.flow.ts"));
+    }
+
+    #[test]
+    fn answered_gate_is_drawn_done_in_graph_stages_and_detail_pane() {
+        let run = sample_waiting_run(json!({
+            "next": {"approve": "land.flow.ts", "reject": "fix.flow.ts"}
+        }));
+        let mut st = RunViewState::new(run);
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 160, 40);
+        let draw = |st: &mut RunViewState| {
+            let mut buf = Buffer::empty(area);
+            st.render(&mut buf, area, &theme, 10_000);
+            buf_text(&buf)
+        };
+        assert!(draw(&mut st).contains("◐ gate"));
+
+        st.set_answered(Some("approve".to_string()));
+        let text = draw(&mut st);
+        assert!(text.contains("✓ gate"), "{text}");
+        assert!(!text.contains('◐'), "{text}");
     }
 
     #[test]

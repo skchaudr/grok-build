@@ -18,7 +18,8 @@ fn escape_label(s: &str) -> String {
 }
 
 /// Mermaid `flowchart` source for a run: one node per flow node, labelled "<state glyph> <id>".
-pub fn mermaid_source(run: &Run, direction: Direction) -> String {
+/// `answered` draws a waiting gate as done.
+pub fn mermaid_source(run: &Run, direction: Direction, answered: bool) -> String {
     let mut lines = Vec::new();
     let dir_str = match direction {
         Direction::LeftRight => "LR",
@@ -32,7 +33,7 @@ pub fn mermaid_source(run: &Run, direction: Direction) -> String {
         let mermaid_id = format!("n{idx}");
         id_map.insert(node.id.as_str(), mermaid_id.clone());
 
-        let state: NodeState = run.node_state(&node.id);
+        let state: NodeState = run.node_state_answered(&node.id, answered);
         let raw_label = format!("{} {}", state.glyph(), node.id);
         let label = escape_label(&raw_label);
 
@@ -190,7 +191,7 @@ mod tests {
             ],
         );
 
-        let src = mermaid_source(&run, Direction::LeftRight);
+        let src = mermaid_source(&run, Direction::LeftRight, false);
         assert_eq!(
             src.lines().collect::<Vec<_>>(),
             vec![
@@ -229,7 +230,7 @@ mod tests {
             ],
         );
 
-        let src = mermaid_source(&run, Direction::LeftRight);
+        let src = mermaid_source(&run, Direction::LeftRight, false);
         assert_eq!(
             src.lines().collect::<Vec<_>>(),
             vec![
@@ -260,7 +261,7 @@ mod tests {
             vec![make_step("prep", 1, NodeKind::Action, Outcome::Ok)],
         );
 
-        let src = mermaid_source(&run, Direction::LeftRight);
+        let src = mermaid_source(&run, Direction::LeftRight, false);
         assert_eq!(
             src.lines().collect::<Vec<_>>(),
             vec![
@@ -296,7 +297,7 @@ mod tests {
             vec![make_step("build", 1, NodeKind::Action, Outcome::Ok)],
         );
 
-        let src = mermaid_source(&run, Direction::LeftRight);
+        let src = mermaid_source(&run, Direction::LeftRight, false);
         assert_eq!(
             src.lines().collect::<Vec<_>>(),
             vec![
@@ -308,6 +309,28 @@ mod tests {
                 "  n1 --> n2",
             ]
         );
+    }
+
+    #[test]
+    fn test_answered_gate_is_drawn_done() {
+        let run = make_run(
+            RunStatus::Waiting,
+            Some("gate"),
+            Some("gate"),
+            vec![
+                make_node("build", NodeKind::Action),
+                make_node("gate", NodeKind::Checkpoint),
+            ],
+            vec![FlowEdge::Simple {
+                from: "build".to_string(),
+                to: "gate".to_string(),
+            }],
+            vec![make_step("build", 1, NodeKind::Action, Outcome::Ok)],
+        );
+        let open = mermaid_source(&run, Direction::LeftRight, false);
+        let answered = mermaid_source(&run, Direction::LeftRight, true);
+        assert!(open.contains("◐ gate") && !open.contains("✓ gate"));
+        assert!(answered.contains("✓ gate") && !answered.contains('◐'));
     }
 
     #[test]
@@ -335,7 +358,7 @@ mod tests {
             vec![],
         );
 
-        let src = mermaid_source(&run, Direction::LeftRight);
+        let src = mermaid_source(&run, Direction::LeftRight, false);
         assert_eq!(
             src.lines().collect::<Vec<_>>(),
             vec![
@@ -369,7 +392,7 @@ mod tests {
             vec![make_step(tricky_id, 1, NodeKind::Action, Outcome::Failed)],
         );
 
-        let src = mermaid_source(&run, Direction::LeftRight);
+        let src = mermaid_source(&run, Direction::LeftRight, false);
         assert_eq!(
             src.lines().collect::<Vec<_>>(),
             vec![
@@ -392,7 +415,7 @@ mod tests {
             vec![make_step("only", 1, NodeKind::Compute, Outcome::Ok)],
         );
 
-        let src = mermaid_source(&run, Direction::TopDown);
+        let src = mermaid_source(&run, Direction::TopDown, false);
         assert_eq!(
             src.lines().collect::<Vec<_>>(),
             vec!["flowchart TD", "  n0[\"✓ only\"]"]
@@ -438,7 +461,7 @@ mod tests {
             ],
         );
 
-        let src = mermaid_source(&run, Direction::LeftRight);
+        let src = mermaid_source(&run, Direction::LeftRight, false);
         assert_eq!(
             src.lines().collect::<Vec<_>>(),
             vec![
@@ -479,7 +502,7 @@ mod tests {
             ],
         );
 
-        let src = mermaid_source(&run, Direction::LeftRight);
+        let src = mermaid_source(&run, Direction::LeftRight, false);
         assert_eq!(
             src.lines().collect::<Vec<_>>(),
             vec![

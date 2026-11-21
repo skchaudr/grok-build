@@ -277,6 +277,15 @@ impl Run {
         NodeState::NotRun
     }
 
+    /// `node_state`, except that a gate which has been answered is done: the
+    /// checkpoint is no longer waiting on anyone.
+    pub fn node_state_answered(&self, node_id: &str, answered: bool) -> NodeState {
+        match self.node_state(node_id) {
+            NodeState::Waiting if answered => NodeState::Done(Outcome::Ok),
+            state => state,
+        }
+    }
+
     pub fn taken_path(&self) -> Vec<String> {
         self.steps.iter().map(|s| s.node_id.clone()).collect()
     }

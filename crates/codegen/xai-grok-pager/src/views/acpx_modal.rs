@@ -673,6 +673,9 @@ pub fn render_acpx_modal(
                         for y in content.y..content.y + content.height {
                             buf.set_stringn(content.x + list_w, y, "│", 1, rule);
                         }
+                        state
+                            .detail
+                            .set_answered(state.ledger.answered_choice(&run.summary.run_id));
                         state.detail.render(buf, right, run, &DetailTarget::Run, &theme, now);
                         state.detail_rect = Some(right);
                     }
@@ -684,6 +687,7 @@ pub fn render_acpx_modal(
                     rv.render(buf, content, &theme, now);
                     if let Some(area) = rv.detail_area() {
                         let area = area.intersection(content);
+                        state.detail.set_answered(rv.answered());
                         state.detail.render(buf, area, rv.run(), &rv.detail_target(), &theme, now);
                         state.detail_rect = Some(area);
                     }

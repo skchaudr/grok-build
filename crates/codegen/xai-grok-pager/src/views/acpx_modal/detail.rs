@@ -33,10 +33,14 @@ struct CacheKey {
     steps_len: usize,
     events_len: usize,
     events_file_len: Option<u64>,
+    answered: Option<String>,
 }
 
 pub struct DetailPanel {
     cache_key: Option<CacheKey>,
+    /// The picked choice of an answered gate; `Some("")` when it was answered
+    /// but the choice is unknown. `None` while the gate is open.
+    answered: Option<String>,
     last_target: Option<(PathBuf, DetailTarget)>,
     lines: Vec<Line<'static>>,
     scroll: usize,
@@ -54,11 +58,19 @@ impl DetailPanel {
     pub fn new() -> Self {
         Self {
             cache_key: None,
+            answered: None,
             last_target: None,
             lines: Vec::new(),
             scroll: 0,
             tail_follow: false,
             last_height: 0,
+        }
+    }
+
+    /// Tell the panel whether the run's gate has been answered, and with what.
+    pub fn set_answered(&mut self, answered: Option<&str>) {
+        if self.answered.as_deref() != answered {
+            self.answered = answered.map(str::to_string);
         }
     }
 
@@ -127,10 +139,18 @@ impl DetailPanel {
             steps_len: run.steps.len(),
             events_len: run.events.len(),
             events_file_len,
+            answered: self.answered.clone(),
         };
 
         if self.cache_key.as_ref() != Some(&key) {
-            self.lines = build_lines(run, target, (area.width as usize).saturating_sub(2), theme, now_ms);
+            self.lines = build_lines(
+                run,
+                target,
+                self.answered.as_deref(),
+                (area.width as usize).saturating_sub(2),
+                theme,
+                now_ms,
+            );
             self.cache_key = Some(key);
         }
 
@@ -200,6 +220,7 @@ fn conversation_file_len(run: &Run, target: &DetailTarget) -> Option<u64> {
 fn build_lines(
     run: &Run,
     target: &DetailTarget,
+    answered: Option<&str>,
     width: usize,
     theme: &Theme,
     now_ms: i64,
@@ -208,28 +229,35 @@ fn build_lines(
         return Vec::new();
     }
     match target {
-        DetailTarget::Run => build_run_lines(run, width, theme, now_ms),
+        DetailTarget::Run => build_run_lines(run, answered, width, theme, now_ms),
         DetailTarget::Step(i) => {
             if let Some(step) = run.steps.get(*i) {
-                build_step_lines(run, *i, step, width, theme)
+                build_step_lines(run, *i, step, answered, width, theme)
             } else {
                 vec![dim_line("step not found", theme)]
             }
         }
-        DetailTarget::Node(id) => build_node_lines(run, id, width, theme),
+        DetailTarget::Node(id) => build_node_lines(run, id, answered, width, theme),
     }
 }
 
 fn build_run_lines(
     run: &Run,
+    answered: Option<&str>,
     width: usize,
     theme: &Theme,
     now_ms: i64,
 ) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     let status = run.summary.status;
-    let status_color = run_status_color(status, theme);
-    let glyph = status.glyph();
+    // A waiting run whose gate is answered reads as done, like the run header.
+    let shown = if status == RunStatus::Waiting && answered.is_some() {
+        RunStatus::Completed
+    } else {
+        status
+    };
+    let status_color = run_status_color(shown, theme);
+    let glyph = shown.glyph();
     let title = if run.summary.title.is_empty() {
         &run.summary.run_id
     } else {
@@ -286,10 +314,11 @@ fn build_run_lines(
     if status == RunStatus::Waiting {
         if let Some(detail) = &run.summary.status_detail {
             if !detail.is_empty() {
-                push_wrapped(&mut out, detail, width, Style::default().fg(theme.warning));
+                let color = if answered.is_some() { theme.gray } else { theme.warning };
+                push_wrapped(&mut out, detail, width, Style::default().fg(color));
             }
         }
-        append_gate_section(&mut out, run, width, theme);
+        append_gate_section(&mut out, run, answered, width, theme);
     }
 
     if matches!(status, RunStatus::Failed | RunStatus::TimedOut) {
@@ -319,7 +348,7 @@ fn build_run_lines(
             .unwrap_or(4);
 
         for node in &run.flow.nodes {
-            let state = run.node_state(&node.id);
+            let state = run.node_state_answered(&node.id, answered.is_some());
             let s_glyph = state.glyph();
             let s_color = node_state_color(state, theme);
             let last_step = run.steps.iter().rev().find(|s| s.node_id == node.id);
@@ -634,6 +663,7 @@ fn build_step_lines(
     run: &Run,
     step_idx: usize,
     step: &Step,
+    answered: Option<&str>,
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
@@ -648,8 +678,12 @@ fn build_step_lines(
         && run.summary.waiting_on.as_deref() == Some(step.node_id.as_str())
         && is_last_of_node;
 
-    let (glyph, glyph_color) = if is_gate {
+    let (glyph, glyph_color) = if is_gate && answered.is_none() {
         (NodeState::Waiting.glyph(), theme.warning)
+    } else if is_gate {
+        // The gate has been answered: done, like the graph and the run header.
+        let state = NodeState::Done(Outcome::Ok);
+        (state.glyph(), node_state_color(state, theme))
     } else {
         let state = NodeState::Done(step.outcome);
         (state.glyph(), node_state_color(state, theme))
@@ -706,10 +740,11 @@ fn build_step_lines(
     if is_gate {
         if let Some(detail) = &run.summary.status_detail {
             if !detail.is_empty() {
-                push_wrapped(&mut out, detail, width, Style::default().fg(theme.warning));
+                let color = if answered.is_some() { theme.gray } else { theme.warning };
+                push_wrapped(&mut out, detail, width, Style::default().fg(color));
             }
         }
-        append_gate_section(&mut out, run, width, theme);
+        append_gate_section(&mut out, run, answered, width, theme);
     }
 
     // Prompt
@@ -853,13 +888,15 @@ fn append_artifact_section(
 fn build_node_lines(
     run: &Run,
     node_id: &str,
+    answered: Option<&str>,
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     let state = run.node_state(node_id);
-    let glyph = state.glyph();
-    let color = node_state_color(state, theme);
+    let shown = run.node_state_answered(node_id, answered.is_some());
+    let glyph = shown.glyph();
+    let color = node_state_color(shown, theme);
 
     out.push(title_row_right(glyph, color, node_id, "", width, theme));
 
@@ -935,10 +972,11 @@ fn build_node_lines(
         NodeState::Waiting => {
             if let Some(detail) = &run.summary.status_detail {
                 if !detail.is_empty() {
-                    push_wrapped(&mut out, detail, width, Style::default().fg(theme.warning));
+                    let color = if answered.is_some() { theme.gray } else { theme.warning };
+                    push_wrapped(&mut out, detail, width, Style::default().fg(color));
                 }
             }
-            append_gate_section(&mut out, run, width, theme);
+            append_gate_section(&mut out, run, answered, width, theme);
         }
         NodeState::NotRun => {
             let msg = if matches!(
@@ -962,39 +1000,66 @@ fn build_node_lines(
 fn append_gate_section(
     out: &mut Vec<Line<'static>>,
     run: &Run,
+    answered: Option<&str>,
     width: usize,
     theme: &Theme,
 ) {
-    push_section_rule(out, "Gate", width, theme);
     let choices = bundle::gate_choices(run);
+    if choices.is_empty() && answered.is_some() {
+        return;
+    }
+    push_section_rule(out, "Gate", width, theme);
     if choices.is_empty() {
         out.push(dim_line(
             "no next step declared: re-run the flow to continue",
             theme,
         ));
-    } else {
-        for (idx, (label, flow_file)) in choices.iter().enumerate() {
-            let n = idx + 1;
-            let row = format!("[{n}] {label} → {flow_file}");
-            let spans = vec![
-                Span::styled(
-                    format!("[{n}] "),
-                    Style::default()
-                        .fg(theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{label} "),
-                    Style::default()
-                        .fg(theme.text_primary)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("→ ", Style::default().fg(theme.gray_dim)),
-                Span::styled(flow_file.clone(), Style::default().fg(theme.path)),
-            ];
-            let _ = row;
-            out.push(truncate_line(Line::from(spans), width));
-        }
+        return;
+    }
+    for (idx, (label, flow_file)) in choices.iter().enumerate() {
+        let spans = match answered {
+            // Answered: nothing to pick any more, so no key numbers; the picked one is ticked.
+            Some(picked) => {
+                let chosen = picked.eq_ignore_ascii_case(label);
+                let (mark, mark_color, label_style) = if chosen {
+                    (
+                        "✓ ",
+                        theme.accent_success,
+                        Style::default()
+                            .fg(theme.text_primary)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    ("  ", theme.gray_dim, Style::default().fg(theme.gray))
+                };
+                vec![
+                    Span::styled(mark, Style::default().fg(mark_color)),
+                    Span::styled(format!("{label} "), label_style),
+                    Span::styled("→ ", Style::default().fg(theme.gray_dim)),
+                    Span::styled(flow_file.clone(), Style::default().fg(theme.gray)),
+                ]
+            }
+            None => {
+                let n = idx + 1;
+                vec![
+                    Span::styled(
+                        format!("[{n}] "),
+                        Style::default()
+                            .fg(theme.warning)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{label} "),
+                        Style::default()
+                            .fg(theme.text_primary)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("→ ", Style::default().fg(theme.gray_dim)),
+                    Span::styled(flow_file.clone(), Style::default().fg(theme.path)),
+                ]
+            }
+        };
+        out.push(truncate_line(Line::from(spans), width));
     }
 }
 
@@ -1996,6 +2061,107 @@ mod tests {
         assert!(full.contains("◐ review"));
     }
 
+    /// A run waiting at checkpoint `review`, whose last step offers two choices.
+    fn waiting_gate_run(dir: &Path) -> Run {
+        let mut run = make_test_run(dir);
+        run.summary.status = RunStatus::Waiting;
+        run.summary.waiting_on = Some("review".to_string());
+        run.summary.status_detail = Some("land it, or send it back?".to_string());
+        for (id, node, kind, output) in [
+            ("list#1", "list", NodeKind::Action, json!({"ok": true})),
+            (
+                "review#1",
+                "review",
+                NodeKind::Checkpoint,
+                json!({"next": {"ship": "deploy.flow.ts", "abort": "rollback.flow.ts"}}),
+            ),
+        ] {
+            run.steps.push(Step {
+                attempt_id: id.to_string(),
+                node_id: node.to_string(),
+                kind,
+                outcome: Outcome::Ok,
+                started_ms: 1_000,
+                finished_ms: 1_100,
+                prompt_text: None,
+                raw_text: None,
+                output,
+                error: None,
+                agent_name: None,
+                action: None,
+                conversation: None,
+                stdout: None,
+                stderr: None,
+                output_artifact: None,
+            });
+        }
+        run
+    }
+
+    fn panel_text(
+        run: &Run,
+        target: &DetailTarget,
+        answered: Option<&str>,
+    ) -> String {
+        let mut panel = DetailPanel::new();
+        panel.set_answered(answered);
+        let area = Rect::new(0, 0, 90, 35);
+        let mut buf = Buffer::empty(area);
+        panel.render(&mut buf, area, run, target, &Theme::default(), 5_000);
+        buffer_lines(&buf).join("\n")
+    }
+
+    #[test]
+    fn answered_gate_is_drawn_done_without_pickable_keys() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run = waiting_gate_run(tmp.path());
+
+        // Open gate, for contrast: live glyph and key numbers.
+        let open_step = panel_text(&run, &DetailTarget::Step(1), None);
+        assert!(open_step.contains("◐ review"));
+        assert!(open_step.contains("[1] abort → rollback.flow.ts"));
+
+        for target in [DetailTarget::Step(1), DetailTarget::Run] {
+            let text = panel_text(&run, &target, Some("ship"));
+            assert!(text.contains("── Gate"), "{target:?}\n{text}");
+            assert!(text.contains("✓ ship → deploy.flow.ts"), "{target:?}\n{text}");
+            assert!(text.contains("  abort → rollback.flow.ts"), "{target:?}\n{text}");
+            assert!(!text.contains("[1]") && !text.contains("[2]"), "{target:?}\n{text}");
+            assert!(!text.contains('◐'), "{target:?}\n{text}");
+            assert!(text.contains("✓ review"), "{target:?}\n{text}");
+        }
+    }
+
+    #[test]
+    fn answered_gate_with_unknown_choice_ticks_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run = waiting_gate_run(tmp.path());
+        let text = panel_text(&run, &DetailTarget::Step(1), Some(""));
+        assert!(text.contains("✓ review"));
+        assert!(text.contains("  ship → deploy.flow.ts"));
+        assert!(!text.contains("✓ ship") && !text.contains("✓ abort"));
+        assert!(!text.contains("[1]"));
+    }
+
+    #[test]
+    fn answer_arriving_redraws_a_cached_panel() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run = waiting_gate_run(tmp.path());
+        let mut panel = DetailPanel::new();
+        let area = Rect::new(0, 0, 90, 35);
+        let theme = Theme::default();
+        let mut buf = Buffer::empty(area);
+        panel.render(&mut buf, area, &run, &DetailTarget::Step(1), &theme, 5_000);
+        assert!(buffer_lines(&buf).join("\n").contains("[1] abort"));
+
+        panel.set_answered(Some("abort"));
+        let mut buf = Buffer::empty(area);
+        panel.render(&mut buf, area, &run, &DetailTarget::Step(1), &theme, 5_000);
+        let text = buffer_lines(&buf).join("\n");
+        assert!(text.contains("✓ abort → rollback.flow.ts"));
+        assert!(!text.contains("[1]"));
+    }
+
     #[test]
     fn test_node_target_not_run() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2311,7 +2477,7 @@ mod tests {
             output_artifact: None,
         });
 
-        let lines = build_run_lines(&run, 60, &Theme::default(), 5_000);
+        let lines = build_run_lines(&run, None, 60, &Theme::default(), 5_000);
         let text: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -2322,7 +2488,7 @@ mod tests {
         assert!(!joined.contains("── Input"));
 
         run.steps[0].output = Value::Null;
-        let lines_null = build_run_lines(&run, 60, &Theme::default(), 5_000);
+        let lines_null = build_run_lines(&run, None, 60, &Theme::default(), 5_000);
         let joined_null: String = lines_null
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
@@ -2331,7 +2497,7 @@ mod tests {
         assert!(!joined_null.contains("── Last result"));
 
         run.steps[0].output = json!({});
-        let lines_empty = build_run_lines(&run, 60, &Theme::default(), 5_000);
+        let lines_empty = build_run_lines(&run, None, 60, &Theme::default(), 5_000);
         let joined_empty: String = lines_empty
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
@@ -2364,7 +2530,7 @@ mod tests {
             output_artifact: None,
         });
 
-        let lines = build_run_lines(&run, 60, &Theme::default(), 5_000);
+        let lines = build_run_lines(&run, None, 60, &Theme::default(), 5_000);
         let text: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
