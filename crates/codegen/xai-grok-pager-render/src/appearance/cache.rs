@@ -52,6 +52,9 @@ const KEEP_TEXT_SELECTION_DEFAULT: TextSelection = TextSelection::Flash;
 const SCROLL_SPEED_DEFAULT: u8 = 50;
 const SCROLL_SPEED_MIN: u8 = 1;
 const SCROLL_SPEED_MAX: u8 = 100;
+/// Rows of a subagent's live transcript shown inside its block.
+const SUBAGENT_PREVIEW_ROWS_DEFAULT: u8 = 24;
+const SUBAGENT_PREVIEW_ROWS_MIN: u8 = 1;
 const SCROLL_MODE_DEFAULT: ScrollMode = ScrollMode::Auto;
 const INVERT_SCROLL_DEFAULT: bool = false;
 /// Sentinel for "never configured": the per-terminal profile keeps its own lines-per-tick.
@@ -603,6 +606,32 @@ pub fn set_scroll_speed(speed: u8) {
 }
 
 thread_local! {
+    static SUBAGENT_PREVIEW_ROWS_CURRENT: Cell<u8> = const { Cell::new(SUBAGENT_PREVIEW_ROWS_DEFAULT) };
+    static SUBAGENT_PREVIEW_ROWS_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Read cached `[ui].subagent_preview_rows` (at least 1), seeding from disk on first call.
+pub fn load_subagent_preview_rows() -> u8 {
+    SUBAGENT_PREVIEW_ROWS_LOADED.with(|loaded| {
+        if !loaded.get() {
+            let raw = load_u8_from_effective_config(
+                "subagent_preview_rows",
+                SUBAGENT_PREVIEW_ROWS_DEFAULT,
+            );
+            SUBAGENT_PREVIEW_ROWS_CURRENT.with(|c| c.set(raw.max(SUBAGENT_PREVIEW_ROWS_MIN)));
+            loaded.set(true);
+        }
+    });
+    SUBAGENT_PREVIEW_ROWS_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached subagent preview rows, raised to at least 1.
+pub fn set_subagent_preview_rows(rows: u8) {
+    SUBAGENT_PREVIEW_ROWS_CURRENT.with(|c| c.set(rows.max(SUBAGENT_PREVIEW_ROWS_MIN)));
+    SUBAGENT_PREVIEW_ROWS_LOADED.with(|l| l.set(true));
+}
+
+thread_local! {
     static SCROLL_MODE_CURRENT: Cell<ScrollMode> = const { Cell::new(SCROLL_MODE_DEFAULT) };
     static SCROLL_MODE_LOADED: Cell<bool> = const { Cell::new(false) };
 }
@@ -847,6 +876,7 @@ pub fn prime(ui: &UiConfig) {
     // `load_*` is a no-op when already set (e.g. by the startup resolve).
     let _ = load_vim_mode();
     let _ = load_scroll_speed();
+    let _ = load_subagent_preview_rows();
     let _ = load_scroll_mode();
     let _ = load_invert_scroll();
     let _ = load_scroll_lines();
@@ -1146,6 +1176,29 @@ mod tests {
             assert!(!load_prompt_suggestions());
             set_prompt_suggestions(true);
             assert!(load_prompt_suggestions());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn set_then_load_round_trips_subagent_preview_rows() {
+        std::thread::spawn(|| {
+            set_subagent_preview_rows(8);
+            assert_eq!(load_subagent_preview_rows(), 8);
+            set_subagent_preview_rows(40);
+            assert_eq!(load_subagent_preview_rows(), 40);
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// `set_subagent_preview_rows` raises 0 to the minimum of 1.
+    #[test]
+    fn set_subagent_preview_rows_clamps_to_minimum() {
+        std::thread::spawn(|| {
+            set_subagent_preview_rows(0);
+            assert_eq!(load_subagent_preview_rows(), SUBAGENT_PREVIEW_ROWS_MIN);
         })
         .join()
         .unwrap();

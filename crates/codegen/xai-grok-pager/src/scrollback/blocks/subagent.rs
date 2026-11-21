@@ -69,13 +69,10 @@ pub struct SubagentBlock {
     /// Cumulative tokens used by the child session, updated on each
     /// `SubagentProgress` tick and stamped at `SubagentFinished`.
     pub tokens_used: Option<u64>,
-    /// Live tail of the child's transcript, drawn under the header (capped at [`PREVIEW_ROWS`]). Empty for agents
+    /// Live tail of the child's transcript, drawn under the header (capped at `[ui].subagent_preview_rows`, default 24). Empty for agents
     /// that send no child updates, so those blocks stay one line.
     pub preview: SubagentPreview,
 }
-
-/// Rows of the child's transcript shown inside the block. Enter still opens the full subagent view.
-pub const PREVIEW_ROWS: usize = 24;
 
 impl SubagentBlock {
     /// Create a "Subagent started" block (for both sync and async).
@@ -331,7 +328,11 @@ impl BlockContent for SubagentBlock {
             let rail = Span::styled("\u{2502} ", theme.muted());
             let rows = self
                 .preview
-                .render(ctx.width.saturating_sub(2), PREVIEW_ROWS, &theme);
+                .render(
+                    ctx.width.saturating_sub(2),
+                    usize::from(crate::appearance::cache::load_subagent_preview_rows()),
+                    &theme,
+                );
             lines.extend(rows.into_iter().map(|row| {
                 let mut spans = vec![rail.clone()];
                 spans.extend(row.spans);
@@ -426,6 +427,40 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect()
+    }
+
+    /// Rows of the block below the header line, with a preview of 30 lines and the setting at `rows`.
+    fn preview_height_with_setting(rows: u8) -> usize {
+        std::thread::spawn(move || {
+            crate::appearance::cache::set_subagent_preview_rows(rows);
+            let mut block = SubagentBlock::started(
+                "read the logs",
+                "child-1",
+                "general-purpose",
+                None,
+                None,
+                None,
+                false,
+            );
+            let text = (0..30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+            let update: agent_client_protocol::SessionUpdate = serde_json::from_value(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": text }
+            }))
+            .expect("valid session update");
+            block.preview.ingest(&update);
+            block.output(&test_ctx()).lines.len() - 1
+        })
+        .join()
+        .expect("render thread")
+    }
+
+    #[test]
+    fn configured_preview_rows_change_the_preview_height() {
+        assert_eq!(preview_height_with_setting(5), 5);
+        assert_eq!(preview_height_with_setting(12), 12);
+        // The default of 24 still caps a longer preview.
+        assert_eq!(preview_height_with_setting(24), 24);
     }
 
     #[test]
