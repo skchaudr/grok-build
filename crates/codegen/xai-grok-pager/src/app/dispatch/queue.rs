@@ -78,6 +78,71 @@ pub(super) fn push_server_queue_echo(
     }
 }
 
+/// Send one prompt through the server-authoritative route and return its effect: the agent appends it to its own pending inputs,
+/// so it is safe while a turn or wake turn the pager did not start is running. Text-only rows go as `SendPrompt`, rows with images
+/// as `SendPromptBlocks`. Shared by the composer's immediate send and by [`release_queued_prompts_into_wake`].
+/// Returns `None` when the agent or its session is gone.
+pub(super) fn send_server_authoritative(
+    app: &mut AppView,
+    agent_id: AgentId,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+    skill_token_ranges: Vec<std::ops::Range<usize>>,
+) -> Option<Effect> {
+    let agent = app.agents.get_mut(&agent_id)?;
+    let session_id = agent.session.session_id.clone()?;
+    let prompt_id = uuid::Uuid::new_v4().to_string();
+    // Self-originated: when this prompt becomes the running turn, the ACP gate must treat its deltas as ours, not another client's
+    // Adoption happens via the `running_prompt_id` broadcast and the turn-start shim
+    agent.note_self_originated_prompt(&prompt_id);
+    agent.session.note_turn_prompt(&text);
+    // A new prompt is taking over: the previous response's follow-up chips must not linger into it
+    // `clear_follow_ups` keeps `follow_up_seen` (it marks the turn boundary) so a stale re-delivery stays rejected
+    agent.clear_follow_ups();
+    agent.credit_limit_stashed_prompt = None;
+    let blocks = (!images.is_empty()).then(|| {
+        let build = crate::prompt_images::build_content_blocks_with_workspace_report(
+            text.clone(),
+            images,
+            Some(std::path::Path::new(&agent.session.cwd)),
+        );
+        app.pending_image_notices
+            .extend(agent.skipped_image_send_notice(&build.skipped_display_numbers));
+        build.blocks
+    });
+    let sid_str = session_id.0.to_string();
+    push_server_queue_echo(app, agent_id, &sid_str, &prompt_id, &text, "prompt");
+    // An external agent gets no queue echo, and claude-agent-acp feeds a mid-turn prompt straight into the running
+    // turn and drops its own replay ("the client already shows it"): paint it now or it is never shown.
+    if app.external_agent
+        && let Some(agent) = app.agents.get_mut(&agent_id)
+    {
+        agent
+            .scrollback
+            .push_block(RenderBlock::interjection_prompt(&text));
+    }
+    crate::unified_log::info(
+        "prompt.send_server_authoritative",
+        Some(&sid_str),
+        Some(serde_json::json!({ "kind": "prompt", "len": text.len() })),
+    );
+    Some(match blocks {
+        Some(blocks) => Effect::SendPromptBlocks {
+            agent_id,
+            session_id,
+            blocks,
+            prompt_id,
+        },
+        None => Effect::SendPrompt {
+            agent_id,
+            session_id,
+            text,
+            prompt_id,
+            skill_token_ranges,
+        },
+    })
+}
+
 /// That covers a prompt restored on cancel, removed, drained, or otherwise resolved without becoming the running turn.
 /// The only client-side queue state is the optimistic echo that bridges the round-trip before the confirming `x.ai/queue/changed` broadcast.
 /// Once a prompt's RPC resolves (or we pull it back on cancel) it will never reappear in a future broadcast, so its echo must be dropped.
@@ -190,12 +255,61 @@ fn flush_target_id(app: &AppView, agent_id: Option<AgentId>) -> Option<AgentId> 
     })
 }
 
+/// Whether the front local row may go to the server now, behind a wake turn the pager did not start.
+fn wake_release_ready(agent: &AgentView) -> bool {
+    use crate::app::agent::QueueEntryKind;
+    let Some(front) = agent.session.pending_prompts.front() else {
+        return false;
+    };
+    agent.wake_turn_active()
+        && !agent.wake_turn_cancelling()
+        && agent.session.session_id.is_some()
+        && !agent.session.model_switch_pending
+        && !agent.session.loading_replay
+        && !agent.session.hook_block_hold
+        && agent.expect_send_now_cancel.is_none()
+        && !matches!(&agent.prompt_mode, PromptMode::EditingQueued { id, .. } if *id == front.id)
+        && matches!(front.kind, QueueEntryKind::Prompt)
+        && front.wire_matches_display()
+        && !front.steer
+}
+
+/// While a wake turn streams, the pane stays Idle, so [`maybe_drain_queue`] holds every local row (a fake local turn would only be
+/// queued by the agent) and a parked-wait release needs a running turn. Claude's synthetic wake lasts as long as a background
+/// subagent runs, so a held row (one with an image, or any row behind one) would wait for it. Send the front rows to the agent
+/// instead, oldest first, stopping at the first row that cannot go (command, bash, skill payload, row under edit): no later
+/// prompt overtakes it. Each row leaves the local queue as it is sent, so nothing goes twice.
+fn release_queued_prompts_into_wake(app: &mut AppView, id: AgentId) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    while !app.reconnect_pending
+        && app.agents.get(&id).is_some_and(wake_release_ready)
+        && let Some(row) = app
+            .agents
+            .get_mut(&id)
+            .and_then(|agent| agent.session.pending_prompts.pop_front())
+    {
+        effects.extend(send_server_authoritative(
+            app,
+            id,
+            row.text,
+            row.images,
+            row.skill_token_ranges,
+        ));
+    }
+    effects
+}
+
 /// Inject held local follow-ups into a parked wait, oldest first.
 /// A leftover earlier row would otherwise resend after the wait.
 pub(crate) fn flush_held_local_queue_into_wait(
     app: &mut AppView,
     agent_id: Option<AgentId>,
 ) -> Vec<Effect> {
+    if let Some(id) = flush_target_id(app, agent_id)
+        && app.agents.get(&id).is_some_and(AgentView::wake_turn_active)
+    {
+        return release_queued_prompts_into_wake(app, id);
+    }
     let mut effects = Vec::new();
     let mut skipped = Vec::new();
     loop {

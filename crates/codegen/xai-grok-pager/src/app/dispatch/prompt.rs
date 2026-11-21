@@ -10,7 +10,7 @@ use super::interject;
 use super::queue::{
     apply_turn_start_shim, attach_prompt_state_to_last_queued, immediate_server_send_eligible,
     maybe_drain_queue, note_peek_page_flip, push_and_page_flip, push_server_queue_echo,
-    retire_optimistic_echo,
+    retire_optimistic_echo, send_server_authoritative,
 };
 use super::router::dispatch;
 use super::turn::finish_turn_view;
@@ -1409,19 +1409,8 @@ pub(super) fn dispatch_send_prompt_submission(
         }
 
         if immediate_server_send {
-            let session_id = agent
-                .session
-                .session_id
-                .clone()
-                .expect("session_id is_some checked");
             let agent_id = agent.session.id;
-            let prompt_id = uuid::Uuid::new_v4().to_string();
-            // Self-originated: when this prompt becomes the running turn, the ACP gate must treat its deltas as ours, not another client's
-            // Adoption happens via the `running_prompt_id` broadcast and the turn-start shim
-            agent.note_self_originated_prompt(&prompt_id);
-            agent.session.note_turn_prompt(&text);
             // Plain image-free sends set no send-now cancel expectation: shell queue state and cancelTrigger decide the outcome
-
             if consume_input {
                 app.pending_image_notices
                     .extend(agent.unbound_image_placeholder_notice());
@@ -1431,43 +1420,20 @@ pub(super) fn dispatch_send_prompt_submission(
                 agent.note_draft_consumed();
                 agent.record_prompt_in_history(&text);
             }
-
-            // A new prompt is taking over: the previous response's follow-up chips must not linger into it
-            // This immediate-send path returns early, so it must clear them here too (notably a chip click, which submits while a turn is running)
-            // `clear_follow_ups` keeps `follow_up_seen` (it marks the turn boundary) so a stale re-delivery stays rejected
-            agent.clear_follow_ups();
-            agent.credit_limit_stashed_prompt = None;
-
-            // `agent` borrow ends here; push the optimistic echo via `app`.
-            let sid_str = session_id.0.to_string();
-            push_server_queue_echo(app, agent_id, &sid_str, &prompt_id, &text, "prompt");
-            // An external agent gets no queue echo, and claude-agent-acp feeds a mid-turn prompt straight into the running
-            // turn and drops its own replay ("the client already shows it"): paint it now or it is never shown.
-            if app.external_agent
-                && let Some(agent) = app.agents.get_mut(&agent_id)
-            {
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::interjection_prompt(&text));
-            }
-            crate::unified_log::info(
-                "prompt.send_server_authoritative",
-                Some(&sid_str),
-                Some(serde_json::json!({ "kind": "prompt", "len": text.len() })),
-            );
+            // The previous response's follow-up chips must not linger into this prompt; the helper clears them (notably a chip click, which submits while a turn is running)
+            effects.extend(send_server_authoritative(
+                app,
+                agent_id,
+                text,
+                Vec::new(),
+                skill_token_ranges,
+            ));
             if queued_while_running
                 && !parked_sendable_wait
                 && !crate::appearance::cache::load_follow_up_steer()
             {
                 maybe_show_send_now_tip(app);
             }
-            effects.push(Effect::SendPrompt {
-                agent_id,
-                session_id,
-                text,
-                prompt_id,
-                skill_token_ranges,
-            });
             return effects;
         }
 
