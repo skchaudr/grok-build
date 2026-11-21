@@ -1,0 +1,190 @@
+```diff
+--- a/crates/codegen/xai-grok-pager/src/views/acpx_modal.rs
++++ b/crates/codegen/xai-grok-pager/src/views/acpx_modal.rs
+@@ -23,7 +23,7 @@
+ 
+ use self::detail::{DetailPanel, DetailTarget};
+ use self::inspector::{InspectorOutcome, InspectorState};
+-use self::ledger::{LedgerOutcome, LedgerState, RowExtra};
++use self::ledger::{GateAnswer, LedgerOutcome, LedgerState, RowExtra};
+ use self::run::{RunOutcome, RunViewState};
+ 
+ const MAX_TITLE_WIDTH: usize = 72;
+@@ -74,6 +74,8 @@
+     preview: Option<Run>,
+     /// Rail and agents per run id, with the `updated_ms` they were read at.
+     extras: HashMap<String, (i64, RowExtra)>,
++    /// Gate answers per run id for runs beyond `EXTRAS_LIMIT`.
++    answers: HashMap<String, Option<GateAnswer>>,
+     /// Where the detail panel was last drawn, for the mouse wheel.
+     detail_rect: Option<Rect>,
+ }
+@@ -98,6 +100,7 @@
+             detail: DetailPanel::new(),
+             preview: None,
+             extras: HashMap::new(),
++            answers: HashMap::new(),
+             detail_rect: None,
+         };
+         state.rescan_runs();
+@@ -108,7 +111,9 @@
+     pub fn open_run(&mut self, dir: &Path) -> bool {
+         match bundle::load_run(dir) {
+             Ok(run) => {
++                let run_id = run.summary.run_id.clone();
+                 let mut view = RunViewState::new(run);
++                view.set_answered(self.ledger.answered_choice(&run_id).map(str::to_string));
+                 view.set_settings(bundle::node_settings(dir), bundle::step_settings(dir));
+                 self.run_view = Some(view);
+                 self.inspector = None;
+@@ -267,6 +272,10 @@
+         self.runs_snapshot = runs.clone();
+         self.load_extras(&runs);
+         self.ledger.set_runs(runs);
++        if let Some(rv) = self.run_view.as_mut() {
++            let run_id = rv.run().summary.run_id.clone();
++            rv.set_answered(self.ledger.answered_choice(&run_id).map(str::to_string));
++        }
+         changed
+     }
+ 
+@@ -280,7 +289,22 @@
+             extra.stalled = bundle::is_stalled(summary, now);
+             kept.insert(summary.run_id.clone(), (at, extra));
+         }
+-        self.ledger.set_extras(kept.iter().map(|(id, (_, extra))| (id.clone(), extra.clone())).collect());
++        let mut all_extras: HashMap<String, RowExtra> = kept
++            .iter()
++            .map(|(id, (_, extra))| (id.clone(), extra.clone()))
++            .collect();
++        for summary in runs.iter().skip(EXTRAS_LIMIT) {
++            let answers = self
++                .answers
++                .entry(summary.run_id.clone())
++                .or_insert_with(|| read_run_answers(&summary.dir))
++                .clone();
++            all_extras.insert(
++                summary.run_id.clone(),
++                RowExtra { answers, ..RowExtra::default() },
++            );
++        }
++        self.ledger.set_extras(all_extras);
+         self.extras = kept;
+     }
+ 
+@@ -525,7 +549,33 @@
+         agents,
+         stalled: false,
+         question: (run.summary.status == bundle::RunStatus::Waiting).then(|| run.summary.status_detail.clone()).flatten(),
+-    }
++        answers: parse_gate_answer(&run.input),
++    }
++}
++
++fn parse_gate_answer(input: &serde_json::Value) -> Option<GateAnswer> {
++    let gate = input.get("gate")?.as_object()?;
++    let run_id = gate.get("runId")?.as_str()?;
++    if run_id.is_empty() {
++        return None;
++    }
++    let choice = gate
++        .get("choice")
++        .and_then(serde_json::Value::as_str)
++        .unwrap_or_default()
++        .to_string();
++    Some(GateAnswer {
++        run_id: run_id.to_string(),
++        choice,
++    })
++}
++
++fn read_run_answers(dir: &Path) -> Option<GateAnswer> {
++    let text = std::fs::read_to_string(dir.join("projections").join("run.json")).ok()?;
++    let val = serde_json::from_str::<serde_json::Value>(&text).ok()?;
++    let input = val.get("input")?;
++    parse_gate_answer(input)
+ }
+ 
+ fn session_replay(s: SessionSummary) -> ReplayRequest {
+@@ -1068,5 +1118,80 @@
+         let mut zero = Buffer::empty(Rect::new(0, 0, 0, 0));
+         let area = zero.area;
+         render_acpx_modal(&mut zero, area, &mut state, false);
+     }
++
++    #[test]
++    fn row_extra_reads_gate_answer_and_handles_missing_or_malformed_gate() {
++        let fx = write_fixture("completed");
++        let run_json_path = fx.run_dir.join("projections").join("run.json");
++
++        fs::write(
++            &run_json_path,
++            r#"{"input":{"gate":{"runId":"r1","node":"g","choice":"approve"}}}"#,
++        )
++        .expect("write run.json");
++        let runs = bundle::list_runs(&fx.runs_base);
++        let summary = runs.first().expect("one run");
++        let extra = row_extra(summary);
++        assert_eq!(
++            extra.answers,
++            Some(GateAnswer {
++                run_id: "r1".into(),
++                choice: "approve".into(),
++            })
++        );
++
++        fs::write(&run_json_path, r#"{"input":{"other":1}}"#).expect("write run.json without gate");
++        let extra = row_extra(summary);
++        assert_eq!(extra.answers, None);
++
++        fs::write(&run_json_path, r#"{"input":{"gate":"not-an-object"}}"#)
++            .expect("write run.json with string gate");
++        let extra = row_extra(summary);
++        assert_eq!(extra.answers, None);
++    }
++
++    #[test]
++    fn run_outside_extras_limit_gets_answers_with_empty_rail() {
++        let fx = write_fixture("completed");
++        fs::write(
++            fx.run_dir.join("projections").join("run.json"),
++            r#"{"input":{"gate":{"runId":"waiting-run","node":"g","choice":"ship"}}}"#,
++        )
++        .expect("write old run.json");
++
++        for i in 0..EXTRAS_LIMIT {
++            let dir = fx.runs_base.join(format!("newer-{i:03}"));
++            let proj = dir.join("projections");
++            fs::create_dir_all(&proj).expect("create newer proj");
++            let live = format!(
++                r#"{{
++                    "runId": "newer-{i:03}",
++                    "flowName": "deploy-flow",
++                    "runTitle": "Newer {i}",
++                    "status": "completed",
++                    "startedAt": "2025-03-02T10:{:02}:{:02}Z",
++                    "updatedAt": "2025-03-02T10:{:02}:{:02}Z"
++                }}"#,
++                i / 60,
++                i % 60,
++                i / 60,
++                i % 60
++            );
++            fs::write(proj.join("live.json"), live).expect("write newer live.json");
++            fs::write(
++                dir.join("flow.json"),
++                r#"{"name":"deploy-flow","startAt":"plan","nodes":{"plan":{"nodeType":"acp"}}}"#,
++            )
++            .expect("write newer flow.json");
++        }
++
++        let state =
++            AcpxModalState::open_at(Some(fx.runs_base.clone()), Some(fx.sessions_base.clone()));
++        assert!(!state.extras.contains_key("run-001"));
++        assert_eq!(
++            state.ledger.answered_choice("waiting-run"),
++            Some("ship")
++        );
++    }
+ }
+```

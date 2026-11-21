@@ -10,7 +10,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::acpx::bundle::{
     self, AgentSettings, NodeKind, NodeState, Outcome, Run, RunStatus, Step, TraceEvent,
@@ -112,6 +112,7 @@ pub struct RunViewState {
     detail_rect: Option<Rect>,
     gate_confirm: Option<GateConfirm>,
     graph_cache: Option<GraphCache>,
+    answered: Option<String>,
 }
 
 impl RunViewState {
@@ -131,6 +132,7 @@ impl RunViewState {
             detail_rect: None,
             gate_confirm: None,
             graph_cache: None,
+            answered: None,
         };
         st.rebuild_tree();
         st.select_initial_stage();
@@ -144,6 +146,14 @@ impl RunViewState {
     ) {
         self.node_settings = nodes;
         self.step_settings = steps;
+    }
+
+    pub fn set_answered(&mut self, choice: Option<String>) {
+        self.answered = choice;
+    }
+
+    pub fn answered(&self) -> Option<&str> {
+        self.answered.as_deref()
     }
 
     pub fn detail_target(&self) -> DetailTarget {
@@ -259,7 +269,9 @@ impl RunViewState {
 
     pub fn shortcuts(&self) -> Vec<&'static str> {
         let mut out = vec!["Enter step", "r replay"];
-        if self.run.summary.status == RunStatus::Waiting && !bundle::gate_choices(&self.run).is_empty()
+        if self.run.summary.status == RunStatus::Waiting
+            && self.answered.is_none()
+            && !bundle::gate_choices(&self.run).is_empty()
         {
             out.push("1-9 gate");
         }
@@ -490,7 +502,7 @@ impl RunViewState {
                 }
             }
             KeyCode::Char(ch @ '1'..='9') => {
-                if self.run.summary.status != RunStatus::Waiting {
+                if self.run.summary.status != RunStatus::Waiting || self.answered.is_some() {
                     return RunOutcome::Unchanged;
                 }
                 let idx = (ch as usize) - ('1' as usize);
@@ -514,6 +526,9 @@ impl RunViewState {
                     label, flow_file, ..
                 }) = self.payloads.get(node_idx)
                 {
+                    if self.answered.is_some() {
+                        return RunOutcome::Unchanged;
+                    }
                     self.gate_confirm = Some(GateConfirm {
                         choice: label.clone(),
                         flow_file: flow_file.clone(),
@@ -565,11 +580,13 @@ impl RunViewState {
         }
 
         // 2. Banner row (when needed)
-        if y < max_y
-            && let Some(banner_line) = self.build_banner(area.width as usize, theme, now_ms)
-        {
-            buf.set_line(area.x, y, &banner_line, area.width);
-            y = y.saturating_add(1);
+        if y < max_y {
+            let banner_lines = self.build_banner(area.width as usize, theme, now_ms);
+            let max_banner = (max_y.saturating_sub(y) as usize).saturating_sub(1);
+            for banner_line in banner_lines.into_iter().take(max_banner) {
+                buf.set_line(area.x, y, &banner_line, area.width);
+                y = y.saturating_add(1);
+            }
         }
 
         // 3. Flow graph (when toggled on and area height >= 16)
@@ -1063,7 +1080,11 @@ impl RunViewState {
     // ---- Rendering helpers ----
 
     fn render_header(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now_ms: i64) {
-        let status = self.run.summary.status;
+        let status = if self.run.summary.status == RunStatus::Waiting && self.answered.is_some() {
+            RunStatus::Completed
+        } else {
+            self.run.summary.status
+        };
         let status_color = status_color(status, theme);
         let bold = Style::default()
             .fg(theme.text_primary)
@@ -1113,13 +1134,13 @@ impl RunViewState {
         buf.set_line(area.x, area.y, &Line::from(spans), area.width);
     }
 
-    fn build_banner(&self, width: usize, theme: &Theme, now_ms: i64) -> Option<Line<'static>> {
+    fn build_banner(&self, width: usize, theme: &Theme, now_ms: i64) -> Vec<Line<'static>> {
         let sum = &self.run.summary;
-        let (text, color) = if bundle::is_stalled(sum, now_ms) {
+        let (text, style) = if bundle::is_stalled(sum, now_ms) {
             let node = sum.current_node.as_deref().unwrap_or("?");
             (
                 format!("⊘ stalled at {node}: the acpx process is gone"),
-                theme.gray,
+                Style::default().fg(theme.gray).add_modifier(Modifier::BOLD),
             )
         } else {
             match sum.status {
@@ -1129,8 +1150,20 @@ impl RunViewState {
                         .as_deref()
                         .or(sum.current_node.as_deref())
                         .unwrap_or("?");
-                    let detail = sum.status_detail.as_deref().unwrap_or("waiting");
-                    (format!("◐ NEEDS YOU at {node}: {detail}"), theme.warning)
+                    if let Some(ref choice) = self.answered {
+                        let msg = if choice.is_empty() {
+                            format!("✓ answered at {node}")
+                        } else {
+                            format!("✓ answered at {node}: {choice}")
+                        };
+                        (msg, Style::default().fg(theme.gray))
+                    } else {
+                        let detail = sum.status_detail.as_deref().unwrap_or("waiting");
+                        (
+                            format!("◐ NEEDS YOU at {node}: {detail}"),
+                            Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
+                        )
+                    }
                 }
                 RunStatus::Failed | RunStatus::TimedOut => {
                     let err = sum
@@ -1138,7 +1171,12 @@ impl RunViewState {
                         .as_deref()
                         .or(sum.status_detail.as_deref())
                         .unwrap_or(sum.status.label());
-                    (format!("✗ {err}"), theme.accent_error)
+                    (
+                        format!("✗ {err}"),
+                        Style::default()
+                            .fg(theme.accent_error)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 }
                 RunStatus::Running => {
                     let node = sum.current_node.as_deref().unwrap_or("?");
@@ -1146,17 +1184,21 @@ impl RunViewState {
                         Some(d) if !d.is_empty() => format!("● {node} · {d}"),
                         _ => format!("● {node}"),
                     };
-                    (msg, theme.accent_running)
+                    (
+                        msg,
+                        Style::default()
+                            .fg(theme.accent_running)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 }
-                RunStatus::Completed | RunStatus::Unknown => return None,
+                RunStatus::Completed | RunStatus::Unknown => return Vec::new(),
             }
         };
 
-        let cut = truncate_str(&text, width);
-        Some(Line::from(Span::styled(
-            cut,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )))
+        wrap_banner(&text, width)
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, style)))
+            .collect()
     }
 
     fn prepare_graph_lines(
@@ -1475,7 +1517,15 @@ impl RunViewState {
             } => {
                 let guide = if is_last_child { "  ╰ " } else { "  │ " };
                 let avail = width.saturating_sub(4);
-                let body = format!("[{choice_idx}] {label} → {flow_file}");
+                let chosen = self
+                    .answered
+                    .as_deref()
+                    .is_some_and(|c| c.eq_ignore_ascii_case(label));
+                let body = if chosen {
+                    format!("[{choice_idx}] ✓ {label} → {flow_file}")
+                } else {
+                    format!("[{choice_idx}] {label} → {flow_file}")
+                };
                 let cut = truncate_str(&body, avail);
                 Line::from(vec![
                     Span::styled(guide, style_with(theme.gray_dim, false)),
@@ -1802,6 +1852,60 @@ fn step_result_summary(step: &Step, theme: &Theme) -> (String, Color) {
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_string()
+}
+
+fn wrap_banner(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+
+    for word in text.split(' ') {
+        let word_w = UnicodeWidthStr::width(word);
+        if cur.is_empty() {
+            if word_w <= width {
+                cur.push_str(word);
+                cur_w = word_w;
+            } else {
+                for ch in word.chars() {
+                    let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if cur_w + ch_w > width && !cur.is_empty() {
+                        lines.push(std::mem::take(&mut cur));
+                        cur_w = 0;
+                    }
+                    cur.push(ch);
+                    cur_w += ch_w;
+                }
+            }
+        } else if cur_w + 1 + word_w <= width {
+            cur.push(' ');
+            cur.push_str(word);
+            cur_w += 1 + word_w;
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0;
+            if word_w <= width {
+                cur.push_str(word);
+                cur_w = word_w;
+            } else {
+                for ch in word.chars() {
+                    let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if cur_w + ch_w > width && !cur.is_empty() {
+                        lines.push(std::mem::take(&mut cur));
+                        cur_w = 0;
+                    }
+                    cur.push(ch);
+                    cur_w += ch_w;
+                }
+            }
+        }
+    }
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+    lines
 }
 
 fn render_mermaid_lines(src: &str, width: usize) -> Vec<Line<'static>> {
@@ -2366,5 +2470,70 @@ mod tests {
         st.handle_key(&key(KeyCode::Char('1')));
         st.render(&mut buf_small, small, &theme, 10_000);
         st.render(&mut buf_zero, Rect::new(0, 0, 0, 0), &theme, 10_000);
+    }
+
+    #[test]
+    fn waiting_long_question_wraps_at_80_columns_and_shows_every_word() {
+        let mut run = sample_waiting_run(json!({}));
+        let question = "Should we proceed with deploying the database migration to production now or wait until the maintenance window tonight?";
+        assert_eq!(question.len(), 119);
+        let question = format!("{question}!");
+        assert_eq!(question.len(), 120);
+        run.summary.status_detail = Some(question.clone());
+        let mut st = RunViewState::new(run);
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        st.render(&mut buf, area, &theme, 10_000);
+        let text = buf_text(&buf);
+        for word in question.split_whitespace() {
+            assert!(text.contains(word), "missing word {word:?} in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn waiting_short_question_takes_one_row() {
+        let mut run = sample_waiting_run(json!({}));
+        run.summary.status_detail = Some("ready?".to_string());
+        let mut st = RunViewState::new(run);
+        st.handle_key(&key(KeyCode::Char('v')));
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(area);
+        st.render(&mut buf, area, &theme, 10_000);
+        assert_eq!(st.detail_area().map(|r| r.y), Some(3));
+    }
+
+    #[test]
+    fn answered_waiting_run_updates_banner_choices_shortcuts_and_keys() {
+        let run = sample_waiting_run(json!({
+            "next": {
+                "approve": "land.flow.ts",
+                "reject": "fix.flow.ts"
+            }
+        }));
+        let mut st = RunViewState::new(run);
+        assert!(st.shortcuts().contains(&"1-9 gate"));
+        assert_eq!(st.handle_key(&key(KeyCode::Char('1'))), RunOutcome::Changed);
+        assert_eq!(st.handle_key(&key(KeyCode::Esc)), RunOutcome::Changed);
+
+        st.set_answered(Some("approve".to_string()));
+        assert_eq!(st.answered(), Some("approve"));
+        assert!(!st.shortcuts().contains(&"1-9 gate"));
+        assert_eq!(
+            st.handle_key(&key(KeyCode::Char('1'))),
+            RunOutcome::Unchanged
+        );
+
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 120, 35);
+        let mut buf = Buffer::empty(area);
+        st.render(&mut buf, area, &theme, 10_000);
+        let text = buf_text(&buf);
+        assert!(text.contains("answered at"));
+        assert!(text.contains("approve"));
+        assert!(!text.contains("NEEDS YOU"));
+        assert!(text.contains("✓ approve → land.flow.ts"));
+        assert!(text.contains("reject → fix.flow.ts"));
     }
 }

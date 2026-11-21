@@ -1,1 +1,12 @@
 20261121T005409Z	agent	ok	/Volumes/Mini-SSD/offload/repos/grok-build-acpx/task-scripts/acpx-repair_out/agent.20261121T005409Z.diff
+20261121T012541Z	project	ok	/Volumes/Mini-SSD/offload/repos/grok-build-acpx/task-scripts/acpx-repair_out/project.20261121T012541Z.diff
+20261121T012541Z	modal	fail	diff rejected (/Volumes/Mini-SSD/offload/repos/grok-build-acpx/task-scripts/acpx-repair_out/modal.20261121T012541Z.rejected.diff): error: patch failed: crates/codegen/xai-grok-pager/src/views/acpx_modal.rs:525
+error: crates/codegen/xai-grok-pager/src/views/acpx_modal.rs: patch does not apply
+20261121T012541Z	detail	ok	/Volumes/Mini-SSD/offload/repos/grok-build-acpx/task-scripts/acpx-repair_out/detail.20261121T012541Z.diff
+20261121T012541Z	run_view	fail	diff rejected (/Volumes/Mini-SSD/offload/repos/grok-build-acpx/task-scripts/acpx-repair_out/run_view.20261121T012541Z.rejected.diff): error: patch failed: crates/codegen/xai-grok-pager/src/views/acpx_modal/run.rs:509
+error: crates/codegen/xai-grok-pager/src/views/acpx_modal/run.rs: patch does not apply
+20261121T012541Z	ledger	ok	/Volumes/Mini-SSD/offload/repos/grok-build-acpx/task-scripts/acpx-repair_out/ledger.20261121T012541Z.diff
+20261121T013035Z	modal	ok	/Volumes/Mini-SSD/offload/repos/grok-build-acpx/task-scripts/acpx-repair_out/modal.20261121T013035Z.diff
+20261121T013035Z	run_view	ok	/Volumes/Mini-SSD/offload/repos/grok-build-acpx/task-scripts/acpx-repair_out/run_view.20261121T013035Z.diff
+20261121T013035Z	ledger	fail	diff rejected (/Volumes/Mini-SSD/offload/repos/grok-build-acpx/task-scripts/acpx-repair_out/ledger.20261121T013035Z.rejected.diff): error: patch failed: crates/codegen/xai-grok-pager/src/views/acpx_modal/ledger.rs:29
+error: crates/codegen/xai-grok-pager/src/views/acpx_modal/ledger.rs: patch does not apply
