@@ -585,7 +585,7 @@ impl InspectorState {
             return;
         }
 
-        let Some(tab_snapshot) = self.tabs.get(self.active_tab).cloned() else {
+        let Some(mut tab_snapshot) = self.tabs.get(self.active_tab).cloned() else {
             return;
         };
 
@@ -599,6 +599,15 @@ impl InspectorState {
             return;
         }
 
+        let total_src = tab_snapshot.text.lines().count().max(1);
+        let digits = decimal_digits(total_src).max(2);
+        let gutter_width = digits + 2;
+
+        // A block that already fits the body does not scroll sideways.
+        if !self.wrap && gutter_width + widest_source_line(&tab_snapshot.text) <= width {
+            tab_snapshot.scroll_x = 0;
+        }
+
         let (visual_lines, total_visual) = self.compute_visual_lines(&tab_snapshot, width);
         let max_scroll = total_visual.saturating_sub(height);
         let scroll_y = tab_snapshot.scroll_y.min(max_scroll);
@@ -606,9 +615,16 @@ impl InspectorState {
             tab_mut.scroll_y = scroll_y;
         }
 
-        let total_src = tab_snapshot.text.lines().count().max(1);
-        let digits = decimal_digits(total_src).max(2);
-        let gutter_width = digits + 2;
+        let widest_text = if self.wrap {
+            visual_lines
+                .iter()
+                .map(|v| v.text.width())
+                .max()
+                .unwrap_or(0)
+        } else {
+            widest_source_line(&tab_snapshot.text)
+        };
+        let (x_off, y_off) = centre_offset(gutter_width + widest_text, total_visual, width, height);
 
         let gutter_style = Style::default().fg(theme.gray_dim);
         let text_style = if tab_snapshot.kind == TabKind::Error {
@@ -622,7 +638,7 @@ impl InspectorState {
             let Some(vline) = visual_lines.get(v_idx) else {
                 break;
             };
-            let y = area.y + row_idx as u16;
+            let y = area.y + (y_off + row_idx) as u16;
 
             let gutter_str = match vline.line_no {
                 Some(n) => format!("{n:>digits$}  "),
@@ -639,7 +655,7 @@ impl InspectorState {
                 Span::styled(gutter_str, gutter_style),
                 Span::styled(vline.text.clone(), text_style),
             ]);
-            buf.set_line(area.x, y, &line, area.width);
+            buf.set_line(area.x + x_off as u16, y, &line, (width - x_off) as u16);
         }
 
         // Bottom-right overflow counter `12-40/312`
@@ -666,6 +682,21 @@ impl InspectorState {
 struct VisualLine {
     line_no: Option<usize>,
     text: String,
+}
+
+/// Display width of the widest source line.
+fn widest_source_line(text: &str) -> usize {
+    text.lines().map(|l| l.width()).max().unwrap_or(0)
+}
+
+/// Offset (columns, rows) that centres a `block_w` x `block_h` block in a
+/// `width` x `height` area. A block taller or wider than the area is drawn
+/// from the top-left corner, as a scrolling block always has been.
+fn centre_offset(block_w: usize, block_h: usize, width: usize, height: usize) -> (usize, usize) {
+    if block_w > width || block_h > height {
+        return (0, 0);
+    }
+    ((width - block_w) / 2, (height - block_h) / 2)
 }
 
 fn outcome_color(outcome: Outcome, theme: &Theme) -> Color {
@@ -1230,5 +1261,105 @@ mod tests {
         assert!(r1.contains("2 Prompt"), "tab row: {r1}");
         assert!(r1.contains("3 Response"), "tab row: {r1}");
         assert!(r1.contains("4 Meta"), "tab row: {r1}");
+    }
+
+    /// Render the active tab of a state whose Output text is `text`.
+    fn render_text(text: &str, wrap: bool, w: u16, h: u16, keys: &[char]) -> Buffer {
+        let dir = tempfile::tempdir().unwrap();
+        let mut step = sample_acp_step();
+        step.output = json!(text);
+        let mut state = InspectorState::new(dir.path(), step, None, (1, 1));
+        state.wrap = wrap;
+        let theme = Theme::default();
+        let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
+        let area = buf.area;
+        state.render(&mut buf, area, &theme, 0);
+        for k in keys {
+            state.handle_key(&KeyEvent::new(KeyCode::Char(*k), KeyModifiers::NONE));
+        }
+        let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
+        state.render(&mut buf, area, &theme, 0);
+        buf
+    }
+
+    /// (row, column) of the first non-space cell at or below the body's first row.
+    fn first_content_cell(buf: &Buffer) -> Option<(u16, u16)> {
+        (2..buf.area.height).find_map(|y| {
+            (0..buf.area.width)
+                .find(|&x| buf[(x, y)].symbol() != " ")
+                .map(|x| (y, x))
+        })
+    }
+
+    #[test]
+    fn short_content_is_centred_as_one_block() {
+        // Body 40x18; block = 4-col gutter + 6-col widest line = 10 x 3 rows.
+        let buf = render_text("ab\nabcdef\nabc", false, 40, 20, &[]);
+        assert_eq!(
+            first_content_cell(&buf),
+            Some((9, 16)),
+            "row, col of the line number"
+        );
+        assert_eq!(buf[(19, 9)].symbol(), "a");
+        // Lines keep their own left alignment inside the block.
+        assert_eq!(buf[(19, 10)].symbol(), "a");
+        assert_eq!(buf[(19, 11)].symbol(), "a");
+        assert_eq!(buf[(22, 10)].symbol(), "d");
+        assert_eq!(buf[(22, 9)].symbol(), " ");
+        // Header and tab rows stay put.
+        assert!(row_text(&buf, 0).starts_with("✓ plan"));
+        assert!(row_text(&buf, 1).starts_with("1 Output"));
+        // Sideways scrolling does not move a block that fits.
+        let moved = render_text("ab\nabcdef\nabc", false, 40, 20, &['l', 'l']);
+        assert_eq!(buf, moved);
+    }
+
+    #[test]
+    fn tall_content_starts_at_the_top_row() {
+        let text = (1..=30)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let buf = render_text(&text, false, 40, 20, &[]);
+        assert_eq!(first_content_cell(&buf), Some((2, 1)));
+        assert!(
+            row_text(&buf, 19).ends_with("1-18/30"),
+            "{}",
+            row_text(&buf, 19)
+        );
+    }
+
+    #[test]
+    fn wide_content_starts_at_the_left_column() {
+        let buf = render_text(&"x".repeat(60), false, 40, 20, &[]);
+        assert_eq!(first_content_cell(&buf), Some((2, 1)));
+    }
+
+    #[test]
+    fn wrap_mode_centres_the_wrapped_lines() {
+        // Body 50x18; content width 46 wraps 60 x's into 46 + 14, plus "b": 3 rows, 50 wide.
+        let text = format!("{}\nb", "x".repeat(60));
+        let buf = render_text(&text, true, 50, 20, &[]);
+        assert_eq!(
+            first_content_cell(&buf),
+            Some((9, 1)),
+            "3 wrapped rows centred vertically"
+        );
+        // A wrapped block narrower than the body is centred sideways as well.
+        let buf = render_text("ab\nabcdef", true, 40, 20, &[]);
+        assert_eq!(first_content_cell(&buf), Some((10, 16)), "2 rows in 18");
+        assert_eq!(buf[(19, 10)].symbol(), "a");
+    }
+
+    #[test]
+    fn tiny_areas_do_not_panic() {
+        for (w, h) in [(0, 0), (1, 1), (3, 3), (5, 3), (4, 4), (60, 2), (2, 30)] {
+            render_text("ab\nabcdef", false, w, h, &[]);
+            render_text("ab\nabcdef", true, w, h, &[]);
+        }
+        assert_eq!(centre_offset(10, 3, 0, 0), (0, 0));
+        assert_eq!(centre_offset(10, 3, 40, 18), (15, 7));
+        assert_eq!(centre_offset(10, 30, 40, 18), (0, 0));
+        assert_eq!(centre_offset(50, 3, 40, 18), (0, 0));
     }
 }
