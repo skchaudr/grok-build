@@ -149,6 +149,10 @@ impl RunViewState {
     }
 
     pub fn set_answered(&mut self, choice: Option<String>) {
+        // A confirm prompt opened before the answer arrived must not stay live.
+        if choice.is_some() {
+            self.gate_confirm = None;
+        }
         self.answered = choice;
     }
 
@@ -2535,5 +2539,25 @@ mod tests {
         assert!(!text.contains("NEEDS YOU"));
         assert!(text.contains("✓ approve → land.flow.ts"));
         assert!(text.contains("reject → fix.flow.ts"));
+    }
+
+    #[test]
+    fn answer_arriving_while_confirm_is_open_closes_the_confirm() {
+        let run = sample_waiting_run(json!({
+            "next": {
+                "approve": "land.flow.ts",
+                "reject": "fix.flow.ts"
+            }
+        }));
+        let mut st = RunViewState::new(run);
+        assert_eq!(st.handle_key(&key(KeyCode::Char('1'))), RunOutcome::Changed);
+        assert!(st.gate_confirm.is_some());
+
+        st.set_answered(Some("approve".to_string()));
+        assert!(st.gate_confirm.is_none());
+        assert!(!matches!(
+            st.handle_key(&key(KeyCode::Enter)),
+            RunOutcome::Gate { .. }
+        ));
     }
 }
