@@ -470,7 +470,7 @@ fn is_empty_container(val: &Value) -> bool {
     }
 }
 
-fn value_inline_summary(val: &Value) -> String {
+pub(super) fn value_inline_summary(val: &Value) -> String {
     match val {
         Value::Null => String::new(),
         Value::Bool(b) => b.to_string(),

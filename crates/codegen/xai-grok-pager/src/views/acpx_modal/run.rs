@@ -20,7 +20,7 @@ use crate::acpx::graph::{Direction, mermaid_source};
 use crate::render::line_utils::truncate_str;
 use crate::scrollback::blocks::markdown_content::MarkdownContent;
 use crate::theme::Theme;
-use crate::views::acpx_modal::detail::DetailTarget;
+use crate::views::acpx_modal::detail::{DetailTarget, value_inline_summary};
 use crate::views::traces_fold::{FoldNode, FoldState, FoldTree};
 use crate::views::traces_modal::fmt_age;
 
@@ -1867,7 +1867,10 @@ fn step_result_summary(step: &Step, theme: &Theme) -> (String, Color) {
             .map(first_line)
             .unwrap_or_else(|| "ok".to_string()),
         Value::String(s) => first_line(s),
-        other => serde_json::to_string(other).unwrap_or_default(),
+        other => match value_inline_summary(other) {
+            s if s.is_empty() => "ok".to_string(),
+            s => s,
+        },
     };
     (text, theme.gray)
 }
@@ -2464,6 +2467,36 @@ mod tests {
                 assert_eq!(buf[(x, y)].symbol(), " ");
             }
         }
+    }
+
+    #[test]
+    fn step_tree_result_line_is_plain_text_not_raw_json() {
+        let mut run = sample_waiting_run(json!({}));
+        run.steps[0].output = json!({"verdict": "approve", "findings": []});
+        let mut st = RunViewState::new(run);
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        st.render(&mut buf, area, &theme, 10_000);
+
+        let text = buf_text(&buf);
+        let line = text
+            .lines()
+            .find(|l| l.contains("verdict approve"))
+            .unwrap_or_else(|| panic!("no result line in:\n{text}"));
+        assert!(line.contains("verdict approve, findings (empty)"), "{line}");
+        assert!(!line.contains('{') && !line.contains('"'), "{line}");
+    }
+
+    #[test]
+    fn step_result_summary_keeps_route_exit_and_error_forms() {
+        let theme = Theme::default();
+        let routed = make_step("a#1", "a", NodeKind::Acp, Outcome::Ok, json!({"route": "pass"}));
+        assert_eq!(step_result_summary(&routed, &theme).0, "→ pass");
+        let shell = make_step("b#1", "b", NodeKind::Action, Outcome::Ok, Value::Null);
+        assert_eq!(step_result_summary(&shell, &theme).0, "exit 0");
+        let failed = make_step("c#1", "c", NodeKind::Action, Outcome::Failed, Value::Null);
+        assert_eq!(step_result_summary(&failed, &theme).0, "boom: command failed");
     }
 
     #[test]
