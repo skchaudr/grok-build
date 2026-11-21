@@ -71,7 +71,7 @@ pub struct SubagentBlock {
     /// Cumulative tokens used by the child session, updated on each
     /// `SubagentProgress` tick and stamped at `SubagentFinished`.
     pub tokens_used: Option<u64>,
-    /// Live tail of the child's transcript, drawn under the header (capped at `[ui].subagent_preview_rows`, default 24). Empty for agents
+    /// Live tail of the child's transcript, drawn under the header (capped at `[ui].subagent_preview_rows`; unset is 5, or 24 in acpx mode). Empty for agents
     /// that send no child updates, so those blocks stay one line.
     pub preview: SubagentPreview,
 }
@@ -440,8 +440,14 @@ mod tests {
 
     /// Rows of the block below the header line, with a preview of 30 lines and the setting at `rows`.
     fn preview_height_with_setting(rows: u8) -> usize {
+        preview_height(Some(rows), false)
+    }
+
+    /// Rows below the header for a 30-line preview, with `[ui].subagent_preview_rows` at `setting` (`None` = unset).
+    fn preview_height(setting: Option<u8>, acpx_mode: bool) -> usize {
         std::thread::spawn(move || {
-            crate::appearance::cache::set_subagent_preview_rows(rows);
+            crate::appearance::cache::set_subagent_preview_rows_setting(setting);
+            crate::appearance::cache::set_subagent_preview_acpx_mode(acpx_mode);
             let mut block = SubagentBlock::started(
                 "read the logs",
                 "child-1",
@@ -470,6 +476,18 @@ mod tests {
         assert_eq!(preview_height_with_setting(12), 12);
         // The default of 24 still caps a longer preview.
         assert_eq!(preview_height_with_setting(24), 24);
+    }
+
+    #[test]
+    fn unset_preview_rows_is_5_in_a_normal_session_and_24_in_acpx_mode() {
+        assert_eq!(preview_height(None, false), 5);
+        assert_eq!(preview_height(None, true), 24);
+    }
+
+    #[test]
+    fn explicit_preview_rows_win_in_both_modes() {
+        assert_eq!(preview_height(Some(9), false), 9);
+        assert_eq!(preview_height(Some(9), true), 9);
     }
 
     fn block_with_preview(with_preview: bool) -> SubagentBlock {

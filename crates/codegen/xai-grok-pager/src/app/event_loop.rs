@@ -31,6 +31,8 @@ pub(crate) fn should_create_home_on_authenticated_startup(app: &AppView) -> bool
         && app.session_startup_allowed()
         && !app.is_access_blocked()
 }
+/// `agentInfo.name` that `grok-acpx-acp` answers `initialize` with; it marks acpx mode.
+const ACPX_AGENT_NAME: &str = "acpx";
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(16);
 /// A resize queues a forced status-line re-run, and the script is told the width the debounced draw recorded.
 const _: () = assert!(
@@ -1157,6 +1159,10 @@ pub(crate) async fn run(
     app.leader_mode = connection.leader_status_rx.is_some();
     app.external_agent = args.launches_external_agent();
     app.agent_info = connection.agent_info.clone();
+    // acpx mode: `grok-acpx-acp` reports itself as `acpx`; flow steps get the taller subagent preview.
+    crate::appearance::cache::set_subagent_preview_acpx_mode(
+        app.agent_info.as_ref().is_some_and(|info| info.name == ACPX_AGENT_NAME),
+    );
     app.external_agent_label = args
         .effective_agent_cmd()
         .as_deref()
