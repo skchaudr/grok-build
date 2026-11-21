@@ -328,23 +328,25 @@ Behavior:
   a string is wrapped as text; a number, bool or null is one line; an object is one row per
   top-level field as `key  value`, keys in the object's own order and padded to the longest key, a nested object or
   array indented two columns under its key; an array is one row per item prefixed "- "; no braces, brackets, quotes
-  or trailing commas anywhere.
+  or trailing commas anywhere. Keys are drawn in the dim style this file uses for labels, values in the primary text style.
 - "Last result" and "Input" in `build_run_lines` use it. These two sections are no longer capped: every
   line is shown (this pane already scrolls). Stop calling `push_wrapped_capped` for them; if that leaves it with no
   caller, remove it.
 - A value that renders no lines (`null`, an empty object) shows no section and no rule. Today an empty object prints
   `{{}}` under its rule; that changes.
-- The step pane and every other caller of `value_text` are unchanged. Copy actions still copy the raw JSON.
-- Out of scope here: the Stages rows still print compact JSON through `step_one_line_summary`, and the step pane's
-  "Result" still uses `value_text`.
+- The step pane's "Result" uses the same function, also with no cap.
+- `step_one_line_summary` (the Stages rows) renders an object as `key value, key value` over its fields and an array
+  as its items joined by ", ", nested values in the same form, with no braces, brackets or quotes; its existing
+  one-line truncation stays.
+- Copy actions still copy the raw JSON. Any other caller of `value_text` is unchanged.
 
 Tests (add; `test_run_target_lists_stages_and_waiting_gate_choices` must still pass). Build them with
 `make_test_run(..)`, a `Step {{ .. }}` literal like the ones in that test, and `DetailPanel::render` + `buffer_lines`
 (or `build_run_lines` directly):
 - a Running run whose last step's output is `{{"summary":"all good","files":["a.rs","b.rs"]}}` renders, between the
   `── Last result` rule and the next section rule, a row containing `summary` and `all good` and a row for each file,
-  and no line in that range contains `{{`, `}}`, `[` or `"summary":` (the Stages rows above still print compact JSON;
-  do not test them);
+  and no line in that range contains `{{`, `}}`, `[` or `"summary":` and the Stages row for that
+  step contains `summary all good` and no `{{` or `"`;
 - a string output renders as wrapped text exactly as before;
 - an empty object and `null` render no section at all;
 - an output that is an array of 40 short strings yields all 40 rows and no "more rows" line (check `build_run_lines`,
@@ -378,17 +380,23 @@ Behavior:
 - Answered gate. Add a private field `answered: Option<String>` (None by default),
   `pub fn set_answered(&mut self, choice: Option<String>)` and `pub fn answered(&self) -> Option<&str>`. Slice `modal`
   calls the setter (it reads the choice from the ledger); outside tests this file never calls it. While it is
-  `Some(choice)` and the run is Waiting: the banner reads "✓ answered: <choice>" ("✓ answered" when the choice is
-  empty) in the style this file uses for a completed run, in place of "◐ NEEDS YOU at <node>: <question>"; and
-  `handle_key` no longer answers the gate: the 1-9 keys and Enter on a gate row return the same outcome as a key that
-  does nothing. Everything else in the view is unchanged.
+  `Some(choice)` and the run is Waiting:
+  - there is no "NEEDS YOU" banner, and the header's status glyph and colour are the ones a completed run gets (✓);
+  - in the banner's place one line in this file's muted style reads "✓ answered at <node>: <choice>"
+    ("✓ answered at <node>" when the choice is empty); it wraps like any banner;
+  - the gate's choices stay listed as a record, and the one whose label equals `choice` (ignoring case) is marked
+    with "✓" before its label;
+  - `handle_key` no longer answers the gate: the 1-9 keys and Enter on a gate choice return the same outcome as a key
+    that does nothing, and the "1-9 gate" shortcut hint is not shown.
+  Everything else in the view is unchanged.
 
 Tests (add; `render_wide_160x40_shows_banner_stages_separator_and_clean_detail_area` must still pass). Build them with
 `sample_waiting_run(..)`, setting `summary.status_detail` before `RunViewState::new`, then `render` and `buf_text`:
 - a Waiting run whose question is 120 characters, rendered 80 wide, shows every word of the question;
 - a short question still takes exactly one row and the rows below it are where they are today;
-- after `set_answered(Some("approve".to_string()))` on a Waiting run, the render contains "answered: approve" and no
-  "NEEDS YOU", and `handle_key` for `1` returns the do-nothing outcome where it returned a gate answer before.
+- after `set_answered(Some("approve".to_string()))` on a Waiting run: the render contains "answered at" and "approve"
+  and no "NEEDS YOU", the gate's choices are still listed, the "1-9 gate" hint is absent, and `handle_key` for `1`
+  returns the do-nothing outcome where it returned a gate answer before.
 {RULES}""",
     },
 ]
