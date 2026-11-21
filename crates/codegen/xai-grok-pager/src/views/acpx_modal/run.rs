@@ -1539,14 +1539,13 @@ impl RunViewState {
             } => {
                 let guide = if is_last_child { "  ╰ " } else { "  │ " };
                 let avail = width.saturating_sub(4);
-                let chosen = self
-                    .answered
-                    .as_deref()
-                    .is_some_and(|c| c.eq_ignore_ascii_case(label));
-                let body = if chosen {
-                    format!("[{choice_idx}] ✓ {label} → {flow_file}")
-                } else {
-                    format!("[{choice_idx}] {label} → {flow_file}")
+                // An answered gate has nothing left to pick: no key numbers, the picked one is ticked.
+                let body = match self.answered.as_deref() {
+                    Some(picked) if picked.eq_ignore_ascii_case(label) => {
+                        format!("✓ {label} → {flow_file}")
+                    }
+                    Some(_) => format!("  {label} → {flow_file}"),
+                    None => format!("[{choice_idx}] {label} → {flow_file}"),
                 };
                 let cut = truncate_str(&body, avail);
                 Line::from(vec![
@@ -2613,6 +2612,40 @@ mod tests {
         assert!(!text.contains("NEEDS YOU"));
         assert!(text.contains("✓ approve → land.flow.ts"));
         assert!(text.contains("reject → fix.flow.ts"));
+    }
+
+    #[test]
+    fn step_tree_gate_rows_drop_the_key_numbers_once_answered() {
+        let run = sample_waiting_run(json!({
+            "next": {"approve": "land.flow.ts", "reject": "fix.flow.ts"}
+        }));
+        let mut st = RunViewState::new(run);
+        let theme = Theme::default();
+        // Wide enough for the detail pane to take the right side; look at the left (tree) half only.
+        let area = Rect::new(0, 0, 160, 40);
+        let tree_text = |st: &mut RunViewState| {
+            let mut buf = Buffer::empty(area);
+            st.render(&mut buf, area, &theme, 10_000);
+            let tree_w = st.detail_area().map_or(area.width, |d| d.x);
+            (0..area.height)
+                .map(|y| {
+                    (0..tree_w)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let open = tree_text(&mut st);
+        assert!(open.contains("[1] approve → land.flow.ts"), "{open}");
+        assert!(open.contains("[2] reject → fix.flow.ts"), "{open}");
+
+        st.set_answered(Some("approve".to_string()));
+        let done = tree_text(&mut st);
+        assert!(done.contains("✓ approve → land.flow.ts"), "{done}");
+        assert!(done.contains("  reject → fix.flow.ts"), "{done}");
+        assert!(!done.contains("[1]") && !done.contains("[2]"), "{done}");
     }
 
     #[test]
