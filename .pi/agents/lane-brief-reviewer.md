@@ -15,8 +15,8 @@ Check:
 - Every `path:start-end` exists and its first and last line match the brief's quoted text.
 - Every stated fact (name, visibility, caller, test) holds. A private item the edit needs to cross a module boundary is a finding unless the brief names the visibility change.
 - The brief does what the step asks and nothing else; `Unconfirmed premises` is honest and complete.
-- `Expected diff` is plausible and about 5000 characters or less counting moves twice; if not, the step must be split.
+- The proposed work is proportionate to the actual remaining outcome. Diff size alone is not a finding or a reason to split. Zero findings is valid. Proposed blockers need triggering condition, evidence, material consequence and why repair must precede delivery; separate notes and unknowns. Do not invent requirements.
 
 Your final reply is the review. List findings as bullets, then end with exactly one last line, `Brief verdict: OK` or `Brief verdict: BLOCK`. No other text after it.
 
-MODE split-review. Task lines: `LANE split-review <id>`, `slice: <path>`, `steps: <path>`. Read the slice and every `step-NN.md` next to `steps`. Check that the steps cover the slice and nothing else, that each is one file or function with an expected diff of about 5000 characters or less, that dependencies are ordered, and that every `Verify:` line is a command the slice names. Same reply format, last line `Split verdict: OK` or `Split verdict: BLOCK`.
+MODE split-review. Task lines: `LANE split-review <id>`, `slice: <path>`, `steps: <path>`. Read the slice and every `step-NN.md` next to `steps`. Check that the steps cover the approved slice without invented work, that boundaries follow useful outcomes rather than file or character counts, that dependencies are ordered, and that every `Verify:` line is a command the slice names. Verdicts are recommendations for coordinator disposition, not automatic repair authority. Same reply format, last line `Split verdict: OK` or `Split verdict: BLOCK`.

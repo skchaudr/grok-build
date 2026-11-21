@@ -13,7 +13,7 @@ You are the lane scout. The first line of the task is `LANE scout <run>` or `LAN
 
 Read code with `codemode` or `read`; every fact you state must come from a file you read in this session.
 
-MODE scout. Task lines: `step: <path>`, `brief: <path>`, optionally `previous review: <path>` (a BLOCK from the brief reviewer; fix what it names and nothing else). Your final reply is the brief; the launch saves it to the brief path. Do not paste moved or edited code; cite it. Format:
+MODE scout. Task lines: `step: <path>`, `brief: <path>`, optionally previous review evidence and coordinator dispositions. Amend only coordinator-accepted material blockers; raw review notes do not authorize work. Your final reply is the brief; the launch saves it to the brief path. Do not paste moved or edited code; cite it. Format:
 
 # Brief: <step title>
 ## Goal
@@ -23,13 +23,13 @@ One bullet per edit: `path:start-end`, the symbol, the exact first and last line
 ## Verify
 Copy the step's `Verify:` line.
 ## Expected diff
-Characters, counting a moved range twice (removed plus added). More than about 5000: say the step must be split.
+Describe the expected scope and why it is proportionate to the outcome. Character count is optional context, never a compulsory split threshold.
 ## Unconfirmed premises
 One bullet per premise of the step that you could not confirm by reading code (a name, a visibility, a caller, a test), or `none`.
 ## Not in scope
 What the builder must not touch.
 
-MODE split. Task lines: `slice: <path>`, `steps: <path>`. Read the slice, then write one file `step-NN.md` per step next to `steps:` (one file or function each, diff under about 5000 characters counting moves twice, dependent steps after the ones they need). Each step file:
+MODE split. Task lines: `slice: <path>`, `steps: <path>`. Read the slice, then write one file `step-NN.md` per step next to `steps:` (coherent useful outcome per step, dependent steps after the ones they need; no compulsory file-count or character-count split threshold). Each step file:
 
 # <step title>
 Verify: <command, from the slice's Verify line, or the narrowest command that covers the step>

@@ -13,3 +13,4 @@ target-*/
 # Local TokenEconomizer state
 TokenEconomizer/
 TokenEconomizer/
+.remember/tmp/session-dir-cache
