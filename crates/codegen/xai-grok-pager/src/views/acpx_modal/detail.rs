@@ -501,6 +501,26 @@ pub(super) fn value_inline_summary(val: &Value) -> String {
     }
 }
 
+/// The key/value rows as plain text, for views that hold text rather than styled lines (the step inspector).
+/// Same layout as the rows: one `key  value` line per field, nested values indented, lists as `- `, `(empty)` for
+/// empty lists and objects, no braces or quotes. Lines are never wrapped here; the viewer wraps.
+pub(super) fn value_plain_text(val: &Value) -> String {
+    if is_empty_container(val) {
+        return EMPTY.to_string();
+    }
+    let theme = Theme::current();
+    format_value_lines(val, usize::MAX / 4, &theme)
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn format_value_lines(val: &Value, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     if matches!(val, Value::Null) {

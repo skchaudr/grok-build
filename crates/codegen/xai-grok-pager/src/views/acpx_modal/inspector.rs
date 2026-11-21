@@ -60,6 +60,8 @@ struct TabEntry {
     is_empty_artifact: bool,
     scroll_y: usize,
     scroll_x: usize,
+    /// What `y` copies when it differs from what the tab shows (a JSON value shown as rows copies its raw JSON).
+    copy: Option<String>,
 }
 
 pub struct InspectorState {
@@ -86,12 +88,22 @@ impl InspectorState {
         // 1. Output
         let output_val_text = value_text(&step.output);
         if !output_val_text.is_empty() {
+            // A JSON value reads as rows, not braces and quotes; `y` still copies the raw JSON.
+            let (text, copy) = if step.output.is_string() {
+                (output_val_text, None)
+            } else {
+                (
+                    crate::views::acpx_modal::detail::value_plain_text(&step.output),
+                    Some(output_val_text),
+                )
+            };
             tabs.push(TabEntry {
                 kind: TabKind::Output,
-                text: output_val_text,
+                text,
                 is_empty_artifact: false,
                 scroll_y: 0,
                 scroll_x: 0,
+                copy,
             });
         } else if let Some(art) = &step.output_artifact {
             let (text, is_empty) = read_artifact_tab(run_dir, art);
@@ -101,6 +113,7 @@ impl InspectorState {
                 is_empty_artifact: is_empty,
                 scroll_y: 0,
                 scroll_x: 0,
+                copy: None,
             });
         }
 
@@ -114,6 +127,7 @@ impl InspectorState {
                 is_empty_artifact: false,
                 scroll_y: 0,
                 scroll_x: 0,
+                copy: None,
             });
         }
 
@@ -127,6 +141,7 @@ impl InspectorState {
                 is_empty_artifact: false,
                 scroll_y: 0,
                 scroll_x: 0,
+                copy: None,
             });
         }
 
@@ -139,6 +154,7 @@ impl InspectorState {
                 is_empty_artifact: is_empty,
                 scroll_y: 0,
                 scroll_x: 0,
+                copy: None,
             });
         }
 
@@ -151,6 +167,7 @@ impl InspectorState {
                 is_empty_artifact: is_empty,
                 scroll_y: 0,
                 scroll_x: 0,
+                copy: None,
             });
         }
 
@@ -164,6 +181,7 @@ impl InspectorState {
                 is_empty_artifact: false,
                 scroll_y: 0,
                 scroll_x: 0,
+                copy: None,
             });
         }
 
@@ -175,6 +193,7 @@ impl InspectorState {
             is_empty_artifact: false,
             scroll_y: 0,
             scroll_x: 0,
+            copy: None,
         });
 
         let is_failed = matches!(step.outcome, Outcome::Failed | Outcome::TimedOut);
@@ -341,7 +360,7 @@ impl InspectorState {
                 let text = self
                     .tabs
                     .get(self.active_tab)
-                    .map(|t| t.text.clone())
+                    .map(|t| t.copy.clone().unwrap_or_else(|| t.text.clone()))
                     .unwrap_or_default();
                 InspectorOutcome::Copy(text)
             }
@@ -1088,6 +1107,49 @@ mod tests {
         state.handle_key(&KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)); // Prompt
         let out = state.handle_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert_eq!(out, InspectorOutcome::Copy("Write a plan".to_string()));
+    }
+
+    #[test]
+    fn json_output_tab_reads_as_rows_and_copy_still_gives_raw_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut step = sample_acp_step();
+        step.output = serde_json::json!({
+            "verdict": "approve",
+            "findings": [],
+            "notes": ["a", "b"],
+            "next": {"approve": "land.flow.ts", "meta": {}}
+        });
+        let mut state = InspectorState::new(dir.path(), step.clone(), None, (1, 1));
+        let tab = state
+            .tabs
+            .iter()
+            .find(|t| t.kind == TabKind::Output)
+            .expect("output tab");
+        assert!(!tab.text.contains('{') && !tab.text.contains('"'), "{}", tab.text);
+        assert!(tab.text.contains("verdict   approve"), "{}", tab.text);
+        assert!(tab.text.contains("findings  (empty)"), "{}", tab.text);
+        assert!(tab.text.contains("- a") && tab.text.contains("- b"), "{}", tab.text);
+        assert!(tab.text.contains("  approve  land.flow.ts"), "{}", tab.text);
+        assert!(tab.text.contains("meta     (empty)"), "{}", tab.text);
+
+        let out = state.handle_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(out, InspectorOutcome::Copy(value_text(&step.output)));
+        let InspectorOutcome::Copy(raw) = out else { unreachable!() };
+        assert!(raw.contains("\"verdict\": \"approve\""));
+    }
+
+    #[test]
+    fn string_output_tab_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut step = sample_acp_step();
+        step.output = serde_json::json!("plain reply");
+        let mut state = InspectorState::new(dir.path(), step, None, (1, 1));
+        let tab = &state.tabs[state.active_tab];
+        assert_eq!(tab.text, "plain reply");
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+            InspectorOutcome::Copy("plain reply".to_string())
+        );
     }
 
     #[test]
