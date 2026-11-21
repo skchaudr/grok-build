@@ -31,8 +31,13 @@ pub(super) fn feed_subagent_preview(parent: &mut AgentView, child_key: &str, upd
         && let RenderBlock::Subagent(ref mut sb) = entry.block
     {
         let before = sb.preview.revision();
+        let was_empty = sb.preview.is_empty();
         sb.preview.ingest(update);
         if sb.preview.revision() != before {
+            // The block became foldable with its first preview row: it starts unfolded, unless the user pinned a fold.
+            if was_empty && !sb.preview.is_empty() && !entry.display_mode_pinned {
+                entry.display_mode = crate::scrollback::DisplayMode::Expanded;
+            }
             entry.invalidate_cache();
             changed = true;
         }

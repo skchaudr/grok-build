@@ -40,8 +40,10 @@ pub enum SubagentBlockKind {
     Cancelled { elapsed: Duration },
 }
 
-/// Always collapsed and not foldable; groupable and selectable.
-/// Enter / Ctrl-F opens the subagent view.
+/// One header line, plus a live preview of the child's transcript when the agent sends child updates.
+/// Not foldable while there is no preview (stock Grok Build); with one, it folds between the header alone
+/// and header plus preview, and the scrollback opens it unfolded when the first preview row lands.
+/// Groupable only without a preview. Enter or Ctrl-F opens the subagent view.
 #[derive(Debug, Clone)]
 pub struct SubagentBlock {
     /// Human-readable description of the task.
@@ -324,7 +326,9 @@ impl BlockContent for SubagentBlock {
         };
 
         let mut lines = vec![line.into()];
-        if !self.preview.is_empty() {
+        // Folded (and foldable): the header alone.
+        let folded = self.is_foldable() && ctx.mode != DisplayMode::Expanded;
+        if !self.preview.is_empty() && !folded {
             let rail = Span::styled("\u{2502} ", theme.muted());
             let rows = self
                 .preview
@@ -381,7 +385,8 @@ impl BlockContent for SubagentBlock {
     }
 
     fn is_foldable(&self) -> bool {
-        false
+        // Only a block with a preview has anything to unfold.
+        !self.preview.is_empty()
     }
 
     fn default_display_mode(&self) -> DisplayMode {
@@ -408,8 +413,12 @@ mod tests {
     use crate::appearance::AppearanceConfig;
 
     fn test_ctx() -> BlockContext {
+        ctx_in(DisplayMode::Collapsed)
+    }
+
+    fn ctx_in(mode: DisplayMode) -> BlockContext {
         BlockContext {
-            mode: DisplayMode::Collapsed,
+            mode,
             is_running: false,
             width: 120,
             raw: false,
@@ -449,7 +458,7 @@ mod tests {
             }))
             .expect("valid session update");
             block.preview.ingest(&update);
-            block.output(&test_ctx()).lines.len() - 1
+            block.output(&ctx_in(DisplayMode::Expanded)).lines.len() - 1
         })
         .join()
         .expect("render thread")
@@ -461,6 +470,42 @@ mod tests {
         assert_eq!(preview_height_with_setting(12), 12);
         // The default of 24 still caps a longer preview.
         assert_eq!(preview_height_with_setting(24), 24);
+    }
+
+    fn block_with_preview(with_preview: bool) -> SubagentBlock {
+        let mut block =
+            SubagentBlock::started("read the logs", "child-1", "general-purpose", None, None, None, false);
+        if with_preview {
+            let update: agent_client_protocol::SessionUpdate = serde_json::from_value(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "first\nsecond\nthird" }
+            }))
+            .expect("valid session update");
+            block.preview.ingest(&update);
+        }
+        block
+    }
+
+    #[test]
+    fn block_with_a_preview_folds_between_header_and_header_plus_preview() {
+        let block = block_with_preview(true);
+        assert!(block.is_foldable());
+        let folded = block.output(&ctx_in(DisplayMode::Collapsed)).lines.len();
+        let open = block.output(&ctx_in(DisplayMode::Expanded)).lines.len();
+        assert_eq!(folded, 1, "folded shows the header line only");
+        assert!(open > 1, "unfolded shows the preview under the header");
+        assert!(!block.is_groupable());
+    }
+
+    #[test]
+    fn block_without_a_preview_is_unchanged() {
+        let block = block_with_preview(false);
+        assert!(!block.is_foldable());
+        assert!(block.is_groupable());
+        assert_eq!(block.default_display_mode(), DisplayMode::Collapsed);
+        for mode in [DisplayMode::Collapsed, DisplayMode::Expanded] {
+            assert_eq!(block.output(&ctx_in(mode)).lines.len(), 1);
+        }
     }
 
     #[test]

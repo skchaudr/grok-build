@@ -3101,3 +3101,39 @@
             );
         }
     }
+
+    #[test]
+    fn first_preview_row_opens_the_subagent_block_unfolded_unless_pinned() {
+        use crate::scrollback::types::DisplayMode;
+        let mut app = make_app_with_agent("sess-parent");
+        for child in ["child-a", "child-b"] {
+            assert!(handle(
+                make_ext_session_notification("sess-parent", test_subagent_spawned("sess-parent", child)),
+                &mut app,
+            ));
+        }
+        let update: agent_client_protocol::SessionUpdate = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "reading the logs" }
+        }))
+        .expect("valid session update");
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let entry_of = |agent: &AgentView, child: &str| {
+            agent.subagent_sessions[child].attempt.scrollback_entry_id.expect("entry")
+        };
+        let (a, b) = (entry_of(agent, "child-a"), entry_of(agent, "child-b"));
+        // Without a preview a subagent row is one collapsed line, as in stock Grok Build.
+        assert_eq!(agent.scrollback.get_by_id(a).unwrap().display_mode, DisplayMode::Collapsed);
+        assert!(!agent.scrollback.get_by_id(a).unwrap().is_foldable());
+        agent.scrollback.get_by_id_mut(b).unwrap().display_mode_pinned = true;
+
+        super::subagent_activity::feed_subagent_preview(agent, "child-a", &update);
+        super::subagent_activity::feed_subagent_preview(agent, "child-b", &update);
+
+        let unpinned = agent.scrollback.get_by_id(a).unwrap();
+        assert!(unpinned.is_foldable());
+        assert_eq!(unpinned.display_mode, DisplayMode::Expanded, "starts unfolded");
+        let pinned = agent.scrollback.get_by_id(b).unwrap();
+        assert_eq!(pinned.display_mode, DisplayMode::Collapsed, "a pinned fold is kept");
+    }
