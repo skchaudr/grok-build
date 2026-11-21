@@ -459,7 +459,7 @@ fn step_one_line_summary(step: &Step) -> String {
     }
 }
 
-/// What an empty list or object shows as a field value.
+/// What an empty list or object shows as a field value (drawn in the same colour as the keys beside it).
 const EMPTY: &str = "(empty)";
 
 fn is_empty_container(val: &Value) -> bool {
@@ -591,7 +591,7 @@ fn append_value_lines(
                         if sub.is_empty() {
                             sub.push(Line::from(Span::styled(
                                 EMPTY,
-                                Style::default().fg(theme.gray_dim),
+                                Style::default().fg(theme.gray),
                             )));
                         }
                         for (idx, sub_line) in sub.into_iter().enumerate() {
@@ -645,7 +645,7 @@ fn append_value_lines(
                         out.push(Line::from(vec![
                             Span::raw(pad_indent.clone()),
                             Span::styled(format!("{k}{key_pad}"), key_style),
-                            Span::styled(EMPTY, Style::default().fg(theme.gray_dim)),
+                            Span::styled(EMPTY, Style::default().fg(theme.gray)),
                         ]));
                     }
                     Value::Object(_) | Value::Array(_) => {
@@ -2222,7 +2222,7 @@ mod tests {
         });
         let theme = Theme::default();
 
-        // Key/value rows: key, then (empty) in the dim style.
+        // Key/value rows: key, then (empty) in the same colour as the key.
         let lines = build_step_lines(&run, 0, &run.steps[0], None, 60, &theme);
         let text: Vec<String> = lines
             .iter()
@@ -2237,7 +2237,14 @@ mod tests {
             .filter(|sp| sp.content.as_ref() == "(empty)")
             .collect();
         assert!(!empties.is_empty());
-        assert!(empties.iter().all(|sp| sp.style.fg == Some(theme.gray_dim)));
+        // The same colour as the keys next to it, not fainter.
+        assert!(empties.iter().all(|sp| sp.style.fg == Some(theme.gray)));
+        let key = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|sp| sp.content.trim() == "findings")
+            .expect("findings key");
+        assert_eq!(key.style.fg, empties[0].style.fg);
 
         // Stages one-line summary.
         let run_lines = build_run_lines(&run, None, 90, &theme, 5_000);
