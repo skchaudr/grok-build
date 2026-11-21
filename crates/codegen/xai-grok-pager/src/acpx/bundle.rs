@@ -430,18 +430,19 @@ pub fn refresh(run: &mut Run) -> bool {
     let manifest_val = read_json_file(&dir.join("manifest.json"));
     let run_proj_val = read_json_file(&dir.join("projections/run.json"));
 
-    if live_val.is_some() || manifest_val.is_some() {
-        let new_summary = build_summary(&dir, live_val.as_ref(), manifest_val.as_ref());
-        if new_summary != run.summary {
-            run.summary = new_summary;
-            changed = true;
-        }
-    }
-
     if let Some(flow_val) = read_json_file(&dir.join("flow.json")) {
         let new_flow = parse_flow_def(&flow_val);
         if new_flow != run.flow {
             run.flow = new_flow;
+            changed = true;
+        }
+    }
+
+    if live_val.is_some() || manifest_val.is_some() {
+        let mut new_summary = build_summary(&dir, live_val.as_ref(), manifest_val.as_ref());
+        restore_question(&mut new_summary, &run.flow);
+        if new_summary != run.summary {
+            run.summary = new_summary;
             changed = true;
         }
     }
@@ -1666,6 +1667,23 @@ mod tests {
         assert_eq!(run.steps.len(), orig_steps_len);
         assert_eq!(run.summary.status, RunStatus::Completed);
         assert!(!refresh(&mut run));
+    }
+
+    #[test]
+    fn test_refresh_keeps_the_restored_gate_question() {
+        let tmp = tempdir().ok().unwrap_or_else(|| unreachable!());
+        write_bundle(tmp.path());
+        // acpx reports only the checkpoint's node id as the detail of a waiting run.
+        let live = SAMPLE_LIVE_WAITING.replace(
+            r#""statusDetail": "human review of the description""#,
+            r#""statusDetail": "review""#,
+        );
+        fs::write(tmp.path().join("projections/live.json"), live).ok();
+
+        let mut run = load_run(tmp.path()).ok().unwrap_or_else(|| unreachable!());
+        assert_eq!(run.summary.status_detail.as_deref(), Some("human review of the description"));
+        assert!(!refresh(&mut run));
+        assert_eq!(run.summary.status_detail.as_deref(), Some("human review of the description"));
     }
 
     #[test]

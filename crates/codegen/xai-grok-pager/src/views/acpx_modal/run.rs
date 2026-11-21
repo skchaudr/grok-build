@@ -1162,9 +1162,16 @@ impl RunViewState {
                         };
                         (msg, Style::default().fg(theme.gray))
                     } else {
-                        let detail = sum.status_detail.as_deref().unwrap_or("waiting");
+                        // The question, when there is one; a detail that only repeats
+                        // the node name is no question.
+                        let msg = match sum.status_detail.as_deref() {
+                            Some(q) if !q.is_empty() && q != node => {
+                                format!("◐ NEEDS YOU at {node}: {q}")
+                            }
+                            _ => format!("◐ NEEDS YOU at {node}"),
+                        };
                         (
-                            format!("◐ NEEDS YOU at {node}: {detail}"),
+                            msg,
                             Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
                         )
                     }
@@ -2387,6 +2394,29 @@ mod tests {
         ));
         st.sync();
         assert_eq!(st.selected_step(), Some(1));
+    }
+
+    #[test]
+    fn banner_shows_the_gate_question_and_falls_back_to_the_node_name() {
+        let theme = Theme::default();
+        let banner = |detail: Option<&str>| {
+            let mut run = sample_waiting_run(json!({"next": {"approve": "land.flow.ts"}}));
+            run.summary.status_detail = detail.map(str::to_string);
+            let st = RunViewState::new(run);
+            st.build_banner(120, &theme, 10_000)
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+                .collect::<String>()
+        };
+        assert!(banner(Some("land it, or send it back?"))
+            .contains("◐ NEEDS YOU at gate: land it, or send it back?"));
+        // acpx reports the node id when the checkpoint has no question: no repeat.
+        let repeated = banner(Some("gate"));
+        assert!(repeated.contains("◐ NEEDS YOU at gate"));
+        assert!(!repeated.contains("gate: gate"));
+        let none = banner(None);
+        assert!(none.contains("◐ NEEDS YOU at gate"));
+        assert!(!none.contains("waiting"));
     }
 
     #[test]
