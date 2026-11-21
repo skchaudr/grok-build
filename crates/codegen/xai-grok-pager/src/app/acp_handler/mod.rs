@@ -784,6 +784,11 @@ fn handle_claude_sdk_message(notif: &acp::ExtNotification, app: &mut AppView) ->
     let Some((_, _, agent)) = routing::resolve_notif_agent(app, &acp::SessionId::new(session_id)) else {
         return false;
     };
+    if running != agent.claude_sdk_running {
+        // The SDK went idle or started another cycle (a follow-up after a background task): what it says next is a new assistant message,
+        // and the adapter marks no other boundary. Without this the reply is glued onto the text before it.
+        agent.session.tracker.close_open_streams(&mut agent.scrollback);
+    }
     agent.claude_sdk_running = running;
     agent.reconcile_claude_working();
     true
@@ -1010,9 +1015,7 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
             return false;
         }
     }
-    agent
-        .scrollback
-        .push_block(RenderBlock::interjection_prompt(text));
+    agent.push_interjection_row(text);
     is_active
 }
 fn handle_ext_method(ext: xai_acp_lib::AcpArgs<acp::ExtRequest>, app: &mut AppView) -> bool {

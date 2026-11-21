@@ -97,9 +97,7 @@ fn dispatch_interject_on_inner(
     // Record its id so the broadcast echo (`x.ai/session/interjection`) is deduped instead of rendering a second copy on this pane
     let interjection_id = uuid::Uuid::new_v4().to_string();
     agent.self_interjection_ids.insert(interjection_id.clone());
-    let entry_id = agent
-        .scrollback
-        .push_block(RenderBlock::interjection_prompt(&text));
+    let entry_id = agent.push_interjection_row(&text);
     agent
         .interjection_painted_blocks
         .insert(interjection_id.clone(), entry_id);

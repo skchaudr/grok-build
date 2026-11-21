@@ -814,6 +814,77 @@ fn wake_release_keeps_order_and_never_overtakes_a_held_row() {
     assert!(flush_held_local_queue_into_wait(&mut app, None).is_empty());
 }
 
+/// Scrollback as `(who, text)` rows: `agent` for assistant text, `user` for a prompt row.
+fn order_rows(app: &AppView) -> Vec<(&'static str, String)> {
+    let agent = agent_ref(app, AgentId(0));
+    (0..agent.scrollback.len())
+        .filter_map(|i| match &agent.scrollback.entry(i).unwrap().block {
+            RenderBlock::AgentMessage(b) => Some(("agent", b.text())),
+            RenderBlock::UserPrompt(b) => Some(("user", b.text.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn stream_agent_text(app: &mut AppView, text: &str) {
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let chunk = acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+        acp::ContentBlock::Text(acp::TextContent::new(text.to_string())),
+    ));
+    agent.session.handle_update(
+        chunk,
+        &crate::acp::meta::NotificationMeta::default(),
+        &mut agent.scrollback,
+    );
+}
+
+/// The reported misorder: the wake turn is streaming text, Sab sends a prompt, and the agent's reply to it
+/// was appended to the earlier assistant entry ABOVE the prompt. A reply always lands below the prompt it answers,
+/// as its own entry, for a straight send and for a row released from the queue.
+#[test]
+fn reply_to_a_prompt_sent_during_a_wake_lands_below_the_prompt() {
+    let mut app = claude_wake_app(true);
+    let _mode = LocalFollowUp::queue(&mut app);
+    stream_agent_text(&mut app, "wake text so far");
+
+    let effects = dispatch(Action::SendPrompt("my question".into()), &mut app);
+    assert_eq!(sent_prompt_texts(&effects), vec!["my question".to_string()]);
+    stream_agent_text(&mut app, "the reply");
+
+    assert_eq!(
+        order_rows(&app),
+        vec![
+            ("agent", "wake text so far".to_string()),
+            ("user", "my question".to_string()),
+            ("agent", "the reply".to_string()),
+        ]
+    );
+
+    // A row released from the local queue takes the same route.
+    stream_agent_text(&mut app, " more");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.pending_prompts.push_back(crate::app::agent::QueuedPrompt::plain(
+            91,
+            "queued question",
+            crate::app::agent::QueueEntryKind::Prompt,
+        ));
+    }
+    let released = flush_held_local_queue_into_wait(&mut app, None);
+    assert_eq!(sent_prompt_texts(&released), vec!["queued question".to_string()]);
+    stream_agent_text(&mut app, "second reply");
+    assert_eq!(
+        order_rows(&app),
+        vec![
+            ("agent", "wake text so far".to_string()),
+            ("user", "my question".to_string()),
+            ("agent", "the reply more".to_string()),
+            ("user", "queued question".to_string()),
+            ("agent", "second reply".to_string()),
+        ]
+    );
+}
+
 fn agent_front_to_command(app: &mut AppView) {
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     agent.session.pending_prompts.front_mut().unwrap().kind =

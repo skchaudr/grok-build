@@ -968,6 +968,16 @@ impl AgentView {
         self.session.tracker.clear_user_cancel();
         self.session.start_turn(&mut self.scrollback);
     }
+    /// Paint a user row the agent never echoes back (a mid-turn send, an interjection) and return its entry id.
+    /// The open thinking and assistant entries close first: the reply that follows must start a new entry below this row, never keep appending above it.
+    pub(crate) fn push_interjection_row(
+        &mut self,
+        text: &str,
+    ) -> crate::scrollback::entry::EntryId {
+        self.session.tracker.close_open_streams(&mut self.scrollback);
+        self.scrollback
+            .push_block(crate::scrollback::RenderBlock::interjection_prompt(text))
+    }
     /// Locally originated prompt or ExecutePlan turn. `note_self` is idempotent.
     pub(crate) fn begin_local_turn(&mut self, prompt_id: &str) {
         self.note_self_originated_prompt(prompt_id);

@@ -117,9 +117,7 @@ pub(super) fn send_server_authoritative(
     if app.external_agent
         && let Some(agent) = app.agents.get_mut(&agent_id)
     {
-        agent
-            .scrollback
-            .push_block(RenderBlock::interjection_prompt(&text));
+        agent.push_interjection_row(&text);
     }
     crate::unified_log::info(
         "prompt.send_server_authoritative",

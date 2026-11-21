@@ -48,3 +48,43 @@ fn other_sdk_messages_and_unknown_sessions_are_ignored() {
     assert!(!handle_ext_notification(&state("nope", "running"), &mut app));
     assert!(!test_agent(&app, AgentId(0)).claude_sdk_running);
 }
+
+fn say(app: &mut AppView, text: &str) {
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let chunk = acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+        acp::ContentBlock::Text(acp::TextContent::new(text.to_string())),
+    ));
+    agent.session.handle_update(
+        chunk,
+        &crate::acp::meta::NotificationMeta::default(),
+        &mut agent.scrollback,
+    );
+}
+
+fn agent_texts(app: &AppView) -> Vec<String> {
+    let agent = test_agent(app, AgentId(0));
+    (0..agent.scrollback.len())
+        .filter_map(|i| match &agent.scrollback.entry(i).unwrap().block {
+            crate::scrollback::RenderBlock::AgentMessage(b) => Some(b.text()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The reported glue: text after a background task's follow-up cycle was appended to the reply before it ("begun1. Cats ...").
+/// A state change is a new assistant message; a repeat of the same state is not.
+#[test]
+fn a_new_sdk_cycle_starts_a_new_assistant_entry() {
+    let mut app = make_app_with_agent("sess-claude");
+    handle_ext_notification(&state("sess-claude", "running"), &mut app);
+    say(&mut app, "begun");
+    say(&mut app, " still");
+    handle_ext_notification(&state("sess-claude", "running"), &mut app);
+    say(&mut app, " going");
+    assert_eq!(agent_texts(&app), vec!["begun still going".to_string()]);
+
+    handle_ext_notification(&state("sess-claude", "idle"), &mut app);
+    handle_ext_notification(&state("sess-claude", "running"), &mut app);
+    say(&mut app, "1. Cats");
+    assert_eq!(agent_texts(&app), vec!["begun still going".to_string(), "1. Cats".to_string()]);
+}
