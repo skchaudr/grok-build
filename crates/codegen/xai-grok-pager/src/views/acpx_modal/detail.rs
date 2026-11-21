@@ -459,6 +459,17 @@ fn step_one_line_summary(step: &Step) -> String {
     }
 }
 
+/// What an empty list or object shows as a field value.
+const EMPTY: &str = "(empty)";
+
+fn is_empty_container(val: &Value) -> bool {
+    match val {
+        Value::Array(a) => a.is_empty(),
+        Value::Object(o) => o.is_empty(),
+        _ => false,
+    }
+}
+
 fn value_inline_summary(val: &Value) -> String {
     match val {
         Value::Null => String::new(),
@@ -474,7 +485,11 @@ fn value_inline_summary(val: &Value) -> String {
         Value::Object(map) => map
             .iter()
             .map(|(k, v)| {
-                let vs = value_inline_summary(v);
+                let vs = if is_empty_container(v) {
+                    EMPTY.to_string()
+                } else {
+                    value_inline_summary(v)
+                };
                 if vs.is_empty() {
                     k.clone()
                 } else {
@@ -553,6 +568,12 @@ fn append_value_lines(
                     Value::Object(_) | Value::Array(_) => {
                         let mut sub = Vec::new();
                         append_value_lines(&mut sub, item, 0, item_w, theme);
+                        if sub.is_empty() {
+                            sub.push(Line::from(Span::styled(
+                                EMPTY,
+                                Style::default().fg(theme.gray_dim),
+                            )));
+                        }
                         for (idx, sub_line) in sub.into_iter().enumerate() {
                             let mut spans = vec![Span::styled(
                                 if idx == 0 {
@@ -600,16 +621,11 @@ fn append_value_lines(
                 let kw = UnicodeWidthStr::width(k.as_str());
                 let key_pad = " ".repeat(max_key_w.saturating_sub(kw) + 2);
                 match v {
-                    Value::Object(sub_map) if sub_map.is_empty() => {
+                    _ if is_empty_container(v) => {
                         out.push(Line::from(vec![
                             Span::raw(pad_indent.clone()),
-                            Span::styled(k.clone(), key_style),
-                        ]));
-                    }
-                    Value::Array(sub_arr) if sub_arr.is_empty() => {
-                        out.push(Line::from(vec![
-                            Span::raw(pad_indent.clone()),
-                            Span::styled(k.clone(), key_style),
+                            Span::styled(format!("{k}{key_pad}"), key_style),
+                            Span::styled(EMPTY, Style::default().fg(theme.gray_dim)),
                         ]));
                     }
                     Value::Object(_) | Value::Array(_) => {
@@ -2160,6 +2176,57 @@ mod tests {
         let text = buffer_lines(&buf).join("\n");
         assert!(text.contains("✓ abort → rollback.flow.ts"));
         assert!(!text.contains("[1]"));
+    }
+
+    #[test]
+    fn empty_list_and_object_values_read_as_empty_in_dim_style() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut run = make_test_run(tmp.path());
+        run.steps.push(Step {
+            attempt_id: "work#1".to_string(),
+            node_id: "work".to_string(),
+            kind: NodeKind::Acp,
+            outcome: Outcome::Ok,
+            started_ms: 1_000,
+            finished_ms: 2_000,
+            prompt_text: None,
+            raw_text: None,
+            output: json!({"verdict": "approve", "findings": [], "meta": {}, "items": [[], {}]}),
+            error: None,
+            agent_name: None,
+            action: None,
+            conversation: None,
+            stdout: None,
+            stderr: None,
+            output_artifact: None,
+        });
+        let theme = Theme::default();
+
+        // Key/value rows: key, then (empty) in the dim style.
+        let lines = build_step_lines(&run, 0, &run.steps[0], None, 60, &theme);
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert!(text.iter().any(|r| r.starts_with("findings") && r.ends_with("(empty)")), "{text:?}");
+        assert!(text.iter().any(|r| r.starts_with("meta") && r.ends_with("(empty)")), "{text:?}");
+        assert_eq!(text.iter().filter(|r| r.contains("- (empty)")).count(), 2, "{text:?}");
+        let empties: Vec<_> = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|sp| sp.content.as_ref() == "(empty)")
+            .collect();
+        assert!(!empties.is_empty());
+        assert!(empties.iter().all(|sp| sp.style.fg == Some(theme.gray_dim)));
+
+        // Stages one-line summary.
+        let run_lines = build_run_lines(&run, None, 90, &theme, 5_000);
+        let run_text: String = run_lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(run_text.contains("verdict approve, findings (empty), meta (empty)"), "{run_text}");
     }
 
     #[test]
