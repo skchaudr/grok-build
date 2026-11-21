@@ -310,29 +310,27 @@ fn sanitize_single_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The one text style of every preview row: the tool-call row's title colour. A subagent block is a tool call, so its tool rows and
+/// its prose lines read alike and never take the main conversation's assistant (`text_primary`) or user text colour.
+fn tool_text_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.gray_bright)
+}
+
 fn render_entry(entry: &PreviewEntry, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let style = tool_text_style(theme);
     match entry {
         PreviewEntry::Thought(text) => {
-            let style = Style::default()
-                .fg(theme.gray)
-                .add_modifier(Modifier::ITALIC);
+            let style = style.add_modifier(Modifier::ITALIC);
             render_prefixed_text(text, "∴ ", "  ", width, style, style)
         }
-        PreviewEntry::Message(text) => {
-            let style = Style::default().fg(theme.text_primary);
-            render_prefixed_text(text, "", "  ", width, style, style)
-        }
-        PreviewEntry::User(text) => {
-            let style = Style::default().fg(theme.gray_dim);
-            render_prefixed_text(text, "› ", "  ", width, style, style)
-        }
+        PreviewEntry::Message(text) => render_prefixed_text(text, "", "  ", width, style, style),
+        PreviewEntry::User(text) => render_prefixed_text(text, "› ", "  ", width, style, style),
         PreviewEntry::Tool { title, status, .. } => {
             vec![render_tool_row(title, *status, width, theme)]
         }
         PreviewEntry::Plan { done, total } => {
             let raw = format!("☐ {done}/{total} steps");
             let clipped = truncate_to_width(&raw, width);
-            let style = Style::default().fg(theme.gray);
             vec![Line::from(Span::styled(clipped, style))]
         }
     }
@@ -350,7 +348,7 @@ fn render_tool_row(
         ToolState::Failed => Style::default().fg(theme.accent_error),
         ToolState::Pending => Style::default().fg(theme.gray_dim),
     };
-    let title_style = Style::default().fg(theme.gray_bright);
+    let title_style = tool_text_style(theme);
     let glyph = "▸ ";
     let glyph_w = glyph.width();
     let status_word = status.word();
@@ -641,7 +639,7 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(line_text(&lines[0]), "∴ Thinking about the solution.");
         assert!(lines[0].spans[0].style.add_modifier.contains(Modifier::ITALIC));
-        assert_eq!(lines[0].spans[0].style.fg, Some(theme.gray));
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme.gray_bright));
     }
 
     #[test]
@@ -898,5 +896,47 @@ mod tests {
         assert_eq!(line_text(&lines[1]), "");
         assert_eq!(line_text(&lines[2]), "  line 2");
         assert_eq!(line_text(&lines[3]), "☐ 2/3 steps");
+    }
+
+    /// The flip Sab saw: a tool row, then prose. Every row of the preview, prose included, carries the tool-call text colour,
+    /// never the assistant text colour (`text_primary`) or the user one, in every shipped theme.
+    #[test]
+    fn every_preview_row_uses_the_tool_text_colour_in_every_theme() {
+        let mut preview = SubagentPreview::new();
+        for update in [
+            json!({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "plan it"}}),
+            json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "echo hi", "kind": "execute", "status": "completed"}),
+            json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "prose after the echo row"}}),
+            json!({"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "a nudge"}}),
+            json!({"sessionUpdate": "plan", "entries": [{"content": "x", "priority": "low", "status": "completed"}]}),
+        ] {
+            preview.ingest(&parse_update(update));
+        }
+        use crate::theme::Theme as T;
+        let themes = [
+            T::groknight(), T::grokday(), T::tokyonight(), T::rosepine_moon(), T::oscura_midnight(),
+            T::kanso_mist(), T::kanagawa_wave(), T::kanagawa(), T::jetbrains_islands_dark(), T::night_owl(),
+            T::one_dark_pro(), T::nstlgy_dark(), T::severance_dark(), T::quasi_monochrome_dark(),
+            T::jetbrains_islands_light(), T::monosami_light(), T::monosami_ink_light(), T::dracula(),
+            T::ayu_darker(), T::fleet_dark(), T::carbonfox(), T::kanagawa_dragon(), T::kanso_ink(),
+            T::fleet_light(), T::dayfox(), T::kanagawa_lotus(), T::kanso_pearl(),
+        ];
+        for (n, theme) in themes.iter().enumerate() {
+            let name = format!("theme #{n}");
+            let lines = preview.render(80, 20, theme);
+            assert_eq!(lines.len(), 5, "{name}");
+            for line in &lines {
+                for span in line.spans.iter().filter(|s| !s.content.trim().is_empty()) {
+                    let fg = span.style.fg;
+                    let status_glyph_or_word = matches!(span.content.as_ref(), "▸ ")
+                        || matches!(span.content.trim(), "done" | "running" | "failed" | "pending");
+                    if status_glyph_or_word {
+                        continue;
+                    }
+                    assert_eq!(fg, Some(theme.gray_bright), "{name}: {:?}", span.content);
+                    assert_ne!(fg, Some(theme.text_primary), "{name}: {:?}", span.content);
+                }
+            }
+        }
     }
 }
