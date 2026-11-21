@@ -166,9 +166,9 @@ the existing tests:
         "custom_id": "agent",
         "file": f"{BIN}/agent.rs",
         "issue": "The pager footer shows the model as \"unknown\".",
-        "open": [
-            "What should the footer say: (A) a fixed label \"acpx\", or (C) the current step's model (needs `project`'s footer-model choice to be yes; this file still advertises \"acpx\", shown between steps)? Option B (the flow's default model) was dropped: it cannot be built in this file.",
-        ],
+        # Settled for this file: A and C need the same code here (one entry, "acpx"). Whether a step's own model
+        # replaces it while the step runs is still open, and is decided in slice `project` (footer model).
+        "open": [],
         "prompt": f"""
 Repair `agent.rs` of the binary grok-acpx-acp (the ACP agent the pager talks to).
 
@@ -190,11 +190,9 @@ schema's `unstable_session_model` feature; the workspace enables it (root Cargo.
 The pager drops a current model that is not in `available_models`, so the list must contain the current id.
 
 Behavior:
-- Add one private function that builds the `acp::SessionModelState` for a session: <OPEN A or C. For both, it is one
-  entry, id "acpx", name "acpx"; under C the per-step model comes from slice `project` and "acpx" is what shows
-  between steps. (Option B, "the flow's default model", was dropped: no flow is chosen when a session is created,
-  because the flow arrives later with `/flow`; `AgentConfig.default_flow` may be None; acpx flow sketches carry a model
-  only per node, with no flow-level default; and this file has no flow parser.)>
+- Add one private function that builds the `acp::SessionModelState` for a session: one entry, id "acpx", name "acpx",
+  which is also the current model. (No flow is chosen when a session is created; the flow arrives later with `/flow`,
+  so there is no flow model to show here.)
 - `new_session` and `load_session` both attach it with `.models(..)`. Nothing else in either function changes.
 
 Tests (add):

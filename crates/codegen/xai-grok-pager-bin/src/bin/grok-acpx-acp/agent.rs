@@ -668,7 +668,7 @@ impl acp::Agent for AcpxAgent {
             let _ = acp_send(notification, &tx).await;
         });
 
-        Ok(acp::NewSessionResponse::new(session_id))
+        Ok(acp::NewSessionResponse::new(session_id).models(session_model_state()))
     }
 
     async fn load_session(
@@ -685,7 +685,7 @@ impl acp::Agent for AcpxAgent {
                 .await;
         }
 
-        Ok(acp::LoadSessionResponse::new())
+        Ok(acp::LoadSessionResponse::new().models(session_model_state()))
     }
 
     async fn list_sessions(
@@ -1100,6 +1100,13 @@ fn parse_flow_input(rest: &str) -> Value {
         return Value::Object(obj);
     }
     json!({ "task": rest })
+}
+
+fn session_model_state() -> acp::SessionModelState {
+    acp::SessionModelState::new(
+        "acpx",
+        vec![acp::ModelInfo::new("acpx", "acpx")],
+    )
 }
 
 fn available_commands() -> Vec<acp::AvailableCommand> {
@@ -1552,5 +1559,15 @@ mod tests {
             }
         });
         assert_eq!(extract_gate_answer_label(&wrapped_cancelled), None);
+    }
+
+    #[test]
+    fn session_model_state_has_valid_current_model() {
+        let state = session_model_state();
+        assert!(!state.current_model_id.0.is_empty());
+        assert!(
+            state.available_models.iter().any(|m| m.model_id == state.current_model_id),
+            "current_model_id must be present in available_models"
+        );
     }
 }
