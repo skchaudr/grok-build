@@ -85,18 +85,13 @@ calls `ledger.set_runs`. Inside `set_extras` the ledger's `runs` is still the pr
 
 # Shared by `ledger` and `modal`: one product choice, each option touches at most one of the two files.
 EXTRAS_OPEN = """
-<OPEN EXTRAS_LIMIT: `load_extras` reads a RowExtra only for the newest EXTRAS_LIMIT (80) runs by start time. An
-answering run is always newer than the run it answered, so a gate is missed exactly when its answering run is outside
-the newest 80. That old answered gate then counts as "needs you" again, and because waiting runs never change these
-accumulate. Pick one:
- (a) leave it: no change in either file for this.
- (b) slice `modal` only: for every listed run outside the newest EXTRAS_LIMIT, put
-     `RowExtra { answers, ..RowExtra::default() }` into the extras handed to the ledger, with `answers` read from
-     `<run dir>/projections/run.json` alone (`std::fs::read_to_string` + `serde_json::from_str::<serde_json::Value>`,
-     named by path; `input.gate` read exactly as in `row_extra`), cached by run id for the life of the modal because a
-     run's input never changes. `rail` stays empty, `stalled` false, `question` None. No ledger change.
- (c) slice `ledger` only: a Waiting run that has no entry in `extras` is not counted in "N needs you", is placed under
-     Finished, is not active, and keeps its existing "waiting: <node>" state text. No modal change.>
+EXTRAS_LIMIT (slice `modal` handles this; slice `ledger` changes nothing for it): `load_extras` reads a RowExtra only
+for the newest EXTRAS_LIMIT (80) runs by start time, so a gate whose answering run is outside the newest 80 would count
+as "needs you" again. In slice `modal`: for every listed run outside the newest EXTRAS_LIMIT, put
+`RowExtra { answers, ..RowExtra::default() }` into the extras handed to the ledger, with `answers` read from
+`<run dir>/projections/run.json` alone (`std::fs::read_to_string` + `serde_json::from_str::<serde_json::Value>`, named
+by path; `input.gate` read exactly as in `row_extra`), cached by run id for the life of the modal because a run's input
+never changes. `rail` stays empty, `stalled` false, `question` None.
 """
 
 TASKS = [
@@ -105,8 +100,6 @@ TASKS = [
         "file": f"{BIN}/project.rs",
         "issue": "The mermaid graph in the run heading never marks finished steps.",
         "open": [
-            "When is the marked graph drawn: (A) a new message after every step that finishes, appended after the Plan update, or (B) folded into the text of the existing Waiting and RunFinished messages?",
-            "Footer model: should this file also send the current step's model as a `served_model` update when an agent step starts, and \"acpx\" when it finishes (see slice `agent`)? The verified wire format is in the prompt.",
         ],
         "prompt": f"""
 Repair `project.rs` of the binary grok-acpx-acp (it maps acpx run events to ACP session updates for the pager).
@@ -126,16 +119,13 @@ Behavior:
   `Pending`, or has no state, is left out (mermaid() draws it '○'). As the code stands, `taken_path()` uses '◐' for
   every InProgress node, running or waiting, while the doc comment on `mermaid()` says '●' running and '◐' waiting.
   Use `taken_path()`'s glyphs and leave that doc comment as it is.
-- <OPEN A or B.
-  (A) At the end of every `StepFinished` arm that changes a node's state, push one more parent message holding a
-      ```mermaid fence built from that map, AFTER the Plan update, so the positional indexes that existing tests check
-      (`outs[1]`, `outs[2]`, ...) stay valid.
-  (B) Only in the `Waiting` arm and the non-waiting `RunFinished` arm: prepend the ```mermaid fence to the text of the
-      message that arm already sends (one message, not a new one), so the Out counts asserted by
-      `checkpoint_waiting_shows_question_once_and_marks_plan_in_progress` (`outs.len() == 2`) and
-      `run_finished_formats_completed_failed_and_waiting` (`ok_outs.len() == 1`) stay unchanged.>
+- Only in the `Waiting` arm and the non-waiting `RunFinished` arm: prepend the ```mermaid fence built from that map
+  to the text of the message that arm already sends (one message, not a new one), so the Out counts asserted by
+  `checkpoint_waiting_shows_question_once_and_marks_plan_in_progress` (`outs.len() == 2`) and
+  `run_finished_formats_completed_failed_and_waiting` (`ok_outs.len() == 1`) stay unchanged. Do not add a message
+  after each step.
 - The message goes through `self.parent_message(..)` like the heading does.
-- <OPEN footer model (if the owner says no, delete this item). If yes: in the `StepStarted` arm for `StepKind::Acp`,
+- Footer model: in the `StepStarted` arm for `StepKind::Acp`,
   when `self.acp_step_desc_and_model(node)` returns `Some(model)`, also push
   `Out::XaiUpdate {{ session_id: self.parent_session_id.clone(), update: json!({{"sessionUpdate": "served_model", "display_name": model}}) }}`
   as the last Out of that arm; in the `StepFinished` arm for `StepKind::Acp`, push the same update with
@@ -146,19 +136,19 @@ Behavior:
   the last step's model between steps. Slice `agent` must still advertise a session model, or the footer reads
   "unknown" before the first step. This changes one existing expectation: in
   `acp_step_order_spawned_before_child_updates`, `start_outs.len()` goes from 3 to 4 (sample_flow's `review-code`
-  node has model "grok-4"); change only that number.>
+  node has model "grok-4"); change only that number.
 - Nothing else about the Plan update, `taken_path()` text, subagent blocks or tool calls changes.
 
 Tests (add; keep `run_started_emits_mermaid_message_and_initial_plan` and
 `mermaid_renders_glyphs_sanitized_ids_and_edge_labels` passing unchanged; every other existing test stays unchanged
 except where an item above says so). Build them with `sample_flow()`, `chunk_text(..)` and `DriverEvent` literals like
 the existing tests:
-- after RunStarted and a successful StepFinished for node X (for B: followed by
+- after RunStarted and a successful StepFinished for node X (followed by
   `RunFinished {{ status: "completed".to_string(), error: None, at_ms: .. }}`), the marked graph that is emitted
   contains "✓ X" and still shows "○" for a node that has not started;
-- a failed step's node carries '✗' in the marked graph (for B: followed by a RunFinished with status "failed");
+- a failed step's node carries '✗' in the marked graph (followed by a RunFinished with status "failed");
 - the RunStarted heading still contains only "○" nodes;
-- (footer model, only if chosen) a StepStarted for an Acp node with a model emits a `served_model` XaiUpdate naming
+- a StepStarted for an Acp node with a model emits a `served_model` XaiUpdate naming
   that model, and its StepFinished emits one with "acpx".
 {RULES}""",
     },
@@ -213,10 +203,6 @@ Tests (add):
         "file": f"{SRC}/views/acpx_modal/ledger.rs",
         "issue": "\"N needs you\" counts gates that were already answered; the gate question is cut off in the run list.",
         "open": [
-            "If the run that answered a gate later failed, does the gate still count as answered? (Draft said yes.)",
-            "What does an answered gate's row show as its state text (\"answered: <choice>\", or something else), and do its ◐ glyph, warning colour and ◐ rail change?",
-            "EXTRAS_LIMIT: answered gates whose answering run is older than the newest 80 runs: (a) leave, (b) modal reads input.gate for every run, (c) ledger stops counting Waiting runs that have no extras. Shared with `modal`.",
-            "Cut-off question in the list: (A) leave the row one line and rely on the right pane, or (B) wrap the selected row's question onto extra rows (the ledger cannot tell whether the right pane is shown)?",
         ],
         "prompt": f"""
 Repair `views/acpx_modal/ledger.rs` in crate xai-grok-pager (the run list on the left of the /acpx modal).
@@ -237,29 +223,28 @@ Behavior for defect 1:
   `set_runs` and `set_extras` from every extra whose `answers` is `Some`. When two runs answered the same gate, the
   answering run with the larger `started_ms` in `self.runs` wins; if either answering run is missing from `self.runs`,
   the larger run id wins.
-- <OPEN failed answerer: if the run that answered a gate later failed, does the gate still count as answered?
-  (yes) every `Some` answer counts, whatever the answering run's status. (no) skip an answer whose answering run has
-  status `RunStatus::Failed` or `RunStatus::TimedOut` in `self.runs`; an answering run missing from `self.runs` still
-  counts. `RunStatus` has no Cancelled variant (Running, Waiting, Completed, Failed, TimedOut, Unknown).>
+- Every `Some` answer counts, whatever the answering run's status: a gate stays answered even if the run that
+  answered it later failed.
 - A run is "answered" when its status is Waiting and its id is a key of `answered`. An answered run: is not counted in
   "N needs you"; is placed under `SectionKind::Finished` by `run_section`; is not active for `is_run_active`; and
-  `flow_state_text` returns <OPEN answered row: the state text, e.g. "answered: <choice>", and whether the row's ◐
-  status glyph and warning colour in `render_flow_row` and the ◐ in its rail change or stay> instead of the gate
-  question.
-- A Waiting run that is not answered behaves exactly as today, except as the EXTRAS_LIMIT choice below says.
+  `flow_state_text` returns `answered: <choice>` (just `answered` when the choice is empty) instead of the gate
+  question. An answered run's row no longer looks like it needs attention: in `render_flow_row` its status glyph and
+  colour are the ones a Completed run gets, and where its rail would draw the waiting ◐ it draws the Completed glyph in
+  the Completed colour.
+- Add `pub fn answered_choice(&self, run_id: &str) -> Option<&str>`: the choice for an answered run, `None` for any
+  other run. Slice `modal` reads it to tell the run view (slice `run_view`) that its gate was answered.
+- A Waiting run that is not answered behaves exactly as today.
 {EXTRAS_OPEN}
 Defect 2 seen on screen: a long gate question is cut off in a run's row.
 
 Cause: in `render_flow_row` the state text is cut to one line by
 `truncate_str(&raw_state_text, flex_budget - 1 - title_col)`, and dropped entirely when `flex_budget <= 17`.
 
-Behavior for defect 2: <OPEN A or B. A: no change in this file. B: when the row is selected and it is an unanswered
-Waiting run, the full question is shown wrapped on continuation rows under the row, indented to the state column;
-unselected rows stay one line. The ledger cannot tell whether the modal shows the right pane (views/acpx_modal.rs
-decides that with `PREVIEW_MIN_WIDTH`), so B wraps whenever such a row is selected; showing it only when the right pane
-is hidden would need a flag from views/acpx_modal.rs, outside this slice. B changes row heights, so `render_flows`
-(keeping the selection visible, the maximum scroll) and `scroll` must count the new heights. There is no click
-hit-testing in the ledger; the mouse only scrolls.>
+Behavior for defect 2: when the row is selected and it is an unanswered Waiting run, the full question is shown
+wrapped on continuation rows under the row, indented to the state column; unselected rows stay one line. The ledger
+cannot tell whether the modal shows the right pane, so wrap whenever such a row is selected. This changes row heights,
+so `render_flows` (keeping the selection visible, the maximum scroll) and `scroll` must count the new heights. There is
+no click hit-testing in the ledger; the mouse only scrolls.
 
 Tests (add; `render_at_120x14_shows_tabs_needs_you_question_rail_and_count` must still pass). Build them with this
 file's fixtures (`make_run`, `LedgerState::new`, `set_runs`, `set_extras`, `render`, `all_text`) and give every Waiting
@@ -270,7 +255,10 @@ run in them its own `RowExtra`:
 - extras replaced by a set without the answering run: the gate counts as needing you again;
 - `set_extras` called before `set_runs` (the modal's order) gives the same result as the reverse order;
 - two runs answering the same gate: the one with the larger `started_ms` supplies the choice;
-- (only for EXTRAS_LIMIT (c)) a Waiting run with no entry in extras is not counted and is under Finished.
+- `answered_choice` returns the choice for the answered run and `None` for an unanswered one;
+- an answered run's rendered row contains `answered: <choice>` and not the gate question;
+- a selected unanswered Waiting run whose question is 200 characters, rendered 100 wide and 20 high, shows every word
+  of the question; the same run unselected takes one row.
 {RULES}""",
     },
     {
@@ -278,8 +266,6 @@ run in them its own `RowExtra`:
         "file": f"{SRC}/views/acpx_modal.rs",
         "issue": "Supplies the data the ledger needs to tell an answered gate from a live one.",
         "open": [
-            "EXTRAS_LIMIT: answered gates whose answering run is older than the newest 80 runs: (a) leave, (b) this file reads input.gate for every run, (c) ledger-only change. Shared with `ledger`.",
-            "If `run_view`'s answered-gate choice is \"fix\", this slice must also wire the answered choice into the run view; settle `run_view` first.",
         ],
         "prompt": f"""
 Repair `views/acpx_modal.rs` in crate xai-grok-pager (the /acpx modal; it loads run folders and feeds the run list).
@@ -299,14 +285,16 @@ Behavior:
   malformed input. This file does not import serde_json; serde_json is a dependency of this crate, so name it by path
   (`serde_json::Value`) where you need the type, and add no new `use` of it.
 - This diff compiles only once slice `ledger`'s diff (which adds `GateAnswer` and the field) is applied too.
-- `load_extras` and its cache are unchanged except as the EXTRAS_LIMIT choice below says: `answers` describes the run
+- `load_extras` and its cache are unchanged except as the EXTRAS_LIMIT item below says: `answers` describes the run
   that owns the RowExtra, so the existing `updated_ms` cache key stays correct.
 - Import `GateAnswer` from the same path `RowExtra` is already imported from.
 {EXTRAS_OPEN}
-- <OPEN run view answered flag: if slice `run_view`'s answered-gate choice is "fix", this slice must also pass the
-  answered choice into the run view (call the new run.rs setter `set_answered` from `open_run` and on poll, reading the
-  new ledger accessor `answered_choice`); that text is not written yet, so settle `run_view` first. If "leave it",
-  delete this item.>
+- Tell the run view when its gate was answered. Slice `ledger` adds
+  `pub fn answered_choice(&self, run_id: &str) -> Option<&str>` on the ledger state; slice `run_view` adds
+  `pub fn set_answered(&mut self, choice: Option<String>)` on `RunViewState`. Call
+  `view.set_answered(self.ledger.answered_choice(<that run's id>).map(str::to_string))` in `open_run` right after
+  `RunViewState::new(run)`, and again for an open run view every time `rescan_runs` has refreshed the ledger. This
+  diff compiles only once those two diffs are applied too.
 
 Tests (add), built on the existing `write_fixture(..)` fixture, which writes no `projections/run.json`:
 - after `write_fixture("completed")`, write
@@ -315,7 +303,7 @@ Tests (add), built on the existing `write_fixture(..)` fixture, which writes no 
   `bundle::list_runs(&fx.runs_base).first()`; expect
   `answers == Some(GateAnswer {{ run_id: "r1".into(), choice: "approve".into() }})`;
 - an input without `gate` yields `None`; an input where `gate` is a string yields `None`;
-- (only for EXTRAS_LIMIT (b)) a run outside the newest EXTRAS_LIMIT gets a RowExtra with its `answers` and an empty rail.
+- a run outside the newest EXTRAS_LIMIT gets a RowExtra with its `answers` and an empty rail.
 Write test JSON as raw string literals (no `serde_json::json!`).
 {RULES}""",
     },
@@ -324,8 +312,6 @@ Write test JSON as raw string literals (no `serde_json::json!`).
         "file": f"{SRC}/views/acpx_modal/detail.rs",
         "issue": "The run pane shows the last result and the input as raw JSON.",
         "open": [
-            "Layout for a result or input that is a JSON object: draft says one `key  value` row per top-level field, nested values indented under their key, no braces or quotes. Needs a mockup marked up by Sab.",
-            "Do the row caps stay (20 for the last result, 12 for the input), or does the pane show everything and scroll?",
         ],
         "prompt": f"""
 Repair `views/acpx_modal/detail.rs` in crate xai-grok-pager (the right-hand pane of the /acpx modal).
@@ -339,12 +325,13 @@ else -> `serde_json::to_string_pretty`.
 
 Behavior:
 - Add a private function that turns a `&serde_json::Value` into display lines for a given width:
-  <OPEN layout. Draft: a string is wrapped as text; a number, bool or null is one line; an object is one row per
+  a string is wrapped as text; a number, bool or null is one line; an object is one row per
   top-level field as `key  value`, keys in the object's own order and padded to the longest key, a nested object or
   array indented two columns under its key; an array is one row per item prefixed "- "; no braces, brackets, quotes
-  or trailing commas anywhere.>
-- "Last result" and "Input" in `build_run_lines` use it. <OPEN caps: keep the existing 20 and 12 row caps with the
-  existing "… +N more rows" line, or remove them.>
+  or trailing commas anywhere.
+- "Last result" and "Input" in `build_run_lines` use it. These two sections are no longer capped: every
+  line is shown (this pane already scrolls). Stop calling `push_wrapped_capped` for them; if that leaves it with no
+  caller, remove it.
 - A value that renders no lines (`null`, an empty object) shows no section and no rule. Today an empty object prints
   `{{}}` under its rule; that changes.
 - The step pane and every other caller of `value_text` are unchanged. Copy actions still copy the raw JSON.
@@ -359,7 +346,9 @@ Tests (add; `test_run_target_lists_stages_and_waiting_gate_choices` must still p
   and no line in that range contains `{{`, `}}`, `[` or `"summary":` (the Stages rows above still print compact JSON;
   do not test them);
 - a string output renders as wrapped text exactly as before;
-- an empty object and `null` render no section at all.
+- an empty object and `null` render no section at all;
+- an output that is an array of 40 short strings yields all 40 rows and no "more rows" line (check `build_run_lines`,
+  not the clipped buffer).
 {RULES}""",
     },
     {
@@ -367,8 +356,6 @@ Tests (add; `test_run_target_lists_stages_and_waiting_gate_choices` must still p
         "file": f"{SRC}/views/acpx_modal/run.rs",
         "issue": "The gate question is cut off in the run view's banner.",
         "open": [
-            "Should the banner wrap to as many rows as the question needs, or to a fixed number of rows?",
-            "A run whose gate was already answered still shows \"NEEDS YOU\" here and accepts the gate keys. Fix it (needs a setter in run.rs, a ledger accessor and modal wiring, so `modal` is then not ready), or leave it?",
         ],
         "prompt": f"""
 Repair `views/acpx_modal/run.rs` in crate xai-grok-pager (the single-run view of the /acpx modal).
@@ -383,28 +370,31 @@ Behavior:
   in the same colour and weight as today. run.rs has no wrap helper (the one in detail.rs is private to that module).
   Add a private `fn wrap_banner(text: &str, width: usize) -> Vec<String>` that breaks on spaces, hard-breaks words
   wider than `width`, and measures with `unicode_width` (already imported at the top of this file; add
-  `UnicodeWidthChar` to that import). <OPEN: no row limit, or a limit.>
+  `UnicodeWidthChar` to that import). There is no row limit.
 - The layout gives the banner as many rows as it returns and takes them from the area below it; with no banner the
   layout is exactly as today. A terminal too short for the banner plus one row of content shows the banner's first
   rows and keeps one content row.
 - Stalled, failed and running banners go through the same wrapping.
-- <OPEN answered gate: a run whose gate was already answered still shows "◐ NEEDS YOU" here and still accepts the
-  1-9 gate keys. (leave) no change. (fix) needs, outside this file, a ledger accessor such as
-  `pub fn answered_choice(&self, run_id: &str) -> Option<&str>` (slice `ledger`) and wiring in views/acpx_modal.rs
-  that calls a new run.rs setter `pub fn set_answered(&mut self, choice: Option<String>)` from `open_run` and on poll
-  (slice `modal`, which is then not ready until its prompt says so). In this file, (fix) adds that setter and, when it
-  is set: <banner text and gate-key behaviour, to be specified by the owner>.>
+- Answered gate. Add a private field `answered: Option<String>` (None by default),
+  `pub fn set_answered(&mut self, choice: Option<String>)` and `pub fn answered(&self) -> Option<&str>`. Slice `modal`
+  calls the setter (it reads the choice from the ledger); outside tests this file never calls it. While it is
+  `Some(choice)` and the run is Waiting: the banner reads "✓ answered: <choice>" ("✓ answered" when the choice is
+  empty) in the style this file uses for a completed run, in place of "◐ NEEDS YOU at <node>: <question>"; and
+  `handle_key` no longer answers the gate: the 1-9 keys and Enter on a gate row return the same outcome as a key that
+  does nothing. Everything else in the view is unchanged.
 
 Tests (add; `render_wide_160x40_shows_banner_stages_separator_and_clean_detail_area` must still pass). Build them with
 `sample_waiting_run(..)`, setting `summary.status_detail` before `RunViewState::new`, then `render` and `buf_text`:
 - a Waiting run whose question is 120 characters, rendered 80 wide, shows every word of the question;
-- a short question still takes exactly one row and the rows below it are where they are today.
+- a short question still takes exactly one row and the rows below it are where they are today;
+- after `set_answered(Some("approve".to_string()))` on a Waiting run, the render contains "answered: approve" and no
+  "NEEDS YOU", and `handle_key` for `1` returns the do-nothing outcome where it returned a gate answer before.
 {RULES}""",
     },
 ]
 
 # Slices that share a contract: each fires only together with its partner.
-PAIRS = [("ledger", "modal")]
+PAIRS = [("ledger", "modal"), ("ledger", "run_view"), ("modal", "run_view")]
 
 # ═══════════════════════════════════════════════════════════════════════
 # Engine. HTTP, retry, key and endpoint resolution, model and prices are reused from acpx-mode.py.
