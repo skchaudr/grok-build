@@ -1,0 +1,271 @@
+--- a/crates/codegen/xai-grok-pager-bin/src/bin/grok-acpx-acp/project.rs
++++ b/crates/codegen/xai-grok-pager-bin/src/bin/grok-acpx-acp/project.rs
+@@ -160,13 +160,21 @@
+                         "subagent_type": "acpx step",
+                         "description": description,
+                     });
+-                    if let Some(m) = model {
+-                        spawned["model"] = Value::String(m);
++                    if let Some(m) = &model {
++                        spawned["model"] = Value::String(m.clone());
+                     }
+                     outs.push(Out::XaiUpdate {
+                         session_id: self.parent_session_id.clone(),
+                         update: spawned,
+                     });
++                    if let Some(model) = model {
++                        outs.push(Out::XaiUpdate {
++                            session_id: self.parent_session_id.clone(),
++                            update: json!({"sessionUpdate": "served_model", "display_name": model}),
++                        });
++                    }
+                     self.parent_after_block = true;
+                     outs
+                 }
+@@ -429,6 +437,12 @@
+                 if plan_changed && let Some(plan_out) = self.build_plan_out() {
+                     outs.push(plan_out);
+                 }
++                if *kind == StepKind::Acp {
++                    outs.push(Out::XaiUpdate {
++                        session_id: self.parent_session_id.clone(),
++                        update: json!({"sessionUpdate": "served_model", "display_name": "acpx"}),
++                    });
++                }
+                 outs
+             }
+ 
+@@ -440,7 +454,11 @@
+             } => {
+                 let _ = choices;
+                 let state_changed = self.set_node_state(node, PlanNodeState::InProgress);
+-                let text = format!("\n\n{}\n\n**◐ {node}** · {question}\n\n", self.taken_path());
++                let text = format!(
++                    "{}\n\n{}\n\n**◐ {node}** · {question}\n\n",
++                    self.mermaid_fence(),
++                    self.taken_path()
++                );
+                 let mut outs = vec![self.parent_message(&text)];
+                 if state_changed
+                     && let Some(plan_out) = self.build_plan_out()
+@@ -458,10 +476,15 @@
+                 if status == "waiting" {
+                     return Vec::new();
+                 }
++                let fence = self.mermaid_fence();
+                 let text = if status == "completed" {
+                     let dur_ms = (*at_ms - self.started_at_ms).max(0) as u64;
+                     let dur = fmt_duration(dur_ms);
+-                    format!("\n\n{}\n\n✓ **{}** finished in {dur}\n", self.taken_path(), self.title)
++                    format!(
++                        "{fence}\n\n{}\n\n✓ **{}** finished in {dur}\n",
++                        self.taken_path(),
++                        self.title
++                    )
+                 } else {
+                     let detail = match error.as_deref().filter(|s| !s.is_empty()) {
+                         Some(err) if status != "failed" => format!("{status} ({err})"),
+                         Some(err) => err.to_string(),
+                         None => status.clone(),
+                     };
+-                    format!("\n\n{}\n\n✗ **{}** failed: {detail}\n", self.taken_path(), self.title)
++                    format!(
++                        "{fence}\n\n{}\n\n✗ **{}** failed: {detail}\n",
++                        self.taken_path(),
++                        self.title
++                    )
+                 };
+                 vec![self.parent_message(&text)]
+             }
+@@ -514,6 +537,29 @@
+             })
+             .collect::<Vec<_>>()
+             .join(" → ")
++    }
++
++    fn mermaid_states(&self) -> HashMap<String, char> {
++        self.plan_states
++            .iter()
++            .filter_map(|(id, state)| {
++                let glyph = match state {
++                    PlanNodeState::Pending => return None,
++                    PlanNodeState::InProgress => '◐',
++                    PlanNodeState::Completed => '✓',
++                    PlanNodeState::Failed => '✗',
++                };
++                Some((id.clone(), glyph))
++            })
++            .collect()
++    }
++
++    fn mermaid_fence(&self) -> String {
++        let Some(flow) = self.flow.as_ref() else {
++            return String::new();
++        };
++        let chart = mermaid(flow, &self.mermaid_states());
++        format!("\n\n```mermaid\n{chart}\n```")
+     }
+ 
+     fn set_node_state(&mut self, node: &str, state: PlanNodeState) -> bool {
+@@ -780,7 +826,7 @@
+             proj.child_session_id("review-code#1").as_deref(),
+             Some("acpx-step:run-1:review-code#1")
+         );
+-        assert_eq!(start_outs.len(), 3);
++        assert_eq!(start_outs.len(), 4);
+ 
+         // 1: Plan update
+         assert!(matches!(
+@@ -1293,4 +1339,138 @@
+ 
+         assert_eq!(format!("{out1:?}"), format!("{out2:?}"));
+     }
++
++    #[test]
++    fn run_finished_completed_emits_marked_mermaid_with_completed_and_unstarted_nodes() {
++        let mut proj = Projector::new("parent-1");
++        let start_outs = proj.on_event(&DriverEvent::RunStarted {
++            run_id: "r1".to_string(),
++            run_dir: PathBuf::from("/tmp/r1"),
++            title: "Build".to_string(),
++            flow_path: "f.json".to_string(),
++            flow: sample_flow(),
++            at_ms: 1_000,
++        });
++        if let Out::Update { update, .. } = &start_outs[0] {
++            let heading = chunk_text(update).unwrap_or_default();
++            assert!(heading.contains("○ extract"));
++            assert!(heading.contains("○ review-code"));
++            assert!(!heading.contains("✓ "));
++            assert!(!heading.contains("✗ "));
++            assert!(!heading.contains("◐ "));
++        } else {
++            panic!("expected heading AgentMessageChunk");
++        }
++
++        proj.on_event(&DriverEvent::StepFinished {
++            node: "extract".to_string(),
++            attempt: "extract#1".to_string(),
++            kind: StepKind::Shell,
++            outcome: "ok".to_string(),
++            duration_ms: 20,
++            error: None,
++            output: Value::Null,
++            stdout: Some("ok\n".to_string()),
++            stderr: None,
++            exit_code: Some(0),
++            at_ms: 1_020,
++        });
++
++        let fin_outs = proj.on_event(&DriverEvent::RunFinished {
++            status: "completed".to_string(),
++            error: None,
++            at_ms: 1_100,
++        });
++        assert_eq!(fin_outs.len(), 1);
++        match &fin_outs[0] {
++            Out::Update { update, .. } => {
++                let text = chunk_text(update).unwrap_or_default();
++                assert!(text.contains("```mermaid\nflowchart LR"));
++                assert!(text.contains("✓ extract"));
++                assert!(text.contains("○ review-code"));
++            }
++            _ => panic!("expected AgentMessageChunk"),
++        }
++    }
++
++    #[test]
++    fn run_finished_failed_marks_failed_node_with_cross_in_mermaid() {
++        let mut proj = Projector::new("parent-1");
++        proj.on_event(&DriverEvent::RunStarted {
++            run_id: "r1".to_string(),
++            run_dir: PathBuf::from("/tmp/r1"),
++            title: "Build".to_string(),
++            flow_path: "f.json".to_string(),
++            flow: sample_flow(),
++            at_ms: 1_000,
++        });
++        proj.on_event(&DriverEvent::StepFinished {
++            node: "extract".to_string(),
++            attempt: "extract#1".to_string(),
++            kind: StepKind::Shell,
++            outcome: "failed".to_string(),
++            duration_ms: 20,
++            error: Some("bad exit".to_string()),
++            output: Value::Null,
++            stdout: None,
++            stderr: None,
++            exit_code: Some(1),
++            at_ms: 1_020,
++        });
++        let fin_outs = proj.on_event(&DriverEvent::RunFinished {
++            status: "failed".to_string(),
++            error: Some("bad exit".to_string()),
++            at_ms: 1_100,
++        });
++        assert_eq!(fin_outs.len(), 1);
++        match &fin_outs[0] {
++            Out::Update { update, .. } => {
++                let text = chunk_text(update).unwrap_or_default();
++                assert!(text.contains("```mermaid\nflowchart LR"));
++                assert!(text.contains("✗ extract"));
++                assert!(text.contains("○ review-code"));
++            }
++            _ => panic!("expected AgentMessageChunk"),
++        }
++    }
++
++    #[test]
++    fn acp_step_emits_served_model_on_start_and_resets_to_acpx_on_finish() {
++        let mut proj = Projector::new("parent-1");
++        proj.on_event(&DriverEvent::RunStarted {
++            run_id: "r1".to_string(),
++            run_dir: PathBuf::from("/tmp/r1"),
++            title: "Build".to_string(),
++            flow_path: "f.json".to_string(),
++            flow: sample_flow(),
++            at_ms: 0,
++        });
++
++        let start_outs = proj.on_event(&DriverEvent::StepStarted {
++            node: "review-code".to_string(),
++            attempt: "review-code#1".to_string(),
++            kind: StepKind::Acp,
++            at_ms: 10,
++        });
++        match start_outs.last() {
++            Some(Out::XaiUpdate { session_id, update }) => {
++                assert_eq!(session_id, "parent-1");
++                assert_eq!(
++                    update,
++                    &json!({"sessionUpdate": "served_model", "display_name": "grok-4"})
++                );
++            }
++            _ => panic!("expected trailing served_model XaiUpdate on StepStarted"),
++        }
++
++        let fin_outs = proj.on_event(&DriverEvent::StepFinished {
++            node: "review-code".to_string(),
++            attempt: "review-code#1".to_string(),
++            kind: StepKind::Acp,
++            outcome: "ok".to_string(),
++            duration_ms: 50,
++            error: None,
++            output: Value::Null,
++            stdout: None,
++            stderr: None,
++            exit_code: None,
++            at_ms: 60,
++        });
++        match fin_outs.last() {
++            Some(Out::XaiUpdate { session_id, update }) => {
++                assert_eq!(session_id, "parent-1");
++                assert_eq!(
++                    update,
++                    &json!({"sessionUpdate": "served_model", "display_name": "acpx"})
++                );
++            }
++            _ => panic!("expected trailing served_model XaiUpdate on StepFinished"),
++        }
++    }
+ }

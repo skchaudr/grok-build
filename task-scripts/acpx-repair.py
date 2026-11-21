@@ -547,6 +547,10 @@ def main():
     parser.add_argument("--only", help=f"Comma-separated slice ids ({ids})")
     parser.add_argument("--dry-run", action="store_true", help="List slices, open choices and prompt sizes; call nothing")
     parser.add_argument("--show", metavar="ID", help="Print the exact prompt one slice would send; call nothing")
+    parser.add_argument(
+        "--note", action="append", default=[], metavar="ID=TEXT",
+        help="Append TEXT (e.g. the git error from the last attempt) to slice ID's prompt for this firing only; repeatable",
+    )
     args = parser.parse_args()
     repo_root = Path(args.repo).resolve()
     known = {t["custom_id"] for t in TASKS}
@@ -597,6 +601,11 @@ def main():
         sys.exit("Not fired: every slice is blocked. Run --dry-run to see the open choices.")
 
     prompts = {t["custom_id"]: build_prompt(repo_root, t) for t in tasks}
+    for note in args.note:
+        nid, _, text = note.partition("=")
+        if nid not in prompts or not text.strip():
+            sys.exit(f"--note: expected ID=TEXT with ID one of the slices being fired ({', '.join(prompts)}); got {note[:60]!r}")
+        prompts[nid] += f"\n\n=== THE PREVIOUS ATTEMPT AT THIS SLICE WAS REJECTED ===\n{text.strip()}\n"
     key, endpoint = engine.resolve_api_config(args.key, args.endpoint)
     if not key:
         sys.exit("API key required via --key, CHEAPERINFERENCE_API_KEY, or OPENROUTER_API_KEY.")
