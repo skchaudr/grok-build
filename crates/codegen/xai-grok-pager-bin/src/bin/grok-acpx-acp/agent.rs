@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 use xai_acp_lib::{AcpClientMessage, acp_send};
 use xai_grok_pager::piw::client::PiwClient;
+use crate::piw_server;
 use xai_grok_pager::piw::gate::{self as piw_gate, PiwGate};
 use xai_grok_pager::piw::runtime;
 
@@ -127,6 +128,22 @@ struct TurnTiming {
     turn_start_ms: i64,
     stream_start_ms: i64,
     prompt_id: Option<String>,
+}
+
+impl TurnTiming {
+    /// A timing for messages the agent sends outside a turn, such as the
+    /// park monitor's final-state report or a server start during a cancel.
+    fn fresh() -> TurnTiming {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default();
+        TurnTiming {
+            turn_start_ms: now_ms,
+            stream_start_ms: now_ms,
+            prompt_id: None,
+        }
+    }
 }
 
 struct SessionState {
@@ -506,12 +523,77 @@ impl AcpxAgent {
         Some((next_flow, next_input))
     }
 
+    /// Make sure a pi-workflows server answers on the machine's default
+    /// socket, starting one the way Pi's own client does when the socket is
+    /// missing or refuses the connection, and never beside a live server
+    /// (the server's own lock stays the authority: the package's own start
+    /// command connects first and starts only when nothing answers). While
+    /// a start runs, the transcript says one line: `Starting the workflow
+    /// server…`. `Err` is the exact failure text for the transcript: the
+    /// package path tried, the server's own error text, and the command to
+    /// run by hand. No retry: one attempt, the package's own bounded one.
+    async fn ensure_piw_server(
+        &self,
+        session_id: &str,
+        timing: &TurnTiming,
+    ) -> std::result::Result<(), String> {
+        match piw_server::socket_presence() {
+            Some(presence) if !presence.needs_start() => return Ok(()),
+            Some(_) => {}
+            None => {
+                return Err(
+                    "The default pi-workflows socket path could not be computed; the workflow server cannot be started automatically. Start it by hand: `pi-workflows server start`."
+                        .to_string(),
+                );
+            }
+        }
+        self.send_parent_text(session_id, "Starting the workflow server…", timing)
+            .await;
+        let Some(agent_dir) = piw_server::pi_agent_dir() else {
+            return Err(
+                "Pi's agent directory ($HOME/.pi/agent) could not be found; the workflow server cannot be started automatically. Start it by hand: `pi-workflows server start`."
+                    .to_string(),
+            );
+        };
+        match piw_server::resolve_piworkflows_package(&agent_dir) {
+            Ok(package) => {
+                let command = piw_server::server_start_command(&package);
+                match piw_server::run_server_start(&command).await {
+                    Ok(()) => Ok(()),
+                    Err(detail) => Err(format!(
+                        "Starting the workflow server failed (`{}`): {detail}. Start it by hand: `{}`.",
+                        package.display(),
+                        command.display()
+                    )),
+                }
+            }
+            Err(resolution) => {
+                let tried = if resolution.tried.is_empty() {
+                    "no pi-workflows entry is in it".to_string()
+                } else {
+                    format!("tried {}", resolution.tried.join(", "))
+                };
+                Err(format!(
+                    "No pi-workflows package found in Pi's packages list (`{}`); {tried}. Start the workflow server by hand: `pi-workflows server start`.",
+                    resolution.settings_path.display()
+                ))
+            }
+        }
+    }
+
     /// Start a pi-workflows run from a workflow file and follow it through the
     /// same projector loop that renders acpx flows. Cancel maps to
     /// `PiwRunHandle::cancel`, which sends `run.cancel` to the server.
     async fn run_piw_flow(&self, session_id: &str, file: &str, input: Value, timing: &TurnTiming) {
         let cwd = self.session_cwd(session_id);
         let workflow = resolve_flow_path(&cwd, file);
+        // Starting a run needs the server; start one only when no server
+        // answers (the pop-up's mirror never does this).
+        if let Err(message) = self.ensure_piw_server(session_id, timing).await {
+            self.send_parent_text(session_id, message, timing)
+                .await;
+            return;
+        }
         let Some(client) = piw_shared_client() else {
             self.send_parent_text(
                 session_id,
@@ -848,6 +930,13 @@ impl AcpxAgent {
             .await;
             return false;
         };
+        // Answering a parked run needs the server; start one only when no
+        // server answers, then the shared client (re)connects to it.
+        if let Err(message) = self.ensure_piw_server(session_id, timing).await {
+            self.send_parent_text(session_id, message, timing)
+                .await;
+            return false;
+        }
         let Some(client) = piw_shared_client() else {
             self.send_parent_text(
                 session_id,
@@ -1613,6 +1702,14 @@ impl acp::Agent for AcpxAgent {
 
         // A pi-workflows run this session is following: cancel goes to the
         // server, and the watch ends once the run reports a final state.
+        // If no server answers anymore, start one first (cancelling a run
+        // is an action that needs the server), then cancel through the
+        // shared client, which reconnects to it.
+        if self.state.borrow().sessions.get(&session_id).is_some_and(|sess| sess.piw.is_some()) {
+            if let Err(message) = self.ensure_piw_server(&session_id, &TurnTiming::fresh()).await {
+                self.send_parent_text(&session_id, message, &TurnTiming::fresh()).await;
+            }
+        }
         {
             let st = self.state.borrow();
             if let Some(sess) = st.sessions.get(&session_id)

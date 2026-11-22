@@ -11,6 +11,7 @@
 mod agent;
 mod driver;
 mod piw_driver;
+mod piw_server;
 mod project;
 
 use agent_client_protocol as acp;
