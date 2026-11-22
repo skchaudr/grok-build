@@ -25,6 +25,8 @@ mod export_extension;
 mod goal_extension;
 #[path = "grok_pi/herdr_extension.rs"]
 mod herdr_extension;
+#[path = "grok_pi/home.rs"]
+mod home;
 #[path = "grok_pi/host_feature_extension.rs"]
 mod host_feature_extension;
 #[path = "grok_pi/loop_extension.rs"]
@@ -103,6 +105,14 @@ fn ui_feature(config: Option<&toml::Value>, key: &str, default: bool) -> bool {
 }
 
 fn main() -> Result<()> {
+    // Isolate grok-pi state from stock Grok (`~/.grok`) before any library
+    // pins `grok_home()` via OnceLock — same as grok-pi.rs. Without this the
+    // ACP path silently reads stock Grok's `~/.grok` config, so any divergence
+    // between the two homes (e.g. `[ui]` feature flags like pi_workflows)
+    // leaks through: features appear off, conflicting packages are admitted.
+    // User/test overrides of GROK_HOME win.
+    home::ensure_default_grok_home();
+
     let mut args = Args::parse_from(normalize_compound_short_flags(std::env::args_os()));
     if args.pi_bin == "pi"
         && let Ok(pi_bin) = std::env::var("PI_BIN")
