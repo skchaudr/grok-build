@@ -17,3 +17,6 @@ TokenEconomizer/
 
 # Python bytecode from task-scripts
 __pycache__/
+
+# Pending insta snapshots written by a failed snapshot test
+*.snap.new

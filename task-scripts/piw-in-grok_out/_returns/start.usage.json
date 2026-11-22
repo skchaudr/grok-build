@@ -1,0 +1,28 @@
+{
+  "usage": {
+    "prompt_tokens": 109774,
+    "completion_tokens": 31998,
+    "total_tokens": 141772,
+    "cost": 0.80119908,
+    "is_byok": false,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0,
+      "audio_tokens": 0,
+      "video_tokens": 0
+    },
+    "cost_details": {
+      "upstream_inference_cost": 0.809292,
+      "upstream_inference_prompt_cost": 0.329322,
+      "upstream_inference_completions_cost": 0.47997
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 24288,
+      "image_tokens": 0,
+      "audio_tokens": 0
+    }
+  },
+  "model": "google/gemini-4-neon",
+  "seconds": 263.5,
+  "finish": "stop"
+}
