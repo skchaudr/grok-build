@@ -970,8 +970,11 @@ pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
         .filter(|s| !s.is_empty())
     {
         r.to_string()
-    } else if let Some(tag) = tag {
+        } else if let Some(tag) = tag {
         tag.to_string()
+    } else if crate::appearance::cache::load_acpx_mode() {
+        // acpx mode: the child is a workflow or acpx step, not a subagent.
+        "step".to_string()
     } else {
         "subagent".to_string()
     };

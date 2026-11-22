@@ -142,6 +142,10 @@ impl VerbGroupKind {
             VerbGroupKind::WebFetch | VerbGroupKind::WebSearch => ("website", "websites"),
             VerbGroupKind::MemorySearch => ("memory", "memories"),
             VerbGroupKind::IntegrationSearch | VerbGroupKind::McpCall => ("MCP tool", "MCP tools"),
+            // acpx mode: the children are workflow or acpx steps, not subagents.
+            VerbGroupKind::Subagent if crate::appearance::cache::load_acpx_mode() => {
+                ("step", "steps")
+            }
             VerbGroupKind::Subagent => ("subagent", "subagents"),
             VerbGroupKind::Command => ("command", "commands"),
             VerbGroupKind::Message => ("message", "messages"),

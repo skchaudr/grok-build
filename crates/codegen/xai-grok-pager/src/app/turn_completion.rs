@@ -30,6 +30,10 @@ pub(crate) const COMPLETION_KIND_KEY: &str = xai_grok_shell::session::commands::
 /// `_meta.completionKind` of [`xai_grok_shell::session::commands::PromptCompletionKind::RemovedFromQueue`].
 pub(crate) const REMOVED_FROM_QUEUE_KIND: &str =
     xai_grok_shell::session::commands::REMOVED_FROM_QUEUE_KIND;
+/// `_meta` key the acpx driver stamps on a turn that already printed its run's duration
+/// (`✓ <run> finished in Xs`): the generic `Worked for Ys` turn marker would print the same
+/// duration again, in a second format, so the marker drops its elapsed time instead.
+pub(crate) const DURATION_SUPPRESSED_KEY: &str = "durationSuppressed";
 
 /// Unknown tokens stay [`TurnStopReason::Unknown`], which maps to `TurnCompleted` (live `_` arm).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

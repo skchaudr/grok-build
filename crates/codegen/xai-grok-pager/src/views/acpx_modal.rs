@@ -628,11 +628,12 @@ impl AcpxModalState {
     }
 
     fn title_text(&self) -> String {
+        // The pop-up lists pi-workflows runs too, not only acpx flows, so it is titled "runs".
         let raw = match self.mode {
-            Mode::Ledger => "acpx".to_string(),
+            Mode::Ledger => "runs".to_string(),
             Mode::Run => match self.run_view.as_ref() {
-                Some(rv) => format!("acpx › {}", rv.run().summary.title),
-                None => "acpx".to_string(),
+                Some(rv) => format!("runs › {}", rv.run().summary.title),
+                None => "runs".to_string(),
             },
             Mode::Step => match (self.run_view.as_ref(), self.inspector.as_ref()) {
                 (Some(rv), Some((idx, _))) => {
@@ -642,9 +643,9 @@ impl AcpxModalState {
                         .steps
                         .get(*idx)
                         .map_or("?", |s| s.node_id.as_str());
-                    format!("acpx › {run_title} › {node_id}")
+                    format!("runs › {run_title} › {node_id}")
                 }
-                _ => "acpx".to_string(),
+                _ => "runs".to_string(),
             },
         };
         truncate_str(&raw, MAX_TITLE_WIDTH)
@@ -1363,7 +1364,8 @@ mod tests {
         let area = buf.area;
         render_acpx_modal(&mut buf, area, &mut state, false);
         let rendered = buffer_text(&buf);
-        assert!(rendered.contains("acpx"));
+        // The pop-up lists pi-workflows runs too, so it is titled "runs".
+        assert!(rendered.contains("runs"));
 
         // 10x3 and 0x0 must not panic
         let mut tiny = Buffer::empty(Rect::new(0, 0, 10, 3));

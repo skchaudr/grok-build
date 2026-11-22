@@ -1866,6 +1866,16 @@ pub(super) fn handle_prompt_response(
             || disk_full
             || request_failed_shown;
         let elapsed = agent.turn_elapsed();
+        // The acpx driver stamps its PromptResponse when the turn's own transcript already
+        // printed the run's duration ("✓ <run> finished in Xs"); the generic "Worked for Ys"
+        // marker would repeat that duration, so the marker and notification carry no elapsed.
+        let duration_suppressed = result.as_ref().ok().and_then(|pr| {
+            pr.meta
+                .as_ref()
+                .and_then(|m| m.get(crate::app::turn_completion::DURATION_SUPPRESSED_KEY))
+                .and_then(serde_json::Value::as_bool)
+        }) == Some(true);
+        let marker_elapsed = if duration_suppressed { None } else { elapsed };
 
         {
             let sid = agent.session.session_id.as_ref().map(|s| s.0.as_ref());
@@ -1929,7 +1939,7 @@ pub(super) fn handle_prompt_response(
             // Don't re-format here
             (Err(err), _) => Some(SessionEvent::TurnFailed {
                 error: err.clone(),
-                elapsed,
+                elapsed: marker_elapsed,
             }),
             (Ok(_), _) => {
                 let stop = if was_cancelling {
@@ -1940,7 +1950,9 @@ pub(super) fn handle_prompt_response(
                 crate::app::turn_completion::terminal_marker(
                     crate::app::turn_completion::TerminalMarkerInput {
                         stop,
-                        elapsed_ms: crate::app::turn_completion::duration_to_elapsed_ms(elapsed),
+                        elapsed_ms: crate::app::turn_completion::duration_to_elapsed_ms(
+                            marker_elapsed,
+                        ),
                         agent_result: None,
                         send_now_cancel: suppress_cancel_marker,
                         cancel_trigger: wire_cancel_trigger.as_deref(),
@@ -1956,7 +1968,7 @@ pub(super) fn handle_prompt_response(
 
         let notification = match (&result, was_cancelling) {
             (Ok(_), false) if !agent.bash_turn => {
-                let body = match elapsed {
+                let body = match marker_elapsed {
                     Some(d) => {
                         format!("Turn complete in {}.", crate::util::format_duration(d))
                     }

@@ -142,6 +142,8 @@ impl GroupKind {
     fn label(self) -> &'static str {
         match self {
             GroupKind::Workflows => "Workflows",
+            // acpx mode: the children are workflow or acpx steps, not subagents.
+            GroupKind::Subagents if crate::appearance::cache::load_acpx_mode() => "Steps",
             GroupKind::Subagents => "Subagents",
             GroupKind::Tasks => "Tasks",
             GroupKind::Watchers => "Watchers",

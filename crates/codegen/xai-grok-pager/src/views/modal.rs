@@ -1351,18 +1351,23 @@ pub fn render_cancel_turn_panel(
     let title_style = Style::default()
         .fg(theme.accent_user)
         .add_modifier(Modifier::BOLD);
+    // acpx mode: the running children are workflow or acpx steps, not subagents.
+    let (title_text, count_one) = if crate::appearance::cache::load_acpx_mode() {
+        ("A step is still running. Stop it?", "1 step running")
+    } else {
+        ("Subagents are still running. Stop them?", "1 subagent running")
+    };
     buf.set_line(
         content_x,
         y,
-        &Line::from(Span::styled(
-            "Subagents are still running. Stop them?",
-            title_style,
-        )),
+        &Line::from(Span::styled(title_text, title_style)),
         content_w as u16,
     );
     y += 1;
     let count_text = if state.running_count == 1 {
-        "1 subagent running".to_string()
+        count_one.to_string()
+    } else if crate::appearance::cache::load_acpx_mode() {
+        format!("{} steps running", state.running_count)
     } else {
         format!("{} subagents running", state.running_count)
     };

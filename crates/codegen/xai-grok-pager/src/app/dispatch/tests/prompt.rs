@@ -4522,6 +4522,53 @@ fn send_now_cancel_via_wire_meta_pushes_no_cancelled_marker() {
     );
 }
 
+/// The acpx driver stamps `_meta.durationSuppressed` on a turn whose transcript already printed
+/// the run's duration ("✓ <run> finished in Xs"); the generic turn marker then carries no elapsed,
+/// rendering "Turn completed." instead of a second "Worked for Ys".
+#[test]
+fn duration_suppressed_meta_renders_turn_completed_without_elapsed() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    dispatch(Action::SendPrompt("first".into()), &mut app);
+    assert!(agent_ref(&app, id).session.state.is_turn_running());
+
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "durationSuppressed".into(),
+        serde_json::Value::Bool(true),
+    );
+    let pr = acp::PromptResponse::new(acp::StopReason::EndTurn).meta(Some(meta));
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(pr),
+            http_status: None,
+            prompt_id: None,
+        }),
+        &mut app,
+    );
+
+    assert!(agent_ref(&app, id).session.state.is_idle());
+    let agent = agent_ref(&app, id);
+    let marker = (0..agent.scrollback.len())
+        .rev()
+        .find_map(|i| match agent.scrollback.get(i).map(|e| &e.block) {
+            Some(RenderBlock::SessionEvent(b)) => Some(b),
+            _ => None,
+        })
+        .expect("a turn marker must exist");
+    assert!(
+        !marker.event.message().contains("Worked for"),
+        "the duration must not print twice, got: {}",
+        marker.event.message()
+    );
+    assert!(
+        marker.event.message().contains("Turn completed"),
+        "the marker should read Turn completed., got: {}",
+        marker.event.message()
+    );
+}
+
 /// Control: a plain cancel (no meta, no expectation) still renders its marker.
 #[test]
 fn plain_cancel_still_pushes_cancelled_marker() {

@@ -226,6 +226,13 @@ fn format_stats(turn_count: Option<u32>, tokens_used: Option<u64>) -> String {
 impl BlockContent for SubagentBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
         let theme = Theme::current();
+        // acpx mode: the "subagent" is a workflow or acpx step run by a peer agent, so the card
+        // says "Step"; a normal Grok Build session keeps the stock "Subagent" wording.
+        let noun = if crate::appearance::cache::load_acpx_mode() {
+            "Step"
+        } else {
+            "Subagent"
+        };
         // When selected, lift only the bold "Subagent" label to `text_primary` so it reads as undimmed
         // This mirrors `read.rs` and `search.rs`, which bump only the label and leave the rest at `muted`
         // The detail text (verb, description, meta) stays muted in every state
@@ -252,11 +259,12 @@ impl BlockContent for SubagentBlock {
                     self.role.as_deref(),
                     self.model.as_deref(),
                 );
-                // "Subagent running: " / "Subagent started: " = 18 chars
-                let overhead = 18 + meta.width() + activity_suffix.width() + stats.width();
+                // "Subagent running: " / "Subagent started: " = 18 chars; "Step …" is 5 shorter.
+                let overhead =
+                    noun.len() + 1 + verb.len() + meta.width() + activity_suffix.width() + stats.width();
                 let desc = quoted_desc(&self.description, w.saturating_sub(overhead));
                 let mut spans = vec![
-                    Span::styled("Subagent ", bold),
+                    Span::styled(format!("{noun} "), bold),
                     Span::styled(verb, muted),
                     Span::styled(desc, muted),
                 ];
@@ -273,11 +281,11 @@ impl BlockContent for SubagentBlock {
             (SubagentBlockKind::Completed { elapsed }, _) => {
                 let time_str = format_duration(*elapsed);
                 let stats = format_stats(self.turn_count, self.tokens_used);
-                // "Subagent completed in Xs: " = 26 + time_str.len()
-                let prefix_len = 26 + time_str.len() + stats.len();
+                let prefix = format!("{noun} completed in {time_str}: ");
+                let prefix_len = prefix.len() + stats.len();
                 let desc = quoted_desc(&self.description, w.saturating_sub(prefix_len));
                 let mut spans = vec![
-                    Span::styled("Subagent ", bold),
+                    Span::styled(format!("{noun} "), bold),
                     Span::styled(format!("completed in {time_str}: "), muted),
                     Span::styled(desc, muted),
                 ];
@@ -294,10 +302,11 @@ impl BlockContent for SubagentBlock {
                     .map(|e| format!(" ({e})"))
                     .unwrap_or_default();
                 let stats = format_stats(self.turn_count, self.tokens_used);
-                let prefix_len = 21 + time_str.len() + detail.len() + stats.len();
+                let prefix = format!("{noun} failed in {time_str}{detail}: ");
+                let prefix_len = prefix.len() + stats.len();
                 let desc = quoted_desc(&self.description, w.saturating_sub(prefix_len));
                 let mut spans = vec![
-                    Span::styled("Subagent ", bold),
+                    Span::styled(format!("{noun} "), bold),
                     Span::styled(format!("failed in {time_str}{detail}: "), muted),
                     Span::styled(desc, muted),
                 ];
@@ -310,11 +319,11 @@ impl BlockContent for SubagentBlock {
             (SubagentBlockKind::Cancelled { elapsed }, _) => {
                 let time_str = format_duration(*elapsed);
                 let stats = format_stats(self.turn_count, self.tokens_used);
-                // "Subagent cancelled in Xs: " = 26 + time_str.len()
-                let prefix_len = 26 + time_str.len() + stats.len();
+                let prefix = format!("{noun} cancelled in {time_str}: ");
+                let prefix_len = prefix.len() + stats.len();
                 let desc = quoted_desc(&self.description, w.saturating_sub(prefix_len));
                 let mut spans = vec![
-                    Span::styled("Subagent ", bold),
+                    Span::styled(format!("{noun} "), bold),
                     Span::styled(format!("cancelled in {time_str}: "), muted),
                     Span::styled(desc, muted),
                 ];
@@ -599,6 +608,97 @@ mod tests {
         assert!(
             text.contains("7 turns \u{00b7} 130k tokens"),
             "missing stats suffix, got: {text}"
+        );
+    }
+
+    /// The lifecycle card's noun. A normal Grok Build session says "Subagent" (stock wording);
+    /// acpx mode (the workflow/flow driver) says "Step", because what runs is a step of the run,
+    /// not a subagent. Runs in a fresh thread because the acpx-mode flag is a sticky thread-local.
+    #[test]
+    fn card_noun_is_step_in_acpx_mode_and_subagent_in_a_normal_session() {
+        let step_card = std::thread::spawn(|| {
+            crate::appearance::cache::set_subagent_preview_acpx_mode(true);
+            let mut block = SubagentBlock::started(
+                "grok \u{00b7} grok-build",
+                "child-1",
+                "acpx step",
+                None,
+                None,
+                None,
+                false,
+            );
+            block.activity_label = Some("Thinking".into());
+            (
+                line_text(&block),
+                line_text(&SubagentBlock::completed(
+                    "grok \u{00b7} grok-build",
+                    "child-1",
+                    Duration::from_secs(37),
+                )),
+                line_text(&SubagentBlock::failed(
+                    "grok \u{00b7} grok-build",
+                    "child-1",
+                    Duration::from_secs(5),
+                    Some("boom".into()),
+                )),
+                line_text(&SubagentBlock::cancelled(
+                    "grok \u{00b7} grok-build",
+                    "child-1",
+                    Duration::from_secs(5),
+                )),
+            )
+        })
+        .join()
+        .expect("acpx-mode render thread");
+        let (started, completed, failed, cancelled) = step_card;
+        assert!(
+            started.starts_with("Step running: \u{201c}grok \u{00b7} grok-build\u{201d}"),
+            "acpx started card must name a step, got: {started}"
+        );
+        assert!(
+            completed.starts_with("Step completed in 37s: "),
+            "acpx completed card must name a step, got: {completed}"
+        );
+        assert!(
+            failed.starts_with("Step failed in 5.0s (boom): "),
+            "acpx failed card must name a step, got: {failed}"
+        );
+        assert!(
+            cancelled.starts_with("Step cancelled in 5.0s: "),
+            "acpx cancelled card must name a step, got: {cancelled}"
+        );
+
+        let stock_card = std::thread::spawn(|| {
+            crate::appearance::cache::set_subagent_preview_acpx_mode(false);
+            let mut block = SubagentBlock::started(
+                "research the parser",
+                "child-1",
+                "general-purpose",
+                None,
+                None,
+                None,
+                false,
+            );
+            block.activity_label = Some("Thinking".into());
+            (
+                line_text(&block),
+                line_text(&SubagentBlock::completed(
+                    "do the thing",
+                    "child-2",
+                    Duration::from_secs(43),
+                )),
+            )
+        })
+        .join()
+        .expect("stock render thread");
+        let (started, completed) = stock_card;
+        assert!(
+            started.starts_with("Subagent running: \u{201c}research the parser\u{201d}"),
+            "normal session keeps the stock wording, got: {started}"
+        );
+        assert!(
+            completed.starts_with("Subagent completed in 43s: "),
+            "normal session keeps the stock wording, got: {completed}"
         );
     }
 }

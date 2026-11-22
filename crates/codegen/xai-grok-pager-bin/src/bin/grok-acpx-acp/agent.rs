@@ -451,13 +451,12 @@ impl AcpxAgent {
                 }
                 None => {
                     let node_name = gate.node.clone();
+                    let choices = gate.choices.clone();
                     self.remember_waiting_gate(session_id, gate);
                     if !self.is_session_cancelled(session_id) {
                         self.send_parent_text(
                             session_id,
-                            format!(
-                                "\n\n◐ Waiting at {node_name}. Answer later with `/answer <label>`.\n\n"
-                            ),
+                            parked_gate_hint(&node_name, &choices),
                             timing,
                         )
                         .await;
@@ -786,11 +785,7 @@ impl AcpxAgent {
                 }
                 // The question was dismissed; the run stays parked and answerable.
                 self.remember_waiting_piw(session_id, gate.clone());
-                let answer_hint = if choices.is_empty() {
-                    format!("\n\n◐ Waiting at {node}. Answer later with `/answer <text>`.\n\n")
-                } else {
-                    format!("\n\n◐ Waiting at {node}. Answer later with `/answer <label>`.\n\n")
-                };
+                let answer_hint = parked_gate_hint(&node, choices);
                 self.send_parent_text(session_id, answer_hint, timing).await;
                 WaitingOutcome::Parked
             }
@@ -1031,7 +1026,9 @@ impl AcpxAgent {
             .map(|c| {
                 json!({
                     "label": c.label,
-                    "description": "answers this gate in place",
+                    // No filler: an option shows its own description only when the
+                    // workflow gave one (pi-workflows choices carry only a label today).
+                    "description": "",
                     "preview": Value::Null,
                     "id": c.label,
                 })
@@ -1389,11 +1386,15 @@ impl acp::Agent for AcpxAgent {
             return Ok(prompt_response(
                 acp::StopReason::EndTurn,
                 client_prompt_id.as_deref(),
+                false,
             ));
         }
 
         let prompt_text = join_prompt_text(&arguments.prompt);
         let cmd = parse_command(&prompt_text, &waiting_labels);
+        // True when this turn runs (or resumes) a flow or workflow run: its
+        // transcript ends with the run's own duration line.
+        let mut ran_flow = false;
 
         match cmd {
             Command::Help => {
@@ -1467,6 +1468,7 @@ impl acp::Agent for AcpxAgent {
                             }
                         }
                         self.pump_piw_events(&session_id, &timing).await;
+                        ran_flow = true;
                     }
                 } else {
                     match waiting_gate {
@@ -1505,6 +1507,7 @@ impl acp::Agent for AcpxAgent {
                             {
                                 self.run_flow_chain(&session_id, next_flow, next_input, &timing)
                                     .await;
+                                ran_flow = true;
                             } else {
                                 self.remember_waiting_gate(&session_id, gate);
                             }
@@ -1524,6 +1527,7 @@ impl acp::Agent for AcpxAgent {
                     self.run_flow_chain(&session_id, flow_path, input, &timing)
                         .await;
                 }
+                ran_flow = true;
             }
             Command::Task { text } => {
                 if let Some(default_flow) = self.default_flow() {
@@ -1540,6 +1544,7 @@ impl acp::Agent for AcpxAgent {
                     };
                     self.run_flow_chain(&session_id, flow_path, input, &timing)
                         .await;
+                    ran_flow = true;
                 } else {
                     self.send_parent_text(&session_id, help_markdown(None), &timing)
                         .await;
@@ -1566,7 +1571,11 @@ impl acp::Agent for AcpxAgent {
         } else {
             acp::StopReason::EndTurn
         };
-        Ok(prompt_response(reason, client_prompt_id.as_deref()))
+        Ok(prompt_response(
+            reason,
+            client_prompt_id.as_deref(),
+            ran_flow,
+        ))
     }
 
     async fn cancel(&self, arguments: acp::CancelNotification) -> Result<(), acp::Error> {
@@ -1861,6 +1870,32 @@ fn extract_gate_answer_label(outer: &Value) -> Option<String> {
     }
 }
 
+/// The transcript hint after a gate is left for later (Shift+x). It names the real choices
+/// built from the gate's labels — `◐ Waiting at gate. Answer with `/answer Continue` or `/answer Stop`.`
+/// — instead of a generic `<label>` placeholder; a checkpoint with no choices keeps the free-text hint.
+fn parked_gate_hint(node: &str, choices: &[GateChoice]) -> String {
+    if choices.is_empty() {
+        return format!("\n\n◐ Waiting at {node}. Answer later with `/answer <text>`.\n\n");
+    }
+    let answers: Vec<String> = choices
+        .iter()
+        .map(|c| format!("`/answer {}`", c.label))
+        .collect();
+    let joined = match answers.as_slice() {
+        [only] => only.clone(),
+        [rest @ .., last] => {
+            let head = rest.join(", ");
+            if head.is_empty() {
+                last.clone()
+            } else {
+                format!("{head} or {last}")
+            }
+        }
+        [] => String::new(),
+    };
+    format!("\n\n◐ Waiting at {node}. Answer with {joined}.\n\n")
+}
+
 fn resolve_flow_path(session_cwd: &Path, flow_file: &str) -> PathBuf {
     let p = Path::new(flow_file);
     if p.is_absolute() {
@@ -1954,11 +1989,26 @@ fn text_chunk(text: impl Into<String>) -> acp::ContentChunk {
 fn prompt_response(
     reason: acp::StopReason,
     client_prompt_id: Option<&str>,
+    suppress_duration: bool,
 ) -> acp::PromptResponse {
     let mut response = acp::PromptResponse::new(reason);
+    let mut has_meta = false;
+    let mut meta = acp::Meta::new();
     if let Some(prompt_id) = client_prompt_id.filter(|id| !id.is_empty()) {
-        let mut meta = acp::Meta::new();
         meta.insert("promptId".into(), Value::String(prompt_id.to_string()));
+        has_meta = true;
+    }
+    if suppress_duration {
+        // The turn's transcript already printed the run's duration
+        // ("✓ <run> finished in Xs"); tell the pager not to repeat it in the
+        // generic "Worked for Ys" turn marker.
+        meta.insert(
+            "durationSuppressed".into(),
+            Value::Bool(true),
+        );
+        has_meta = true;
+    }
+    if has_meta {
         response = response.meta(Some(meta));
     }
     response
@@ -2445,6 +2495,42 @@ mod tests {
         assert_eq!(
             xai_grok_pager::piw::gate::parse_answer(&checkpoint, "just text"),
             Ok(GateAnswer::Input(json!("just text")))
+        );
+    }
+
+    #[test]
+    fn parked_gate_hint_names_the_real_choices() {
+        use crate::driver::GateChoice;
+
+        let two = vec![
+            GateChoice {
+                label: "Continue".to_string(),
+                flow_file: "next.flow.json".to_string(),
+            },
+            GateChoice {
+                label: "Stop".to_string(),
+                flow_file: "stop.flow.json".to_string(),
+            },
+        ];
+        assert_eq!(
+            parked_gate_hint("gate", &two),
+            "\n\n\u{25d0} Waiting at gate. Answer with `/answer Continue` or `/answer Stop`.\n\n"
+        );
+
+        let three = vec![
+            GateChoice { label: "a".to_string(), flow_file: "a.json".to_string() },
+            GateChoice { label: "b".to_string(), flow_file: "b.json".to_string() },
+            GateChoice { label: "c".to_string(), flow_file: "c.json".to_string() },
+        ];
+        assert_eq!(
+            parked_gate_hint("review", &three),
+            "\n\n\u{25d0} Waiting at review. Answer with `/answer a`, `/answer b` or `/answer c`.\n\n"
+        );
+
+        // A checkpoint with no choices keeps the free-text hint.
+        assert_eq!(
+            parked_gate_hint("notes", &[]),
+            "\n\n\u{25d0} Waiting at notes. Answer later with `/answer <text>`.\n\n"
         );
     }
 }

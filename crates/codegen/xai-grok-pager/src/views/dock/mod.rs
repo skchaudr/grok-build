@@ -98,6 +98,8 @@ impl Section {
     fn label(self) -> &'static str {
         match self {
             Section::Workflows => "Workflows",
+            // acpx mode: the children are workflow or acpx steps, not subagents.
+            Section::Subagents if crate::appearance::cache::load_acpx_mode() => "Steps",
             Section::Subagents => "Subagents",
             Section::Tasks => "Tasks",
             Section::Watchers => "Watchers",

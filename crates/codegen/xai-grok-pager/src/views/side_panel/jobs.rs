@@ -120,7 +120,13 @@ pub(super) fn rows(c: &Ctx) -> Vec<Row> {
     let all: Vec<&Job> = c.info.jobs.iter().chain(&c.info.subagents).collect();
     let fit = meta_level(&all, c.width);
     section("Background jobs", &c.info.jobs, c, fit, &mut out);
-    section("Subagents", &c.info.subagents, c, fit, &mut out);
+    // acpx mode: the children are workflow or acpx steps, not subagents.
+    let subagents_title = if crate::appearance::cache::load_acpx_mode() {
+        "Steps"
+    } else {
+        "Subagents"
+    };
+    section(subagents_title, &c.info.subagents, c, fit, &mut out);
     out
 }
 

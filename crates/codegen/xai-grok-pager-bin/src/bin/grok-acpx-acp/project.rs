@@ -483,14 +483,15 @@ impl Projector {
 
             DriverEvent::Waiting {
                 node,
-                question,
-                choices,
+                question: _,
+                choices: _,
                 ..
             } => {
-                let _ = choices;
                 let state_changed = self.set_node_state(node, PlanNodeState::InProgress);
+                // The question itself is printed once, by the ask panel below; the
+                // transcript line only marks the gate as waiting.
                 let text = format!(
-                    "{}\n\n{}\n\n**◐ {node}** · {question}\n\n",
+                    "{}\n\n{}\n\n**◐ {node}**\n\n",
                     self.mermaid_fence(),
                     self.taken_path()
                 );
@@ -728,18 +729,16 @@ fn escape_mermaid_text(s: &str) -> String {
 
 fn plan_node_label(node: &SketchNode) -> String {
     match node.kind {
+        // One form for every agent step: step id, then the agent. A step that names no
+        // agent runs on Pi, so it reads "<id> · pi" (the model and effort stay on the
+        // card's model meta, not in the name).
         StepKind::Acp => {
-            let mut parts = vec![node.id.as_str()];
-            if let Some(p) = node.profile.as_deref().filter(|s| !s.is_empty()) {
-                parts.push(p);
-            }
-            if let Some(m) = node.model.as_deref().filter(|s| !s.is_empty()) {
-                parts.push(m);
-            }
-            if let Some(e) = node.effort.as_deref().filter(|s| !s.is_empty()) {
-                parts.push(e);
-            }
-            parts.join(" · ")
+            let agent = node
+                .profile
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("pi");
+            format!("{} · {}", node.id, agent)
         }
         StepKind::Shell => format!("{} · shell", node.id),
         StepKind::Checkpoint => format!("{} · checkpoint", node.id),
@@ -938,7 +937,7 @@ mod tests {
                 );
                 assert_eq!(
                     entries[1].get("content").and_then(Value::as_str),
-                    Some("review-code · grok-build · grok-4 · high")
+                    Some("review-code · grok-build")
                 );
                 assert_eq!(
                     entries[2].get("content").and_then(Value::as_str),
@@ -1568,7 +1567,16 @@ mod tests {
         match &outs[0] {
             Out::Update { update, .. } => {
                 let text = chunk_text(update).unwrap_or_default();
-                assert!(text.contains("**◐ human_gate** · Approve changes?"));
+                // The gate line marks the gate as waiting; the question itself is
+                // printed once, by the ask panel, not again here.
+                assert!(
+                    text.contains("**◐ human_gate**\n"),
+                    "gate line must not repeat the question, got: {text}"
+                );
+                assert!(
+                    !text.contains("Approve changes?"),
+                    "the question must appear only in the ask panel, got: {text}"
+                );
                 // The choices live in the question pop-up only; the transcript shows the question once.
                 assert!(!text.contains("deploy.flow.json"));
                 assert!(text.contains("◐ human_gate"));
@@ -1703,7 +1711,7 @@ mod tests {
                 );
                 assert_eq!(
                     entries[1].get("content").and_then(Value::as_str),
-                    Some("review-code · grok-build · grok-4 · high ✗")
+                    Some("review-code · grok-build ✗")
                 );
             }
             _ => panic!("expected Plan update"),
@@ -1727,6 +1735,46 @@ mod tests {
         assert!(chart.contains("human_gate[\"○ human_gate\"]"));
         assert!(chart.contains("extract --> review_code"));
         assert!(chart.contains("route -->|needs_approval| human_gate"));
+    }
+
+    #[test]
+    fn agent_step_names_are_step_id_then_agent() {
+        // A step that names an agent: "<id> · <agent>".
+        assert_eq!(
+            plan_node_label(&SketchNode {
+                id: "grok".to_string(),
+                kind: StepKind::Acp,
+                summary: None,
+                profile: Some("grok-build".to_string()),
+                model: Some("grok-4".to_string()),
+                effort: Some("high".to_string()),
+            }),
+            "grok · grok-build"
+        );
+        // A step that names no agent runs on Pi: "<id> · pi", never the bare id.
+        assert_eq!(
+            plan_node_label(&SketchNode {
+                id: "pi".to_string(),
+                kind: StepKind::Acp,
+                summary: None,
+                profile: None,
+                model: None,
+                effort: None,
+            }),
+            "pi · pi"
+        );
+        // The model and effort stay out of the name; non-agent nodes keep their kind suffix.
+        assert_eq!(
+            plan_node_label(&SketchNode {
+                id: "extract".to_string(),
+                kind: StepKind::Shell,
+                summary: None,
+                profile: None,
+                model: None,
+                effort: None,
+            }),
+            "extract · shell"
+        );
     }
 
     #[test]

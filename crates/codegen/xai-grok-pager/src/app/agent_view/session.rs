@@ -1520,10 +1520,16 @@ impl AgentView {
         })
     }
     /// The subagent wait label with the running subagent count, such as `Waiting for 2 subagents`.
+    /// In acpx mode the children are steps, so the label says `Waiting for step` / `Waiting for N steps`.
     fn subagent_wait_subject(&self) -> String {
-        crate::acp::tracker::waiting_on_subagents_subject(
-            self.running_foreground_subagents().count(),
-        )
+        let n = self.running_foreground_subagents().count();
+        if crate::appearance::cache::load_acpx_mode() {
+            if n <= 1 {
+                return "Waiting for step".to_string();
+            }
+            return format!("Waiting for {n} steps");
+        }
+        crate::acp::tracker::waiting_on_subagents_subject(n)
     }
     /// Update context state with a full snapshot from live callers.
     ///

@@ -655,6 +655,13 @@ pub fn set_subagent_preview_acpx_mode(on: bool) {
     SUBAGENT_PREVIEW_ACPX_MODE.with(|c| c.set(on));
 }
 
+/// True when the session's agent reports itself as `acpx` (the flow/workflow driver), so what the
+/// stock Grok session calls a subagent is a workflow or acpx **step**: subagent chrome in this mode
+/// reads "Step"/"Steps" while a normal session keeps the stock wording.
+pub fn load_acpx_mode() -> bool {
+    SUBAGENT_PREVIEW_ACPX_MODE.with(|c| c.get())
+}
+
 thread_local! {
     static SCROLL_MODE_CURRENT: Cell<ScrollMode> = const { Cell::new(SCROLL_MODE_DEFAULT) };
     static SCROLL_MODE_LOADED: Cell<bool> = const { Cell::new(false) };
