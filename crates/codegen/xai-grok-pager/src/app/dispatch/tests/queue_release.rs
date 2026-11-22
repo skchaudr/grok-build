@@ -676,3 +676,253 @@ fn send_while_thinking_stays_queued() {
     );
     assert_eq!(agent_ref(&app, AgentId(0)).session.pending_prompts.len(), 1);
 }
+
+/// What Claude shows while a background subagent runs after its prompt turn: a synthetic wake over an Idle pane.
+fn claude_wake_app(external_agent: bool) -> AppView {
+    let mut app = test_app_with_agent();
+    app.external_agent = external_agent;
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.claude_sdk_running = true;
+    agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+        prompt_id: "claude-autonomous".into(),
+        cancel_sent: false,
+    });
+    agent
+        .subagent_sessions
+        .insert("child-1".into(), make_test_subagent("child-1", "sa-1"));
+    app
+}
+
+fn wake_image() -> crate::prompt_images::PastedImage {
+    crate::prompt_images::PastedImage {
+        element_id: xai_ratatui_textarea::ElementId::from_raw(0),
+        display_number: 0,
+        mime_type: "image/png".to_owned(),
+        dimensions: Some((8, 8)),
+        byte_len: 1,
+        encoded_bytes: Some(vec![0].into()),
+        source_path: None,
+        staged_temp_path: None,
+        session_image_path: None,
+        preview: crate::prompt_images::PromptImagePreview::default(),
+    }
+}
+
+fn sent_prompt_texts(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::SendPrompt { text, .. } => Some(text.clone()),
+            Effect::SendPromptBlocks { blocks, .. } => Some(match blocks.first() {
+                Some(acp::ContentBlock::Text(t)) => t.text.clone(),
+                _ => String::new(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The reported hang: an image prompt sent while only a background subagent keeps the session busy sat in the local
+/// queue ("Queued 1") and held every later prompt until the subagent ended. It must go out at once, on every host kind.
+#[test]
+fn image_prompt_during_wake_with_running_subagent_is_sent_without_waiting() {
+    for external_agent in [true, false] {
+        let mut app = claude_wake_app(external_agent);
+        let _mode = LocalFollowUp::queue(&mut app);
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .prompt
+            .insert_image(wake_image())
+            .unwrap();
+
+        let effects = dispatch(Action::SendPrompt("look at this".into()), &mut app);
+
+        assert!(
+            matches!(effects.as_slice(), [Effect::SendPromptBlocks { blocks, .. }]
+                if blocks.len() >= 2),
+            "external={external_agent}: expected one blocks send carrying the image, got {effects:?}"
+        );
+        let agent = agent_ref(&app, AgentId(0));
+        assert!(agent.session.pending_prompts.is_empty());
+        assert!(agent.session.state.is_idle(), "no fake local turn over a wake");
+        assert!(agent.running_wake_turn.is_some(), "the subagent is still running");
+        assert!(agent.subagent_sessions.values().any(|s| s.is_running()));
+
+        // A text prompt right behind it is not held by the earlier one, and nothing is sent twice.
+        let next = dispatch(Action::SendPrompt("then this".into()), &mut app);
+        assert_eq!(sent_prompt_texts(&next), vec!["then this".to_string()]);
+        assert!(flush_held_local_queue_into_wait(&mut app, None).is_empty());
+    }
+}
+
+/// Rows queued while the wake runs leave in first-in first-out order, images or not, and an unsendable row in front
+/// holds everything behind it instead of being overtaken.
+#[test]
+fn wake_release_keeps_order_and_never_overtakes_a_held_row() {
+    let mut app = claude_wake_app(true);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.enqueue_prompt("/compact".into());
+        let id = agent.session.next_queue_id;
+        agent.session.next_queue_id += 1;
+        agent.session.pending_prompts.push_back(crate::app::agent::QueuedPrompt {
+            images: vec![wake_image()],
+            ..crate::app::agent::QueuedPrompt::plain(
+                id,
+                "two with image",
+                crate::app::agent::QueueEntryKind::Prompt,
+            )
+        });
+    }
+    // Make the front row a command so it cannot be sent into a wake.
+    agent_front_to_command(&mut app);
+
+    assert!(
+        flush_held_local_queue_into_wait(&mut app, None).is_empty(),
+        "a command in front holds the prompts behind it"
+    );
+    assert_eq!(agent_ref(&app, AgentId(0)).session.pending_prompts.len(), 2);
+
+    // Without the blocker the rows go out oldest first.
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.pending_prompts.pop_front();
+        agent.session.pending_prompts.push_front(
+            crate::app::agent::QueuedPrompt::plain(
+                90,
+                "one",
+                crate::app::agent::QueueEntryKind::Prompt,
+            ),
+        );
+        let id = agent.session.next_queue_id;
+        agent.session.next_queue_id += 1;
+        agent.session.pending_prompts.push_back(
+            crate::app::agent::QueuedPrompt::plain(
+                id,
+                "three",
+                crate::app::agent::QueueEntryKind::Prompt,
+            ),
+        );
+    }
+    let effects = flush_held_local_queue_into_wait(&mut app, None);
+    assert_eq!(
+        sent_prompt_texts(&effects),
+        vec!["one".to_string(), "two with image".to_string(), "three".to_string()]
+    );
+    assert!(agent_ref(&app, AgentId(0)).session.pending_prompts.is_empty());
+    assert!(flush_held_local_queue_into_wait(&mut app, None).is_empty());
+}
+
+/// Scrollback as `(who, text)` rows: `agent` for assistant text, `user` for a prompt row.
+fn order_rows(app: &AppView) -> Vec<(&'static str, String)> {
+    let agent = agent_ref(app, AgentId(0));
+    (0..agent.scrollback.len())
+        .filter_map(|i| match &agent.scrollback.entry(i).unwrap().block {
+            RenderBlock::AgentMessage(b) => Some(("agent", b.text())),
+            RenderBlock::UserPrompt(b) => Some(("user", b.text.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn stream_agent_text(app: &mut AppView, text: &str) {
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let chunk = acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+        acp::ContentBlock::Text(acp::TextContent::new(text.to_string())),
+    ));
+    agent.session.handle_update(
+        chunk,
+        &crate::acp::meta::NotificationMeta::default(),
+        &mut agent.scrollback,
+    );
+}
+
+/// The reported misorder: the wake turn is streaming text, Sab sends a prompt, and the agent's reply to it
+/// was appended to the earlier assistant entry ABOVE the prompt. A reply always lands below the prompt it answers,
+/// as its own entry, for a straight send and for a row released from the queue.
+#[test]
+fn reply_to_a_prompt_sent_during_a_wake_lands_below_the_prompt() {
+    let mut app = claude_wake_app(true);
+    let _mode = LocalFollowUp::queue(&mut app);
+    stream_agent_text(&mut app, "wake text so far");
+
+    let effects = dispatch(Action::SendPrompt("my question".into()), &mut app);
+    assert_eq!(sent_prompt_texts(&effects), vec!["my question".to_string()]);
+    stream_agent_text(&mut app, "the reply");
+
+    assert_eq!(
+        order_rows(&app),
+        vec![
+            ("agent", "wake text so far".to_string()),
+            ("user", "my question".to_string()),
+            ("agent", "the reply".to_string()),
+        ]
+    );
+
+    // A row released from the local queue takes the same route.
+    stream_agent_text(&mut app, " more");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.pending_prompts.push_back(crate::app::agent::QueuedPrompt::plain(
+            91,
+            "queued question",
+            crate::app::agent::QueueEntryKind::Prompt,
+        ));
+    }
+    let released = flush_held_local_queue_into_wait(&mut app, None);
+    assert_eq!(sent_prompt_texts(&released), vec!["queued question".to_string()]);
+    stream_agent_text(&mut app, "second reply");
+    assert_eq!(
+        order_rows(&app),
+        vec![
+            ("agent", "wake text so far".to_string()),
+            ("user", "my question".to_string()),
+            ("agent", "the reply more".to_string()),
+            ("user", "queued question".to_string()),
+            ("agent", "second reply".to_string()),
+        ]
+    );
+}
+
+fn agent_front_to_command(app: &mut AppView) {
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.session.pending_prompts.front_mut().unwrap().kind =
+        crate::app::agent::QueueEntryKind::Command;
+}
+
+/// A wake whose cancel is already in flight, or a row being edited, is left alone.
+#[test]
+fn wake_release_skips_a_cancelled_wake() {
+    let mut app = claude_wake_app(true);
+    enqueue_local(&mut app, AgentId(0), "held");
+    app.agents.get_mut(&AgentId(0)).unwrap().mark_wake_cancel_sent();
+    assert!(flush_held_local_queue_into_wait(&mut app, None).is_empty());
+    assert_eq!(agent_ref(&app, AgentId(0)).session.pending_prompts.len(), 1);
+}
+
+/// A real prompt turn is unchanged: text goes straight to the server queue when steering, an image row is still held for the turn.
+#[test]
+fn real_prompt_turn_keeps_its_rules() {
+    let mut app = running_turn_app();
+    let _mode = LocalFollowUp::steer(&mut app);
+
+    let effects = dispatch(Action::SendPrompt("mid turn".into()), &mut app);
+    assert_eq!(sent_prompt_texts(&effects), vec!["mid turn".to_string()]);
+
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .prompt
+        .insert_image(wake_image())
+        .unwrap();
+    let effects = dispatch(Action::SendPrompt("with image".into()), &mut app);
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. } | Effect::SendInterject { .. }
+        )),
+        "image row waits for the real turn, got {effects:?}"
+    );
+    assert_eq!(agent_ref(&app, AgentId(0)).session.pending_prompts.len(), 1);
+}

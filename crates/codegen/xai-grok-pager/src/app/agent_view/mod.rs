@@ -1532,8 +1532,10 @@ pub struct AgentView {
     pub is_subagent_view: bool,
     /// Root of its session, or a child mirrored under a parent's takeover; every child-specific gate derives from it.
     role: AgentRole,
-    /// Set while the view shows a past session from `/traces`: read-only, no composer. Holds the sessions list to put back on Esc.
-    pub(crate) trace_return: Option<Box<crate::views::traces_modal::TracesModalState>>,
+    /// The flow `/acpx run` started from this view, while it runs.
+    pub(crate) acpx_run: Option<crate::app::dispatch::acpx_run::AcpxRunning>,
+    /// Set while the view shows a past session from `/traces` or `/acpx`: read-only, no composer. Holds the modal to put back on Esc.
+    pub(crate) trace_return: Option<crate::views::modal::ActiveModal>,
     /// Set when `/traces` opened this view from inside a grok session: the agent Esc returns to; this view is then closed.
     pub(crate) trace_origin: Option<crate::app::agent::AgentId>,
     /// Live Claude or Pi session: receipts and spans keep feeding this view until Esc.
@@ -2141,6 +2143,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         }
         ActionId::ShortcutsHelp => return None,
         ActionId::OpenSettings => return None,
+        ActionId::OpenAcpx => return None,
         ActionId::ToggleTodos
         | ActionId::ToggleTasks
         | ActionId::EditPromptExternal

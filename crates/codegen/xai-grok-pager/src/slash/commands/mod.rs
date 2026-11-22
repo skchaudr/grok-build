@@ -76,6 +76,7 @@ pub mod share;
 pub mod tasks;
 pub mod theme;
 pub mod timeline;
+pub mod acpx;
 pub mod traces;
 pub mod timestamps;
 pub mod toggle_mouse_reporting;
@@ -167,6 +168,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         // Reached for occasionally.
         Arc::new(timeline::TimelineCommand),
         Arc::new(traces::TracesCommand),
+        Arc::new(acpx::AcpxCommand),
         Arc::new(cd::CdCommand),
         Arc::new(imagine::ImagineCommand),
         Arc::new(imagine_video::ImagineVideoCommand),
@@ -436,6 +438,7 @@ mod tests {
             "dream",
             "session",
             "traces",
+            "acpx",
             "hotkeys",
             "shortcuts",
             "keys",

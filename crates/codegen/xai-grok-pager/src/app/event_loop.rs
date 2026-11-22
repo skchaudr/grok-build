@@ -31,6 +31,8 @@ pub(crate) fn should_create_home_on_authenticated_startup(app: &AppView) -> bool
         && app.session_startup_allowed()
         && !app.is_access_blocked()
 }
+/// `agentInfo.name` that `grok-acpx-acp` answers `initialize` with; it marks acpx mode.
+const ACPX_AGENT_NAME: &str = "acpx";
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(16);
 /// A resize queues a forced status-line re-run, and the script is told the width the debounced draw recorded.
 const _: () = assert!(
@@ -1157,6 +1159,10 @@ pub(crate) async fn run(
     app.leader_mode = connection.leader_status_rx.is_some();
     app.external_agent = args.launches_external_agent();
     app.agent_info = connection.agent_info.clone();
+    // acpx mode: `grok-acpx-acp` reports itself as `acpx`; flow steps get the taller subagent preview.
+    crate::appearance::cache::set_subagent_preview_acpx_mode(
+        app.agent_info.as_ref().is_some_and(|info| info.name == ACPX_AGENT_NAME),
+    );
     app.external_agent_label = args
         .effective_agent_cmd()
         .as_deref()
@@ -2745,7 +2751,8 @@ pub(crate) async fn run(
                 let tailed = super::dispatch::traces_live::tick(&mut app);
                 let live_dirty = super::dispatch::standalone_traces::drain_live(&mut app);
                 let panel_dirty = side_panel_agent_mut(&mut app).is_some_and(|agent| agent.poll_side_panel());
-                if live_dirty || tailed || panel_dirty || traces_state_mut(&mut app).is_some_and(|state| state.poll_live()) {
+                let acpx_dirty = acpx_state_mut(&mut app).is_some_and(|state| state.poll()) | super::dispatch::acpx_run::tick(&mut app);
+                if live_dirty || tailed || panel_dirty || acpx_dirty || traces_state_mut(&mut app).is_some_and(|state| state.poll_live()) {
                     presenter.request(false);
                 }
             }
@@ -4302,15 +4309,31 @@ fn process_effects(
 }
 /// The traces list, or a live Claude/Pi session view, both of which wake on the one-second poll.
 fn traces_poll_wanted(app: &AppView) -> bool {
+    if super::dispatch::acpx_run::any_running(app) {
+        return true;
+    }
     let ActiveView::Agent(id) = app.active_view else { return false };
     let Some(agent) = app.agents.get(&id) else { return false };
-    matches!(agent.active_modal, Some(crate::views::modal::ActiveModal::Traces { .. })) || agent.trace_live.is_some() || agent.side_panel.open
+    matches!(
+        agent.active_modal,
+        Some(crate::views::modal::ActiveModal::Traces { .. } | crate::views::modal::ActiveModal::Acpx { .. })
+    ) || agent.trace_live.is_some()
+        || agent.side_panel.open
 }
 
 /// The active agent while its side panel is open.
 fn side_panel_agent_mut(app: &mut AppView) -> Option<&mut super::agent_view::AgentView> {
     let ActiveView::Agent(id) = app.active_view else { return None };
     app.agents.get_mut(&id).filter(|agent| agent.side_panel.open)
+}
+
+/// The open `/acpx` modal of the active agent, if any. It is re-read every second: runs are started outside the pager.
+fn acpx_state_mut(app: &mut AppView) -> Option<&mut crate::views::acpx_modal::AcpxModalState> {
+    let ActiveView::Agent(id) = app.active_view else { return None };
+    match app.agents.get_mut(&id)?.active_modal.as_mut()? {
+        crate::views::modal::ActiveModal::Acpx { state } => Some(state.as_mut()),
+        _ => None,
+    }
 }
 
 /// The open `/traces` modal of the active agent, if any.

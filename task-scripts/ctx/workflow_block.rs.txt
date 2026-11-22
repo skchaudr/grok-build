@@ -1,0 +1,468 @@
+// ---- crates/codegen/xai-grok-pager/src/scrollback/blocks/workflow.rs (lines 1,309)
+use std::time::Duration;
+
+use ratatui::style::Modifier;
+use ratatui::text::{Line, Span, Text};
+
+use crate::appearance::AppearanceConfig;
+use crate::scrollback::block::BlockContent;
+use crate::scrollback::types::{AccentStyle, BlockContext, BlockOutput, DisplayMode};
+use crate::theme::Theme;
+use crate::util::format_duration;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkflowBlockStatus {
+    Running,
+    Done { elapsed: Duration },
+    Failed { elapsed: Duration },
+    Cancelled { elapsed: Duration },
+    Paused { elapsed: Duration },
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowBlockPhase {
+    pub title: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowBlock {
+    pub run_id: String,
+    pub name: String,
+    pub objective: String,
+    pub status: WorkflowBlockStatus,
+    pub phases: Vec<WorkflowBlockPhase>,
+    pub current_phase: Option<String>,
+    pub active_agents: u32,
+    pub elapsed: Duration,
+}
+
+impl WorkflowBlock {
+    pub fn started(
+        run_id: impl Into<String>,
+        name: impl Into<String>,
+        objective: impl Into<String>,
+    ) -> Self {
+        Self {
+            run_id: run_id.into(),
+            name: name.into(),
+            objective: objective.into(),
+            status: WorkflowBlockStatus::Running,
+            phases: Vec::new(),
+            current_phase: None,
+            active_agents: 0,
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    fn phase_trail(&self) -> Option<String> {
+        if self.phases.is_empty() {
+            return self.current_phase.clone();
+        }
+        Some(
+            self.phases
+                .iter()
+                .map(|p| {
+                    let mark = match p.state.as_str() {
+                        "done" => "✓",
+                        "active" => "●",
+                        _ => "○",
+                    };
+                    format!("{} {mark}", p.title)
+                })
+                .collect::<Vec<_>>()
+                .join(" · "),
+        )
+    }
+}
+
+impl BlockContent for WorkflowBlock {
+    fn output(&self, ctx: &BlockContext) -> BlockOutput {
+        let theme = Theme::current();
+        let bold = if ctx.is_selected {
+            theme.primary().add_modifier(Modifier::BOLD)
+        } else {
+            theme.muted().add_modifier(Modifier::BOLD)
+        };
+        let muted = theme.muted();
+
+        let mut spans = vec![Span::styled("Workflow ", bold)];
+        let verb = match &self.status {
+            WorkflowBlockStatus::Running => format!("{}: ", self.name),
+            WorkflowBlockStatus::Done { elapsed } => {
+                format!("{} done in {}: ", self.name, format_duration(*elapsed))
+            }
+            WorkflowBlockStatus::Failed { elapsed } => {
+                format!("{} failed in {}: ", self.name, format_duration(*elapsed))
+            }
+            WorkflowBlockStatus::Cancelled { elapsed } => {
+                format!(
+                    "{} ◌ cancelled after {}: ",
+                    self.name,
+                    format_duration(*elapsed)
+                )
+            }
+            WorkflowBlockStatus::Paused { elapsed } => {
+                format!("{} paused at {}: ", self.name, format_duration(*elapsed))
+            }
+        };
+        let text_style = if matches!(self.status, WorkflowBlockStatus::Cancelled { .. }) {
+            theme.dim()
+        } else {
+            muted
+        };
+        spans.push(Span::styled(verb, text_style));
+        spans.push(Span::styled(self.objective.replace('\n', " "), text_style));
+        if let Some(trail) = self.phase_trail()
+            && !trail.is_empty()
+        {
+            spans.push(Span::styled(format!("  [{trail}]"), text_style));
+        }
+        if matches!(self.status, WorkflowBlockStatus::Running) && self.active_agents > 0 {
+            spans.push(Span::styled(
+                format!("  ({} agents)", self.active_agents),
+                muted,
+            ));
+        }
+
+        BlockOutput {
+            lines: vec![Line::from(spans).into()],
+        }
+    }
+
+    fn accent(&self, ctx: &BlockContext) -> Option<AccentStyle> {
+        let theme = Theme::current();
+        match &self.status {
+            WorkflowBlockStatus::Running if ctx.is_running => {
+                Some(AccentStyle::static_color(theme.accent_running))
+            }
+            _ => None,
+        }
+    }
+
+    fn bullet(&self, ctx: &BlockContext) -> Option<AccentStyle> {
+        let theme = Theme::current();
+        match &self.status {
+            WorkflowBlockStatus::Running => {
+                if ctx.is_running {
+                    Some(AccentStyle::animated_running(ctx, &theme))
+                } else {
+                    None
+                }
+            }
+            WorkflowBlockStatus::Done { .. } => {
+                Some(AccentStyle::static_color(theme.accent_success))
+            }
+            WorkflowBlockStatus::Failed { .. } => {
+                Some(AccentStyle::static_color(theme.accent_error))
+            }
+            WorkflowBlockStatus::Cancelled { .. } => {
+                Some(AccentStyle::static_color(theme.gray_dim))
+            }
+            WorkflowBlockStatus::Paused { .. } => Some(AccentStyle::static_color(theme.warning)),
+        }
+    }
+
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
+        false
+    }
+
+    fn has_raw_mode(&self) -> bool {
+        false
+    }
+
+    fn is_foldable(&self) -> bool {
+        false
+    }
+
+    fn default_display_mode(&self) -> DisplayMode {
+        DisplayMode::Collapsed
+    }
+
+    fn is_selectable(&self) -> bool {
+        true
+    }
+
+    fn has_bullet(&self, _ctx: &BlockContext) -> bool {
+        true
+    }
+
+    fn is_groupable(&self) -> bool {
+        true
+    }
+
+    fn preamble(&self, _ctx: &BlockContext) -> Option<Text<'static>> {
+        let theme = Theme::current();
+        let mut lines = vec![
+            Line::from(Span::styled(self.objective.clone(), theme.primary())),
+            Line::from(""),
+        ];
+        for p in &self.phases {
+            let mark = match p.state.as_str() {
+                "done" => "✓",
+                "active" => "●",
+                _ => "○",
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {mark} {}", p.title),
+                theme.muted(),
+            )));
+        }
+        Some(Text::from(lines))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::appearance::AppearanceConfig;
+
+    fn test_ctx() -> BlockContext {
+        BlockContext {
+            mode: DisplayMode::Collapsed,
+            is_running: false,
+            width: 120,
+            raw: false,
+            max_lines: None,
+            appearance: AppearanceConfig::default(),
+            is_selected: false,
+            cwd: None,
+        }
+    }
+
+    fn line_text(block: &WorkflowBlock) -> String {
+        let output = block.output(&test_ctx());
+        let Some(line) = output.lines.first() else {
+            panic!("expected at least one line");
+        };
+        line.content
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn running_line_shows_phase_trail_and_agents() {
+        let mut block = WorkflowBlock::started("wf_1", "deep-research", "compare A and B");
+        block.phases = vec![
+            WorkflowBlockPhase {
+                title: "Plan".into(),
+                state: "done".into(),
+            },
+            WorkflowBlockPhase {
+                title: "Research".into(),
+                state: "active".into(),
+            },
+        ];
+        block.active_agents = 3;
+        let text = line_text(&block);
+        assert!(text.contains("deep-research"), "got: {text}");
+        assert!(text.contains("Plan ✓"), "got: {text}");
+        assert!(text.contains("Research ●"), "got: {text}");
+        assert!(text.contains("(3 agents)"), "got: {text}");
+    }
+
+    #[test]
+    fn done_line_shows_duration_and_drops_agents() {
+        let mut block = WorkflowBlock::started("wf_1", "deep-research", "q");
+        block.active_agents = 3;
+        block.status = WorkflowBlockStatus::Done {
+            elapsed: Duration::from_secs(90),
+        };
+        let text = line_text(&block);
+        assert!(text.contains("done in"), "got: {text}");
+        assert!(!text.contains("agents"), "got: {text}");
+    }
+
+    #[test]
+    fn cancelled_line_shows_dim_glyph_not_failure() {
+        let mut block = WorkflowBlock::started("wf_1", "deep-research", "q");
+        block.active_agents = 2;
+        block.status = WorkflowBlockStatus::Cancelled {
+            elapsed: Duration::from_secs(45),
+        };
+        let text = line_text(&block);
+        assert!(text.contains("◌ cancelled after"), "got: {text}");
+        assert!(!text.contains("failed"), "got: {text}");
+        assert!(!text.contains("agents"), "got: {text}");
+    }
+
+    #[test]
+    fn cancelled_bullet_is_static_gray() {
+        let mut block = WorkflowBlock::started("wf_1", "deep-research", "q");
+        block.status = WorkflowBlockStatus::Cancelled {
+            elapsed: Duration::from_secs(1),
+        };
+        let theme = Theme::current();
+        let bullet = block.bullet(&test_ctx()).expect("terminal bullet");
+        assert_eq!(bullet, AccentStyle::static_color(theme.gray_dim));
+        assert!(block.accent(&test_ctx()).is_none());
+    }
+
+    #[test]
+    fn multiline_objective_collapses() {
+        let block = WorkflowBlock::started("wf_1", "x", "line1\nline2");
+        let text = line_text(&block);
+        assert!(!text.contains('\n'));
+        assert!(text.contains("line1 line2"));
+    }
+}
+
+// ---- crates/codegen/xai-grok-pager/src/scrollback/block.rs (lines 36,190)
+
+/// Each block type implements this trait. The RenderBlock enum delegates to the inner type via the `delegate_block!` macro below.
+/// This trait describes *what* to render (content, styles, padding).
+/// Actual rendering to a Buffer is done via the `Renderable` trait from `ui/render/renderable.rs`.
+pub trait BlockContent {
+    /// Produce renderable content for the given context.
+    fn output(&self, ctx: &BlockContext) -> BlockOutput;
+
+    /// Accent line style (color, animation).
+    /// Returns `None` for blocks without an accent line.
+    /// Returns `Some(AccentStyle)` with color and animation info.
+    fn accent(&self, ctx: &BlockContext) -> Option<AccentStyle>;
+
+    /// Bullet/icon color style. Default: delegates to `accent()`, so the bullet matches the accent color. a failed Read
+    /// has no accent but a red bullet.
+    fn bullet(&self, ctx: &BlockContext) -> Option<AccentStyle> {
+        self.accent(ctx)
+    }
+
+    /// Whether accent column gets block's background.
+    fn accent_background(&self, _ctx: &BlockContext) -> bool {
+        false
+    }
+
+    /// Block content area background.
+    fn background(&self, _ctx: &BlockContext) -> BlockBackground {
+        BlockBackground::None
+    }
+
+    /// Vertical padding (blank line with accent top/bottom).
+    ///
+    /// Borrows the appearance rather than taking a [`BlockContext`] so the O(history) height passes do not build one per entry.
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
+        true
+    }
+
+    fn has_vpad(&self, ctx: &BlockContext) -> bool {
+        self.has_vpad_for(&ctx.appearance)
+    }
+
+    /// Whether block supports raw mode toggle.
+    fn has_raw_mode(&self) -> bool {
+        false
+    }
+
+    /// Whether block can be collapsed/expanded.
+    fn is_foldable(&self) -> bool {
+        true
+    }
+
+    /// Get the next display mode when toggling fold. Default behavior: toggle between Collapsed and Expanded. Blocks
+    /// can override for 3-way cycling. The `is_running` parameter allows blocks to behave differently while streaming.
+    fn next_fold_mode(&self, current: DisplayMode, is_running: bool) -> DisplayMode {
+        let _ = is_running; // Default ignores running state
+        match current {
+            DisplayMode::Collapsed => DisplayMode::Expanded,
+            DisplayMode::Truncated | DisplayMode::Expanded => DisplayMode::Collapsed,
+        }
+    }
+
+    /// Get the display mode to use when explicitly collapsing (left/h key).
+    /// Default: Collapsed. Blocks can override to use a different minimum mode when running.
+    /// Execute blocks use Truncated while running to keep showing the streaming output preview.
+    fn collapse_mode(&self, is_running: bool) -> DisplayMode {
+        let _ = is_running;
+        DisplayMode::Collapsed
+    }
+
+    /// Get the default display mode for this block type.
+    ///
+    /// Default: Expanded. Blocks can override (e.g., thinking defaults to Truncated).
+    fn default_display_mode(&self) -> DisplayMode {
+        DisplayMode::Expanded
+    }
+
+    /// Display mode to adopt when the entry finishes running. Called by `finish_running()`. Returns `Some(mode)` to
+    /// override the current display mode, or `None` to keep it as-is. Default: `None` (no change). Blocks that
+    /// auto-collapse on finish (thinking, execute) or on error (edit) should override this.
+    fn finished_display_mode(&self) -> Option<DisplayMode> {
+        None
+    }
+
+    /// Whether block can be selected via j/k navigation.
+    /// Non-selectable blocks are rendered normally but skipped during navigation.
+    fn is_selectable(&self) -> bool {
+        true
+    }
+
+    /// Whether this block should display a bullet/icon prefix.
+    /// Default: `false`. Override to opt in (e.g., ToolCallBlock when the bullet is configured, ThinkingBlock when collapsed).
+    /// The bullet character and color are determined by the appearance config and accent style.
+    fn has_bullet(&self, _ctx: &BlockContext) -> bool {
+        false
+    }
+
+    /// Preamble content for the fullscreen viewer. Returns `None` for blocks without a natural header.
+    fn preamble(&self, _ctx: &BlockContext) -> Option<Text<'static>> {
+        None
+    }
+
+    /// Whether this block participates in dense group rendering. Groupable blocks that are adjacent form a "group":
+    /// they render without gap rows between them when collapsed. Non-groupable blocks always have gap rows around them
+    /// and break any adjacent group.
+    fn is_groupable(&self) -> bool {
+        false
+    }
+
+    /// Image file references in this block (default: none).
+    fn image_references(&self) -> &[ScrollbackImageRef] {
+        &[]
+    }
+
+    /// Video file references in this block (default: none).
+    fn video_references(&self) -> &[ScrollbackVideoRef] {
+        &[]
+    }
+
+    /// Inline media metadata for blocks that should display media inline in the scrollback.
+    /// The renderer uses this to reserve height and the draw loop uses it to emit terminal image escape sequences. Default: none.
+    fn inline_media(&self) -> Option<InlineMediaInfo> {
+        None
+    }
+
+    /// Blocks without `inline_media()` return empty. Every non-media block (all agent messages, all non-media tool
+    /// calls) returns here without building `output()`. The `output()` rebuild below runs only for a media block (today
+    /// only `OtherToolCallBlock`), whose `output()` is a cheap 2 or 3 line build.
+    fn inline_media_placements(&self, ctx: &BlockContext) -> Vec<AnchoredMedia> {
+        let Some(info) = self.inline_media() else {
+            return Vec::new();
+        };
+        // Trailing geometry: the image starts one row below the block's text (`content_lines + 1`)
+        // It is fitted to the same cell budget `EntryRenderer::inline_media_rows` reserves
+        // The line count needs the laid-out output; the generic wrapper can't know it otherwise
+        let content_lines = self.output(ctx).lines.len() as u16;
+        let (rows, _total_rows) = inline_media_reserved_rows(&info, ctx.width);
+        vec![AnchoredMedia {
+            info,
+            row_offset: content_lines + 1,
+            rows,
+        }]
+    }
+
+    /// Clickable affordance rows for the diagrams in this block's `output()` (the `auto`/`on` Mermaid display).
+    /// Default: none (only agent messages with diagrams override this).
+    fn diagram_affordances(&self, _ctx: &BlockContext) -> Vec<DiagramAffordance> {
+        Vec::new()
+    }
+
+    /// Rows this block inserts into `output()` that the source-text height *estimate* cannot see.
+    /// The off-screen estimate adds them so it never under-reserves.
+    /// The only such rows today are Mermaid treatment rows (one affordance row or fallback caption per detected diagram). Default: `0`.
+    fn estimate_extra_rows(&self) -> u16 {
+        0
+    }
+
+

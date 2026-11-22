@@ -612,6 +612,12 @@ impl AcpUpdateTracker {
             scrollback.finish_running(agent_id);
         }
     }
+    /// Close the open thinking and assistant entries before a user row is painted below them.
+    /// Without it the reply's chunks keep appending to the entry ABOVE the prompt they answer.
+    pub(crate) fn close_open_streams(&mut self, scrollback: &mut ScrollbackState) {
+        self.finish_thinking(scrollback);
+        self.finish_response_stream(scrollback);
+    }
     fn bump_agent_output_epoch(&mut self) {
         self.agent_output_epoch = self.agent_output_epoch.wrapping_add(1);
     }

@@ -1,5 +1,5 @@
-//! F3 side panel, after dsh-tui's: a column beside the chat (a real layout split, not an overlay) with four pages:
-//! Session, Traces, Agents, Recent. Traces is the `/traces` follow view ([`Follow`]) drawn in the column, with its own
+//! F3 side panel, after dsh-tui's: a column beside the chat (a real layout split, not an overlay) with five pages:
+//! Session, Traces, Agents, Recent, Flows. Traces is the `/traces` follow view ([`Follow`]) drawn in the column, with its own
 //! cursor and folding. The other pages are lists of one-line [`Row`]s; ↑/↓ (j/k) move a row cursor and `y` copies the
 //! highlighted row. Esc hands the keyboard back to the chat, `z` swaps the panel and chat widths, `+`/`-` resize.
 //! Tab/Shift+Tab switch pages everywhere; on the other pages ←/→ and h/l do too, but on Traces they fold and unfold.
@@ -8,6 +8,7 @@
 //! Shared parts live here (page enum, cursor, copy, scrolling, drawing). Each row page owns its module and exposes
 //! `rows(&Ctx) -> Vec<Row>`; nothing else in a page module may touch the cursor or the key handling.
 
+pub(crate) mod flows;
 mod jobs;
 mod recent;
 mod session;
@@ -43,10 +44,11 @@ pub enum Page {
     Traces,
     Agents,
     Recent,
+    Flows,
 }
 
 impl Page {
-    const ALL: [Page; 4] = [Page::Session, Page::Traces, Page::Agents, Page::Recent];
+    const ALL: [Page; 5] = [Page::Session, Page::Traces, Page::Agents, Page::Recent, Page::Flows];
 
     fn tab(self) -> &'static str {
         match self {
@@ -54,6 +56,7 @@ impl Page {
             Page::Traces => "Traces",
             Page::Agents => "Agents",
             Page::Recent => "Recent",
+            Page::Flows => "Flows",
         }
     }
 
@@ -243,11 +246,12 @@ pub struct SidePanel {
     width: u16,
     traces: Traces,
     recent: recent::Recent,
+    flows: flows::Flows,
     /// Claude's 5-hour limit, from the statusline snapshots `ocq` reads.
     pub five_hour_pct: Option<u8>,
-    view: [View; 4],
+    view: [View; 5],
     /// Rows on each page as of the last frame.
-    len: [usize; 4],
+    len: [usize; 5],
     /// Body height as of the last frame, for PgUp/PgDn.
     page_h: usize,
     /// (copy text, open id) of the highlighted row as of the last frame.
@@ -267,9 +271,10 @@ impl Default for SidePanel {
             width: DEFAULT_WIDTH,
             traces: Traces::Idle,
             recent: recent::Recent::default(),
+            flows: flows::Flows::default(),
             five_hour_pct: None,
-            view: [View::default(); 4],
-            len: [0; 4],
+            view: [View::default(); 5],
+            len: [0; 5],
             page_h: 10,
             selected: None,
             event: None,
@@ -418,7 +423,8 @@ impl SidePanel {
         let five_hour = claude_five_hour_pct(&Path::new(&home).join(".cache/claude-status"));
         let usage_moved = std::mem::replace(&mut self.five_hour_pct, five_hour) != five_hour;
         let recent = self.page == Page::Recent && self.recent.poll(now_ms);
-        usage_moved | self.poll_traces(native, now_ms) | recent
+        let flows = self.page == Page::Flows && self.flows.poll(now_ms);
+        usage_moved | self.poll_traces(native, now_ms) | recent | flows
     }
 
     fn poll_traces(&mut self, native: Option<&str>, now_ms: i64) -> bool {
@@ -534,6 +540,7 @@ impl SidePanel {
             }
             Page::Agents => jobs::rows(&ctx),
             Page::Recent => self.recent.rows(&ctx),
+            Page::Flows => self.flows.rows(&ctx),
         };
         self.draw_rows(buf, body, rows, theme);
     }
@@ -586,7 +593,9 @@ fn tab_bar(page: Page, w: usize, theme: &Theme) -> Line<'static> {
     let on = Style::default().fg(theme.bg_base).bg(theme.text_primary).add_modifier(Modifier::BOLD);
     let off = Style::default().fg(theme.text_secondary);
     let names: usize = Page::ALL.iter().map(|p| p.tab().len()).sum();
-    let (wide, short) = (w >= names + 15, w < names + 6);
+    // Named tabs need two columns between each; the wide form adds a pad each side of a name and the two arrows.
+    let n = Page::ALL.len();
+    let (wide, short) = (w >= names + 3 * n + 3, w < names + 2 * (n - 1));
     let mut spans = Vec::new();
     if wide {
         spans.push(Span::styled("◀ ", off));
@@ -861,10 +870,10 @@ mod tests {
         assert_eq!(p.page, Page::Traces);
         p.handle_key(&key(KeyCode::Tab));
         assert_eq!(p.page, Page::Agents);
-        for _ in 0..3 {
+        for _ in 0..4 {
             p.handle_key(&key(KeyCode::Right));
         }
-        assert_eq!(p.page, Page::Traces, "off Traces, Right turns a page and four pages wrap");
+        assert_eq!(p.page, Page::Traces, "off Traces, Right turns a page and five pages wrap");
         let pages: Vec<Page> = [KeyCode::Tab, KeyCode::Char('l'), KeyCode::Char('h'), KeyCode::BackTab]
             .into_iter()
             .map(|k| {
@@ -986,13 +995,13 @@ mod tests {
     #[test]
     fn the_tab_bar_fits_every_panel_width_and_keeps_the_current_page_named() {
         let text = |w| tab_bar(Page::Traces, w, &Theme::current()).spans.iter().map(|s| s.content.to_string()).collect::<String>();
-        for w in [21, 29, 30, 31, 37, 38, 39, 43] {
+        for w in [21, 29, 30, 31, 37, 38, 39, 43, 47, 48] {
             assert!(text(w).chars().count() <= w, "{w}: {:?}", text(w));
             assert!(text(w).contains("Traces"));
         }
-        assert_eq!(text(21), "S Traces A R");
-        assert!(text(43).starts_with("◀ ") && text(43).ends_with('▸'));
-        assert!(text(31).contains("Session  Traces  Agents  Recent"));
+        assert_eq!(text(21), "S Traces A R F");
+        assert!(text(48).starts_with("◀ ") && text(48).ends_with('▸'));
+        assert!(text(38).contains("Session  Traces  Agents  Recent  Flows"));
     }
 
     // ---- the chat's status row as the Traces page's last row ----

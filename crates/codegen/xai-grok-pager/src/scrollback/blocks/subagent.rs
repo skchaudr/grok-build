@@ -19,6 +19,7 @@ use crate::app::subagent::format_subagent_meta;
 use crate::appearance::AppearanceConfig;
 use crate::render::line_utils::truncate_str;
 use crate::scrollback::block::BlockContent;
+use crate::scrollback::blocks::subagent_preview::SubagentPreview;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockOutput, DisplayMode};
 use crate::theme::Theme;
 use crate::util::format_duration;
@@ -39,8 +40,10 @@ pub enum SubagentBlockKind {
     Cancelled { elapsed: Duration },
 }
 
-/// Always collapsed and not foldable; groupable and selectable.
-/// Enter / Ctrl-F opens the subagent view.
+/// One header line, plus a live preview of the child's transcript when the agent sends child updates.
+/// Not foldable while there is no preview (stock Grok Build); with one, it folds between the header alone
+/// and header plus preview, and the scrollback opens it unfolded when the first preview row lands.
+/// Groupable only without a preview. Enter or Ctrl-F opens the subagent view.
 #[derive(Debug, Clone)]
 pub struct SubagentBlock {
     /// Human-readable description of the task.
@@ -68,6 +71,9 @@ pub struct SubagentBlock {
     /// Cumulative tokens used by the child session, updated on each
     /// `SubagentProgress` tick and stamped at `SubagentFinished`.
     pub tokens_used: Option<u64>,
+    /// Live tail of the child's transcript, drawn under the header (capped at `[ui].subagent_preview_rows`; unset is 5, or 24 in acpx mode). Empty for agents
+    /// that send no child updates, so those blocks stay one line.
+    pub preview: SubagentPreview,
 }
 
 impl SubagentBlock {
@@ -93,6 +99,7 @@ impl SubagentBlock {
             activity_label: None,
             turn_count: None,
             tokens_used: None,
+            preview: SubagentPreview::default(),
         }
     }
 
@@ -114,6 +121,7 @@ impl SubagentBlock {
             activity_label: None,
             turn_count: None,
             tokens_used: None,
+            preview: SubagentPreview::default(),
         }
     }
 
@@ -136,6 +144,7 @@ impl SubagentBlock {
             activity_label: None,
             turn_count: None,
             tokens_used: None,
+            preview: SubagentPreview::default(),
         }
     }
 
@@ -157,6 +166,7 @@ impl SubagentBlock {
             activity_label: None,
             turn_count: None,
             tokens_used: None,
+            preview: SubagentPreview::default(),
         }
     }
 
@@ -315,9 +325,25 @@ impl BlockContent for SubagentBlock {
             }
         };
 
-        BlockOutput {
-            lines: vec![line.into()],
+        let mut lines = vec![line.into()];
+        // Folded (and foldable): the header alone.
+        let folded = self.is_foldable() && ctx.mode != DisplayMode::Expanded;
+        if !self.preview.is_empty() && !folded {
+            let rail = Span::styled("\u{2502} ", theme.muted());
+            let rows = self
+                .preview
+                .render(
+                    ctx.width.saturating_sub(2),
+                    usize::from(crate::appearance::cache::load_subagent_preview_rows()),
+                    &theme,
+                );
+            lines.extend(rows.into_iter().map(|row| {
+                let mut spans = vec![rail.clone()];
+                spans.extend(row.spans);
+                Line::from(spans).into()
+            }));
         }
+        BlockOutput { lines }
     }
 
     fn accent(&self, ctx: &BlockContext) -> Option<AccentStyle> {
@@ -359,7 +385,8 @@ impl BlockContent for SubagentBlock {
     }
 
     fn is_foldable(&self) -> bool {
-        false
+        // Only a block with a preview has anything to unfold.
+        !self.preview.is_empty()
     }
 
     fn default_display_mode(&self) -> DisplayMode {
@@ -375,7 +402,8 @@ impl BlockContent for SubagentBlock {
     }
 
     fn is_groupable(&self) -> bool {
-        true
+        // A block showing a live preview is a step to read, not a row to fold into a group.
+        self.preview.is_empty()
     }
 }
 
@@ -385,8 +413,12 @@ mod tests {
     use crate::appearance::AppearanceConfig;
 
     fn test_ctx() -> BlockContext {
+        ctx_in(DisplayMode::Collapsed)
+    }
+
+    fn ctx_in(mode: DisplayMode) -> BlockContext {
         BlockContext {
-            mode: DisplayMode::Collapsed,
+            mode,
             is_running: false,
             width: 120,
             raw: false,
@@ -404,6 +436,94 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect()
+    }
+
+    /// Rows of the block below the header line, with a preview of 30 lines and the setting at `rows`.
+    fn preview_height_with_setting(rows: u8) -> usize {
+        preview_height(Some(rows), false)
+    }
+
+    /// Rows below the header for a 30-line preview, with `[ui].subagent_preview_rows` at `setting` (`None` = unset).
+    fn preview_height(setting: Option<u8>, acpx_mode: bool) -> usize {
+        std::thread::spawn(move || {
+            crate::appearance::cache::set_subagent_preview_rows_setting(setting);
+            crate::appearance::cache::set_subagent_preview_acpx_mode(acpx_mode);
+            let mut block = SubagentBlock::started(
+                "read the logs",
+                "child-1",
+                "general-purpose",
+                None,
+                None,
+                None,
+                false,
+            );
+            let text = (0..30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+            let update: agent_client_protocol::SessionUpdate = serde_json::from_value(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": text }
+            }))
+            .expect("valid session update");
+            block.preview.ingest(&update);
+            block.output(&ctx_in(DisplayMode::Expanded)).lines.len() - 1
+        })
+        .join()
+        .expect("render thread")
+    }
+
+    #[test]
+    fn configured_preview_rows_change_the_preview_height() {
+        assert_eq!(preview_height_with_setting(5), 5);
+        assert_eq!(preview_height_with_setting(12), 12);
+        // The default of 24 still caps a longer preview.
+        assert_eq!(preview_height_with_setting(24), 24);
+    }
+
+    #[test]
+    fn unset_preview_rows_is_5_in_a_normal_session_and_24_in_acpx_mode() {
+        assert_eq!(preview_height(None, false), 5);
+        assert_eq!(preview_height(None, true), 24);
+    }
+
+    #[test]
+    fn explicit_preview_rows_win_in_both_modes() {
+        assert_eq!(preview_height(Some(9), false), 9);
+        assert_eq!(preview_height(Some(9), true), 9);
+    }
+
+    fn block_with_preview(with_preview: bool) -> SubagentBlock {
+        let mut block =
+            SubagentBlock::started("read the logs", "child-1", "general-purpose", None, None, None, false);
+        if with_preview {
+            let update: agent_client_protocol::SessionUpdate = serde_json::from_value(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "first\nsecond\nthird" }
+            }))
+            .expect("valid session update");
+            block.preview.ingest(&update);
+        }
+        block
+    }
+
+    #[test]
+    fn block_with_a_preview_folds_between_header_and_header_plus_preview() {
+        let block = block_with_preview(true);
+        assert!(block.is_foldable());
+        let folded = block.output(&ctx_in(DisplayMode::Collapsed)).lines.len();
+        let open = block.output(&ctx_in(DisplayMode::Expanded)).lines.len();
+        assert_eq!(folded, 1, "folded shows the header line only");
+        assert!(open > 1, "unfolded shows the preview under the header");
+        assert!(!block.is_groupable());
+    }
+
+    #[test]
+    fn block_without_a_preview_is_unchanged() {
+        let block = block_with_preview(false);
+        assert!(!block.is_foldable());
+        assert!(block.is_groupable());
+        assert_eq!(block.default_display_mode(), DisplayMode::Collapsed);
+        for mode in [DisplayMode::Collapsed, DisplayMode::Expanded] {
+            assert_eq!(block.output(&ctx_in(mode)).lines.len(), 1);
+        }
     }
 
     #[test]

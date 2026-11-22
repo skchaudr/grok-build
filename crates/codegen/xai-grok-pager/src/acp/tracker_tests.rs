@@ -1131,6 +1131,97 @@ fn streaming_execute_failure() {
         other => panic!("Expected Execute block, got {:?}", other),
     }
 }
+/// An acpx shell step arrives as an Execute call whose title is the command line, then an update carrying the
+/// Bash-shaped rawOutput and a text content block (the exact shape grok-acpx-acp projects). The block must hold
+/// the printed output and fold.
+#[test]
+fn acpx_shell_step_output_is_foldable() {
+    use serde_json::json;
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let id = "acpx-tool:run1:copy#1";
+    let call = acp::SessionUpdate::ToolCall(
+        acp::ToolCall::new(acp::ToolCallId::new(Arc::from(id)), "bash -c 'wc -l a.py'".to_string())
+            .kind(acp::ToolKind::Execute)
+            .status(acp::ToolCallStatus::InProgress)
+            .content(vec![])
+            .locations(vec![])
+            .raw_input(Some(json!({"command": "bash -c 'wc -l a.py'", "cwd": "/tmp"}))),
+    );
+    tracker.handle_update(call, &meta(), &mut sb);
+    let out = "      19 a.py\n";
+    let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from(id)),
+        acp::ToolCallUpdateFields::new()
+            .status(Some(acp::ToolCallStatus::Completed))
+            .content(Some(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+                acp::TextContent::new(out.to_string()),
+            ))]))
+            .raw_output(Some(json!({
+                "type": "Bash",
+                "output": out.as_bytes(),
+                "output_for_prompt": out,
+                "exit_code": 0,
+                "command": "bash -c 'wc -l a.py'",
+                "truncated": false,
+                "signal": null,
+                "timed_out": false,
+                "description": null,
+                "current_dir": "",
+                "output_file": "",
+                "total_bytes": out.len(),
+            }))),
+    ));
+    tracker.handle_update(update, &meta(), &mut sb);
+    let entry = sb.get(0).unwrap();
+    match &entry.block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(exec)) => {
+            assert_eq!(exec.output.as_deref(), Some(out));
+            assert!(exec.error.is_none());
+        }
+        other => panic!("Expected Execute block, got {:?}", other),
+    }
+    assert!(entry.is_foldable(), "a shell step with output must fold");
+}
+/// A non-zero exit from an acpx shell step marks the Execute block failed with the exit code.
+#[test]
+fn acpx_shell_step_nonzero_exit_sets_error() {
+    use serde_json::json;
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let id = "acpx-tool:run1:test#1";
+    let call = acp::SessionUpdate::ToolCall(
+        acp::ToolCall::new(acp::ToolCallId::new(Arc::from(id)), "bash -c 'exit 3'".to_string())
+            .kind(acp::ToolKind::Execute)
+            .status(acp::ToolCallStatus::InProgress)
+            .content(vec![])
+            .locations(vec![])
+            .raw_input(Some(json!({"command": "bash -c 'exit 3'"}))),
+    );
+    tracker.handle_update(call, &meta(), &mut sb);
+    let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from(id)),
+        acp::ToolCallUpdateFields::new()
+            .status(Some(acp::ToolCallStatus::Failed))
+            .content(Some(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+                acp::TextContent::new("boom".to_string()),
+            ))]))
+            .raw_output(Some(json!({
+                "type": "Bash", "output": b"boom".as_slice(), "output_for_prompt": "boom",
+                "exit_code": 3, "command": "bash -c 'exit 3'", "truncated": false,
+                "signal": null, "timed_out": false, "description": null,
+                "current_dir": "", "output_file": "", "total_bytes": 4,
+            }))),
+    ));
+    tracker.handle_update(update, &meta(), &mut sb);
+    match &sb.get(0).unwrap().block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(exec)) => {
+            assert_eq!(exec.output.as_deref(), Some("boom"));
+            assert_eq!(exec.error.as_deref(), Some("exit code 3"));
+        }
+        other => panic!("Expected Execute block, got {:?}", other),
+    }
+}
 /// Execute with description from raw_input.
 #[test]
 fn execute_with_description() {

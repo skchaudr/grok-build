@@ -1148,6 +1148,22 @@ pub enum Action {
     OpenMemoryModal,
     /// Open the `/traces` session ledger and start an index scan.
     OpenTraces,
+    /// `/acpx`: the acpx flow runs and sessions. `run` is a run id or directory to open straight away.
+    OpenAcpx {
+        run: Option<String>,
+    },
+    /// Replay a flow step's conversation, or a whole acpx session, as a read-only transcript.
+    AcpxReplay(Box<crate::views::acpx_modal::ReplayRequest>),
+    AcpxCopy {
+        text: String,
+    },
+    /// `/acpx run <file> [json]`: start a flow and follow it in a transcript card.
+    AcpxRun {
+        flow_file: std::path::PathBuf,
+        input_json: Option<String>,
+    },
+    /// `/acpx cancel`: stop the flow this view started.
+    AcpxCancel,
     /// Re-scan trace roots while `/traces` is open.
     TracesRescan,
     /// Enter on a Claude session in `/traces`: open it read-only in the session view.

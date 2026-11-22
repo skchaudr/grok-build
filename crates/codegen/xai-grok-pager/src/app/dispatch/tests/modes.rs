@@ -1532,6 +1532,16 @@ fn set_yolo_mode_no_op_when_no_active_agent() {
     assert_eq!(app.current_ui.permission_mode, perm_mode_before);
 }
 
+/// F4 and `/acpx` share `Action::OpenAcpx`; dispatching it opens the acpx modal on the active agent.
+#[test]
+fn open_acpx_opens_the_acpx_modal() {
+    use crate::views::modal::ActiveModal;
+    let mut app = test_app_with_agent();
+    let _ = dispatch(Action::OpenAcpx { run: None }, &mut app);
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(matches!(agent.active_modal, Some(ActiveModal::Acpx { .. })));
+}
+
 /// Refresh contract: dispatching `SetYoloMode(true)` while the settings modal is open must refresh the modal's snapshots.
 /// Both `pager_snapshot.yolo_mode` and `ui_snapshot.permission_mode` update; without this the indicator stays stale.
 #[test]

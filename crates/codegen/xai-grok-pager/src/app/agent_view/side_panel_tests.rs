@@ -142,8 +142,8 @@ fn focused_agents_page() {
 fn focused_recent_page() {
     let mut agent = agent();
     press(&mut agent, KeyCode::F(3));
-    press(&mut agent, KeyCode::BackTab);
-    press(&mut agent, KeyCode::BackTab);
+    press(&mut agent, KeyCode::Tab);
+    press(&mut agent, KeyCode::Tab);
     assert_eq!(agent.side_panel.page, Page::Recent);
     insta::assert_snapshot!(draw(&mut agent, 110, 30));
 }
@@ -240,4 +240,14 @@ fn panel_row_has_its_clock_when_the_chat_is_not_drawn() {
         agent.activity_started_at.is_some(),
         "armed outside the chat's draw"
     );
+}
+
+/// F4 opens the `/acpx` pop-up: the same `Action::OpenAcpx { run: None }` the slash command returns.
+#[test]
+fn f4_asks_for_the_acpx_popup() {
+    let mut agent = agent();
+    assert!(matches!(
+        press(&mut agent, KeyCode::F(4)),
+        InputOutcome::Action(crate::app::actions::Action::OpenAcpx { run: None })
+    ));
 }

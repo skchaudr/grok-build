@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Build grok-fork, grok-pi-acp and grok-traces in one cargo run, install them on this Mac and on sab-air, and check the checksums.
+# Build grok-fork, grok-pi-acp, grok-acpx-acp and grok-traces in one cargo run, install them on this Mac and on sab-air, and check the checksums.
 # grok-traces is the hook/indexer binary the harness hooks run; it shares the index with grok-fork, so it ships with it.
 #   scripts/install-fork.sh            build, then install
 #   scripts/install-fork.sh --no-build install what target/release already holds
@@ -20,7 +20,8 @@ fi
 
 # Copy then rename: copying over a running binary kills the sessions using it.
 # grok-pi-acp is the Pi agent `grok grok-pi` starts; it must match the pager it talks to.
-typeset -A bins=(xai-grok-pager grok-fork grok-traces grok-traces grok-pi-acp grok-pi-acp)
+# grok-acpx-acp is the agent acpx mode starts (`--agent-cmd`); it is a bin of xai-grok-pager-bin, so the same cargo line builds it.
+typeset -A bins=(xai-grok-pager grok-fork grok-traces grok-traces grok-pi-acp grok-pi-acp grok-acpx-acp grok-acpx-acp)
 fail=0
 for src dst in ${(kv)bins}; do
   cp "target/release/$src" ~/.grok/bin/$dst.new && mv ~/.grok/bin/$dst.new ~/.grok/bin/$dst

@@ -1,0 +1,1050 @@
+--- a/crates/codegen/xai-grok-pager/src/views/acpx_modal/ledger.rs
++++ b/crates/codegen/xai-grok-pager/src/views/acpx_modal/ledger.rs
+@@ -29,12 +29,21 @@
+     Close,
+ }
+ 
++/// The gate this run answered: read from this run's own input, written by `bundle::gate_input` when a gate answer
++/// starts the next flow file. `projections/run.json` -> `input.gate = { "runId": <the waiting run>, "node": .., "choice": .. }`.
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++pub struct GateAnswer {
++    pub run_id: String,   // input.gate.runId: the run that was waiting at the gate
++    pub choice: String,   // input.gate.choice: the label that was picked
++}
++
+ /// Per-run facts the parent loads (cached) so the ledger does no I/O.
+ #[derive(Debug, Clone, Default, PartialEq)]
+ pub struct RowExtra {
+     pub rail: Vec<NodeState>,
+     pub agents: String,
+     pub stalled: bool,
+     pub question: Option<String>,
++    pub answers: Option<GateAnswer>,
+ }
+ 
+@@ -94,6 +103,7 @@
+     Header { kind: SectionKind, count: usize },
+     Blank,
+     Run(usize), // index in `runs`
++    Continuation { indent: usize, text: String },
+ }
+ 
+ impl FlowListRow {
+@@ -106,12 +116,14 @@
+     tab: LedgerTab,
+     runs: Vec<RunSummary>,
+     extras: HashMap<String, RowExtra>,
++    answered: HashMap<String, String>,
+     sessions: Vec<SessionSummary>,
+ 
+     // Per-tab filter, order, active-only, selection & scroll
+     flow_filter: String,
+     flow_active_only: bool,
+     flow_order: FlowOrder,
+     flow_selected_run_id: Option<String>,
++    flow_selection_pinned: bool,
+     flow_scroll: usize,
+ 
+@@ -134,12 +146,14 @@
+             tab: LedgerTab::Flows,
+             runs: Vec::new(),
+             extras: HashMap::new(),
++            answered: HashMap::new(),
+             sessions: Vec::new(),
+ 
+             flow_filter: String::new(),
+             flow_active_only: false,
+             flow_order: FlowOrder::Grouped,
+             flow_selected_run_id: None,
++            flow_selection_pinned: false,
+             flow_scroll: 0,
+ 
+             session_filter: String::new(),
+@@ -156,11 +170,21 @@
+ 
+     pub fn set_runs(&mut self, runs: Vec<RunSummary>) {
+         self.runs = runs;
++        self.rebuild_answered();
++        if !self.flow_selection_pinned {
++            self.flow_selected_run_id = None;
++        }
+         self.reconcile_flow_selection();
+     }
+ 
+     pub fn set_extras(&mut self, extras: HashMap<String, RowExtra>) {
+         self.extras = extras;
++        self.rebuild_answered();
++        if !self.flow_selection_pinned {
++            self.flow_selected_run_id = None;
++        }
+         self.reconcile_flow_selection();
+     }
+ 
++    pub fn answered_choice(&self, run_id: &str) -> Option<&str> {
++        if !self.runs.is_empty()
++            && !self
++                .runs
++                .iter()
++                .any(|r| r.run_id == run_id && r.status == RunStatus::Waiting)
++        {
++            return None;
++        }
++        self.answered.get(run_id).map(String::as_str)
++    }
++
+     pub fn selected_run(&self) -> Option<&RunSummary> {
+         if self.tab != LedgerTab::Flows {
+             return None;
+@@ -211,6 +235,41 @@
+         }
+     }
+ 
++    fn rebuild_answered(&mut self) {
++        let mut by_gate: HashMap<&str, Vec<(&str, Option<i64>, &str)>> = HashMap::new();
++        for (answering_id, extra) in &self.extras {
++            if let Some(ans) = &extra.answers {
++                let started_ms = self
++                    .runs
++                    .iter()
++                    .find(|r| r.run_id == *answering_id)
++                    .map(|r| r.started_ms);
++                by_gate.entry(ans.run_id.as_str()).or_default().push((
++                    answering_id.as_str(),
++                    started_ms,
++                    ans.choice.as_str(),
++                ));
++            }
++        }
++        self.answered.clear();
++        for (gate_id, mut candidates) in by_gate {
++            let all_have_started = candidates.iter().all(|(_, s, _)| s.is_some());
++            candidates.sort_by(|a, b| {
++                if all_have_started {
++                    a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0))
++                } else {
++                    a.0.cmp(b.0)
++                }
++            });
++            if let Some((_, _, choice)) = candidates.last() {
++                self.answered.insert(gate_id.to_string(), (*choice).to_string());
++            }
++        }
++    }
++
++    fn is_answered(&self, run: &RunSummary) -> bool {
++        run.status == RunStatus::Waiting && self.answered.contains_key(&run.run_id)
++    }
++
+     fn is_stalled(&self, run: &RunSummary) -> bool {
+         self.extras
+             .get(&run.run_id)
+@@ -233,7 +292,9 @@
+     }
+ 
+     fn is_run_active(&self, run: &RunSummary) -> bool {
+-        matches!(run.status, RunStatus::Running | RunStatus::Waiting) && !self.is_stalled(run)
++        matches!(run.status, RunStatus::Running | RunStatus::Waiting)
++            && !self.is_stalled(run)
++            && !self.is_answered(run)
+     }
+ 
+     fn matches_flow_filter(&self, run: &RunSummary) -> bool {
+@@ -273,7 +334,7 @@
+ 
+     fn run_section(&self, run: &RunSummary) -> SectionKind {
+         let stalled = self.is_stalled(run);
+-        if run.status == RunStatus::Waiting {
++        if run.status == RunStatus::Waiting && !self.is_answered(run) {
+             SectionKind::NeedsYou
+         } else if run.status == RunStatus::Running && !stalled {
+             SectionKind::Running
+@@ -338,13 +399,22 @@
+ 
+     /// Build visual rows for the Flows tab. `list_height` is used to decide whether blank rows
+     /// separate sections when the list is shorter than the area.
+-    fn build_flow_rows(&self, list_height: usize) -> Vec<FlowListRow> {
++    fn build_flow_rows(&self, list_height: usize, width: usize, now_ms: i64) -> Vec<FlowListRow> {
+         let indices = self.filtered_flow_indices();
+         if indices.is_empty() {
+             return Vec::new();
+         }
+         if self.flow_order != FlowOrder::Grouped {
+-            return indices.into_iter().map(FlowListRow::Run).collect();
++            let mut out = Vec::with_capacity(indices.len());
++            for idx in indices {
++                out.push(FlowListRow::Run(idx));
++                if let Some(run) = self.runs.get(idx) {
++                    for row in self.flow_continuation_rows(run, width, now_ms) {
++                        out.push(row);
++                    }
++                }
++            }
++            return out;
+         }
+ 
+         let mut needs_you = Vec::new();
+@@ -369,7 +439,20 @@
+         .filter(|(_, items)| !items.is_empty())
+         .collect();
+ 
+-        let non_blank_rows: usize = sections.iter().map(|(_, items)| 1 + items.len()).sum();
++        let extra_continuation_rows: usize = sections
++            .iter()
++            .flat_map(|(_, items)| items.iter())
++            .map(|&idx| {
++                self.runs
++                    .get(idx)
++                    .map(|r| self.flow_continuation_rows(r, width, now_ms).len())
++                    .unwrap_or(0)
++            })
++            .sum();
++        let non_blank_rows: usize = sections
++            .iter()
++            .map(|(_, items)| 1 + items.len())
++            .sum::<usize>()
++            + extra_continuation_rows;
+         let blank_count = sections.len().saturating_sub(1);
+         let insert_blanks = non_blank_rows + blank_count <= list_height;
+ 
+@@ -384,6 +467,11 @@
+             });
+             for idx in items {
+                 out.push(FlowListRow::Run(idx));
++                if let Some(run) = self.runs.get(idx) {
++                    for row in self.flow_continuation_rows(run, width, now_ms) {
++                        out.push(row);
++                    }
++                }
+             }
+         }
+         out
+@@ -481,6 +569,7 @@
+                 let new_pos = (cur_pos as isize + delta).clamp(0, max_pos as isize) as usize;
+                 let new_id = self.runs.get(indices[new_pos]).map(|r| r.run_id.clone());
+                 if new_id != self.flow_selected_run_id {
++                    self.flow_selection_pinned = true;
+                     self.flow_selected_run_id = new_id;
+                     true
+                 } else {
+@@ -525,6 +614,7 @@
+                     .and_then(|&i| self.runs.get(i))
+                     .map(|r| r.run_id.clone());
+                 if first_id.is_some() && first_id != self.flow_selected_run_id {
++                    self.flow_selection_pinned = true;
+                     self.flow_selected_run_id = first_id;
+                     true
+                 } else {
+@@ -556,6 +646,7 @@
+                     .and_then(|&i| self.runs.get(i))
+                     .map(|r| r.run_id.clone());
+                 if last_id.is_some() && last_id != self.flow_selected_run_id {
++                    self.flow_selection_pinned = true;
+                     self.flow_selected_run_id = last_id;
+                     true
+                 } else {
+@@ -658,6 +749,7 @@
+             KeyCode::Char('a') => {
+                 match self.tab {
+                     LedgerTab::Flows => {
++                        self.flow_selection_pinned = true;
+                         self.flow_active_only = !self.flow_active_only;
+                         self.reconcile_flow_selection();
+                     }
+@@ -671,6 +763,7 @@
+             KeyCode::Char('s') => {
+                 match self.tab {
+                     LedgerTab::Flows => {
++                        self.flow_selection_pinned = true;
+                         self.flow_order = self.flow_order.next();
+                         self.reconcile_flow_selection();
+                     }
+@@ -735,6 +828,7 @@
+                 self.filter_open = false;
+                 self.active_filter_mut().clear();
+                 match self.tab {
++                    LedgerTab::Flows => self.reconcile_flow_selection(),
+                     LedgerTab::Flows => self.reconcile_flow_selection(),
+                     LedgerTab::Sessions => self.reconcile_session_selection(),
+                 }
+@@ -743,7 +837,10 @@
+             KeyCode::Backspace => {
+                 self.active_filter_mut().pop();
+                 match self.tab {
+-                    LedgerTab::Flows => self.reconcile_flow_selection(),
++                    LedgerTab::Flows => {
++                        self.flow_selection_pinned = true;
++                        self.reconcile_flow_selection();
++                    }
+                     LedgerTab::Sessions => self.reconcile_session_selection(),
+                 }
+                 LedgerOutcome::Changed
+@@ -754,7 +851,10 @@
+                 {
+                     self.active_filter_mut().push(c);
+                     match self.tab {
+-                        LedgerTab::Flows => self.reconcile_flow_selection(),
++                        LedgerTab::Flows => {
++                            self.flow_selection_pinned = true;
++                            self.reconcile_flow_selection();
++                        }
+                         LedgerTab::Sessions => self.reconcile_session_selection(),
+                     }
+                     LedgerOutcome::Changed
+@@ -791,7 +891,8 @@
+             height: area.height.saturating_sub(1),
+         };
+ 
+-        let overflow_counter = self.compute_overflow_counter(list_area.height as usize);
++        let overflow_counter =
++            self.compute_overflow_counter(list_area.height as usize, area.width as usize, now_ms);
+         self.render_tab_row(
+             buf,
+             Rect {
+@@ -814,13 +915,18 @@
+         }
+     }
+ 
+-    fn compute_overflow_counter(&self, list_height: usize) -> Option<String> {
++    fn compute_overflow_counter(
++        &self,
++        list_height: usize,
++        width: usize,
++        now_ms: i64,
++    ) -> Option<String> {
+         if list_height == 0 {
+             return None;
+         }
+         match self.tab {
+             LedgerTab::Flows => {
+-                let rows = self.build_flow_rows(list_height);
++                let rows = self.build_flow_rows(list_height, width, now_ms);
+                 if rows.len() <= list_height {
+                     return None;
+                 }
+@@ -948,7 +1054,7 @@
+         let waiting = self
+             .runs
+             .iter()
+-            .filter(|r| r.status == RunStatus::Waiting)
++            .filter(|r| r.status == RunStatus::Waiting && !self.is_answered(r))
+             .count();
+         let running = self
+             .runs
+@@ -999,7 +1105,7 @@
+ 
+     fn render_flows(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme, now_ms: i64) {
+         let list_h = area.height as usize;
+-        let rows = self.build_flow_rows(list_h);
++        let rows = self.build_flow_rows(list_h, area.width as usize, now_ms);
+ 
+         if rows.is_empty() {
+             let msg = if !self.flow_filter.is_empty() || self.flow_active_only {
+@@ -1021,17 +1127,21 @@
+ 
+         // Adjust scroll to keep selection visible (and include header row immediately above if at top)
+         if let Some(sel_v) = selected_visual_idx {
++            let sel_h = 1 + rows[sel_v + 1..]
++                .iter()
++                .take_while(|r| matches!(r, FlowListRow::Continuation { .. }))
++                .count();
+             if sel_v < self.flow_scroll {
+                 self.flow_scroll = sel_v;
+                 // If the row right above `sel_v` is a section header, show it too when possible
+                 if sel_v > 0
+                     && matches!(rows.get(sel_v - 1), Some(FlowListRow::Header { .. }))
+-                    && list_h > 1
++                    && list_h > sel_h
+                 {
+                     self.flow_scroll = sel_v - 1;
+                 }
+-            } else if sel_v >= self.flow_scroll + list_h {
+-                self.flow_scroll = (sel_v + 1).saturating_sub(list_h);
++            } else if sel_v + sel_h > self.flow_scroll + list_h {
++                self.flow_scroll = (sel_v + sel_h).saturating_sub(list_h).min(sel_v);
+             }
+         }
+         let max_scroll = rows.len().saturating_sub(list_h);
+@@ -1064,6 +1174,18 @@
+                         self.render_flow_row(buf, row_rect, run, is_selected, theme, now_ms);
+                     }
+                 }
++                FlowListRow::Continuation { indent, text } => {
++                    buf.set_style(row_rect, Style::default().bg(theme.bg_highlight));
++                    let line = Line::from(vec![
++                        Span::raw(" ".repeat(*indent)),
++                        Span::styled(
++                            text.clone(),
++                            Style::default()
++                                .fg(theme.warning)
++                                .add_modifier(Modifier::BOLD),
++                        ),
++                    ]);
++                    buf.set_line(row_rect.x, row_rect.y, &line, row_rect.width);
++                }
+             }
+         }
+     }
+@@ -1096,6 +1218,93 @@
+         buf.set_line(row.x, row.y, &line, row.width);
+     }
+ 
++    fn flow_continuation_rows(
++        &self,
++        run: &RunSummary,
++        w: usize,
++        now_ms: i64,
++    ) -> Vec<FlowListRow> {
++        let is_selected = self.flow_selected_run_id.as_deref() == Some(run.run_id.as_str());
++        if !is_selected || run.status != RunStatus::Waiting || self.is_answered(run) || w == 0 {
++            return Vec::new();
++        }
++        let extra = self.extras.get(&run.run_id);
++        let stalled = extra.map(|e| e.stalled).unwrap_or(false);
++        let dummy_theme = Theme::default();
++        let (raw_state_text, _) = self.flow_state_text(run, extra, stalled, &dummy_theme);
++        if raw_state_text.is_empty() {
++            return Vec::new();
++        }
++
++        let (state_col, state_budget) = self.flow_state_columns(run, w, now_ms);
++        if state_budget == 0 {
++            let indent = state_col.min(w);
++            let wrap_w = w.saturating_sub(indent);
++            if wrap_w == 0 {
++                return Vec::new();
++            }
++            return wrap_text(&raw_state_text, wrap_w)
++                .into_iter()
++                .map(|text| FlowListRow::Continuation { indent, text })
++                .collect();
++        }
++
++        let mut wrapped = wrap_text(&raw_state_text, state_budget);
++        if wrapped.len() <= 1 {
++            return Vec::new();
++        }
++        wrapped.remove(0);
++        wrapped
++            .into_iter()
++            .map(|text| FlowListRow::Continuation {
++                indent: state_col,
++                text,
++            })
++            .collect()
++    }
++
++    fn flow_state_columns(&self, run: &RunSummary, w: usize, now_ms: i64) -> (usize, usize) {
++        let extra = self.extras.get(&run.run_id);
++        let stalled = extra.map(|e| e.stalled).unwrap_or(false);
++        let answered = self.is_answered(run);
++        let glyph = if stalled {
++            "⊘"
++        } else if answered {
++            RunStatus::Completed.glyph()
++        } else {
++            run.status.glyph()
++        };
++        let prefix_w = glyph.width() + 1;
++
++        let show_rail = w >= 48;
++        let show_age = w >= 64;
++        let show_rail_count = w >= 80;
++        let show_duration = w >= 96;
++        let show_agents = w >= 120;
++
++        let rail_width = if show_rail {
++            let count_w = |n: usize| {
++                if show_rail_count {
++                    format!(" {n}/{n}").width()
++                } else {
++                    0
++                }
++            };
++            self.extras
++                .values()
++                .map(|e| {
++                    if e.rail.is_empty() {
++                        0
++                    } else {
++                        e.rail.len() + count_w(e.rail.len())
++                    }
++                })
++                .max()
++                .unwrap_or(0)
++        } else {
++            0
++        };
++
++        let agents_str = if show_agents {
++            extra
++                .map(|e| e.agents.as_str())
++                .filter(|s| !s.is_empty())
++                .map(|s| truncate_str(s, 26))
++                .unwrap_or_default()
++        } else {
++            String::new()
++        };
++        let age_str = if show_age {
++            fmt_age(now_ms.saturating_sub(run.updated_ms))
++        } else {
++            String::new()
++        };
++        let dur_str = if show_duration {
++            let end_ms = if run.status.is_live() && !stalled {
++                now_ms
++            } else {
++                run.finished_ms.unwrap_or(run.updated_ms)
++            };
++            let dur_ms = (end_ms - run.started_ms).max(0) as u64;
++            fmt_duration(dur_ms)
++        } else {
++            String::new()
++        };
++
++        let rail_col_w = if rail_width > 0 { 1 + rail_width } else { 0 };
++        let agents_col_w = if !agents_str.is_empty() {
++            1 + agents_str.width()
++        } else {
++            0
++        };
++        let age_col_w = if !age_str.is_empty() {
++            1 + age_str.width()
++        } else {
++            0
++        };
++        let dur_col_w = if !dur_str.is_empty() {
++            1 + dur_str.width()
++        } else {
++            0
++        };
++
++        let fixed_w = prefix_w + rail_col_w + agents_col_w + age_col_w + dur_col_w;
++        let flex_budget = w.saturating_sub(fixed_w);
++        if flex_budget <= 17 {
++            return (prefix_w, 0);
++        }
++        let longest_title = self.runs.iter().map(|r| r.title.width()).max().unwrap_or(0);
++        let half = (flex_budget - 1).div_euclid(2);
++        let title_col = longest_title.clamp(16, half.max(16));
++        let state_col = prefix_w + title_col + rail_col_w + 1;
++        let state_budget = flex_budget - 1 - title_col;
++        (state_col, state_budget)
++    }
++
+     fn render_flow_row(
+         &self,
+         buf: &mut Buffer,
+@@ -1119,10 +1428,13 @@
+ 
+         let extra = self.extras.get(&run.run_id);
+         let stalled = extra.map(|e| e.stalled).unwrap_or(false);
++        let answered = self.is_answered(run);
+ 
+         // Status glyph
+         let (glyph, glyph_color) = if stalled {
+             ("⊘", theme.gray)
++        } else if answered {
++            (RunStatus::Completed.glyph(), theme.accent_success)
+         } else {
+             let c = match run.status {
+                 RunStatus::Running => theme.accent_running,
+@@ -1149,6 +1461,11 @@
+             && !ex.rail.is_empty()
+         {
+             for &ns in &ex.rail {
++                let ns = if answered && ns == NodeState::Waiting {
++                    NodeState::Done(Outcome::Ok)
++                } else {
++                    ns
++                };
+                 let g = ns.glyph();
+                 let color = match ns {
+                     NodeState::Running => theme.accent_running,
+@@ -1242,14 +1559,19 @@
+         let fixed_w = prefix_w + rail_col_w + agents_col_w + age_col_w + dur_col_w;
+         let flex_budget = w.saturating_sub(fixed_w);
+ 
++        let wrap_question = selected && run.status == RunStatus::Waiting && !answered;
+         // Title and state text share what is left. Every row uses the same title width, so the columns line up.
+         let longest_title = self.runs.iter().map(|r| r.title.width()).max().unwrap_or(0);
+         let (title_str, state_str) = if flex_budget <= 17 || raw_state_text.is_empty() && rail_width == 0 {
+             (truncate_str(&run.title, flex_budget), String::new())
+         } else {
+             let half = (flex_budget - 1).div_euclid(2);
+             let title_col = longest_title.clamp(16, half.max(16));
+             let title = truncate_str(&run.title, title_col);
+             let pad = title_col.saturating_sub(title.width());
+-            let state = truncate_str(&raw_state_text, flex_budget - 1 - title_col);
++            let state_budget = flex_budget - 1 - title_col;
++            let state = if wrap_question && !raw_state_text.is_empty() {
++                wrap_text(&raw_state_text, state_budget)
++                    .into_iter()
++                    .next()
++                    .unwrap_or_default()
++            } else {
++                truncate_str(&raw_state_text, state_budget)
++            };
+             (format!("{title}{}", " ".repeat(pad)), state)
+         };
+ 
+@@ -1317,6 +1639,14 @@
+         theme: &Theme,
+     ) -> (String, Color) {
+         if run.status == RunStatus::Waiting {
++            if let Some(choice) = self.answered_choice(&run.run_id) {
++                let text = if choice.is_empty() {
++                    "answered".to_string()
++                } else {
++                    format!("answered: {choice}")
++                };
++                return (text, theme.gray);
++            }
+             if let Some(q) = extra.and_then(|e| e.question.as_deref()).filter(|q| !q.is_empty()) {
+                 return (q.to_string(), theme.warning);
+             }
+@@ -1629,6 +1959,59 @@
+     }
+ }
+ 
++fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
++    let max_width = max_width.max(1);
++    let mut lines: Vec<String> = Vec::new();
++    let mut current = String::new();
++    let mut current_w = 0usize;
++
++    for word in text.split_whitespace() {
++        let word_w = word.width();
++        if current.is_empty() {
++            if word_w <= max_width {
++                current.push_str(word);
++                current_w = word_w;
++            } else {
++                for ch in word.chars() {
++                    let ch_w = ch.to_string().width();
++                    if current_w + ch_w > max_width && !current.is_empty() {
++                        lines.push(std::mem::take(&mut current));
++                        current_w = 0;
++                    }
++                    current.push(ch);
++                    current_w += ch_w;
++                }
++            }
++        } else if current_w + 1 + word_w <= max_width {
++            current.push(' ');
++            current.push_str(word);
++            current_w += 1 + word_w;
++        } else {
++            lines.push(std::mem::take(&mut current));
++            current_w = 0;
++            if word_w <= max_width {
++                current.push_str(word);
++                current_w = word_w;
++            } else {
++                for ch in word.chars() {
++                    let ch_w = ch.to_string().width();
++                    if current_w + ch_w > max_width && !current.is_empty() {
++                        lines.push(std::mem::take(&mut current));
++                        current_w = 0;
++                    }
++                    current.push(ch);
++                    current_w += ch_w;
++                }
++            }
++        }
++    }
++    if !current.is_empty() {
++        lines.push(current);
++    }
++    if lines.is_empty() {
++        lines.push(String::new());
++    }
++    lines
++}
++
+ fn pad_right(s: &str, width: usize) -> String {
+     let w = s.width();
+     if w >= width {
+@@ -1820,6 +2203,7 @@
+                 agents: String::new(),
+                 stalled: true,
+                 question: None,
++                answers: None,
+             },
+         );
+         state.set_extras(extras);
+@@ -2015,6 +2399,7 @@
+                 agents: "grok-build · grok-4".to_string(),
+                 stalled: false,
+                 question: Some("Ship to prod?".to_string()),
++                answers: None,
+             },
+         );
+         state.set_extras(extras);
+@@ -2058,6 +2443,7 @@
+                 agents: "grok-agent".to_string(),
+                 stalled: false,
+                 question: Some("Approve?".to_string()),
++                answers: None,
+             },
+         );
+         state.set_extras(extras);
+@@ -2089,4 +2475,260 @@
+         let full = all_text(&empty_buf);
+         assert!(full.contains("No acpx flow runs found"));
+     }
++
++    #[test]
++    fn answered_gate_reduces_needs_you_count_and_moves_older_waiting_run_to_finished() {
++        let mut state = LedgerState::new();
++        state.set_runs(vec![
++            make_run("r-old", "Old Gate", RunStatus::Waiting, 1_000),
++            make_run("r-new", "New Gate", RunStatus::Waiting, 2_000),
++            make_run("r-next", "Continuation", RunStatus::Completed, 3_000),
++        ]);
++        let mut extras = HashMap::new();
++        extras.insert(
++            "r-old".to_string(),
++            RowExtra {
++                rail: vec![NodeState::Waiting],
++                agents: String::new(),
++                stalled: false,
++                question: Some("Proceed with old?".to_string()),
++                answers: None,
++            },
++        );
++        extras.insert(
++            "r-new".to_string(),
++            RowExtra {
++                rail: vec![NodeState::Waiting],
++                agents: String::new(),
++                stalled: false,
++                question: Some("Proceed with new?".to_string()),
++                answers: None,
++            },
++        );
++        extras.insert(
++            "r-next".to_string(),
++            RowExtra {
++                rail: vec![NodeState::Done(Outcome::Ok)],
++                agents: String::new(),
++                stalled: false,
++                question: None,
++                answers: Some(GateAnswer {
++                    run_id: "r-old".to_string(),
++                    choice: "Approve".to_string(),
++                }),
++            },
++        );
++        state.set_extras(extras);
++
++        let theme = Theme::default();
++        let mut buf = Buffer::empty(Rect::new(0, 0, 100, 12));
++        let area = buf.area;
++        state.render(&mut buf, area, &theme, 10_000);
++
++        let r0 = row_text(&buf, 0);
++        assert!(r0.contains("1 needs you"));
++        assert!(!r0.contains("2 needs you"));
++
++        let full = all_text(&buf);
++        assert!(full.contains("NEEDS YOU 1"));
++        assert!(full.contains("FINISHED 2"));
++        let finished_pos = full.find("FINISHED 2").unwrap_or(0);
++        let old_pos = full.find("Old Gate").unwrap_or(0);
++        assert!(old_pos > finished_pos);
++    }
++
++    #[test]
++    fn unanswered_waiting_run_remains_in_needs_you() {
++        let mut state = LedgerState::new();
++        state.set_runs(vec![make_run("r-wait", "Pending Gate", RunStatus::Waiting, 2_000)]);
++        let mut extras = HashMap::new();
++        extras.insert(
++            "r-wait".to_string(),
++            RowExtra {
++                rail: vec![NodeState::Waiting],
++                agents: String::new(),
++                stalled: false,
++                question: Some("Continue?".to_string()),
++                answers: None,
++            },
++        );
++        state.set_extras(extras);
++
++        let theme = Theme::default();
++        let mut buf = Buffer::empty(Rect::new(0, 0, 100, 10));
++        let area = buf.area;
++        state.render(&mut buf, area, &theme, 10_000);
++
++        let full = all_text(&buf);
++        assert!(row_text(&buf, 0).contains("1 needs you"));
++        assert!(full.contains("NEEDS YOU 1"));
++        assert!(full.contains("Pending Gate"));
++    }
++
++    #[test]
++    fn replacing_extras_without_answering_run_restores_needs_you() {
++        let mut state = LedgerState::new();
++        state.set_runs(vec![
++            make_run("r-wait", "Gate Run", RunStatus::Waiting, 1_000),
++            make_run("r-ans", "Answering Run", RunStatus::Failed, 2_000),
++        ]);
++        let mut extras = HashMap::new();
++        extras.insert(
++            "r-wait".to_string(),
++            RowExtra {
++                rail: vec![NodeState::Waiting],
++                agents: String::new(),
++                stalled: false,
++                question: Some("Deploy now?".to_string()),
++                answers: None,
++            },
++        );
++        extras.insert(
++            "r-ans".to_string(),
++            RowExtra {
++                rail: vec![],
++                agents: String::new(),
++                stalled: false,
++                question: None,
++                answers: Some(GateAnswer {
++                    run_id: "r-wait".to_string(),
++                    choice: "Yes".to_string(),
++                }),
++            },
++        );
++        state.set_extras(extras);
++        assert_eq!(state.answered_choice("r-wait"), Some("Yes"));
++
++        let mut extras_without = HashMap::new();
++        extras_without.insert(
++            "r-wait".to_string(),
++            RowExtra {
++                rail: vec![NodeState::Waiting],
++                agents: String::new(),
++                stalled: false,
++                question: Some("Deploy now?".to_string()),
++                answers: None,
++            },
++        );
++        state.set_extras(extras_without);
++        assert_eq!(state.answered_choice("r-wait"), None);
++
++        let theme = Theme::default();
++        let mut buf = Buffer::empty(Rect::new(0, 0, 100, 10));
++        let area = buf.area;
++        state.render(&mut buf, area, &theme, 10_000);
++        let full = all_text(&buf);
++        assert!(row_text(&buf, 0).contains("1 needs you"));
++        assert!(full.contains("NEEDS YOU 1"));
++    }
++
++    #[test]
++    fn set_extras_before_set_runs_matches_reverse_order() {
++        let runs = vec![
++            make_run("r-answered", "Answered Gate", RunStatus::Waiting, 3_000),
++            make_run("r-open", "Open Gate", RunStatus::Waiting, 2_000),
++            make_run("r-next", "Next Flow", RunStatus::Completed, 4_000),
++        ];
++        let mut extras = HashMap::new();
++        extras.insert(
++            "r-answered".to_string(),
++            RowExtra {
++                rail: vec![NodeState::Waiting],
++                agents: String::new(),
++                stalled: false,
++                question: Some("First question?".to_string()),
++                answers: None,
++            },
++        );
++        extras.insert(
++            "r-open".to_string(),
++            RowExtra {
++                rail: vec![NodeState::Waiting],
++                agents: String::new(),
++                stalled: false,
++                question: Some("Second question?".to_string()),
++                answers: None,
++            },
++        );
++        extras.insert(
++            "r-next".to_string(),
++            RowExtra {
++                rail: vec![NodeState::Done(Outcome::Ok)],
++                agents: String::new(),
++                stalled: false,
++                question: None,
++                answers: Some(GateAnswer {
++                    run_id: "r-answered".to_string(),
++                    choice: "Continue".to_string(),
++                }),
++            },
++        );
++
++        let mut modal_order = LedgerState::new();
++        modal_order.set_extras(extras.clone());
++        modal_order.set_runs(runs.clone());
++
++        let mut reverse_order = LedgerState::new();
++        reverse_order.set_runs(runs);
++        reverse_order.set_extras(extras);
++
++        assert_eq!(
++            modal_order.selected_run().map(|r| &r.run_id),
++            reverse_order.selected_run().map(|r| &r.run_id)
++        );
++        assert_eq!(
++            modal_order.answered_choice("r-answered"),
++            reverse_order.answered_choice("r-answered")
++        );
++
++        let theme = Theme::default();
++        let mut buf_a = Buffer::empty(Rect::new(0, 0, 100, 12));
++        let area_a = buf_a.area;
++        modal_order.render(&mut buf_a, area_a, &theme, 10_000);
++
++        let mut buf_b = Buffer::empty(Rect::new(0, 0, 100, 12));
++        let area_b = buf_b.area;
++        reverse_order.render(&mut buf_b, area_b, &theme, 10_000);
++
++        assert_eq!(all_text(&buf_a), all_text(&buf_b));
++    }
++
++    #[test]
++    fn later_started_ms_wins_when_two_runs_answer_same_gate_and_renders_answered_choice() {
++        let mut state = LedgerState::new();
++        state.set_runs(vec![
++            make_run("r-gate", "Gate Run", RunStatus::Waiting, 1_000),
++            make_run("r-unanswered", "Other Gate", RunStatus::Waiting, 1_500),
++            make_run("z-older-ans", "Older Answer", RunStatus::Failed, 2_000),
++            make_run("a-newer-ans", "Newer Answer", RunStatus::Completed, 5_000),
++        ]);
++        let mut extras = HashMap::new();
++        extras.insert(
++            "r-gate".to_string(),
++            RowExtra {
++                rail: vec![NodeState::Done(Outcome::Ok), NodeState::Waiting],
++                agents: String::new(),
++                stalled: false,
++                question: Some("Secret gate question?".to_string()),
++                answers: None,
++            },
++        );
++        extras.insert(
++            "r-unanswered".to_string(),
++            RowExtra {
++                rail: vec![NodeState::Waiting],
++                agents: String::new(),
++                stalled: false,
++                question: Some("Unanswered question?".to_string()),
++                answers: None,
++            },
++        );
++        extras.insert(
++            "z-older-ans".to_string(),
++            RowExtra {
++                rail: vec![],
++                agents: String::new(),
++                stalled: false,
++                question: None,
++                answers: Some(GateAnswer {
++                    run_id: "r-gate".to_string(),
++                    choice: "OldChoice".to_string(),
++                }),
++            },
++        );
++        extras.insert(
++            "a-newer-ans".to_string(),
++            RowExtra {
++                rail: vec![],
++                agents: String::new(),
++                stalled: false,
++                question: None,
++                answers: Some(GateAnswer {
++                    run_id: "r-gate".to_string(),
++                    choice: "NewChoice".to_string(),
++                }),
++            },
++        );
++        state.set_extras(extras);
++
++        assert_eq!(state.answered_choice("r-gate"), Some("NewChoice"));
++        assert_eq!(state.answered_choice("r-unanswered"), None);
++
++        let theme = Theme::default();
++        let mut buf = Buffer::empty(Rect::new(0, 0, 100, 12));
++        let area = buf.area;
++        state.render(&mut buf, area, &theme, 10_000);
++
++        let full = all_text(&buf);
++        assert!(full.contains("answered: NewChoice"));
++        assert!(!full.contains("Secret gate question?"));
++    }
++
++    #[test]
++    fn selected_unanswered_waiting_run_wraps_200_char_question_and_unselected_takes_one_row() {
++        let question = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu one two three four five six seven!!";
++        assert_eq!(question.len(), 200);
++
++        let mut state = LedgerState::new();
++        state.set_runs(vec![
++            make_run("r-long", "Long Question Run", RunStatus::Waiting, 9_000),
++            make_run("r-second", "Second Waiting Run", RunStatus::Waiting, 8_000),
++        ]);
++        let mut extras = HashMap::new();
++        extras.insert(
++            "r-long".to_string(),
++            RowExtra {
++                rail: vec![NodeState::Done(Outcome::Ok), NodeState::Waiting],
++                agents: String::new(),
++                stalled: false,
++                question: Some(question.to_string()),
++                answers: None,
++            },
++        );
++        extras.insert(
++            "r-second".to_string(),
++            RowExtra {
++                rail: vec![NodeState::Waiting],
++                agents: String::new(),
++                stalled: false,
++                question: Some("Short?".to_string()),
++                answers: None,
++            },
++        );
++        state.set_extras(extras);
++
++        assert_eq!(
++            state.selected_run().map(|r| r.run_id.as_str()),
++            Some("r-long")
++        );
++
++        let theme = Theme::default();
++        let mut buf = Buffer::empty(Rect::new(0, 0, 100, 20));
++        let area = buf.area;
++        state.render(&mut buf, area, &theme, 10_000);
++
++        let full = all_text(&buf);
++        for word in question.split_whitespace() {
++            assert!(full.contains(word), "missing word: {word}");
++        }
++        let second_y_when_selected = (0..20)
++            .find(|&y| row_text(&buf, y).contains("Second Waiting Run"))
++            .unwrap_or(0);
++        assert!(second_y_when_selected > 3);
++
++        // Move selection to the second run: now r-long is unselected and takes one row
++        state.handle_key(&key(KeyCode::Down));
++        let mut buf_unsel = Buffer::empty(Rect::new(0, 0, 100, 20));
++        let area_unsel = buf_unsel.area;
++        state.render(&mut buf_unsel, area_unsel, &theme, 10_000);
++
++        let long_y = (0..20)
++            .find(|&y| row_text(&buf_unsel, y).contains("Long Question Run"))
++            .unwrap_or(0);
++        let second_y_when_unselected = (0..20)
++            .find(|&y| row_text(&buf_unsel, y).contains("Second Waiting Run"))
++            .unwrap_or(0);
++        assert_eq!(second_y_when_unselected, long_y + 1);
++    }
+ }

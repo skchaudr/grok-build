@@ -52,6 +52,11 @@ const KEEP_TEXT_SELECTION_DEFAULT: TextSelection = TextSelection::Flash;
 const SCROLL_SPEED_DEFAULT: u8 = 50;
 const SCROLL_SPEED_MIN: u8 = 1;
 const SCROLL_SPEED_MAX: u8 = 100;
+/// Rows of a subagent's live transcript shown inside its block when `[ui].subagent_preview_rows` is unset.
+const SUBAGENT_PREVIEW_ROWS_DEFAULT: u8 = 5;
+/// The same default in acpx mode (the agent reports itself as `acpx`), where flow steps run long and the tail is the point.
+const SUBAGENT_PREVIEW_ROWS_ACPX_DEFAULT: u8 = 24;
+const SUBAGENT_PREVIEW_ROWS_MIN: u8 = 1;
 const SCROLL_MODE_DEFAULT: ScrollMode = ScrollMode::Auto;
 const INVERT_SCROLL_DEFAULT: bool = false;
 /// Sentinel for "never configured": the per-terminal profile keeps its own lines-per-tick.
@@ -603,6 +608,54 @@ pub fn set_scroll_speed(speed: u8) {
 }
 
 thread_local! {
+    /// `[ui].subagent_preview_rows` as the user set it; `None` means unset.
+    static SUBAGENT_PREVIEW_ROWS_SETTING: Cell<Option<u8>> = const { Cell::new(None) };
+    static SUBAGENT_PREVIEW_ROWS_LOADED: Cell<bool> = const { Cell::new(false) };
+    static SUBAGENT_PREVIEW_ACPX_MODE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Height of the live preview: the user's value when set, else 5 (24 in acpx mode); never below 1.
+fn subagent_preview_rows_for(setting: Option<u8>, acpx_mode: bool) -> u8 {
+    let default = if acpx_mode {
+        SUBAGENT_PREVIEW_ROWS_ACPX_DEFAULT
+    } else {
+        SUBAGENT_PREVIEW_ROWS_DEFAULT
+    };
+    setting.unwrap_or(default).max(SUBAGENT_PREVIEW_ROWS_MIN)
+}
+
+/// Read `[ui].subagent_preview_rows` (at least 1), seeding from disk on first call.
+/// Unset gives 5 in a normal session and 24 in acpx mode; a set value is used in both.
+pub fn load_subagent_preview_rows() -> u8 {
+    SUBAGENT_PREVIEW_ROWS_LOADED.with(|loaded| {
+        if !loaded.get() {
+            SUBAGENT_PREVIEW_ROWS_SETTING.with(|c| c.set(load_opt_u8_from_effective_config("subagent_preview_rows")));
+            loaded.set(true);
+        }
+    });
+    subagent_preview_rows_for(
+        SUBAGENT_PREVIEW_ROWS_SETTING.with(|c| c.get()),
+        SUBAGENT_PREVIEW_ACPX_MODE.with(|c| c.get()),
+    )
+}
+
+/// Replace the cached `[ui].subagent_preview_rows`; `None` means unset (the mode's default applies).
+pub fn set_subagent_preview_rows_setting(setting: Option<u8>) {
+    SUBAGENT_PREVIEW_ROWS_SETTING.with(|c| c.set(setting));
+    SUBAGENT_PREVIEW_ROWS_LOADED.with(|l| l.set(true));
+}
+
+/// Replace cached subagent preview rows with an explicit value, raised to at least 1 when read.
+pub fn set_subagent_preview_rows(rows: u8) {
+    set_subagent_preview_rows_setting(Some(rows));
+}
+
+/// Mark the session as acpx mode, which changes the unset default of the subagent preview height.
+pub fn set_subagent_preview_acpx_mode(on: bool) {
+    SUBAGENT_PREVIEW_ACPX_MODE.with(|c| c.set(on));
+}
+
+thread_local! {
     static SCROLL_MODE_CURRENT: Cell<ScrollMode> = const { Cell::new(SCROLL_MODE_DEFAULT) };
     static SCROLL_MODE_LOADED: Cell<bool> = const { Cell::new(false) };
 }
@@ -847,6 +900,7 @@ pub fn prime(ui: &UiConfig) {
     // `load_*` is a no-op when already set (e.g. by the startup resolve).
     let _ = load_vim_mode();
     let _ = load_scroll_speed();
+    let _ = load_subagent_preview_rows();
     let _ = load_scroll_mode();
     let _ = load_invert_scroll();
     let _ = load_scroll_lines();
@@ -918,15 +972,16 @@ fn load_keep_text_selection_from_effective_config() -> TextSelection {
 
 /// Read a `[ui].<key>` u8 from the shell's layered effective config.
 fn load_u8_from_effective_config(key: &str, default: u8) -> u8 {
-    let root = match xai_grok_config::load_effective_config_disk_only() {
-        Ok(r) => r,
-        Err(_) => return default,
-    };
+    load_opt_u8_from_effective_config(key).unwrap_or(default)
+}
+
+/// Like [`load_u8_from_effective_config`], but `None` when the key is unset or unreadable.
+fn load_opt_u8_from_effective_config(key: &str) -> Option<u8> {
+    let root = xai_grok_config::load_effective_config_disk_only().ok()?;
     root.get("ui")
         .and_then(|ui| ui.get(key))
         .and_then(|v| v.as_integer())
         .and_then(|v| u8::try_from(v).ok())
-        .unwrap_or(default)
 }
 
 /// Read a `[ui].<key>` string from the shell's layered effective config.
@@ -1146,6 +1201,48 @@ mod tests {
             assert!(!load_prompt_suggestions());
             set_prompt_suggestions(true);
             assert!(load_prompt_suggestions());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn set_then_load_round_trips_subagent_preview_rows() {
+        std::thread::spawn(|| {
+            set_subagent_preview_rows(8);
+            assert_eq!(load_subagent_preview_rows(), 8);
+            set_subagent_preview_rows(40);
+            assert_eq!(load_subagent_preview_rows(), 40);
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// Unset: 5 in a normal session, 24 in acpx mode. An explicit value wins in both. 0 is raised to 1.
+    #[test]
+    fn subagent_preview_rows_default_depends_on_acpx_mode() {
+        std::thread::spawn(|| {
+            set_subagent_preview_rows_setting(None);
+            assert_eq!(load_subagent_preview_rows(), 5, "unset, normal session");
+            set_subagent_preview_acpx_mode(true);
+            assert_eq!(load_subagent_preview_rows(), 24, "unset, acpx mode");
+            set_subagent_preview_rows(8);
+            assert_eq!(load_subagent_preview_rows(), 8, "explicit, acpx mode");
+            set_subagent_preview_acpx_mode(false);
+            assert_eq!(load_subagent_preview_rows(), 8, "explicit, normal session");
+            set_subagent_preview_rows(0);
+            assert_eq!(load_subagent_preview_rows(), 1, "0 is raised to 1");
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// `set_subagent_preview_rows` raises 0 to the minimum of 1.
+    #[test]
+    fn set_subagent_preview_rows_clamps_to_minimum() {
+        std::thread::spawn(|| {
+            set_subagent_preview_rows(0);
+            assert_eq!(load_subagent_preview_rows(), SUBAGENT_PREVIEW_ROWS_MIN);
         })
         .join()
         .unwrap();

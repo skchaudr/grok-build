@@ -18,6 +18,37 @@ pub(super) fn sync_activity_label(
     }
 }
 
+/// Feed one child session update into the live preview of the child's block in its parent transcript.
+pub(super) fn feed_subagent_preview(parent: &mut AgentView, child_key: &str, update: &acp::SessionUpdate) {
+    let Some(info) = parent.subagent_sessions.get(child_key) else {
+        return;
+    };
+    let Some(eid) = info.attempt.scrollback_entry_id else {
+        return;
+    };
+    let mut changed = false;
+    if let Some(entry) = parent.scrollback.get_by_id_mut(eid)
+        && let RenderBlock::Subagent(ref mut sb) = entry.block
+    {
+        let before = sb.preview.revision();
+        let was_empty = sb.preview.is_empty();
+        sb.preview.ingest(update);
+        if sb.preview.revision() != before {
+            // The block became foldable with its first preview row: it starts unfolded, unless the user pinned a fold.
+            if was_empty && !sb.preview.is_empty() && !entry.display_mode_pinned {
+                entry.display_mode = crate::scrollback::DisplayMode::Expanded;
+            }
+            entry.invalidate_cache();
+            changed = true;
+        }
+    }
+    // The block grows with its preview and leaves the "N subagents" fold once it has one: re-measure and re-fold.
+    if changed {
+        parent.scrollback.mark_structurally_dirty(eid);
+        parent.scrollback.mark_height_dirty(eid);
+    }
+}
+
 /// Fan a subagent's computed activity label out to both places that show it, so the two can't drift.
 /// Those are the collapsed scrollback block and the [`SubagentInfo`] backing the tasks pane and dashboard rows.
 /// Once `finished` is set, only a clear (`None`) lands: buffered updates from the child race `SubagentFinished` and must not re-stamp the label.

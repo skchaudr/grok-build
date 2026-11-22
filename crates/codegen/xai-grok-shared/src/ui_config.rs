@@ -255,6 +255,10 @@ pub struct UiConfig {
     /// Mouse-wheel and trackpad scroll speed multiplier (1 to 100).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll_speed: Option<u8>,
+    /// Rows of a subagent's live transcript shown inside its block (minimum 1; 0 is raised to 1).
+    /// `None` means 5 in a normal session and 24 in acpx mode; a set value is used in both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_preview_rows: Option<u8>,
     /// Force scroll input classification (`auto` | `wheel` | `trackpad`).
     /// Written by the pager's settings modal; unset defaults to `auto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -570,6 +574,7 @@ impl Default for UiConfig {
             auto_dark_theme: None,
             auto_light_theme: None,
             scroll_speed: None,
+            subagent_preview_rows: None,
             scroll_mode: None,
             invert_scroll: None,
             scroll_lines: None,

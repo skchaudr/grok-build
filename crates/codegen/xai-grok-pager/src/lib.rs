@@ -10,6 +10,7 @@
 //! A clean-room implementation built on the v3 pager rendering engine.
 #![deny(clippy::indexing_slicing)]
 pub mod acp;
+pub mod acpx;
 pub mod actions;
 pub mod agent_runtime;
 pub mod app;
@@ -46,6 +47,7 @@ pub mod obf;
 pub mod pi_model_config;
 pub mod pi_resource_config;
 pub mod pi_resource_policy;
+pub mod piw;
 pub mod plugin_cmd;
 pub mod pty_wrap;
 pub mod recent_dirs;

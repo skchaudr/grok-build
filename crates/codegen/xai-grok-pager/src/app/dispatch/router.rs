@@ -1783,6 +1783,42 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             });
             vec![Effect::ScanTraces { agent_id: id }]
         }
+        Action::OpenAcpx { run } => {
+            with_active_agent(app, |agent| {
+                let mut state = crate::views::acpx_modal::AcpxModalState::open();
+                if let Some(run) = run.as_deref() {
+                    let given = std::path::Path::new(run);
+                    let dir = match crate::acpx::bundle::runs_base() {
+                        Some(base) if !given.is_absolute() => base.join(given),
+                        _ => given.to_path_buf(),
+                    };
+                    state.open_run(&dir);
+                }
+                agent.active_modal = Some(crate::views::modal::ActiveModal::Acpx { state: Box::new(state) });
+            });
+            vec![]
+        }
+        Action::AcpxRun { flow_file, input_json } => {
+            super::acpx_run::start(app, flow_file, input_json);
+            vec![]
+        }
+        Action::AcpxCancel => {
+            super::acpx_run::cancel(app);
+            vec![]
+        }
+        Action::AcpxReplay(request) => {
+            super::standalone_traces::open_acpx(app, *request);
+            vec![]
+        }
+        Action::AcpxCopy { text } => {
+            let delivery = crate::clipboard::copy_text_or_file(&text);
+            with_active_agent(app, |agent| {
+                if let Some(crate::views::modal::ActiveModal::Acpx { state }) = agent.active_modal.as_mut() {
+                    state.set_notice(format!("copy: {delivery:?}"));
+                }
+            });
+            vec![]
+        }
         Action::TracesOpenClaude(row) => {
             super::standalone_traces::open_claude(app, *row);
             vec![]

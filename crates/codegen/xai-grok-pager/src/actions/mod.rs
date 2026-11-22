@@ -125,6 +125,7 @@ pub enum ActionId {
 
     // Settings
     OpenSettings,
+    OpenAcpx,
 
     // Agent Dashboard
     OpenDashboard,
@@ -953,6 +954,21 @@ mod tests {
         assert_eq!(
             registry.lookup(&f8, When::Always),
             Some(ActionId::VoiceToggle)
+        );
+    }
+
+    #[test]
+    fn f4_opens_acpx_and_f2_still_opens_settings() {
+        let registry = ActionRegistry::defaults();
+        let f4 = KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE);
+        let f2 = KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE);
+        assert_eq!(
+            registry.lookup(&f4, When::AgentScreen),
+            Some(ActionId::OpenAcpx)
+        );
+        assert_eq!(
+            registry.lookup(&f2, When::AgentScreen),
+            Some(ActionId::OpenSettings)
         );
     }
 

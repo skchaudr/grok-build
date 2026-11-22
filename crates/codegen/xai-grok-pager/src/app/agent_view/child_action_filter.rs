@@ -102,6 +102,7 @@ impl ViewSurface {
                     | ActionId::CommandPalette
                     | ActionId::OpenSessions
                     | ActionId::OpenSettings
+                    | ActionId::OpenAcpx
                     | ActionId::OpenExtensions
                     | ActionId::ToggleYolo
                     | ActionId::SendToBackground

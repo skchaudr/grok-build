@@ -184,6 +184,10 @@ impl AgentView {
                 self.side_panel.set_note(note);
             }
             // The /traces modal on that session's trajectory: read-only, no model turn, no harness resume.
+            Event::Open(id) if id.starts_with(crate::views::side_panel::flows::OPEN_PREFIX) => {
+                let run = id.trim_start_matches(crate::views::side_panel::flows::OPEN_PREFIX).to_string();
+                return InputOutcome::Action(Action::OpenAcpx { run: Some(run) });
+            }
             Event::Open(id) => {
                 let index = xai_grok_traces::TraceIndex::open(&xai_grok_traces::default_db_path())
                     .map_err(|e| tracing::warn!(%e, "side panel: traces index open failed"))

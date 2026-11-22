@@ -483,6 +483,8 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         .expect("find_session_match returned an existing AgentId");
                     let child_key: &str = notif.request.session_id.0.as_ref();
                     record_child_usage_update(parent, child_key, &notif.request.update);
+                    // The child view consumes the update; keep a copy for the step block's live preview.
+                    let preview_update = notif.request.update.clone();
                     let activity_label = {
                         let child_view = parent
                             .descendant_view_for_live_update_mut(child_key)
@@ -574,6 +576,7 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
 
                     if let Some(owner) = parent.descendant_parent_view_mut(child_key) {
                         sync_subagent_activity(owner, child_key, activity_label);
+                        subagent_activity::feed_subagent_preview(owner, child_key, &preview_update);
                     }
 
                     is_active
@@ -781,6 +784,11 @@ fn handle_claude_sdk_message(notif: &acp::ExtNotification, app: &mut AppView) ->
     let Some((_, _, agent)) = routing::resolve_notif_agent(app, &acp::SessionId::new(session_id)) else {
         return false;
     };
+    if running != agent.claude_sdk_running {
+        // The SDK went idle or started another cycle (a follow-up after a background task): what it says next is a new assistant message,
+        // and the adapter marks no other boundary. Without this the reply is glued onto the text before it.
+        agent.session.tracker.close_open_streams(&mut agent.scrollback);
+    }
     agent.claude_sdk_running = running;
     agent.reconcile_claude_working();
     true
@@ -1007,9 +1015,7 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
             return false;
         }
     }
-    agent
-        .scrollback
-        .push_block(RenderBlock::interjection_prompt(text));
+    agent.push_interjection_row(text);
     is_active
 }
 fn handle_ext_method(ext: xai_acp_lib::AcpArgs<acp::ExtRequest>, app: &mut AppView) -> bool {

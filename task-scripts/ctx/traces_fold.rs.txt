@@ -1,0 +1,172 @@
+// ---- crates/codegen/xai-grok-pager/src/views/traces_fold.rs (lines 1,170)
+//! Pure fold model for `/traces` tree views.
+//!
+//! A `FoldTree` is a preorder list of nodes; a `FoldState` records which
+//! foldable nodes are collapsed, keyed by a stable `K` so state survives
+//! live requeries. Leaves are never stored as collapsed.
+
+use std::collections::HashSet;
+use std::hash::Hash;
+use std::ops::Range;
+
+/// One node in preorder. `parent` is the index of its parent; `depth` is 0 for roots.
+#[derive(Clone, Debug)]
+pub(crate) struct FoldNode<K> {
+    pub key: K,
+    pub parent: Option<usize>,
+    pub depth: usize,
+}
+
+/// Preorder node list. Invariant: `parent < child index` and `depth == parent.depth + 1`.
+#[derive(Clone, Debug)]
+pub(crate) struct FoldTree<K> {
+    pub nodes: Vec<FoldNode<K>>,
+}
+
+/// Collapsed-node set keyed by stable identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FoldState<K: Eq + Hash + Clone> {
+    collapsed: HashSet<K>,
+}
+
+impl<K: Eq + Hash + Clone> FoldTree<K> {
+    /// True when node `i` has at least one child (the node directly after it).
+    pub fn has_children(&self, i: usize) -> bool {
+        self.nodes.get(i + 1).is_some_and(|n| n.parent == Some(i))
+    }
+
+    /// Index range of node `i` and all its descendants.
+    pub fn subtree(&self, i: usize) -> Range<usize> {
+        let depth = self.nodes.get(i).map_or(0, |n| n.depth);
+        let end = self
+            .nodes
+            .iter()
+            .enumerate()
+            .skip(i + 1)
+            .find(|(_, n)| n.depth <= depth)
+            .map_or(self.nodes.len(), |(j, _)| j);
+        i..end
+    }
+
+    /// Indices of nodes to render, in order. Descendants of collapsed nodes are skipped.
+    pub fn visible(&self, st: &FoldState<K>) -> Vec<usize> {
+        let mut out = Vec::with_capacity(self.nodes.len());
+        let mut i = 0;
+        while let Some(node) = self.nodes.get(i) {
+            out.push(i);
+            i = if self.has_children(i) && st.is_collapsed(&node.key) {
+                self.subtree(i).end
+            } else {
+                i + 1
+            };
+        }
+        out
+    }
+}
+
+impl<K: Eq + Hash + Clone> Default for FoldState<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K: Eq + Hash + Clone> FoldState<K> {
+    /// Empty state: everything expanded.
+    pub fn new() -> Self {
+        Self {
+            collapsed: HashSet::new(),
+        }
+    }
+
+    /// State with exactly the given keys collapsed.
+    pub fn with_collapsed<I: IntoIterator<Item = K>>(keys: I) -> Self {
+        Self {
+            collapsed: keys.into_iter().collect(),
+        }
+    }
+
+    /// True when `key` is stored as collapsed.
+    pub fn is_collapsed(&self, key: &K) -> bool {
+        self.collapsed.contains(key)
+    }
+
+    /// Flip node `i`'s fold. No-op on leaves.
+    pub fn toggle(&mut self, tree: &FoldTree<K>, i: usize) {
+        if !tree.has_children(i) {
+            return;
+        }
+        let Some(node) = tree.nodes.get(i) else {
+            return;
+        };
+        if !self.collapsed.remove(&node.key) {
+            self.collapsed.insert(node.key.clone());
+        }
+    }
+
+    /// Collapse node `i`. If `i` is a leaf or already collapsed, returns its parent index
+    /// so the caller can move selection there; otherwise returns `None`.
+    pub fn collapse(&mut self, tree: &FoldTree<K>, i: usize) -> Option<usize> {
+        let node = tree.nodes.get(i)?;
+        if !tree.has_children(i) || self.is_collapsed(&node.key) {
+            return node.parent;
+        }
+        self.collapsed.insert(node.key.clone());
+        None
+    }
+
+    /// Expand node `i` only. No-op on leaves.
+    pub fn expand(&mut self, tree: &FoldTree<K>, i: usize) {
+        if let Some(node) = tree.nodes.get(i) {
+            self.collapsed.remove(&node.key);
+        }
+    }
+
+    /// Expand node `i` and every descendant. Nodes outside the subtree are untouched.
+    pub fn expand_subtree(&mut self, tree: &FoldTree<K>, i: usize) {
+        for j in tree.subtree(i) {
+            self.expand(tree, j);
+        }
+    }
+
+    /// Collapse node `i` and every descendant that has children. Nodes outside the subtree are untouched.
+    pub fn collapse_subtree(&mut self, tree: &FoldTree<K>, i: usize) {
+        for j in tree.subtree(i) {
+            if tree.has_children(j) {
+                self.collapse(tree, j);
+            }
+        }
+    }
+
+    /// Smart toggle over the whole tree: if any foldable node is collapsed, expand all;
+    /// otherwise collapse all foldable nodes.
+    pub fn toggle_all(&mut self, tree: &FoldTree<K>) {
+        let any_collapsed = tree
+            .nodes
+            .iter()
+            .enumerate()
+            .any(|(j, n)| tree.has_children(j) && self.is_collapsed(&n.key));
+        if any_collapsed {
+            self.collapsed.clear();
+        } else {
+            for j in 0..tree.nodes.len() {
+                self.collapse(tree, j);
+            }
+        }
+    }
+
+    /// Drop stored keys that no longer appear in `tree`.
+    pub fn retain(&mut self, tree: &FoldTree<K>) {
+        let live: HashSet<&K> = tree.nodes.iter().map(|n| &n.key).collect();
+        self.collapsed.retain(|k| live.contains(k));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a tree from `(key, depth)` pairs in preorder; parents are derived from depth.
+    fn tree(spec: &[(&'static str, usize)]) -> FoldTree<&'static str> {
+        let mut stack: Vec<usize> = Vec::new();
+        let mut nodes = Vec::new();
+
