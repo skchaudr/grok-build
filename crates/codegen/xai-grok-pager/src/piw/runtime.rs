@@ -14,11 +14,6 @@ use crate::acpx::bundle::{self, RunSummary};
 use crate::piw::client::PiwClient;
 use crate::piw::mirror::PiwMirror;
 
-/// The pi-workflows viewer CLI the helper binary runs to start a run
-/// (`pi-workflows start <file> --json`, executed with `node`).
-/// Override with `$GROK_PIWORKFLOWS_CLI`.
-pub const DEFAULT_PIWORKFLOWS_CLI: &str = "/Users/sab-mini/repos/pi-workflows/dist/viewer/cli.js";
-
 /// Where the pager writes its mirrored pi-workflows run folders:
 /// `<grok home>/cache/pi-workflows-mirror`. Read by the flow screens through
 /// the ordinary acpx readers, so nothing but this path is new to them.

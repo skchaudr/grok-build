@@ -521,6 +521,18 @@ impl Projector {
                         self.taken_path(),
                         self.title
                     )
+                } else if status == "cancelled" {
+                    // A cancelled run was stopped on purpose: it is not a
+                    // failure, and the transcript must say cancelled.
+                    let detail = match error.as_deref().filter(|s| !s.is_empty()) {
+                        Some(err) => format!(" ({err})"),
+                        None => String::new(),
+                    };
+                    format!(
+                        "{fence}\n\n{}\n\n✗ **{}** cancelled{detail}\n",
+                        self.taken_path(),
+                        self.title
+                    )
                 } else {
                     let detail = match error.as_deref().filter(|s| !s.is_empty()) {
                         Some(err) if status != "failed" => format!("{status} ({err})"),
@@ -1647,6 +1659,33 @@ mod tests {
                 assert!(text.contains("✗ **Build** failed: step crashed"));
             }
             _ => panic!("expected failed message"),
+        }
+
+        let mut proj = Projector::new("parent-2");
+        proj.on_event(&DriverEvent::RunStarted {
+            run_id: "r2".to_string(),
+            run_dir: PathBuf::from("/tmp/r2"),
+            title: "mixed".to_string(),
+            flow_path: "f.json".to_string(),
+            flow: sample_flow(),
+            at_ms: 1_000,
+        });
+        let cancelled_outs = proj.on_event(&DriverEvent::RunFinished {
+            status: "cancelled".to_string(),
+            error: Some("Workflow run cancelled".to_string()),
+            at_ms: 1_600,
+        });
+        assert_eq!(cancelled_outs.len(), 1);
+        match &cancelled_outs[0] {
+            Out::Update { update, .. } => {
+                let text = chunk_text(update).unwrap_or_default();
+                assert!(
+                    text.contains("✗ **mixed** cancelled (Workflow run cancelled)"),
+                    "text was: {text}"
+                );
+                assert!(!text.contains("failed"), "text was: {text}");
+            }
+            _ => panic!("expected cancelled message"),
         }
     }
 

@@ -182,17 +182,17 @@ fn is_piworkflows_package(dir: &Path) -> bool {
 /// source through tsx when it does not (the choice `startDetached` makes
 /// between the built and the source server entry). Both wait for the
 /// server's ready handshake before exiting, and start nothing when a server
-/// already answers.
+/// One command line the driver runs: a program, its arguments, and the
+/// working directory that lets the package's own tsx resolve (the package
+/// directory), or none to inherit this process's.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerStartCommand {
+pub struct CliCommand {
     pub program: PathBuf,
     pub args: Vec<PathBuf>,
-    /// The working directory: the package, so `--import tsx` resolves the
-    /// package's own tsx.
-    pub cwd: PathBuf,
+    pub cwd: Option<PathBuf>,
 }
 
-impl ServerStartCommand {
+impl CliCommand {
     /// The command as the person would type it, for failure messages.
     pub fn display(&self) -> String {
         let mut text = self.program.display().to_string();
@@ -202,29 +202,111 @@ impl ServerStartCommand {
         }
         text
     }
+
+    /// `pi-workflows server start`.
+    pub fn server_start(&self) -> CliCommand {
+        let mut command = self.clone();
+        command.args.extend(["server", "start"].iter().map(PathBuf::from));
+        command
+    }
+
+    /// `pi-workflows start <workflow> --input <json> --json`.
+    pub fn run_start(&self, workflow: &Path, input_json: &str) -> CliCommand {
+        let mut command = self.clone();
+        command.args.extend([
+            PathBuf::from("start"),
+            workflow.to_path_buf(),
+            PathBuf::from("--input"),
+            PathBuf::from(input_json),
+            PathBuf::from("--json"),
+        ]);
+        command
+    }
 }
 
-pub fn server_start_command(package: &Path) -> ServerStartCommand {
+/// The pi-workflows CLI the driver uses for everything it shells out to:
+/// run starts and server starts always come from the same CLI. With no
+/// `$GROK_PIWORKFLOWS_CLI` override, that is the package Pi's settings
+/// resolve, its own viewer CLI chosen the way the package chooses (built,
+/// or source through tsx when dist is absent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverCli {
+    /// `node <cli>`, the CLI's entry point.
+    pub entry: CliCommand,
+    /// What failure messages name as the package that was tried.
+    pub package: PathBuf,
+}
+
+/// Resolve the CLI the driver uses. `$GROK_PIWORKFLOWS_CLI` is an explicit
+/// override and applies to both the run start and the server start;
+/// without it, the package Pi's settings resolve is used, so the server and
+/// the runs always come from the same package. `Err` carries the settings
+/// path and every candidate tried.
+pub fn driver_cli(agent_dir: &Path) -> std::result::Result<DriverCli, PackageResolution> {
+    let override_cli = std::env::var_os("GROK_PIWORKFLOWS_CLI")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    driver_cli_with_override(agent_dir, override_cli.as_deref())
+}
+
+/// The same with an explicit override, for tests.
+pub fn driver_cli_with_override(
+    agent_dir: &Path,
+    override_cli: Option<&Path>,
+) -> std::result::Result<DriverCli, PackageResolution> {
+    if let Some(cli) = override_cli {
+        return Ok(DriverCli {
+            entry: CliCommand {
+                program: PathBuf::from("node"),
+                args: vec![cli.to_path_buf()],
+                cwd: None,
+            },
+            package: cli.to_path_buf(),
+        });
+    }
+    let package = resolve_piworkflows_package(agent_dir)?;
+    Ok(DriverCli {
+        entry: package_cli_entry(&package),
+        package,
+    })
+}
+
+/// `node <package>/dist/viewer/cli.js` when the build exists, else
+/// `node --import tsx <package>/src/viewer/cli.ts` run from the package
+/// directory so `--import tsx` resolves the package's own tsx — the same
+/// built-vs-source choice the package's own `startDetached` makes.
+fn package_cli_entry(package: &Path) -> CliCommand {
     let built = package.join("dist").join("viewer").join("cli.js");
     if built.is_file() {
-        return ServerStartCommand {
+        return CliCommand {
             program: PathBuf::from("node"),
-            args: vec![built, PathBuf::from("server"), PathBuf::from("start")],
-            cwd: package.to_path_buf(),
+            args: vec![built],
+            cwd: Some(package.to_path_buf()),
         };
     }
-    let source = package.join("src").join("viewer").join("cli.ts");
-    ServerStartCommand {
+    CliCommand {
         program: PathBuf::from("node"),
         args: vec![
             PathBuf::from("--import"),
             PathBuf::from("tsx"),
-            source,
-            PathBuf::from("server"),
-            PathBuf::from("start"),
+            package.join("src").join("viewer").join("cli.ts"),
         ],
-        cwd: package.to_path_buf(),
+        cwd: Some(package.to_path_buf()),
     }
+}
+
+/// The failure text when no pi-workflows CLI could be resolved: the
+/// settings path and every candidate tried, and the way out.
+pub fn cli_not_found_text(resolution: &PackageResolution, hand_command: &str) -> String {
+    let tried = if resolution.tried.is_empty() {
+        "no pi-workflows entry is in it".to_string()
+    } else {
+        format!("tried {}", resolution.tried.join(", "))
+    };
+    format!(
+        "No pi-workflows package found in Pi's packages list (`{}`); {tried}. {hand_command}",
+        resolution.settings_path.display()
+    )
 }
 
 /// Run the package's own start command and wait for it. `Ok(())` when the
@@ -233,15 +315,17 @@ pub fn server_start_command(package: &Path) -> ServerStartCommand {
 /// the server's own error text (stderr, or the spawn failure) for the
 /// transcript. One attempt; the retry loop inside the CLI is the package's
 /// own bounded one, not a second one here.
-pub async fn run_server_start(command: &ServerStartCommand) -> std::result::Result<(), String> {
-    let mut process = match tokio::process::Command::new(&command.program)
+pub async fn run_server_start(command: &CliCommand) -> std::result::Result<(), String> {
+    let mut process = tokio::process::Command::new(&command.program);
+    process
         .args(&command.args)
-        .current_dir(&command.cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+    if let Some(cwd) = &command.cwd {
+        process.current_dir(cwd);
+    }
+    let mut process = match process.spawn() {
         Ok(process) => process,
         Err(err) => {
             return Err(format!("could not run `{}`: {err}", command.display()));
@@ -424,14 +508,15 @@ mod tests {
         let built = package.join("dist").join("viewer").join("cli.js");
         std::fs::create_dir_all(built.parent().unwrap()).expect("create dist");
         std::fs::write(&built, "// built cli").expect("write cli.js");
-        let command = server_start_command(&package);
+        let agent_dir = dir.path().join("agent");
+        write_settings(&agent_dir, &format!("[{}]", json_string(&package)));
+        let cli = driver_cli_with_override(&agent_dir, None).expect("resolve");
+        let command = cli.entry.server_start();
         assert_eq!(command.program, PathBuf::from("node"));
-        assert_eq!(
-            command.args,
-            vec![built, PathBuf::from("server"), PathBuf::from("start")]
-        );
-        assert_eq!(command.cwd, package);
+        assert_eq!(command.args[0], built);
+        assert_eq!(command.cwd, Some(package.clone()));
         assert!(command.display().ends_with("cli.js server start"));
+        assert_eq!(cli.package, package);
     }
 
     #[test]
@@ -441,21 +526,107 @@ mod tests {
         let source = package.join("src").join("viewer").join("cli.ts");
         std::fs::create_dir_all(source.parent().unwrap()).expect("create src");
         std::fs::write(&source, "// source cli").expect("write cli.ts");
-        let command = server_start_command(&package);
+        let agent_dir = dir.path().join("agent");
+        write_settings(&agent_dir, &format!("[{}]", json_string(&package)));
+        let cli = driver_cli_with_override(&agent_dir, None).expect("resolve");
+        let command = cli.entry.server_start();
         assert_eq!(command.program, PathBuf::from("node"));
         assert_eq!(
             command.args,
             vec![
                 PathBuf::from("--import"),
                 PathBuf::from("tsx"),
-                source,
+                source.clone(),
                 PathBuf::from("server"),
                 PathBuf::from("start")
             ]
         );
-        assert_eq!(command.cwd, package);
+        assert_eq!(command.cwd, Some(package));
         assert!(command.display().contains("--import tsx"));
         assert!(command.display().ends_with("cli.ts server start"));
+    }
+
+    #[test]
+    fn the_run_start_uses_the_resolved_package() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let package = make_package(&dir.path().join("pi-workflows"));
+        let built = package.join("dist").join("viewer").join("cli.js");
+        std::fs::create_dir_all(built.parent().unwrap()).expect("create dist");
+        std::fs::write(&built, "// built cli").expect("write cli.js");
+        let agent_dir = dir.path().join("agent");
+        write_settings(&agent_dir, &format!("[{}]", json_string(&package)));
+        let cli = driver_cli_with_override(&agent_dir, None).expect("resolve");
+        let workflow = dir.path().join("mixed.workflow.ts");
+        let input = "{\"who\":\"grok\"}";
+        let command = cli.entry.run_start(&workflow, input);
+        assert_eq!(command.program, PathBuf::from("node"));
+        assert_eq!(
+            command.args,
+            vec![
+                built,
+                PathBuf::from("start"),
+                workflow,
+                PathBuf::from("--input"),
+                PathBuf::from(input),
+                PathBuf::from("--json")
+            ]
+        );
+        assert_eq!(command.cwd, Some(package));
+    }
+
+    #[test]
+    fn the_override_wins_for_both_the_run_start_and_the_server_start() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A real package in the settings, so a resolution could also
+        // happen: the override must win anyway.
+        let package = make_package(&dir.path().join("pi-workflows"));
+        let agent_dir = dir.path().join("agent");
+        write_settings(&agent_dir, &format!("[{}]", json_string(&package)));
+        let override_cli = dir.path().join("elsewhere").join("cli.js");
+        let cli = driver_cli_with_override(&agent_dir, Some(&override_cli)).expect("resolve");
+        assert_eq!(cli.package, override_cli);
+        assert_eq!(cli.entry.cwd, None, "an explicit CLI needs no cwd");
+
+        let start = cli.entry.run_start(&dir.path().join("mixed.workflow.ts"), "{}");
+        assert_eq!(start.args[0], override_cli);
+        assert!(start.display().contains("elsewhere/cli.js start"));
+
+        let server = cli.entry.server_start();
+        assert_eq!(server.args[0], override_cli);
+        assert!(server.display().ends_with("elsewhere/cli.js server start"));
+    }
+
+    #[test]
+    fn neither_found_gives_the_settings_path_and_candidates_tried() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let agent_dir = dir.path().join("agent");
+        let not_piw = dir.path().join("not-piw");
+        std::fs::create_dir_all(&not_piw).expect("create dir");
+        std::fs::write(not_piw.join("package.json"), "{\"name\":\"other\"}").expect("write");
+        write_settings(
+            &agent_dir,
+            &format!("[{},\"npm:@osolmaz/pi-workflows\"]", json_string(&not_piw)),
+        );
+        let Err(resolution) = driver_cli_with_override(&agent_dir, None) else {
+            panic!("resolution must fail");
+        };
+        let npm_tried = agent_dir
+            .join("npm")
+            .join("node_modules")
+            .join("@osolmaz")
+            .join("pi-workflows");
+        let hand = "Start it by hand: `pi-workflows server start`.";
+        let text = cli_not_found_text(&resolution, hand);
+        assert!(
+            text.contains(&agent_dir.join("settings.json").display().to_string()),
+            "text was: {text}"
+        );
+        assert!(text.contains(&not_piw.display().to_string()), "text was: {text}");
+        assert!(
+            text.contains(&npm_tried.display().to_string()),
+            "text was: {text}"
+        );
+        assert!(text.contains(hand), "text was: {text}");
     }
 
     #[test]
@@ -463,10 +634,10 @@ mod tests {
         // A command whose program cannot exist: the spawn failure itself is
         // the error text, and it names the command.
         let dir = tempfile::tempdir().expect("tempdir");
-        let command = ServerStartCommand {
+        let command = CliCommand {
             program: dir.path().join("no-such-node"),
             args: vec![PathBuf::from("server"), PathBuf::from("start")],
-            cwd: dir.path().to_path_buf(),
+            cwd: Some(dir.path().to_path_buf()),
         };
         let err = tokio::runtime::Builder::new_current_thread()
             .enable_all()

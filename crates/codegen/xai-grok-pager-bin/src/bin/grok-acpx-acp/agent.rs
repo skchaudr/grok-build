@@ -12,9 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 use xai_acp_lib::{AcpClientMessage, acp_send};
 use xai_grok_pager::piw::client::PiwClient;
-use crate::piw_server;
 use xai_grok_pager::piw::gate::{self as piw_gate, PiwGate};
 use xai_grok_pager::piw::runtime;
+use crate::piw_server;
 
 /// One shared workflow-server client for this process, connected lazily to the
 /// machine's default socket. `None` while there is no server: everything acpx
@@ -29,15 +29,23 @@ fn is_workflow_file(file: &str) -> bool {
     file.to_ascii_lowercase().ends_with(".workflow.ts")
 }
 
-/// The pi-workflows viewer CLI run to start a workflow (`pi-workflows start
-/// <file> --json`, with `node`). Overridable with `$GROK_PIWORKFLOWS_CLI` for
-/// machines where the package lives elsewhere; the default is the path on
-/// this machine's checkout.
-fn piworkflows_cli_path() -> PathBuf {
-    std::env::var_os("GROK_PIWORKFLOWS_CLI")
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(runtime::DEFAULT_PIWORKFLOWS_CLI))
+/// The pi-workflows CLI the driver shells out to, for starting runs and
+/// the server: `$GROK_PIWORKFLOWS_CLI` when set (an explicit override for
+/// both), else the package Pi's settings resolve (`piw_server::driver_cli`),
+/// so the server and the runs always come from the same package.
+fn driver_piw_cli() -> std::result::Result<piw_server::DriverCli, String> {
+    let Some(agent_dir) = piw_server::pi_agent_dir() else {
+        return Err(
+            "Pi's agent directory ($HOME/.pi/agent) could not be found; the pi-workflows CLI cannot be found. Set $GROK_PIWORKFLOWS_CLI to a pi-workflows CLI."
+                .to_string(),
+        );
+    };
+    piw_server::driver_cli(&agent_dir).map_err(|resolution| {
+        piw_server::cli_not_found_text(
+            &resolution,
+            "Set $GROK_PIWORKFLOWS_CLI to a pi-workflows CLI.",
+        )
+    })
 }
 
 pub struct AgentConfig {
@@ -549,35 +557,21 @@ impl AcpxAgent {
         }
         self.send_parent_text(session_id, "Starting the workflow server…", timing)
             .await;
-        let Some(agent_dir) = piw_server::pi_agent_dir() else {
-            return Err(
-                "Pi's agent directory ($HOME/.pi/agent) could not be found; the workflow server cannot be started automatically. Start it by hand: `pi-workflows server start`."
-                    .to_string(),
-            );
-        };
-        match piw_server::resolve_piworkflows_package(&agent_dir) {
-            Ok(package) => {
-                let command = piw_server::server_start_command(&package);
+        // The same CLI the run start uses: `$GROK_PIWORKFLOWS_CLI` when set,
+        // else the package Pi's settings resolve.
+        match driver_piw_cli() {
+            Ok(cli) => {
+                let command = cli.entry.server_start();
                 match piw_server::run_server_start(&command).await {
                     Ok(()) => Ok(()),
                     Err(detail) => Err(format!(
                         "Starting the workflow server failed (`{}`): {detail}. Start it by hand: `{}`.",
-                        package.display(),
+                        cli.package.display(),
                         command.display()
                     )),
                 }
             }
-            Err(resolution) => {
-                let tried = if resolution.tried.is_empty() {
-                    "no pi-workflows entry is in it".to_string()
-                } else {
-                    format!("tried {}", resolution.tried.join(", "))
-                };
-                Err(format!(
-                    "No pi-workflows package found in Pi's packages list (`{}`); {tried}. Start the workflow server by hand: `pi-workflows server start`.",
-                    resolution.settings_path.display()
-                ))
-            }
+            Err(message) => Err(message),
         }
     }
 
@@ -982,8 +976,10 @@ impl AcpxAgent {
         }
     }
 
-    /// `pi-workflows start <file> --json`, run with `node`; returns
-    /// (run id, server session id) from the JSON line it prints.
+    /// `pi-workflows start <file> --json`, run with the same CLI the server
+    /// start uses (the `$GROK_PIWORKFLOWS_CLI` override, else the package Pi's
+    /// settings resolve); returns (run id, server session id) from the JSON
+    /// line it prints.
     async fn piw_start_run(
         &self,
         cwd: &Path,
@@ -991,23 +987,19 @@ impl AcpxAgent {
         input: &Value,
     ) -> std::result::Result<(String, String), String> {
         let input_json = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
-        let cli = piworkflows_cli_path();
-        if !cli.is_file() {
-            return Err(format!(
-                "the pi-workflows CLI was not found at `{}`; set $GROK_PIWORKFLOWS_CLI to its path",
-                cli.display()
-            ));
-        }
+        let cli = driver_piw_cli()?;
+        let command = cli.entry.run_start(workflow, &input_json);
+        let mut process = tokio::process::Command::new(&command.program);
+        process.args(&command.args);
+        // An explicit override keeps the session's working directory (the
+        // workflow path is absolute); the package's own CLI runs from the
+        // package directory so its source entry resolves tsx.
+        process.current_dir(command.cwd.as_deref().unwrap_or(cwd));
         let output = match tokio::time::timeout(
             Duration::from_secs(120),
-            tokio::process::Command::new("node")
-                .arg(&cli)
-                .arg("start")
-                .arg(workflow)
-                .arg("--input")
-                .arg(&input_json)
-                .arg("--json")
-                .current_dir(cwd)
+            process
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
                 .output(),
         )
         .await
@@ -1019,8 +1011,8 @@ impl AcpxAgent {
             Ok(output) => output,
             Err(err) => {
                 return Err(format!(
-                    "running `node {} start` failed: {err}",
-                    cli.display()
+                    "running `{}` failed: {err}",
+                    command.display()
                 ))
             }
         };

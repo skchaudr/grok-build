@@ -84,6 +84,22 @@ fn open_pi_extension_question(
     rx
 }
 
+/// A question an agent driver asked on its own running turn, such as an
+/// acpx gate: answered over ACP, but not a local Pi dialog.
+fn open_driver_question(
+    agent: &mut AgentView,
+) -> tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<acp::ExtResponse>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    agent.question_view = Some(QuestionViewState::with_response_tx(
+        "gate-run-1-attempt-0".into(),
+        vec![question("Which?")],
+        StashedPrompt::default(),
+        Some(tx),
+        AskUserQuestionMode::Default,
+    ));
+    rx
+}
+
 fn cancelled_outcome(
     rx: &mut tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<acp::ExtResponse>>,
 ) -> serde_json::Value {
@@ -487,6 +503,69 @@ fn pi_extension_cancel_keys_work_from_input_mode() {
         );
         assert_eq!(cancelled_outcome(&mut rx)["outcome"], "cancelled");
     }
+}
+
+#[test]
+fn ctrl_c_on_a_running_turns_driver_question_withdraws_the_turn() {
+    let mut agent = make_agent();
+    let mut rx = open_driver_question(&mut agent);
+    agent.session.state = crate::app::agent::AgentState::TurnRunning;
+
+    let outcome = agent.handle_question_key_for_test(&KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    ));
+
+    assert!(
+        matches!(
+            outcome,
+            crate::app::agent_view::InputOutcome::Action(crate::app::actions::Action::CancelTurn)
+        ),
+        "Ctrl+C on a driver question of a running turn must withdraw the turn, got {outcome:?}"
+    );
+    assert!(
+        agent.question_view.is_some(),
+        "the cancel path, not the key handler, must take the card"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "the question must not be answered locally; the turn cancel answers it"
+    );
+}
+
+#[test]
+fn ctrl_c_on_a_driver_question_without_a_running_turn_cancels_the_card() {
+    let mut agent = make_agent();
+    let mut rx = open_driver_question(&mut agent);
+
+    let _ = agent.handle_question_key_for_test(&KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    ));
+
+    assert!(
+        agent.question_view.is_none(),
+        "with no turn to withdraw, Ctrl+C keeps the plain cancel"
+    );
+    assert_eq!(cancelled_outcome(&mut rx)["outcome"], "cancelled");
+}
+
+#[test]
+fn ctrl_c_on_a_pi_extension_dialog_keeps_the_pi_cancel_contract() {
+    let mut agent = make_agent();
+    let mut rx = open_pi_extension_question(&mut agent);
+    agent.session.state = crate::app::agent::AgentState::TurnRunning;
+
+    let _ = agent.handle_question_key_for_test(&KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    ));
+
+    assert!(
+        agent.question_view.is_none(),
+        "a local Pi dialog keeps tui.select.cancel even while a turn runs"
+    );
+    assert_eq!(cancelled_outcome(&mut rx)["outcome"], "cancelled");
 }
 
 #[test]

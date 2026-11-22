@@ -409,7 +409,7 @@ impl AgentView {
                     return self.dismiss_question_view();
                 }
                 if key!('c', CONTROL).matches(key) {
-                    return self.submit_question_answers(true);
+                    return self.question_ctrl_c();
                 }
                 if key!('f', CONTROL).matches(key) {
                     qv.fullscreen = !qv.fullscreen;
@@ -1039,6 +1039,25 @@ impl AgentView {
             .map(|s| s.as_str())
             .unwrap_or("");
         self.prompt.set_text_preserving(new_text);
+    }
+    /// Ctrl+C on an open question. A Pi extension dialog keeps Pi's
+    /// `tui.select.cancel` convention (Esc and Ctrl+C both cancel the dialog),
+    /// and so does a driver question with no turn to withdraw. But a driver's
+    /// question that belongs to a running turn (an acpx gate, an agent ask)
+    /// must withdraw the turn, not just the card: the driver cancels what the
+    /// turn is doing — a withdrawn gate cancels the workflow run — instead of
+    /// parking the run behind a card the person believes they cancelled.
+    fn question_ctrl_c(&mut self) -> InputOutcome {
+        let from_running_turn = self
+            .question_view
+            .as_ref()
+            .is_some_and(|qv| qv.response_tx.is_some() && !qv.is_pi_extension_ui())
+            && self.stoppable_activity_running();
+        if from_running_turn {
+            self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::CtrlC);
+            return InputOutcome::Action(Action::CancelTurn);
+        }
+        self.submit_question_answers(true)
     }
     /// Dismiss (hide) the question view without submitting answers.
     /// Restores the original prompt text that was stashed when the question view opened, so typed "additional context" doesn't leak into the main prompt. Also clears any stashed (tab-hidden) question view.
