@@ -15,6 +15,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::acpx::bundle::{self, Run, RunSummary};
 use crate::acpx::sessions::{self, SessionSummary};
+use crate::piw::gate::{self as piw_gate, GateAnswer as PiwGateAnswer, GateAnswerer};
+use crate::piw::mirror;
+use crate::piw::runtime;
 use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
 use crate::views::modal_window::{
@@ -79,6 +82,11 @@ pub struct AcpxModalState {
     extras: HashMap<String, (i64, RowExtra)>,
     /// Gate answers per run id for runs beyond `EXTRAS_LIMIT`.
     answers: HashMap<String, Option<GateAnswer>>,
+    /// Answers being sent to pi-workflows gates, polled on the one-second tick.
+    answerers: Vec<GateAnswerer>,
+    /// The mirrored run whose folder the run view is open on, so closing the
+    /// view can release it.
+    open_mirror_run: Option<String>,
     /// Where the detail panel was last drawn, for the mouse wheel.
     detail_rect: Option<Rect>,
 }
@@ -104,6 +112,8 @@ impl AcpxModalState {
             preview: None,
             extras: HashMap::new(),
             answers: HashMap::new(),
+            answerers: Vec::new(),
+            open_mirror_run: None,
             detail_rect: None,
         };
         state.rescan_runs();
@@ -112,9 +122,11 @@ impl AcpxModalState {
     }
 
     pub fn open_run(&mut self, dir: &Path) -> bool {
+        self.release_open_mirror_run();
         match bundle::load_run(dir) {
             Ok(run) => {
                 let run_id = run.summary.run_id.clone();
+                self.watch_open_mirror_run(dir, &run_id);
                 let mut view = RunViewState::new(run);
                 view.set_answered(self.ledger.answered_choice(&run_id).map(str::to_string));
                 view.set_settings(bundle::node_settings(dir), bundle::step_settings(dir));
@@ -140,19 +152,25 @@ impl AcpxModalState {
         match self.mode {
             // Runs are started outside the pager, so the list is always re-read.
             Mode::Ledger => true,
-            Mode::Run | Mode::Step => self
-                .run_view
-                .as_ref()
-                .is_some_and(|rv| rv.run().summary.status.is_live()),
+            // A gate answer in flight must keep ticking even when the parked
+            // run itself shows nothing new.
+            Mode::Run | Mode::Step => {
+                !self.answerers.is_empty()
+                    || self
+                        .run_view
+                        .as_ref()
+                        .is_some_and(|rv| rv.run().summary.status.is_live())
+            }
         }
     }
 
     pub fn poll(&mut self) -> bool {
+        let answerers_changed = self.poll_answerers();
         match self.mode {
-            Mode::Ledger => self.rescan_runs(),
+            Mode::Ledger => self.rescan_runs() | answerers_changed,
             Mode::Run | Mode::Step => {
                 let Some(rv) = self.run_view.as_mut() else {
-                    return false;
+                    return answerers_changed;
                 };
                 if bundle::refresh(rv.run_mut()) {
                     let dir = rv.run().summary.dir.clone();
@@ -160,7 +178,7 @@ impl AcpxModalState {
                     rv.sync();
                     true
                 } else {
-                    false
+                    answerers_changed
                 }
             }
         }
@@ -270,11 +288,7 @@ impl AcpxModalState {
     }
 
     fn rescan_runs(&mut self) -> bool {
-        let runs = self
-            .runs_base
-            .as_deref()
-            .map(bundle::list_runs)
-            .unwrap_or_default();
+        let runs = runtime::list_runs_with_mirror(self.runs_base.as_deref());
         let changed = runs != self.runs_snapshot;
         self.runs_snapshot = runs.clone();
         self.load_extras(&runs);
@@ -358,6 +372,114 @@ impl AcpxModalState {
         }
     }
 
+    /// A mirrored run was opened: keep mirroring it in full.
+    fn watch_open_mirror_run(&mut self, dir: &Path, bundle_run_id: &str) {
+        self.open_mirror_run = None;
+        let Some(root) = runtime::mirror().map(|m| m.root().to_path_buf()) else {
+            return;
+        };
+        if !mirror::is_mirror_dir(&root, dir) {
+            return;
+        }
+        let run_id = mirror::run_id_of_folder(dir).unwrap_or_else(|| bundle_run_id.to_string());
+        if let Some(m) = runtime::mirror() {
+            m.want_run(&run_id);
+        }
+        self.open_mirror_run = Some(run_id);
+    }
+
+    /// The run view left its run (back, another run opened, modal closed): a
+    /// finished mirror run stops being watched.
+    pub fn release_open_mirror_run(&mut self) {
+        if let Some(run_id) = self.open_mirror_run.take() {
+            if let Some(m) = runtime::mirror() {
+                m.release_run(&run_id);
+            }
+        }
+    }
+
+    /// `/acpx cancel` with no flow of ours running: cancel the mirrored run
+    /// the run view is open on, through the server.
+    pub fn cancel_open_mirror_run(&mut self) -> bool {
+        let Some(rv) = self.run_view.as_ref() else {
+            return false;
+        };
+        let dir = rv.run().summary.dir.clone();
+        if !rv.run().summary.status.is_live() {
+            return false;
+        }
+        let Some(m) = runtime::mirror() else {
+            return false;
+        };
+        if !mirror::is_mirror_dir(m.root(), &dir) {
+            return false;
+        }
+        let Some(run_id) = mirror::run_id_of_folder(&dir) else {
+            return false;
+        };
+        let request = m
+            .client()
+            .send("run.cancel", Some(&run_id), None, serde_json::json!({}));
+        let _ = request;
+        self.notice = Some(format!("{run_id}: cancel sent"));
+        true
+    }
+
+    /// Drive every in-flight gate answer one step on the tick. True when one
+    /// finished or made progress worth showing.
+    fn poll_answerers(&mut self) -> bool {
+        let mut changed = false;
+        let mut any_done = false;
+        for answerer in &mut self.answerers {
+            match answerer.poll() {
+                piw_gate::AnswerProgress::Pending => {}
+                piw_gate::AnswerProgress::Accepted => {
+                    self.notice = Some("answer accepted; the run continues".to_string());
+                    any_done = true;
+                    changed = true;
+                }
+                piw_gate::AnswerProgress::Refused(message) => {
+                    self.notice = Some(message);
+                    any_done = true;
+                    changed = true;
+                }
+            }
+        }
+        if any_done {
+            self.answerers.clear();
+        }
+        changed
+    }
+
+    /// A chosen gate label whose "flow file" is a pi-workflows answer target
+    /// (`piw-answer://<run>/<choice>`): answer it in place instead of starting
+    /// a flow. The answer itself is a `GateAnswerer` polled on the tick.
+    fn answer_mirror_gate(&mut self, run_id: &str, choice_label: &str, choice_key: &str) -> AcpxOutcome {
+        let Some(m) = runtime::mirror() else {
+            self.notice = Some("no workflow server is running; answer there instead".to_string());
+            return AcpxOutcome::Changed;
+        };
+        let Some(gate) = m.gate(run_id) else {
+            self.notice = Some("this run is not parked on a question the mirror can see".to_string());
+            return AcpxOutcome::Changed;
+        };
+        let Some(index) = gate.choices.iter().position(|c| c.key == choice_key) else {
+            self.notice = Some(format!("choice `{choice_key}` is not one this run waits on"));
+            return AcpxOutcome::Changed;
+        };
+        let answer = PiwGateAnswer::Choice {
+            index,
+            text: None,
+        };
+        self.answerers.push(GateAnswerer::new(
+            std::sync::Arc::clone(m.client()),
+            gate,
+            answer,
+        ));
+        self.notice = Some(format!("{choice_label}: answer sent"));
+        AcpxOutcome::Changed
+    }
+
     fn handle_run_key(&mut self, key: &KeyEvent) -> AcpxOutcome {
         let Some(rv) = self.run_view.as_mut() else {
             self.mode = Mode::Ledger;
@@ -370,6 +492,7 @@ impl AcpxModalState {
                 self.mode = Mode::Ledger;
                 self.run_view = None;
                 self.inspector = None;
+                self.release_open_mirror_run();
                 self.rescan_runs();
                 AcpxOutcome::Changed
             }
@@ -390,6 +513,11 @@ impl AcpxModalState {
                 }
             }
             RunOutcome::Gate { choice, flow_file } => {
+                // A pi-workflows gate answers in place instead of starting a
+                // flow; the target is checked before any relative-path join.
+                if let Some((run_id, choice_key)) = piw_gate::parse_answer_target(&flow_file) {
+                    return self.answer_mirror_gate(&run_id, &choice, &choice_key);
+                }
                 let run = rv.run();
                 // A relative flow file is beside the flow that declared it.
                 let declared = PathBuf::from(&flow_file);
@@ -1320,5 +1448,120 @@ mod tests {
             state.ledger.answered_choice("waiting-run"),
             Some("ship")
         );
+    }
+}
+
+#[cfg(test)]
+mod gate_answer_target_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// A waiting run whose gate choice carries a pi-workflows answer target as
+    /// its "flow file".
+    fn write_piw_gate_fixture() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runs_base = tmp.path().join("runs");
+        let run_dir = runs_base.join("run-001");
+        let proj = run_dir.join("projections");
+        fs::create_dir_all(&proj).expect("create projections");
+        fs::write(
+            proj.join("live.json"),
+            r#"{
+                "runId": "run-001",
+                "flowName": "piw-demo",
+                "runTitle": "mixed demo",
+                "status": "waiting",
+                "startedAt": "2025-03-01T10:00:00Z",
+                "updatedAt": "2025-03-01T10:01:00Z",
+                "currentNode": "review",
+                "waitingOn": "review"
+            }"#,
+        )
+        .expect("write live.json");
+        fs::write(
+            run_dir.join("flow.json"),
+            r#"{
+                "name": "piw-demo",
+                "startAt": "plan",
+                "nodes": {
+                    "plan": { "nodeType": "acp", "summary": "Draft plan" },
+                    "review": { "nodeType": "checkpoint", "summary": "Decide" }
+                },
+                "edges": [ { "from": "plan", "to": "review" } ]
+            }"#,
+        )
+        .expect("write flow.json");
+        fs::write(
+            proj.join("steps.json"),
+            r#"[
+                {
+                    "attemptId": "review#1",
+                    "nodeId": "review",
+                    "nodeType": "acp",
+                    "outcome": "ok",
+                    "startedAt": "2025-03-01T10:00:30Z",
+                    "finishedAt": "2025-03-01T10:00:40Z",
+                    "output": {
+                        "next": {
+                            "Approve": "piw-answer://run-001/approve"
+                        }
+                    }
+                }
+            ]"#,
+        )
+        .expect("write steps.json");
+        (tmp, runs_base)
+    }
+
+    #[test]
+    fn answer_target_is_parsed_and_routed_not_launched() {
+        let (_tmp, runs_base) = write_piw_gate_fixture();
+        let run_dir = runs_base.join("run-001");
+
+        // The target on the fixture's choice is a real answer target.
+        assert_eq!(
+            crate::piw::gate::parse_answer_target("piw-answer://run-001/approve"),
+            Some(("run-001".to_string(), "approve".to_string()))
+        );
+
+        let mut state = AcpxModalState::open_at(Some(runs_base), None);
+        assert!(state.open_run(&run_dir), "the mirrored-format folder opens");
+
+        // 1 selects the gate choice, Enter confirms it.
+        assert_eq!(state.handle_key(&key(KeyCode::Char('1'))), AcpxOutcome::Changed);
+        let outcome = state.handle_key(&key(KeyCode::Enter));
+        assert!(
+            !matches!(outcome, AcpxOutcome::RunFlow { .. }),
+            "an answer target must not launch a flow, got {outcome:?}"
+        );
+        assert_eq!(outcome, AcpxOutcome::Changed);
+        // No mirror is running in this test process: the answer is refused
+        // locally with a notice, exactly as with no server present.
+        assert!(
+            state
+                .notice()
+                .is_some_and(|n| n.contains("no workflow server is running")),
+            "unexpected notice: {:?}",
+            state.notice()
+        );
+
+        // Leaving the run is safe with no mirror running.
+        state.release_open_mirror_run();
+        assert!(state.answerers.is_empty());
+    }
+
+    #[test]
+    fn cancel_open_mirror_run_without_mirror_is_a_no_op() {
+        let (_tmp, runs_base) = write_piw_gate_fixture();
+        let run_dir = runs_base.join("run-001");
+        let mut state = AcpxModalState::open_at(Some(runs_base), None);
+        assert!(state.open_run(&run_dir));
+        assert!(!state.cancel_open_mirror_run());
     }
 }

@@ -26,19 +26,23 @@ pub(super) struct Flows {
 impl Flows {
     /// The 1 s tick while this page is showing. True when the rows changed.
     pub(super) fn poll(&mut self, now_ms: i64) -> bool {
-        match bundle::runs_base() {
-            Some(base) => self.poll_at(&base, now_ms),
-            None => {
-                let changed = !self.runs.is_empty() || self.featured.is_some();
-                self.runs.clear();
-                self.featured = None;
-                changed
-            }
+        let runs = crate::piw::runtime::list_runs_with_mirror(bundle::runs_base().as_deref());
+        if runs.is_empty() {
+            let changed = !self.runs.is_empty() || self.featured.is_some();
+            self.runs.clear();
+            self.featured = None;
+            return changed;
         }
+        self.poll_runs(runs, now_ms)
     }
 
-    fn poll_at(&mut self, base: &Path, _now_ms: i64) -> bool {
-        let mut runs = bundle::list_runs(base);
+    /// Single-directory poll, the shape the tests drive directly.
+    #[cfg(test)]
+    fn poll_at(&mut self, base: &Path, now_ms: i64) -> bool {
+        self.poll_runs(bundle::list_runs(base), now_ms)
+    }
+
+    fn poll_runs(&mut self, mut runs: Vec<RunSummary>, _now_ms: i64) -> bool {
         runs.truncate(LIMIT);
 
         let mut changed = self.runs != runs;

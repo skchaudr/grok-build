@@ -54,8 +54,20 @@ pub(crate) fn start(app: &mut AppView, flow_file: PathBuf, input_json: Option<St
 }
 
 pub(crate) fn cancel(app: &mut AppView) {
+    let mut cancelled_flow = false;
     if let Some(running) = super::ctx::get_active_agent_mut(app).and_then(|agent| agent.acpx_run.as_mut()) {
         running.launch.cancel();
+        cancelled_flow = true;
+    }
+    if cancelled_flow {
+        return;
+    }
+    // No flow of ours is running: a mirrored pi-workflows run open in the
+    // /acpx modal can still be cancelled, through the server socket.
+    if let Some(agent) = super::ctx::get_active_agent_mut(app) {
+        if let Some(crate::views::modal::ActiveModal::Acpx { state }) = agent.active_modal.as_mut() {
+            let _ = state.cancel_open_mirror_run();
+        }
     }
 }
 
@@ -65,6 +77,9 @@ pub(crate) fn any_running(app: &AppView) -> bool {
 
 /// The one-second tick: every view's flow, not only the one on screen. True when a card changed.
 pub(crate) fn tick(app: &mut AppView) -> bool {
+    // The screens are about to read runs: pick up a workflow server that has
+    // appeared since the pager started. Cheap when the mirror already runs.
+    let _ = crate::piw::runtime::ensure_mirror_started();
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut dirty = false;
     for agent in app.agents.values_mut() {

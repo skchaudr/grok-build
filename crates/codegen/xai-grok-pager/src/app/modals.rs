@@ -6000,6 +6000,11 @@ fn acpx_outcome(outcome: crate::views::acpx_modal::AcpxOutcome, active_modal: &m
         AcpxOutcome::Unchanged => InputOutcome::Unchanged,
         AcpxOutcome::Changed => InputOutcome::Changed,
         AcpxOutcome::Close => {
+            if let Some(ActiveModal::Acpx { state }) = active_modal.as_mut() {
+                // The modal is dropped next; let the mirror stop watching the
+                // run its view was open on.
+                state.release_open_mirror_run();
+            }
             *active_modal = None;
             InputOutcome::Changed
         }
