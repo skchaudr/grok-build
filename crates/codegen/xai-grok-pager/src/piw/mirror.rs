@@ -82,6 +82,20 @@ pub fn write_run(mirror_root: &Path, input: &MirrorInput<'_>) -> Result<PathBuf>
     write_run_at(mirror_root, input, None)
 }
 
+/// Which runs get a full write this pass: the active ones, the ones the modal
+/// has open, and every listed run the mirror has never written in full.
+fn desired_full_ids(
+    active: &HashSet<String>,
+    wanted: &HashSet<String>,
+    listed: &HashSet<String>,
+    ever_full: &HashSet<String>,
+) -> HashSet<String> {
+    let mut out = active.clone();
+    out.extend(wanted.iter().cloned());
+    out.extend(listed.iter().filter(|id| !ever_full.contains(*id)).cloned());
+    out
+}
+
 fn write_run_at(
     mirror_root: &Path,
     input: &MirrorInput<'_>,
@@ -347,6 +361,27 @@ fn write_run_at(
         ));
     }
 
+    // The streamed step text, per attempt: its agent messages in order. This
+    // is what the step detail shows as the step's text, the way an acpx
+    // step's response does.
+    let mut activity_text_by_attempt: HashMap<String, String> = HashMap::new();
+    {
+        let mut by_attempt: HashMap<&str, Vec<&StepActivity>> = HashMap::new();
+        for act in input.activity.iter().filter(|a| !a.attempt_id.is_empty()) {
+            by_attempt.entry(act.attempt_id.as_str()).or_default().push(act);
+        }
+        for (attempt, acts) in by_attempt {
+            let mut ordered = acts;
+            ordered.sort_by_key(|a| a.seq);
+            let text: String = ordered
+                .iter()
+                .filter(|a| a.kind == ActivityKind::Text)
+                .map(|a| a.text.as_str())
+                .collect();
+            activity_text_by_attempt.insert(attempt.to_string(), text);
+        }
+    }
+
     if let Some(v) = view_val {
         let merged_steps = collect_steps(v, state_val);
         let mut has_any_acp_session = !meta.conv_ranges.is_empty();
@@ -449,7 +484,14 @@ fn write_run_at(
                 "promptText".to_string(),
                 prompt_text.map(Value::String).unwrap_or(Value::Null),
             );
-            step_obj.insert("rawText".to_string(), Value::Null);
+            let raw_text = activity_text_by_attempt
+                .get(&attempt_id)
+                .cloned()
+                .unwrap_or_default();
+            step_obj.insert(
+                "rawText".to_string(),
+                if raw_text.is_empty() { Value::Null } else { Value::String(raw_text) },
+            );
             step_obj.insert("output".to_string(), output_val);
             if let Some(ref err) = step_error {
                 step_obj.insert("error".to_string(), json!(err));
@@ -897,6 +939,7 @@ fn mirror_worker(
     let mut last_gen: u64 = u64::MAX;
     let mut last_wanted: HashSet<String> = HashSet::new();
     let mut watched_runs: HashSet<String> = HashSet::new();
+    let mut ever_full: HashSet<String> = HashSet::new();
     let mut watched_sessions: HashSet<String> = HashSet::new();
     let mut last_stall_refresh: HashMap<String, i64> = HashMap::new();
 
@@ -940,8 +983,16 @@ fn mirror_worker(
                 }
             }
 
-            let mut desired_full: HashSet<String> = active_ids;
-            desired_full.extend(cur_wanted.iter().cloned());
+            let mut all_ids: HashSet<String> = summary_by_id.keys().cloned().collect();
+            all_ids.extend(cur_wanted.iter().cloned());
+            all_ids.extend(active_ids.iter().cloned());
+
+            // A run the mirror has never written in full (e.g. one that
+            // finished before the mirror ever watched it) still gets one
+            // full write, so the runs list can show its step marks; after
+            // that it drops out of the watch set again.
+            let desired_full =
+                desired_full_ids(&active_ids, &cur_wanted, &all_ids, &ever_full);
 
             for id in desired_full.difference(&watched_runs) {
                 client.watch_run(id);
@@ -951,9 +1002,6 @@ fn mirror_worker(
                 client.unwatch_run(id);
             }
             watched_runs = desired_full.clone();
-
-            let mut all_ids: HashSet<String> = summary_by_id.keys().cloned().collect();
-            all_ids.extend(desired_full.iter().cloned());
 
             let mut next_gates: HashMap<String, PiwGate> = HashMap::new();
 
@@ -965,7 +1013,12 @@ fn mirror_worker(
                         .get(id)
                         .is_none_or(|&t| now_ms.saturating_sub(t) >= STALL_REFRESH_INTERVAL_MS);
 
-                if !gen_changed && !needs_stall {
+                // A run waiting for its one full write (a finished run the
+                // mirror never watched) must not be skipped: its view arrives
+                // only a tick after `watch_run`, so the first pass that
+                // requested it wrote a summary-only folder.
+                let pending_full = desired_full.contains(id) && !ever_full.contains(id);
+                if !gen_changed && !needs_stall && !pending_full {
                     continue;
                 }
 
@@ -1018,6 +1071,9 @@ fn mirror_worker(
                 };
                 let connected_now = if connected { Some(now_ms) } else { None };
                 let _ = write_run_at(&root, &input, connected_now);
+                if view.is_some() {
+                    ever_full.insert(id.clone());
+                }
                 if needs_stall || (connected && is_running) {
                     last_stall_refresh.insert(id.clone(), now_ms);
                 }
@@ -1662,6 +1718,121 @@ mod tests {
         assert!(run.steps[0].conversation.is_some());
         let ev_text = fs::read_to_string(run.session_events_path("main").expect("path")).expect("read");
         assert!(ev_text.contains("All tests pass"));
+    }
+
+    #[test]
+    fn test_step_text_from_activity_becomes_raw_text() {
+        let tmp = tempdir().expect("tempdir");
+        let rv = RunView {
+            revision: 5,
+            run_revision: 5,
+            view: json!({
+                "runId": "run-talk",
+                "display": { "status": "completed", "activity": null, "controls": [], "reason": null },
+                "manifest": {
+                    "runId": "run-talk",
+                    "workflowName": "mixed-talk",
+                    "startedAt": "2026-11-18T19:00:00.000Z",
+                    "finishedAt": "2026-11-18T19:01:00.000Z",
+                    "status": "completed"
+                },
+                "state": {
+                    "runId": "run-talk",
+                    "workflowName": "mixed-talk",
+                    "startedAt": "2026-11-18T19:00:00.000Z",
+                    "updatedAt": "2026-11-18T19:01:00.000Z",
+                    "finishedAt": "2026-11-18T19:01:00.000Z",
+                    "status": "completed",
+                    "input": {},
+                    "steps": [{
+                        "attemptId": "grok#1",
+                        "nodeId": "grok",
+                        "nodeType": "agent",
+                        "outcome": "ok",
+                        "startedAt": "2026-11-18T19:00:00.000Z",
+                        "finishedAt": "2026-11-18T19:00:50.000Z",
+                        "prompt": "Write eight sentences",
+                        "output": {"who": "grok", "n": 1}
+                    }]
+                },
+                "workflow": base_workflow()
+            }),
+        };
+        let act = vec![
+            StepActivity {
+                run_id: "run-talk".to_string(),
+                node_id: "grok".to_string(),
+                attempt_id: "grok#1".to_string(),
+                seq: 1,
+                at: "2026-11-18T19:00:10.000Z".to_string(),
+                kind: ActivityKind::Thought,
+                text: "Planning the sentences.".to_string(),
+                tool: None,
+            },
+            StepActivity {
+                run_id: "run-talk".to_string(),
+                node_id: "grok".to_string(),
+                attempt_id: "grok#1".to_string(),
+                seq: 2,
+                at: "2026-11-18T19:00:20.000Z".to_string(),
+                kind: ActivityKind::Text,
+                text: "1. Heavy grey clouds roll over the roofs. ".to_string(),
+                tool: None,
+            },
+            StepActivity {
+                run_id: "run-talk".to_string(),
+                node_id: "grok".to_string(),
+                attempt_id: "grok#1".to_string(),
+                seq: 3,
+                at: "2026-11-18T19:00:30.000Z".to_string(),
+                kind: ActivityKind::Text,
+                text: "2. Cold rain drums on the decks.".to_string(),
+                tool: None,
+            },
+        ];
+        let input = MirrorInput {
+            summary: None,
+            view: Some(&rv),
+            activity: &act,
+            gate: None,
+            text_of: &inline_text_of,
+        };
+        let dir = write_run(tmp.path(), &input).expect("write");
+        let run = bundle::load_run(&dir).expect("load");
+
+        // The step's text (its agent messages) reads back as the response.
+        assert_eq!(
+            run.steps[0].raw_text.as_deref(),
+            Some("1. Heavy grey clouds roll over the roofs. 2. Cold rain drums on the decks.")
+        );
+        // The transcript replay carries the thought and both messages.
+        let ev_text = fs::read_to_string(run.session_events_path("main").expect("path")).expect("read");
+        assert!(ev_text.contains("Planning the sentences."));
+        assert!(ev_text.contains("Heavy grey clouds"));
+        assert!(ev_text.contains("Cold rain drums"));
+    }
+
+    #[test]
+    fn test_desired_full_includes_never_written_runs_once() {
+        let active: HashSet<String> = ["run-live".to_string()].into();
+        let wanted: HashSet<String> = ["run-open".to_string()].into();
+        let listed: HashSet<String> =
+            ["run-live".to_string(), "run-open".to_string(), "run-old".to_string()].into();
+        let empty: HashSet<String> = HashSet::new();
+
+        // A run that finished before the mirror ever watched it is included
+        // once, so its step marks reach the runs list.
+        let first = desired_full_ids(&active, &wanted, &listed, &empty);
+        assert!(first.contains("run-live"));
+        assert!(first.contains("run-open"));
+        assert!(first.contains("run-old"));
+
+        // After its one full write it drops out of the watch set again.
+        let ever: HashSet<String> = ["run-old".to_string()].into();
+        let second = desired_full_ids(&active, &wanted, &listed, &ever);
+        assert!(second.contains("run-live"));
+        assert!(second.contains("run-open"));
+        assert!(!second.contains("run-old"));
     }
 
     #[test]

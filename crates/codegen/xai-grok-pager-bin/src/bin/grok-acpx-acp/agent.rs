@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 use xai_acp_lib::{AcpClientMessage, acp_send};
 use xai_grok_pager::piw::client::PiwClient;
@@ -70,6 +70,47 @@ struct WaitingGate {
 #[derive(Debug, Clone)]
 struct WaitingPiwGate {
     gate: PiwGate,
+}
+
+/// What happened to a gate question asked in the chat.
+#[derive(Debug, Clone, PartialEq)]
+enum GateAsk {
+    /// A typed answer to send to the server.
+    Answered(String),
+    /// The user dismissed the question; the run stays parked and answerable.
+    Dismissed,
+    /// The request never got a response: the pager withdrew it because the
+    /// turn is being cancelled. The run must be cancelled with it, and the
+    /// turn must end on the run's final state so the chat shows it cancelled.
+    Withdrawn,
+}
+
+/// What a `Waiting` event did to the turn: keep pumping, park the run and end
+/// the turn, or keep pumping until the run reports its cancelled final state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum WaitingOutcome {
+    Resumed,
+    Parked,
+    Cancelled,
+}
+
+/// The response to a gate question, as one of [`GateAsk`]. A response that
+/// names no matching label (or an empty checkpoint text) is a dismissal: the
+/// run stays parked and answerable through `/answer`.
+fn classify_gate_response(outer: &Value, choices: &[GateChoice]) -> GateAsk {
+    let notes = extract_gate_answer_notes(outer);
+    if choices.is_empty() {
+        return match notes.filter(|text| !text.is_empty()) {
+            Some(text) => GateAsk::Answered(text),
+            None => GateAsk::Dismissed,
+        };
+    }
+    match extract_gate_answer_label(outer)
+        .and_then(|label| piw_typed_answer(choices, &label, notes.as_deref()))
+    {
+        Some(typed) => GateAsk::Answered(typed),
+        None => GateAsk::Dismissed,
+    }
 }
 
 /// A pi-workflows run this session is following. The watch task outlives the
@@ -528,6 +569,9 @@ impl AcpxAgent {
 
         let mut projector = Projector::new(session_id);
         let mut parked = false;
+        // Once the turn is cancelled, the run's final state gets this long to
+        // arrive so the chat ends on the run cancelled, not on a timer.
+        let mut cancel_grace_until: Option<Instant> = None;
 
         loop {
             let ev = tokio::select! {
@@ -537,10 +581,15 @@ impl AcpxAgent {
                 },
                 _ = tokio::time::sleep(Duration::from_millis(1000)) => {
                     // A liveness guard: a cancelled turn must end even if the
-                    // server never answers. The run's own events usually
-                    // arrive first.
+                    // server never answers. The run's own cancelled state
+                    // usually arrives first; give it a moment before giving up.
                     if self.is_session_cancelled(session_id) {
-                        break;
+                        let until = *cancel_grace_until.get_or_insert_with(|| {
+                            Instant::now() + Duration::from_secs(5)
+                        });
+                        if Instant::now() >= until {
+                            break;
+                        }
                     }
                     continue;
                 }
@@ -561,27 +610,130 @@ impl AcpxAgent {
             }
 
             if let Some((node, attempt, question, choices)) = waiting {
-                let resumed = self
+                match self
                     .handle_piw_waiting(session_id, &node, &attempt, &question, &choices, timing)
-                    .await;
-                if !resumed {
-                    parked = true;
-                    break;
+                    .await
+                {
+                    WaitingOutcome::Resumed => {}
+                    WaitingOutcome::Parked => {
+                        parked = true;
+                        break;
+                    }
+                    WaitingOutcome::Cancelled => {
+                        // The question was withdrawn with the turn being
+                        // cancelled: keep pumping until the run's cancelled
+                        // final state ends the turn.
+                        cancel_grace_until = Some(Instant::now() + Duration::from_secs(5));
+                    }
                 }
             }
         }
 
+        let mut parked_run_id: Option<String> = None;
         let mut st = self.state.borrow_mut();
         if let Some(sess) = st.sessions.get_mut(session_id) {
             if parked {
                 if let Some(watch) = sess.piw.as_mut() {
                     watch.rx = Some(rx);
+                    parked_run_id = Some(watch.run_id.clone());
                 }
             } else {
                 // The run is final; the watch task ends by itself.
                 sess.piw = None;
             }
         }
+        drop(st);
+        // A parked run can still be cancelled or answered from elsewhere (the
+        // /acpx modal, another tab). Watch its server state so the chat ends
+        // on the run's final state instead of the stale waiting hint.
+        if let Some(run_id) = parked_run_id {
+            self.spawn_piw_park_monitor(session_id, &run_id);
+        }
+    }
+
+    /// Watch a parked run's server state and report its final state into the
+    /// chat. Ends when the run is answered in this chat (`waiting_piw` is
+    /// cleared), the session is gone, or the final state was reported.
+    fn spawn_piw_park_monitor(&self, session_id: &str, run_id: &str) {
+        let Some(client) = piw_shared_client() else {
+            return;
+        };
+        let state = Rc::clone(&self.state);
+        let client_tx = self.client_tx.clone();
+        let session_id = session_id.to_string();
+        let run_id = run_id.to_string();
+        tokio::task::spawn_local(async move {
+            client.watch_run(&run_id);
+            loop {
+                tokio::time::sleep(Duration::from_millis(2000)).await;
+                let still_parked = {
+                    let st = state.borrow();
+                    st.sessions
+                        .get(&session_id)
+                        .is_some_and(|sess| sess.waiting_piw.is_some())
+                };
+                if !still_parked {
+                    return;
+                }
+                let Some(view) = client.run_view(&run_id) else {
+                    continue;
+                };
+                let v = &view.view;
+                let status = v
+                    .get("display")
+                    .and_then(|d| d.get("status"))
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        v.get("manifest")
+                            .and_then(|m| m.get("status"))
+                            .and_then(Value::as_str)
+                    });
+                let Some(status) = status else { continue };
+                if matches!(
+                    status,
+                    "queued" | "starting" | "running" | "waiting" | "paused" | "parked" | "ambiguous"
+                ) {
+                    continue;
+                }
+                let title = v
+                    .get("workflowName")
+                    .and_then(Value::as_str)
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or(run_id.as_str());
+                let text = match status {
+                    "completed" | "done" => {
+                        format!("\n\n✓ **{title}** finished.\n\n")
+                    }
+                    "cancelled" => {
+                        format!("\n\n✗ **{title}** · Workflow run cancelled.\n\n")
+                    }
+                    other => {
+                        format!("\n\n✗ **{title}** failed: {other}.\n\n")
+                    }
+                };
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or_default();
+                let timing = TurnTiming {
+                    turn_start_ms: now_ms,
+                    stream_start_ms: now_ms,
+                    prompt_id: None,
+                };
+                let agent = AcpxAgent {
+                    client_tx: client_tx.clone(),
+                    state: Rc::clone(&state),
+                };
+                agent.send_parent_text(&session_id, text, &timing).await;
+                let mut st = state.borrow_mut();
+                if let Some(sess) = st.sessions.get_mut(&session_id) {
+                    sess.waiting_piw = None;
+                    // The run is final; the parked watch is released with it.
+                    sess.piw = None;
+                }
+                return;
+            }
+        });
     }
 
     /// A pi-workflows run parked on a human gate: ask the question and answer
@@ -594,7 +746,7 @@ impl AcpxAgent {
         question: &str,
         choices: &[GateChoice],
         timing: &TurnTiming,
-    ) -> bool {
+    ) -> WaitingOutcome {
         let (run_id, gate) = {
             let st = self.state.borrow();
             st.sessions
@@ -604,42 +756,75 @@ impl AcpxAgent {
                 .unwrap_or_default()
         };
         if run_id.is_empty() {
-            return false;
+            return WaitingOutcome::Parked;
         }
 
-        let typed = self
+        let ask = self
             .ask_piw_gate_question(session_id, &run_id, attempt, question, choices, gate.as_ref())
             .await;
 
-        let Some(typed) = typed else {
-            // The question was dismissed; the run stays parked and answerable.
-            self.remember_waiting_piw(session_id, gate.clone());
-            if !self.is_session_cancelled(session_id) {
+        match ask {
+            GateAsk::Withdrawn => {
+                // The pager withdrew the question because the turn is being
+                // cancelled. Cancel the run now and keep pumping until its
+                // final state ends the turn, so the chat shows the run
+                // cancelled instead of a stale waiting hint.
+                self.piw_gate_withdrawn(session_id)
+            }
+            GateAsk::Dismissed => {
+                // The pager answers an Esc dismissal and a Ctrl+C withdrawal
+                // of the turn with the same `outcome: cancelled` response; the
+                // session cancel follows a beat later only in the Ctrl+C
+                // case. Give it that beat before parking, so a run cancelled
+                // with the turn ends on its cancelled state.
+                let withdrawn = self.is_session_cancelled(session_id) || {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    self.is_session_cancelled(session_id)
+                };
+                if withdrawn {
+                    return self.piw_gate_withdrawn(session_id);
+                }
+                // The question was dismissed; the run stays parked and answerable.
+                self.remember_waiting_piw(session_id, gate.clone());
                 let answer_hint = if choices.is_empty() {
                     format!("\n\n◐ Waiting at {node}. Answer later with `/answer <text>`.\n\n")
                 } else {
                     format!("\n\n◐ Waiting at {node}. Answer later with `/answer <label>`.\n\n")
                 };
                 self.send_parent_text(session_id, answer_hint, timing).await;
+                WaitingOutcome::Parked
             }
-            return false;
-        };
-
-        if self.is_session_cancelled(session_id) {
-            self.remember_waiting_piw(session_id, gate);
-            return false;
-        }
-
-        if self.answer_piw_gate(session_id, gate.clone(), &typed, timing).await {
-            let mut st = self.state.borrow_mut();
-            if let Some(sess) = st.sessions.get_mut(session_id) {
-                sess.waiting_piw = None;
+            GateAsk::Answered(typed) => {
+                if self.is_session_cancelled(session_id) {
+                    self.remember_waiting_piw(session_id, gate);
+                    return WaitingOutcome::Parked;
+                }
+                if self.answer_piw_gate(session_id, gate.clone(), &typed, timing).await {
+                    let mut st = self.state.borrow_mut();
+                    if let Some(sess) = st.sessions.get_mut(session_id) {
+                        sess.waiting_piw = None;
+                    }
+                    WaitingOutcome::Resumed
+                } else {
+                    self.remember_waiting_piw(session_id, gate);
+                    WaitingOutcome::Parked
+                }
             }
-            true
-        } else {
-            self.remember_waiting_piw(session_id, gate);
-            false
         }
+    }
+
+    /// The turn is being cancelled with the gate question withdrawn: cancel
+    /// the run and keep pumping until its final state ends the turn.
+    fn piw_gate_withdrawn(&self, session_id: &str) -> WaitingOutcome {
+        {
+            let st = self.state.borrow();
+            if let Some(sess) = st.sessions.get(session_id)
+                && let Some(watch) = sess.piw.as_ref()
+            {
+                watch.handle.cancel();
+            }
+        }
+        WaitingOutcome::Cancelled
     }
 
     fn remember_waiting_piw(&self, session_id: &str, gate: Option<PiwGate>) {
@@ -836,7 +1021,7 @@ impl AcpxAgent {
         question: &str,
         choices: &[GateChoice],
         gate: Option<&PiwGate>,
-    ) -> Option<String> {
+    ) -> GateAsk {
         let tool_call_id = gate_tool_call_id(run_id, attempt);
         let needs_text = gate.is_some_and(|g| {
             g.choices.iter().any(|c| c.text_input.as_deref().is_some_and(|t| !t.is_empty()))
@@ -868,14 +1053,12 @@ impl AcpxAgent {
             "noFreeform": !choices.is_empty() && !needs_text,
         });
 
-        let outer = self.ask_question_raw(session_id, tool_call_id, params).await?;
-        let notes = extract_gate_answer_notes(&outer);
-        if choices.is_empty() {
-            // Checkpoint: the typed text is the answer.
-            return notes.filter(|text| !text.is_empty());
-        }
-        let label = extract_gate_answer_label(&outer)?;
-        Some(piw_typed_answer(choices, &label, notes.as_deref())?)
+        let Some(outer) = self.ask_question_raw(session_id, tool_call_id, params).await else {
+            // No response at all: the pager withdrew the request while the
+            // turn is being cancelled, not a user dismissal.
+            return GateAsk::Withdrawn;
+        };
+        classify_gate_response(&outer, choices)
     }
 
     /// Send one `x.ai/ask_user_question` request and return its response
@@ -2148,6 +2331,59 @@ mod tests {
             Some("Rework".to_string())
         );
         assert_eq!(piw_typed_answer(&choices, "unknown", None), None);
+    }
+
+    #[test]
+    fn classify_gate_response_variants() {
+        let choices = vec![
+            GateChoice { label: "Continue".into(), flow_file: "piw-answer://run-1/continue".into() },
+            GateChoice { label: "Stop".into(), flow_file: "piw-answer://run-1/stop".into() },
+        ];
+        // A decision answer with notes types back label + notes.
+        assert_eq!(
+            classify_gate_response(
+                &json!({
+                    "outcome": "accepted",
+                    "answers": {"q": ["continue"]},
+                    "annotations": {"q": {"notes": "run the rest"}}
+                }),
+                &choices,
+            ),
+            GateAsk::Answered("Continue run the rest".to_string())
+        );
+        // A dismissed (cancelled outcome) question leaves the run parked.
+        assert_eq!(
+            classify_gate_response(&json!({"outcome": "cancelled"}), &choices),
+            GateAsk::Dismissed
+        );
+        // A label that matches no choice is a dismissal, not an answer.
+        assert_eq!(
+            classify_gate_response(
+                &json!({"outcome": "accepted", "answers": {"q": ["nope"]}}),
+                &choices,
+            ),
+            GateAsk::Dismissed
+        );
+        // A checkpoint answers with its typed text.
+        assert_eq!(
+            classify_gate_response(
+                &json!({
+                    "outcome": "accepted",
+                    "answers": {"q": ["Other"]},
+                    "annotations": {"q": {"notes": "ship it"}}
+                }),
+                &[],
+            ),
+            GateAsk::Answered("ship it".to_string())
+        );
+        // An empty checkpoint text is a dismissal.
+        assert_eq!(
+            classify_gate_response(
+                &json!({"outcome": "accepted", "answers": {"q": ["Other"]}}),
+                &[],
+            ),
+            GateAsk::Dismissed
+        );
     }
 
     #[test]

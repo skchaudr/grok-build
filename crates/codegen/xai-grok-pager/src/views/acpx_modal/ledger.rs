@@ -39,6 +39,11 @@ pub struct GateAnswer {
     pub choice: String,   // input.gate.choice: the label that was picked
 }
 
+/// How many step marks a runs-list row shows at most. A workflow with
+/// hundreds of nodes would otherwise stretch the marks column past every
+/// other column; the run view keeps the full picture.
+const RAIL_MARKS_CAP: usize = 24;
+
 /// Per-run facts the parent loads (cached) so the ledger does no I/O.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RowExtra {
@@ -1357,7 +1362,7 @@ impl LedgerState {
                     }
                 })
                 .collect();
-            for &ns in &rail {
+            for &ns in rail.iter().take(RAIL_MARKS_CAP) {
                 let g = ns.glyph();
                 let color = match ns {
                     NodeState::Running => theme.accent_running,
@@ -1393,7 +1398,13 @@ impl LedgerState {
             let widest = self
                 .extras
                 .values()
-                .map(|e| if e.rail.is_empty() { 0 } else { e.rail.len() + count_w(e.rail.len()) })
+                .map(|e| {
+                    if e.rail.is_empty() {
+                        0
+                    } else {
+                        e.rail.len().min(RAIL_MARKS_CAP) + count_w(e.rail.len())
+                    }
+                })
                 .max()
                 .unwrap_or(0);
             if widest > rail_width {
@@ -1575,7 +1586,7 @@ impl LedgerState {
                     if e.rail.is_empty() {
                         0
                     } else {
-                        e.rail.len() + count_w(e.rail.len())
+                        e.rail.len().min(RAIL_MARKS_CAP) + count_w(e.rail.len())
                     }
                 })
                 .max()
@@ -2174,6 +2185,95 @@ mod tests {
             .map(|y| row_text(buf, y))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn probe_title_state_age_render_at_live_width() {
+        let mut state = LedgerState::new();
+        let mut wait = make_run("r-wait", "ship: slugify", RunStatus::Waiting, 10_000);
+        wait.waiting_on = Some("accept".to_string());
+        let done = make_run("r-done", "mixed-talk", RunStatus::Completed, 9_000);
+        state.set_runs(vec![wait.clone(), done.clone()]);
+        let mut extras = HashMap::new();
+        extras.insert(
+            "r-wait".to_string(),
+            RowExtra {
+                rail: vec![
+                    NodeState::Done(Outcome::Ok),
+                    NodeState::Done(Outcome::Ok),
+                    NodeState::NotRun,
+                    NodeState::Done(Outcome::Ok),
+                    NodeState::NotRun,
+                    NodeState::Waiting,
+                ],
+                agents: String::new(),
+                stalled: false,
+                question: Some("tests and review are in: land it, or send it back?".to_string()),
+                answers: None,
+            },
+        );
+        extras.insert(
+            "r-done".to_string(),
+            RowExtra {
+                rail: vec![NodeState::Done(Outcome::Ok); 6],
+                agents: String::new(),
+                stalled: false,
+                question: None,
+                answers: None,
+            },
+        );
+        // A workflow with hundreds of nodes (the monitor run: 262) must not
+        // squeeze the title and state out of every row.
+        let mut huge = make_run("r-huge", "monitor", RunStatus::Running, 8_000);
+        huge.current_node = Some("step-200".to_string());
+        state.set_runs(vec![wait.clone(), done.clone(), huge]);
+        let mut huge_rail = Vec::with_capacity(262);
+        for i in 0..262 {
+            huge_rail.push(if i < 5 { NodeState::Done(Outcome::Ok) } else { NodeState::NotRun });
+        }
+        extras.insert(
+            "r-huge".to_string(),
+            RowExtra {
+                rail: huge_rail,
+                agents: String::new(),
+                stalled: false,
+                question: None,
+                answers: None,
+            },
+        );
+        state.set_extras(extras);
+
+        let theme = Theme::default();
+        for w in [77u16, 114] {
+            let mut buf = Buffer::empty(Rect::new(0, 0, w, 12));
+            let area_ = buf.area;
+            state.render(&mut buf, area_, &theme, 20_000);
+            let text = all_text(&buf);
+            assert!(
+                text.contains("ship: slugify"),
+                "title missing at w={w}: {text:?}"
+            );
+            assert!(
+                text.contains("mixed-talk"),
+                "finished title missing at w={w}: {text:?}"
+            );
+            assert!(text.contains("done"), "state missing at w={w}: {text:?}");
+            assert!(
+                text.contains("monitor"),
+                "huge-rail run title missing at w={w}: {text:?}"
+            );
+            if w >= 80 {
+                assert!(
+                    text.contains("5/262"),
+                    "huge-rail count must read the whole run at w={w}: {text:?}"
+                );
+            }
+            let marks: String = text.chars().filter(|c| *c == '✓').collect();
+            assert!(
+                marks.len() < 60,
+                "a row must not draw hundreds of marks at w={w}"
+            );
+        }
     }
 
     #[test]

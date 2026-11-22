@@ -278,10 +278,6 @@ impl Projector {
                 exit_code,
                 ..
             } => {
-                if *kind == StepKind::Checkpoint {
-                    return Vec::new();
-                }
-
                 let is_ok = outcome == "ok";
                 let new_plan_state = if is_ok {
                     PlanNodeState::Completed
@@ -455,7 +451,22 @@ impl Projector {
                         self.parent_after_block = true;
                     }
 
-                    StepKind::Checkpoint => {}
+                    StepKind::Checkpoint => {
+                        // The newest run-state block on screen is the gate
+                        // question from `Waiting`, which still shows the gate
+                        // as ◐ and the following steps as ○. Print the updated
+                        // diagram and path so the run's newest visible state
+                        // is the answered gate while the next step runs.
+                        let glyph = if is_ok { "✓" } else { "✗" };
+                        let answer = checkpoint_answer_text(output);
+                        let text = format!(
+                            "{}\n\n{}\n\n**{glyph} {node}** · answered: {answer}\n",
+                            self.mermaid_fence(),
+                            self.taken_path()
+                        );
+                        outs.push(self.parent_message(&text));
+                        self.parent_after_block = true;
+                    }
                 }
 
                 if plan_changed && let Some(plan_out) = self.build_plan_out() {
@@ -785,6 +796,30 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
         Some((byte_idx, _)) => s[..byte_idx].to_string(),
         None => s.to_string(),
     }
+}
+
+
+/// The text shown when a gate is answered: the run view reports the checkpoint
+/// output as `{"choice": "continue"}`-style objects; other string fields and
+/// plain strings are accepted too.
+fn checkpoint_answer_text(output: &Value) -> String {
+    if let Some(obj) = output.as_object() {
+        for key in ["choice", "answer", "decision", "value", "result"] {
+            if let Some(v) = obj.get(key) {
+                if let Some(t) = v.as_str() {
+                    return t.to_string();
+                }
+                if !v.is_null() {
+                    return v.to_string();
+                }
+            }
+        }
+        return "—".to_string();
+    }
+    if let Some(t) = output.as_str().filter(|t| !t.is_empty()) {
+        return t.to_string();
+    }
+    "—".to_string()
 }
 
 #[cfg(test)]
@@ -1398,6 +1433,106 @@ mod tests {
             bad.pointer("/content/0/content/text").and_then(Value::as_str),
             Some("no such file")
         );
+    }
+
+    #[test]
+    fn answered_gate_step_finish_marks_it_done_in_the_path_and_diagram() {
+        // H1: a pi-workflows gate is a checkpoint-kind step; when the server
+        // reports it finished ok after the answer, the plan must show ✓.
+        let mut proj = Projector::new("parent-1");
+        proj.on_event(&DriverEvent::RunStarted {
+            run_id: "r1".to_string(),
+            run_dir: PathBuf::from("/tmp/r1"),
+            title: "mixed-talk".to_string(),
+            flow_path: "mixed-talk.workflow.ts".to_string(),
+            flow: sample_flow(),
+            at_ms: 0,
+        });
+        proj.on_event(&DriverEvent::Waiting {
+            node: "human_gate".to_string(),
+            attempt: "human_gate#1".to_string(),
+            question: "Approve changes?".to_string(),
+            choices: vec![GateChoice {
+                label: "Approve".to_string(),
+                flow_file: "piw-answer://r1/approve".to_string(),
+            }],
+            at_ms: 100,
+        });
+
+        let outs = proj.on_event(&DriverEvent::StepFinished {
+            node: "human_gate".to_string(),
+            attempt: "human_gate#1".to_string(),
+            kind: StepKind::Checkpoint,
+            outcome: "ok".to_string(),
+            duration_ms: 12000,
+            error: None,
+            output: json!({"choice": "continue"}),
+            stdout: None,
+            stderr: None,
+            exit_code: None,
+            at_ms: 12100,
+        });
+
+        // The answered gate prints a fresh run-state message so the newest
+        // block on screen shows ✓ gate while the next step runs, instead of
+        // leaving the gate question as the newest visible state.
+        let answered_msg = outs
+            .iter()
+            .find_map(|o| match o {
+                Out::Update { update, .. } => chunk_text(update),
+                _ => None,
+            })
+            .expect("checkpoint finish prints an updated state message");
+        assert!(
+            answered_msg.contains("**✓ human_gate** · answered: continue"),
+            "answered-gate message: {answered_msg:?}"
+        );
+        assert!(
+            answered_msg.contains("✓ human_gate"),
+            "the path in the answered-gate message must show the gate done: {answered_msg:?}"
+        );
+
+        let plan = outs
+            .iter()
+            .find_map(|o| match o {
+                Out::Update {
+                    update: acp::SessionUpdate::Plan(plan),
+                    ..
+                } => Some(plan.clone()),
+                _ => None,
+            })
+            .expect("checkpoint finish updates the plan");
+        let v = serde_json::to_value(&plan).unwrap_or(Value::Null);
+        let entries = v
+            .get("entries")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        // `human_gate` is the fourth node of `sample_flow`, so the fourth entry.
+        assert_eq!(
+            entries.get(3).and_then(|e| e.get("status")).and_then(Value::as_str),
+            Some("completed"),
+            "an answered gate must read completed in the plan: {entries:?}"
+        );
+
+        let done = proj.on_event(&DriverEvent::RunFinished {
+            status: "completed".to_string(),
+            error: None,
+            at_ms: 13000,
+        });
+        let text = done
+            .iter()
+            .find_map(|o| match o {
+                Out::Update { update, .. } => chunk_text(update),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(
+            text.contains("✓ human_gate"),
+            "the finished path must show the answered gate as done: {text}"
+        );
+        assert!(text.contains("```mermaid"));
+        assert!(text.contains("human_gate[\"✓ human_gate\"]"));
     }
 
     #[test]
