@@ -176,6 +176,29 @@ impl acp::Agent for PiAgent {
             return self.execute_bash(command, arguments.meta.as_ref()).await;
         }
 
+        // Pager-yielded `/compact` arrives as prompt text in external sessions
+        // (YIELDED_TO_EXTERNAL_AGENT): route it to Pi's own `compact` request
+        // instead of the model prompt, mirroring `x.ai/compact_conversation`.
+        if let Some(instructions) = compact_command(&arguments.prompt) {
+            let mut request = json!({ "type": "compact" });
+            if !instructions.trim().is_empty() {
+                request["customInstructions"] = Value::String(instructions);
+            }
+            self.rpc.request(request).await.map_err(acp_internal)?;
+            let client_prompt_id = arguments
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("promptId"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string);
+            return Ok(prompt_response(
+                acp::StopReason::EndTurn,
+                client_prompt_id.as_deref(),
+            ));
+        }
+
         let (message, images) = prompt_to_pi(&arguments.prompt);
         let display_message = message.clone();
         if message.trim().is_empty() && images.is_empty() {

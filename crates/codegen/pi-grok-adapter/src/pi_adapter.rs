@@ -23,8 +23,8 @@ use crate::{
         BridgeCommandRequest, BridgeCommandTx, WORKFLOW_CANCEL_COMMAND, WORKFLOW_SPAWN_COMMAND,
     },
     prompt_bridge::{
-        direct_bash_command, format_bash_result, prompt_response, prompt_streaming_behavior,
-        prompt_to_pi, queue_lane_for_behavior,
+        compact_command, direct_bash_command, format_bash_result, prompt_response,
+        prompt_streaming_behavior, prompt_to_pi, queue_lane_for_behavior,
     },
     queue_bridge::{
         QueueEntry, QueueLane, QueueMirror, QueueOrigin, queue_changed_params, string_list,
@@ -860,6 +860,19 @@ fn command_catalog(commands: &[PiCommand], workflows_enabled: bool) -> Vec<acp::
 
     if workflows_enabled {
         inject_workflow_slash_commands(&mut out, &mut seen);
+    }
+    // The pager gates its `/compact` builtin on the agent advertising the
+    // command (EXTERNAL_COMMON_STUB_COMMANDS): unadvertised, the pager stub
+    // refuses and `x.ai/compact_conversation` is never sent. Pi rpc
+    // `get_commands` lists TUI external commands only, so surface compact here;
+    // the pager builtin then dispatches to ext_method, which answers it.
+    if seen.insert("compact".to_string()) {
+        out.push(
+            acp::AvailableCommand::new("compact".to_string(), "Compact conversation history".to_string())
+                .input(Some(acp::AvailableCommandInput::Unstructured(
+                    acp::UnstructuredCommandInput::new("compaction instructions".to_string()),
+                ))),
+        );
     }
     out
 }

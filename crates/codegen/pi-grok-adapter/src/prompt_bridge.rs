@@ -17,6 +17,25 @@ pub(crate) fn direct_bash_command(blocks: &[acp::ContentBlock]) -> Option<String
     })
 }
 
+/// Pager-yielded `/compact` arrives as prompt text in external sessions
+/// (`YIELDED_TO_EXTERNAL_AGENT`): the pager forwards the typed text verbatim,
+/// the way Zed does. Pi rpc `prompt` treats it as a plain user message, so the
+/// adapter intercepts it here and `prompt()` routes it to Pi `compact`.
+pub(crate) fn compact_command(blocks: &[acp::ContentBlock]) -> Option<String> {
+    let text = blocks.iter().find_map(|block| {
+        let acp::ContentBlock::Text(text) = block else {
+            return None;
+        };
+        Some(text.text.as_str())
+    })?;
+    let text = text.trim();
+    let rest = text.strip_prefix("/compact")?;
+    if !rest.is_empty() && !rest.starts_with(' ') {
+        return None;
+    }
+    Some(rest.trim().to_string())
+}
+
 /// Stamp client `promptId` on PromptResponse so the pager can discard queued
 /// mid-turn RPC completions that never became `current_prompt_id`.
 pub(crate) fn prompt_response(
