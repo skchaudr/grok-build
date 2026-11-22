@@ -47,6 +47,7 @@ pub mod obf;
 pub mod pi_model_config;
 pub mod pi_resource_config;
 pub mod pi_resource_policy;
+pub mod piw;
 pub mod plugin_cmd;
 pub mod pty_wrap;
 pub mod recent_dirs;

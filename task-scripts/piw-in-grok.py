@@ -1227,9 +1227,11 @@ def post(key: str, payload: dict) -> dict:
     raise RuntimeError(last)
 
 
-def run_task(key: str, model: str, task: TaskSpec, out: Path) -> Dict[str, Any]:
+def run_task(key: str, model: str, task: TaskSpec, out: Path, effort: str = "") -> Dict[str, Any]:
     start = time.time()
     payload = {"model": model, "temperature": 0.0, "max_tokens": MAX_TOKENS, "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": build_prompt(task)}]}
+    if effort:  # thinking counts against max_tokens: at the default level it used 31-46k of 64k (2026-11-21)
+        payload["reasoning"] = {"effort": effort}
     try:
         res = post(key, payload)
         choice = (res.get("choices") or [{}])[0]
@@ -1262,6 +1264,7 @@ def main():
     ap.add_argument("--model", default=MODEL)
     ap.add_argument("--output", default=str(HERE / "piw-in-grok_out"))
     ap.add_argument("--only", help="comma-separated slice ids")
+    ap.add_argument("--effort", default="", help="thinking level sent as reasoning.effort (low|medium|high); default: the model's own")
     ap.add_argument("--dry-run", action="store_true", help="write full prompts to <output>/_prompts, print sizes and a cost estimate, call nothing")
     args = ap.parse_args()
     out = Path(args.output).resolve()
@@ -1302,7 +1305,7 @@ def main():
         futures = []
         for t in tasks:
             print(f"  sent {t['custom_id']}: {len(build_prompt(t)) // 4:,} tokens in", flush=True)
-            futures.append(pool.submit(run_task, key, args.model, t, out))
+            futures.append(pool.submit(run_task, key, args.model, t, out, args.effort))
         for fut in as_completed(futures):
             r = fut.result()
             tid = r["task"]["custom_id"]
