@@ -158,6 +158,17 @@ pub(super) fn handle(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
             agent.scrollback.push_block(RenderBlock::AttachCard(card));
             true
         }
+        "pi/ui/dpi_help" => {
+            let Some(help) = crate::scrollback::blocks::DpiHelpBlock::from_json(&params) else {
+                return false;
+            };
+            let Some(agent) = pi_target(app, session_id.as_deref()) else {
+                return false;
+            };
+            agent.session.turn_saw_agent_text = true;
+            agent.scrollback.push_block(RenderBlock::DpiHelp(help));
+            true
+        }
         "pi/ui/plan_file" => {
             let Some(path) = str_of(&["planFilePath"]) else {
                 return false;

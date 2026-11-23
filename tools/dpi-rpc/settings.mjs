@@ -166,19 +166,22 @@ export function hintsFor({ device, session, playgroundUrl }) {
   ];
 }
 
-export function helpText({ device, session, playgroundUrl, commands }) {
-  const width = Math.max(...commands.map(([label]) => label.length));
-  return [
-    `Durable Pi: your agent lives on ${device}, not in this window. Close the window and it keeps working; ctrl+r or dpi-grok ${session} brings you back.`,
-    "",
-    "Keys",
-    "  F2        settings (model, thinking, read-only, prompts, extensions, auto-compact)",
-    "  ctrl+r    switch session or agent",
-    ...SHORTCUTS.map((s) => `  ${keyLabel(s.key).padEnd(9)} ${s.description}`),
-    "",
-    "Commands",
-    ...commands.map(([label, description]) => `  /${label.padEnd(width)}  ${description}`),
-    "",
-    playgroundUrl ? `Playground: ${playgroundUrl}` : "Playground: none for this backend",
-  ].join("\n");
+// The /dpi-help card: the pager draws it as a block with real headings and key names (`pi/ui/dpi_help`), not a
+// grey notice.
+export function helpCard({ device, session, playgroundUrl, commands }) {
+  return {
+    intro: `Durable Pi: your agent lives on ${device}, not in this window. Close the window and it keeps working; ctrl+r or dpi-grok ${session} brings you back.`,
+    sections: [
+      {
+        title: "Keys",
+        rows: [
+          ["F2", "Settings: model, thinking, read-only, prompts, extensions, auto-compact"],
+          ["ctrl+r", "Switch session or agent"],
+          ...SHORTCUTS.map((s) => [keyLabel(s.key), s.description]),
+        ],
+      },
+      { title: "Commands", rows: commands.map(([label, description]) => [`/${label}`, description]) },
+    ],
+    playgroundUrl: playgroundUrl ?? null,
+  };
 }

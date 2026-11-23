@@ -910,9 +910,15 @@ test("/dpi-help, /dpi-settings and /dpi-open say something useful", async () => 
   const s = await shim({ DPI_HUB_URL: "http://hub.example:4781" });
   try {
     await s.call({ type: "prompt", message: "/dpi-help" });
-    const help = await s.until((l) => l.method === "notify" && l.message.startsWith("Durable Pi:"));
-    for (const part of ["mini-host", "F2", "ctrl+r", "Alt+C", "/dpi-compact [instructions]", "/dpi-archive", "/dpi-help", "Playground: http://hub.example:4781"]) assert.ok(help.message.includes(part), part);
-    assert.ok(!help.message.includes("__pi_")); // internal bridge commands stay out of the guide
+    const help = await s.until((l) => l.method === "dpiHelp");
+    assert.ok(help.intro.startsWith("Durable Pi:") && help.intro.includes("mini-host"));
+    assert.deepEqual(help.sections.map((x) => x.title), ["Keys", "Commands"]);
+    const [keys, commands] = help.sections.map((x) => x.rows.map(([key]) => key));
+    for (const key of ["F2", "ctrl+r", "Alt+C"]) assert.ok(keys.includes(key), key);
+    for (const command of ["/dpi-compact [instructions]", "/dpi-archive", "/dpi-help"]) assert.ok(commands.includes(command), command);
+    assert.ok(help.sections.every((x) => x.rows.every((row) => row.length === 2 && row.every((cell) => typeof cell === "string" && cell))));
+    assert.equal(help.playgroundUrl, "http://hub.example:4781");
+    assert.ok(!JSON.stringify(help).includes("__pi_")); // internal bridge commands stay out of the guide
     await s.call({ type: "prompt", message: "/dpi-open" });
     await s.until((l) => l.method === "notify" && l.message === "Playground: http://hub.example:4781");
     await s.call({ type: "prompt", message: "/dpi-settings" });
@@ -923,5 +929,7 @@ test("/dpi-help, /dpi-settings and /dpi-open say something useful", async () => 
   try {
     await none.call({ type: "prompt", message: "/dpi-open" });
     await none.until((l) => l.method === "notify" && l.message === "This backend has no playground.");
+    await none.call({ type: "prompt", message: "/dpi-help" });
+    assert.equal((await none.until((l) => l.method === "dpiHelp")).playgroundUrl, null);
   } finally { none.close(); }
 });

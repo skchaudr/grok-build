@@ -13,7 +13,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import {
-  THINKING_LEVELS, buildOptions, commandForKey, compactionPatch, contextInfo, helpText, hintsFor,
+  THINKING_LEVELS, buildOptions, commandForKey, compactionPatch, contextInfo, helpCard, hintsFor,
   resolvePlaygroundUrl, shortcutCatalog, usageTokens,
 } from "./settings.mjs";
 
@@ -665,7 +665,8 @@ function publishShortcuts() {
 async function showHelp() {
   const commands = [...(await shimCommands())].filter(([name]) => name.startsWith("dpi-")).map(([name, c]) => [name + (c.args ? ` ${c.args}` : ""), c.description]);
   const url = await playgroundUrl();
-  notify(helpText({ device: hostName(), session: (await api("GET", sessionPath())).name, playgroundUrl: url, commands }));
+  const card = helpCard({ device: hostName(), session: (await api("GET", sessionPath())).name, playgroundUrl: url, commands });
+  out({ type: "extension_ui_request", id: randomUUID(), method: "dpiHelp", ...card });
 }
 
 async function showSettings() {

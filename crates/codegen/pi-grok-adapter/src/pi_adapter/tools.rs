@@ -786,6 +786,10 @@ impl PiAgent {
                 self.send_ext_notification("pi/ui/remote", dpi_remote_location(event))
                     .await;
             }
+            // dpi-rpc shim: the /dpi-help card, drawn by the pager as a block with headings and key names.
+            "dpihelp" => {
+                self.send_ext_notification("pi/ui/dpi_help", event).await;
+            }
             "settitle" => {
                 if let Some(title) = string(&event, &["title"]) {
                     self.send_extension_title(title).await;

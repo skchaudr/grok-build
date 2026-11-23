@@ -799,6 +799,7 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
             | RenderBlock::SessionEvent(_)
             | RenderBlock::MemoryCapture(_)
             | RenderBlock::AttachCard(_)
+            | RenderBlock::DpiHelp(_)
             | RenderBlock::Stub(_) => {}
         }
     }
@@ -892,6 +893,7 @@ fn block_short_text(block: &crate::scrollback::block::RenderBlock) -> Option<Str
         RenderBlock::CreditLimit(_) => Some("(credit limit)".to_string()),
         RenderBlock::MemoryCapture(_) => Some("(memory capture)".to_string()),
         RenderBlock::AttachCard(_) => Some("(dpi attach)".to_string()),
+        RenderBlock::DpiHelp(_) => Some("(dpi help)".to_string()),
         RenderBlock::Stub(_) => None,
     }
 }
