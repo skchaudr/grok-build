@@ -5,6 +5,9 @@
 //! from the backend (`pi/ui/attach_card`: a title and label/value rows) and the adapter sends it after the replayed
 //! history, so it sits at the bottom of the scrollback right above the prompt. It is a block, not a modal: a
 //! `--resume` session opens straight into it, and ctrl+r and quit keep their usual meaning.
+//!
+//! The Durable Pi mark sits beside the title and the agent's browser playground, and a muted line ends the card with
+//! the keys a newcomer needs.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -19,19 +22,28 @@ use crate::theme::Theme;
 pub struct AttachCardBlock {
     /// e.g. `dpi · polish-test on mini`.
     pub title: String,
-    /// `(label, value)` rows in the shim's order: model, cwd, activity, last ask, tasks, keys.
+    /// `(label, value)` rows in the shim's order: model, cwd, activity, last ask, tasks.
     pub rows: Vec<(String, String)>,
+    /// The agent in the browser playground, when the backend has one.
+    pub playground_url: Option<String>,
 }
+
+/// The card's last line: what F2, ctrl+r and quitting do here.
+const HINTS: &str = "F2 settings \u{00B7} ctrl+r switch agents \u{00B7} quitting detaches, the agent keeps running \u{00B7} /dpi-help";
+/// Narrower than this, the mark gives its columns back to the title.
+const LOGO_MIN_WIDTH: usize = 40;
 
 impl AttachCardBlock {
     pub fn new(title: impl Into<String>, rows: Vec<(String, String)>) -> Self {
         Self {
             title: title.into(),
             rows,
+            playground_url: None,
         }
     }
 
-    /// The `pi/ui/attach_card` payload: `{title, rows: [[label, value], ...]}`. Malformed rows are skipped.
+    /// The `pi/ui/attach_card` payload: `{title, rows: [[label, value], ...], playgroundUrl?}`. Malformed rows are
+    /// skipped.
     pub fn from_json(params: &serde_json::Value) -> Option<Self> {
         let title = params.get("title")?.as_str()?.trim();
         if title.is_empty() {
@@ -49,11 +61,20 @@ impl AttachCardBlock {
                 Some((clean(label), clean(value)))
             })
             .collect();
-        Some(Self::new(clean(title), rows))
+        let playground_url = params
+            .get("playgroundUrl")
+            .and_then(serde_json::Value::as_str)
+            .map(clean)
+            .filter(|url| !url.is_empty());
+        Some(Self {
+            playground_url,
+            ..Self::new(clean(title), rows)
+        })
     }
 
     pub fn searchable_text(&self) -> String {
         std::iter::once(self.title.clone())
+            .chain(self.playground_url.clone())
             .chain(self.rows.iter().map(|(label, value)| format!("{label} {value}")))
             .collect::<Vec<_>>()
             .join("\n")
@@ -70,16 +91,41 @@ impl BlockContent for AttachCardBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
         let theme = Theme::current();
         let width = ctx.width as usize;
-        let title = Line::from(Span::styled(
-            crate::util::truncate_to_width(&self.title, width).into_owned(),
+        let fit = |text: &str, budget: usize| crate::util::truncate_to_width(text, budget).into_owned();
+        // The mark, then the title and the playground beside it.
+        let (mut heading, beside) = if width >= LOGO_MIN_WIDTH {
+            let gap = "  ";
+            let indent = usize::from(crate::views::dpi_logo::WIDTH) + gap.len();
+            let [top, bottom] = crate::views::dpi_logo::lines(&theme);
+            let lead = |line: Line<'static>| {
+                let mut spans = line.spans;
+                spans.push(Span::raw(gap));
+                spans
+            };
+            ([lead(top), lead(bottom)], width - indent)
+        } else {
+            ([Vec::new(), Vec::new()], width)
+        };
+        heading[0].push(Span::styled(
+            fit(&self.title, beside),
             Style::default()
                 .fg(theme.accent_assistant)
                 .add_modifier(Modifier::BOLD),
         ));
-        let mut lines = vec![
-            BlockLine::styled(title).with_selection_range(Some(0)),
-            BlockLine::separator(Line::from("")),
-        ];
+        if let Some(url) = &self.playground_url {
+            heading[1].push(Span::styled(
+                fit(url, beside),
+                Style::default()
+                    .fg(theme.text_primary)
+                    .add_modifier(Modifier::UNDERLINED),
+            ));
+        }
+        let [top, bottom] = heading;
+        let mut lines = vec![BlockLine::styled(Line::from(top)).with_selection_range(Some(0))];
+        if bottom.iter().any(|span| !span.content.trim().is_empty()) {
+            lines.push(BlockLine::styled(Line::from(bottom)).with_selection_range(Some(0)));
+        }
+        lines.push(BlockLine::separator(Line::from("")));
         // Labels share one column so the values line up; the column is only as wide as the longest label.
         let label_width = self.rows.iter().map(|(l, _)| l.width()).max().unwrap_or(0) + 2;
         for (label, value) in &self.rows {
@@ -92,6 +138,8 @@ impl BlockContent for AttachCardBlock {
             ]);
             lines.push(BlockLine::styled(line).with_selection_range(Some(0)));
         }
+        lines.push(BlockLine::separator(Line::from("")));
+        lines.push(BlockLine::styled(Line::from(Span::styled(fit(HINTS, width), theme.muted()))));
         BlockOutput { lines }
     }
 
@@ -153,8 +201,9 @@ mod tests {
                 ["cwd", "mini:~/repos/lab · main"],
                 ["last ask", "fix the\nheader"],
                 ["broken"],
-                ["keys", "ctrl+r switches agents · quitting detaches; the agent keeps running"],
+                ["tasks", "none live"],
             ],
+            "playgroundUrl": "http://mini:5173/s/polish-test",
         }))
         .unwrap()
     }
@@ -164,30 +213,49 @@ mod tests {
         let card = card();
         assert_eq!(card.title, "dpi · polish-test on mini");
         let labels: Vec<_> = card.rows.iter().map(|(l, _)| l.as_str()).collect();
-        assert_eq!(labels, ["model", "cwd", "last ask", "keys"]);
+        assert_eq!(labels, ["model", "cwd", "last ask", "tasks"]);
         assert_eq!(card.rows[2].1, "fix the");
+        assert_eq!(card.playground_url.as_deref(), Some("http://mini:5173/s/polish-test"));
+        let bare = AttachCardBlock::from_json(&serde_json::json!({ "title": "t", "playgroundUrl": null })).unwrap();
+        assert_eq!(bare.playground_url, None);
         assert!(AttachCardBlock::from_json(&serde_json::json!({ "rows": [] })).is_none());
         assert!(AttachCardBlock::from_json(&serde_json::json!({ "title": " " })).is_none());
     }
 
     #[test]
-    fn output_is_a_bold_title_then_aligned_rows() {
+    fn output_is_the_mark_beside_title_and_playground_then_aligned_rows_then_hints() {
         let output = card().output(&ctx(100));
-        assert_eq!(output.lines.len(), 2 + 4);
-        assert_eq!(text(&output.lines[0]), "dpi · polish-test on mini");
-        assert!(output.lines[0].content.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        // mark + title, mark + playground, gap, 4 rows, gap, hints
+        assert_eq!(output.lines.len(), 3 + 4 + 2);
+        assert_eq!(text(&output.lines[0]), "██▀▀▄▄  ██▀▀██    dpi · polish-test on mini");
+        assert_eq!(text(&output.lines[1]), "██▄▄▀▀  ██▀▀  ██  http://mini:5173/s/polish-test");
+        let title = output.lines[0].content.spans.last().unwrap();
+        assert!(title.style.add_modifier.contains(Modifier::BOLD));
         // "last ask" is the longest label, so every value starts in column 10.
-        assert_eq!(text(&output.lines[2]), "model     gpt-6.1-sol (cliproxy) · thinking medium");
-        assert_eq!(text(&output.lines[3]), "cwd       mini:~/repos/lab · main");
-        assert!(text(&output.lines[5]).starts_with("keys      ctrl+r switches agents"));
+        assert_eq!(text(&output.lines[3]), "model     gpt-6.1-sol (cliproxy) · thinking medium");
+        assert_eq!(text(&output.lines[4]), "cwd       mini:~/repos/lab · main");
+        assert_eq!(text(&output.lines[6]), "tasks     none live");
+        assert!(text(&output.lines[8]).starts_with("F2 settings · ctrl+r switch agents · quitting detaches"));
+    }
+
+    #[test]
+    fn without_a_playground_the_mark_still_takes_two_rows() {
+        let mut card = card();
+        card.playground_url = None;
+        let output = card.output(&ctx(100));
+        assert_eq!(text(&output.lines[1]), "██▄▄▀▀  ██▀▀  ██  ");
     }
 
     #[test]
     fn narrow_widths_truncate_values_instead_of_overflowing() {
-        let output = card().output(&ctx(30));
-        for line in &output.lines {
-            assert!(text(line).width() <= 30, "{:?}", text(line));
+        for width in [30, 44] {
+            let output = card().output(&ctx(width));
+            for line in &output.lines {
+                assert!(text(line).width() <= usize::from(width), "{:?}", text(line));
+            }
         }
+        // Too narrow for the mark: the title gets the whole line.
+        assert!(text(&card().output(&ctx(30)).lines[0]).starts_with("dpi · polish"));
     }
 
     #[test]
