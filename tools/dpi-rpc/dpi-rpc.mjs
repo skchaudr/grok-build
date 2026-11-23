@@ -12,6 +12,10 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import {
+  THINKING_LEVELS, buildOptions, commandForKey, compactionPatch, contextInfo, helpText, hintsFor,
+  resolvePlaygroundUrl, shortcutCatalog, usageTokens,
+} from "./settings.mjs";
 
 function fileEnv(name) {
   try {
@@ -292,7 +296,9 @@ const OPS_POLL_MS = Number(process.env.DPI_OPS_POLL_MS) || 3000;
 const OPS_REPROMPT_MS = Number(process.env.DPI_OPS_REPROMPT_MS) || 600_000;
 const asked = new Set(); // deploy keys already prompted: one dialog per request, across re-attaches
 const OPS_DIALOG_MS = Number(process.env.DPI_OPS_DIALOG_MS) || 300_000;
-const dialogs = new Map(); // confirm request id -> {deployId, key, at, gone?}; gone = {how, at} once decided elsewhere
+const dialogs = new Map(); // deploy confirm request id -> {deployId, key, at, gone?}; gone = {how, at} once decided elsewhere
+// Every dialog we opened and still await: extension_ui_request id -> fn(response). Deploy approvals and confirm() both live here.
+const pending = new Map();
 let awaiting = new Set(); // deploy keys awaiting approval at the last poll
 // An id alone is not unique: a demo reset restarts ids, so a request is its id plus when it was made.
 const deployKey = (d) => `${d.id}:${d.requestedAt}`;
@@ -325,6 +331,7 @@ function watchDeploys(signal, show) {
           asked.add(key);
           const id = randomUUID();
           dialogs.set(id, { deployId: d.id, key, at: Date.now() });
+          pending.set(id, (r) => answerDeploy(id, r));
           // The adapter shows `message` (not `title`) as a confirm's question, so the title leads it.
           const title = `Deploy ${d.incidentId}: ${d.summary}`;
           const message = [title, `commit ${d.commit}`, `branch ${d.branch}`, d.diffStat, "If this was already decided elsewhere (hub, another device) you can dismiss this; dismissing records nothing."].join("\n");
@@ -344,12 +351,33 @@ function watchDeploys(signal, show) {
   })();
 }
 
-// The TUI's answer to a confirm. Only an explicit confirmed true/false is a decision; a dismissed
-// dialog records nothing and the deploy is offered again after the cooldown.
+// The TUI's answer to a dialog we opened; answers to ids we did not open are ignored.
 function onUiResponse(r) {
-  const dlg = dialogs.get(r.id);
-  if (dlg === undefined) return;
-  dialogs.delete(r.id);
+  const answer = pending.get(r.id);
+  if (!answer) return;
+  pending.delete(r.id);
+  answer(r);
+}
+
+// Ask a yes/no question and run `action` on Yes. Returns at once: the answer arrives later as an extension_ui_response,
+// and holding the prompt open meanwhile would stall the adapter. A dismissed or timed-out dialog does nothing.
+const CONFIRM_MS = Number(process.env.DPI_CONFIRM_MS) || 120_000;
+function confirmThen(title, message, action) {
+  const id = randomUUID();
+  const timer = setTimeout(() => pending.delete(id), CONFIRM_MS + 5000).unref(); // the adapter retracts the dialog at CONFIRM_MS
+  pending.set(id, (r) => {
+    clearTimeout(timer);
+    if (r.confirmed === true) action().catch((err) => notify(`${title}: ${err.message}`, "error"));
+    else notify(`${title}: nothing done.`);
+  });
+  out({ type: "extension_ui_request", id, method: "confirm", title, message, timeout: CONFIRM_MS });
+}
+
+// A deploy dialog's answer. Only an explicit confirmed true/false is a decision; a dismissed
+// dialog records nothing and the deploy is offered again after the cooldown.
+function answerDeploy(id, r) {
+  const dlg = dialogs.get(id);
+  dialogs.delete(id);
   const { deployId } = dlg;
   if (typeof r.confirmed === "boolean" && dlg.gone) return notify(`Deploy ${deployId} was already ${dlg.gone.how}${dlg.gone.at}; your ${r.confirmed ? "Yes" : "No"} was not sent.`);
   if (dlg.gone) return; // timed out or dismissed after it went stale: nothing to say
@@ -403,8 +431,8 @@ async function remote(card = false) {
       ["activity", `${activity}${messages.length ? ` · ${messages.length} messages` : ""}`],
       ...(lastUser ? [["last ask", clip(textOf(lastUser.content).replace(/\s+/g, " ").trim(), 100)]] : []),
       ["tasks", taskText(live) ?? "none live"],
-      ["keys", "ctrl+r switches agents · quitting detaches; the agent keeps running"],
     ],
+    playgroundUrl: await playgroundUrl(), // string, or null when this backend has no playground
   };
   return r;
 }
@@ -433,9 +461,7 @@ async function getState() {
 
 async function sessionStats() {
   const messages = await activeMessages();
-  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant" && m.usage);
-  const u = lastAssistant?.usage;
-  const tokens = u ? (u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0) : 0;
+  const tokens = usageTokens(messages) ?? 0;
   const a = await api("GET", agentPath());
   const known = device.models.find((m) => m.provider === a.config.model.provider && m.id === a.config.model.modelId);
   return {
@@ -495,6 +521,17 @@ async function shimCommands() {
   const prompts = await savedPrompts().catch((err) => (log(`prompts: ${err.message}`), []));
   return new Map([
     [CONTEXT_BREAKDOWN, { description: "Internal Pi-Grok bridge: write context token breakdown", run: writeContextBreakdown }],
+    [SHORTCUT_DISPATCH, { description: "Internal Pi-Grok bridge: run the Durable Pi action bound to a key", run: dispatchShortcut }],
+    ["dpi-help", { description: "What Durable Pi is, its keys and commands", run: showHelp }],
+    ["dpi-settings", { description: "Summarise this agent's settings (F2 opens them)", run: showSettings }],
+    ["dpi-open", { description: "Print the playground URL", run: showPlayground }],
+    ["dpi-compact", { description: "Summarise older context now; stored history stays", args: "[instructions]", run: compactNow }],
+    ["dpi-reset", { description: "Start a fresh context after a confirm; history stays stored", args: "[handoff note]", run: resetAgent }],
+    ["dpi-fork", { description: "Branch this agent at its last reply into a new agent", args: "[name]", run: forkAgent }],
+    ["dpi-new-agent", { description: "Add a new agent to this session", args: "[name]", run: newAgent }],
+    ["dpi-rename", { description: "Rename this agent (the session, for the main agent)", args: "<name>", run: renameAgent }],
+    ["dpi-stop", { description: "Stop the running turn and its background tasks", run: stopAgent }],
+    ["dpi-archive", { description: "Archive this session after a confirm; nothing is deleted", run: archiveSession }],
     ["dpi-sessions", { description: "List the sessions on this dpi backend (ctrl+r switches)", run: listSessions }],
     ["dpi-tasks", { description: "Show this session's live and recent tasks", run: listTasks }],
     ["dpi-deploys", { description: "Show deploys awaiting approval and reopen their dialogs", run: listDeploys }],
@@ -507,20 +544,187 @@ async function shimCommands() {
 
 // The backend's saved system prompts: a prompt is in effect when its checkbox is on and the system-prompts extension is.
 const SYSTEM_PROMPTS = "system-prompts";
+const getExtensions = async () => (await api("GET", agentPath() + "/extensions")).extensions;
 async function savedPrompts() {
-  const ext = (await api("GET", agentPath() + "/extensions")).extensions.find((e) => e.name === SYSTEM_PROMPTS);
+  const ext = (await getExtensions()).find((e) => e.name === SYSTEM_PROMPTS);
   return (ext?.prompts ?? []).map((p) => ({ ...p, active: ext.enabled && p.enabled }));
 }
 
-async function togglePrompt(id) {
-  const ext = (await api("GET", agentPath() + "/extensions")).extensions.find((e) => e.name === SYSTEM_PROMPTS);
+// Turn one saved prompt on or off; turning one on also turns the extension on, or it would do nothing.
+async function setPrompt(id, on) {
+  const ext = (await getExtensions()).find((e) => e.name === SYSTEM_PROMPTS);
   const prompt = ext?.prompts?.find((p) => p.id === id);
   if (!prompt) throw new Error(`no saved system prompt ${id} on this backend`);
-  const on = !(ext.enabled && prompt.enabled);
   if (prompt.enabled !== on) await api("PATCH", agentPath() + "/extensions", { prompt: id, enabled: on });
   if (on && !ext.enabled) await api("PATCH", agentPath() + "/extensions", { name: SYSTEM_PROMPTS, enabled: true });
+  return prompt;
+}
+
+async function togglePrompt(id) {
+  const ext = (await getExtensions()).find((e) => e.name === SYSTEM_PROMPTS);
+  const current = ext?.prompts?.find((p) => p.id === id);
+  if (!current) throw new Error(`no saved system prompt ${id} on this backend`);
+  const on = !(ext.enabled && current.enabled);
+  const prompt = await setPrompt(id, on);
   const active = (await savedPrompts()).filter((p) => p.active).map((p) => p.title);
   notify(`System prompt "${prompt.title}" is ${on ? "on" : "off"} from this agent's next turn. In effect: ${active.join(", ") || "none"}.`);
+}
+
+// ---- settings and info for grok-pi's F2 modal: dpi_settings / dpi_set_setting -----------------------------------------
+
+const sessionPath = () => `/sessions/${encodeURIComponent(session)}`;
+
+// Where the playground is; looked up once a minute at most, since a probe that fails costs its timeout.
+let playground = { at: 0, url: null };
+async function playgroundUrl() {
+  if (Date.now() - playground.at < 60_000) return playground.url;
+  const probe = (url) => fetch(url, { signal: AbortSignal.timeout(1500) }).then(() => true, () => false);
+  const url = await resolvePlaygroundUrl({ env: process.env, clientEnv, base: BASE, probe });
+  playground = { at: Date.now(), url };
+  return url;
+}
+
+async function snapshot() {
+  device = await api("GET", "/device");
+  const [agentRow, s, ext, compaction, entries, url] = await Promise.all([
+    api("GET", agentPath()),
+    api("GET", sessionPath()),
+    api("GET", agentPath() + "/extensions"),
+    api("GET", sessionPath() + "/compaction").catch(() => undefined),
+    activeEntries().catch(() => []),
+    playgroundUrl(),
+  ]);
+  const cfg = agentRow.config;
+  const known = device.models.find((m) => m.provider === cfg.model.provider && m.id === cfg.model.modelId);
+  const context = contextInfo(usageTokens(modelMessages(entries)), known?.contextWindow);
+  const cwd = cfg.cwd ?? s.cwd;
+  const info = {
+    device: hostName(),
+    session: s.name, sessionId: s.id,
+    agent: agentRow.name, agentId: String(agentRow.id),
+    cwd: tilde(cwd),
+    ...(agentRow.branch ? { branch: agentRow.branch } : {}),
+    model: `${cfg.model.modelId} (${cfg.model.provider})`,
+    thinking: cfg.thinkingLevel ?? "medium",
+    readOnly: !!cfg.readOnly,
+    tools: (agentRow.tools ?? []).filter((t) => t.offered).map((t) => t.name),
+    ...(context ? { context } : {}),
+    backendUrl: BASE,
+    playgroundUrl: url,
+    hints: hintsFor({ device: hostName(), session: s.name, playgroundUrl: url }),
+  };
+  return { info, options: buildOptions({ agent: agentRow, device, ext, compaction }) };
+}
+
+const wantBoolean = (value, what) => {
+  if (typeof value !== "boolean") throw new Error(`${what} is on or off, got ${JSON.stringify(value)}`);
+  return value;
+};
+
+// One setting, by option id, to the backend call the playground makes for it. Nothing here guesses: an id or value
+// the backend would not take is an error the person reads.
+async function applySetting(id, value) {
+  if (id === "model") {
+    device = await api("GET", "/device");
+    const m = device.models.find((x) => `${x.provider}/${x.id}` === value);
+    if (!m) throw new Error(`no model ${JSON.stringify(value)} on this backend`);
+    return api("PATCH", agentPath() + "/config", { model: { provider: m.provider, modelId: m.id } });
+  }
+  if (id === "thinking") {
+    if (!THINKING_LEVELS.includes(value)) throw new Error(`thinking is one of ${THINKING_LEVELS.join(", ")}`);
+    return api("PATCH", agentPath() + "/config", { thinkingLevel: value });
+  }
+  if (id === "read_only") return api("PATCH", agentPath() + "/config", { readOnly: wantBoolean(value, "Read-only") });
+  if (id.startsWith("prompt:")) return setPrompt(id.slice("prompt:".length), wantBoolean(value, "A system prompt"));
+  if (id.startsWith("ext:")) return api("PATCH", agentPath() + "/extensions", { name: id.slice("ext:".length), enabled: wantBoolean(value, "An extension") });
+  if (id === "compaction") {
+    const a = await api("GET", agentPath());
+    const window = device.models.find((m) => m.provider === a.config.model.provider && m.id === a.config.model.modelId)?.contextWindow;
+    return api("PATCH", sessionPath() + "/compaction", compactionPatch(window, String(value)));
+  }
+  throw new Error(`unknown setting ${JSON.stringify(id)}`);
+}
+
+// ---- actions: slash commands and shortcut keys ---------------------------------------------------------------------------
+
+const SHORTCUT_DISPATCH = "__pi_shortcut_dispatch";
+
+// The pager matches keys itself and sends the key id back as `/__pi_shortcut_dispatch <key>`.
+async function dispatchShortcut(key) {
+  const name = commandForKey(key);
+  if (!name) throw new Error(`no Durable Pi action on ${key}`);
+  await (await shimCommands()).get(name).run("");
+}
+
+// The catalog the pager reads (pi_ui.rs `__pi_extension_shortcuts__`); it drops one that arrives before the session
+// exists, so it goes out at startup, again when the adapter asks for commands, and every 30s after.
+function publishShortcuts() {
+  out({ type: "extension_ui_request", id: randomUUID(), method: "setWidget", widgetKey: "__pi_extension_shortcuts__", widgetLines: [JSON.stringify(shortcutCatalog())] });
+}
+
+async function showHelp() {
+  const commands = [...(await shimCommands())].filter(([name]) => name.startsWith("dpi-")).map(([name, c]) => [name + (c.args ? ` ${c.args}` : ""), c.description]);
+  const url = await playgroundUrl();
+  notify(helpText({ device: hostName(), session: (await api("GET", sessionPath())).name, playgroundUrl: url, commands }));
+}
+
+async function showSettings() {
+  const { info, options } = await snapshot();
+  const on = options.filter((o) => o.type === "boolean" && o.category !== "Agent" && o.currentValue).length;
+  const compact = options.find((o) => o.id === "compaction");
+  notify(`Press F2 to change these. Now: ${info.model} · thinking ${info.thinking} · read-only ${info.readOnly ? "on" : "off"} · ${on} prompt${on === 1 ? "" : "s"} and extension${on === 1 ? "" : "s"} on${compact ? ` · auto-compact ${compact.currentValue === "off" ? "off" : `at ${compact.currentValue}%`}` : ""}`);
+}
+
+async function showPlayground() {
+  const url = await playgroundUrl();
+  notify(url ? `Playground: ${url}` : "This backend has no playground.");
+}
+
+async function compactNow(instructions) {
+  const { taskId } = await api("POST", agentPath() + "/compact", instructions ? { instructions } : {});
+  notify(`Compacting this agent's context (task #${taskId}); /dpi-tasks shows how it goes. Stored history stays.`);
+}
+
+function resetAgent(note) {
+  confirmThen("Reset this agent?", "Starts a fresh context: the agent forgets the conversation so far. Its history stays stored and is still visible in the playground.", async () => {
+    await api("POST", agentPath() + "/reset", note ? { note } : {});
+    notify("New context started.");
+  });
+}
+
+// The new agent is a sibling in the same session. The TUI cannot be moved to it from here, so say how to get there.
+async function forkAgent(name) {
+  const last = (await activeEntries()).filter((e) => e.kind === "pi.assistant").at(-1);
+  if (!last) throw new Error("nothing to fork yet: the agent has not replied");
+  const forked = await api("POST", agentPath() + "/fork", { entryId: last.id, ...(name ? { name } : {}) });
+  notify(`Forked at reply #${last.id} as agent ${forked.name ?? forked.id}. This one is untouched; ctrl+r switches to the fork.`);
+}
+
+async function newAgent(name) {
+  const created = await api("POST", sessionPath() + "/agents", { from: agent, ...(name ? { name } : {}) });
+  notify(`New agent ${created.name ?? created.id} in this session, with this agent's model and settings. ctrl+r switches to it.`);
+}
+
+// The main agent is the session: its name is the session's. Any other agent has a name of its own.
+async function renameAgent(name) {
+  if (!name) throw new Error("usage: /dpi-rename <name>");
+  const a = await api("GET", agentPath());
+  if (a.kind === "root") await api("PATCH", sessionPath(), { name });
+  else await api("PATCH", agentPath(), { name });
+  notify(`${a.kind === "root" ? "Session" : "Agent"} renamed to ${name}.`);
+}
+
+async function stopAgent() {
+  await api("POST", agentPath() + "/abort", { background: true });
+  notify("Stopped: the running turn and its background tasks.");
+}
+
+function archiveSession() {
+  confirmThen("Archive this session?", "Stops its agents and moves it out of the list. Nothing is deleted, and the playground can restore it.", async () => {
+    await api("DELETE", sessionPath());
+    stream?.abort(); // the session is gone: stop polling it
+    notify("Session archived. This window no longer has a session; ctrl+r picks another, or quit.");
+  });
 }
 
 async function listSessions() {
@@ -577,7 +781,16 @@ const handlers = {
   get_state: getState,
   // Re-read so model list edits on the backend show without restarting grok-pi.
   get_available_models: async () => ((device = await api("GET", "/device")), { models: device.models }),
-  get_commands: async () => ({ commands: [...(await shimCommands())].map(([name, c]) => ({ name, description: c.description, source: "extension" })) }),
+  get_commands: async () => {
+    const commands = [...(await shimCommands())].map(([name, c]) => ({ name, description: c.description, source: "extension" }));
+    setTimeout(publishShortcuts, 0); // after this answer: the adapter has the session by now
+    return { commands };
+  },
+  dpi_settings: snapshot,
+  dpi_set_setting: async (c) => {
+    await applySetting(String(c.settingId ?? ""), c.value);
+    return snapshot();
+  },
   get_messages: async () => ({ messages: await activeMessages() }),
   get_entries: async () => {
     const msgs = await activeMessages();
@@ -691,6 +904,8 @@ async function main() {
   agent = String(a.id);
   if (process.argv.includes("--resolve")) return console.log(`${session}:${agent}`); // for dpi-grok's pre-check and --resume
   attach();
+  publishShortcuts();
+  setInterval(publishShortcuts, 30_000).unref();
   const rl = createInterface({ input: process.stdin });
   rl.on("line", (line) => {
     if (!line.trim()) return;
