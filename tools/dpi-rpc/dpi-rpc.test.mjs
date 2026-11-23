@@ -781,6 +781,8 @@ test("the shortcut catalog goes out at startup in the pager's format, with keys 
     assert.deepEqual(shortcuts.map((x) => x.key), ["alt+c", "alt+a", "alt+k", "alt+x", "alt+o", "alt+h"]);
     assert.ok(shortcuts.every((x) => x.extension === "dpi" && x.enabled === true && x.description && x.key === x.key.toLowerCase()));
     assert.equal(new Set(shortcuts.map((x) => x.key)).size, shortcuts.length);
+    assert.deepEqual(shortcuts.map((x) => x.label), ["compact", "new agent", "fork", "stop", "playground", "help"]);
+    assert.ok(shortcuts.every((x) => x.label.length <= 12 && x.label !== x.description));
     // none is an Option dead key (e i n u) or a word-motion letter (b f d): the terminal would never deliver those as Alt+letter
     assert.ok(shortcuts.every((x) => !/^alt\+[einubfd]$/.test(x.key)));
     // every key maps to a command the shim really has

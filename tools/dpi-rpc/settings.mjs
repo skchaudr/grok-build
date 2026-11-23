@@ -111,18 +111,19 @@ export function contextInfo(tokens, window) {
 // every Ctrl+letter we could want is taken (g k j u d e f c t r b o m s n p x l w q i), Alt+s is the prompt stash and
 // F2/F4 are settings and acpx, so these are Alt+letters. Left out on purpose: b, f, d (word motion in text fields),
 // and e, i, n, u (macOS Option dead keys: the terminal never reports them as Alt+letter).
+// `label` is the short word the F2 footer shows beside the key ("Alt+C compact").
 // Letters name the action: Compact, new Agent, fork (Keep a copy to experiment on), stop (X), Open playground, Help.
 // Reset and archive have no key: they destroy, so they stay behind a typed command and a confirm.
 export const SHORTCUTS = [
-  { key: "alt+c", command: "dpi-compact", description: "Compact this agent's context" },
-  { key: "alt+a", command: "dpi-new-agent", description: "New agent in this session" },
-  { key: "alt+k", command: "dpi-fork", description: "Fork this agent to try something" },
-  { key: "alt+x", command: "dpi-stop", description: "Stop the turn and background tasks" },
-  { key: "alt+o", command: "dpi-open", description: "Show the playground URL" },
-  { key: "alt+h", command: "dpi-help", description: "Durable Pi help" },
+  { key: "alt+c", command: "dpi-compact", label: "compact", description: "Compact this agent's context" },
+  { key: "alt+a", command: "dpi-new-agent", label: "new agent", description: "New agent in this session" },
+  { key: "alt+k", command: "dpi-fork", label: "fork", description: "Fork this agent to try something" },
+  { key: "alt+x", command: "dpi-stop", label: "stop", description: "Stop the turn and background tasks" },
+  { key: "alt+o", command: "dpi-open", label: "playground", description: "Show the playground URL" },
+  { key: "alt+h", command: "dpi-help", label: "help", description: "Durable Pi help" },
 ];
 
-export const shortcutCatalog = () => ({ shortcuts: SHORTCUTS.map(({ key, description }) => ({ key, description, extension: "dpi", enabled: true })) });
+export const shortcutCatalog = () => ({ shortcuts: SHORTCUTS.map(({ key, label, description }) => ({ key, label, description, extension: "dpi", enabled: true })) });
 export const commandForKey = (key) => SHORTCUTS.find((s) => s.key === String(key).trim().toLowerCase())?.command;
 export const keyLabel = (key) => key.replace(/^alt\+/, "Alt+").replace(/^(\w)/, (c) => c.toUpperCase()).replace(/\+(\w)$/, (_, c) => `+${c.toUpperCase()}`);
 
@@ -150,7 +151,7 @@ export async function resolvePlaygroundUrl({ env, clientEnv, base, probe }) {
 // ---- words --------------------------------------------------------------------------------------------------------
 
 export function hintsFor({ device, session, playgroundUrl }) {
-  const keys = SHORTCUTS.map((s) => `${keyLabel(s.key)} ${s.description.split(" ")[0].toLowerCase()}`).join(", ");
+  const keys = SHORTCUTS.map((s) => `${keyLabel(s.key)} ${s.label}`).join(", ");
   return [
     `Quitting only detaches: the agent keeps working on ${device}. dpi-grok ${session} brings you back to where it got to.`,
     "ctrl+r switches between sessions and agents; /dpi-sessions lists what is on this device.",
