@@ -73,8 +73,10 @@ impl PiAgent {
     /// rows) and `info` as `pi/ui/dpi_info` (the panel header). Returns the options for an ACP response.
     pub(super) async fn publish_dpi_snapshot(&self, snapshot: &Value) -> Vec<acp::SessionConfigOption> {
         if let Some(info) = snapshot.get("info").filter(|info| info.is_object()) {
-            self.send_ext_notification("pi/ui/dpi_info", info.clone())
-                .await;
+            // `sessionId` routes a pi/ui notification to its pager session; the shim's is the backend's session id.
+            let mut info = info.clone();
+            info["sessionId"] = self.session_id().0.as_ref().into();
+            self.send_ext_notification("pi/ui/dpi_info", info).await;
         }
         let options = dpi_config_options(snapshot);
         self.send_update(acp::SessionUpdate::ConfigOptionUpdate(

@@ -107,6 +107,58 @@ fn a_registered_extension_shortcut_is_dispatched_to_pi() {
 }
 
 #[test]
+fn dpi_info_lands_on_the_agent_for_the_settings_header() {
+    let mut app = make_app_with_agent("sess-pi");
+    assert!(handle_ext_notification(
+        &pi(
+            "pi/ui/dpi_info",
+            serde_json::json!({ "device": "mini", "session": "modal-test", "agent": "Main", "cwd": "~/w",
+                                "model": "gpt-5", "readOnly": true, "tools": ["read"], "playgroundUrl": null,
+                                "hints": ["F2 opens settings"] }),
+        ),
+        &mut app,
+    ));
+    let info = test_agent(&app, AgentId(0)).dpi_info.clone().expect("info stored");
+    assert_eq!((info.session.as_str(), info.read_only, info.playground_url), ("modal-test", true, None));
+}
+
+#[test]
+fn only_the_durable_agents_keys_reach_pi_through_the_settings_panel() {
+    use crate::views::modal::ActiveModal;
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let mut app = make_app_with_agent("sess-pi");
+    handle_ext_notification(
+        &pi(
+            "pi/ui/shortcuts",
+            serde_json::json!({ "shortcuts": [
+                { "key": "alt+c", "description": "Compact the context", "label": "compact", "extension": "dpi" },
+                { "key": "alt+t", "description": "tutor", "extension": "pi-tutor" },
+            ] }),
+        ),
+        &mut app,
+    );
+    let panel = || ActiveModal::PiSettings {
+        state: Box::new(crate::views::pi_settings::PiSettingsState::new(
+            std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
+            Default::default(),
+            Default::default(),
+        )),
+    };
+    app.agents.get_mut(&AgentId(0)).unwrap().active_modal = Some(panel());
+    app.handle_input(&key(KeyCode::Char('t'), KeyModifiers::ALT));
+    assert!(pi_inputs(&mut app).is_empty(), "another extension's key stays out while the panel is open");
+    assert!(test_agent(&app, AgentId(0)).active_modal.is_some());
+
+    app.handle_input(&key(KeyCode::Char('c'), KeyModifiers::ALT));
+    assert_eq!(pi_inputs(&mut app), vec![("pi/ui/shortcut_dispatch", serde_json::json!({ "key": "alt+c" }))]);
+    assert!(test_agent(&app, AgentId(0)).active_modal.is_none(), "the panel closes so the result is in view");
+    assert_eq!(
+        crate::settings::dpi::action_captions(test_agent(&app, AgentId(0)).pi_shortcuts.as_ref()),
+        ["Alt+C compact"]
+    );
+}
+
+#[test]
 fn pi_plan_file_points_view_plan_at_the_sidecar() {
     let mut app = make_app_with_agent("sess-pi");
     assert!(handle_ext_notification(
