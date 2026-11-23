@@ -182,6 +182,13 @@ pub struct Shortcut<'a> {
     pub id: usize,
 }
 
+/// A footer entry that renders nothing and starts a new row, so a caller can keep a group of shortcuts together.
+pub const ROW_BREAK: Shortcut<'static> = Shortcut {
+    label: "",
+    clickable: false,
+    id: usize::MAX,
+};
+
 /// Append an `i search` footer hint when a vim-nav picker is in NAV mode (vim-mode on and search not yet active).
 /// The hint is how users discover they can start typing.
 /// No-op otherwise. Shared by the picker modals' footer builders.
@@ -587,28 +594,41 @@ fn compute_modal_dims(area: Rect, sizing: &ModalSizing) -> (u16, u16) {
 
 /// Compute how many rows a set of shortcuts needs at a given width.
 ///
-/// Uses the same greedy line-breaking logic as [`render_modal_shortcuts`] so the layout prediction matches the actual render.
+/// Uses the same line-breaking as [`render_modal_shortcuts`] so the layout prediction matches the actual render.
 pub(crate) fn shortcuts_rows_needed(shortcuts: &[Shortcut<'_>], width: u16) -> u16 {
     if width == 0 || shortcuts.is_empty() {
         return 0;
     }
-    let avail = width as usize;
-    let sep_w = "  |  ".width(); // 5
-    let mut rows = 1u16;
+    shortcut_rows(shortcuts, width as usize).len() as u16
+}
+
+/// Break shortcuts into rows greedily: each row holds as many shortcuts (by index) as fit within `avail`, and a
+/// [`ROW_BREAK`] starts a new row.
+fn shortcut_rows(shortcuts: &[Shortcut<'_>], avail: usize) -> Vec<Vec<usize>> {
+    let sep_w = "  |  ".width();
+    let mut rows: Vec<Vec<usize>> = vec![vec![]];
     let mut cur_row_w: usize = 0;
-    for shortcut in shortcuts {
+    for (idx, shortcut) in shortcuts.iter().enumerate() {
+        let row_empty = rows.last().is_none_or(Vec::is_empty);
+        if shortcut.label.is_empty() {
+            if !row_empty {
+                rows.push(vec![]);
+                cur_row_w = 0;
+            }
+            continue;
+        }
         let label_w = shortcut.label.width();
-        let needed = if cur_row_w == 0 {
-            label_w
-        } else {
-            cur_row_w + sep_w + label_w
-        };
-        if needed > avail && cur_row_w > 0 {
-            rows += 1;
+        let needed = if row_empty { label_w } else { cur_row_w + sep_w + label_w };
+        if needed > avail && !row_empty {
+            rows.push(vec![idx]);
             cur_row_w = label_w;
         } else {
+            rows.last_mut().expect("rows starts non-empty").push(idx);
             cur_row_w = needed;
         }
+    }
+    if rows.len() > 1 && rows.last().is_some_and(Vec::is_empty) {
+        rows.pop();
     }
     rows
 }
@@ -639,25 +659,7 @@ pub fn render_modal_shortcuts(
     let separator = "  |  ";
     let sep_w = separator.width();
 
-    // Break shortcuts into rows greedily: each row holds as many shortcuts as fit within the available width
-    let mut rows: Vec<Vec<usize>> = vec![vec![]];
-    let mut cur_row_w: usize = 0;
-    for (idx, shortcut) in shortcuts.iter().enumerate() {
-        let label_w = shortcut.label.width();
-        let needed = if rows.last().unwrap().is_empty() {
-            label_w
-        } else {
-            cur_row_w + sep_w + label_w
-        };
-
-        if needed > avail && !rows.last().unwrap().is_empty() {
-            rows.push(vec![idx]);
-            cur_row_w = label_w;
-        } else {
-            rows.last_mut().unwrap().push(idx);
-            cur_row_w = needed;
-        }
-    }
+    let mut rows = shortcut_rows(shortcuts, avail);
 
     // Limit to available height.
     rows.truncate(area.height as usize);
@@ -1105,6 +1107,19 @@ mod tests {
             let w = UnicodeWidthStr::width(line);
             assert!(w <= 20, "line {line:?} is {w} columns wide (max 20)");
         }
+    }
+
+    /// A row break starts a new row without rendering; a leading, doubled or trailing break adds no empty row.
+    #[test]
+    fn row_break_starts_a_new_footer_row() {
+        let s = |label| Shortcut { label, clickable: false, id: 0 };
+        let plain = [s("a one"), s("b two"), s("c three")];
+        assert_eq!(shortcut_rows(&plain, 80), vec![vec![0, 1, 2]]);
+        let broken = [ROW_BREAK, s("a one"), ROW_BREAK, ROW_BREAK, s("b two"), s("c three"), ROW_BREAK];
+        assert_eq!(shortcut_rows(&broken, 80), vec![vec![1], vec![4, 5]]);
+        assert_eq!(shortcuts_rows_needed(&broken, 80), 2);
+        // Greedy wrapping still applies inside a group.
+        assert_eq!(shortcut_rows(&broken, 12), vec![vec![1], vec![4], vec![5]]);
     }
 
     #[test]
