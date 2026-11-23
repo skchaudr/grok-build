@@ -472,6 +472,7 @@ impl AgentView {
             pending_recap_entry: None,
             display_name: None,
             machine_name: None,
+            dpi_remote: None,
             agent_label: None,
             pi_statuses: Default::default(),
             pi_widgets: Default::default(),

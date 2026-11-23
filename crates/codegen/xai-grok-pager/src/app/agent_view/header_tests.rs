@@ -539,3 +539,35 @@ fn nested_subagent_keeps_the_parent_header_and_routes_like_it() {
         InputOutcome::Action(Action::DashboardOverlayExit)
     ));
 }
+
+/// dpi-grok: the header shows where the durable agent runs (`branch remote host:~/path`), never the laptop folder,
+/// the laptop's branch, or the laptop's worktree badge; with no backend branch it shows no branch at all.
+#[test]
+fn dpi_remote_header_replaces_the_local_location() {
+    let _theme = crate::theme::cache::pin_theme();
+    let registry = ActionRegistry::defaults();
+    for branch in [Some("sab/remote-branch"), None] {
+        let mut agent = agent_at(120);
+        agent.current_branch = Some("laptop-branch".into());
+        agent.is_worktree = true;
+        agent.machine_name = Some("laptop".into());
+        agent.dpi_remote = Some(crate::views::location::DpiRemote {
+            host: "mini".into(),
+            cwd: "/Users/bob/repos/lab".into(),
+            label: "mini:~/repos/lab".into(),
+            branch: branch.map(str::to_owned),
+        });
+        let buf = draw(&mut agent, &registry, false, OverlayHeader::default());
+        let row = header_row(&agent, &buf);
+        let expected = match branch {
+            Some(branch) => format!("{branch} remote mini:~/repos/lab"),
+            None => "remote mini:~/repos/lab".to_owned(),
+        };
+        assert!(row.trim_start().starts_with(&expected), "row = {row:?}");
+        for local in [PATH, "laptop", "worktree"] {
+            assert!(!row.contains(local), "no local {local:?}, row = {row:?}");
+        }
+        let cwd = agent.hit_cwd.rect.expect("the remote path is clickable");
+        assert_eq!(text_at(&buf, cwd), "mini:~/repos/lab");
+    }
+}

@@ -52,6 +52,33 @@ impl PiAgent {
         self.send_models(bootstrap).await;
         self.send_session_title(bootstrap.state.session_name.as_deref())
             .await;
+        self.publish_dpi_remote(false).await;
+    }
+
+    /// dpi-rpc shim only: where the durable agent really runs (backend host, cwd, branch) for the pager header,
+    /// and with `card` the attach card for a session just opened. Pi itself has no `dpi_remote`.
+    pub(super) async fn publish_dpi_remote(&self, card: bool) {
+        if !dpi_shim() {
+            return;
+        }
+        let data = match self
+            .rpc
+            .request(json!({ "type": "dpi_remote", "card": card }))
+            .await
+        {
+            Ok(data) => data,
+            Err(error) => {
+                tracing::warn!(%error, "dpi remote location unavailable");
+                return;
+            }
+        };
+        let attach_card = data.get("card").filter(|card| card.is_object()).cloned();
+        self.send_ext_notification("pi/ui/remote", dpi_remote_location(data))
+            .await;
+        if let Some(attach_card) = attach_card {
+            self.send_ext_notification("pi/ui/attach_card", attach_card)
+                .await;
+        }
     }
 
     pub(super) async fn replay_history(&self) -> Result<()> {

@@ -14,6 +14,45 @@ pub(crate) fn worktree_badge(theme: &Theme) -> Span<'static> {
     Span::styled("worktree ", theme.faint())
 }
 
+/// Where a durable dpi agent really runs (`pi/ui/remote` from the dpi-rpc shim). When set, the session header shows
+/// this instead of the laptop folder grok-pi was started in, and never probes local git for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DpiRemote {
+    /// Backend device, e.g. `mini`.
+    pub host: String,
+    /// Absolute cwd on that device.
+    pub cwd: String,
+    /// What the header shows, e.g. `mini:~/repos/foo`.
+    pub label: String,
+    /// The cwd's branch as the backend reports it; `None` when the backend does not report one.
+    pub branch: Option<String>,
+}
+
+impl DpiRemote {
+    pub(crate) fn from_json(params: &serde_json::Value) -> Option<Self> {
+        let field = |key: &str| {
+            params
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(|s| crate::views::session_title::sanitize_display_text(s.trim()).into_owned())
+                .filter(|s| !s.is_empty())
+        };
+        let (host, cwd) = (field("host")?, field("cwd")?);
+        let label = field("label").unwrap_or_else(|| format!("{host}:{cwd}"));
+        Some(Self { host, cwd, label, branch: field("branch") })
+    }
+
+    /// What clicking the path copies: `host:/abs/path`, ready for scp or ssh.
+    pub(crate) fn copy_text(&self) -> String {
+        format!("{}:{}", self.host, self.cwd)
+    }
+}
+
+/// `remote ` beside a dpi agent's location, painted like [`worktree_badge`] so the location itself stays the strongest word.
+pub(crate) fn remote_badge(theme: &Theme) -> Span<'static> {
+    Span::styled("remote ", theme.faint())
+}
+
 /// The branch as the location line shows it: git reports a detached HEAD as an empty name.
 pub(crate) fn branch_label(branch: String) -> String {
     if branch.is_empty() {
@@ -55,6 +94,20 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn dpi_remote_from_json_requires_host_and_cwd() {
+        let remote = DpiRemote::from_json(&serde_json::json!({
+            "host": "mini", "cwd": "/Users/bob/repo", "label": "mini:~/repo", "branch": "main",
+        }))
+        .unwrap();
+        assert_eq!(remote.label, "mini:~/repo");
+        assert_eq!(remote.branch.as_deref(), Some("main"));
+        assert_eq!(remote.copy_text(), "mini:/Users/bob/repo");
+        let bare = DpiRemote::from_json(&serde_json::json!({ "host": "mini", "cwd": "/srv", "branch": "" })).unwrap();
+        assert_eq!((bare.label.as_str(), bare.branch), ("mini:/srv", None));
+        assert!(DpiRemote::from_json(&serde_json::json!({ "host": "mini" })).is_none());
+    }
 
     #[test]
     fn location_parts_from_maps_each_probe_outcome() {

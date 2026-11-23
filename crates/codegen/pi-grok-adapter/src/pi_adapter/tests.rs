@@ -711,3 +711,31 @@ fn codemode_nested_calls_are_suppressed_by_known_parent_ids() {
         })
     ));
 }
+
+#[test]
+fn dpi_remote_location_keeps_the_location_and_drops_card_and_envelope() {
+    let reply = json!({
+        "host": "mini",
+        "cwd": "/Users/bob/repo",
+        "label": "mini:~/repo",
+        "branch": "main",
+        "card": { "title": "dpi · a on mini", "rows": [] },
+    });
+    assert_eq!(
+        dpi_remote_location(reply),
+        json!({ "host": "mini", "cwd": "/Users/bob/repo", "label": "mini:~/repo", "branch": "main" })
+    );
+    // The shim's pushed setRemote arrives inside an extension_ui_request envelope.
+    let pushed = json!({
+        "type": "extension_ui_request",
+        "id": "remote-1",
+        "method": "setRemote",
+        "host": "mini",
+        "cwd": "/srv",
+        "label": "mini:/srv",
+    });
+    assert_eq!(
+        dpi_remote_location(pushed),
+        json!({ "host": "mini", "cwd": "/srv", "label": "mini:/srv" })
+    );
+}

@@ -18,7 +18,7 @@ const agents1 = [
   { id: 2, name: "Alt", kind: "fork", parentId: 1, busy: true },
   { id: 3, name: "Sub", kind: "subagent", ownerAgentId: 2, busy: false },
 ];
-const state = { tasks: [], doneTasks: [], prime: null, requests: [], ext: null };
+const state = { tasks: [], doneTasks: [], prime: null, requests: [], ext: null, branch: "main", streams: [] };
 const freshExt = () => ({
   builtIn: ["coding-tools"],
   extensions: [{
@@ -55,7 +55,7 @@ const server = createServer((req, res) => {
     if (p === "/sessions" && req.method === "GET") {
       return json(res, 200, [
         { id: "s1", name: "one", cwd: "/w", model: "m", createdAt: 1000, agents: agents1 },
-        { id: "s2", name: "two", cwd: "/w", model: "m", createdAt: 9000, agents: [{ id: 1, name: "Main", kind: "root", busy: false }] },
+        { id: "s2", name: "two", cwd: "/home/bob/two", model: "m", createdAt: 9000, agents: [{ id: 1, name: "Main", kind: "root", busy: false }] },
       ]);
     }
     if (p === "/sessions" && req.method === "POST") return json(res, 201, { id: "s3", agents: [{ id: 1 }] });
@@ -69,6 +69,7 @@ const server = createServer((req, res) => {
       const id = a === "main" ? 1 : Number(a);
       if (rest === "/events") {
         res.writeHead(200, { "content-type": "text/event-stream" });
+        state.streams.push(res);
         return res.write(`data: ${JSON.stringify({ type: "snapshot", snapshot: { entries: [] } })}\n\n`);
       }
       if (rest === "/entries") return entries[`${s}/${id}`] ? json(res, 200, { items: entries[`${s}/${id}`] }) : json(res, 500, { error: { message: "boom" } });
@@ -81,7 +82,7 @@ const server = createServer((req, res) => {
         return json(res, 200, state.ext);
       }
       if (rest === "/extensions") return json(res, 200, state.ext);
-      if (rest === "") return json(res, 200, { id, sessionId: s, name: "n", kind: "root", busy: false, config: { model: { provider: "p", modelId: "m" }, cwd: "/w/proj", thinkingLevel: "low" } });
+      if (rest === "") return json(res, 200, { id, sessionId: s, name: "n", kind: "root", busy: false, config: { model: { provider: "p", modelId: "m" }, cwd: id === 3 ? "/Users/bob/repo" : "/w/proj", thinkingLevel: "low" }, ...(state.branch && id === 1 ? { branch: state.branch } : {}) });
     }
     json(res, 404, { error: { message: `fake: ${req.method} ${p}` } });
   });
@@ -202,7 +203,7 @@ test("/dpi-sessions lists every session and marks the attached one", async () =>
   const s = await shim();
   try {
     await s.call({ type: "prompt", message: "/dpi-sessions" });
-    await notified(s, "2 sessions on mini-host (▸ this one; ctrl+r switches):\n▸ one · 3 agents · 1 running · /w\n  two · 1 agent · /w");
+    await notified(s, "2 sessions on mini-host (▸ this one; ctrl+r switches):\n▸ one · 3 agents · 1 running · /w\n  two · 1 agent · ~/two");
   } finally { s.close(); }
 });
 
@@ -234,6 +235,51 @@ test("a shim command that fails shows its error instead of going quiet", async (
     const n = await s.until((l) => l.method === "notify" && l.notifyType === "error");
     assert.equal(n.message, "/dpi-tasks: tasks down");
   } finally { s.close(); state.failTasks = false; }
+});
+
+test("dpi_remote names the backend host, the agent's real cwd and branch; home folds to ~", async () => {
+  const s = await shim();
+  try {
+    assert.deepEqual((await s.call({ type: "dpi_remote" })).data, { host: "mini-host", cwd: "/w/proj", label: "mini-host:/w/proj", branch: "main" });
+  } finally { s.close(); }
+  const sub = await shim({}, "dpi://s1/3");
+  try {
+    assert.deepEqual((await sub.call({ type: "dpi_remote" })).data, { host: "mini-host", cwd: "/Users/bob/repo", label: "mini-host:~/repo" }); // no branch: none shown
+  } finally { sub.close(); }
+});
+
+test("dpi_remote with card: the attach card's title and rows come from the backend", async () => {
+  state.tasks = [{ id: 2, kind: "job", state: { status: "running" } }];
+  const s = await shim();
+  try {
+    const { card } = (await s.call({ type: "dpi_remote", card: true })).data;
+    assert.equal(card.title, "dpi · s1 on mini-host");
+    const rows = Object.fromEntries(card.rows);
+    assert.deepEqual(Object.keys(rows), ["model", "cwd", "activity", "last ask", "tasks", "keys"]);
+    assert.equal(rows.model, "m (p) · thinking low");
+    assert.equal(rows.cwd, "mini-host:/w/proj · main");
+    assert.match(rows.activity, /^last message \d+d ago · 3 messages$/);
+    assert.equal(rows["last ask"], "second");
+    assert.equal(rows.tasks, "1 task: job");
+  } finally { s.close(); state.tasks = []; }
+});
+
+test("after a turn ends, a changed branch is pushed as setRemote; an unchanged one is not", async () => {
+  state.streams.length = 0;
+  const s = await shim();
+  try {
+    await s.call({ type: "dpi_remote" });
+    await s.until(() => state.streams.length > 0);
+    const runEnd = () => state.streams.at(-1).write(`data: ${JSON.stringify({ type: "batch", events: [{ type: "run_end" }] })}\n\n`);
+    runEnd();
+    await s.until((l) => l.type === "agent_settled");
+    state.branch = "sab/other";
+    runEnd();
+    const push = await s.until((l) => l.method === "setRemote");
+    assert.deepEqual([push.label, push.branch], ["mini-host:/w/proj", "sab/other"]);
+    await settle();
+    assert.equal(s.lines.filter((l) => l.method === "setRemote").length, 1);
+  } finally { s.close(); state.branch = "main"; }
 });
 
 test("get_fork_messages lists user turns by dpi entry id", async () => {

@@ -11,7 +11,7 @@ impl PiAgent {
             let state = self.state.borrow();
             catalog_session_dir(&state.bootstrap.state, &state.session_dir)
         };
-        if std::env::var_os("GROK_PI_DPI").is_some_and(|value| value == "1") {
+        if dpi_shim() {
             // dpi-rpc shim: sessions live on a dpi-backend, not in local JSONL.
             let sessions = match self
                 .rpc

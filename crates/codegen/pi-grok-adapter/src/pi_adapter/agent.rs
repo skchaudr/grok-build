@@ -53,6 +53,9 @@ impl acp::Agent for PiAgent {
             self.state.borrow_mut().acp_session_id = bootstrap.state.session_id.clone();
         }
         self.publish_bootstrap(&bootstrap).await;
+        if !cancelled {
+            self.publish_dpi_remote(true).await;
+        }
         // Fresh session starts outside plan mode and receives its own JSONL
         // sidecar plan file rather than sharing the configured session root.
         {
@@ -120,6 +123,8 @@ impl acp::Agent for PiAgent {
             self.replay_subagents("load").await?;
         }
         self.publish_bootstrap(&bootstrap).await;
+        // After the replayed history, so the attach card is the last thing on screen.
+        self.publish_dpi_remote(true).await;
         self.refresh_context_usage().await;
         let mut response = acp::LoadSessionResponse::new();
         if let Some(models) = bootstrap.acp_models() {

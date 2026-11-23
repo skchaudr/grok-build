@@ -735,6 +735,22 @@ fn reserve_reload_request(in_flight: &mut bool) -> bool {
     true
 }
 
+/// grok-pi runs on the dpi-rpc shim (`GROK_PI_DPI=1`, set by dpi-grok): the agent is a durable one on a dpi backend.
+fn dpi_shim() -> bool {
+    std::env::var_os("GROK_PI_DPI").is_some_and(|value| value == "1")
+}
+
+/// The shim's `dpi_remote` reply minus its attach card: what `pi/ui/remote` carries.
+fn dpi_remote_location(mut data: Value) -> Value {
+    if let Some(object) = data.as_object_mut() {
+        object.remove("card");
+        object.remove("id");
+        object.remove("method");
+        object.remove("type");
+    }
+    data
+}
+
 fn bridge_command_message(command: &str, args: &str) -> String {
     if args.trim().is_empty() {
         format!("/{command}")

@@ -125,6 +125,17 @@ pub(super) fn handle(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
             agent.session.turn_saw_agent_text = true;
             agent.pi_remote_tui.apply(&op, id, lines, title)
         }
+        // dpi-rpc shim (dpi-grok): the durable agent's real location.
+        "pi/ui/remote" => {
+            let Some(remote) = crate::views::location::DpiRemote::from_json(&params) else {
+                return false;
+            };
+            let Some(agent) = pi_target(app, session_id.as_deref()) else {
+                return false;
+            };
+            agent.dpi_remote = Some(remote);
+            true
+        }
         "pi/ui/plan_file" => {
             let Some(path) = str_of(&["planFilePath"]) else {
                 return false;

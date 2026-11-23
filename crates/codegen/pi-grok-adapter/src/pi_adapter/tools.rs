@@ -781,6 +781,11 @@ impl PiAgent {
                 // forwards Pi's semantic widget payload.
                 self.send_ext_notification("pi/ui/widget", event).await;
             }
+            // dpi-rpc shim: the agent's backend location changed after a turn (a checkout, a cd).
+            "setremote" => {
+                self.send_ext_notification("pi/ui/remote", dpi_remote_location(event))
+                    .await;
+            }
             "settitle" => {
                 if let Some(title) = string(&event, &["title"]) {
                     self.send_extension_title(title).await;

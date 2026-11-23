@@ -177,6 +177,7 @@ async function runStream(signal) {
           } else if (msg.type === "batch") {
             for (const e of msg.events) {
               for (const t of translate(e)) out(t);
+              if (e.type === "run_end") refreshRemote(); // a turn may have switched branches
               if (Number.isInteger(e.entry?.id)) lastSeen = Math.max(lastSeen ?? 0, e.entry.id);
             }
           }
@@ -371,6 +372,50 @@ const forkMessages = (items) => items
   .filter((e) => e.kind === "pi.user")
   .map((e) => ({ entryId: String(e.id), text: textOf(e.model?.[0]?.content) }));
 
+// ---- where the agent really runs, for grok-pi's header and attach card (GROK_PI_DPI=1) ----
+
+const tilde = (path) => path.replace(/^(?:\/Users\/[^/]+|\/home\/[^/]+|\/root)(?=\/|$)/, "~");
+// The backend's device as people call it: `sab-mini`, not `sab-mini.local` or a URL.
+const hostName = () => String(device.hostname || device.name || new URL(BASE).hostname).replace(/\.local$/, "");
+const ago = (ms) => {
+  const m = Math.round((Date.now() - ms) / 60000);
+  return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 2880 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+};
+
+// {host, cwd, label: "host:~/path", branch?}; with `card`, also the attach card's title and rows.
+async function remote(card = false) {
+  const a = await api("GET", agentPath());
+  const s = card || !a.config.cwd ? await api("GET", `/sessions/${encodeURIComponent(session)}`) : null;
+  const host = hostName();
+  const cwd = a.config.cwd ?? s.cwd;
+  const r = { host, cwd, label: `${host}:${tilde(cwd)}`, ...(a.branch ? { branch: a.branch } : {}) };
+  if (!card) return r;
+  const [entries, live] = await Promise.all([activeEntries(), api("GET", `/sessions/${encodeURIComponent(session)}/tasks?status=live`).catch(() => [])]);
+  const messages = modelMessages(entries);
+  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  const lastAt = Math.max(0, ...messages.map((m) => m.timestamp ?? 0));
+  const activity = a.busy ? "running now" : lastAt ? `last message ${ago(lastAt)}` : "no messages yet";
+  r.card = {
+    title: `dpi · ${a.kind === "root" ? s.name : `${s.name} / ${a.name}`} on ${host}`,
+    rows: [
+      ["model", `${a.config.model.modelId} (${a.config.model.provider}) · thinking ${a.config.thinkingLevel ?? "medium"}`],
+      ["cwd", `${r.label}${r.branch ? ` · ${r.branch}` : ""}`],
+      ["activity", `${activity}${messages.length ? ` · ${messages.length} messages` : ""}`],
+      ...(lastUser ? [["last ask", clip(textOf(lastUser.content).replace(/\s+/g, " ").trim(), 100)]] : []),
+      ["tasks", taskText(live) ?? "none live"],
+      ["keys", "ctrl+r switches agents · quitting detaches; the agent keeps running"],
+    ],
+  };
+  return r;
+}
+
+// After a turn, tell the TUI if the agent's location changed (a checkout or cd on the backend).
+let lastRemote = null; // the location the TUI last got, as JSON
+const sentRemote = (r) => { const was = lastRemote; lastRemote = JSON.stringify({ ...r, card: undefined }); return lastRemote !== was; };
+function refreshRemote() {
+  remote().then((r) => { if (sentRemote(r)) out({ type: "extension_ui_request", id: randomUUID(), method: "setRemote", ...r }); }, (err) => log(`remote: ${err.message}`));
+}
+
 async function getState() {
   const [a, s] = await Promise.all([api("GET", agentPath()), api("GET", `/sessions/${encodeURIComponent(session)}`)]);
   const { provider, modelId } = a.config.model;
@@ -483,9 +528,9 @@ async function listSessions() {
   const rows = sessions.map((s) => {
     const agents = s.agents ?? [];
     const busy = agents.filter((a) => a.busy).length;
-    return `${s.id === session ? "▸" : " "} ${s.name} · ${agents.length} agent${agents.length === 1 ? "" : "s"}${busy ? ` · ${busy} running` : ""} · ${s.cwd}`;
+    return `${s.id === session ? "▸" : " "} ${s.name} · ${agents.length} agent${agents.length === 1 ? "" : "s"}${busy ? ` · ${busy} running` : ""} · ${tilde(s.cwd)}`;
   });
-  notify([`${sessions.length} session${sessions.length === 1 ? "" : "s"} on ${device.hostname ?? BASE} (▸ this one; ctrl+r switches):`, ...rows].join("\n"));
+  notify([`${sessions.length} session${sessions.length === 1 ? "" : "s"} on ${hostName()} (▸ this one; ctrl+r switches):`, ...rows].join("\n"));
 }
 
 const taskLine = (t) => {
@@ -586,6 +631,7 @@ const handlers = {
   // grok-pi's /resume picker (GROK_PI_DPI=1): one row per durable agent.
   // The tree has no activity time or counts, so each row reads its agent's active transcript.
   // shortcut: one fetch per agent on every picker open; add a backend field or cache if sessions grow.
+  dpi_remote: async (c) => { const r = await remote(!!c.card); sentRemote(r); return r; },
   dpi_list_sessions: async () => {
     const rows = (await api("GET", "/sessions")).flatMap((s) => (s.agents ?? []).map((a) => [s, a]));
     const active = await Promise.all(rows.map(([s, a]) => activeEntries(`/sessions/${s.id}/agents/${a.id}`).catch(() => [])));

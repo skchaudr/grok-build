@@ -1943,10 +1943,16 @@ impl AgentView {
             }),
             dropdown_open,
         );
-        let location_path = self.location_path().to_string_lossy();
-        let location_path = crate::views::session_title::sanitize_display_text(&location_path);
-        let short =
-            crate::util::display_location_path(std::path::Path::new(location_path.as_ref()));
+        let remote = self.dpi_remote.as_ref();
+        let short = match remote {
+            Some(remote) => remote.label.clone(),
+            None => {
+                let location_path = self.location_path().to_string_lossy();
+                let location_path =
+                    crate::views::session_title::sanitize_display_text(&location_path);
+                crate::util::display_location_path(std::path::Path::new(location_path.as_ref()))
+            }
+        };
         let left_budget = areas
             .values()
             .map(|r| r.x)
@@ -1967,30 +1973,43 @@ impl AgentView {
                 bg.fg(theme.accent_running),
             ));
         }
-        if let Some(machine) = self.machine_name.as_deref().filter(|name| !name.is_empty()) {
+        // A dpi agent's label already names its host.
+        if let Some(machine) = self
+            .machine_name
+            .as_deref()
+            .filter(|name| !name.is_empty() && remote.is_none())
+        {
             location.push(Span::styled(
                 format!("{machine} "),
                 bg.fg(theme.text_primary),
             ));
         }
-        let probe_local_git = true;
+        // The local folder says nothing about a dpi agent's repo: only the backend's branch counts.
+        let probe_local_git = remote.is_none();
         let lazy_git = probe_local_git
             .then(|| crate::git_info::cwd_git_info_lazy(&self.session.cwd))
             .flatten();
-        let branch = self
-            .current_branch
-            .clone()
-            .or_else(|| lazy_git.as_ref().and_then(|i| i.branch.clone()))
-            .map(crate::views::location::branch_label);
+        let branch = match remote {
+            Some(remote) => remote.branch.clone(),
+            None => self
+                .current_branch
+                .clone()
+                .or_else(|| lazy_git.as_ref().and_then(|i| i.branch.clone())),
+        }
+        .map(crate::views::location::branch_label);
         if let Some(branch) = branch {
             location.push(Span::styled(branch, dim));
             location.push(Span::styled(" ", bg));
         }
-        let show_worktree_label = self.is_worktree
-            || self.session.is_worktree
-            || lazy_git.as_ref().is_some_and(|i| i.is_worktree);
+        let show_worktree_label = remote.is_none()
+            && (self.is_worktree
+                || self.session.is_worktree
+                || lazy_git.as_ref().is_some_and(|i| i.is_worktree));
         if show_worktree_label {
             location.push(crate::views::location::worktree_badge(&theme).patch_style(bg));
+        }
+        if remote.is_some() {
+            location.push(crate::views::location::remote_badge(&theme).patch_style(bg));
         }
         if let Some(profile) = xai_grok_sandbox::profile_name() {
             location.push(Span::styled(
