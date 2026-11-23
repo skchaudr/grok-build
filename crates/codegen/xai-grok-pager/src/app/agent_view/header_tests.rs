@@ -564,6 +564,11 @@ fn dpi_remote_header_replaces_the_local_location() {
             None => "remote mini:~/repos/lab".to_owned(),
         };
         assert!(row.trim_start().starts_with(&expected), "row = {row:?}");
+        // `remote` is as readable as the branch beside it.
+        let y = agent.hit_dashboard.rect.expect("header row").y;
+        let column = |word: &str| row[..row.find(word).expect(word)].chars().count() as u16;
+        let dim = crate::theme::Theme::current().dim().fg.expect("dim text has a colour");
+        assert_eq!(fg(&buf, column("remote "), y), dim, "row = {row:?}");
         for local in [PATH, "laptop", "worktree"] {
             assert!(!row.contains(local), "no local {local:?}, row = {row:?}");
         }

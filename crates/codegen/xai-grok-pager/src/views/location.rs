@@ -48,9 +48,10 @@ impl DpiRemote {
     }
 }
 
-/// `remote ` beside a dpi agent's location, painted like [`worktree_badge`] so the location itself stays the strongest word.
+/// `remote ` beside a dpi agent's location, in the branch's dim text: it tells you the folder is on another machine,
+/// so it has to stay readable, while the location itself stays the strongest word.
 pub(crate) fn remote_badge(theme: &Theme) -> Span<'static> {
-    Span::styled("remote ", theme.faint())
+    Span::styled("remote ", theme.dim())
 }
 
 /// The branch as the location line shows it: git reports a detached HEAD as an empty name.
