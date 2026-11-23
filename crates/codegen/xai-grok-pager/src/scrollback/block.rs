@@ -10,7 +10,7 @@ use xai_grok_pager_diff::DiffHunk;
 
 use super::blocks::mermaid_content::DiagramAffordance;
 use super::blocks::{
-    AgentMessageBlock, BgTaskBlock, BtwBlock, ContextInfoBlock, CreditLimitBlock,
+    AgentMessageBlock, AttachCardBlock, BgTaskBlock, BtwBlock, ContextInfoBlock, CreditLimitBlock,
     EditToolCallBlock, ExecuteToolCallBlock, LineRange, ListDirToolCallBlock, MemoryCaptureBlock,
     OtherToolCallBlock, ReadToolCallBlock, SearchFileMatch, SearchToolCallBlock, SessionEvent,
     SessionEventBlock, SubagentBlock, SubagentBlockKind, SystemMessageBlock, ThinkingBlock,
@@ -335,6 +335,8 @@ pub enum RenderBlock {
     ContextInfo(ContextInfoBlock),
     /// Credit-limit card for max-tier users (red accent, single action).
     CreditLimit(CreditLimitBlock),
+    /// dpi welcome card for an attached durable agent (`pi/ui/attach_card`).
+    AttachCard(AttachCardBlock),
     /// Debug-only generated memory details.
     MemoryCapture(MemoryCaptureBlock),
 }
@@ -357,6 +359,7 @@ macro_rules! delegate_block {
             RenderBlock::Btw(b) => b.$method($($arg),*),
             RenderBlock::ContextInfo(b) => b.$method($($arg),*),
             RenderBlock::CreditLimit(b) => b.$method($($arg),*),
+            RenderBlock::AttachCard(b) => b.$method($($arg),*),
             RenderBlock::MemoryCapture(b) => b.$method($($arg),*),
         }
     };
@@ -962,7 +965,8 @@ impl RenderBlock {
             RenderBlock::System(_)
             | RenderBlock::SessionEvent(_)
             | RenderBlock::ContextInfo(_)
-            | RenderBlock::CreditLimit(_) => None,
+            | RenderBlock::CreditLimit(_)
+            | RenderBlock::AttachCard(_) => None,
             | RenderBlock::MemoryCapture(_) => None,
             RenderBlock::Btw(_) => Some(theme.accent_plan),
             RenderBlock::Stub(block) => Some(block.accent_color),
@@ -1124,6 +1128,7 @@ impl RenderBlock {
             RenderBlock::CreditLimit(b) => {
                 join_searchable([Some(b.heading.clone()), Some(b.url.clone())])
             }
+            RenderBlock::AttachCard(b) => join_searchable([Some(b.searchable_text())]),
             RenderBlock::MemoryCapture(b) => join_searchable([Some(b.searchable_text())]),
             RenderBlock::ToolCall(tc) => tc.searchable_text(),
         }

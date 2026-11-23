@@ -1,5 +1,6 @@
 mod acpx_flow;
 mod agent;
+mod attach_card;
 mod bg_task;
 mod btw;
 mod cancel_cause;
@@ -18,6 +19,7 @@ mod user;
 mod workflow;
 
 pub use agent::AgentMessageBlock;
+pub use attach_card::AttachCardBlock;
 pub(crate) use bg_task::KILLED_SIGNAL;
 pub use bg_task::{BgTaskBlock, BgTaskKind};
 pub use btw::BtwBlock;

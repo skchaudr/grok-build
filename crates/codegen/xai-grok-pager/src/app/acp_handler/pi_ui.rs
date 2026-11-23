@@ -125,7 +125,7 @@ pub(super) fn handle(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
             agent.session.turn_saw_agent_text = true;
             agent.pi_remote_tui.apply(&op, id, lines, title)
         }
-        // dpi-rpc shim (dpi-grok): the durable agent's real location.
+        // dpi-rpc shim (dpi-grok): the durable agent's real location, and the welcome card when attaching.
         "pi/ui/remote" => {
             let Some(remote) = crate::views::location::DpiRemote::from_json(&params) else {
                 return false;
@@ -134,6 +134,16 @@ pub(super) fn handle(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
                 return false;
             };
             agent.dpi_remote = Some(remote);
+            true
+        }
+        "pi/ui/attach_card" => {
+            let Some(card) = crate::scrollback::blocks::AttachCardBlock::from_json(&params) else {
+                return false;
+            };
+            let Some(agent) = pi_target(app, session_id.as_deref()) else {
+                return false;
+            };
+            agent.scrollback.push_block(RenderBlock::AttachCard(card));
             true
         }
         "pi/ui/plan_file" => {
