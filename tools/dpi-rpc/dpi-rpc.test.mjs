@@ -3,7 +3,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,7 @@ import { createInterface } from "node:readline";
 const SHIM = join(dirname(fileURLToPath(import.meta.url)), "dpi-rpc.mjs");
 const TOKEN = "test-token";
 const msg = (role, ts, content = "x") => ({ role, content, timestamp: ts });
+const tool = (name) => ({ name, description: `${name} tool`, parameters: { type: "object" } });
 const agents1 = [
   { id: 1, name: "Main", kind: "root", busy: false },
   { id: 2, name: "Alt", kind: "fork", parentId: 1, busy: true },
@@ -20,10 +21,12 @@ const agents1 = [
 const state = { tasks: [], prime: null, requests: [] };
 const entries = {
   "s1/1": [
-    { id: 4, kind: "pi.system", model: [msg("system", 1500)] },
+    { id: 4, kind: "pi.system", model: [{ ...msg("system", 1500), sections: { a: "aaaa", b: "bbbbbbbb" }, toolsAdded: [tool("read"), tool("bash")] }] },
     { id: 5, kind: "pi.user", model: [msg("user", 2000, "first question")] },
     { id: 6, kind: "pi.assistant", model: [msg("assistant", 3000)] },
     { id: 7, kind: "pi.user", model: [msg("user", 4000, [{ type: "text", text: "second" }])] },
+    // a later patch: drops section a, adds c, swaps the read tool for edit
+    { id: 11, kind: "pi.system", model: [{ ...msg("system", 4500, ""), sections: { a: null, c: "cc" }, toolsRemoved: [{ name: "read" }], toolsAdded: [tool("edit")] }] },
   ],
   "s1/3": [{ id: 8, kind: "pi.user", model: [msg("user", 5000)] }],
 };
@@ -113,6 +116,35 @@ test("dpi_list_sessions fills parent, message count and activity time", async ()
     assert.equal(row("s1:2").messageCount, 0); // entries fetch failed: row still listed
     assert.equal(row("s1:2").modifiedAt, new Date(1000).toISOString());
     assert.equal(row("s2:1").modifiedAt, new Date(9000).toISOString());
+  } finally { s.close(); }
+});
+
+test("/context: get_commands registers the breakdown bridge, and running it writes prompt and tool estimates without messaging the agent", async () => {
+  const out = join(mkdtempSync(join(tmpdir(), "dpi-rpc-")), "breakdown.json");
+  const s = await shim({ PI_GROK_CONTEXT_BREAKDOWN: out });
+  try {
+    const { data } = await s.call({ type: "get_commands" });
+    assert.ok(data.commands.some((c) => c.name === "__pi_context_breakdown" && c.source === "extension"));
+    state.requests.length = 0;
+    assert.equal((await s.call({ type: "prompt", message: "/__pi_context_breakdown" })).success, true);
+    const defs = [tool("bash"), tool("edit")];
+    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")), {
+      version: 1,
+      systemPromptTokensRaw: Math.ceil("x\n\nbbbbbbbb\n\ncc".length / 4), // content, then sections in effect
+      toolDefinitionsCount: 2,
+      toolDefinitionsTokensRaw: Math.ceil(JSON.stringify(defs).length / 4),
+      appendTokensRaw: 0, contextFiles: [], skillsCount: 0, skillsTokensRaw: 0,
+    });
+    assert.equal(state.requests.some((q) => q.includes("/messages")), false);
+  } finally { s.close(); }
+});
+
+test("a prompt that is not a shim command goes to the agent, slash and all", async () => {
+  const s = await shim();
+  try {
+    state.requests.length = 0;
+    await s.call({ type: "prompt", message: "/not-a-command hi" });
+    assert.ok(state.requests.some((q) => q.startsWith("POST /sessions/s1/agents/1/messages") && q.includes('"content":"/not-a-command hi"')));
   } finally { s.close(); }
 });
 

@@ -402,17 +402,71 @@ async function sessionStats() {
   };
 }
 
+// The system prompt and tools the model is sent, replayed from the transcript's system messages the way
+// pi-ai's getCurrentSystemMessage does: content appends, sections patch by name (null removes), tools by name.
+function systemContext(entries) {
+  const content = [];
+  const sections = new Map();
+  const tools = new Map();
+  for (const m of entries.flatMap((e) => e.model ?? []).filter((m) => m.role === "system")) {
+    const text = textOf(m.content);
+    if (text) content.push(text);
+    for (const [k, v] of Object.entries(m.sections ?? {})) v === null ? sections.delete(k) : sections.set(k, v);
+    for (const t of m.toolsRemoved ?? []) tools.delete(t.name);
+    for (const t of m.toolsAdded ?? []) tools.set(t.name, t);
+  }
+  return { prompt: [content.join("\n\n"), ...sections.values()].filter(Boolean).join("\n\n"), tools: [...tools.values()] };
+}
+
+// grok-pi's /context asks for this (pi-grok-context's payload): raw ceil(len/4) estimates it scales to the real total.
+const CONTEXT_BREAKDOWN = "__pi_context_breakdown";
+const estimate = (text) => Math.ceil((text?.length ?? 0) / 4);
+async function writeContextBreakdown() {
+  const outPath = process.env.PI_GROK_CONTEXT_BREAKDOWN;
+  if (!outPath) throw new Error("PI_GROK_CONTEXT_BREAKDOWN is not set");
+  const { prompt, tools } = systemContext(await activeEntries());
+  const defs = tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
+  writeFileSync(outPath, JSON.stringify({
+    version: 1,
+    systemPromptTokensRaw: estimate(prompt),
+    toolDefinitionsCount: defs.length,
+    toolDefinitionsTokensRaw: defs.length ? estimate(JSON.stringify(defs)) : 0,
+    appendTokensRaw: 0,
+    contextFiles: [],
+    skillsCount: 0,
+    skillsTokensRaw: 0,
+  }));
+}
+
 async function send(content, whenBusy) {
   if (typeof content !== "string") content = JSON.stringify(content);
   await api("POST", agentPath() + "/messages", { content, whenBusy, requestId: randomUUID() });
   if (!running) awaitingRun = true;
 }
 
+// Slash commands the shim answers itself. Pi RPC delivers them as `prompt` "/name args"; source "extension"
+// makes grok-pi run them at once without a turn, and they never reach the agent's transcript.
+async function shimCommands() {
+  return new Map([
+    [CONTEXT_BREAKDOWN, { description: "Internal Pi-Grok bridge: write context token breakdown", run: writeContextBreakdown }],
+  ]);
+}
+
+// true when `message` was one of the shim's commands (and it ran), false for anything to send to the agent.
+async function runCommand(message) {
+  const m = typeof message === "string" && message.match(/^\/(\S+)\s*([\s\S]*)$/);
+  if (!m) return false;
+  const cmd = (await shimCommands()).get(m[1]);
+  if (!cmd) return false;
+  await cmd.run(m[2].trim());
+  return true;
+}
+
 const handlers = {
   get_state: getState,
   // Re-read so model list edits on the backend show without restarting grok-pi.
   get_available_models: async () => ((device = await api("GET", "/device")), { models: device.models }),
-  get_commands: async () => ({ commands: [] }),
+  get_commands: async () => ({ commands: [...(await shimCommands())].map(([name, c]) => ({ name, description: c.description, source: "extension" })) }),
   get_messages: async () => ({ messages: await activeMessages() }),
   get_entries: async () => {
     const msgs = await activeMessages();
@@ -448,7 +502,7 @@ const handlers = {
     attach();
     return { cancelled: false };
   },
-  prompt: async (c) => send(c.message, c.streamingBehavior === "steer" ? "steer" : "followUp"),
+  prompt: async (c) => { if (!(await runCommand(c.message))) await send(c.message, c.streamingBehavior === "steer" ? "steer" : "followUp"); },
   steer: async (c) => send(c.message, "steer"),
   follow_up: async (c) => send(c.message, "followUp"),
   abort: async () => { await api("POST", agentPath() + "/abort", {}); },
