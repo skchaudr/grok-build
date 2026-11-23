@@ -55,6 +55,35 @@ impl PiAgent {
         self.publish_dpi_remote(false).await;
     }
 
+    /// dpi-rpc shim only: read the agent's settings snapshot and publish it, `None` without the shim or on error.
+    pub(super) async fn publish_dpi_settings(&self) -> Option<Vec<acp::SessionConfigOption>> {
+        if !dpi_shim() {
+            return None;
+        }
+        match self.rpc.request(json!({ "type": "dpi_settings" })).await {
+            Ok(snapshot) => Some(self.publish_dpi_snapshot(&snapshot).await),
+            Err(error) => {
+                tracing::warn!(%error, "dpi settings unavailable");
+                None
+            }
+        }
+    }
+
+    /// One `dpi_settings` / `dpi_set_setting` reply to the pager: the options as a `config_option_update` (the F2
+    /// rows) and `info` as `pi/ui/dpi_info` (the panel header). Returns the options for an ACP response.
+    pub(super) async fn publish_dpi_snapshot(&self, snapshot: &Value) -> Vec<acp::SessionConfigOption> {
+        if let Some(info) = snapshot.get("info").filter(|info| info.is_object()) {
+            self.send_ext_notification("pi/ui/dpi_info", info.clone())
+                .await;
+        }
+        let options = dpi_config_options(snapshot);
+        self.send_update(acp::SessionUpdate::ConfigOptionUpdate(
+            acp::ConfigOptionUpdate::new(options.clone()),
+        ))
+        .await;
+        options
+    }
+
     /// dpi-rpc shim only: where the durable agent really runs (backend host, cwd, branch) for the pager header,
     /// and with `card` the attach card for a session just opened. Pi itself has no `dpi_remote`.
     pub(super) async fn publish_dpi_remote(&self, card: bool) {

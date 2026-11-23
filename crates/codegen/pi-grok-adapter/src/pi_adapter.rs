@@ -751,6 +751,76 @@ fn dpi_remote_location(mut data: Value) -> Value {
     data
 }
 
+/// `_meta` key the pager reads a dpi option's settings section from (`{"category": "Agent"}`).
+const DPI_OPTION_META: &str = "dpi";
+
+/// The shim's `dpi_settings` / `dpi_set_setting` snapshot as ACP session config options, in the shim's order.
+/// Ids, names and values pass through verbatim; the category rides in `_meta.dpi` so the pager can group rows
+/// without the options claiming ACP's reserved `model` / `thought_level` categories (Pi already owns `/model`).
+/// Malformed entries are skipped rather than failing the whole list.
+fn dpi_config_options(snapshot: &Value) -> Vec<acp::SessionConfigOption> {
+    let Some(options) = snapshot.get("options").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    options
+        .iter()
+        .filter_map(|option| {
+            let text = |key: &str| option.get(key).and_then(Value::as_str);
+            let id = text("id").filter(|id| !id.is_empty())?;
+            let mut wire = json!({
+                "id": id,
+                "name": text("name").filter(|name| !name.is_empty()).unwrap_or(id),
+                "_meta": { DPI_OPTION_META: { "category": text("category").unwrap_or("Agent") } },
+            });
+            if let Some(description) = text("description").filter(|d| !d.is_empty()) {
+                wire["description"] = json!(description);
+            }
+            match text("type")? {
+                "boolean" => {
+                    wire["type"] = json!("boolean");
+                    wire["currentValue"] = json!(option.get("currentValue")?.as_bool()?);
+                }
+                "select" => {
+                    let values: Vec<Value> = option
+                        .get("values")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|value| {
+                            let id = value.get("value")?.as_str()?;
+                            let name = value.get("name").and_then(Value::as_str).unwrap_or(id);
+                            let mut entry = json!({ "value": id, "name": name });
+                            if let Some(description) = value.get("description").and_then(Value::as_str) {
+                                entry["description"] = json!(description);
+                            }
+                            Some(entry)
+                        })
+                        .collect();
+                    wire["type"] = json!("select");
+                    wire["currentValue"] = json!(option.get("currentValue")?.as_str()?);
+                    wire["options"] = Value::Array(values);
+                }
+                _ => return None,
+            }
+            serde_json::from_value(wire).ok()
+        })
+        .collect()
+}
+
+/// The shim's `dpi_set_setting` request for a pager `session/set_config_option`: the id verbatim, the value as the
+/// JSON boolean or string the option takes.
+fn dpi_set_setting_request(request: &acp::SetSessionConfigOptionRequest) -> Value {
+    let value = match &request.value {
+        acp::SessionConfigOptionValue::Boolean { value } => json!(value),
+        acp::SessionConfigOptionValue::ValueId { value } => json!(value.0.as_ref()),
+        // A future value shape: hand the shim whatever ACP put on the wire.
+        other => serde_json::to_value(other)
+            .ok()
+            .and_then(|wire| wire.get("value").cloned())
+            .unwrap_or(Value::Null),
+    };
+    json!({ "type": "dpi_set_setting", "settingId": request.config_id.0.as_ref(), "value": value })
+}
+
 fn bridge_command_message(command: &str, args: &str) -> String {
     if args.trim().is_empty() {
         format!("/{command}")

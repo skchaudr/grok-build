@@ -72,6 +72,9 @@ impl acp::Agent for PiAgent {
         if let Some(models) = bootstrap.acp_models() {
             response = response.models(Some(models));
         }
+        if !cancelled && let Some(options) = self.publish_dpi_settings().await {
+            response = response.config_options(Some(options));
+        }
         response = response.modes(Some(self.acp_session_modes()));
         self.persist_plan_mode_state().map_err(acp_internal)?;
         self.sync_plan_mode_control().map_err(acp_internal)?;
@@ -129,6 +132,9 @@ impl acp::Agent for PiAgent {
         let mut response = acp::LoadSessionResponse::new();
         if let Some(models) = bootstrap.acp_models() {
             response = response.models(Some(models));
+        }
+        if let Some(options) = self.publish_dpi_settings().await {
+            response = response.config_options(Some(options));
         }
         response = response.modes(Some(self.acp_session_modes()));
         self.sync_plan_mode_control().map_err(acp_internal)?;
@@ -491,6 +497,24 @@ impl acp::Agent for PiAgent {
         Ok(acp::SetSessionModelResponse::new())
     }
 
+    /// dpi-rpc shim only: a durable agent's F2 rows write through `dpi_set_setting`. Real Pi advertises no config
+    /// options, so this stays ACP's method-not-found for it.
+    async fn set_session_config_option(
+        &self,
+        arguments: acp::SetSessionConfigOptionRequest,
+    ) -> Result<acp::SetSessionConfigOptionResponse, acp::Error> {
+        if !dpi_shim() {
+            return Err(acp::Error::method_not_found());
+        }
+        let snapshot = self
+            .rpc
+            .request(dpi_set_setting_request(&arguments))
+            .await
+            .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+        let options = self.publish_dpi_snapshot(&snapshot).await;
+        Ok(acp::SetSessionConfigOptionResponse::new(options))
+    }
+
     async fn ext_method(&self, arguments: acp::ExtRequest) -> Result<acp::ExtResponse, acp::Error> {
         match arguments.method.as_ref() {
             "x.ai/interject" => self.handle_steer_message(arguments.params.get()).await,
@@ -846,6 +870,11 @@ impl acp::Agent for PiAgent {
 
     async fn ext_notification(&self, arguments: acp::ExtNotification) -> Result<(), acp::Error> {
         match arguments.method.as_ref() {
+            // The pager opened F2 on a dpi session: re-read the settings so the header and rows are current.
+            "pi/dpi/refresh" => {
+                self.publish_dpi_settings().await;
+                Ok(())
+            }
             "pi/extension_command" => {
                 let params: Value =
                     serde_json::from_str(arguments.params.get()).unwrap_or_default();

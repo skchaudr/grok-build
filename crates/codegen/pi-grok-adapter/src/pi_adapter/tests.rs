@@ -739,3 +739,122 @@ fn dpi_remote_location_keeps_the_location_and_drops_card_and_envelope() {
         json!({ "host": "mini", "cwd": "/srv", "label": "mini:/srv" })
     );
 }
+
+fn dpi_snapshot() -> Value {
+    json!({
+        "info": { "device": "mini", "session": "modal-test" },
+        "options": [
+            {"id": "model", "name": "Model", "description": "The model", "category": "Agent", "type": "select",
+             "currentValue": "cliproxy/gpt", "values": [
+                {"value": "cliproxy/gpt", "name": "gpt", "description": "cliproxy"},
+                {"value": "openrouter/x", "name": "x"}]},
+            {"id": "read_only", "name": "Read-only", "description": "Blocks write tools", "category": "Agent",
+             "type": "boolean", "currentValue": false},
+            {"id": "prompt:abc", "name": "Reviewer", "category": "System prompts", "type": "boolean", "currentValue": true},
+            {"id": "bad-type", "name": "Nope", "type": "slider", "currentValue": 3},
+            {"name": "no id", "type": "boolean", "currentValue": true},
+            {"id": "bad-bool", "name": "Bad", "type": "boolean", "currentValue": "yes"},
+        ],
+    })
+}
+
+#[test]
+fn dpi_settings_become_config_options_with_ids_verbatim_and_category_in_meta() {
+    let options = dpi_config_options(&dpi_snapshot());
+    let wire = serde_json::to_value(&options).unwrap();
+    assert_eq!(options.len(), 3, "malformed entries are skipped: {wire}");
+    assert_eq!(wire[0]["id"], "model");
+    assert_eq!(wire[0]["type"], "select");
+    assert_eq!(wire[0]["currentValue"], "cliproxy/gpt");
+    assert_eq!(wire[0]["description"], "The model");
+    assert_eq!(wire[0]["options"][0], json!({"value": "cliproxy/gpt", "name": "gpt", "description": "cliproxy"}));
+    assert_eq!(wire[0]["options"][1]["name"], "x");
+    // No ACP category: Pi already owns `/model` and the footer; a `model` category would hijack them.
+    assert!(wire[0].get("category").is_none());
+    assert_eq!(wire[0]["_meta"]["dpi"]["category"], "Agent");
+    assert_eq!(wire[1], json!({
+        "id": "read_only", "name": "Read-only", "description": "Blocks write tools", "type": "boolean",
+        "currentValue": false, "_meta": {"dpi": {"category": "Agent"}},
+    }));
+    assert_eq!(wire[2]["id"], "prompt:abc");
+    assert_eq!(wire[2]["_meta"]["dpi"]["category"], "System prompts");
+    assert!(dpi_config_options(&json!({"info": {}})).is_empty());
+}
+
+#[test]
+fn set_config_option_becomes_dpi_set_setting_with_the_typed_value() {
+    let toggle = acp::SetSessionConfigOptionRequest::new(
+        acp::SessionId::new("s1"),
+        "read_only",
+        acp::SessionConfigOptionValue::boolean(true),
+    );
+    assert_eq!(
+        dpi_set_setting_request(&toggle),
+        json!({"type": "dpi_set_setting", "settingId": "read_only", "value": true})
+    );
+    let select = acp::SetSessionConfigOptionRequest::new(
+        acp::SessionId::new("s1"),
+        "prompt:abc",
+        acp::SessionConfigValueId::new("off"),
+    );
+    assert_eq!(
+        dpi_set_setting_request(&select),
+        json!({"type": "dpi_set_setting", "settingId": "prompt:abc", "value": "off"})
+    );
+}
+
+/// `grok grok-pi` on real Pi (no `GROK_PI_DPI`): no dpi request ever reaches Pi, no config options are advertised,
+/// and `session/set_config_option` stays ACP's method-not-found. The Pi here never answers, so any request would hang.
+#[cfg(unix)]
+#[tokio::test]
+async fn real_pi_gets_no_dpi_requests_and_no_config_options() {
+    use acp::Agent as _;
+    if dpi_shim() {
+        eprintln!("GROK_PI_DPI=1 in the test environment; skipping the real-Pi path");
+        return;
+    }
+    let process = crate::pi_rpc::PiRpc::spawn(crate::pi_rpc::SpawnConfig {
+        program: "sh".into(),
+        prefix_args: vec!["-c".into(), "exec cat > /dev/null".into()],
+        cwd: std::env::temp_dir(),
+        pi_args: Vec::new(),
+        env: Vec::new(),
+    })
+    .await
+    .expect("spawn silent Pi");
+    let dir = tempfile::tempdir().unwrap();
+    let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+    let bootstrap = PiBootstrap {
+        state: parse_state(&json!({ "sessionId": "s1" })),
+        models: Vec::new(),
+        commands: Vec::new(),
+    };
+    let agent = PiAgent::new(
+        process.rpc, client_tx, bootstrap, dir.path().to_path_buf(), None, None, None, None, None, false, false,
+    )
+    .unwrap();
+    let deadline = Duration::from_secs(5);
+    let options = tokio::time::timeout(deadline, agent.publish_dpi_settings()).await.expect("no Pi round trip");
+    assert!(options.is_none());
+    let set = acp::SetSessionConfigOptionRequest::new(
+        acp::SessionId::new("s1"),
+        "read_only",
+        acp::SessionConfigOptionValue::boolean(true),
+    );
+    let error = tokio::time::timeout(deadline, agent.set_session_config_option(set))
+        .await
+        .expect("no Pi round trip")
+        .expect_err("real Pi has no config options");
+    assert_eq!(error.code, acp::Error::method_not_found().code);
+    tokio::time::timeout(
+        deadline,
+        agent.ext_notification(acp::ExtNotification::new(
+            "pi/dpi/refresh",
+            serde_json::value::to_raw_value(&json!({})).unwrap().into(),
+        )),
+    )
+    .await
+    .expect("no Pi round trip")
+    .unwrap();
+    assert!(client_rx.try_recv().is_err(), "nothing is sent to the pager");
+}
