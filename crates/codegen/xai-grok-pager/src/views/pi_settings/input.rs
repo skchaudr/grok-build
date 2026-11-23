@@ -112,6 +112,11 @@ fn browse_key(state: &mut PiSettingsState, key: &KeyEvent) -> Outcome {
             None => Outcome::Unchanged,
         },
         KeyCode::Enter => activate_focused(state),
+        // The Durable Pi tab's header offers the agent's browser playground.
+        KeyCode::Char('o') if key.modifiers.is_empty() => match state.playground_url() {
+            Some(url) => Outcome::Action(Action::OpenUrl(url.to_owned())),
+            None => Outcome::Unchanged,
+        },
         // `i` aliases `/`, matching the shared pickers' vim-nav convention.
         KeyCode::Char('/') | KeyCode::Char('i') if key.modifiers.is_empty() => {
             state.to_search();
@@ -122,8 +127,8 @@ fn browse_key(state: &mut PiSettingsState, key: &KeyEvent) -> Outcome {
             // user's to change.
             Some((_, meta)) if matches!(meta.kind, SettingKind::Group { .. }) => Outcome::Unchanged,
             Some((key, _)) if state.lock(key).is_some() => Outcome::Unchanged,
-            // A live Claude option has no default to reset to.
-            Some((key, _)) if crate::settings::claude::is_claude_key(key) => Outcome::Unchanged,
+            // A live session option has no default to reset to.
+            Some((key, _)) if state.is_session_option(key) => Outcome::Unchanged,
             Some((key, _)) => {
                 state.mode = Mode::ConfirmReset { key };
                 Outcome::Changed
@@ -576,6 +581,11 @@ fn list_mouse(state: &mut PiSettingsState, kind: MouseEventKind, column: u16, ro
 
     match kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            if contains(state.browser_rect, column, row)
+                && let Some(url) = state.playground_url()
+            {
+                return Outcome::Action(Action::OpenUrl(url.to_owned()));
+            }
             if !on_list {
                 return Outcome::Unchanged;
             }

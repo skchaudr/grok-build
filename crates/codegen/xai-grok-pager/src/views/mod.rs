@@ -23,6 +23,7 @@ pub mod history_search;
 pub mod import_claude_modal;
 pub mod jump;
 pub mod list_pane;
+pub(crate) mod dpi_logo;
 pub(crate) mod location;
 pub mod managed_connectors_wait;
 pub mod mcps_modal;

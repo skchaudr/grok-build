@@ -102,6 +102,7 @@ pub struct ModelState {
     pub thought_level_config_id: Option<String>,
     /// Every config option the agent last advertised (create, load, `config_option_update`).
     /// Claude's settings rows (mode, effort, fast, agent) read these; see `settings::claude`.
+    /// An explicit catalog (Pi) keeps only the durable Pi options here (`settings::dpi`).
     pub config_options: Vec<acp::SessionConfigOption>,
 }
 
@@ -325,7 +326,13 @@ impl ModelState {
     /// Returns whether the footer or the picker list changed.
     pub fn apply_config_options(&mut self, options: &[acp::SessionConfigOption]) -> bool {
         if self.model_config_id.is_none() && !self.available.is_empty() {
-            return false;
+            // The catalog stays as it is; a durable Pi agent's options still reach its settings rows.
+            let dpi = dpi_options(options);
+            if dpi.is_empty() || dpi == self.config_options {
+                return false;
+            }
+            self.config_options = dpi;
+            return true;
         }
         let Some(resolved) = models_or_config_option(None, Some(options)) else {
             return false;
@@ -637,14 +644,33 @@ const THOUGHT_LEVEL_CONFIG_ID_META: &str = "x.ai/thoughtLevelConfigId";
 /// The advertised option list itself, so the settings rows see options the model catalog does not use.
 const CONFIG_OPTIONS_META: &str = "x.ai/configOptions";
 
+/// The options grok-pi-acp took from the dpi-rpc shim (`settings::dpi`). An explicit catalog keeps only these.
+fn dpi_options(options: &[acp::SessionConfigOption]) -> Vec<acp::SessionConfigOption> {
+    options
+        .iter()
+        .filter(|option| crate::settings::dpi::is_dpi_option(option))
+        .cloned()
+        .collect()
+}
+
 /// Standard ACP agents may advertise models only as a `model`-category select config option (Codex, DSH, claude-agent-acp).
 /// Use the explicit `models` state when present; otherwise build one from the first model-category option (id may differ).
 pub fn models_or_config_option(
     models: Option<acp::SessionModelState>,
     config_options: Option<&[acp::SessionConfigOption]>,
 ) -> Option<acp::SessionModelState> {
-    if models.is_some() {
-        return models;
+    if let Some(mut models) = models {
+        // Pi's explicit catalog keeps `session/set_model`; only the durable Pi settings ride along for the panel.
+        let dpi = config_options.map(dpi_options).unwrap_or_default();
+        if !dpi.is_empty()
+            && let Ok(value) = serde_json::to_value(&dpi)
+        {
+            models
+                .meta
+                .get_or_insert_with(acp::Meta::new)
+                .insert(CONFIG_OPTIONS_META.to_string(), value);
+        }
+        return Some(models);
     }
     let option = config_options.and_then(advertised_model_option)?;
     let acp::SessionConfigKind::Select(select) = &option.kind else {
@@ -1137,6 +1163,43 @@ mod tests {
         assert!(!state.apply_config_options(&[option]));
         assert_eq!(state.footer_label().as_deref(), Some("Model A"));
         assert!(state.model_config_id.is_none());
+    }
+
+    fn dpi_read_only(value: bool) -> acp::SessionConfigOption {
+        serde_json::from_value(serde_json::json!({
+            "id": "read_only", "name": "Read-only", "type": "boolean", "currentValue": value,
+            "_meta": {"dpi": {"category": "Agent"}},
+        }))
+        .unwrap()
+    }
+
+    /// Pi's explicit catalog keeps `session/set_model`, but a durable Pi agent's options reach the settings rows.
+    #[test]
+    fn explicit_catalog_keeps_only_dpi_options_and_leaves_the_catalog_alone() {
+        let mut state = sample_models();
+        let mode = acp::SessionConfigOption::select(
+            "mode",
+            "Mode",
+            "code",
+            vec![acp::SessionConfigSelectOption::new("code", "Code")],
+        );
+        assert!(state.apply_config_options(&[mode.clone(), dpi_read_only(false)]));
+        assert_eq!(state.config_options, vec![dpi_read_only(false)]);
+        assert!(!state.apply_config_options(&[dpi_read_only(false)]), "same options: no change");
+        assert!(state.apply_config_options(&[dpi_read_only(true)]));
+        assert_eq!(state.footer_label().as_deref(), Some("Model A"));
+        assert!(state.model_config_id.is_none());
+
+        let models = acp::SessionModelState::new(
+            "model-a",
+            vec![acp::ModelInfo::new("model-a", "Model A")],
+        );
+        let created: ModelState =
+            models_or_config_option(Some(models.clone()), Some(&[mode.clone(), dpi_read_only(true)])).into();
+        assert_eq!(created.config_options, vec![dpi_read_only(true)]);
+        assert!(created.model_config_id.is_none());
+        let plain: ModelState = models_or_config_option(Some(models), Some(&[mode])).into();
+        assert!(plain.config_options.is_empty(), "real Pi advertises nothing for the panel");
     }
 
     fn sample_models() -> ModelState {

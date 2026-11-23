@@ -1588,6 +1588,8 @@ pub struct AgentView {
     pub machine_name: Option<String>,
     /// dpi-grok: where the attached durable agent really runs; replaces the local folder in the header.
     pub(crate) dpi_remote: Option<crate::views::location::DpiRemote>,
+    /// dpi-grok: the durable agent's info block (`pi/ui/dpi_info`), shown atop the settings panel's Durable Pi tab.
+    pub(crate) dpi_info: Option<crate::settings::dpi::DpiInfo>,
     /// Pi extension statuses (`pi/ui/status`), shown in the status bar.
     pub pi_statuses: std::collections::BTreeMap<String, String>,
     /// Pi extension widgets (`pi/ui/widget`), shown above the prompt.

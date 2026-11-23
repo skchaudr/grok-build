@@ -804,10 +804,10 @@ mod claude_rows {
         // Current is `acceptEdits`; Down lands on `plan`.
         press(&mut state, KeyCode::Down);
         match press(&mut state, KeyCode::Enter) {
-            Outcome::Action(Action::SetClaudeOption { key, value }) => {
+            Outcome::Action(Action::SetSessionOption { key, value }) => {
                 assert_eq!((key, value.as_str()), (claude::MODE, "plan"));
             }
-            other => panic!("expected SetClaudeOption, got {other:?}"),
+            other => panic!("expected SetSessionOption, got {other:?}"),
         }
     }
 
@@ -818,10 +818,10 @@ mod claude_rows {
         assert!(state.open_chooser());
         press(&mut state, KeyCode::Up);
         match press(&mut state, KeyCode::Enter) {
-            Outcome::Action(Action::SetClaudeOption { key, value }) => {
+            Outcome::Action(Action::SetSessionOption { key, value }) => {
                 assert_eq!((key, value.as_str()), (claude::EFFORT, "low"));
             }
-            other => panic!("expected SetClaudeOption, got {other:?}"),
+            other => panic!("expected SetSessionOption, got {other:?}"),
         }
     }
 
@@ -830,10 +830,10 @@ mod claude_rows {
         let mut state = state_for(AgentKind::Claude, &options());
         assert!(state.focus_key(claude::FAST));
         match press(&mut state, KeyCode::Char(' ')) {
-            Outcome::Action(Action::SetClaudeOption { key, value }) => {
+            Outcome::Action(Action::SetSessionOption { key, value }) => {
                 assert_eq!((key, value.as_str()), (claude::FAST, "on"));
             }
-            other => panic!("expected SetClaudeOption, got {other:?}"),
+            other => panic!("expected SetSessionOption, got {other:?}"),
         }
         let mut on = options();
         on[3] = acp::SessionConfigOption::select(
@@ -848,8 +848,8 @@ mod claude_rows {
         let mut state = state_for(AgentKind::Claude, &on);
         assert!(state.focus_key(claude::FAST));
         match press(&mut state, KeyCode::Char(' ')) {
-            Outcome::Action(Action::SetClaudeOption { value, .. }) => assert_eq!(value, "off"),
-            other => panic!("expected SetClaudeOption, got {other:?}"),
+            Outcome::Action(Action::SetSessionOption { value, .. }) => assert_eq!(value, "off"),
+            other => panic!("expected SetSessionOption, got {other:?}"),
         }
     }
 
@@ -891,5 +891,182 @@ mod claude_rows {
                 "Grok wording in a Claude row: {line}"
             );
         }
+    }
+}
+
+// -- Durable Pi tab -------------------------------------------------------------
+
+mod dpi_tab {
+    use super::*;
+    use crate::settings::claude::{self, ClaudeSettings};
+    use crate::settings::dpi::{self, DpiInfo, DpiSettings};
+    use crate::views::pi_settings::state::AgentKind;
+    use agent_client_protocol as acp;
+    use serde_json::json;
+
+    /// Options as grok-pi-acp advertises them from the dpi-rpc shim.
+    fn options() -> Vec<acp::SessionConfigOption> {
+        serde_json::from_value(json!([
+            {"id": "model", "name": "Model", "description": "The agent's model", "type": "select",
+             "currentValue": "cliproxy/gpt-5", "_meta": {"dpi": {"category": "Agent"}},
+             "options": [{"value": "cliproxy/gpt-5", "name": "gpt-5"}, {"value": "openrouter/x", "name": "x"}]},
+            {"id": "read_only", "name": "Read-only", "description": "Blocks write tools", "type": "boolean",
+             "currentValue": false, "_meta": {"dpi": {"category": "Agent"}}},
+            {"id": "prompt:abc", "name": "Reviewer", "description": "Reviewer system prompt", "type": "boolean",
+             "currentValue": true, "_meta": {"dpi": {"category": "System prompts"}}},
+        ]))
+        .unwrap()
+    }
+
+    fn info(full: bool) -> DpiInfo {
+        let mut info = json!({
+            "device": "mini", "session": "modal-test", "sessionId": "s1", "agent": "root", "agentId": "a1",
+            "cwd": "~/repos/lab", "model": "gpt-5", "thinking": "medium", "readOnly": true,
+            "tools": ["read", "bash"], "backendUrl": "http://mini:8787", "playgroundUrl": null,
+            "hints": ["F2 opens these settings", "ctrl+r switches agents"],
+        });
+        if full {
+            info["branch"] = json!("main");
+            info["context"] = json!({"tokens": 84_000, "window": 200_000, "percent": 42});
+            info["playgroundUrl"] = json!("http://mini:5173/s/modal-test");
+        }
+        DpiInfo::from_json(&info).unwrap()
+    }
+
+    fn state_with(options: &[acp::SessionConfigOption], info: Option<DpiInfo>) -> PiSettingsState {
+        let dpi = DpiSettings::from_options(options);
+        let base = claude::registry_with_claude_rows(&SettingsRegistry::defaults());
+        let mut state = PiSettingsState::new_with(
+            Arc::new(dpi::registry_with_rows(&base, &dpi)),
+            UiConfig::default(),
+            PagerLocalSnapshot::default(),
+            AgentKind::Pi,
+            ClaudeSettings::default(),
+            dpi,
+        );
+        state.dpi_info = info;
+        state.dpi_captions = vec!["Alt+C compact", "Alt+O open playground"];
+        state
+    }
+
+    fn dpi_rows(state: &PiSettingsState) -> Vec<String> {
+        state
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Section { category: SettingCategory::DurablePi, name } => Some(format!("# {name}")),
+                Row::Setting { key, .. } if dpi::is_dpi_key(key) => Some((*key).to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rows_come_grouped_by_the_shims_categories_on_the_first_tab() {
+        let state = state_with(&options(), Some(info(true)));
+        assert_eq!(
+            dpi_rows(&state),
+            ["# Agent", "dpi.model", "dpi.read_only", "# System prompts", "dpi.prompt:abc"]
+        );
+        assert_eq!(state.active_category(), Some(SettingCategory::DurablePi));
+        assert_eq!(state.tab_labels()[0], "Durable Pi");
+        assert_eq!(state.value_of("dpi.read_only"), Some(crate::settings::SettingValue::Bool(false)));
+        assert_eq!(state.session_display("dpi.model").as_deref(), Some("gpt-5"));
+        assert_eq!(state.session_display("dpi.read_only"), None, "a toggle shows on/off, not a name");
+    }
+
+    #[test]
+    fn real_pi_has_no_durable_pi_tab() {
+        let state = state_with(&[], None);
+        assert!(dpi_rows(&state).is_empty());
+        assert!(!state.tab_labels().iter().any(|l| l.contains("Durable")));
+        assert!(!state.dpi_tab_active());
+        assert_eq!(state.playground_url(), None);
+    }
+
+    #[test]
+    fn toggles_and_choices_write_through_session_options() {
+        let mut state = state_with(&options(), Some(info(true)));
+        assert!(state.focus_key("dpi.read_only"));
+        let Outcome::Action(Action::SetSessionOption { key, value }) = press(&mut state, KeyCode::Char(' ')) else {
+            panic!("a dpi toggle sends a session option");
+        };
+        assert_eq!((key, value.as_str()), ("dpi.read_only", "on"));
+        assert!(matches!(press(&mut state, KeyCode::Char('d')), Outcome::Unchanged), "no default to reset to");
+
+        assert!(state.focus_key("dpi.model"));
+        assert!(state.open_chooser());
+        assert_eq!(state.mode.kind(), ModeKind::Picking);
+        press(&mut state, KeyCode::Down);
+        let Outcome::Action(Action::SetSessionOption { key, value }) = press(&mut state, KeyCode::Enter) else {
+            panic!("a dpi choice sends a session option");
+        };
+        assert_eq!((key, value.as_str()), ("dpi.model", "openrouter/x"));
+    }
+
+    #[test]
+    fn o_opens_the_playground_only_when_there_is_one() {
+        let mut state = state_with(&options(), Some(info(true)));
+        let Outcome::Action(Action::OpenUrl(url)) = press(&mut state, KeyCode::Char('o')) else {
+            panic!("o opens the playground");
+        };
+        assert_eq!(url, "http://mini:5173/s/modal-test");
+        let mut bare = state_with(&options(), Some(info(false)));
+        assert!(matches!(press(&mut bare, KeyCode::Char('o')), Outcome::Unchanged));
+    }
+
+    #[test]
+    fn the_header_shows_who_and_where_the_agent_is_and_the_footer_its_keys() {
+        let mut state = state_with(&options(), Some(info(true)));
+        let screen = render_lines(&mut state, 118, 50).join("\n");
+        for needle in [
+            "██▀▀▄▄  ██▀▀██    mini · modal-test · root",
+            "██▄▄▀▀  ██▀▀  ██  ~/repos/lab · main",
+            "model    gpt-5 · thinking medium · read-only",
+            "context  ████████░░░░░░░░░░░░ 42% · 84k of 200k",
+            "browser  http://mini:5173/s/modal-test  o open in browser",
+            "tools    read, bash",
+            "backend  http://mini:8787",
+            "tip      F2 opens these settings",
+            "Read-only",
+            "Reviewer",
+            "Alt+C compact",
+            "Alt+O open playground",
+        ] {
+            assert!(screen.contains(needle), "missing `{needle}`:\n{screen}");
+        }
+        assert!(!screen.contains("cliproxy/gpt-5"), "the value id leaked:\n{screen}");
+        assert_ne!(state.browser_rect, Rect::default(), "the playground URL is clickable");
+    }
+
+    #[test]
+    fn the_header_degrades_without_optional_fields_and_on_short_screens() {
+        let mut state = state_with(&options(), Some(info(false)));
+        let screen = render_lines(&mut state, 118, 50).join("\n");
+        assert!(screen.contains("~/repos/lab"));
+        for absent in ["~/repos/lab ·", "context", "browser", "o open in browser"] {
+            assert!(!screen.contains(absent), "`{absent}` without its field:\n{screen}");
+        }
+        assert_eq!(state.browser_rect, Rect::default());
+
+        // Shorter: the identity lines stay and the lower lines go first.
+        let mut state = state_with(&options(), Some(info(true)));
+        let screen = render_lines(&mut state, 118, 26).join("\n");
+        assert!(screen.contains("mini · modal-test · root"), "{screen}");
+        assert!(screen.contains("Read-only"), "{screen}");
+        assert!(!screen.contains("tip "), "{screen}");
+
+        // Too short for a header: the list keeps the room.
+        let screen = render_lines(&mut state, 118, 22).join("\n");
+        assert!(!screen.contains("modal-test"), "{screen}");
+        assert!(screen.contains("Read-only"), "{screen}");
+    }
+
+    #[test]
+    fn the_tip_rotates_across_openings() {
+        let mut state = state_with(&options(), Some(info(true)));
+        assert_eq!(state.dpi_tip(), Some("F2 opens these settings"));
+        state.dpi_hint = 3;
+        assert_eq!(state.dpi_tip(), Some("ctrl+r switches agents"));
     }
 }

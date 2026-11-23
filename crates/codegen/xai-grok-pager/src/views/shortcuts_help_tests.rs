@@ -71,6 +71,7 @@ fn extension_shortcuts_are_prepended_and_use_effective_keys() {
             extension: "pi-language-tutor".to_string(),
             enabled: true,
             remapped_to: Some("alt+shift+t".to_string()),
+            label: None,
         },
         ExtensionShortcut {
             key: "ctrl+k".to_string(),
@@ -78,6 +79,7 @@ fn extension_shortcuts_are_prepended_and_use_effective_keys() {
             extension: "pi-disabled".to_string(),
             enabled: false,
             remapped_to: None,
+            label: None,
         },
     ];
     let entries = build_entries_with_extension_shortcuts(

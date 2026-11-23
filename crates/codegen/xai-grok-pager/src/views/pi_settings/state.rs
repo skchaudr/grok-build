@@ -26,6 +26,7 @@ use super::layout;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
 use crate::settings::claude::{self, ClaudeSettings};
+use crate::settings::dpi::{self, DpiInfo, DpiSettings};
 use crate::settings::{
     CodingDataSharingLock, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory,
     SettingKey, SettingKind, SettingMeta, SettingValue, SettingsRegistry, StringValidator,
@@ -202,6 +203,14 @@ pub struct PiSettingsState {
     pub agent: AgentKind,
     /// The focused Claude session's live options, refreshed with the snapshots.
     pub claude: ClaudeSettings,
+    /// The focused durable Pi agent's live options (the Durable Pi tab), refreshed with the snapshots.
+    pub dpi: DpiSettings,
+    /// The durable agent's info block, drawn above the Durable Pi tab's rows.
+    pub dpi_info: Option<DpiInfo>,
+    /// The dpi shim's action keys as footer captions (`Alt+C compact`), from the session's shortcut catalog.
+    pub dpi_captions: Vec<&'static str>,
+    /// Which of `dpi_info.hints` this opening shows; picked once per open so the tip does not flicker.
+    pub dpi_hint: usize,
 
     /// Every tab's rows, in render order.
     pub rows: Vec<Row>,
@@ -240,6 +249,8 @@ pub struct PiSettingsState {
     /// Esc/Enter out of a chooser closes the panel instead of returning to
     /// Browse. Set by deep-link opens such as `/privacy`.
     pub close_on_picker_exit: bool,
+    /// Click rect of the header's playground URL ("open in browser").
+    pub browser_rect: Rect,
 }
 
 impl PiSettingsState {
@@ -265,7 +276,19 @@ impl PiSettingsState {
         agent: AgentKind,
         claude: ClaudeSettings,
     ) -> Self {
-        let rows = build_rows(&registry, agent, &claude);
+        Self::new_with(registry, ui_snapshot, pager_snapshot, agent, claude, DpiSettings::default())
+    }
+
+    /// [`Self::new_for`] plus a durable Pi agent's rows, whose tab opens first.
+    pub fn new_with(
+        registry: Arc<SettingsRegistry>,
+        ui_snapshot: UiConfig,
+        pager_snapshot: PagerLocalSnapshot,
+        agent: AgentKind,
+        claude: ClaudeSettings,
+        dpi: DpiSettings,
+    ) -> Self {
+        let rows = build_rows(&registry, agent, &claude, &dpi);
         let tabs = build_tabs(&rows);
         let mut state = Self {
             window: ModalWindowState::with_tabs(tabs.len()),
@@ -274,6 +297,10 @@ impl PiSettingsState {
             pager_snapshot,
             agent,
             claude,
+            dpi,
+            dpi_info: None,
+            dpi_captions: Vec::new(),
+            dpi_hint: 0,
             rows,
             tabs,
             active_tab: 0,
@@ -291,6 +318,7 @@ impl PiSettingsState {
             stepper_rects: (Rect::default(), Rect::default()),
             hover: None,
             close_on_picker_exit: false,
+            browser_rect: Rect::default(),
         };
         state.refresh_visible();
         state.select_first_visible();
@@ -350,19 +378,48 @@ impl PiSettingsState {
         if claude::is_claude_key(key) {
             return self.claude.value_of(key);
         }
+        if dpi::is_dpi_key(key) {
+            return self.dpi.value_of(key);
+        }
         current_value_for(key, &self.ui_snapshot, &self.pager_snapshot)
     }
 
-    /// Display text for a Claude row's value (the option's name rather than its id), `None` for other rows.
-    pub fn claude_display(&self, key: SettingKey) -> Option<String> {
+    /// Display text for a session option's value (the option's name rather than its id), `None` for toggles and
+    /// for other rows.
+    pub fn session_display(&self, key: SettingKey) -> Option<String> {
+        if dpi::is_dpi_key(key) {
+            return self.dpi.display(key);
+        }
         let option = self.claude.option(key)?;
         (key != claude::FAST).then(|| option.current_label())
+    }
+
+    /// A live session option (Claude or durable Pi) rather than a pager setting.
+    pub fn is_session_option(&self, key: SettingKey) -> bool {
+        claude::is_claude_key(key) || dpi::is_dpi_key(key)
+    }
+
+    /// The agent's browser playground, while the Durable Pi tab is on screen.
+    pub fn playground_url(&self) -> Option<&str> {
+        let url = self.dpi_info.as_ref()?.playground_url.as_deref()?;
+        self.dpi_tab_active().then_some(url)
+    }
+
+    /// Whether the Durable Pi tab is the one on screen (browsing, not searching).
+    pub fn dpi_tab_active(&self) -> bool {
+        !self.searching() && self.active_category() == Some(SettingCategory::DurablePi)
+    }
+
+    /// The tip this opening shows, rotating through the shim's hints across opens.
+    pub fn dpi_tip(&self) -> Option<&str> {
+        let hints = &self.dpi_info.as_ref()?.hints;
+        (!hints.is_empty()).then(|| hints[self.dpi_hint % hints.len()].as_str())
     }
 
     /// Registered default for a key.
     pub fn default_of(&self, key: SettingKey) -> Option<SettingValue> {
         // A live session option has no registered default to reset to.
-        if claude::is_claude_key(key) {
+        if claude::is_claude_key(key) || dpi::is_dpi_key(key) {
             return None;
         }
         self.registry.find(key).map(default_value_for)
@@ -410,6 +467,9 @@ impl PiSettingsState {
     pub fn choices_for(&self, key: SettingKey) -> Vec<OwnedEnumChoice> {
         if claude::is_claude_key(key) {
             return self.claude.choices_for(key);
+        }
+        if dpi::is_dpi_key(key) {
+            return self.dpi.choices_for(key);
         }
         match self.registry.find(key).map(|m| &m.kind) {
             Some(SettingKind::Enum { choices, .. }) => self
@@ -506,7 +566,7 @@ impl PiSettingsState {
         let previous_tab = self.active_category();
         let sub_pane_key = self.mode.subject();
 
-        self.rows = build_rows(&self.registry, self.agent, &self.claude);
+        self.rows = build_rows(&self.registry, self.agent, &self.claude, &self.dpi);
         self.tabs = build_tabs(&self.rows);
         self.window.tab_count = self.tabs.len();
         self.window.tab_rects = vec![None; self.tabs.len()];
@@ -747,9 +807,9 @@ impl PiSettingsState {
         // A DynamicEnum value that no longer resolves (a renamed model, say)
         // must not land on the "(no override)" sentinel, or Enter would
         // silently wipe the user's preference.
-        // Claude's choices carry no "(no override)" sentinel to skip past.
+        // Session options carry no "(no override)" sentinel to skip past.
         let unknown_fallback =
-            usize::from(is_dynamic && !claude::is_claude_key(key) && choices.len() > 1);
+            usize::from(is_dynamic && !self.is_session_option(key) && choices.len() > 1);
         let index = match &current {
             Some(SettingValue::Enum(cur)) => choices
                 .iter()
@@ -902,6 +962,7 @@ impl PiSettingsState {
         self.sidebar_rects.clear();
         self.choice_rects.clear();
         self.stepper_rects = (Rect::default(), Rect::default());
+        self.browser_rect = Rect::default();
     }
 }
 
@@ -986,7 +1047,12 @@ pub(super) fn row_visible(
 
 /// Build the full row table: per category, a tab heading followed by each
 /// non-empty section's heading and its settings.
-fn build_rows(registry: &SettingsRegistry, agent: AgentKind, claude: &ClaudeSettings) -> Vec<Row> {
+fn build_rows(
+    registry: &SettingsRegistry,
+    agent: AgentKind,
+    claude: &ClaudeSettings,
+    dpi: &DpiSettings,
+) -> Vec<Row> {
     let kitty = crate::app::kitty_releases_reported();
     let minimal = crate::app::minimal_mode_active();
     let voice = crate::app::voice_mode_enabled();
@@ -1014,6 +1080,7 @@ fn build_rows(registry: &SettingsRegistry, agent: AgentKind, claude: &ClaudeSett
             .filter(|(_, m)| row_visible(m, kitty, minimal, voice, external, agent))
             // Fast mode and Agent exist only when the session lists them.
             .filter(|(_, m)| !claude::is_claude_key(m.key) || claude.offers(m.key))
+            .filter(|(_, m)| !dpi::is_dpi_key(m.key) || dpi.offers(m.key))
             .filter(|(_, m)| !group_children.contains(m.key))
             .collect();
         if members.is_empty() {
@@ -1022,12 +1089,20 @@ fn build_rows(registry: &SettingsRegistry, agent: AgentKind, claude: &ClaudeSett
         rows.push(Row::Tab {
             category: *category,
         });
-        // Sidebar order comes from the layout table; inside a section the
-        // registry's declaration order is preserved.
-        for section in layout::sections_for(*category) {
+        // Sidebar order comes from the layout table (the Durable Pi tab's from the agent's own categories);
+        // inside a section the registry's declaration order is preserved.
+        let section_of = |key: SettingKey| match dpi.section_of(key) {
+            Some(section) => section,
+            None => layout::section_for(key),
+        };
+        let sections = match category {
+            SettingCategory::DurablePi => dpi.sections(),
+            _ => layout::sections_for(*category).to_vec(),
+        };
+        for section in sections {
             let mut emitted = false;
             for (meta, m) in &members {
-                if layout::section_for(m.key) != *section {
+                if section_of(m.key) != section {
                     continue;
                 }
                 if !emitted {

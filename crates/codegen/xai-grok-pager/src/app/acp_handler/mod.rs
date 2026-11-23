@@ -270,11 +270,14 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         is_active && !stale_zero
                     } else if let acp::SessionUpdate::ConfigOptionUpdate(ref update) =
                         notif.request.update
-                        // Native explicit-model sessions use the generic handler below.
-                        && (agent.session.models.model_config_id.is_some() || external_agent)
+                        // Native explicit-model sessions use the generic handler below, unless the update carries a
+                        // durable Pi agent's settings (Pi keeps its explicit catalog; `settings::dpi`).
+                        && (agent.session.models.model_config_id.is_some()
+                            || external_agent
+                            || update.config_options.iter().any(crate::settings::dpi::is_dpi_option))
                     {
                         let models = &mut agent.session.models;
-                        if agent.session.model_switch_pending {
+                        if agent.session.model_switch_pending && (models.model_config_id.is_some() || external_agent) {
                             models.model_changed_during_switch = true;
                         }
                         let changed = models.apply_config_options(&update.config_options);

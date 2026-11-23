@@ -2623,14 +2623,29 @@ fn host_restart_name(
     brand.map_or("grok-pi", |brand| brand.title)
 }
 
-/// A `claude.*` settings row changed: ask the adapter for it on the focused Claude session.
-/// The row repaints from the reply (`claude_option_set`), not from a guess made here.
-pub(in crate::app::dispatch) fn set_claude_option(
+/// A session option row's live option and its toast label: a `claude.*` row on a Claude session or a `dpi.*` row
+/// on a durable Pi agent. Both live among the session's ACP config options.
+fn session_option(
+    options: &[acp::SessionConfigOption],
+    key: &'static str,
+) -> (Option<crate::settings::session_option::SessionOption>, &'static str) {
+    use crate::settings::{claude, dpi};
+    if dpi::is_dpi_key(key) {
+        let settings = dpi::DpiSettings::from_options(options);
+        (settings.option(key).cloned(), settings.label_of(key))
+    } else {
+        let settings = claude::ClaudeSettings::from_options(options);
+        (settings.option(key).cloned(), claude::label_of(key))
+    }
+}
+
+/// A session option row changed: ask the adapter for it on the focused session.
+/// The row repaints from the reply (`session_option_set`), not from a guess made here.
+pub(in crate::app::dispatch) fn set_session_option(
     app: &mut AppView,
     key: &'static str,
     value: String,
 ) -> Vec<Effect> {
-    use crate::settings::claude::{self, ClaudeSettings};
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -2640,38 +2655,37 @@ pub(in crate::app::dispatch) fn set_claude_option(
     let Some(session_id) = agent.session.session_id.clone() else {
         return vec![];
     };
-    let settings = ClaudeSettings::from_options(&agent.session.models.config_options);
-    let Some(option) = settings.option(key) else {
-        tracing::error!(target: "settings", key, "session does not offer this Claude option");
+    let Some(option) = session_option(&agent.session.models.config_options, key).0 else {
+        tracing::error!(target: "settings", key, "session does not offer this option");
         return vec![];
     };
     if option.current == value {
         return vec![];
     }
-    vec![Effect::SetClaudeOption {
+    vec![Effect::SetSessionOption {
         agent_id: id,
         key,
-        request: claude::set_option_request(session_id, option, &value),
+        request: crate::settings::session_option::set_option_request(session_id, &option, &value),
     }]
 }
 
-/// The adapter answered a Claude row's `session/set_config_option`.
-pub(in crate::app::dispatch) fn claude_option_set(
+/// The adapter answered a session option row's `session/set_config_option`.
+pub(in crate::app::dispatch) fn session_option_set(
     app: &mut AppView,
     agent_id: crate::app::agent::AgentId,
     key: &'static str,
     result: Result<Vec<acp::SessionConfigOption>, String>,
 ) -> Vec<Effect> {
-    use crate::settings::claude::{self, ClaudeSettings};
-    let label = claude::label_of(key);
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };
     match result {
         Ok(options) => {
             agent.session.models.apply_config_options(&options);
-            let value = ClaudeSettings::from_options(&options).option(key).map(|o| {
-                if key == claude::FAST {
+            let (option, label) = session_option(&options, key);
+            // A toggle reads on/off; a choice reads its name.
+            let value = option.map(|o| {
+                if key == crate::settings::claude::FAST || o.boolean {
                     o.current.clone()
                 } else {
                     o.current_label()
@@ -2684,7 +2698,8 @@ pub(in crate::app::dispatch) fn claude_option_set(
             refresh_open_settings_modals(app);
         }
         Err(error) => {
-            tracing::warn!(target: "settings", key, %error, "claude option change refused");
+            let label = session_option(&agent.session.models.config_options, key).1;
+            tracing::warn!(target: "settings", key, %error, "session option change refused");
             agent.show_toast(&format!("\u{2717} Couldn't change {label}: {error}"));
         }
     }

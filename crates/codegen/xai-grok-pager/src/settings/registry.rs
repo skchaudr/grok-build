@@ -29,6 +29,9 @@ pub enum SettingOwner {
 /// The settings modal renders one section per category in `ALL` order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingCategory {
+    /// A durable Pi agent's live settings (`settings::dpi`). Only a dpi session has rows here, so other sessions
+    /// never see the tab.
+    DurablePi,
     Appearance,
     Popups,
     Mouse,
@@ -41,8 +44,9 @@ pub enum SettingCategory {
 }
 
 impl SettingCategory {
-    /// Render order: Appearance first (most-touched), then Mouse, then the rest.
+    /// Render order: a dpi session's own tab first, then Appearance (most-touched), Mouse, and the rest.
     pub const ALL: &'static [Self] = &[
+        Self::DurablePi,
         Self::Appearance,
         Self::Popups,
         Self::Mouse,
@@ -57,6 +61,7 @@ impl SettingCategory {
     /// Section-header label as rendered in the modal.
     pub fn label(&self) -> &'static str {
         match self {
+            Self::DurablePi => "Durable Pi",
             Self::Appearance => "Appearance",
             Self::Popups => "Popups",
             Self::Mouse => "Mouse",
@@ -108,9 +113,9 @@ pub enum DynamicEnumSource {
     /// Models from the active session's catalog.
     /// Prepends a `"(no override)"` sentinel so the user can clear the setting.
     ActiveModelCatalog,
-    /// Choices the active Claude session advertises (`settings::claude`); the panel resolves them from the session,
-    /// so the snapshot-only resolver below has none.
-    ClaudeSession,
+    /// Choices the active session advertises as config options (`settings::claude`, `settings::dpi`); the panel
+    /// resolves them from the session, so the snapshot-only resolver below has none.
+    SessionOption,
 }
 
 /// Build the owned choice list for a `DynamicEnum` at picker-open time.
@@ -136,7 +141,7 @@ pub fn dynamic_enum_choices(
             }
             out
         }
-        DynamicEnumSource::ClaudeSession => Vec::new(),
+        DynamicEnumSource::SessionOption => Vec::new(),
     }
 }
 

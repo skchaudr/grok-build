@@ -21,6 +21,8 @@ pub const OTHER_SECTION: &str = "Other";
 /// sections with no visible rows are skipped at build time.
 pub fn sections_for(category: SettingCategory) -> &'static [&'static str] {
     match category {
+        // Sections come from the agent's own categories (`settings::dpi`), not from this table.
+        SettingCategory::DurablePi => &[],
         SettingCategory::Appearance => &["Theme", "Display", "Thinking", "Tool output", "Prompt"],
         SettingCategory::Popups => &["Tool details"],
         SettingCategory::Mouse => &["Scrolling", "Selection"],

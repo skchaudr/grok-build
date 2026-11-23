@@ -136,6 +136,18 @@ pub(super) fn handle(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
             agent.dpi_remote = Some(remote);
             true
         }
+        // The durable agent's info block, for the settings panel's Durable Pi tab (`settings::dpi`).
+        "pi/ui/dpi_info" => {
+            let Some(info) = crate::settings::dpi::DpiInfo::from_json(&params) else {
+                return false;
+            };
+            let Some(agent) = pi_target(app, session_id.as_deref()) else {
+                return false;
+            };
+            agent.dpi_info = Some(info);
+            crate::app::dispatch::refresh_open_settings_modals(app);
+            true
+        }
         "pi/ui/attach_card" => {
             let Some(card) = crate::scrollback::blocks::AttachCardBlock::from_json(&params) else {
                 return false;
@@ -326,6 +338,7 @@ fn set_shortcuts(agent: &mut AgentView, value: &serde_json::Value) -> bool {
                 extension: text(v, "extension").unwrap_or_else(|| "unknown".to_owned()),
                 enabled: v.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(true),
                 remapped_to: text(v, "remappedTo"),
+                label: text(v, "label"),
             })
         })
         .collect();

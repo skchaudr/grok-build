@@ -18,8 +18,10 @@
 
 pub mod claude;
 pub mod defs;
+pub mod dpi;
 pub mod layout;
 pub mod registry;
+pub mod session_option;
 
 pub use layout::{OTHER_SECTION, section_for, sections_for};
 pub use registry::{

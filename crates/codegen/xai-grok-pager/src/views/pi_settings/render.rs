@@ -206,6 +206,16 @@ fn render_browse(buf: &mut Buffer, content: Rect, state: &mut PiSettingsState, t
         };
     }
 
+    // The Durable Pi tab opens with who and where the agent is, as far as the height allows.
+    if state.dpi_tab_active() {
+        let used = render_dpi_header(buf, area, state, theme);
+        area = Rect {
+            y: area.y + used,
+            height: area.height - used,
+            ..area
+        };
+    }
+
     // Reserve the description block whenever a usable list still fits.
     let (list_area, description) = if area.height > DESCRIPTION_BLOCK + 1 {
         (
@@ -228,6 +238,150 @@ fn render_browse(buf: &mut Buffer, content: Rect, state: &mut PiSettingsState, t
     if let Some(description) = description {
         render_description(buf, description, state, theme);
     }
+}
+
+/// Rows the settings list keeps under the Durable Pi header before the header gives up lines.
+const DPI_MIN_LIST_ROWS: u16 = 4;
+/// Label column of the header's lower lines.
+const DPI_LABEL_W: usize = 9;
+/// Cells in the context-usage bar.
+const DPI_BAR_W: usize = 20;
+
+/// A token count as a person reads it: `840`, `84k`, `1.2M`.
+fn dpi_tokens(n: u64) -> String {
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{}k", (n + 500) / 1_000),
+        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
+    }
+}
+
+/// The durable agent's header lines, most important first. The playground line, if any, is marked so its URL can
+/// be made clickable.
+fn dpi_header_lines(state: &PiSettingsState, theme: &Theme) -> Vec<(Line<'static>, bool)> {
+    let Some(info) = &state.dpi_info else {
+        return vec![];
+    };
+    let dot = || Span::styled(" \u{00B7} ", theme.muted());
+    let primary = Style::default().fg(theme.text_primary);
+    let label = |text: &str| Span::styled(format!("{text:<DPI_LABEL_W$}"), theme.muted());
+    let [logo_top, logo_bottom] = crate::views::dpi_logo::lines(theme);
+
+    let mut top = logo_top.spans;
+    top.push(Span::raw("  "));
+    top.push(Span::styled(info.device.clone(), primary));
+    top.push(dot());
+    top.push(Span::styled(info.session.clone(), primary.add_modifier(Modifier::BOLD)));
+    top.push(dot());
+    top.push(Span::styled(info.agent.clone(), Style::default().fg(theme.accent_assistant)));
+    let mut bottom = logo_bottom.spans;
+    bottom.push(Span::raw("  "));
+    bottom.push(Span::styled(info.cwd.clone(), primary));
+    if let Some(branch) = &info.branch {
+        bottom.push(dot());
+        bottom.push(Span::styled(branch.clone(), Style::default().fg(theme.accent_assistant)));
+    }
+    let mut lines = vec![(Line::from(top), false), (Line::from(bottom), false)];
+
+    let mut model = vec![label("model"), Span::styled(info.model.clone(), primary)];
+    if let Some(thinking) = &info.thinking {
+        model.extend([dot(), Span::styled(format!("thinking {thinking}"), primary)]);
+    }
+    if info.read_only {
+        model.extend([dot(), Span::styled("read-only", Style::default().fg(theme.warning))]);
+    }
+    lines.push((Line::from(model), false));
+
+    if let Some(context) = info.context {
+        let filled = (usize::from(context.percent.min(100)) * DPI_BAR_W + 50) / 100;
+        lines.push((
+            Line::from(vec![
+                label("context"),
+                Span::styled("\u{2588}".repeat(filled), Style::default().fg(theme.accent_assistant)),
+                Span::styled("\u{2591}".repeat(DPI_BAR_W - filled), theme.muted()),
+                Span::styled(
+                    format!(
+                        " {}% \u{00B7} {} of {}",
+                        context.percent,
+                        dpi_tokens(context.tokens),
+                        dpi_tokens(context.window)
+                    ),
+                    primary,
+                ),
+            ]),
+            false,
+        ));
+    }
+    if let Some(url) = &info.playground_url {
+        lines.push((
+            Line::from(vec![
+                label("browser"),
+                Span::styled(
+                    url.clone(),
+                    Style::default()
+                        .fg(theme.accent_assistant)
+                        .add_modifier(Modifier::UNDERLINED),
+                ),
+                Span::styled("  o open in browser", theme.muted()),
+            ]),
+            true,
+        ));
+    }
+    if !info.tools.is_empty() {
+        lines.push((
+            Line::from(vec![label("tools"), Span::styled(info.tools.join(", "), primary)]),
+            false,
+        ));
+    }
+    if let Some(url) = &info.backend_url {
+        lines.push((Line::from(vec![label("backend"), Span::styled(url.clone(), primary)]), false));
+    }
+    if let Some(tip) = state.dpi_tip() {
+        lines.push((
+            Line::from(vec![
+                label("tip"),
+                Span::styled(
+                    tip.to_owned(),
+                    Style::default().fg(theme.gray).add_modifier(Modifier::ITALIC),
+                ),
+            ]),
+            false,
+        ));
+    }
+    lines
+}
+
+/// Paint the Durable Pi header at the top of `area`; returns the rows it took (0 when the panel is too short).
+fn render_dpi_header(buf: &mut Buffer, area: Rect, state: &mut PiSettingsState, theme: &Theme) -> u16 {
+    state.browser_rect = Rect::default();
+    let lines = dpi_header_lines(state, theme);
+    // The two identity lines and a spacer, or nothing.
+    let budget = area
+        .height
+        .saturating_sub(DESCRIPTION_BLOCK + DPI_MIN_LIST_ROWS)
+        .saturating_sub(1);
+    if lines.is_empty() || budget < 2 {
+        return 0;
+    }
+    let shown = lines.len().min(usize::from(budget));
+    let x = area.x + SIDEBAR_INDENT;
+    let width = area.width.saturating_sub(SIDEBAR_INDENT);
+    for (i, (line, browser)) in lines.into_iter().take(shown).enumerate() {
+        let y = area.y + i as u16;
+        buf.set_style(Rect { y, height: 1, ..area }, Style::default().bg(theme.bg_base));
+        buf.set_line(x, y, &line, width);
+        if browser {
+            let url_w = line.spans.get(1).map_or(0, |s| s.content.width()) as u16;
+            let left = DPI_LABEL_W as u16;
+            state.browser_rect = Rect {
+                x: x + left,
+                y,
+                width: url_w.min(width.saturating_sub(left)),
+                height: 1,
+            };
+        }
+    }
+    shown as u16 + 1
 }
 
 /// Paint the section sidebar and settings pane, and record their hit rects.
@@ -316,7 +470,7 @@ fn render_rows(buf: &mut Buffer, area: Rect, state: &mut PiSettingsState, theme:
                     rect,
                     meta,
                     state.value_of(key).as_ref(),
-                    state.claude_display(key).as_deref(),
+                    state.session_display(key).as_deref(),
                     label_w,
                     style,
                     state.lock(key),
@@ -1104,10 +1258,20 @@ fn build_shortcuts(state: &PiSettingsState) -> Vec<Shortcut<'static>> {
                 hints.push(shortcut("Tab sections"));
             }
             hints.push(shortcut("/ search"));
-            if !locked {
+            let resettable = state
+                .focused()
+                .is_some_and(|(key, _)| !crate::settings::dpi::is_dpi_key(key));
+            if !locked && resettable {
                 hints.push(shortcut("d reset"));
             }
             hints.push(shortcut("F2/Esc close"));
+            // The durable agent's own keys work from here too.
+            if state.dpi_tab_active() {
+                if state.playground_url().is_some() {
+                    hints.push(shortcut("o open in browser"));
+                }
+                hints.extend(state.dpi_captions.iter().map(|caption| shortcut(caption)));
+            }
             hints
         }
         ModeKind::Search => vec![

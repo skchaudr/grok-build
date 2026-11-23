@@ -31,6 +31,9 @@ pub struct ExtensionShortcut {
     /// Optional remapped key (Pi KeyId format).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remapped_to: Option<String>,
+    /// Short caption for a footer (`compact`), when the extension gives one; `description` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -491,6 +494,7 @@ mod tests {
                 extension: "pi-language-tutor".to_string(),
                 enabled: true,
                 remapped_to: Some("alt+shift+t".to_string()),
+                label: None,
             },
         );
 
@@ -515,6 +519,7 @@ mod tests {
                 extension: "pi-language-tutor".to_string(),
                 enabled: false,
                 remapped_to: None,
+                label: None,
             },
         );
 
@@ -534,6 +539,7 @@ mod tests {
                 extension: "pi-language-tutor".to_string(),
                 enabled: true,
                 remapped_to: None,
+                label: None,
             },
         );
 
@@ -560,6 +566,7 @@ mod tests {
                 extension: "pi-language-tutor".to_string(),
                 enabled: true,
                 remapped_to: None,
+                label: None,
             },
         );
         // Note: HashMap won't actually store duplicates with same key,

@@ -730,7 +730,7 @@ pub enum Action {
     },
     /// Change one of the focused Claude session's live options (a `claude.*` settings row)
     /// through `session/set_config_option`. `value` is the option's value id, or `on`/`off` for Fast mode.
-    SetClaudeOption {
+    SetSessionOption {
         key: &'static str,
         value: String,
     },
@@ -2094,7 +2094,7 @@ pub enum Effect {
         mode_id: acp::SessionModeId,
     },
     /// Send a Claude settings row's `session/set_config_option`; the reply carries the options as they now stand.
-    SetClaudeOption {
+    SetSessionOption {
         agent_id: AgentId,
         /// The `claude.*` row, for the result toast.
         key: &'static str,
@@ -3084,7 +3084,7 @@ pub enum TaskResult {
         mode_id: acp::SessionModeId,
     },
     /// `session/set_config_option` for a Claude settings row answered. `Ok` carries the options as the agent now reports them.
-    ClaudeOptionSet {
+    SessionOptionSet {
         agent_id: AgentId,
         key: &'static str,
         result: Result<Vec<acp::SessionConfigOption>, String>,

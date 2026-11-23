@@ -473,6 +473,7 @@ impl AgentView {
             display_name: None,
             machine_name: None,
             dpi_remote: None,
+            dpi_info: None,
             agent_label: None,
             pi_statuses: Default::default(),
             pi_widgets: Default::default(),

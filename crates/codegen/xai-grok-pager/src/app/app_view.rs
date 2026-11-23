@@ -2775,11 +2775,26 @@ impl AppView {
     /// Quit always goes through double-press confirmation, even when escalated from agent-level (e.g., Ctrl-C while cancelling).
     /// Pi sessions: an open Remote TUI component owns the keyboard (Ctrl+Shift+Esc drops it), otherwise a key
     /// a Pi extension registered goes to Pi. A native dialog the component opened keeps its own input.
+    /// While the F2 panel is browsing, the durable Pi agent's own keys (the ones its footer lists) still reach Pi;
+    /// the panel closes so their result is in view.
     fn route_pi_input(&mut self, agent_id: AgentId, ev: &Event) -> Option<InputOutcome> {
         use crate::app::actions::Effect;
+        use crate::views::modal::ActiveModal;
         use crossterm::event::KeyModifiers;
         let agent = self.agents.get_mut(&agent_id)?;
-        if agent.active_modal.is_some() || agent.question_view.is_some() {
+        if agent.question_view.is_some() {
+            return None;
+        }
+        let in_panel = match &agent.active_modal {
+            None => false,
+            Some(ActiveModal::PiSettings { state })
+                if state.mode.kind() == crate::views::pi_settings::ModeKind::Browse =>
+            {
+                true
+            }
+            Some(_) => return None,
+        };
+        if in_panel && agent.pi_remote_tui.id.is_some() {
             return None;
         }
         let session_id = agent.session.session_id.clone()?;
@@ -2813,7 +2828,18 @@ impl AppView {
         if key.kind == KeyEventKind::Release {
             return None;
         }
-        let key_id = agent.pi_shortcuts.as_ref()?.match_key(key)?.to_owned();
+        let shortcuts = agent.pi_shortcuts.as_ref()?;
+        let key_id = shortcuts.match_key(key)?.to_owned();
+        if in_panel {
+            let dpi_key = shortcuts
+                .all()
+                .iter()
+                .any(|s| s.key == key_id && s.extension == crate::settings::dpi::OPTION_META);
+            if !dpi_key {
+                return None;
+            }
+            agent.active_modal = None;
+        }
         agent.show_toast(&format!("Shortcut: {key_id}"));
         self.pending_effects
             .push(input("pi/ui/shortcut_dispatch", serde_json::json!({ "key": key_id })));

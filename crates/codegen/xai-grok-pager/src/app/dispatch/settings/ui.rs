@@ -442,6 +442,19 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     effects
 }
 
+/// The panel's registry: the shared one plus the session's own rows. Claude's and the durable Pi agent's rows are
+/// added here, never to the shared registry, and shown only when the session offers them.
+fn panel_registry(
+    base: &crate::settings::SettingsRegistry,
+    dpi: &crate::settings::dpi::DpiSettings,
+) -> std::sync::Arc<crate::settings::SettingsRegistry> {
+    let with_claude = crate::settings::claude::registry_with_claude_rows(base);
+    std::sync::Arc::new(match dpi.is_empty() {
+        true => with_claude,
+        false => crate::settings::dpi::registry_with_rows(&with_claude, dpi),
+    })
+}
+
 /// Open the grok-pi settings panel — the tabbed F2 surface.
 ///
 /// Deliberately separate from [`dispatch_open_settings`]: upstream's modal and
@@ -452,6 +465,7 @@ pub(in crate::app::dispatch) fn dispatch_open_pi_settings(
     focus_key: Option<&'static str>,
 ) -> Vec<Effect> {
     use crate::settings::claude::ClaudeSettings;
+    use crate::settings::dpi::DpiSettings;
     use crate::views::modal::ActiveModal;
     use crate::views::pi_settings::{AgentKind, PiSettingsState};
 
@@ -476,10 +490,6 @@ pub(in crate::app::dispatch) fn dispatch_open_pi_settings(
             }
         }
     };
-    // Claude's rows are appended here, never to the shared registry, and shown only for a Claude session.
-    let registry = std::sync::Arc::new(crate::settings::claude::registry_with_claude_rows(
-        &app.settings_registry,
-    ));
     let agent_kind = if app.is_claude_agent(id) {
         AgentKind::Claude
     } else if app.is_pi_agent(id) {
@@ -494,6 +504,8 @@ pub(in crate::app::dispatch) fn dispatch_open_pi_settings(
         return effects;
     };
     let claude = ClaudeSettings::from_options(&agent.session.models.config_options);
+    let dpi = DpiSettings::from_options(&agent.session.models.config_options);
+    let registry = panel_registry(&app.settings_registry, &dpi);
     if matches!(&agent.active_modal, Some(ActiveModal::PiSettings { .. })) {
         if focus_key.is_none() {
             debug_assert!(
@@ -507,13 +519,29 @@ pub(in crate::app::dispatch) fn dispatch_open_pi_settings(
     }
 
     tracing::info!(target: "settings", "opened pi settings panel");
-    let mut state = Box::new(PiSettingsState::new_for(
+    let mut state = Box::new(PiSettingsState::new_with(
         registry,
         ui_snapshot,
         pager_snapshot,
         agent_kind,
         claude,
+        dpi,
     ));
+    if let Some(info) = &agent.dpi_info {
+        // One tip per opening, the next one next time.
+        static NEXT_HINT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        state.dpi_hint = NEXT_HINT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        state.dpi_info = Some(info.clone());
+        state.dpi_captions = crate::settings::dpi::action_captions(agent.pi_shortcuts.as_ref());
+        // The agent's model, context and settings move while it works; the reply repaints the open panel.
+        if let Some(session_id) = agent.session.session_id.clone() {
+            effects.push(Effect::PiUiInput {
+                session_id,
+                method: "pi/dpi/refresh",
+                params: serde_json::json!({}),
+            });
+        }
+    }
     if let Some(key) = focus_key
         && state.focus_key(key)
     {
@@ -541,13 +569,22 @@ pub(crate) fn refresh_open_pi_settings(app: &mut AppView) {
     let ui_snapshot = app.current_ui.clone();
     let pager_snapshot = build_pager_snapshot(app);
     for agent in app.agents.values_mut() {
-        let claude = crate::settings::claude::ClaudeSettings::from_options(
-            &agent.session.models.config_options,
-        );
+        let options = &agent.session.models.config_options;
+        let claude = crate::settings::claude::ClaudeSettings::from_options(options);
+        let dpi = crate::settings::dpi::DpiSettings::from_options(options);
         let Some(ActiveModal::PiSettings { state }) = agent.active_modal.as_mut() else {
             continue;
         };
         state.claude = claude;
+        // A durable agent's options can come and go (compaction needs a known window), so its rows are re-registered.
+        if dpi != state.dpi {
+            state.registry = panel_registry(&app.settings_registry, &dpi);
+            state.dpi = dpi;
+        }
+        if agent.dpi_info.is_some() {
+            state.dpi_info.clone_from(&agent.dpi_info);
+            state.dpi_captions = crate::settings::dpi::action_captions(agent.pi_shortcuts.as_ref());
+        }
         state.rebuild_rows();
         state.ui_snapshot = ui_snapshot.clone();
         state.pager_snapshot = pager_snapshot.clone();

@@ -10,8 +10,9 @@
 //! them, so Pi and stock Grok never register or see them.
 
 use agent_client_protocol as acp;
-use serde_json::Value;
 
+pub use super::session_option::{SessionOption, set_option_request};
+use super::session_option::{ON, bool_value};
 use super::{
     DynamicEnumSource, OwnedEnumChoice, SettingCategory, SettingKey, SettingKind, SettingMeta,
     SettingOwner, SettingValue, SettingsRegistry,
@@ -25,10 +26,6 @@ pub const AGENT: SettingKey = "claude.agent";
 
 /// Sidebar section the rows sit in (Agent tab).
 pub const SECTION: &str = "Claude";
-
-/// Wire value for a Fast-mode select option (the adapter's `FAST_MODE_ON` / `FAST_MODE_OFF`).
-const FAST_ON: &str = "on";
-const FAST_OFF: &str = "off";
 
 /// Whether `key` is one of the Claude rows.
 pub fn is_claude_key(key: &str) -> bool {
@@ -47,31 +44,10 @@ fn key_for_config_id(id: &str) -> Option<SettingKey> {
     })
 }
 
-/// One advertised option, reduced to what a row needs.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ClaudeOption {
-    pub config_id: String,
-    /// Current value id. Fast mode is always `"on"` / `"off"`, whichever way the adapter types it.
-    pub current: String,
-    /// The adapter typed the option as a boolean, so the wire carries a bool rather than a value id.
-    pub boolean: bool,
-    pub choices: Vec<OwnedEnumChoice>,
-}
-
-impl ClaudeOption {
-    /// Display name of the current value, falling back to the raw id.
-    pub fn current_label(&self) -> String {
-        self.choices
-            .iter()
-            .find(|c| c.canonical == self.current)
-            .map_or_else(|| self.current.clone(), |c| c.display.clone())
-    }
-}
-
 /// The Claude rows a session currently offers, keyed by setting key.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ClaudeSettings {
-    options: Vec<(SettingKey, ClaudeOption)>,
+    options: Vec<(SettingKey, SessionOption)>,
 }
 
 impl ClaudeSettings {
@@ -82,7 +58,7 @@ impl ClaudeSettings {
             .filter_map(|option| {
                 let json = serde_json::to_value(option).ok()?;
                 let key = key_for_config_id(json.get("id")?.as_str()?)?;
-                Some((key, parse_option(&json)?))
+                Some((key, SessionOption::parse(&json)?))
             })
             .collect();
         Self { options }
@@ -92,7 +68,7 @@ impl ClaudeSettings {
         self.options.is_empty()
     }
 
-    pub fn option(&self, key: SettingKey) -> Option<&ClaudeOption> {
+    pub fn option(&self, key: SettingKey) -> Option<&SessionOption> {
         self.options.iter().find(|(k, _)| *k == key).map(|(_, o)| o)
     }
 
@@ -101,7 +77,7 @@ impl ClaudeSettings {
     pub fn value_of(&self, key: SettingKey) -> Option<SettingValue> {
         let option = self.option(key)?;
         Some(if key == FAST {
-            SettingValue::Bool(option.current == FAST_ON)
+            SettingValue::Bool(option.current == ON)
         } else {
             SettingValue::String(option.current.clone())
         })
@@ -121,70 +97,6 @@ impl ClaudeSettings {
     }
 }
 
-fn parse_option(json: &Value) -> Option<ClaudeOption> {
-    let config_id = json.get("id")?.as_str()?.to_owned();
-    let boolean = json.get("type").and_then(Value::as_str) == Some("boolean");
-    let current = match json.get("currentValue")? {
-        Value::String(s) => s.clone(),
-        Value::Bool(true) => FAST_ON.to_owned(),
-        Value::Bool(false) => FAST_OFF.to_owned(),
-        _ => return None,
-    };
-    let mut choices = Vec::new();
-    if let Some(entries) = json.get("options").and_then(Value::as_array) {
-        for entry in entries {
-            // Grouped selects nest their entries one level down.
-            match entry.get("options").and_then(Value::as_array) {
-                Some(group) => group.iter().for_each(|e| push_choice(&mut choices, e)),
-                None => push_choice(&mut choices, entry),
-            }
-        }
-    }
-    Some(ClaudeOption {
-        config_id,
-        current,
-        boolean,
-        choices,
-    })
-}
-
-fn push_choice(out: &mut Vec<OwnedEnumChoice>, entry: &Value) {
-    let Some(value) = entry.get("value").and_then(Value::as_str) else {
-        return;
-    };
-    let text = |k: &str| entry.get(k).and_then(Value::as_str).unwrap_or_default();
-    out.push(OwnedEnumChoice {
-        canonical: value.to_owned(),
-        display: match text("name") {
-            "" => value.to_owned(),
-            name => name.to_owned(),
-        },
-        description: text("description").to_owned(),
-    });
-}
-
-/// `session/set_config_option` for a Claude row. `value` is the chosen value id,
-/// or `"on"` / `"off"` for Fast mode.
-pub fn set_option_request(
-    session_id: acp::SessionId,
-    option: &ClaudeOption,
-    value: &str,
-) -> acp::SetSessionConfigOptionRequest {
-    if option.boolean {
-        acp::SetSessionConfigOptionRequest::new(
-            session_id,
-            option.config_id.clone(),
-            acp::SessionConfigOptionValue::boolean(value == FAST_ON),
-        )
-    } else {
-        acp::SetSessionConfigOptionRequest::new(
-            session_id,
-            option.config_id.clone(),
-            acp::SessionConfigValueId::new(value.to_owned()),
-        )
-    }
-}
-
 /// Row label, also used in the result toast.
 pub fn label_of(key: SettingKey) -> &'static str {
     match key {
@@ -198,7 +110,7 @@ pub fn label_of(key: SettingKey) -> &'static str {
 
 /// The Fast row's wire value for a toggle.
 pub fn fast_value(enabled: bool) -> &'static str {
-    if enabled { FAST_ON } else { FAST_OFF }
+    bool_value(enabled)
 }
 
 fn row(
@@ -232,7 +144,7 @@ fn choice_row(
         keywords,
         SettingKind::DynamicEnum {
             default: "",
-            source: DynamicEnumSource::ClaudeSession,
+            source: DynamicEnumSource::SessionOption,
             supports_preview: false,
         },
     )

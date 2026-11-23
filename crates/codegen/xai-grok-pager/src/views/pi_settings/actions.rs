@@ -6,12 +6,14 @@
 //! the two in step with the registry.
 
 use crate::app::actions::Action;
-use crate::settings::claude;
+use crate::settings::session_option::bool_value;
+use crate::settings::{claude, dpi};
 use crate::settings::{PagerLocalSnapshot, SettingKey, StringValidator};
 
-/// A Claude row's change: the dispatcher resolves the adapter's config id from the live session.
-fn claude_action(key: SettingKey, value: &str) -> Option<Action> {
-    (!value.is_empty()).then(|| Action::SetClaudeOption {
+/// A session option row's change (Claude or durable Pi): the dispatcher resolves the adapter's config id from the
+/// live session.
+fn session_action(key: SettingKey, value: &str) -> Option<Action> {
+    (!value.is_empty()).then(|| Action::SetSessionOption {
         key,
         value: value.to_owned(),
     })
@@ -20,7 +22,10 @@ fn claude_action(key: SettingKey, value: &str) -> Option<Action> {
 /// Construct the typed `Action::Set*` for a Bool setting.
 pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
     if key == claude::FAST {
-        return claude_action(key, claude::fast_value(new));
+        return session_action(key, claude::fast_value(new));
+    }
+    if dpi::is_dpi_key(key) {
+        return session_action(key, bool_value(new));
     }
     if let Some(spec) = xai_grok_shell::host_features::feature_spec_by_setting_key(key) {
         return Some(Action::SetHostFeatureBool {
@@ -148,8 +153,8 @@ pub(super) fn action_for_enum_preview(key: SettingKey, choice: &str) -> Option<A
 /// instead of mis-mapping.
 pub(super) fn action_for_enum_commit(key: SettingKey, choice: &str) -> Option<Action> {
     use crate::app::actions::{PermissionModeKind, PlanModeKind};
-    if claude::is_claude_key(key) {
-        return claude_action(key, choice);
+    if claude::is_claude_key(key) || dpi::is_dpi_key(key) {
+        return session_action(key, choice);
     }
     match key {
         "theme" => Some(Action::SetTheme(choice.to_string())),

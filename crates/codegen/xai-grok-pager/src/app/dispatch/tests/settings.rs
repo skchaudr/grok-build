@@ -4067,21 +4067,21 @@ fn claude_settings_row_sends_set_config_option_for_the_focused_session() {
     ];
     for (key, value, config_id, wire_value) in cases {
         let effects = dispatch(
-            Action::SetClaudeOption {
+            Action::SetSessionOption {
                 key,
                 value: value.to_owned(),
             },
             &mut app,
         );
         let [
-            Effect::SetClaudeOption {
+            Effect::SetSessionOption {
                 agent_id,
                 key: effect_key,
                 request,
             },
         ] = effects.as_slice()
         else {
-            panic!("{key}: expected one SetClaudeOption effect, got {effects:?}");
+            panic!("{key}: expected one SetSessionOption effect, got {effects:?}");
         };
         assert_eq!(*agent_id, AgentId(0));
         assert_eq!(*effect_key, key);
@@ -4096,7 +4096,7 @@ fn claude_settings_row_sends_set_config_option_for_the_focused_session() {
 fn claude_settings_row_is_a_no_op_for_the_current_value_or_an_unoffered_option() {
     let mut app = claude_app("plan");
     let same = dispatch(
-        Action::SetClaudeOption {
+        Action::SetSessionOption {
             key: "claude.mode",
             value: "plan".to_owned(),
         },
@@ -4107,7 +4107,7 @@ fn claude_settings_row_is_a_no_op_for_the_current_value_or_an_unoffered_option()
         "re-selecting the current mode sends nothing: {same:?}"
     );
     let unoffered = dispatch(
-        Action::SetClaudeOption {
+        Action::SetSessionOption {
             key: "claude.agent",
             value: "reviewer".to_owned(),
         },
@@ -4123,7 +4123,7 @@ fn claude_settings_row_is_a_no_op_for_the_current_value_or_an_unoffered_option()
 fn claude_option_reply_moves_the_tracked_value_and_names_it_in_the_toast() {
     let mut app = claude_app("default");
     let effects = dispatch(
-        Action::TaskComplete(TaskResult::ClaudeOptionSet {
+        Action::TaskComplete(TaskResult::SessionOptionSet {
             agent_id: AgentId(0),
             key: "claude.mode",
             result: Ok(claude_config_options("plan", "off")),
@@ -4146,7 +4146,7 @@ fn claude_option_reply_moves_the_tracked_value_and_names_it_in_the_toast() {
 fn claude_option_refusal_toasts_and_keeps_the_tracked_value() {
     let mut app = claude_app("default");
     let _ = dispatch(
-        Action::TaskComplete(TaskResult::ClaudeOptionSet {
+        Action::TaskComplete(TaskResult::SessionOptionSet {
             agent_id: AgentId(0),
             key: "claude.effort",
             result: Err("Invalid value for config option effort: max".to_owned()),
