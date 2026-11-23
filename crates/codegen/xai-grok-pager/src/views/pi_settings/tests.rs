@@ -1020,8 +1020,10 @@ mod dpi_tab {
         let mut state = state_with(&options(), Some(info(true)));
         let screen = render_lines(&mut state, 118, 50).join("\n");
         for needle in [
-            "██▀▀▄▄  ██▀▀██    mini · modal-test · root",
-            "██▄▄▀▀  ██▀▀  ██  ~/repos/lab · main",
+            "████    ██████    mini · modal-test · root",
+            "██  ██  ██  ██    ~/repos/lab · main",
+            "██  ██  ████  ██  model    gpt-5",
+            "████    ██    ██  context  ",
             "model    gpt-5 · thinking medium · read-only",
             "context  ████████░░░░░░░░░░░░ 42% · 84k of 200k",
             "browser  http://mini:5173/s/modal-test  o open in browser",
@@ -1037,6 +1039,32 @@ mod dpi_tab {
         }
         assert!(!screen.contains("cliproxy/gpt-5"), "the value id leaked:\n{screen}");
         assert_ne!(state.browser_rect, Rect::default(), "the playground URL is clickable");
+        // The agent's keys get a footer row of their own; `o` is only on the header's browser line.
+        let captions = screen.lines().find(|line| line.contains("Alt+C compact")).unwrap();
+        assert!(!captions.contains("F2/Esc close"), "{captions}");
+        assert_eq!(screen.matches("o open in browser").count(), 1, "{screen}");
+    }
+
+    #[test]
+    fn long_tools_end_in_a_count_and_a_long_tip_wraps_to_two_lines() {
+        let mut info = info(true);
+        info.tools = (1..=14).map(|i| format!("tool_number_{i}")).collect();
+        let tip = "Quitting only detaches: the agent keeps working on the backend device, and coming back later shows \
+                   everything it did while you were away, including tasks it started";
+        let mut state = state_with(&options(), Some(info));
+        state.dpi_info.as_mut().unwrap().hints = vec![tip.to_owned()];
+        let screen = render_lines(&mut state, 118, 50);
+        let tools = screen.iter().find(|line| line.contains("tools ")).unwrap();
+        assert!(tools.contains("tool_number_1, ") && tools.contains(" more"), "{tools}");
+        let at = screen.iter().position(|line| line.contains("tip ")).unwrap();
+        assert!(screen[at].contains("Quitting only detaches"), "{}", screen[at]);
+        assert!(screen[at + 1].trim_end().trim_end_matches('\u{2502}').trim_end().ends_with('\u{2026}'), "a third line's worth is cut: {}", screen[at + 1]);
+
+        assert_eq!(super::super::render::dpi_fit_list(&["a".into(), "b".into()], 10), "a, b");
+        let many: Vec<String> = ["read", "write", "edit", "bash"].map(String::from).into();
+        assert_eq!(super::super::render::dpi_fit_list(&many, 21), "read, write … +2 more");
+        assert_eq!(super::super::render::dpi_fit_list(&many, 20), "read … +3 more");
+        assert_eq!(super::super::render::dpi_wrap("one two three four", 9, 2), ["one two", "three …"]);
     }
 
     #[test]

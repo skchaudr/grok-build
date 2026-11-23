@@ -246,6 +246,10 @@ const DPI_MIN_LIST_ROWS: u16 = 4;
 const DPI_LABEL_W: usize = 9;
 /// Cells in the context-usage bar.
 const DPI_BAR_W: usize = 20;
+/// Narrower than this, the header drops the mark and its lines take the full width.
+const DPI_MARK_MIN_W: usize = 60;
+/// Most lines the rotating tip wraps to.
+const DPI_TIP_LINES: usize = 2;
 
 /// A token count as a person reads it: `840`, `84k`, `1.2M`.
 fn dpi_tokens(n: u64) -> String {
@@ -256,32 +260,59 @@ fn dpi_tokens(n: u64) -> String {
     }
 }
 
-/// The durable agent's header lines, most important first. The playground line, if any, is marked so its URL can
-/// be made clickable.
-fn dpi_header_lines(state: &PiSettingsState, theme: &Theme) -> Vec<(Line<'static>, bool)> {
+/// `items` joined with commas in `budget` columns: as many as fit, then `… +N more`.
+pub(super) fn dpi_fit_list(items: &[String], budget: usize) -> String {
+    let all = items.join(", ");
+    if all.width() <= budget {
+        return all;
+    }
+    (0..items.len())
+        .rev()
+        .map(|keep| {
+            let more = format!("\u{2026} +{} more", items.len() - keep);
+            match keep {
+                0 => more,
+                _ => format!("{} {more}", items[..keep].join(", ")),
+            }
+        })
+        .find(|text| text.width() <= budget)
+        .unwrap_or_else(|| crate::util::truncate_to_width(&format!("\u{2026} +{} more", items.len()), budget).into_owned())
+}
+
+/// `text` word-wrapped to `width`, at most `max` lines; a cut last line ends in an ellipsis.
+pub(super) fn dpi_wrap(text: &str, width: usize, max: usize) -> Vec<String> {
+    let mut lines = wrap_text(text, width as u16);
+    if lines.len() > max {
+        lines.truncate(max);
+        let last = lines.pop().unwrap_or_default();
+        let room = crate::render::line_utils::byte_offset_at_width(&last, width.saturating_sub(2));
+        lines.push(format!("{} \u{2026}", last[..room].trim_end()));
+    }
+    lines
+}
+
+/// The durable agent's header lines, most important first, each fitted to `width`. The playground line, if any, is
+/// marked so its URL can be made clickable.
+fn dpi_header_lines(state: &PiSettingsState, theme: &Theme, width: usize) -> Vec<(Line<'static>, bool)> {
     let Some(info) = &state.dpi_info else {
         return vec![];
     };
     let dot = || Span::styled(" \u{00B7} ", theme.muted());
     let primary = Style::default().fg(theme.text_primary);
     let label = |text: &str| Span::styled(format!("{text:<DPI_LABEL_W$}"), theme.muted());
-    let [logo_top, logo_bottom] = crate::views::dpi_logo::lines(theme);
+    let value_w = width.saturating_sub(DPI_LABEL_W);
 
-    let mut top = logo_top.spans;
-    top.push(Span::raw("  "));
-    top.push(Span::styled(info.device.clone(), primary));
-    top.push(dot());
-    top.push(Span::styled(info.session.clone(), primary.add_modifier(Modifier::BOLD)));
-    top.push(dot());
-    top.push(Span::styled(info.agent.clone(), Style::default().fg(theme.accent_assistant)));
-    let mut bottom = logo_bottom.spans;
-    bottom.push(Span::raw("  "));
-    bottom.push(Span::styled(info.cwd.clone(), primary));
+    let mut identity = vec![Span::styled(info.device.clone(), primary)];
+    identity.push(dot());
+    identity.push(Span::styled(info.session.clone(), primary.add_modifier(Modifier::BOLD)));
+    identity.push(dot());
+    identity.push(Span::styled(info.agent.clone(), Style::default().fg(theme.accent_assistant)));
+    let mut place = vec![Span::styled(info.cwd.clone(), primary)];
     if let Some(branch) = &info.branch {
-        bottom.push(dot());
-        bottom.push(Span::styled(branch.clone(), Style::default().fg(theme.accent_assistant)));
+        place.push(dot());
+        place.push(Span::styled(branch.clone(), Style::default().fg(theme.accent_assistant)));
     }
-    let mut lines = vec![(Line::from(top), false), (Line::from(bottom), false)];
+    let mut lines = vec![(Line::from(identity), false), (Line::from(place), false)];
 
     let mut model = vec![label("model"), Span::styled(info.model.clone(), primary)];
     if let Some(thinking) = &info.thinking {
@@ -329,7 +360,7 @@ fn dpi_header_lines(state: &PiSettingsState, theme: &Theme) -> Vec<(Line<'static
     }
     if !info.tools.is_empty() {
         lines.push((
-            Line::from(vec![label("tools"), Span::styled(info.tools.join(", "), primary)]),
+            Line::from(vec![label("tools"), Span::styled(dpi_fit_list(&info.tools, value_w), primary)]),
             false,
         ));
     }
@@ -337,49 +368,52 @@ fn dpi_header_lines(state: &PiSettingsState, theme: &Theme) -> Vec<(Line<'static
         lines.push((Line::from(vec![label("backend"), Span::styled(url.clone(), primary)]), false));
     }
     if let Some(tip) = state.dpi_tip() {
-        lines.push((
-            Line::from(vec![
-                label("tip"),
-                Span::styled(
-                    tip.to_owned(),
-                    Style::default().fg(theme.gray).add_modifier(Modifier::ITALIC),
-                ),
-            ]),
-            false,
-        ));
+        let style = Style::default().fg(theme.gray).add_modifier(Modifier::ITALIC);
+        for (i, part) in dpi_wrap(tip, value_w, DPI_TIP_LINES).into_iter().enumerate() {
+            let lead = if i == 0 { label("tip") } else { label("") };
+            lines.push((Line::from(vec![lead, Span::styled(part, style)]), false));
+        }
     }
     lines
 }
 
-/// Paint the Durable Pi header at the top of `area`; returns the rows it took (0 when the panel is too short).
+/// Paint the Durable Pi header at the top of `area`; returns the rows it took (0 when the panel is too short). The
+/// lines sit beside the mark when there is room for all four of its rows, and take the full width otherwise.
 fn render_dpi_header(buf: &mut Buffer, area: Rect, state: &mut PiSettingsState, theme: &Theme) -> u16 {
+    use crate::views::dpi_logo;
     state.browser_rect = Rect::default();
-    let lines = dpi_header_lines(state, theme);
     // The two identity lines and a spacer, or nothing.
-    let budget = area
-        .height
-        .saturating_sub(DESCRIPTION_BLOCK + DPI_MIN_LIST_ROWS)
-        .saturating_sub(1);
-    if lines.is_empty() || budget < 2 {
+    let budget = usize::from(
+        area.height
+            .saturating_sub(DESCRIPTION_BLOCK + DPI_MIN_LIST_ROWS)
+            .saturating_sub(1),
+    );
+    if state.dpi_info.is_none() || budget < 2 {
         return 0;
     }
-    let shown = lines.len().min(usize::from(budget));
     let x = area.x + SIDEBAR_INDENT;
     let width = area.width.saturating_sub(SIDEBAR_INDENT);
-    for (i, (line, browser)) in lines.into_iter().take(shown).enumerate() {
+    let mark = budget >= dpi_logo::ROWS && usize::from(width) >= DPI_MARK_MIN_W;
+    let indent = if mark { dpi_logo::INDENT } else { 0 };
+    let entries = dpi_header_lines(state, theme, usize::from(width) - indent);
+    let browser_row = entries.iter().position(|(_, browser)| *browser);
+    let lines: Vec<Line<'static>> = entries.into_iter().map(|(line, _)| line).collect();
+    let lines = if mark { dpi_logo::beside(theme, lines) } else { lines };
+    let shown = lines.len().min(budget);
+    for (i, line) in lines.iter().take(shown).enumerate() {
         let y = area.y + i as u16;
         buf.set_style(Rect { y, height: 1, ..area }, Style::default().bg(theme.bg_base));
-        buf.set_line(x, y, &line, width);
-        if browser {
-            let url_w = line.spans.get(1).map_or(0, |s| s.content.width()) as u16;
-            let left = DPI_LABEL_W as u16;
-            state.browser_rect = Rect {
-                x: x + left,
-                y,
-                width: url_w.min(width.saturating_sub(left)),
-                height: 1,
-            };
-        }
+        buf.set_line(x, y, line, width);
+    }
+    let url_w = state.playground_url().map_or(0, |url| url.width());
+    if let Some(row) = browser_row.filter(|row| *row < shown) {
+        let left = (indent + DPI_LABEL_W) as u16;
+        state.browser_rect = Rect {
+            x: x + left,
+            y: area.y + row as u16,
+            width: (url_w as u16).min(width.saturating_sub(left)),
+            height: 1,
+        };
     }
     shown as u16 + 1
 }
@@ -1265,11 +1299,10 @@ fn build_shortcuts(state: &PiSettingsState) -> Vec<Shortcut<'static>> {
                 hints.push(shortcut("d reset"));
             }
             hints.push(shortcut("F2/Esc close"));
-            // The durable agent's own keys work from here too.
-            if state.dpi_tab_active() {
-                if state.playground_url().is_some() {
-                    hints.push(shortcut("o open in browser"));
-                }
+            // The durable agent's own keys work from here too, on rows of their own (`o` is on the header's
+            // browser line).
+            if state.dpi_tab_active() && !state.dpi_captions.is_empty() {
+                hints.push(modal_window::ROW_BREAK);
                 hints.extend(state.dpi_captions.iter().map(|caption| shortcut(caption)));
             }
             hints

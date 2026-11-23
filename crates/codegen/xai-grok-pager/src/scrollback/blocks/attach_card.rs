@@ -6,8 +6,8 @@
 //! history, so it sits at the bottom of the scrollback right above the prompt. It is a block, not a modal: a
 //! `--resume` session opens straight into it, and ctrl+r and quit keep their usual meaning.
 //!
-//! The Durable Pi mark sits beside the title and the agent's browser playground, and a muted line ends the card with
-//! the keys a newcomer needs.
+//! The title, the agent's browser playground and the rows share one column beside the Durable Pi mark, and a muted
+//! line, wrapped to the width, ends the card with the keys a newcomer needs.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -28,9 +28,10 @@ pub struct AttachCardBlock {
     pub playground_url: Option<String>,
 }
 
-/// The card's last line: what F2, ctrl+r and quitting do here.
-const HINTS: &str = "F2 settings \u{00B7} ctrl+r switch agents \u{00B7} quitting detaches, the agent keeps running \u{00B7} /dpi-help";
-/// Narrower than this, the mark gives its columns back to the title.
+/// The card's last line: what F2, ctrl+r and quitting do here. A no-break space keeps each dot with the hint before
+/// it when the line wraps.
+const HINTS: &str = "F2 settings\u{00A0}\u{00B7} ctrl+r switch agents\u{00A0}\u{00B7} quitting detaches, the agent keeps running\u{00A0}\u{00B7} /dpi-help";
+/// Narrower than this, the mark gives its columns back to the card.
 const LOGO_MIN_WIDTH: usize = 40;
 
 impl AttachCardBlock {
@@ -89,57 +90,56 @@ fn clean(text: &str) -> String {
 
 impl BlockContent for AttachCardBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
+        use crate::views::dpi_logo;
         let theme = Theme::current();
         let width = ctx.width as usize;
-        let fit = |text: &str, budget: usize| crate::util::truncate_to_width(text, budget).into_owned();
-        // The mark, then the title and the playground beside it.
-        let (mut heading, beside) = if width >= LOGO_MIN_WIDTH {
-            let gap = "  ";
-            let indent = usize::from(crate::views::dpi_logo::WIDTH) + gap.len();
-            let [top, bottom] = crate::views::dpi_logo::lines(&theme);
-            let lead = |line: Line<'static>| {
-                let mut spans = line.spans;
-                spans.push(Span::raw(gap));
-                spans
-            };
-            ([lead(top), lead(bottom)], width - indent)
-        } else {
-            ([Vec::new(), Vec::new()], width)
-        };
-        heading[0].push(Span::styled(
-            fit(&self.title, beside),
+        let with_mark = width >= LOGO_MIN_WIDTH;
+        // Everything sits in one column beside the mark: title, playground, then the rows.
+        let budget = if with_mark { width - dpi_logo::INDENT } else { width };
+        let fit = |text: &str| crate::util::truncate_to_width(text, budget).into_owned();
+        let mut content = vec![Line::from(Span::styled(
+            fit(&self.title),
             Style::default()
                 .fg(theme.accent_assistant)
                 .add_modifier(Modifier::BOLD),
-        ));
+        ))];
         if let Some(url) = &self.playground_url {
-            heading[1].push(Span::styled(
-                fit(url, beside),
+            content.push(Line::from(Span::styled(
+                fit(url),
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::UNDERLINED),
-            ));
+            )));
         }
-        let [top, bottom] = heading;
-        let mut lines = vec![BlockLine::styled(Line::from(top)).with_selection_range(Some(0))];
-        if bottom.iter().any(|span| !span.content.trim().is_empty()) {
-            lines.push(BlockLine::styled(Line::from(bottom)).with_selection_range(Some(0)));
-        }
-        lines.push(BlockLine::separator(Line::from("")));
         // Labels share one column so the values line up; the column is only as wide as the longest label.
         let label_width = self.rows.iter().map(|(l, _)| l.width()).max().unwrap_or(0) + 2;
         for (label, value) in &self.rows {
             let pad = label_width.saturating_sub(label.width());
-            let value_budget = width.saturating_sub(label_width);
-            let value = crate::util::truncate_to_width(value, value_budget).into_owned();
-            let line = Line::from(vec![
+            let value = crate::util::truncate_to_width(value, budget.saturating_sub(label_width)).into_owned();
+            content.push(Line::from(vec![
                 Span::styled(format!("{label}{}", " ".repeat(pad)), theme.muted()),
                 Span::styled(value, Style::default().fg(theme.text_primary)),
-            ]);
-            lines.push(BlockLine::styled(line).with_selection_range(Some(0)));
+            ]));
         }
+        let content = if with_mark { dpi_logo::beside(&theme, content) } else { content };
+        let mut lines: Vec<BlockLine> = content
+            .into_iter()
+            .map(|line| BlockLine::styled(line).with_selection_range(Some(0)))
+            .collect();
         lines.push(BlockLine::separator(Line::from("")));
-        lines.push(BlockLine::styled(Line::from(Span::styled(fit(HINTS, width), theme.muted()))));
+        // The hints wrap rather than lose their tail on a phone-width terminal.
+        let hints = Line::from(Span::styled(HINTS, theme.muted()));
+        let indent = Line::from(" ".repeat(width - budget));
+        let options = crate::render::wrapping::RtOptions::new(width)
+            .initial_indent(indent.clone())
+            .subsequent_indent(indent)
+            .word_separator(textwrap::WordSeparator::AsciiSpace)
+            .word_splitter(textwrap::WordSplitter::NoHyphenation);
+        lines.extend(
+            crate::render::wrapping::word_wrap_lines([hints], options)
+                .into_iter()
+                .map(|line| BlockLine::styled(line).with_selection_range(Some(0))),
+        );
         BlockOutput { lines }
     }
 
@@ -223,36 +223,50 @@ mod tests {
     }
 
     #[test]
-    fn output_is_the_mark_beside_title_and_playground_then_aligned_rows_then_hints() {
-        let output = card().output(&ctx(100));
-        // mark + title, mark + playground, gap, 4 rows, gap, hints
-        assert_eq!(output.lines.len(), 3 + 4 + 2);
-        assert_eq!(text(&output.lines[0]), "██▀▀▄▄  ██▀▀██    dpi · polish-test on mini");
-        assert_eq!(text(&output.lines[1]), "██▄▄▀▀  ██▀▀  ██  http://mini:5173/s/polish-test");
+    fn output_is_one_column_beside_the_mark_then_the_hints() {
+        let output = card().output(&ctx(120));
+        // title, playground, 4 rows (the first two beside the mark), gap, hints on one line
+        assert_eq!(output.lines.len(), 6 + 1 + 1);
+        let pad = " ".repeat(crate::views::dpi_logo::INDENT);
+        assert_eq!(text(&output.lines[0]), "████    ██████    dpi · polish-test on mini");
+        assert_eq!(text(&output.lines[1]), "██  ██  ██  ██    http://mini:5173/s/polish-test");
         let title = output.lines[0].content.spans.last().unwrap();
         assert!(title.style.add_modifier.contains(Modifier::BOLD));
-        // "last ask" is the longest label, so every value starts in column 10.
-        assert_eq!(text(&output.lines[3]), "model     gpt-6.1-sol (cliproxy) · thinking medium");
-        assert_eq!(text(&output.lines[4]), "cwd       mini:~/repos/lab · main");
-        assert_eq!(text(&output.lines[6]), "tasks     none live");
-        assert!(text(&output.lines[8]).starts_with("F2 settings · ctrl+r switch agents · quitting detaches"));
+        // "last ask" is the longest label, so every value starts 10 columns into the card's column.
+        assert_eq!(text(&output.lines[2]), "██  ██  ████  ██  model     gpt-6.1-sol (cliproxy) · thinking medium");
+        assert_eq!(text(&output.lines[3]), "████    ██    ██  cwd       mini:~/repos/lab · main");
+        assert_eq!(text(&output.lines[5]), format!("{pad}tasks     none live"));
+        assert_eq!(
+            text(&output.lines[7]).replace('\u{00A0}', " "),
+            format!("{pad}F2 settings · ctrl+r switch agents · quitting detaches, the agent keeps running · /dpi-help")
+        );
     }
 
     #[test]
-    fn without_a_playground_the_mark_still_takes_two_rows() {
+    fn without_a_playground_the_rows_move_up_beside_the_mark() {
         let mut card = card();
         card.playground_url = None;
-        let output = card.output(&ctx(100));
-        assert_eq!(text(&output.lines[1]), "██▄▄▀▀  ██▀▀  ██  ");
+        let output = card.output(&ctx(120));
+        assert_eq!(text(&output.lines[1]), "██  ██  ██  ██    model     gpt-6.1-sol (cliproxy) · thinking medium");
     }
 
     #[test]
-    fn narrow_widths_truncate_values_instead_of_overflowing() {
-        for width in [30, 44] {
+    fn a_phone_width_wraps_the_hints_whole_and_never_overflows() {
+        for width in [30, 44, 75] {
             let output = card().output(&ctx(width));
             for line in &output.lines {
                 assert!(text(line).width() <= usize::from(width), "{:?}", text(line));
             }
+            let hints: String = output
+                .lines
+                .iter()
+                .skip_while(|line| !text(line).trim().is_empty())
+                .skip(1)
+                .map(|line| text(line).trim().to_owned())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(hints.replace('\u{00A0}', " ").ends_with("the agent keeps running · /dpi-help"), "{width}: {hints}");
+            assert!(!hints.contains('\u{2026}'), "{width}: {hints}");
         }
         // Too narrow for the mark: the title gets the whole line.
         assert!(text(&card().output(&ctx(30)).lines[0]).starts_with("dpi · polish"));
