@@ -18,7 +18,17 @@ const agents1 = [
   { id: 2, name: "Alt", kind: "fork", parentId: 1, busy: true },
   { id: 3, name: "Sub", kind: "subagent", ownerAgentId: 2, busy: false },
 ];
-const state = { tasks: [], prime: null, requests: [] };
+const state = { tasks: [], doneTasks: [], prime: null, requests: [], ext: null };
+const freshExt = () => ({
+  builtIn: ["coding-tools"],
+  extensions: [{
+    name: "system-prompts", title: "System prompts", enabled: false,
+    prompts: [
+      { id: "smart_ass_opus_fix.md", title: "Smart Ass Opus fix", enabled: true },
+      { id: "one_sentence.md", title: "One sentence", enabled: false },
+    ],
+  }],
+});
 const entries = {
   "s1/1": [
     { id: 4, kind: "pi.system", model: [{ ...msg("system", 1500), sections: { a: "aaaa", b: "bbbbbbbb" }, toolsAdded: [tool("read"), tool("bash")] }] },
@@ -41,7 +51,7 @@ const server = createServer((req, res) => {
     const p = url.pathname.replace(/^\/v1/, "");
     state.requests.push(`${req.method} ${p}${url.search}${body ? " " + body : ""}`);
     let m;
-    if (p === "/device") return json(res, 200, { models: [{ provider: "p", id: "m", contextWindow: 1000 }] });
+    if (p === "/device") return json(res, 200, { hostname: "mini-host", models: [{ provider: "p", id: "m", contextWindow: 1000 }] });
     if (p === "/sessions" && req.method === "GET") {
       return json(res, 200, [
         { id: "s1", name: "one", cwd: "/w", model: "m", createdAt: 1000, agents: agents1 },
@@ -51,7 +61,8 @@ const server = createServer((req, res) => {
     if (p === "/sessions" && req.method === "POST") return json(res, 201, { id: "s3", agents: [{ id: 1 }] });
     if (p === "/sessions/s1/agents" && req.method === "POST") return json(res, 201, { id: 10 });
     if ((m = p.match(/^\/sessions\/(s\d)$/))) return json(res, 200, { id: m[1], name: m[1], cwd: "/w" });
-    if (p.endsWith("/tasks")) return json(res, 200, state.tasks);
+    if (p.endsWith("/tasks") && state.failTasks) return json(res, 500, { error: { message: "tasks down" } });
+    if (p.endsWith("/tasks")) return json(res, 200, url.search.includes("terminal") ? state.doneTasks : state.tasks);
     if (p.endsWith("/prime/work")) return state.prime ? json(res, 200, state.prime) : json(res, 404, { error: { message: "no such route" } });
     if ((m = p.match(/^\/sessions\/(s\d)\/agents\/(\w+)(\/.*)?$/))) {
       const [, s, a, rest = ""] = m;
@@ -62,6 +73,14 @@ const server = createServer((req, res) => {
       }
       if (rest === "/entries") return entries[`${s}/${id}`] ? json(res, 200, { items: entries[`${s}/${id}`] }) : json(res, 500, { error: { message: "boom" } });
       if (rest === "/fork") return json(res, 201, { id: 9 });
+      if (rest === "/extensions" && req.method === "PATCH") {
+        const b = JSON.parse(body);
+        const ext = state.ext.extensions[0];
+        if (b.name) ext.enabled = b.enabled;
+        else ext.prompts.find((x) => x.id === b.prompt).enabled = b.enabled;
+        return json(res, 200, state.ext);
+      }
+      if (rest === "/extensions") return json(res, 200, state.ext);
       if (rest === "") return json(res, 200, { id, sessionId: s, name: "n", kind: "root", busy: false, config: { model: { provider: "p", modelId: "m" }, cwd: "/w/proj", thinkingLevel: "low" } });
     }
     json(res, 404, { error: { message: `fake: ${req.method} ${p}` } });
@@ -146,6 +165,75 @@ test("a prompt that is not a shim command goes to the agent, slash and all", asy
     await s.call({ type: "prompt", message: "/not-a-command hi" });
     assert.ok(state.requests.some((q) => q.startsWith("POST /sessions/s1/agents/1/messages") && q.includes('"content":"/not-a-command hi"')));
   } finally { s.close(); }
+});
+
+const notified = (s, text) => s.until((l) => l.method === "notify" && l.message === text);
+
+test("get_commands lists the dpi commands and one toggle per saved system prompt, all run by the shim", async () => {
+  state.ext = freshExt();
+  const s = await shim();
+  try {
+    const { data } = await s.call({ type: "get_commands" });
+    const names = data.commands.map((c) => c.name);
+    assert.deepEqual(names, ["__pi_context_breakdown", "dpi-sessions", "dpi-tasks", "dpi-deploys", "prompt-smart-ass-opus-fix", "prompt-one-sentence"]);
+    assert.ok(data.commands.every((c) => c.source === "extension" && c.description));
+  } finally { s.close(); }
+});
+
+test("a saved-prompt command turns the prompt on (with its extension) and off again, and says what is in effect", async () => {
+  state.ext = freshExt();
+  const s = await shim();
+  try {
+    state.requests.length = 0;
+    await s.call({ type: "prompt", message: "/prompt-one-sentence" });
+    await notified(s, 'System prompt "One sentence" is on from this agent\'s next turn. In effect: Smart Ass Opus fix, One sentence.');
+    assert.deepEqual(state.requests.filter((q) => q.startsWith("PATCH")), [
+      'PATCH /sessions/s1/agents/1/extensions {"prompt":"one_sentence.md","enabled":true}',
+      'PATCH /sessions/s1/agents/1/extensions {"name":"system-prompts","enabled":true}',
+    ]);
+    await s.call({ type: "prompt", message: "/prompt-one-sentence" });
+    await notified(s, 'System prompt "One sentence" is off from this agent\'s next turn. In effect: Smart Ass Opus fix.');
+    assert.equal(state.ext.extensions[0].enabled, true); // the other checked prompt stays on
+    assert.equal(state.requests.some((q) => q.includes("/messages")), false);
+  } finally { s.close(); }
+});
+
+test("/dpi-sessions lists every session and marks the attached one", async () => {
+  const s = await shim();
+  try {
+    await s.call({ type: "prompt", message: "/dpi-sessions" });
+    await notified(s, "2 sessions on mini-host (▸ this one; ctrl+r switches):\n▸ one · 3 agents · 1 running · /w\n  two · 1 agent · /w");
+  } finally { s.close(); }
+});
+
+test("/dpi-tasks shows live tasks and recent non-turn tasks with their outcome", async () => {
+  state.doneTasks = [
+    { id: 9, kind: "pi.generation", state: { status: "terminal", outcome: { status: "completed" } } },
+    { id: 8, kind: "pi.tool", state: { status: "terminal", outcome: { status: "failed", error: { message: "Tool bash threw" } } } },
+  ];
+  const s = await shim();
+  try {
+    await s.call({ type: "prompt", message: "/dpi-tasks" });
+    await notified(s, "Live tasks: none\nRecent: \n  #8 pi.tool failed: Tool bash threw");
+  } finally { s.close(); state.doneTasks = []; }
+});
+
+test("/dpi-deploys says when no ops service answers", async () => {
+  const s = await shim({ DPI_OPS_URL: "http://127.0.0.1:1" });
+  try {
+    await s.call({ type: "prompt", message: "/dpi-deploys" });
+    await s.until((l) => l.method === "notify" && l.message.startsWith("No ops service answering at http://127.0.0.1:1 ("));
+  } finally { s.close(); }
+});
+
+test("a shim command that fails shows its error instead of going quiet", async () => {
+  state.failTasks = true;
+  const s = await shim();
+  try {
+    assert.equal((await s.call({ type: "prompt", message: "/dpi-tasks" })).success, true);
+    const n = await s.until((l) => l.method === "notify" && l.notifyType === "error");
+    assert.equal(n.message, "/dpi-tasks: tasks down");
+  } finally { s.close(); state.failTasks = false; }
 });
 
 test("get_fork_messages lists user turns by dpi entry id", async () => {
@@ -323,6 +411,19 @@ test("a dismissed dialog records nothing, notifies, stays pending, and re-prompt
     await new Promise((r) => setTimeout(r, 200));
     assert.deepEqual(ops.decisions, []);
     assert.equal(s.lines.filter((l) => l.statusKey === "ops-deploy").at(-1).statusText, "1 deploy awaiting approval");
+  } finally { s.close(); }
+});
+
+test("/dpi-deploys lists pending deploys and reopens a dismissed dialog without waiting out the cooldown", async () => {
+  Object.assign(ops, { deploys: [deploy({ id: 7 })], decisions: [] });
+  const s = await shim({ DPI_OPS_URL: opsUrl, DPI_OPS_REPROMPT_MS: "600000" });
+  try {
+    const first = await s.until(isConfirm);
+    s.send({ type: "extension_ui_response", id: first.id, cancelled: true });
+    await s.until((l) => l.method === "notify" && l.message.startsWith("No decision recorded for deploy 7"));
+    await s.call({ type: "prompt", message: "/dpi-deploys" });
+    await s.until((l) => l.method === "notify" && l.message === "1 deploy awaiting approval (dialogs open on the next poll):\n  7 INC-0001: retry fix (fix/x abc123)");
+    await s.until((l) => isConfirm(l) && l.id !== first.id);
   } finally { s.close(); }
 });
 

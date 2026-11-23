@@ -307,7 +307,7 @@ async function ops(method, path, body) {
   return res.json();
 }
 
-const notify = (message) => out({ type: "extension_ui_request", id: randomUUID(), method: "notify", message, notifyType: "info" });
+const notify = (message, notifyType = "info") => out({ type: "extension_ui_request", id: randomUUID(), method: "notify", message, notifyType });
 const hhmm = (ms) => new Date(ms).toLocaleTimeString("sv").slice(0, 5);
 // How a deploy left awaiting_approval, from its row: "approved", "declined", ... and the local HH:MM it was decided.
 const outcome = (d) => ({ how: { declined: "declined", cancelled: "cancelled" }[d?.status] ?? (d ? "approved" : "resolved"), at: d?.decidedAt ? ` at ${hhmm(d.decidedAt)}` : "" });
@@ -447,9 +447,74 @@ async function send(content, whenBusy) {
 // Slash commands the shim answers itself. Pi RPC delivers them as `prompt` "/name args"; source "extension"
 // makes grok-pi run them at once without a turn, and they never reach the agent's transcript.
 async function shimCommands() {
+  const prompts = await savedPrompts().catch((err) => (log(`prompts: ${err.message}`), []));
   return new Map([
     [CONTEXT_BREAKDOWN, { description: "Internal Pi-Grok bridge: write context token breakdown", run: writeContextBreakdown }],
+    ["dpi-sessions", { description: "List the sessions on this dpi backend (ctrl+r switches)", run: listSessions }],
+    ["dpi-tasks", { description: "Show this session's live and recent tasks", run: listTasks }],
+    ["dpi-deploys", { description: "Show deploys awaiting approval and reopen their dialogs", run: listDeploys }],
+    ...prompts.map((p) => [`prompt-${p.id.replace(/\.md$/, "").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`, {
+      description: `Turn the saved system prompt "${p.title}" on or off for this agent`,
+      run: () => togglePrompt(p.id),
+    }]),
   ]);
+}
+
+// The backend's saved system prompts: a prompt is in effect when its checkbox is on and the system-prompts extension is.
+const SYSTEM_PROMPTS = "system-prompts";
+async function savedPrompts() {
+  const ext = (await api("GET", agentPath() + "/extensions")).extensions.find((e) => e.name === SYSTEM_PROMPTS);
+  return (ext?.prompts ?? []).map((p) => ({ ...p, active: ext.enabled && p.enabled }));
+}
+
+async function togglePrompt(id) {
+  const ext = (await api("GET", agentPath() + "/extensions")).extensions.find((e) => e.name === SYSTEM_PROMPTS);
+  const prompt = ext?.prompts?.find((p) => p.id === id);
+  if (!prompt) throw new Error(`no saved system prompt ${id} on this backend`);
+  const on = !(ext.enabled && prompt.enabled);
+  if (prompt.enabled !== on) await api("PATCH", agentPath() + "/extensions", { prompt: id, enabled: on });
+  if (on && !ext.enabled) await api("PATCH", agentPath() + "/extensions", { name: SYSTEM_PROMPTS, enabled: true });
+  const active = (await savedPrompts()).filter((p) => p.active).map((p) => p.title);
+  notify(`System prompt "${prompt.title}" is ${on ? "on" : "off"} from this agent's next turn. In effect: ${active.join(", ") || "none"}.`);
+}
+
+async function listSessions() {
+  const sessions = await api("GET", "/sessions");
+  const rows = sessions.map((s) => {
+    const agents = s.agents ?? [];
+    const busy = agents.filter((a) => a.busy).length;
+    return `${s.id === session ? "▸" : " "} ${s.name} · ${agents.length} agent${agents.length === 1 ? "" : "s"}${busy ? ` · ${busy} running` : ""} · ${s.cwd}`;
+  });
+  notify([`${sessions.length} session${sessions.length === 1 ? "" : "s"} on ${device.hostname ?? BASE} (▸ this one; ctrl+r switches):`, ...rows].join("\n"));
+}
+
+const taskLine = (t) => {
+  const o = t.state?.outcome;
+  return `#${t.id} ${t.kind} ${o ? o.status : t.state?.status ?? ""}${o?.error?.message ? `: ${o.error.message}` : ""}`;
+};
+async function listTasks() {
+  const base = `/sessions/${encodeURIComponent(session)}`;
+  const [live, done] = await Promise.all([api("GET", base + "/tasks?status=live"), api("GET", base + "/tasks?status=terminal&limit=50")]);
+  // Every turn is a pi.generation task; the rest (tools, jobs, subagents) is what someone looks for.
+  const recent = done.filter((t) => t.kind !== "pi.generation").slice(0, 8);
+  notify([
+    `Live tasks: ${live.length ? "" : "none"}`, ...live.map((t) => `  ${taskLine(t)}`),
+    `Recent: ${recent.length ? "" : "none"}`, ...recent.map((t) => `  ${taskLine(t)}`),
+  ].join("\n"));
+}
+
+async function listDeploys() {
+  let deploys;
+  try { deploys = await ops("GET", "/deploys"); } catch (err) {
+    return notify(`No ops service answering at ${OPS_URL} (${err.message}), so no deploy approvals to show.`);
+  }
+  const waiting = deploys.filter((d) => d.status === "awaiting_approval");
+  const open = new Set([...dialogs.values()].map((d) => d.key));
+  // A dismissed dialog waits out its cooldown; asking for the list reopens it on the next poll.
+  for (const d of waiting) if (!open.has(deployKey(d))) asked.delete(deployKey(d));
+  notify(waiting.length
+    ? [`${waiting.length} deploy${waiting.length > 1 ? "s" : ""} awaiting approval (dialogs open on the next poll):`, ...waiting.map((d) => `  ${d.id} ${d.incidentId}: ${d.summary} (${d.branch} ${d.commit})`)].join("\n")
+    : "No deploys awaiting approval.");
 }
 
 // true when `message` was one of the shim's commands (and it ran), false for anything to send to the agent.
@@ -458,7 +523,8 @@ async function runCommand(message) {
   if (!m) return false;
   const cmd = (await shimCommands()).get(m[1]);
   if (!cmd) return false;
-  await cmd.run(m[2].trim());
+  if (m[1] === CONTEXT_BREAKDOWN) await cmd.run(); // a failure is the adapter's to handle: /context falls back quietly
+  else await cmd.run(m[2].trim()).catch((err) => notify(`/${m[1]}: ${err.message}`, "error"));
   return true;
 }
 
