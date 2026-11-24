@@ -481,6 +481,8 @@ pub struct DashboardState {
     pub show_hidden_agents: bool,
     /// dpi agents hidden from this dashboard at the last roster poll, shown or not.
     pub hidden_agent_count: usize,
+    /// The roster is a dpi backend's: Ctrl+X never deletes there, so a row with no archive/hide action offers none.
+    pub(crate) dpi_dashboard: bool,
     pub spinner_tick: u64,
     pub(crate) painted_animations: PaintedAnimations,
     /// Last frame's row layout: hit areas keyed by row id.
@@ -1206,6 +1208,7 @@ impl DashboardState {
             dpi_rows: std::collections::HashMap::new(),
             show_hidden_agents: false,
             hidden_agent_count: 0,
+            dpi_dashboard: false,
             spinner_tick: 0,
             painted_animations: PaintedAnimations::default(),
             row_rects: Vec::new(),

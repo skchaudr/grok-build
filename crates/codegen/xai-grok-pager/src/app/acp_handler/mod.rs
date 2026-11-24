@@ -938,6 +938,14 @@ fn apply_dpi_roster_activity(app: &mut AppView, sessions: &[serde_json::Value]) 
     use crate::app::roster::RosterActivity;
     use crate::views::dashboard::{DpiRowKind, state::HIDDEN_ROW_SUFFIX};
     let show_hidden = app.dashboard.as_ref().is_some_and(|d| d.show_hidden_agents);
+    let dpi_dashboard = app.external_agent && crate::settings::dpi::dpi_host();
+    // The agents this window is attached to: their rows come from the live agent, so a hidden one keeps its roster row
+    // (and its Ctrl+X unhide) instead of being dropped.
+    let attached: std::collections::HashSet<String> = app
+        .agents
+        .values()
+        .filter_map(|agent| agent.session.session_id.as_ref().map(|id| id.0.to_string()))
+        .collect();
     let mut dpi_rows = std::collections::HashMap::new();
     let mut hidden_count = 0;
     app.dashboard_local_sessions.retain_mut(|row| {
@@ -958,7 +966,7 @@ fn apply_dpi_roster_activity(app: &mut AppView, sessions: &[serde_json::Value]) 
         let hidden = extra && session.get("hidden").and_then(serde_json::Value::as_bool) == Some(true);
         if hidden {
             hidden_count += 1;
-            if !show_hidden {
+            if !show_hidden && !attached.contains(&row.session_id) {
                 return false;
             }
             if let Some(title) = row.title.as_mut() {
@@ -972,6 +980,7 @@ fn apply_dpi_roster_activity(app: &mut AppView, sessions: &[serde_json::Value]) 
     if let Some(d) = app.dashboard.as_mut() {
         d.dpi_rows = dpi_rows;
         d.hidden_agent_count = hidden_count;
+        d.dpi_dashboard = dpi_dashboard;
     }
     clear_stopping_turn_toast(app);
 }

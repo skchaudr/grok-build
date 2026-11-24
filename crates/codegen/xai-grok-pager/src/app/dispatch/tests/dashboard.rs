@@ -8434,6 +8434,67 @@ fn dpi_dashboard_stop_on_an_idle_main_agent_confirms_then_archives_its_session()
     assert_eq!(d.error_toast.as_deref(), Some("Archiving alpha\u{2026}"));
 }
 
+/// The row of the agent this window is attached to comes from the live agent, not the roster, and gets the same Ctrl+X:
+/// an extra agent hides (its row stays while the window is on it), a main agent archives its session after the
+/// playground's confirm, and an agent missing from the backend's list gets nothing. Never a delete.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dpi_dashboard_stop_on_the_attached_agent_archives_or_hides_never_deletes() {
+    use crate::views::dashboard::{DashboardRowId, DpiRowKind};
+    let mut app = dpi_dashboard_app();
+    let id = *app.agents.keys().next().unwrap();
+    let row = DashboardRowId::TopLevel(id);
+    let attach = |app: &mut AppView, session_id: &str| {
+        app.agents.get_mut(&id).unwrap().session.session_id = Some(acp::SessionId::new(session_id));
+        let d = app.dashboard.as_mut().unwrap();
+        d.delete_confirm = None;
+        d.focus_row(DashboardRowId::TopLevel(id));
+    };
+
+    attach(&mut app, "a:2");
+    let hide = dispatch_dashboard_stop(&mut app);
+    assert!(matches!(
+        &hide[..],
+        [Effect::PiUiInput { method: "pi/dpi/hide", params, .. }] if params["target"] == "a:2" && params["hidden"] == true
+    ), "{hide:?}");
+    let d = app.dashboard.as_ref().unwrap();
+    assert_eq!(d.selected.as_ref(), Some(&row), "the attached agent's row stays selected");
+    assert_eq!(d.dpi_rows.get("a:2"), Some(&DpiRowKind::Extra { hidden: true }), "and keeps its unhide");
+    assert!(roster_ids(&app).contains(&"a:2".to_owned()));
+    let unhide = dispatch_dashboard_stop(&mut app);
+    assert!(matches!(
+        &unhide[..],
+        [Effect::PiUiInput { method: "pi/dpi/hide", params, .. }] if params["hidden"] == false
+    ), "{unhide:?}");
+
+    attach(&mut app, "a:main");
+    assert!(dispatch_dashboard_stop(&mut app).is_empty());
+    let d = app.dashboard.as_ref().unwrap();
+    assert!(d.delete_confirm.is_some(), "armed");
+    assert_eq!(
+        d.error_toast.as_deref(),
+        Some("Archive alpha? Stops all of its work and moves its files to archive/ on the backend. Nothing is deleted.")
+    );
+    let archive = dispatch_dashboard_stop(&mut app);
+    assert!(matches!(
+        &archive[..],
+        [Effect::PiUiInput { method: "pi/dpi/archive", params, .. }] if params["target"] == "a:main"
+    ), "{archive:?}");
+    assert_eq!(roster_ids(&app), ["b:main"], "the archived session's rows leave together");
+
+    attach(&mut app, "gone:1");
+    let none = dispatch_dashboard_stop(&mut app);
+    let second = dispatch_dashboard_stop(&mut app);
+    crate::settings::dpi::set_dpi_host_for_test(None);
+    assert!(none.is_empty() && second.is_empty(), "{none:?} {second:?}");
+    let d = app.dashboard.as_ref().unwrap();
+    assert!(d.delete_confirm.is_none(), "nothing armed");
+    assert_eq!(
+        d.error_toast.as_deref(),
+        Some("This agent is not in the backend's session list, so there is nothing to archive or hide.")
+    );
+}
+
 /// Ctrl+X on an extra agent hides it from the dashboard only; with hidden agents shown, Ctrl+X unhides it.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]

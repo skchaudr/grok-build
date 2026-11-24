@@ -1855,6 +1855,65 @@ fn dpi_row_kind(app: &AppView, session_id: &str) -> Option<crate::views::dashboa
     }
     app.dashboard.as_ref()?.dpi_rows.get(session_id).copied()
 }
+/// The dpi roster row behind a dashboard row, and what it is: a roster row, or the row of the agent this window is
+/// attached to (the roster lists it too; the dashboard shows it from the live agent instead).
+fn dpi_row_entry(
+    app: &AppView,
+    row: &crate::views::dashboard::DashboardRowId,
+) -> Option<(crate::app::roster::RosterEntry, crate::views::dashboard::DpiRowKind)> {
+    use crate::views::dashboard::DashboardRowId;
+    let session_id = match row {
+        DashboardRowId::Roster { session_id } => session_id.clone(),
+        DashboardRowId::TopLevel(id) => app.agents.get(id)?.session.session_id.as_ref()?.0.to_string(),
+        DashboardRowId::Workspace { .. } => return None,
+    };
+    let kind = dpi_row_kind(app, &session_id)?;
+    let entry = app
+        .leader_roster
+        .iter()
+        .chain(app.dashboard_local_sessions.iter())
+        .find(|e| e.session_id == session_id)?
+        .clone();
+    Some((entry, kind))
+}
+/// This window is on a dpi backend: an idle row there is archived or hidden, never deleted.
+fn on_dpi(app: &AppView) -> bool {
+    app.external_agent && crate::settings::dpi::dpi_host()
+}
+/// An attached agent's row that the backend's list does not have (not loaded yet, or its session was archived).
+const DPI_ROW_NOT_LISTED_TOAST: &str =
+    "This agent is not in the backend's session list, so there is nothing to archive or hide.";
+/// Ctrl+X on an idle dpi row: a main agent asks in the playground's words, then archives its session on the second
+/// Ctrl+X; an extra agent hides from the dashboard, or unhides.
+fn dpi_row_stop(
+    app: &mut AppView,
+    sel: crate::views::dashboard::DashboardRowId,
+    entry: &crate::app::roster::RosterEntry,
+    kind: crate::views::dashboard::DpiRowKind,
+) -> Vec<Effect> {
+    let name = dpi_row_name(entry);
+    match kind {
+        crate::views::dashboard::DpiRowKind::Main => {
+            let armed = app
+                .dashboard
+                .as_mut()
+                .and_then(|d| d.armed_delete_row())
+                .as_ref()
+                == Some(&sel);
+            if !armed {
+                // The playground's archive dialog, word for word.
+                let host = dpi_backend_host(app);
+                app.show_toast(&format!(
+                    "Archive {name}? Stops all of its work and moves its files to archive/ on {host}. Nothing is deleted."
+                ));
+            }
+            arm_or_delete(app, sel)
+        }
+        crate::views::dashboard::DpiRowKind::Extra { hidden } => {
+            set_dpi_row_hidden(app, sel, entry.session_id.clone(), &name, !hidden)
+        }
+    }
+}
 /// A dpi row's name as the backend has it (session name, or "session / agent"), without the hidden marker.
 fn dpi_row_name(entry: &crate::app::roster::RosterEntry) -> String {
     let title = entry.title.as_deref().unwrap_or(&entry.session_id);
@@ -1873,12 +1932,13 @@ fn dpi_backend_host(app: &AppView) -> String {
 }
 /// Archive the session behind a confirmed main-agent row: `DELETE /v1/sessions/<id>` through the shim, as /dpi-archive
 /// and the playground do. Its rows leave the list at once; the selection moves to a row of another session.
-fn archive_dpi_session(app: &mut AppView, entry: &crate::app::roster::RosterEntry) -> Vec<Effect> {
+fn archive_dpi_session(
+    app: &mut AppView,
+    row: crate::views::dashboard::DashboardRowId,
+    entry: &crate::app::roster::RosterEntry,
+) -> Vec<Effect> {
     use crate::views::dashboard::DashboardRowId;
     let session_prefix = format!("{}:", entry.session_id.split(':').next().unwrap_or_default());
-    let row = DashboardRowId::Roster {
-        session_id: entry.session_id.clone(),
-    };
     let neighbor = dashboard_neighbor_row_where(app, &row, |id| {
         !matches!(id, DashboardRowId::Roster { session_id } if session_id.starts_with(&session_prefix))
     });
@@ -1909,10 +1969,11 @@ fn set_dpi_row_hidden(
 ) -> Vec<Effect> {
     use crate::views::dashboard::{DpiRowKind, state::HIDDEN_ROW_SUFFIX};
     let show_hidden = app.dashboard.as_ref().is_some_and(|d| d.show_hidden_agents);
-    let neighbor = (hidden && !show_hidden)
-        .then(|| dashboard_neighbor_row(app, &row))
-        .flatten();
-    if hidden && !show_hidden {
+    // The agent this window is attached to stays on the dashboard (from the live agent) until the window moves off it.
+    let attached = matches!(row, crate::views::dashboard::DashboardRowId::TopLevel(_));
+    let drop_row = hidden && !show_hidden && !attached;
+    let neighbor = drop_row.then(|| dashboard_neighbor_row(app, &row)).flatten();
+    if drop_row {
         app.dashboard_local_sessions.retain(|e| e.session_id != session_id);
     } else if let Some(entry) = app
         .dashboard_local_sessions
@@ -1932,7 +1993,7 @@ fn set_dpi_row_hidden(
         } else {
             d.hidden_agent_count.saturating_sub(1)
         };
-        if hidden && !show_hidden {
+        if drop_row {
             d.dpi_rows.remove(&session_id);
             match neighbor {
                 Some(row) => d.focus_row(row),
@@ -1942,7 +2003,11 @@ fn set_dpi_row_hidden(
             d.dpi_rows.insert(session_id.clone(), DpiRowKind::Extra { hidden });
         }
     }
-    app.show_toast(&if hidden {
+    app.show_toast(&if hidden && attached {
+        format!(
+            "Hid {name} from the dashboard once this window leaves it. It stays on the backend; Ctrl+Y shows hidden agents."
+        )
+    } else if hidden {
         format!("Hid {name} from the dashboard. It stays on the backend; Ctrl+Y shows hidden agents.")
     } else {
         format!("{name} is back on the dashboard.")
@@ -2030,6 +2095,16 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
                     }
                 };
             }
+            if let Some((entry, kind)) = dpi_row_entry(app, &sel) {
+                return dpi_row_stop(app, sel, &entry, kind);
+            }
+            if on_dpi(app) {
+                if let Some(d) = app.dashboard.as_mut() {
+                    d.delete_confirm = None;
+                }
+                app.show_toast(DPI_ROW_NOT_LISTED_TOAST);
+                return vec![];
+            }
             arm_or_delete(app, sel)
         }
         DashboardRowId::Roster { session_id } => {
@@ -2067,32 +2142,10 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
                     }]
                 }
                 Some(e) if dpi_row_kind(app, &e.session_id).is_some() => {
-                    let Some(kind) = dpi_row_kind(app, &e.session_id) else {
+                    let Some((entry, kind)) = dpi_row_entry(app, &sel) else {
                         return vec![];
                     };
-                    let name = dpi_row_name(e);
-                    let session_id = e.session_id.clone();
-                    match kind {
-                        crate::views::dashboard::DpiRowKind::Main => {
-                            let armed = app
-                                .dashboard
-                                .as_mut()
-                                .and_then(|d| d.armed_delete_row())
-                                .as_ref()
-                                == Some(&sel);
-                            if !armed {
-                                // The playground's archive dialog, word for word.
-                                let host = dpi_backend_host(app);
-                                app.show_toast(&format!(
-                                    "Archive {name}? Stops all of its work and moves its files to archive/ on {host}. Nothing is deleted."
-                                ));
-                            }
-                            arm_or_delete(app, sel)
-                        }
-                        crate::views::dashboard::DpiRowKind::Extra { hidden } => {
-                            set_dpi_row_hidden(app, sel, session_id, &name, !hidden)
-                        }
-                    }
+                    dpi_row_stop(app, sel, &entry, kind)
                 }
                 Some(e)
                     if !crate::views::dashboard::roster_activity_to_state(e.activity)
@@ -2288,6 +2341,13 @@ fn delete_dashboard_row(
     if app.workspace_dashboard_enabled {
         return archive_dashboard_row(app, row);
     }
+    if let Some((entry, crate::views::dashboard::DpiRowKind::Main)) = dpi_row_entry(app, &row) {
+        return archive_dpi_session(app, row, &entry);
+    }
+    if on_dpi(app) && matches!(row, DashboardRowId::TopLevel(_)) {
+        app.show_toast(DPI_ROW_NOT_LISTED_TOAST);
+        return vec![];
+    }
     match row {
         DashboardRowId::TopLevel(id) => {
             let Some(agent) = app.agents.get(&id) else {
@@ -2324,9 +2384,6 @@ fn delete_dashboard_row(
             if entry.origin.kind == "conversation" {
                 app.show_toast("Deleting chat conversations isn't supported yet");
                 return vec![];
-            }
-            if dpi_row_kind(app, &session_id) == Some(crate::views::dashboard::DpiRowKind::Main) {
-                return archive_dpi_session(app, &entry);
             }
             if !crate::views::dashboard::roster_activity_to_state(entry.activity).allows_delete() {
                 app.show_toast("Stop the session before deleting");

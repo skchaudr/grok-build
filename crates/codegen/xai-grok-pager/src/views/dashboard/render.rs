@@ -190,13 +190,19 @@ pub(crate) fn render_dashboard(
             Some(DashboardRowId::Roster { .. }) | None => None,
         }
     } else {
-        // An idle dpi row is never deleted: its main agent archives the session, an extra agent hides.
-        match state.selected.as_ref() {
-            Some(DashboardRowId::Roster { session_id }) => {
-                state.dpi_rows.get(session_id).map(|kind| kind.stop_action())
-            }
+        // An idle dpi row is never deleted: its main agent archives the session, an extra agent hides. The row of the
+        // agent this window is attached to comes from the live agent; its roster row says what it is.
+        let dpi_session = match state.selected.as_ref() {
+            Some(DashboardRowId::Roster { session_id }) => Some(session_id.as_str()),
+            Some(DashboardRowId::TopLevel(id)) => agents
+                .get(id)
+                .and_then(|agent| agent.session.session_id.as_ref())
+                .map(|session_id| session_id.0.as_ref()),
             _ => None,
-        }
+        };
+        dpi_session
+            .and_then(|session_id| state.dpi_rows.get(session_id))
+            .map(|kind| kind.stop_action())
     };
     let peek_active = state.peek_owns_input();
 
@@ -2708,10 +2714,13 @@ fn render_footer(
         return;
     }
 
-    let show_ctrl_x = state
-        .selected
-        .as_ref()
-        .is_none_or(|row| !row.is_workspace() || state.workspace_membership_mode)
+    let busy = matches!(selected_state, Some(RowState::Working | RowState::NeedsInput));
+    let dpi_without_action = state.dpi_dashboard && state.selected_stop_action.is_none() && !busy;
+    let show_ctrl_x = !dpi_without_action
+        && state
+            .selected
+            .as_ref()
+            .is_none_or(|row| !row.is_workspace() || state.workspace_membership_mode)
         && selected_state.is_some_and(|s| {
             matches!(s, RowState::Working | RowState::NeedsInput) || s.allows_delete()
         });
