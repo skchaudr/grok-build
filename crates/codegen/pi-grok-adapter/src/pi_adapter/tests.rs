@@ -921,6 +921,32 @@ fn dpi_row_requests_name_the_row_and_need_one() {
 }
 
 #[test]
+fn dpi_row_results_toast_every_archive_and_only_failed_stops_or_hides() {
+    use super::session::dpi_row_result;
+    let ok: anyhow::Result<Value> = Ok(json!({}));
+    let busy: anyhow::Result<Value> = Err(anyhow::anyhow!("session is busy"));
+    let named = json!({ "target": "abc:main", "name": "alpha" });
+    assert_eq!(
+        dpi_row_result("pi/dpi/archive", &named, "Archive", &ok),
+        Some(("Archived alpha.".to_owned(), None))
+    );
+    assert_eq!(
+        dpi_row_result("pi/dpi/archive", &named, "Archive", &busy),
+        Some(("Could not archive alpha: session is busy".to_owned(), Some("error")))
+    );
+    assert_eq!(
+        dpi_row_result("pi/dpi/archive", &json!({ "target": "abc:main" }), "Archive", &ok),
+        Some(("Archived abc:main.".to_owned(), None)),
+        "an older pager sends no name: the row id"
+    );
+    assert_eq!(dpi_row_result("pi/dpi/hide", &json!({ "target": "abc:2" }), "Hide", &ok), None);
+    assert_eq!(
+        dpi_row_result("pi/dpi/abort", &json!({ "target": "abc:2" }), "Stop", &busy),
+        Some(("Stop failed: session is busy".to_owned(), Some("error")))
+    );
+}
+
+#[test]
 fn dpi_session_rows_carry_their_live_activity_and_hidden_flag() {
     let rows = super::session::parse_dpi_sessions(&json!({ "sessions": [
         { "id": "s:1", "path": "dpi://s/1", "activity": "working" },

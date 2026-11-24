@@ -37,13 +37,19 @@ pub(super) fn handle(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
             agent.session.turn_saw_agent_text = true;
             let kind = str_of(&["notifyType", "kind"]);
             agent.pi_notifications.push(crate::views::modal::PiNotification { message: message.clone(), kind: kind.clone() });
-            match kind.as_deref() {
+            let toast = match kind.as_deref() {
                 Some("info") => {
                     agent.scrollback.push_block(RenderBlock::system(message));
+                    return true;
                 }
-                Some("warning") => agent.show_toast(&format!("Warning: {message}")),
-                Some("error") => agent.show_toast(&format!("Error: {message}")),
-                _ => agent.show_toast(&message),
+                Some("warning") => format!("Warning: {message}"),
+                Some("error") => format!("Error: {message}"),
+                _ => message,
+            };
+            agent.show_toast(&toast);
+            // The Agent Dashboard draws its own toast over the agent's, e.g. the answer to its "Archiving <name>…".
+            if matches!(app.active_view, crate::app::app_view::ActiveView::AgentDashboard) {
+                app.show_toast(&toast);
             }
             true
         }

@@ -1848,6 +1848,23 @@ fn dashboard_neighbor_row_where(
     let next = focusables.get(cur + 1..).and_then(|rest| rest.iter().find_map(row));
     next.or_else(|| focusables.get(..cur).and_then(|prefix| prefix.iter().rev().find_map(row)))
 }
+/// The nearest row above `closed` that `keep` accepts, for the selection after a dpi archive or hide. Never a row below:
+/// that is often the next session's main agent, where a second Ctrl+X would archive it.
+fn dashboard_row_above_where(
+    app: &AppView,
+    closed: &crate::views::dashboard::DashboardRowId,
+    keep: impl Fn(&crate::views::dashboard::DashboardRowId) -> bool,
+) -> Option<crate::views::dashboard::DashboardRowId> {
+    use crate::views::dashboard::Focusable;
+    let focusables = dashboard_focusables(app);
+    let cur = focusables
+        .iter()
+        .position(|f| matches!(f, Focusable::Row(id) if id == closed))?;
+    focusables[..cur].iter().rev().find_map(|f| match f {
+        Focusable::Row(id) if keep(id) => Some(id.clone()),
+        Focusable::Row(_) | Focusable::Section(_) | Focusable::IdleOverflow => None,
+    })
+}
 /// What the dpi roster row `session_id` is, when this TUI is on dpi and the row came from the dpi roster.
 fn dpi_row_kind(app: &AppView, session_id: &str) -> Option<crate::views::dashboard::DpiRowKind> {
     if !(app.external_agent && crate::settings::dpi::dpi_host()) {
@@ -1931,7 +1948,8 @@ fn dpi_backend_host(app: &AppView) -> String {
         .unwrap_or_else(|| "the backend".to_owned())
 }
 /// Archive the session behind a confirmed main-agent row: `DELETE /v1/sessions/<id>` through the shim, as /dpi-archive
-/// and the playground do. Its rows leave the list at once; the selection moves to a row of another session.
+/// and the playground do. Its rows leave the list at once and the selection moves to the row above (or New Agent). The
+/// request is the first thing sent; the adapter toasts "Archived <name>." when the backend answers, or the error.
 fn archive_dpi_session(
     app: &mut AppView,
     row: crate::views::dashboard::DashboardRowId,
@@ -1939,7 +1957,7 @@ fn archive_dpi_session(
 ) -> Vec<Effect> {
     use crate::views::dashboard::DashboardRowId;
     let session_prefix = format!("{}:", entry.session_id.split(':').next().unwrap_or_default());
-    let neighbor = dashboard_neighbor_row_where(app, &row, |id| {
+    let neighbor = dashboard_row_above_where(app, &row, |id| {
         !matches!(id, DashboardRowId::Roster { session_id } if session_id.starts_with(&session_prefix))
     });
     app.dashboard_local_sessions
@@ -1951,11 +1969,12 @@ fn archive_dpi_session(
             None => d.focus_new_agent_button(),
         }
     }
-    app.show_toast(&format!("Archiving {}\u{2026}", dpi_row_name(entry)));
+    let name = dpi_row_name(entry);
+    app.show_toast(&format!("Archiving {name}\u{2026}"));
     vec![Effect::PiUiInput {
         session_id: acp::SessionId::new(entry.session_id.clone()),
         method: "pi/dpi/archive",
-        params: serde_json::json!({ "target": entry.session_id }),
+        params: serde_json::json!({ "target": entry.session_id, "name": name }),
     }]
 }
 /// Hide an extra dpi agent from this dashboard, or unhide it. The shim keeps the list, so it lasts across restarts;
@@ -1972,7 +1991,7 @@ fn set_dpi_row_hidden(
     // The agent this window is attached to stays on the dashboard (from the live agent) until the window moves off it.
     let attached = matches!(row, crate::views::dashboard::DashboardRowId::TopLevel(_));
     let drop_row = hidden && !show_hidden && !attached;
-    let neighbor = drop_row.then(|| dashboard_neighbor_row(app, &row)).flatten();
+    let neighbor = drop_row.then(|| dashboard_row_above_where(app, &row, |_| true)).flatten();
     if drop_row {
         app.dashboard_local_sessions.retain(|e| e.session_id != session_id);
     } else if let Some(entry) = app

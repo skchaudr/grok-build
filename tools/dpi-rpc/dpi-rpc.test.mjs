@@ -70,6 +70,7 @@ const server = createServer((req, res) => {
     if (p === "/sessions" && req.method === "POST") return json(res, 201, { id: "s3", agents: [{ id: 1 }] });
     if (p === "/sessions/s1/agents" && req.method === "POST") return json(res, 201, { id: 10 });
     if (req.method === "DELETE" && state.failDelete) return json(res, 409, { error: { message: "session is busy" } });
+    if (req.method === "DELETE" && state.holdDelete) return state.holdDelete(res); // answered by the test
     if ((m = p.match(/^\/sessions\/(s\d)$/))) return json(res, 200, { id: m[1], name: m[1], cwd: "/w" });
     if (p.endsWith("/tasks") && state.failTasks) return json(res, 500, { error: { message: "tasks down" } });
     if (p.endsWith("/tasks")) return json(res, 200, url.search.includes("terminal") ? state.doneTasks : state.tasks);
@@ -139,7 +140,7 @@ async function shim(env = {}, target = "s1") {
   };
   const status = (key, text) => until((l) => l.method === "setStatus" && l.statusKey === key && l.statusText === text);
   const send = (obj) => child.stdin.write(JSON.stringify(obj) + "\n");
-  return { call, status, until, lines, send, close: () => child.kill() };
+  return { call, status, until, lines, send, close: () => child.kill(), kill: (signal) => child.kill(signal) };
 }
 
 test("dpi_list_sessions fills parent, message count and activity time", async () => {
@@ -211,6 +212,19 @@ test("dpi_archive archives the row's session (the playground's DELETE) and stays
     assert.equal(refused.success, false);
     assert.equal(refused.error, "session is busy");
   } finally { s.close(); state.failDelete = false; }
+});
+
+test("dpi_archive's DELETE outlives the shim: killing it mid-request (a quit or a closed window) does not cut it off", async () => {
+  const s = await shim();
+  const held = new Promise((r) => { state.holdDelete = r; });
+  try {
+    s.send({ type: "dpi_archive", target: "s2:1", id: "a1" });
+    const res = await held;
+    s.kill("SIGKILL"); // as the adapter does on quit, while the backend has not answered yet
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(res.socket.destroyed, false, "the request is still open: its own process sent it");
+    json(res, 200, {});
+  } finally { s.close(); state.holdDelete = null; }
 });
 
 test("dpi_hide hides a row from the dashboard list only, survives a restart, and unhides", async () => {

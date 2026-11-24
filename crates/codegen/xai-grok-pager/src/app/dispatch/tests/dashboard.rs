@@ -8420,18 +8420,33 @@ fn dpi_dashboard_stop_on_an_idle_main_agent_confirms_then_archives_its_session()
     assert_eq!(effects.len(), 1, "{effects:?}");
     assert!(matches!(
         &effects[0],
-        Effect::PiUiInput { method: "pi/dpi/archive", params, .. } if params["target"] == "a:main"
-    ));
+        Effect::PiUiInput { method: "pi/dpi/archive", params, .. }
+            if params["target"] == "a:main" && params["name"] == "alpha"
+    ), "the adapter toasts \"Archived alpha.\" by this name when the backend answers");
     assert!(!effects.iter().any(|e| matches!(e, Effect::DeleteSession { .. })), "never a delete");
     assert_eq!(roster_ids(&app), ["b:main"], "the archived session's rows leave together");
     let d = app.dashboard.as_ref().unwrap();
     assert!(!d.dpi_rows.contains_key("a:main") && !d.dpi_rows.contains_key("a:2"));
-    assert_eq!(
-        d.selected,
-        Some(crate::views::dashboard::DashboardRowId::Roster { session_id: "b:main".into() }),
-        "the cursor moves to a row of another session"
-    );
+    assert_eq!(d.selected, None, "no row above the top one: never the next session's main row");
+    assert_eq!(d.actions_focus, Some(crate::views::dashboard::state::ActionsFocus::NewAgent), "New Agent instead");
     assert_eq!(d.error_toast.as_deref(), Some("Archiving alpha\u{2026}"));
+}
+
+/// After an archive the cursor goes to the row above, never down onto the next session's main agent, where a second
+/// Ctrl+X would archive it. (The hide test checks the same for a hide.)
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dpi_dashboard_archive_moves_the_cursor_to_the_row_above() {
+    use crate::views::dashboard::DashboardRowId;
+    let roster = |id: &str| DashboardRowId::Roster { session_id: id.into() };
+    let mut app = dpi_dashboard_app();
+    assert_eq!(dashboard_row_order(&app), [roster("a:2"), roster("a:main"), roster("b:main")]);
+    select_roster(&mut app, "b:main");
+    dispatch_dashboard_stop(&mut app);
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(matches!(&effects[..], [Effect::PiUiInput { method: "pi/dpi/archive", .. }]), "{effects:?}");
+    crate::settings::dpi::set_dpi_host_for_test(None);
+    assert_eq!(app.dashboard.as_ref().unwrap().selected, Some(roster("a:main")), "the row above");
 }
 
 /// The row of the agent this window is attached to comes from the live agent, not the roster, and gets the same Ctrl+X:
@@ -8513,7 +8528,8 @@ fn dpi_dashboard_stop_on_an_extra_agent_hides_it_and_ctrl_y_brings_it_back_to_un
     let d = app.dashboard.as_ref().unwrap();
     assert!(d.delete_confirm.is_none(), "no confirm: hiding is undoable");
     assert_eq!(d.hidden_agent_count, 1);
-    assert!(matches!(&d.selected, Some(crate::views::dashboard::DashboardRowId::Roster { session_id }) if session_id != "a:2"));
+    assert_eq!(d.selected, None, "the top row: nothing above it, and never the row below");
+    assert_eq!(d.actions_focus, Some(crate::views::dashboard::state::ActionsFocus::NewAgent), "New Agent instead");
     assert_eq!(
         d.error_toast.as_deref(),
         Some("Hid alpha / helper from the dashboard. It stays on the backend; Ctrl+Y shows hidden agents.")

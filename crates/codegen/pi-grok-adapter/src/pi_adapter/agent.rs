@@ -887,10 +887,13 @@ impl acp::Agent for PiAgent {
                     tracing::warn!(method, "ignored a dpi row action without a target");
                     return Ok(());
                 };
-                if let Err(error) = self.rpc.request(request).await {
+                let result = self.rpc.request(request).await;
+                if let Err(error) = &result {
                     tracing::warn!(%error, method, "dpi row action failed");
-                    self.send_ui_notification(&format!("{action} failed: {error}"), Some("error"))
-                        .await;
+                }
+                // The dashboard's "Archiving <name>…" is answered either way; a stop or hide reports only a failure.
+                if let Some((message, kind)) = super::session::dpi_row_result(method, &params, action, &result) {
+                    self.send_ui_notification(&message, kind).await;
                 }
                 Ok(())
             }

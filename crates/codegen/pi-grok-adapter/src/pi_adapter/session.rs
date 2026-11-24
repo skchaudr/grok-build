@@ -1051,6 +1051,28 @@ pub(super) fn dpi_row_request(method: &str, params: &Value) -> Option<(Value, &'
     })
 }
 
+/// The toast for a finished dashboard row action: an archive always says how it went, by the row's name; a stop or hide
+/// only says when it failed.
+pub(super) fn dpi_row_result(
+    method: &str,
+    params: &Value,
+    action: &str,
+    result: &anyhow::Result<Value>,
+) -> Option<(String, Option<&'static str>)> {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| params.get("target").and_then(Value::as_str))
+        .unwrap_or("the session");
+    match (method, result) {
+        ("pi/dpi/archive", Ok(_)) => Some((format!("Archived {name}."), None)),
+        ("pi/dpi/archive", Err(error)) => Some((format!("Could not archive {name}: {error}"), Some("error"))),
+        (_, Ok(_)) => None,
+        (_, Err(error)) => Some((format!("{action} failed: {error}"), Some("error"))),
+    }
+}
+
 /// Rows from the dpi-rpc shim's `dpi_list_sessions`: one per durable agent,
 /// `path` = `dpi://<session>/<agent>` (handed back to `switch_session`).
 pub(super) fn parse_dpi_sessions(data: &Value) -> Vec<PiSessionInfo> {

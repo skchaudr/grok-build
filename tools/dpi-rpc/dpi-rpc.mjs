@@ -8,6 +8,7 @@
 // id; default: first session), DPI_AGENT (default main). Without env, DPI_URL/
 // DPI_TOKEN come from ~/.dpi/backend.env (local backend), else ~/.dpi/client.env.
 import { createInterface } from "node:readline";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -774,9 +775,39 @@ async function stopAgent() {
   notify("Stopped: the running turn and its background tasks.");
 }
 
-// DELETE /v1/sessions/<id> archives (the playground's "Archive session"; it restores from "Archived sessions").
+// The archive's DELETE, run by a process of its own (detached: its own process group), so once it has started,
+// closing the window (SIGHUP to the window's processes) or quitting (the adapter kills this shim) cannot cut it off.
+// It exits 0 when the backend answers OK, else prints the backend's error and exits 1.
+const DETACHED_DELETE = `
+process.stdout.on("error", () => {});
+fetch(process.env.DPI_DELETE_URL, { method: "DELETE", headers: { authorization: "Bearer " + process.env.DPI_DELETE_TOKEN } })
+  .then(async (res) => {
+    if (res.ok) return;
+    const text = await res.text();
+    let message = "DELETE: HTTP " + res.status;
+    try { message = JSON.parse(text)?.error?.message || message; } catch {}
+    process.stdout.write(message);
+    process.exitCode = 1;
+  }, (err) => { process.stdout.write(err.message); process.exitCode = 1; });
+`;
+function detachedDelete(path) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["-e", DETACHED_DELETE], {
+      detached: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, DPI_DELETE_URL: BASE + "/v1" + path, DPI_DELETE_TOKEN: TOKEN ?? "" },
+    });
+    let out = "";
+    child.stdout.on("data", (c) => (out += c));
+    child.on("error", reject);
+    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(out || `DELETE ${path}: exit ${code}`))));
+  });
+}
+
+// DELETE /v1/sessions/<id> archives (the playground's "Archive session"; it restores from "Archived sessions"). It is
+// sent before anything else, this window's own stream included.
 async function archive(s) {
-  await api("DELETE", `/sessions/${encodeURIComponent(s)}`);
+  await detachedDelete(`/sessions/${encodeURIComponent(s)}`);
   if (s === session) stream?.abort(); // this window's session is gone: stop polling it
 }
 

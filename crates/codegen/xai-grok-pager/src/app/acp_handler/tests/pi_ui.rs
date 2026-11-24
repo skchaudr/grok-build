@@ -295,6 +295,30 @@ fn dpi_catalog_rows_show_their_live_activity_on_the_dashboard() {
     assert!(!row("local-pi").resident);
 }
 
+/// The adapter's answer to the dashboard's "Archiving <name>…" shows on the dashboard, which draws its own toast; an
+/// error keeps its "Error:" prefix, and an info notice stays in the scrollback only.
+#[test]
+fn pi_toasts_show_on_the_open_agent_dashboard() {
+    let mut app = make_app_with_agent("s-a:main");
+    app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
+    app.active_view = crate::app::app_view::ActiveView::AgentDashboard;
+    let mut dashboard = crate::views::dashboard::DashboardState::default();
+    dashboard.error_toast = Some("Archiving beta\u{2026}".to_owned());
+    app.dashboard = Some(dashboard);
+    let toast = |app: &AppView| app.dashboard.as_ref().unwrap().error_toast.clone();
+    handle_ext_notification(&pi("pi/ui/notify", serde_json::json!({ "message": "Archived beta." })), &mut app);
+    assert_eq!(toast(&app).as_deref(), Some("Archived beta."));
+    assert_eq!(test_agent(&app, AgentId(0)).toast.as_ref().map(|(m, _)| m.as_str()), Some("Archived beta."));
+    handle_ext_notification(
+        &pi("pi/ui/notify", serde_json::json!({ "message": "Could not archive beta: session is busy", "notifyType": "error" })),
+        &mut app,
+    );
+    assert_eq!(toast(&app).as_deref(), Some("Error: Could not archive beta: session is busy"));
+    handle_ext_notification(&pi("pi/ui/notify", serde_json::json!({ "message": "eval ready", "notifyType": "info" })), &mut app);
+    assert_eq!(toast(&app).as_deref(), Some("Error: Could not archive beta: session is busy"), "info: scrollback only");
+}
+
 /// Ctrl+X's "Stopping the agent's turn" toast stays while the roster still shows the agent working, and clears once it
 /// goes idle.
 #[test]
