@@ -9,9 +9,9 @@
 // DPI_TOKEN come from ~/.dpi/backend.env (local backend), else ~/.dpi/client.env.
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   THINKING_LEVELS, buildOptions, commandForKey, compactionPatch, contextInfo, helpCard, hintsFor,
   resolvePlaygroundUrl, shortcutCatalog, usageTokens,
@@ -201,6 +201,16 @@ async function runStream(signal) {
 
 // `--continue` means the durable agent this machine last attached to.
 const LAST = join(homedir(), ".dpi", "grok-pi-last.json");
+// Agents this machine hid from the Agent Dashboard ("<session>:<agent>" row ids). Local only: the backend and the
+// playground still show them.
+const HIDDEN = join(homedir(), ".dpi", "grok-pi-hidden.json");
+const readHidden = () => { try { return new Set(JSON.parse(readFileSync(HIDDEN, "utf8"))); } catch { return new Set(); } };
+function setHidden(id, hidden) {
+  const ids = readHidden();
+  if (hidden) ids.add(id); else ids.delete(id);
+  mkdirSync(dirname(HIDDEN), { recursive: true });
+  writeFileSync(HIDDEN, JSON.stringify([...ids].sort()));
+}
 
 function argValue(flag) {
   const i = process.argv.indexOf(flag);
@@ -214,6 +224,13 @@ function parseTarget(value) {
   const pair = value.match(/^([0-9a-f-]{36}):(.+)$/);
   if (pair) return [pair[1], pair[2]];
   return [value, "main"];
+}
+
+// A dashboard row: its id "<session>:<agent>" (dpi_list_sessions) or a dpi:// path.
+function rowTarget(value) {
+  const target = String(value ?? "");
+  const row = target.match(/^([^/:]+):([^/:]+)$/);
+  return row ? [row[1], row[2]] : parseTarget(target);
 }
 
 async function pickTarget() {
@@ -431,14 +448,20 @@ const ago = (ms) => {
   return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 2880 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
 };
 
-// {host, cwd, label: "host:~/path", branch?}; with `card`, also the attach card's title and rows. `busy` overrides the
-// backend's flag: right after run_end the shim knows the turn is over before the agent record says so.
+// {host, cwd, label: "host:~/path", branch?, session?}; with `card`, also the attach card's title and rows. `busy`
+// overrides the backend's flag: right after run_end the shim knows the turn is over before the agent record says so.
+// `session` is the name the dashboard shows. The session GET runs beside the agent GET so it adds no round trip, and
+// its failure only fails the reply when the cwd or the card needs it.
 async function remote(card = false, busy = undefined) {
-  const a = await api("GET", agentPath());
-  const s = card || !a.config.cwd ? await api("GET", `/sessions/${encodeURIComponent(session)}`) : null;
+  const [a, s] = await Promise.all([
+    api("GET", agentPath()),
+    api("GET", `/sessions/${encodeURIComponent(session)}`).catch((err) => ({ err })),
+  ]);
+  if (s.err && (card || !a.config.cwd)) throw s.err;
   const host = hostName();
   const cwd = a.config.cwd ?? s.cwd;
-  const r = { host, cwd, label: `${host}:${tilde(cwd)}`, ...(a.branch ? { branch: a.branch } : {}) };
+  const name = s.err || !s.name ? null : a.kind === "root" ? s.name : `${s.name} / ${a.name}`;
+  const r = { host, cwd, label: `${host}:${tilde(cwd)}`, ...(a.branch ? { branch: a.branch } : {}), ...(name ? { session: name } : {}) };
   if (!card) return r;
   const [entries, live] = await Promise.all([activeEntries(), api("GET", `/sessions/${encodeURIComponent(session)}/tasks?status=live`).catch(() => [])]);
   const messages = modelMessages(entries);
@@ -446,7 +469,7 @@ async function remote(card = false, busy = undefined) {
   const lastAt = Math.max(0, ...messages.map((m) => m.timestamp ?? 0));
   const activity = (busy ?? a.busy) ? "running now" : lastAt ? `last message ${ago(lastAt)}` : "no messages yet";
   r.card = {
-    title: `dpi · ${a.kind === "root" ? s.name : `${s.name} / ${a.name}`} on ${host}`,
+    title: `dpi · ${name} on ${host}`,
     rows: [
       ["model", `${a.config.model.modelId} (${a.config.model.provider}) · thinking ${a.config.thinkingLevel ?? "medium"}`],
       ["cwd", `${r.label}${r.branch ? ` · ${r.branch}` : ""}`],
@@ -744,11 +767,20 @@ async function stopAgent() {
   notify("Stopped: the running turn and its background tasks.");
 }
 
-function archiveSession() {
-  confirmThen("Archive this session?", "Stops its agents and moves it out of the list. Nothing is deleted, and the playground can restore it.", async () => {
-    await api("DELETE", sessionPath());
-    stream?.abort(); // the session is gone: stop polling it
-    notify("Session archived. This window no longer has a session; ctrl+r picks another, or quit.");
+// DELETE /v1/sessions/<id> archives (the playground's "Archive session"; it restores from "Archived sessions").
+async function archive(s) {
+  await api("DELETE", `/sessions/${encodeURIComponent(s)}`);
+  if (s === session) stream?.abort(); // this window's session is gone: stop polling it
+}
+
+// The playground's archive dialog, word for word.
+const archivePrompt = (name) => [`Archive ${name}?`, `Stops all of its work and moves its files to archive/ on ${hostName()}. Nothing is deleted.`];
+
+async function archiveSession() {
+  const { name } = await api("GET", sessionPath());
+  confirmThen(...archivePrompt(name), async () => {
+    await archive(session);
+    notify(`Archived ${name}. This window no longer has a session; ctrl+r picks another, or quit.`);
   });
 }
 
@@ -857,11 +889,15 @@ const handlers = {
   abort: async () => { await api("POST", agentPath() + "/abort", {}); },
   // The dashboard's stop on a row this TUI is not attached to: abort that agent's turn, stay where we are.
   dpi_abort: async (c) => {
-    // target: a roster row id "<session>:<agent>" (dpi_list_sessions) or a dpi:// path
-    const target = String(c.target ?? "");
-    const row = target.match(/^([^/:]+):([^/:]+)$/);
-    const [s, a] = row ? [row[1], row[2]] : parseTarget(target);
+    const [s, a] = rowTarget(c.target);
     await api("POST", `/sessions/${encodeURIComponent(s)}/agents/${encodeURIComponent(a)}/abort`, {});
+  },
+  // The dashboard's Ctrl+X on an idle main agent, after its confirm: archive that session.
+  dpi_archive: async (c) => { await archive(rowTarget(c.target)[0]); },
+  // The dashboard's Ctrl+X on an idle extra agent: hide it from the dashboard, or unhide it. The agent stays.
+  dpi_hide: async (c) => {
+    const [s, a] = rowTarget(c.target);
+    setHidden(`${s}:${a}`, c.hidden !== false);
   },
   set_model: async (c) => {
     await api("PATCH", agentPath() + "/config", { model: { provider: c.provider, modelId: c.modelId } });
@@ -881,6 +917,7 @@ const handlers = {
   dpi_list_sessions: async () => {
     const rows = (await api("GET", "/sessions")).flatMap((s) => (s.agents ?? []).map((a) => [s, a]));
     const active = await Promise.all(rows.map(([s, a]) => listedEntries(s, a)));
+    const hidden = readHidden();
     return {
       sessions: rows.map(([s, a], i) => {
         const messages = modelMessages(active[i]);
@@ -895,6 +932,7 @@ const handlers = {
           messageCount: messages.length,
           firstMessage: a.busy ? "(running)" : "",
           activity: a.busy ? "working" : "idle",
+          ...(hidden.has(`${s.id}:${a.id}`) ? { hidden: true } : {}),
           modelId: s.model,
           parentSessionPath: a.kind === "root" ? undefined : `dpi://${s.id}/${a.parentId ?? a.ownerAgentId ?? "main"}`,
         };

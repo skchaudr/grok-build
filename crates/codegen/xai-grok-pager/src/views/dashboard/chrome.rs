@@ -7,7 +7,9 @@ use crate::views::agent_status::AgentStatusBar;
 use crate::views::dashboard::animation::{Animation, SPINNER_DIVISOR};
 use crate::views::dashboard::row::DashboardRow;
 use crate::views::dashboard::state::{ActionsFocus, DashboardState, RowState};
-use crate::views::location::{LocationParts, location_parts, worktree_badge};
+use crate::views::location::{
+    DpiRemote, LocationParts, branch_label, location_parts, remote_badge, worktree_badge,
+};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -23,7 +25,23 @@ pub struct HeaderUpgradeCta<'a> {
     /// The promo's trimmed `cta.caption` value; painted only when `pinned` is set.
     pub caption: Option<&'a str>,
 }
+/// `branch remote host:~/path · session`, the dpi agent's backend location as the agent header shows it, plus its session name.
+fn remote_location_spans(theme: &Theme, remote: &DpiRemote, bg: Style, dim: Style) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if let Some(branch) = remote.branch.clone().map(branch_label) {
+        spans.push(Span::styled(branch, dim));
+        spans.push(Span::styled(" ", bg));
+    }
+    spans.push(remote_badge(theme).patch_style(bg));
+    spans.push(Span::styled(remote.label.clone(), bg.fg(theme.text_secondary)));
+    if let Some(session) = remote.session.clone() {
+        spans.push(Span::styled(" · ", dim));
+        spans.push(Span::styled(session, bg.fg(theme.text_primary)));
+    }
+    spans
+}
 /// Paint the dashboard header into `area` and write `location_hit` / `upgrade_cta_hit`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_header(
     buf: &mut Buffer,
     area: Rect,
@@ -32,6 +50,8 @@ pub(super) fn render_header(
     state: &mut DashboardState,
     registry: &crate::actions::ActionRegistry,
     upgrade_cta: Option<HeaderUpgradeCta<'_>>,
+    // Where the dpi agent really runs; replaces the laptop folder and its picker.
+    remote: Option<&DpiRemote>,
 ) {
     if area.area() == 0 {
         return;
@@ -113,21 +133,28 @@ pub(super) fn render_header(
         1 + crate::views::announcements::upgrade_cta_reserve(cta.label, upgrade_caption) as usize
     });
     let label_budget = full_label_budget.saturating_sub(upgrade_reserve);
-    let LocationParts {
-        branch,
-        is_worktree,
-        cwd_display,
-    } = location_parts(&state.cwd);
-    let mut location_spans: Vec<Span<'static>> = Vec::new();
-    if let Some(branch) = branch {
-        location_spans.push(Span::styled(branch, dim));
-        location_spans.push(Span::styled(" ", bg));
-    }
-    if is_worktree {
-        location_spans.push(worktree_badge(theme).patch_style(bg));
-    }
-    location_spans.push(Span::styled(cwd_display, bg.fg(theme.text_secondary)));
-    let picks_folder = true;
+    let location_spans = match remote {
+        Some(remote) => remote_location_spans(theme, remote, bg, dim),
+        None => {
+            let LocationParts {
+                branch,
+                is_worktree,
+                cwd_display,
+            } = location_parts(&state.cwd);
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if let Some(branch) = branch {
+                spans.push(Span::styled(branch, dim));
+                spans.push(Span::styled(" ", bg));
+            }
+            if is_worktree {
+                spans.push(worktree_badge(theme).patch_style(bg));
+            }
+            spans.push(Span::styled(cwd_display, bg.fg(theme.text_secondary)));
+            spans
+        }
+    };
+    // The picker chooses a laptop folder, which a dpi agent never runs in.
+    let picks_folder = remote.is_none();
     let mut location = truncate_line(Line::from(location_spans), label_budget);
     if state.location_hit.hovered {
         location.spans = underline_location_on_hover(std::mem::take(&mut location.spans));

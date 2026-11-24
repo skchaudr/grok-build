@@ -8358,3 +8358,189 @@ fn real_pi_dashboard_stop_on_a_working_roster_row_sends_no_dpi_abort() {
     crate::settings::dpi::set_dpi_host_for_test(None);
     assert!(effects.is_empty());
 }
+
+/// A dpi dashboard on rows from two sessions: "a" with its main agent and an extra one, "b" with its main agent.
+fn dpi_dashboard_app() -> AppView {
+    use crate::views::dashboard::DpiRowKind;
+    crate::settings::dpi::set_dpi_host_for_test(Some(true));
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
+    let mut a_main = idle_roster_entry("a:main", "alpha");
+    a_main.activity = crate::app::roster::RosterActivity::Idle;
+    a_main.resident = true; // the dpi roster marks its rows live and external
+    a_main.session_kind = Some("external".into());
+    let mut a_extra = idle_roster_entry("a:2", "alpha / helper");
+    a_extra.activity = crate::app::roster::RosterActivity::Idle;
+    a_extra.resident = true; // the dpi roster marks its rows live and external
+    a_extra.session_kind = Some("external".into());
+    let mut b_main = idle_roster_entry("b:main", "beta");
+    b_main.activity = crate::app::roster::RosterActivity::Idle;
+    b_main.resident = true; // the dpi roster marks its rows live and external
+    b_main.session_kind = Some("external".into());
+    app.dashboard_local_sessions = vec![a_main, a_extra, b_main];
+    app.leader_mode = false;
+    app.workspace_dashboard_enabled = false;
+    open_dashboard(&mut app);
+    let d = app.dashboard.as_mut().unwrap();
+    d.dpi_rows.insert("a:main".into(), DpiRowKind::Main);
+    d.dpi_rows.insert("a:2".into(), DpiRowKind::Extra { hidden: false });
+    d.dpi_rows.insert("b:main".into(), DpiRowKind::Main);
+    assert_eq!(dashboard_row_order(&app).len(), 3, "all three rows are on the dashboard");
+    app
+}
+
+fn select_roster(app: &mut AppView, session_id: &str) {
+    app.dashboard.as_mut().unwrap().focus_row(crate::views::dashboard::DashboardRowId::Roster {
+        session_id: session_id.into(),
+    });
+}
+
+fn roster_ids(app: &AppView) -> Vec<String> {
+    app.dashboard_local_sessions.iter().map(|e| e.session_id.clone()).collect()
+}
+
+/// Ctrl+X on an idle main agent never deletes: it asks in the playground's words, and the second Ctrl+X archives the
+/// whole session (the shim's DELETE /v1/sessions/<id>), dropping all of that session's rows.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dpi_dashboard_stop_on_an_idle_main_agent_confirms_then_archives_its_session() {
+    let mut app = dpi_dashboard_app();
+    select_roster(&mut app, "a:main");
+    let first = dispatch_dashboard_stop(&mut app);
+    assert!(first.is_empty(), "{first:?}");
+    let d = app.dashboard.as_ref().unwrap();
+    assert!(d.delete_confirm.is_some(), "armed");
+    assert_eq!(
+        d.error_toast.as_deref(),
+        Some("Archive alpha? Stops all of its work and moves its files to archive/ on the backend. Nothing is deleted.")
+    );
+    let effects = dispatch_dashboard_stop(&mut app);
+    crate::settings::dpi::set_dpi_host_for_test(None);
+    assert_eq!(effects.len(), 1, "{effects:?}");
+    assert!(matches!(
+        &effects[0],
+        Effect::PiUiInput { method: "pi/dpi/archive", params, .. } if params["target"] == "a:main"
+    ));
+    assert!(!effects.iter().any(|e| matches!(e, Effect::DeleteSession { .. })), "never a delete");
+    assert_eq!(roster_ids(&app), ["b:main"], "the archived session's rows leave together");
+    let d = app.dashboard.as_ref().unwrap();
+    assert!(!d.dpi_rows.contains_key("a:main") && !d.dpi_rows.contains_key("a:2"));
+    assert_eq!(
+        d.selected,
+        Some(crate::views::dashboard::DashboardRowId::Roster { session_id: "b:main".into() }),
+        "the cursor moves to a row of another session"
+    );
+    assert_eq!(d.error_toast.as_deref(), Some("Archiving alpha\u{2026}"));
+}
+
+/// Ctrl+X on an extra agent hides it from the dashboard only; with hidden agents shown, Ctrl+X unhides it.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dpi_dashboard_stop_on_an_extra_agent_hides_it_and_ctrl_y_brings_it_back_to_unhide() {
+    use crate::views::dashboard::DpiRowKind;
+    let mut app = dpi_dashboard_app();
+    select_roster(&mut app, "a:2");
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert_eq!(effects.len(), 1, "{effects:?}");
+    assert!(matches!(
+        &effects[0],
+        Effect::PiUiInput { method: "pi/dpi/hide", params, .. }
+            if params["target"] == "a:2" && params["hidden"] == true
+    ));
+    assert_eq!(roster_ids(&app), ["a:main", "b:main"]);
+    let d = app.dashboard.as_ref().unwrap();
+    assert!(d.delete_confirm.is_none(), "no confirm: hiding is undoable");
+    assert_eq!(d.hidden_agent_count, 1);
+    assert!(matches!(&d.selected, Some(crate::views::dashboard::DashboardRowId::Roster { session_id }) if session_id != "a:2"));
+    assert_eq!(
+        d.error_toast.as_deref(),
+        Some("Hid alpha / helper from the dashboard. It stays on the backend; Ctrl+Y shows hidden agents.")
+    );
+
+    // Ctrl+Y: show hidden agents. The next roster poll lists the row again, marked hidden.
+    crate::app::dispatch::dashboard::dispatch_dashboard_toggle_hidden_agents(&mut app);
+    let d = app.dashboard.as_mut().unwrap();
+    assert!(d.show_hidden_agents);
+    assert_eq!(
+        d.error_toast.as_deref(),
+        Some("Showing 1 hidden agent. Ctrl+X on it unhides it; Ctrl+Y hides it again.")
+    );
+    d.dpi_rows.insert("a:2".into(), DpiRowKind::Extra { hidden: true });
+    let mut back = idle_roster_entry("a:2", "alpha / helper (hidden)");
+    back.activity = crate::app::roster::RosterActivity::Idle;
+    back.resident = true; // the dpi roster marks its rows live and external
+    back.session_kind = Some("external".into());
+    app.dashboard_local_sessions.push(back);
+    select_roster(&mut app, "a:2");
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(matches!(
+        &effects[..],
+        [Effect::PiUiInput { method: "pi/dpi/hide", params, .. }] if params["target"] == "a:2" && params["hidden"] == false
+    ));
+    let row = app.dashboard_local_sessions.iter().find(|e| e.session_id == "a:2").unwrap();
+    assert_eq!(row.title.as_deref(), Some("alpha / helper"), "the hidden marker goes");
+    let d = app.dashboard.as_ref().unwrap();
+    assert_eq!(d.hidden_agent_count, 0);
+    assert_eq!(d.dpi_rows.get("a:2"), Some(&DpiRowKind::Extra { hidden: false }));
+    assert_eq!(d.error_toast.as_deref(), Some("alpha / helper is back on the dashboard."));
+    crate::settings::dpi::set_dpi_host_for_test(None);
+}
+
+/// Ctrl+Y off again drops the hidden rows at once; on a dashboard with nothing hidden it says how to hide one.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dpi_dashboard_ctrl_y_off_drops_hidden_rows_and_explains_when_none() {
+    use crate::views::dashboard::DpiRowKind;
+    let mut app = dpi_dashboard_app();
+    crate::app::dispatch::dashboard::dispatch_dashboard_toggle_hidden_agents(&mut app);
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+        Some("No hidden agents. Ctrl+X on an agent that is not its session's main agent hides it.")
+    );
+    let d = app.dashboard.as_mut().unwrap();
+    d.dpi_rows.insert("a:2".into(), DpiRowKind::Extra { hidden: true });
+    d.hidden_agent_count = 1;
+    crate::app::dispatch::dashboard::dispatch_dashboard_toggle_hidden_agents(&mut app);
+    crate::settings::dpi::set_dpi_host_for_test(None);
+    let d = app.dashboard.as_ref().unwrap();
+    assert!(!d.show_hidden_agents);
+    assert_eq!(d.error_toast.as_deref(), Some("Hidden agents are off the dashboard again."));
+    assert_eq!(roster_ids(&app), ["a:main", "b:main"]);
+}
+
+/// Not on dpi: Ctrl+Y does nothing and an idle roster row keeps the delete arm.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn ctrl_y_does_nothing_off_dpi() {
+    let mut app = dpi_dashboard_app();
+    crate::settings::dpi::set_dpi_host_for_test(Some(false));
+    crate::app::dispatch::dashboard::dispatch_dashboard_toggle_hidden_agents(&mut app);
+    crate::settings::dpi::set_dpi_host_for_test(None);
+    assert!(!app.dashboard.as_ref().unwrap().show_hidden_agents);
+}
+
+/// Down with no cursor (its row left the list) lands on the first row instead of skipping it.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_down_with_no_cursor_selects_the_first_row() {
+    let mut app = dpi_dashboard_app();
+    crate::settings::dpi::set_dpi_host_for_test(None);
+    let order = dashboard_row_order(&app);
+    let d = app.dashboard.as_mut().unwrap();
+    d.selected = None;
+    d.actions_focus = None;
+    d.selected_section = None;
+    d.selected_idle_overflow = false;
+    crate::app::dispatch::dashboard::dispatch_dashboard_select(&mut app, true);
+    let first = crate::app::dispatch::dashboard::dashboard_focusables(&app).into_iter().next().unwrap();
+    let d = app.dashboard.as_ref().unwrap();
+    match first {
+        crate::views::dashboard::Focusable::Row(id) => {
+            assert_eq!(d.selected.as_ref(), Some(&id));
+            assert_eq!(Some(&id), order.first());
+        }
+        crate::views::dashboard::Focusable::Section(key) => assert_eq!(d.selected_section, Some(key)),
+        crate::views::dashboard::Focusable::IdleOverflow => assert!(d.selected_idle_overflow),
+    }
+}

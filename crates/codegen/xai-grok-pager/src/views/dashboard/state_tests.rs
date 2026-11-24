@@ -7005,3 +7005,37 @@ fn rename_keeps_flag_tags_and_drops_loose_ones() {
     handle_rename_paste(&mut full, &format!("{near_cap}{scotland}"));
     assert_eq!(format!("{near_cap}\u{1f3f4}"), full.text());
 }
+
+/// A selected row that misses one roster refresh gets the cursor back when it returns: by row id, not by position.
+#[test]
+fn reanchor_selection_returns_to_a_row_that_comes_back() {
+    let row = |n: usize| super::super::row::DashboardRow {
+        id: DashboardRowId::TopLevel(AgentId(n)),
+        session_id: None,
+        label: format!("r{n}"),
+        subtitle: None,
+        state: RowState::Idle,
+        activity: None,
+        secondary_line: None,
+        cwd_display: String::new(),
+        cwd: std::path::PathBuf::from("/"),
+        last_change_at: std::time::SystemTime::now(),
+        pinned: false,
+        badges: Vec::new(),
+        context_pct: None,
+    };
+    let mut state = DashboardState::new();
+    state.focus_row(DashboardRowId::TopLevel(AgentId(2)));
+    state.reanchor_selection(&[row(1), row(3)]);
+    assert_eq!(state.selected, None);
+    state.reanchor_selection(&[]);
+    assert_eq!(state.selected, None);
+    state.reanchor_selection(&[row(1), row(2), row(3)]);
+    assert_eq!(state.selected, Some(DashboardRowId::TopLevel(AgentId(2))), "same agent, not same index");
+
+    // The user moved meanwhile: their choice wins.
+    state.reanchor_selection(&[row(1), row(3)]);
+    state.focus_row(DashboardRowId::TopLevel(AgentId(3)));
+    state.reanchor_selection(&[row(1), row(2), row(3)]);
+    assert_eq!(state.selected, Some(DashboardRowId::TopLevel(AgentId(3))));
+}

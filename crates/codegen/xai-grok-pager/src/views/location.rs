@@ -26,6 +26,8 @@ pub(crate) struct DpiRemote {
     pub label: String,
     /// The cwd's branch as the backend reports it; `None` when the backend does not report one.
     pub branch: Option<String>,
+    /// The durable session's name (`session / agent` for a non-root agent); `None` when the backend has none.
+    pub session: Option<String>,
 }
 
 impl DpiRemote {
@@ -39,7 +41,7 @@ impl DpiRemote {
         };
         let (host, cwd) = (field("host")?, field("cwd")?);
         let label = field("label").unwrap_or_else(|| format!("{host}:{cwd}"));
-        Some(Self { host, cwd, label, branch: field("branch") })
+        Some(Self { host, cwd, label, branch: field("branch"), session: field("session") })
     }
 
     /// What clicking the path copies: `host:/abs/path`, ready for scp or ssh.
@@ -99,14 +101,15 @@ mod tests {
     #[test]
     fn dpi_remote_from_json_requires_host_and_cwd() {
         let remote = DpiRemote::from_json(&serde_json::json!({
-            "host": "mini", "cwd": "/Users/bob/repo", "label": "mini:~/repo", "branch": "main",
+            "host": "mini", "cwd": "/Users/bob/repo", "label": "mini:~/repo", "branch": "main", "session": "r3",
         }))
         .unwrap();
         assert_eq!(remote.label, "mini:~/repo");
+        assert_eq!(remote.session.as_deref(), Some("r3"));
         assert_eq!(remote.branch.as_deref(), Some("main"));
         assert_eq!(remote.copy_text(), "mini:/Users/bob/repo");
         let bare = DpiRemote::from_json(&serde_json::json!({ "host": "mini", "cwd": "/srv", "branch": "" })).unwrap();
-        assert_eq!((bare.label.as_str(), bare.branch), ("mini:/srv", None));
+        assert_eq!((bare.label.as_str(), bare.branch, bare.session), ("mini:/srv", None, None));
         assert!(DpiRemote::from_json(&serde_json::json!({ "host": "mini" })).is_none());
     }
 

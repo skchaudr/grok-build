@@ -751,6 +751,15 @@ fn dpi_remote_location(mut data: Value) -> Value {
     data
 }
 
+/// The backend cwd from a `dpi_remote` reply, for `/session-info`; `None` when the shim reports none.
+fn dpi_remote_cwd(data: &Value) -> Option<String> {
+    data.get("cwd")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+        .map(str::to_owned)
+}
+
 /// The attach card a pushed `setRemote` carries after a turn, marked `refresh` so the pager updates the card it
 /// already shows instead of adding a second one.
 fn dpi_refreshed_card(event: &Value) -> Option<Value> {

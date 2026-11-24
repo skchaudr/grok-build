@@ -741,6 +741,16 @@ fn dpi_remote_location_keeps_the_location_and_drops_card_and_envelope() {
 }
 
 #[test]
+fn dpi_remote_cwd_reads_the_backend_cwd_or_none() {
+    assert_eq!(
+        dpi_remote_cwd(&json!({ "host": "mini", "cwd": "/Users/bob/dpi-work", "session": "r3" })).as_deref(),
+        Some("/Users/bob/dpi-work")
+    );
+    assert_eq!(dpi_remote_cwd(&json!({ "host": "mini", "cwd": "  " })), None);
+    assert_eq!(dpi_remote_cwd(&json!({ "error": "no session" })), None);
+}
+
+#[test]
 fn dpi_refreshed_card_marks_a_pushed_card_as_a_refresh() {
     let pushed = json!({
         "type": "extension_ui_request",
@@ -886,22 +896,39 @@ async fn real_pi_gets_no_dpi_requests_and_no_config_options() {
 }
 
 #[test]
-fn dpi_abort_request_names_the_row_and_needs_one() {
+fn dpi_row_requests_name_the_row_and_need_one() {
+    use super::session::dpi_row_request;
     assert_eq!(
-        super::session::dpi_abort_request(&json!({ "target": "abc:2" })),
-        Some(json!({ "type": "dpi_abort", "target": "abc:2" }))
+        dpi_row_request("pi/dpi/abort", &json!({ "target": "abc:2" })),
+        Some((json!({ "type": "dpi_abort", "target": "abc:2" }), "Stop"))
     );
-    assert_eq!(super::session::dpi_abort_request(&json!({ "target": "  " })), None);
-    assert_eq!(super::session::dpi_abort_request(&json!({})), None);
+    assert_eq!(
+        dpi_row_request("pi/dpi/archive", &json!({ "target": "abc:main" })),
+        Some((json!({ "type": "dpi_archive", "target": "abc:main" }), "Archive"))
+    );
+    assert_eq!(
+        dpi_row_request("pi/dpi/hide", &json!({ "target": "abc:2", "hidden": true })),
+        Some((json!({ "type": "dpi_hide", "target": "abc:2", "hidden": true }), "Hide"))
+    );
+    assert_eq!(
+        dpi_row_request("pi/dpi/hide", &json!({ "target": "abc:2", "hidden": false })),
+        Some((json!({ "type": "dpi_hide", "target": "abc:2", "hidden": false }), "Unhide"))
+    );
+    assert_eq!(dpi_row_request("pi/dpi/hide", &json!({ "target": "abc:2" })), None, "hide says which way");
+    assert_eq!(dpi_row_request("pi/dpi/abort", &json!({ "target": "  " })), None);
+    assert_eq!(dpi_row_request("pi/dpi/archive", &json!({})), None);
+    assert_eq!(dpi_row_request("pi/dpi/delete", &json!({ "target": "abc:2" })), None, "no delete");
 }
 
 #[test]
-fn dpi_session_rows_carry_their_live_activity() {
+fn dpi_session_rows_carry_their_live_activity_and_hidden_flag() {
     let rows = super::session::parse_dpi_sessions(&json!({ "sessions": [
         { "id": "s:1", "path": "dpi://s/1", "activity": "working" },
-        { "id": "s:2", "path": "dpi://s/2", "activity": "idle" },
+        { "id": "s:2", "path": "dpi://s/2", "activity": "idle", "hidden": true },
         { "id": "s:3", "path": "dpi://s/3" },
     ] }));
     let activity: Vec<_> = rows.iter().map(|row| row.activity.as_deref()).collect();
     assert_eq!(activity, [Some("working"), Some("idle"), None]);
+    let hidden: Vec<_> = rows.iter().map(|row| row.hidden).collect();
+    assert_eq!(hidden, [false, true, false]);
 }

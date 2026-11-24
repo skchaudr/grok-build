@@ -142,6 +142,8 @@ pub(crate) fn render_dashboard(
         }
     }
 
+    // Under dpi every agent is the backend's; the newest one that reported a location names it.
+    let remote = agents.values().rev().find_map(|a| a.dpi_remote.clone());
     super::chrome::render_header(
         buf,
         layout.header,
@@ -150,6 +152,7 @@ pub(crate) fn render_dashboard(
         state,
         registry,
         upgrade_cta,
+        remote.as_ref(),
     );
     super::chrome::render_actions_row(
         buf,
@@ -178,15 +181,23 @@ pub(crate) fn render_dashboard(
         .selected
         .as_ref()
         .and_then(|sel| rows.iter().find(|r| r.id == *sel).map(|r| r.state));
-    state.selected_stop_action = workspace_dashboard_enabled
-        .then(|| match state.selected.as_ref() {
+    state.selected_stop_action = if workspace_dashboard_enabled {
+        match state.selected.as_ref() {
             Some(DashboardRowId::TopLevel(id)) => agents
                 .get(id)
                 .map(|agent| crate::app::dashboard_stop_readiness(agent).action()),
             Some(DashboardRowId::Workspace { .. }) => Some(DashboardStopAction::Archive),
             Some(DashboardRowId::Roster { .. }) | None => None,
-        })
-        .flatten();
+        }
+    } else {
+        // An idle dpi row is never deleted: its main agent archives the session, an extra agent hides.
+        match state.selected.as_ref() {
+            Some(DashboardRowId::Roster { session_id }) => {
+                state.dpi_rows.get(session_id).map(|kind| kind.stop_action())
+            }
+            _ => None,
+        }
+    };
     let peek_active = state.peek_owns_input();
 
     // Peek REPLACES the dispatch input when active (a single rounded box at the same screen position, instead of a separate panel floating above it)
@@ -2575,6 +2586,17 @@ fn render_file_search_dropdown_for(
 /// permission UI. The. CtrlCtrl+x chip label follows the selected agent's state: `stop` for an agent
 /// with a live turn, `delete` otherwise.
 #[allow(clippy::too_many_arguments)]
+/// Footer label for Ctrl+Y while dpi agents are hidden from the dashboard (or being shown).
+fn hidden_agents_hint(state: &DashboardState) -> Option<String> {
+    if state.show_hidden_agents {
+        Some("hide hidden".to_owned())
+    } else if state.hidden_agent_count > 0 {
+        Some(format!("{} hidden", state.hidden_agent_count))
+    } else {
+        None
+    }
+}
+
 fn render_footer(
     buf: &mut Buffer,
     area: Rect,
@@ -2621,6 +2643,11 @@ fn render_footer(
             let confirm_label =
                 if matches!(state.selected_stop_action, Some(DashboardStopAction::Close)) {
                     "confirm close"
+                } else if !state.workspace_membership_mode
+                    && matches!(state.selected_stop_action, Some(DashboardStopAction::Archive))
+                {
+                    // the playground's submit button
+                    "Archive session"
                 } else if state.workspace_membership_mode {
                     "confirm archive"
                 } else {
@@ -2697,6 +2724,8 @@ fn render_footer(
         Some(RowState::Working | RowState::NeedsInput)
     ) {
         "stop"
+    } else if let Some(action) = state.selected_stop_action {
+        action.label()
     } else {
         "delete"
     };
@@ -2764,6 +2793,13 @@ fn render_footer(
         ];
         if show_ctrl_x {
             hints.push(HintItem::new(stop, stop_label).pinned());
+        }
+        if let Some(label) = hidden_agents_hint(state) {
+            let key = key_for(
+                crate::actions::ActionId::DashboardToggleHiddenAgents,
+                key!('y', CONTROL),
+            );
+            hints.push(HintItem::new(key, label));
         }
 
         ShortcutsBar::new(&hints)

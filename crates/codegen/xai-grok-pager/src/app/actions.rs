@@ -1053,6 +1053,8 @@ pub enum Action {
     DashboardPeekCycleMode,
     /// Toggle grouping between State and Directory.
     DashboardToggleGrouping,
+    /// Show or stop showing the dpi agents hidden from the dashboard.
+    DashboardToggleHiddenAgents,
     /// Set the live filter (typically driven by the dispatch input).
     DashboardSetFilter(crate::views::dashboard::FilterValue),
     /// Move selection cursor one row down.

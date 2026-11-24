@@ -15,7 +15,7 @@ fn render_header_only(
 ) {
     let registry = crate::actions::ActionRegistry::defaults();
     state.clear_chrome_hit_areas();
-    render_header(buf, area, theme, rows, state, &registry, None);
+    render_header(buf, area, theme, rows, state, &registry, None, None);
 }
 /// Paint the actions row on its own, the way `render_dashboard` does (per-frame hit-area reset included).
 fn render_actions_only(
@@ -199,6 +199,35 @@ fn header_paints_cwd_then_choose_hint_with_design_colours() {
         (hit.x as usize + hit.width as usize) >= start + expected.len(),
         "the location hit rect must cover the `[Choose …]` hint, got {hit:?}",
     );
+}
+/// Under dpi the header names the backend folder and session, never the laptop cwd, and offers no folder picker.
+#[test]
+fn header_shows_dpi_remote_and_session_without_choose_hint() {
+    let theme = Theme::current();
+    let area = Rect::new(0, 0, 200, 1);
+    let mut state = DashboardState::new();
+    state.cwd = std::path::PathBuf::from("/grok-laptop-cwd-marker");
+    let remote = crate::views::location::DpiRemote {
+        host: "sab-mini".into(),
+        cwd: "/Users/sab/dpi-work".into(),
+        label: "sab-mini:~/dpi-work".into(),
+        branch: Some("main".into()),
+        session: Some("r3-scratch".into()),
+    };
+    let registry = crate::actions::ActionRegistry::defaults();
+    state.clear_chrome_hit_areas();
+    let mut buf = Buffer::empty(area);
+    render_header(&mut buf, area, &theme, &[], &mut state, &registry, None, Some(&remote));
+    let text = buf_to_text(&buf);
+    assert!(
+        text.contains("main remote sab-mini:~/dpi-work · r3-scratch"),
+        "header must name the backend location and session, got: {text:?}",
+    );
+    assert!(
+        !text.contains("grok-laptop-cwd-marker") && !text.contains("Choose"),
+        "no laptop cwd and no folder picker under dpi, got: {text:?}",
+    );
+    assert!(state.location_hit.rect.is_none(), "the picker click target must not register");
 }
 /// Terminal theme: `Theme::faint` is DIM with no hard colour.
 #[test]

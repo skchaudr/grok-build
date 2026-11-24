@@ -89,19 +89,8 @@ impl PiAgent {
     /// dpi-rpc shim only: where the durable agent really runs (backend host, cwd, branch) for the pager header,
     /// and with `card` the attach card for a session just opened. Pi itself has no `dpi_remote`.
     pub(super) async fn publish_dpi_remote(&self, card: bool) {
-        if !dpi_shim() {
+        let Some(data) = self.request_dpi_remote(card).await else {
             return;
-        }
-        let data = match self
-            .rpc
-            .request(json!({ "type": "dpi_remote", "card": card }))
-            .await
-        {
-            Ok(data) => data,
-            Err(error) => {
-                tracing::warn!(%error, "dpi remote location unavailable");
-                return;
-            }
         };
         let attach_card = data.get("card").filter(|card| card.is_object()).cloned();
         self.send_ext_notification("pi/ui/remote", dpi_remote_location(data))
@@ -109,6 +98,24 @@ impl PiAgent {
         if let Some(attach_card) = attach_card {
             self.send_ext_notification("pi/ui/attach_card", attach_card)
                 .await;
+        }
+    }
+
+    /// The shim's `dpi_remote` reply; `None` outside the dpi-rpc shim or when the shim cannot answer.
+    pub(super) async fn request_dpi_remote(&self, card: bool) -> Option<Value> {
+        if !dpi_shim() {
+            return None;
+        }
+        match self
+            .rpc
+            .request(json!({ "type": "dpi_remote", "card": card }))
+            .await
+        {
+            Ok(data) => Some(data),
+            Err(error) => {
+                tracing::warn!(%error, "dpi remote location unavailable");
+                None
+            }
         }
     }
 

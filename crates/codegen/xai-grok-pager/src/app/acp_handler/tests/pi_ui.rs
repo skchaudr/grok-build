@@ -350,3 +350,37 @@ fn dpi_stopped_row_going_idle_leaves_a_newer_toast() {
     assert_eq!(d.error_toast.as_deref(), Some("\u{2717} Select a session first"));
     assert_eq!(d.stopping_turn, None);
 }
+
+/// dpi rows: main agents (no parent) and extra agents; hidden extra agents stay off the dashboard unless Ctrl+Y shows
+/// them, marked hidden. A main agent is never hidden.
+#[test]
+fn dpi_catalog_hides_hidden_extra_agents_and_records_row_kinds() {
+    use crate::views::dashboard::DpiRowKind;
+    let mut app = make_app_with_agent("s-a:main");
+    app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
+    app.active_view = crate::app::app_view::ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::default());
+    let catalog = pi(
+        "pi/ui/session_catalog",
+        serde_json::json!({ "scope": "current", "sessions": [
+            { "id": "s-b:main", "cwd": "/w", "summary": "beta", "activity": "idle", "hidden": true },
+            { "id": "s-b:2", "cwd": "/w", "summary": "beta / helper", "parentSessionPath": "dpi://s-b/main", "activity": "idle", "hidden": true },
+            { "id": "s-b:3", "cwd": "/w", "summary": "beta / other", "parentSessionPath": "dpi://s-b/main", "activity": "idle" },
+        ] }),
+    );
+    handle_ext_notification(&catalog, &mut app);
+    let ids: Vec<_> = app.dashboard_local_sessions.iter().map(|r| r.session_id.as_str()).collect();
+    assert_eq!(ids, ["s-b:main", "s-b:3"]);
+    let d = app.dashboard.as_ref().unwrap();
+    assert_eq!(d.hidden_agent_count, 1);
+    assert_eq!(d.dpi_rows.get("s-b:main"), Some(&DpiRowKind::Main));
+    assert_eq!(d.dpi_rows.get("s-b:3"), Some(&DpiRowKind::Extra { hidden: false }));
+    assert_eq!(d.dpi_rows.get("s-b:2"), None);
+
+    app.dashboard.as_mut().unwrap().show_hidden_agents = true;
+    handle_ext_notification(&catalog, &mut app);
+    let row = app.dashboard_local_sessions.iter().find(|r| r.session_id == "s-b:2").unwrap();
+    assert_eq!(row.title.as_deref(), Some("beta / helper (hidden)"));
+    assert_eq!(app.dashboard.as_ref().unwrap().dpi_rows.get("s-b:2"), Some(&DpiRowKind::Extra { hidden: true }));
+}

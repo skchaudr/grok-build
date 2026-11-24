@@ -46,7 +46,7 @@ pub use row::{
     sort_rows,
 };
 pub(crate) use row::{WorkspaceRowInputs, build_rows_with_workspace};
-pub(crate) use state::DashboardStopAction;
+pub(crate) use state::{DashboardStopAction, DpiRowKind};
 pub use state::{
     DashboardDispatchMode, DashboardRowId, DashboardState, Filter, FilterValue, Focusable,
     Grouping, LocationCandidate, LocationPickerState, PendingDispatchModel, PersistedDashboard,

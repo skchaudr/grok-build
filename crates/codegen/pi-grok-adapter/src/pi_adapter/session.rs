@@ -19,9 +19,11 @@ impl PiAgent {
                 .await
             {
                 Ok(data) => parse_dpi_sessions(&data),
+                // Keep the rows the pager has: an empty list would empty the dashboard and drop its selection
+                // until the next poll. A down backend shows as rows that stop changing.
                 Err(error) => {
                     tracing::warn!(%error, "dpi session list failed");
-                    Vec::new()
+                    return;
                 }
             };
             return self.send_session_catalog(sessions, all).await;
@@ -69,6 +71,7 @@ impl PiAgent {
                     "messageCount": session.message_count,
                     "parentSessionPath": session.parent_session_path,
                     "activity": session.activity,
+                    "hidden": session.hidden,
                 })).collect::<Vec<_>>(),
             }),
         )
@@ -1029,10 +1032,23 @@ impl PiAgent {
     }
 }
 
-/// The dpi-rpc shim request that aborts the roster row `params.target` (`<session>:<agent>`).
-pub(super) fn dpi_abort_request(params: &Value) -> Option<Value> {
+/// The dpi-rpc shim request for an Agent Dashboard action on the roster row `params.target` (`<session>:<agent>`),
+/// and what to call it when it fails: `pi/dpi/abort` stops its turn, `pi/dpi/archive` archives its session,
+/// `pi/dpi/hide` hides or unhides it on this dashboard (`params.hidden`).
+pub(super) fn dpi_row_request(method: &str, params: &Value) -> Option<(Value, &'static str)> {
     let target = params.get("target")?.as_str()?.trim();
-    (!target.is_empty()).then(|| json!({ "type": "dpi_abort", "target": target }))
+    if target.is_empty() {
+        return None;
+    }
+    Some(match method {
+        "pi/dpi/abort" => (json!({ "type": "dpi_abort", "target": target }), "Stop"),
+        "pi/dpi/archive" => (json!({ "type": "dpi_archive", "target": target }), "Archive"),
+        "pi/dpi/hide" => {
+            let hidden = params.get("hidden")?.as_bool()?;
+            (json!({ "type": "dpi_hide", "target": target, "hidden": hidden }), if hidden { "Hide" } else { "Unhide" })
+        }
+        _ => return None,
+    })
 }
 
 /// Rows from the dpi-rpc shim's `dpi_list_sessions`: one per durable agent,
@@ -1061,6 +1077,7 @@ pub(super) fn parse_dpi_sessions(data: &Value) -> Vec<PiSessionInfo> {
                 total_cost: None,
                 parent_session_path: text("parentSessionPath"),
                 activity: text("activity"),
+                hidden: row.get("hidden").and_then(Value::as_bool).unwrap_or(false),
             })
         })
         .collect()

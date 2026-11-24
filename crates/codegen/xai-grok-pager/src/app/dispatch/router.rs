@@ -21,6 +21,7 @@ use super::dashboard::{
     dispatch_dashboard_pick_session, dispatch_dashboard_question_answer,
     dispatch_dashboard_reorder, dispatch_dashboard_select, dispatch_dashboard_stop,
     dispatch_dashboard_toggle_auto_approve, dispatch_dashboard_toggle_grouping,
+    dispatch_dashboard_toggle_hidden_agents,
     dispatch_dashboard_toggle_pin, dispatch_dashboard_toggle_worktree, dispatch_exit_dashboard,
     dispatch_open_dashboard,
 };
@@ -1966,6 +1967,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::DashboardPeekCycleMode => dispatch_dashboard_peek_cycle_mode(app),
         Action::DashboardToggleGrouping => dispatch_dashboard_toggle_grouping(app),
+        Action::DashboardToggleHiddenAgents => dispatch_dashboard_toggle_hidden_agents(app),
         Action::DashboardSetFilter(value) => {
             if let Some(d) = app.dashboard.as_mut() {
                 d.filter = crate::views::dashboard::Filter::from_value(value);

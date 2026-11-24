@@ -506,6 +506,7 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PiSessionInfo> 
         total_cost: row.get(13)?,
         parent_session_path: row.get(14)?,
         activity: None,
+        hidden: false,
     })
 }
 

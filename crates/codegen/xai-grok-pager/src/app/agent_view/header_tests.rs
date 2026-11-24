@@ -556,6 +556,7 @@ fn dpi_remote_header_replaces_the_local_location() {
             cwd: "/Users/bob/repos/lab".into(),
             label: "mini:~/repos/lab".into(),
             branch: branch.map(str::to_owned),
+            session: None,
         });
         let buf = draw(&mut agent, &registry, false, OverlayHeader::default());
         let row = header_row(&agent, &buf);

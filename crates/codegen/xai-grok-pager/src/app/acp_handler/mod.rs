@@ -932,21 +932,46 @@ pub(super) fn handle_pi_ui_session_catalog(notif: &acp::ExtNotification, app: &m
 /// dpi-rpc rows carry their agent's live state (`"activity": "working" | "idle"`, from the backend's busy flag): show it
 /// on the dashboard's roster rows instead of the dormant default. A durable agent is resident on its backend, so an
 /// idle one sits in the Idle group, not Inactive. Local Pi rows carry no activity and stay dormant.
+/// They also say whether the agent is its session's main agent (no `parentSessionPath`) and whether this machine hid it
+/// from the dashboard (`hidden`); hidden rows are dropped unless Ctrl+Y shows them, marked hidden.
 fn apply_dpi_roster_activity(app: &mut AppView, sessions: &[serde_json::Value]) {
     use crate::app::roster::RosterActivity;
-    for row in &mut app.dashboard_local_sessions {
-        let activity = sessions
+    use crate::views::dashboard::{DpiRowKind, state::HIDDEN_ROW_SUFFIX};
+    let show_hidden = app.dashboard.as_ref().is_some_and(|d| d.show_hidden_agents);
+    let mut dpi_rows = std::collections::HashMap::new();
+    let mut hidden_count = 0;
+    app.dashboard_local_sessions.retain_mut(|row| {
+        let Some(session) = sessions
             .iter()
             .find(|session| session.get("id").and_then(serde_json::Value::as_str) == Some(row.session_id.as_str()))
-            .and_then(|session| session.get("activity"))
-            .and_then(serde_json::Value::as_str);
-        row.activity = match activity {
+        else {
+            return true;
+        };
+        row.activity = match session.get("activity").and_then(serde_json::Value::as_str) {
             Some("working") => RosterActivity::Working,
             Some("idle") => RosterActivity::Idle,
-            _ => continue,
+            _ => return true,
         };
         row.resident = true;
         row.session_kind = Some("external".to_owned());
+        let extra = session.get("parentSessionPath").is_some_and(|parent| !parent.is_null());
+        let hidden = extra && session.get("hidden").and_then(serde_json::Value::as_bool) == Some(true);
+        if hidden {
+            hidden_count += 1;
+            if !show_hidden {
+                return false;
+            }
+            if let Some(title) = row.title.as_mut() {
+                title.push_str(HIDDEN_ROW_SUFFIX);
+            }
+        }
+        let kind = if extra { DpiRowKind::Extra { hidden } } else { DpiRowKind::Main };
+        dpi_rows.insert(row.session_id.clone(), kind);
+        true
+    });
+    if let Some(d) = app.dashboard.as_mut() {
+        d.dpi_rows = dpi_rows;
+        d.hidden_agent_count = hidden_count;
     }
     clear_stopping_turn_toast(app);
 }

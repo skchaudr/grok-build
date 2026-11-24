@@ -875,21 +875,21 @@ impl acp::Agent for PiAgent {
                 self.publish_dpi_settings().await;
                 Ok(())
             }
-            // The Agent Dashboard stopped a dpi row this TUI is not attached to: abort that agent on the backend and
-            // stay attached where we are. Real Pi has no such agents, so nothing reaches it.
-            "pi/dpi/abort" => {
+            // The Agent Dashboard acted on a dpi row this TUI is not attached to: stop its turn, archive its session or
+            // hide it, and stay attached where we are. Real Pi has no such agents, so nothing reaches it.
+            method @ ("pi/dpi/abort" | "pi/dpi/archive" | "pi/dpi/hide") => {
                 if !dpi_shim() {
                     return Ok(());
                 }
                 let params: Value =
                     serde_json::from_str(arguments.params.get()).unwrap_or_default();
-                let Some(request) = super::session::dpi_abort_request(&params) else {
-                    tracing::warn!("ignored pi/dpi/abort without a target");
+                let Some((request, action)) = super::session::dpi_row_request(method, &params) else {
+                    tracing::warn!(method, "ignored a dpi row action without a target");
                     return Ok(());
                 };
                 if let Err(error) = self.rpc.request(request).await {
-                    tracing::warn!(%error, "dpi abort failed");
-                    self.send_ui_notification(&format!("Stop failed: {error}"), Some("error"))
+                    tracing::warn!(%error, method, "dpi row action failed");
+                    self.send_ui_notification(&format!("{action} failed: {error}"), Some("error"))
                         .await;
                 }
                 Ok(())

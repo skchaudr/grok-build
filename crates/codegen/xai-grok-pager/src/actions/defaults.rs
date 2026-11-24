@@ -1031,7 +1031,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "On a busy top-level row, Ctrl+X cancels the running turn.\nOnce the row is idle, press Ctrl+X again within 2s to permanently delete the session.",
+                "On a busy top-level row, Ctrl+X cancels the running turn.\nOnce the row is idle, press Ctrl+X again within 2s to permanently delete the session.\nUnder dpi nothing is deleted: on a session's main agent Ctrl+X asks, then archives the session (the playground restores it); on any other agent it hides the agent from this dashboard (Ctrl+Y shows hidden agents).",
             ),
         },
         ActionDef {
@@ -1071,6 +1071,22 @@ pub(super) fn default_actions(
             requires_confirmation: false,
             long_help: Some(
                 "Switches the dashboard between a flat list and rows grouped by state, such as working versus idle.\nGrouping surfaces the agents that need attention; the flat list keeps a stable order.\nYour choice persists across sessions.",
+            ),
+        },
+        ActionDef {
+            id: ActionId::DashboardToggleHiddenAgents,
+            label: "hidden",
+            description: "Show / hide hidden agents",
+            // `Ctrl+Y`: free in the dashboard; `Ctrl+H` is Backspace in most terminals.
+            default_key: key!('y', CONTROL),
+            alt_keys: vec![],
+            category: Category::Dashboard,
+            context: When::DashboardFocused,
+            hint_priority: None,
+            hint_key_display: None,
+            requires_confirmation: false,
+            long_help: Some(
+                "Under dpi, lists the agents you hid from the dashboard with Ctrl+X, marked hidden.\nCtrl+X on a hidden agent unhides it. Press Ctrl+Y again to hide them.\nHidden agents stay on the backend and in the playground.",
             ),
         },
         ActionDef {

@@ -136,6 +136,7 @@ pub enum ActionId {
     DashboardStop,
     DashboardCycleMode,
     DashboardToggleGrouping,
+    DashboardToggleHiddenAgents,
     DashboardReorderUp,
     DashboardReorderDown,
     DashboardShortcutsHelp,

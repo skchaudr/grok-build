@@ -203,6 +203,10 @@ pub(crate) enum DashboardStopAction {
     Stop,
     Archive,
     Close,
+    /// A dpi agent that is not its session's main agent: hide it from this dashboard. It stays on the backend.
+    Hide,
+    /// The same, for a hidden agent shown with the hidden-agents toggle.
+    Unhide,
 }
 
 impl DashboardStopAction {
@@ -211,6 +215,8 @@ impl DashboardStopAction {
             Self::Stop => "stop",
             Self::Archive => "archive",
             Self::Close => "close",
+            Self::Hide => "hide",
+            Self::Unhide => "unhide",
         }
     }
 
@@ -219,6 +225,26 @@ impl DashboardStopAction {
             Self::Stop => None,
             Self::Archive => Some("archive this session"),
             Self::Close => Some("close this session"),
+            Self::Hide | Self::Unhide => None,
+        }
+    }
+}
+
+/// What a dpi roster row is, from the shim's `dpi_list_sessions`: a session's main agent, or an extra agent (fork,
+/// new agent or subagent) that the dashboard can hide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DpiRowKind {
+    Main,
+    Extra { hidden: bool },
+}
+
+impl DpiRowKind {
+    /// Ctrl+X on this idle row: archive the session (main agent) or hide / unhide the agent.
+    pub(crate) fn stop_action(self) -> DashboardStopAction {
+        match self {
+            Self::Main => DashboardStopAction::Archive,
+            Self::Extra { hidden: false } => DashboardStopAction::Hide,
+            Self::Extra { hidden: true } => DashboardStopAction::Unhide,
         }
     }
 }
@@ -355,6 +381,9 @@ impl PersistedDashboard {
     }
 }
 
+/// Marks a hidden dpi agent's row while Ctrl+Y shows hidden agents.
+pub(crate) const HIDDEN_ROW_SUFFIX: &str = " (hidden)";
+
 /// Toast shown while Ctrl+X stops a dpi agent's turn; cleared when the roster shows that agent idle.
 pub(crate) const STOPPING_TURN_TOAST: &str = "Stopping the agent's turn";
 
@@ -440,9 +469,18 @@ pub struct DashboardState {
     /// A second gesture on the same row within [`CONFIRM_WINDOW`] deletes it (see [`Self::armed_delete_row`]); otherwise it lapses.
     /// Cleared on any focus change.
     pub delete_confirm: Option<(DashboardRowId, Instant)>,
+    /// The selected row when it left the list (a roster refresh that missed it). If it comes back before the user moves
+    /// the cursor, the selection returns to it: by row id, never by position.
+    pub(crate) lost_selection: Option<DashboardRowId>,
     pub workspace_membership_mode: bool,
     /// Ctrl+X meaning for the selected v2 row in the current frame.
     pub(crate) selected_stop_action: Option<DashboardStopAction>,
+    /// dpi roster rows by session id ("<session>:<agent>"), rebuilt from every roster poll.
+    pub(crate) dpi_rows: std::collections::HashMap<String, DpiRowKind>,
+    /// Ctrl+Y: list the dpi agents hidden from this dashboard (marked hidden) so they can be unhidden.
+    pub show_hidden_agents: bool,
+    /// dpi agents hidden from this dashboard at the last roster poll, shown or not.
+    pub hidden_agent_count: usize,
     pub spinner_tick: u64,
     pub(crate) painted_animations: PaintedAnimations,
     /// Last frame's row layout: hit areas keyed by row id.
@@ -1162,8 +1200,12 @@ impl DashboardState {
             error_toast: None,
             stopping_turn: None,
             delete_confirm: None,
+            lost_selection: None,
             workspace_membership_mode: false,
             selected_stop_action: None,
+            dpi_rows: std::collections::HashMap::new(),
+            show_hidden_agents: false,
+            hidden_agent_count: 0,
             spinner_tick: 0,
             painted_animations: PaintedAnimations::default(),
             row_rects: Vec::new(),
@@ -1309,6 +1351,7 @@ impl DashboardState {
 
     /// Focus the actions row's `+ New Agent` button.
     pub fn focus_new_agent_button(&mut self) {
+        self.lost_selection = None;
         self.focus_action(ActionsFocus::NewAgent);
     }
 
@@ -1372,6 +1415,7 @@ impl DashboardState {
             self.delete_confirm = None;
         }
         self.selected = Some(id);
+        self.lost_selection = None;
         self.actions_focus = None;
         self.selected_section = None;
         self.selected_idle_overflow = false;
@@ -1390,6 +1434,7 @@ impl DashboardState {
     /// Focus the section header identified by `key`; the third cursor target alongside rows and the `+ New Agent` button.
     /// Clears the row selection and button focus so exactly one cursor is active.
     pub fn focus_section(&mut self, key: SectionKey) {
+        self.lost_selection = None;
         self.selected_section = Some(key);
         self.selected = None;
         self.actions_focus = None;
@@ -1400,6 +1445,7 @@ impl DashboardState {
     /// Focus the Idle group's "N more" overflow toggle; the fourth cursor target.
     /// Clears the other three so exactly one cursor is active.
     pub fn focus_idle_overflow(&mut self) {
+        self.lost_selection = None;
         self.selected_idle_overflow = true;
         self.selected = None;
         self.selected_section = None;
@@ -4081,6 +4127,16 @@ impl DashboardState {
     /// A deliberately-cleared selection (`None`) is PRESERVED: `None` is a valid steady state.
     /// The contract: no row selected means dispatch creates a new session; a selected row means dispatch replies to that agent.
     pub fn reanchor_selection(&mut self, rows: &[DashboardRow]) {
+        // A selected row that dropped out of one refresh and is back: select it again, unless the user moved meanwhile.
+        if self.selected.is_none()
+            && self.actions_focus.is_none()
+            && self.selected_section.is_none()
+            && !self.selected_idle_overflow
+            && let Some(lost) = self.lost_selection.as_ref()
+            && rows.iter().any(|r| r.id == *lost)
+        {
+            self.selected = self.lost_selection.take();
+        }
         // Section-cursor validation: a selected section header can go stale without any grouping toggle: a
         // `s:state` filter suppresses all state headers, and row churn (the last Working agent going idle)
         // removes the header outright.
@@ -4125,7 +4181,9 @@ impl DashboardState {
             }
         }
         if rows.is_empty() {
-            self.selected = None;
+            if let Some(sel) = self.selected.take() {
+                self.lost_selection = Some(sel);
+            }
             self.delete_confirm = None;
             return;
         }
@@ -4133,8 +4191,8 @@ impl DashboardState {
             && !rows.iter().any(|r| r.id == *sel)
         {
             // The previously selected row was filtered out or closed.
-            // Drop the cursor; re-selecting is the user's job
-            self.selected = None;
+            // Drop the cursor (no selection means a dispatch starts a new agent); remember it in case it comes back.
+            self.lost_selection = self.selected.take();
         }
         self.sync_delete_confirm_to_selection();
     }
@@ -4173,6 +4231,9 @@ fn dashboard_action_for_id(
         }
         ActionId::DashboardToggleGrouping => {
             Some(InputOutcome::Action(Action::DashboardToggleGrouping))
+        }
+        ActionId::DashboardToggleHiddenAgents => {
+            Some(InputOutcome::Action(Action::DashboardToggleHiddenAgents))
         }
         ActionId::DashboardReorderUp => Some(InputOutcome::Action(Action::DashboardReorderUp)),
         ActionId::DashboardReorderDown => Some(InputOutcome::Action(Action::DashboardReorderDown)),

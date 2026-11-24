@@ -359,9 +359,18 @@ impl PiAgent {
                 state.bootstrap.state.session_name.clone(),
             )
         };
-        let cwd = std::env::current_dir()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        // Under dpi the laptop cwd is not where the agent runs: ask the shim for the backend's.
+        let cwd = match self
+            .request_dpi_remote(false)
+            .await
+            .as_ref()
+            .and_then(dpi_remote_cwd)
+        {
+            Some(cwd) => cwd,
+            None => std::env::current_dir()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        };
         let mut response = build_session_info_response(
             &stats,
             messages.as_ref(),

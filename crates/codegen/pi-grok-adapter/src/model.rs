@@ -31,6 +31,8 @@ pub struct PiSessionInfo {
     /// Live activity for a durable dpi agent (`"working"` / `"idle"` from the backend's busy flag), so the Agent
     /// Dashboard roster can show it. `None` for local Pi sessions, which have no live state of their own.
     pub activity: Option<String>,
+    /// A dpi agent this machine hid from the Agent Dashboard (the dpi-rpc shim keeps the list).
+    pub hidden: bool,
 }
 
 /// Pi's `switch_session` response. A cancelled response is successful RPC
@@ -678,6 +680,7 @@ fn parse_session_file(path: &Path) -> Option<PiSessionInfo> {
         total_cost,
         parent_session_path: None,
         activity: None,
+        hidden: false,
     })
 }
 

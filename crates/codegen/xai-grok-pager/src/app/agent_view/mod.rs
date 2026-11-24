@@ -2166,6 +2166,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         | ActionId::DashboardStop
         | ActionId::DashboardCycleMode
         | ActionId::DashboardToggleGrouping
+        | ActionId::DashboardToggleHiddenAgents
         | ActionId::DashboardReorderUp
         | ActionId::DashboardReorderDown
         | ActionId::DashboardShortcutsHelp

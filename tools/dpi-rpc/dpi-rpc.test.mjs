@@ -194,6 +194,42 @@ test("dpi_abort aborts the named agent on the backend and stays attached where i
   } finally { s.close(); }
 });
 
+test("dpi_archive archives the row's session (the playground's DELETE) and stays attached where it was", async () => {
+  const s = await shim();
+  try {
+    const at = mark();
+    await s.call({ type: "dpi_archive", target: "s2:1" });
+    assert.deepEqual(sent(at), ["DELETE /sessions/s2"]);
+    assert.equal((await s.call({ type: "get_state" })).data.sessionId, "s1:1");
+    state.failDelete = true;
+    const refused = await s.call({ type: "dpi_archive", target: "s2:1" });
+    assert.equal(refused.success, false);
+    assert.equal(refused.error, "session is busy");
+  } finally { s.close(); state.failDelete = false; }
+});
+
+test("dpi_hide hides a row from the dashboard list only, survives a restart, and unhides", async () => {
+  const home = mkdtempSync(join(tmpdir(), "dpi-rpc-"));
+  const hiddenRows = async (sh) => (await sh.call({ type: "dpi_list_sessions" })).data.sessions.filter((r) => r.hidden).map((r) => r.id);
+  const s = await shim({ HOME: home });
+  try {
+    assert.deepEqual(await hiddenRows(s), []);
+    const at = mark();
+    await s.call({ type: "dpi_hide", target: "s1:2", hidden: true });
+    await s.call({ type: "dpi_hide", target: "dpi://s1/3", hidden: true });
+    assert.deepEqual(sent(at), [], "nothing reaches the backend");
+    assert.deepEqual(await hiddenRows(s), ["s1:2", "s1:3"]);
+    const row = (await s.call({ type: "dpi_list_sessions" })).data.sessions.find((r) => r.id === "s1:2");
+    assert.equal(row.activity, "working", "a hidden row is still listed, with its live state");
+  } finally { s.close(); }
+  const again = await shim({ HOME: home });
+  try {
+    assert.deepEqual(await hiddenRows(again), ["s1:2", "s1:3"], "kept in ~/.dpi across restarts");
+    await again.call({ type: "dpi_hide", target: "s1:2", hidden: false });
+    assert.deepEqual(await hiddenRows(again), ["s1:3"]);
+  } finally { again.close(); }
+});
+
 test("attaching elsewhere mid-turn ends the turn for the TUI without aborting it on the backend", async () => {
   state.streams.length = 0;
   const s = await shim();
@@ -325,12 +361,19 @@ test("a shim command that fails shows its error instead of going quiet", async (
 test("dpi_remote names the backend host, the agent's real cwd and branch; home folds to ~", async () => {
   const s = await shim();
   try {
-    assert.deepEqual((await s.call({ type: "dpi_remote" })).data, { host: "mini-host", cwd: "/w/proj", label: "mini-host:/w/proj", branch: "main" });
+    assert.deepEqual((await s.call({ type: "dpi_remote" })).data, { host: "mini-host", cwd: "/w/proj", label: "mini-host:/w/proj", branch: "main", session: "s1" });
   } finally { s.close(); }
   const sub = await shim({}, "dpi://s1/3");
   try {
-    assert.deepEqual((await sub.call({ type: "dpi_remote" })).data, { host: "mini-host", cwd: "/Users/bob/repo", label: "mini-host:~/repo" }); // no branch: none shown
+    assert.deepEqual((await sub.call({ type: "dpi_remote" })).data, { host: "mini-host", cwd: "/Users/bob/repo", label: "mini-host:~/repo", session: "s1" }); // no branch: none shown
   } finally { sub.close(); }
+});
+
+test("dpi_remote names the session; a non-root agent reads `session / agent` like the card title", async () => {
+  const fork = await shim({}, "dpi://s1/2");
+  try {
+    assert.equal((await fork.call({ type: "dpi_remote" })).data.session, "s1 / n");
+  } finally { fork.close(); }
 });
 
 test("dpi_remote with card: the attach card's title and rows come from the backend", async () => {
@@ -947,24 +990,25 @@ test("/dpi-reset and /dpi-archive ask first: nothing happens until Yes, and No o
     assert.deepEqual(sent(at), ['POST /sessions/s1/agents/1/reset {"note":"handing over"}']);
 
     at = mark();
-    const nothingDone = () => s.lines.filter((x) => x.method === "notify" && x.message === "Archive this session?: nothing done.").length;
+    const nothingDone = () => s.lines.filter((x) => x.method === "notify" && x.message === "Archive s1?: nothing done.").length;
     await s.call({ type: "prompt", message: "/dpi-archive" });
-    const no = await s.until((l) => l.method === "confirm" && l.title === "Archive this session?");
+    const no = await s.until((l) => l.method === "confirm" && l.title === "Archive s1?");
+    assert.equal(no.message, "Stops all of its work and moves its files to archive/ on mini-host. Nothing is deleted."); // the playground's words
     s.send({ type: "extension_ui_response", id: no.id, confirmed: false });
     await until(() => nothingDone() === 1);
     await s.call({ type: "prompt", message: "/dpi-archive" });
-    const dismissed = await s.until((l) => l.method === "confirm" && l.id !== no.id && l.title === "Archive this session?");
+    const dismissed = await s.until((l) => l.method === "confirm" && l.id !== no.id && l.title === "Archive s1?");
     s.send({ type: "extension_ui_response", id: dismissed.id, cancelled: true }); // dismissed, not answered
     await until(() => nothingDone() === 2);
     assert.deepEqual(sent(at), []);
 
     await s.call({ type: "prompt", message: "/dpi-archive" });
-    const yes = await s.until((l) => l.method === "confirm" && l.id !== no.id && l.id !== dismissed.id && l.title === "Archive this session?");
+    const yes = await s.until((l) => l.method === "confirm" && l.id !== no.id && l.id !== dismissed.id && l.title === "Archive s1?");
     s.send({ type: "extension_ui_response", id: "not-ours", confirmed: true }); // an id we never opened changes nothing
     await new Promise((r) => setTimeout(r, 100));
     assert.deepEqual(sent(at), []);
     s.send({ type: "extension_ui_response", id: yes.id, confirmed: true });
-    await s.until((l) => l.method === "notify" && l.message.startsWith("Session archived."));
+    await s.until((l) => l.method === "notify" && l.message.startsWith("Archived s1."));
     assert.deepEqual(sent(at), ["DELETE /sessions/s1"]);
     s.send({ type: "extension_ui_response", id: yes.id, confirmed: true }); // answered once only
     await new Promise((r) => setTimeout(r, 100));
@@ -977,10 +1021,10 @@ test("a confirmed action the backend refuses says why instead of going quiet", a
   const s = await shim();
   try {
     await s.call({ type: "prompt", message: "/dpi-archive" });
-    const d = await s.until((l) => l.method === "confirm" && l.title === "Archive this session?");
+    const d = await s.until((l) => l.method === "confirm" && l.title === "Archive s1?");
     s.send({ type: "extension_ui_response", id: d.id, confirmed: true });
-    await s.until((l) => l.method === "notify" && l.notifyType === "error" && l.message === "Archive this session?: session is busy");
-    assert.ok(!s.lines.some((l) => l.method === "notify" && l.message?.startsWith("Session archived")));
+    await s.until((l) => l.method === "notify" && l.notifyType === "error" && l.message === "Archive s1?: session is busy");
+    assert.ok(!s.lines.some((l) => l.method === "notify" && l.message?.startsWith("Archived s1")));
   } finally { s.close(); state.failDelete = false; }
 });
 

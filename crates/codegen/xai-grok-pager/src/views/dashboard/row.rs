@@ -477,7 +477,8 @@ fn top_level_row(id: AgentId, agent: &AgentView, pinned: bool, home: Option<&str
     let secondary_line = top_level_secondary_line(agent, state, activity.as_deref());
     let last_change_at = top_level_last_change_at(agent, state);
     let mut badges = Vec::new();
-    let local_worktree = agent.is_worktree;
+    // A dpi agent's folder is on the backend; the laptop's worktree state says nothing about it.
+    let local_worktree = agent.is_worktree && agent.dpi_remote.is_none();
     if local_worktree {
         badges.push(RowBadge::Worktree);
     }
@@ -488,7 +489,13 @@ fn top_level_row(id: AgentId, agent: &AgentView, pinned: bool, home: Option<&str
     if pinned {
         badges.push(RowBadge::Pinned);
     }
-    let cwd_display = super::state::compact_cwd(agent.location_path(), home);
+    let (cwd_display, cwd) = match agent.dpi_remote.as_ref() {
+        Some(remote) => (remote.label.clone(), PathBuf::from(&remote.cwd)),
+        None => (
+            super::state::compact_cwd(agent.location_path(), home),
+            agent.location_path().to_path_buf(),
+        ),
+    };
     DashboardRow {
         id: DashboardRowId::TopLevel(id),
         session_id: agent.session.session_id.as_ref().map(|id| id.0.to_string()),
@@ -498,7 +505,7 @@ fn top_level_row(id: AgentId, agent: &AgentView, pinned: bool, home: Option<&str
         activity,
         secondary_line,
         cwd_display,
-        cwd: agent.location_path().to_path_buf(),
+        cwd,
         last_change_at,
         pinned,
         badges,
@@ -529,6 +536,19 @@ fn cwd_basename(cwd: &std::path::Path) -> Option<String> {
 }
 /// The branch shown is therefore the latest, not a stale notification value.
 fn top_level_subtitle(agent: &AgentView) -> Option<String> {
+    // A dpi agent runs on the backend: its branch and folder, never the laptop cwd grok-pi started in.
+    if let Some(remote) = agent.dpi_remote.as_ref() {
+        let branch = remote
+            .branch
+            .clone()
+            .map(crate::views::location::branch_label);
+        let parts: Vec<String> = branch
+            .into_iter()
+            .chain(cwd_basename(std::path::Path::new(&remote.cwd)))
+            .map(|s| sanitize(&s))
+            .collect();
+        return (!parts.is_empty()).then(|| parts.join(" "));
+    }
     let lazy = crate::git_info::cwd_git_info_lazy(&agent.session.cwd);
     let trimmed = |s: &str| {
         let t = s.trim();
@@ -1672,6 +1692,26 @@ mod tests {
         agent.is_worktree = false;
         agent.current_branch = None;
         assert_eq!(top_level_subtitle(&agent).as_deref(), Some("bar"));
+    }
+    /// A dpi agent's row shows the backend branch and folder, not the laptop cwd it was started in.
+    #[test]
+    fn subtitle_dpi_remote_uses_backend_branch_and_folder() {
+        let mut agent = make_idle_agent_with_model(None);
+        agent.session.cwd = PathBuf::from("/Users/me/sab-mini");
+        agent.current_branch = Some("laptop-branch".to_string());
+        agent.is_worktree = true;
+        agent.dpi_remote = Some(crate::views::location::DpiRemote {
+            host: "sab-mini".into(),
+            cwd: "/Users/sab/dpi-work".into(),
+            label: "sab-mini:~/dpi-work".into(),
+            branch: Some("r3-scratch".into()),
+            session: Some("r3".into()),
+        });
+        assert_eq!(top_level_subtitle(&agent).as_deref(), Some("r3-scratch dpi-work"));
+        let row = top_level_row(AgentId(0), &agent, false, None);
+        assert_eq!(row.cwd_display, "sab-mini:~/dpi-work");
+        assert_eq!(row.cwd, PathBuf::from("/Users/sab/dpi-work"));
+        assert!(!row.badges.contains(&RowBadge::Worktree));
     }
     /// Task counts reflect running background commands only.
     /// `bg_tasks` retains finished (`Done` / `Failed`) tasks for the tasks-pane history, and those must not pin a stale badge on the row forever.
