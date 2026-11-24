@@ -18,6 +18,7 @@ disk), or the workflows run UI (`/workflow runs`).
 - **`/dashboard`** (aliases **`/agents-dashboard`**, **`/sessions`**) — open
   from inside a session.
 - **`Ctrl+\`** — same view as the slash command.
+- **`←`** on an empty prompt inside a session — same as `Ctrl+\`.
 
 Hidden in minimal mode. Set `GROK_AGENT_DASHBOARD=0` or
 `[dashboard].enabled = false` to disable.

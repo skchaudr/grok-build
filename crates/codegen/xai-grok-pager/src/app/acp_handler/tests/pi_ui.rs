@@ -242,3 +242,29 @@ fn pi_notifications_are_kept_for_notify() {
     let list = crate::views::modal::NotificationListState::new(kept.clone());
     assert_eq!(list.filtered()[0].message, "quota low", "newest first");
 }
+
+#[test]
+fn dpi_catalog_rows_show_their_live_activity_on_the_dashboard() {
+    use crate::app::roster::RosterActivity;
+    let mut app = make_app_with_agent("s-a:main");
+    app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
+    app.active_view = crate::app::app_view::ActiveView::AgentDashboard;
+    assert!(handle_ext_notification(
+        &pi(
+            "pi/ui/session_catalog",
+            serde_json::json!({ "scope": "current", "sessions": [
+                { "id": "s-b:main", "cwd": "/w", "activity": "working" },
+                { "id": "s-c:main", "cwd": "/w", "activity": "idle" },
+                { "id": "local-pi", "cwd": "/w" },
+            ] }),
+        ),
+        &mut app,
+    ));
+    let row = |id: &str| app.dashboard_local_sessions.iter().find(|row| row.session_id == id).unwrap();
+    assert_eq!(row("s-b:main").activity, RosterActivity::Working);
+    assert_eq!(row("s-c:main").activity, RosterActivity::Idle);
+    assert!(row("s-c:main").resident, "a durable agent is live on its backend");
+    assert_eq!(row("local-pi").activity, RosterActivity::Dormant, "no activity: unchanged");
+    assert!(!row("local-pi").resident);
+}

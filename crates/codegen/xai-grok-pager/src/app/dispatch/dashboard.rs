@@ -1057,6 +1057,20 @@ pub(super) fn dispatch_dashboard_overlay_cycle(app: &mut AppView, delta: i32) ->
     surface_yolo_launch_block_notice(app, next_id);
     vec![]
 }
+/// Why a dashboard dispatch must wait on a Pi host, or `None` when it may go ahead.
+fn pi_dispatch_blocked(app: &AppView, pi_host: bool, dpi: bool) -> Option<&'static str> {
+    if !pi_host {
+        return None;
+    }
+    let mut busy = app.agents.values().filter(|agent| agent.session.state.is_busy());
+    if !dpi {
+        return busy
+            .next()
+            .map(|_| "Finish the current Pi turn before dispatching a new session");
+    }
+    busy.any(|agent| !agent.session.pending_prompts.is_empty() || !agent.shared_queue.is_empty())
+        .then_some("Send or clear the queued prompts before dispatching a new agent")
+}
 pub(super) fn dispatch_dashboard_dispatch(
     app: &mut AppView,
     text: String,
@@ -1098,15 +1112,12 @@ pub(super) fn dispatch_dashboard_dispatch(
     // One Pi RPC host owns one mutable active session. Starting another while a
     // local turn is running would retarget later events/prompts to the new Pi
     // context, so fail closed until the current turn settles.
+    // A durable dpi agent keeps running on its backend after the shim attaches elsewhere (its row shows it working),
+    // so under dpi-grok only prompts still queued in this TUI hold the dispatch: they would land on the new agent.
     let pi_host = app.external_agent && crate::slash::external_common::is_pi_label(app.agent_label(None));
-    if pi_host
-        && app
-            .agents
-            .values()
-            .any(|agent| agent.session.state.is_busy())
-    {
+    if let Some(reason) = pi_dispatch_blocked(app, pi_host, crate::settings::dpi::dpi_host()) {
         if let Some(d) = app.dashboard.as_mut() {
-            d.set_error_toast("Finish the current Pi turn before dispatching a new session");
+            d.set_error_toast(reason);
         }
         return vec![];
     }
@@ -1900,6 +1911,24 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
                 Some(e) if e.origin.kind == "conversation" => {
                     app.show_toast("Deleting chat conversations isn't supported yet");
                     vec![]
+                }
+                // A working durable dpi agent this TUI is not attached to: abort its turn on the backend, stay here.
+                // The next roster poll shows it idle.
+                Some(e)
+                    if e.activity == crate::app::roster::RosterActivity::Working
+                        && app.external_agent
+                        && crate::settings::dpi::dpi_host() =>
+                {
+                    let target = e.session_id.clone();
+                    if let Some(d) = app.dashboard.as_mut() {
+                        d.delete_confirm = None;
+                    }
+                    app.show_toast("Stopping the agent's turn");
+                    vec![Effect::PiUiInput {
+                        session_id: acp::SessionId::new(target.clone()),
+                        method: "pi/dpi/abort",
+                        params: serde_json::json!({ "target": target }),
+                    }]
                 }
                 Some(e)
                     if !crate::views::dashboard::roster_activity_to_state(e.activity)

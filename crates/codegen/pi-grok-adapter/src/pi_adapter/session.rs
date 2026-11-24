@@ -68,6 +68,7 @@ impl PiAgent {
                     "totalCost": session.total_cost,
                     "messageCount": session.message_count,
                     "parentSessionPath": session.parent_session_path,
+                    "activity": session.activity,
                 })).collect::<Vec<_>>(),
             }),
         )
@@ -1028,9 +1029,15 @@ impl PiAgent {
     }
 }
 
+/// The dpi-rpc shim request that aborts the roster row `params.target` (`<session>:<agent>`).
+pub(super) fn dpi_abort_request(params: &Value) -> Option<Value> {
+    let target = params.get("target")?.as_str()?.trim();
+    (!target.is_empty()).then(|| json!({ "type": "dpi_abort", "target": target }))
+}
+
 /// Rows from the dpi-rpc shim's `dpi_list_sessions`: one per durable agent,
 /// `path` = `dpi://<session>/<agent>` (handed back to `switch_session`).
-fn parse_dpi_sessions(data: &Value) -> Vec<PiSessionInfo> {
+pub(super) fn parse_dpi_sessions(data: &Value) -> Vec<PiSessionInfo> {
     let rows = data
         .get("sessions")
         .and_then(Value::as_array)
@@ -1053,6 +1060,7 @@ fn parse_dpi_sessions(data: &Value) -> Vec<PiSessionInfo> {
                 total_tokens: None,
                 total_cost: None,
                 parent_session_path: text("parentSessionPath"),
+                activity: text("activity"),
             })
         })
         .collect()

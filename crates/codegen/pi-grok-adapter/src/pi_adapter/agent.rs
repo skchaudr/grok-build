@@ -875,6 +875,25 @@ impl acp::Agent for PiAgent {
                 self.publish_dpi_settings().await;
                 Ok(())
             }
+            // The Agent Dashboard stopped a dpi row this TUI is not attached to: abort that agent on the backend and
+            // stay attached where we are. Real Pi has no such agents, so nothing reaches it.
+            "pi/dpi/abort" => {
+                if !dpi_shim() {
+                    return Ok(());
+                }
+                let params: Value =
+                    serde_json::from_str(arguments.params.get()).unwrap_or_default();
+                let Some(request) = super::session::dpi_abort_request(&params) else {
+                    tracing::warn!("ignored pi/dpi/abort without a target");
+                    return Ok(());
+                };
+                if let Err(error) = self.rpc.request(request).await {
+                    tracing::warn!(%error, "dpi abort failed");
+                    self.send_ui_notification(&format!("Stop failed: {error}"), Some("error"))
+                        .await;
+                }
+                Ok(())
+            }
             "pi/extension_command" => {
                 let params: Value =
                     serde_json::from_str(arguments.params.get()).unwrap_or_default();

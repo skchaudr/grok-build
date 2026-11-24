@@ -28,6 +28,9 @@ pub struct PiSessionInfo {
     /// `sessions.parent_session_path`). Used to render the fork/copy
     /// relationship tree in the resume picker. `None` for root sessions.
     pub parent_session_path: Option<String>,
+    /// Live activity for a durable dpi agent (`"working"` / `"idle"` from the backend's busy flag), so the Agent
+    /// Dashboard roster can show it. `None` for local Pi sessions, which have no live state of their own.
+    pub activity: Option<String>,
 }
 
 /// Pi's `switch_session` response. A cancelled response is successful RPC
@@ -674,6 +677,7 @@ fn parse_session_file(path: &Path) -> Option<PiSessionInfo> {
         total_tokens,
         total_cost,
         parent_session_path: None,
+        activity: None,
     })
 }
 

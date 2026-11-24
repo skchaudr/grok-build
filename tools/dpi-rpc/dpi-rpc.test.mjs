@@ -114,7 +114,7 @@ after(() => { server.closeAllConnections(); server.close(); });
 // Spawn the shim attached to s1; returns call(cmd) and the extension_ui_request frames seen so far.
 async function shim(env = {}, target = "s1") {
   const child = spawn("node", [SHIM, "--session", target], {
-    env: { PATH: process.env.PATH, HOME: mkdtempSync(join(tmpdir(), "dpi-rpc-")), DPI_URL: base, DPI_TOKEN: TOKEN, DPI_TASK_POLL_MS: "50", DPI_OPS_POLL_MS: "50", DPI_OPS_URL: "http://127.0.0.1:1", ...env },
+    env: { PATH: process.env.PATH, HOME: mkdtempSync(join(tmpdir(), "dpi-rpc-")), DPI_URL: base, DPI_TOKEN: TOKEN, DPI_TASK_POLL_MS: "50", DPI_OPS_POLL_MS: "50", DPI_OPS_URL: "http://127.0.0.1:1", DPI_HUB_PORT: "1", ...env },
   });
   const lines = [];
   const waiters = [];
@@ -156,6 +156,68 @@ test("dpi_list_sessions fills parent, message count and activity time", async ()
     assert.equal(row("s1:2").messageCount, 0); // entries fetch failed: row still listed
     assert.equal(row("s1:2").modifiedAt, new Date(1000).toISOString());
     assert.equal(row("s2:1").modifiedAt, new Date(9000).toISOString());
+  } finally { s.close(); }
+});
+
+test("dpi_list_sessions gives each row its live activity from the backend busy flag", async () => {
+  const s = await shim();
+  try {
+    const { data } = await s.call({ type: "dpi_list_sessions" });
+    const row = (id) => data.sessions.find((r) => r.id === id);
+    assert.equal(row("s1:1").activity, "idle");
+    assert.equal(row("s1:2").activity, "working"); // busy: true in the fake tree
+    assert.equal(row("s2:1").activity, "idle");
+  } finally { s.close(); }
+});
+
+test("dpi_list_sessions re-reads a busy agent's transcript every poll and reuses an idle one's", async () => {
+  const s = await shim();
+  try {
+    await s.call({ type: "dpi_list_sessions" });
+    const reads = (path) => state.requests.filter((q) => q.startsWith(`GET ${path}/entries`)).length;
+    const idle0 = reads("/sessions/s1/agents/1"), busy0 = reads("/sessions/s1/agents/2");
+    await s.call({ type: "dpi_list_sessions" });
+    assert.equal(reads("/sessions/s1/agents/1"), idle0, "idle agent: cached");
+    assert.equal(reads("/sessions/s1/agents/2"), busy0 + 1, "busy agent: read again");
+  } finally { s.close(); }
+});
+
+test("dpi_abort aborts the named agent on the backend and stays attached where it was", async () => {
+  const s = await shim();
+  try {
+    await s.call({ type: "dpi_abort", target: "s2:1" });
+    assert.ok(state.requests.includes("POST /sessions/s2/agents/1/abort {}"), "a roster row id");
+    await s.call({ type: "dpi_abort", target: "dpi://s1/2" });
+    assert.ok(state.requests.includes("POST /sessions/s1/agents/2/abort {}"), "a dpi:// path");
+    assert.equal((await s.call({ type: "get_state" })).data.sessionId, "s1:1");
+    assert.ok(!state.requests.some((q) => q.startsWith("POST /sessions/s1/agents/1/abort")));
+  } finally { s.close(); }
+});
+
+test("attaching elsewhere mid-turn ends the turn for the TUI without aborting it on the backend", async () => {
+  state.streams.length = 0;
+  const s = await shim();
+  try {
+    await s.call({ type: "get_state" });
+    await s.until(() => state.streams.length > 0);
+    state.streams.at(-1).write(`data: ${JSON.stringify({ type: "batch", events: [{ type: "run_start" }] })}\n\n`);
+    await s.until((l) => l.type === "agent_start");
+    const before = state.requests.length;
+    const r = await s.call({ type: "new_session" });
+    const end = s.lines.findIndex((l) => l.type === "agent_end");
+    const settled = s.lines.findIndex((l) => l.type === "agent_settled");
+    assert.ok(end >= 0 && settled > end, "agent_end then agent_settled");
+    assert.ok(settled < s.lines.indexOf(r), "released before new_session answers");
+    assert.ok(!state.requests.slice(before).some((q) => q.includes("/abort")), "no abort sent");
+    assert.equal((await s.call({ type: "get_state" })).data.sessionId, "s3:1");
+  } finally { s.close(); }
+});
+
+test("attaching while idle emits no agent_end", async () => {
+  const s = await shim();
+  try {
+    await s.call({ type: "new_session" });
+    assert.ok(!s.lines.some((l) => l.type === "agent_end"));
   } finally { s.close(); }
 });
 
@@ -754,6 +816,8 @@ test("playground URL: env, then the client file for this backend, then :4781 on 
   const probe = async (u) => (probed.push(u), true);
   assert.equal(await url({ clientEnv: { DPI_URL: "http://elsewhere:4780", DPI_HUB_URL: "http://file-hub:4781" }, probe }), "http://100.66.99.64:4781");
   assert.deepEqual(probed, ["http://100.66.99.64:4781"]);
+  // tests (and odd setups) move the guessed port so a live hub on this machine never answers for a fake backend
+  assert.equal(await url({ env: { DPI_HUB_PORT: "1" }, probe }), "http://100.66.99.64:1");
   assert.equal(await url({ probe: async () => false }), null);
   assert.equal(await url({ base: "http://100.66.99.64:4782", clientEnv: { DPI_HUB_URL: "http://file-hub:4781" } }), null); // Prime backend
   assert.equal(await url({ base: "http://100.66.99.64:4782", env: { DPI_HUB_URL: "http://env-hub:4781" } }), "http://env-hub:4781"); // but an explicit one wins

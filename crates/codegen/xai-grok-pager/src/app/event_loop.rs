@@ -1321,13 +1321,13 @@ pub(crate) async fn run(
     app.plugin_cta_marketplace = launch_effective_config
         .as_ref()
         .and_then(plugin_cta_marketplace_from);
-    app.workspace_dashboard_enabled = xai_grok_config::env_bool("GROK_WORKSPACE_DASHBOARD")
-        .or_else(|| {
-            remote_settings
-                .as_ref()
-                .and_then(|s| s.workspace_dashboard_enabled)
-        })
-        .unwrap_or(false);
+    app.workspace_dashboard_enabled = workspace_dashboard_on(
+        crate::settings::dpi::dpi_host(),
+        xai_grok_config::env_bool("GROK_WORKSPACE_DASHBOARD"),
+        remote_settings
+            .as_ref()
+            .and_then(|s| s.workspace_dashboard_enabled),
+    );
     app.session_picker_grouped = std::env::var("GROK_SESSION_PICKER_GROUPED")
         .ok()
         .and_then(|v| match v.as_str() {
@@ -4345,9 +4345,25 @@ fn traces_state_mut(app: &mut AppView) -> Option<&mut crate::views::traces_modal
     }
 }
 
+/// Whether the Agent Dashboard runs on Grok's workspace store (`GROK_WORKSPACE_DASHBOARD`, else remote settings).
+/// dpi-grok never does: its agents live on the dpi backend and reach the roster through the Pi session catalog, which
+/// the workspace dashboard never asks for.
+fn workspace_dashboard_on(dpi_host: bool, env: Option<bool>, remote: Option<bool>) -> bool {
+    !dpi_host && env.or(remote).unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dpi_grok_keeps_the_dashboard_on_its_backend_agents() {
+        assert!(!workspace_dashboard_on(true, Some(true), Some(true)));
+        assert!(workspace_dashboard_on(false, None, Some(true)), "Grok and real Pi follow remote settings");
+        assert!(!workspace_dashboard_on(false, Some(false), Some(true)), "the env var wins");
+        assert!(!workspace_dashboard_on(false, None, None));
+    }
+
     fn nth<T>(xs: &[T], i: usize) -> &T {
         let Some(x) = xs.get(i) else {
             panic!("expected index {i}, len {}", xs.len());

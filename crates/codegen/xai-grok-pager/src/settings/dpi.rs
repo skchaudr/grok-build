@@ -27,6 +27,30 @@ const KEY_PREFIX: &str = "dpi.";
 /// Sidebar section for an option the shim gave no category.
 const DEFAULT_SECTION: &str = "Agent";
 
+/// Exported by dpi-grok: grok-pi-acp sits on the dpi-rpc shim, so every Pi session is a durable agent on a dpi or
+/// Prime backend that keeps running whether or not this TUI is attached. Real Pi (`grok grok-pi`) never sets it.
+pub const HOST_ENV: &str = "GROK_PI_DPI";
+
+#[cfg(test)]
+thread_local! {
+    static HOST_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether this pager drives durable dpi agents (`GROK_PI_DPI=1`).
+pub fn dpi_host() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = HOST_FOR_TEST.with(std::cell::Cell::get) {
+        return forced;
+    }
+    std::env::var(HOST_ENV).is_ok_and(|value| value == "1")
+}
+
+/// Pins [`dpi_host`] for this test thread (`None` reads the environment again).
+#[cfg(test)]
+pub fn set_dpi_host_for_test(forced: Option<bool>) {
+    HOST_FOR_TEST.with(|cell| cell.set(forced));
+}
+
 /// Whether `key` is one of the dpi rows.
 pub fn is_dpi_key(key: &str) -> bool {
     key.starts_with(KEY_PREFIX)

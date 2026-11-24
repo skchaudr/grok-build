@@ -453,6 +453,23 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
+        // 0c2. Left on an empty prompt opens the Agent Dashboard, the same as Ctrl+\ (an empty composer has no cursor motion to fall back to).
+        // Inside the dashboard overlay it backs out to the list, as Ctrl+\ does there. Vim normal mode lives on the scrollback pane and never reaches here.
+        if self.prompt_mode == PromptMode::Normal
+            && self.prompt_input_mode == PromptInputMode::Normal
+            && self.prompt.text().is_empty()
+            && !self.prompt.file_search_visible()
+            && !self.prompt.slash_open()
+            && key!(Left).matches(key)
+            && registry.find(ActionId::OpenDashboard).is_some()
+        {
+            return InputOutcome::Action(if self.in_dashboard_overlay {
+                Action::DashboardOverlayExit
+            } else {
+                Action::OpenDashboard
+            });
+        }
+
         // 0d. Bash mode activation: `!` on empty prompt enters bash mode.
         if self.prompt_input_mode == PromptInputMode::Normal
             && is_bang_key(key)
@@ -2082,5 +2099,102 @@ mod queue_recall_tests {
 
         assert_eq!(agent.active_pane, AgentPane::Prompt);
         assert_eq!(agent.prompt.text(), "an older prompt");
+    }
+}
+
+#[cfg(test)]
+mod left_opens_dashboard_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn left(agent: &mut AgentView) -> InputOutcome {
+        agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn left_on_an_empty_prompt_opens_the_dashboard() {
+        let mut agent = test_fixtures::make_agent();
+        agent.active_pane = AgentPane::Prompt;
+        assert!(agent.prompt.text().is_empty());
+
+        let outcome = left(&mut agent);
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::OpenDashboard)),
+            "Left on an empty prompt behaves like Ctrl+\\, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn left_inside_the_dashboard_overlay_backs_out_like_ctrl_backslash() {
+        let mut agent = test_fixtures::make_agent();
+        agent.in_dashboard_overlay = true;
+
+        let outcome = left(&mut agent);
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
+            "got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn left_with_text_stays_cursor_motion() {
+        let mut agent = test_fixtures::make_agent();
+        agent.prompt.set_text("abc");
+        agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let before = agent.prompt.cursor();
+        assert!(before > 0, "Right moved the cursor into the text");
+
+        let outcome = left(&mut agent);
+        assert!(
+            !matches!(outcome, InputOutcome::Action(_)),
+            "got {outcome:?}"
+        );
+        assert_eq!(agent.prompt.text(), "abc");
+        assert_eq!(agent.prompt.cursor(), before - 1, "the cursor moved left");
+    }
+
+    #[test]
+    fn left_in_bash_mode_does_not_open_the_dashboard() {
+        let mut agent = test_fixtures::make_agent();
+        agent.prompt_input_mode = PromptInputMode::Bash;
+
+        let outcome = left(&mut agent);
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::OpenDashboard)),
+            "got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn modified_left_does_not_open_the_dashboard() {
+        let mut agent = test_fixtures::make_agent();
+        for mods in [KeyModifiers::SHIFT, KeyModifiers::ALT, KeyModifiers::CONTROL] {
+            let outcome = agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Left, mods));
+            assert!(
+                !matches!(outcome, InputOutcome::Action(Action::OpenDashboard)),
+                "{mods:?}+Left got {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn left_without_a_dashboard_binding_falls_through() {
+        let mut agent = test_fixtures::make_agent();
+        let actions = ActionRegistry::non_vscode_for_test()
+            .all()
+            .iter()
+            .filter(|def| def.id != ActionId::OpenDashboard)
+            .cloned()
+            .collect();
+        let registry = ActionRegistry::new(actions);
+
+        let outcome = agent.handle_prompt_key_with_registry_for_test(
+            &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            &registry,
+        );
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::OpenDashboard)),
+            "got {outcome:?}"
+        );
     }
 }

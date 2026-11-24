@@ -944,7 +944,7 @@ pub(super) fn default_actions(
         ActionDef {
             id: ActionId::OpenDashboard,
             label: "dashboard",
-            description: "Open the Agent Dashboard",
+            description: "Open the Agent Dashboard (also ← on an empty prompt)",
             default_key: key!('\\', CONTROL),
             // Classic C0 FS (0x1c): without KKP, Ctrl+\ arrives as Char('4')+CONTROL (e.g. Apple Terminal).
             // Omit when ToggleQueue already owns Ctrl+4
@@ -959,7 +959,7 @@ pub(super) fn default_actions(
             hint_key_display: Some("Ctrl+\\"),
             requires_confirmation: false,
             long_help: Some(
-                "Opens the Agent Dashboard: a list of all your running and recent agents to monitor and switch between.\nWorks from anywhere, including the welcome screen and inside a session.\nFrom there you can dispatch, attach, stop, group, and reorder agents.",
+                "Opens the Agent Dashboard: a list of all your running and recent agents to monitor and switch between.\nWorks from anywhere, including the welcome screen and inside a session.\nInside a session, ← on an empty prompt does the same.\nFrom there you can dispatch, attach, stop, group, and reorder agents.",
             ),
         },
         // Register all in-dashboard shortcuts through the registry under `When::DashboardFocused`

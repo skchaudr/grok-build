@@ -856,5 +856,36 @@ async fn real_pi_gets_no_dpi_requests_and_no_config_options() {
     .await
     .expect("no Pi round trip")
     .unwrap();
+    tokio::time::timeout(
+        deadline,
+        agent.ext_notification(acp::ExtNotification::new(
+            "pi/dpi/abort",
+            serde_json::value::to_raw_value(&json!({ "target": "s1:main" })).unwrap().into(),
+        )),
+    )
+    .await
+    .expect("no Pi round trip")
+    .unwrap();
     assert!(client_rx.try_recv().is_err(), "nothing is sent to the pager");
+}
+
+#[test]
+fn dpi_abort_request_names_the_row_and_needs_one() {
+    assert_eq!(
+        super::session::dpi_abort_request(&json!({ "target": "abc:2" })),
+        Some(json!({ "type": "dpi_abort", "target": "abc:2" }))
+    );
+    assert_eq!(super::session::dpi_abort_request(&json!({ "target": "  " })), None);
+    assert_eq!(super::session::dpi_abort_request(&json!({})), None);
+}
+
+#[test]
+fn dpi_session_rows_carry_their_live_activity() {
+    let rows = super::session::parse_dpi_sessions(&json!({ "sessions": [
+        { "id": "s:1", "path": "dpi://s/1", "activity": "working" },
+        { "id": "s:2", "path": "dpi://s/2", "activity": "idle" },
+        { "id": "s:3", "path": "dpi://s/3" },
+    ] }));
+    let activity: Vec<_> = rows.iter().map(|row| row.activity.as_deref()).collect();
+    assert_eq!(activity, [Some("working"), Some("idle"), None]);
 }

@@ -230,7 +230,15 @@ async function pickTarget() {
   return [newest.id, "main"];
 }
 
+// Leaving an agent mid-turn (dashboard dispatch, resume, fork): end the turn for the TUI so its prompt does not wait
+// forever. Nothing is sent to the backend: the run carries on there and its row shows it working.
+function releaseTurn() {
+  if (awaitingRun && !running) for (const t of translate({ type: "run_start" })) out(t);
+  if (running) for (const t of translate({ type: "run_end" })) out(t);
+}
+
 function attach() {
+  releaseTurn();
   try { writeFileSync(LAST, JSON.stringify({ session, agent })); } catch {}
   stream?.abort();
   stream = new AbortController();
@@ -243,6 +251,19 @@ function attach() {
 // ---- commands: Pi RPC -> /v1 ---------------------------------------------
 
 const activeEntries = async (path = agentPath()) => (await api("GET", path + "/entries?scope=active")).items;
+// dpi_list_sessions' transcript per agent. Re-read while the agent is busy, when it was busy at the last read, or after
+// LISTED_TTL_MS; otherwise an idle agent's transcript has not changed since.
+const LISTED_TTL_MS = 30_000;
+const listed = new Map(); // "<session>:<agent>" -> { busy, at, entries }
+async function listedEntries(s, a) {
+  const key = `${s.id}:${a.id}`;
+  const hit = listed.get(key);
+  if (hit && !a.busy && !hit.busy && Date.now() - hit.at < LISTED_TTL_MS) return hit.entries;
+  const entries = await activeEntries(`/sessions/${s.id}/agents/${a.id}`).catch(() => null);
+  if (entries === null) { listed.delete(key); return []; }
+  listed.set(key, { busy: !!a.busy, at: Date.now(), entries });
+  return entries;
+}
 const modelMessages = (entries) => entries.flatMap((i) => i.model ?? []).filter((m) => m.role !== "system");
 const activeMessages = async () => modelMessages(await activeEntries());
 
@@ -831,6 +852,14 @@ const handlers = {
   steer: async (c) => send(c.message, "steer"),
   follow_up: async (c) => send(c.message, "followUp"),
   abort: async () => { await api("POST", agentPath() + "/abort", {}); },
+  // The dashboard's stop on a row this TUI is not attached to: abort that agent's turn, stay where we are.
+  dpi_abort: async (c) => {
+    // target: a roster row id "<session>:<agent>" (dpi_list_sessions) or a dpi:// path
+    const target = String(c.target ?? "");
+    const row = target.match(/^([^/:]+):([^/:]+)$/);
+    const [s, a] = row ? [row[1], row[2]] : parseTarget(target);
+    await api("POST", `/sessions/${encodeURIComponent(s)}/agents/${encodeURIComponent(a)}/abort`, {});
+  },
   set_model: async (c) => {
     await api("PATCH", agentPath() + "/config", { model: { provider: c.provider, modelId: c.modelId } });
     return device.models.find((m) => m.provider === c.provider && m.id === c.modelId) ?? { provider: c.provider, id: c.modelId };
@@ -842,13 +871,13 @@ const handlers = {
   set_follow_up_mode: async () => {},
   set_auto_compaction: async () => {},
   set_auto_retry: async () => {},
-  // grok-pi's /resume picker (GROK_PI_DPI=1): one row per durable agent.
-  // The tree has no activity time or counts, so each row reads its agent's active transcript.
-  // shortcut: one fetch per agent on every picker open; add a backend field or cache if sessions grow.
+  // grok-pi's /resume picker and the Agent Dashboard roster (GROK_PI_DPI=1): one row per durable agent, with its live
+  // activity from the backend's busy flag. The tree has no activity time or counts, so each row reads its agent's
+  // active transcript; the dashboard polls every second, so an idle agent's transcript is reused (see listedEntries).
   dpi_remote: async (c) => { const r = await remote(!!c.card); sentRemote(r); return r; },
   dpi_list_sessions: async () => {
     const rows = (await api("GET", "/sessions")).flatMap((s) => (s.agents ?? []).map((a) => [s, a]));
-    const active = await Promise.all(rows.map(([s, a]) => activeEntries(`/sessions/${s.id}/agents/${a.id}`).catch(() => [])));
+    const active = await Promise.all(rows.map(([s, a]) => listedEntries(s, a)));
     return {
       sessions: rows.map(([s, a], i) => {
         const messages = modelMessages(active[i]);
@@ -862,6 +891,7 @@ const handlers = {
           modifiedAt: new Date(last).toISOString(),
           messageCount: messages.length,
           firstMessage: a.busy ? "(running)" : "",
+          activity: a.busy ? "working" : "idle",
           modelId: s.model,
           parentSessionPath: a.kind === "root" ? undefined : `dpi://${s.id}/${a.parentId ?? a.ownerAgentId ?? "main"}`,
         };

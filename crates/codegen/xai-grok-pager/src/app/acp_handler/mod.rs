@@ -924,7 +924,30 @@ pub(super) fn handle_pi_ui_session_catalog(notif: &acp::ExtNotification, app: &m
             })
         })
         .collect();
-    app.set_external_session_catalog(entries, scope)
+    let changed = app.set_external_session_catalog(entries, scope);
+    apply_dpi_roster_activity(app, sessions);
+    changed
+}
+
+/// dpi-rpc rows carry their agent's live state (`"activity": "working" | "idle"`, from the backend's busy flag): show it
+/// on the dashboard's roster rows instead of the dormant default. A durable agent is resident on its backend, so an
+/// idle one sits in the Idle group, not Inactive. Local Pi rows carry no activity and stay dormant.
+fn apply_dpi_roster_activity(app: &mut AppView, sessions: &[serde_json::Value]) {
+    use crate::app::roster::RosterActivity;
+    for row in &mut app.dashboard_local_sessions {
+        let activity = sessions
+            .iter()
+            .find(|session| session.get("id").and_then(serde_json::Value::as_str) == Some(row.session_id.as_str()))
+            .and_then(|session| session.get("activity"))
+            .and_then(serde_json::Value::as_str);
+        row.activity = match activity {
+            Some("working") => RosterActivity::Working,
+            Some("idle") => RosterActivity::Idle,
+            _ => continue,
+        };
+        row.resident = true;
+        row.session_kind = Some("external".to_owned());
+    }
 }
 
 /// Record the shell's latest `session/new` setup step so a create timeout can name where it stalled.

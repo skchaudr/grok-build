@@ -8248,3 +8248,110 @@ fn stop_readiness_predicate_matches_the_built_plan() {
     assert!(!DashboardStopPlan::would_stop_anything(agent));
     agree(agent);
 }
+
+/// Under dpi-grok the busy agent keeps running on its backend, so a dashboard dispatch goes ahead mid-turn: the old
+/// agent is detached (never cancelled) and the new durable session is created.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dpi_dashboard_dispatch_goes_ahead_while_a_turn_runs_and_cancels_nothing() {
+    crate::settings::dpi::set_dpi_host_for_test(Some(true));
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
+    app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
+    open_dashboard(&mut app);
+    let effects = dispatch_dashboard_dispatch(&mut app, "second agent".into(), false);
+    crate::settings::dpi::set_dpi_host_for_test(None);
+    assert!(app.dashboard.as_ref().unwrap().error_toast.is_none());
+    assert!(!app.agents.contains_key(&AgentId(0)), "the busy agent is detached");
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::CreateSession { .. })));
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::CancelTurn { .. } | Effect::CancelTurnThenFetchRewindPoints { .. }
+        )),
+        "detaching must not abort the running turn: {effects:?}"
+    );
+}
+
+/// A prompt still queued in this TUI would be sent to the new agent once the old turn is released, so it holds the
+/// dispatch even under dpi-grok.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dpi_dashboard_dispatch_waits_for_prompts_queued_on_the_busy_agent() {
+    crate::settings::dpi::set_dpi_host_for_test(Some(true));
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.pending_prompts.push_back(crate::app::agent::QueuedPrompt::plain(
+            1,
+            "queued follow-up",
+            crate::app::agent::QueueEntryKind::Prompt,
+        ));
+    }
+    open_dashboard(&mut app);
+    let effects = dispatch_dashboard_dispatch(&mut app, "second agent".into(), false);
+    crate::settings::dpi::set_dpi_host_for_test(None);
+    assert!(effects.is_empty());
+    assert!(app.agents.contains_key(&AgentId(0)));
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+        Some("\u{2717} Send or clear the queued prompts before dispatching a new agent")
+    );
+}
+
+/// Ctrl+X on a working dpi roster row aborts that agent on the backend and stays put: no attach, no delete arm.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dpi_dashboard_stop_on_a_working_roster_row_aborts_it_without_attaching() {
+    crate::settings::dpi::set_dpi_host_for_test(Some(true));
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
+    let mut entry = idle_roster_entry("s-other:main", "Other agent");
+    entry.activity = crate::app::roster::RosterActivity::Working;
+    app.dashboard_local_sessions = vec![entry];
+    open_dashboard(&mut app);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.selected = Some(crate::views::dashboard::DashboardRowId::Roster {
+            session_id: "s-other:main".into(),
+        });
+    }
+    let effects = dispatch_dashboard_stop(&mut app);
+    crate::settings::dpi::set_dpi_host_for_test(None);
+    assert_eq!(effects.len(), 1, "{effects:?}");
+    assert!(matches!(
+        &effects[0],
+        Effect::PiUiInput { method: "pi/dpi/abort", params, .. }
+            if params["target"] == "s-other:main"
+    ));
+    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_none());
+    assert_eq!(app.agents.len(), 1);
+    assert!(app.agents.contains_key(&AgentId(0)), "still attached to the same agent");
+    assert!(matches!(app.active_view, ActiveView::AgentDashboard));
+}
+
+/// Real Pi keeps the old behaviour: a working roster row only toasts.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn real_pi_dashboard_stop_on_a_working_roster_row_sends_no_dpi_abort() {
+    crate::settings::dpi::set_dpi_host_for_test(Some(false));
+    let mut app = test_app_with_agent();
+    app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
+    let mut entry = idle_roster_entry("pi-sess", "Pi row");
+    entry.activity = crate::app::roster::RosterActivity::Working;
+    app.dashboard_local_sessions = vec![entry];
+    open_dashboard(&mut app);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.selected = Some(crate::views::dashboard::DashboardRowId::Roster {
+            session_id: "pi-sess".into(),
+        });
+    }
+    let effects = dispatch_dashboard_stop(&mut app);
+    crate::settings::dpi::set_dpi_host_for_test(None);
+    assert!(effects.is_empty());
+}

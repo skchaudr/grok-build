@@ -134,8 +134,9 @@ const origin = (u) => { try { return new URL(u).origin; } catch { return undefin
 
 /**
  * Where the browser playground (hub) is: DPI_HUB_URL from the environment, else the one in client.env when that file
- * is for this backend, else port 4781 on the backend's host if `probe(url)` says something answers. The Prime backend
- * (port 4782) has no hub. null when none. The playground has no deep links to a session, so this is its base URL.
+ * is for this backend, else port 4781 (DPI_HUB_PORT overrides it) on the backend's host if `probe(url)` says something
+ * answers. The Prime backend (port 4782) has no hub. null when none. The playground has no deep links to a session, so
+ * this is its base URL.
  */
 export async function resolvePlaygroundUrl({ env, clientEnv, base, probe }) {
   const fromEnv = clean(env.DPI_HUB_URL);
@@ -144,7 +145,7 @@ export async function resolvePlaygroundUrl({ env, clientEnv, base, probe }) {
   if (u.port === "4782") return null;
   const fromFile = clean(clientEnv.DPI_HUB_URL);
   if (fromFile && (!clientEnv.DPI_URL || origin(clientEnv.DPI_URL) === u.origin)) return fromFile;
-  const guess = `${u.protocol}//${u.hostname}:4781`;
+  const guess = `${u.protocol}//${u.hostname}:${clean(env.DPI_HUB_PORT) ?? "4781"}`;
   return (await probe(guess)) ? guess : null;
 }
 
