@@ -452,18 +452,14 @@ impl Projector {
                     }
 
                     StepKind::Checkpoint => {
-                        // The newest run-state block on screen is the gate
-                        // question from `Waiting`, which still shows the gate
-                        // as ◐ and the following steps as ○. Print the updated
-                        // diagram and path so the run's newest visible state
-                        // is the answered gate while the next step runs.
+                        // One line: the gate question and its options live in
+                        // the ask panel, so the transcript only records that
+                        // the gate was answered. The run's graph is printed
+                        // once at RunStarted; re-printing it on every
+                        // transition buried the thread in stale copies.
                         let glyph = if is_ok { "✓" } else { "✗" };
                         let answer = checkpoint_answer_text(output);
-                        let text = format!(
-                            "{}\n\n{}\n\n**{glyph} {node}** · answered: {answer}\n",
-                            self.mermaid_fence(),
-                            self.taken_path()
-                        );
+                        let text = format!("**{glyph} {node}** · answered: {answer}\n");
                         outs.push(self.parent_message(&text));
                         self.parent_after_block = true;
                     }
@@ -488,13 +484,9 @@ impl Projector {
                 ..
             } => {
                 let state_changed = self.set_node_state(node, PlanNodeState::InProgress);
-                // The question itself is printed once, by the ask panel below; the
-                // transcript line only marks the gate as waiting.
-                let text = format!(
-                    "{}\n\n{}\n\n**◐ {node}**\n\n",
-                    self.mermaid_fence(),
-                    self.taken_path()
-                );
+                // The question and its options are printed once, by the ask
+                // panel; this line only marks the gate in the transcript.
+                let text = format!("**◐ {node}** · waiting for your answer\n");
                 let mut outs = vec![self.parent_message(&text)];
                 if state_changed
                     && let Some(plan_out) = self.build_plan_out()
@@ -512,15 +504,16 @@ impl Projector {
                 if status == "waiting" {
                     return Vec::new();
                 }
-                let fence = self.mermaid_fence();
+                let path = self.taken_path();
                 let text = if status == "completed" {
                     let dur_ms = (*at_ms - self.started_at_ms).max(0) as u64;
                     let dur = fmt_duration(dur_ms);
-                    format!(
-                        "{fence}\n\n{}\n\n✓ **{}** finished in {dur}\n",
-                        self.taken_path(),
-                        self.title
-                    )
+                    let path = if path.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {path}")
+                    };
+                    format!("✓ **{}** finished in {dur}{path}\n", self.title)
                 } else if status == "cancelled" {
                     // A cancelled run was stopped on purpose: it is not a
                     // failure, and the transcript must say cancelled.
@@ -528,22 +521,18 @@ impl Projector {
                         Some(err) => format!(" ({err})"),
                         None => String::new(),
                     };
-                    format!(
-                        "{fence}\n\n{}\n\n✗ **{}** cancelled{detail}\n",
-                        self.taken_path(),
-                        self.title
-                    )
+                    format!("✗ **{}** cancelled{detail}\n", self.title)
                 } else {
                     let detail = match error.as_deref().filter(|s| !s.is_empty()) {
                         Some(err) if status != "failed" => format!("{status} ({err})"),
                         Some(err) => err.to_string(),
                         None => status.clone(),
                     };
-                    format!(
-                        "{fence}\n\n{}\n\n✗ **{}** failed: {detail}\n",
-                        self.taken_path(),
-                        self.title
-                    )
+                    let at = self
+                        .failed_node()
+                        .map(|node| format!(" at {node}"))
+                        .unwrap_or_default();
+                    format!("✗ **{}** failed{at}: {detail}\n", self.title)
                 };
                 vec![self.parent_message(&text)]
             }
@@ -601,27 +590,18 @@ impl Projector {
             .join(" → ")
     }
 
-    fn mermaid_states(&self) -> HashMap<String, char> {
-        self.plan_states
+    /// The node the run stopped on, for the one-line failure summary.
+    fn failed_node(&self) -> Option<String> {
+        let flow = self.flow.as_ref()?;
+        flow.nodes
             .iter()
-            .filter_map(|(id, state)| {
-                let glyph = match state {
-                    PlanNodeState::Pending => return None,
-                    PlanNodeState::InProgress => '◐',
-                    PlanNodeState::Completed => '✓',
-                    PlanNodeState::Failed => '✗',
-                };
-                Some((id.clone(), glyph))
+            .find(|n| self.plan_states.get(&n.id) == Some(&PlanNodeState::Failed))
+            .or_else(|| {
+                flow.nodes
+                    .iter()
+                    .find(|n| self.plan_states.get(&n.id) == Some(&PlanNodeState::InProgress))
             })
-            .collect()
-    }
-
-    fn mermaid_fence(&self) -> String {
-        let Some(flow) = self.flow.as_ref() else {
-            return String::new();
-        };
-        let chart = mermaid(flow, &self.mermaid_states());
-        format!("\n\n```mermaid\n{chart}\n```")
+            .map(|n| n.id.clone())
     }
 
     fn set_node_state(&mut self, node: &str, state: PlanNodeState) -> bool {
@@ -1542,8 +1522,10 @@ mod tests {
             text.contains("✓ human_gate"),
             "the finished path must show the answered gate as done: {text}"
         );
-        assert!(text.contains("```mermaid"));
-        assert!(text.contains("human_gate[\"✓ human_gate\"]"));
+        assert!(
+            !text.contains("```mermaid"),
+            "the run must not print a second graph at the end: {text}"
+        );
     }
 
     #[test]
@@ -1582,7 +1564,7 @@ mod tests {
                 // The gate line marks the gate as waiting; the question itself is
                 // printed once, by the ask panel, not again here.
                 assert!(
-                    text.contains("**◐ human_gate**\n"),
+                    text.contains("**◐ human_gate** · waiting for your answer\n"),
                     "gate line must not repeat the question, got: {text}"
                 );
                 assert!(
@@ -1591,7 +1573,7 @@ mod tests {
                 );
                 // The choices live in the question pop-up only; the transcript shows the question once.
                 assert!(!text.contains("deploy.flow.json"));
-                assert!(text.contains("◐ human_gate"));
+                assert!(!text.contains("```mermaid"), "no second graph: {text}");
             }
             _ => panic!("expected AgentMessageChunk"),
         }
@@ -1882,7 +1864,7 @@ mod tests {
     }
 
     #[test]
-    fn run_finished_completed_emits_marked_mermaid_with_completed_and_unstarted_nodes() {
+    fn run_finished_completed_prints_one_line_with_the_taken_path() {
         let mut proj = Projector::new("parent-1");
         let start_outs = proj.on_event(&DriverEvent::RunStarted {
             run_id: "r1".to_string(),
@@ -1926,16 +1908,18 @@ mod tests {
         match &fin_outs[0] {
             Out::Update { update, .. } => {
                 let text = chunk_text(update).unwrap_or_default();
-                assert!(text.contains("```mermaid\nflowchart LR"));
-                assert!(text.contains("✓ extract"));
-                assert!(text.contains("○ review-code"));
+                assert!(
+                    text.contains("✓ **Build** finished in 100ms · ✓ extract"),
+                    "finish line carries the path: {text}"
+                );
+                assert!(!text.contains("```mermaid"), "no second graph: {text}");
             }
             _ => panic!("expected AgentMessageChunk"),
         }
     }
 
     #[test]
-    fn run_finished_failed_marks_failed_node_with_cross_in_mermaid() {
+    fn run_finished_failed_names_the_node_without_a_second_graph() {
         let mut proj = Projector::new("parent-1");
         proj.on_event(&DriverEvent::RunStarted {
             run_id: "r1".to_string(),
@@ -1967,9 +1951,11 @@ mod tests {
         match &fin_outs[0] {
             Out::Update { update, .. } => {
                 let text = chunk_text(update).unwrap_or_default();
-                assert!(text.contains("```mermaid\nflowchart LR"));
-                assert!(text.contains("✗ extract"));
-                assert!(text.contains("○ review-code"));
+                assert!(
+                    text.contains("✗ **Build** failed at extract: bad exit"),
+                    "failure names the node: {text}"
+                );
+                assert!(!text.contains("```mermaid"), "no second graph: {text}");
             }
             _ => panic!("expected AgentMessageChunk"),
         }
