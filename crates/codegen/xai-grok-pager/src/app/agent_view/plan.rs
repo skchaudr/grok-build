@@ -1274,6 +1274,19 @@ mod plan_chip_tests {
         assert_eq!(a2.active_pane, ActivePane::Scrollback);
     }
     #[test]
+    fn new_agent_under_dpi_starts_on_the_prompt_in_vim_mode() {
+        crate::appearance::cache::set_simple_mode(false);
+        crate::settings::dpi::set_dpi_host_for_test(Some(true));
+        let dpi = make_agent();
+        crate::settings::dpi::set_dpi_host_for_test(Some(false));
+        let grok = make_agent();
+        crate::settings::dpi::set_dpi_host_for_test(None);
+        assert!(!dpi.is_simple_mode());
+        assert_eq!(dpi.active_pane, ActivePane::Prompt);
+        assert!(!grok.is_simple_mode());
+        assert_eq!(grok.active_pane, ActivePane::Scrollback);
+    }
+    #[test]
     fn set_input_mode_reconciles_pane_orthogonal_to_active_modal_field() {
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);

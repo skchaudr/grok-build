@@ -516,6 +516,11 @@ impl AgentView {
             InputMode::Vim
         };
         view.set_input_mode(mode);
+        // Vim input mode starts on the transcript, but dpi-grok opens on the prompt: Left on the empty prompt is the
+        // way into the Agent Dashboard, and it should work the moment dpi attaches.
+        if crate::settings::dpi::dpi_host() {
+            let _switched = view.set_active_pane(ActivePane::Prompt, true);
+        }
         view
     }
     /// Establish persistent Pi child-session identity before a view is stored

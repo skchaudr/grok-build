@@ -431,8 +431,9 @@ const ago = (ms) => {
   return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 2880 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
 };
 
-// {host, cwd, label: "host:~/path", branch?}; with `card`, also the attach card's title and rows.
-async function remote(card = false) {
+// {host, cwd, label: "host:~/path", branch?}; with `card`, also the attach card's title and rows. `busy` overrides the
+// backend's flag: right after run_end the shim knows the turn is over before the agent record says so.
+async function remote(card = false, busy = undefined) {
   const a = await api("GET", agentPath());
   const s = card || !a.config.cwd ? await api("GET", `/sessions/${encodeURIComponent(session)}`) : null;
   const host = hostName();
@@ -443,7 +444,7 @@ async function remote(card = false) {
   const messages = modelMessages(entries);
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
   const lastAt = Math.max(0, ...messages.map((m) => m.timestamp ?? 0));
-  const activity = a.busy ? "running now" : lastAt ? `last message ${ago(lastAt)}` : "no messages yet";
+  const activity = (busy ?? a.busy) ? "running now" : lastAt ? `last message ${ago(lastAt)}` : "no messages yet";
   r.card = {
     title: `dpi · ${a.kind === "root" ? s.name : `${s.name} / ${a.name}`} on ${host}`,
     rows: [
@@ -458,11 +459,13 @@ async function remote(card = false) {
   return r;
 }
 
-// After a turn, tell the TUI if the agent's location changed (a checkout or cd on the backend).
+// After a turn, tell the TUI if the agent's location changed (a checkout or cd on the backend), and refresh the attach
+// card it shows so its activity and last ask follow the conversation.
 let lastRemote = null; // the location the TUI last got, as JSON
+let cardShown = false; // the TUI asked for an attach card
 const sentRemote = (r) => { const was = lastRemote; lastRemote = JSON.stringify({ ...r, card: undefined }); return lastRemote !== was; };
 function refreshRemote() {
-  remote().then((r) => { if (sentRemote(r)) out({ type: "extension_ui_request", id: randomUUID(), method: "setRemote", ...r }); }, (err) => log(`remote: ${err.message}`));
+  remote(cardShown, running).then((r) => { if (sentRemote(r) || r.card) out({ type: "extension_ui_request", id: randomUUID(), method: "setRemote", ...r }); }, (err) => log(`remote: ${err.message}`));
 }
 
 async function getState() {
@@ -874,7 +877,7 @@ const handlers = {
   // grok-pi's /resume picker and the Agent Dashboard roster (GROK_PI_DPI=1): one row per durable agent, with its live
   // activity from the backend's busy flag. The tree has no activity time or counts, so each row reads its agent's
   // active transcript; the dashboard polls every second, so an idle agent's transcript is reused (see listedEntries).
-  dpi_remote: async (c) => { const r = await remote(!!c.card); sentRemote(r); return r; },
+  dpi_remote: async (c) => { const r = await remote(!!c.card); sentRemote(r); cardShown ||= !!c.card; return r; },
   dpi_list_sessions: async () => {
     const rows = (await api("GET", "/sessions")).flatMap((s) => (s.agents ?? []).map((a) => [s, a]));
     const active = await Promise.all(rows.map(([s, a]) => listedEntries(s, a)));

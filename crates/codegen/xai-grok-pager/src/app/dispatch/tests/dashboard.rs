@@ -8328,7 +8328,10 @@ fn dpi_dashboard_stop_on_a_working_roster_row_aborts_it_without_attaching() {
         Effect::PiUiInput { method: "pi/dpi/abort", params, .. }
             if params["target"] == "s-other:main"
     ));
-    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_none());
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert!(dashboard.delete_confirm.is_none());
+    assert_eq!(dashboard.error_toast.as_deref(), Some(crate::views::dashboard::state::STOPPING_TURN_TOAST));
+    assert_eq!(dashboard.stopping_turn.as_deref(), Some("s-other:main"));
     assert_eq!(app.agents.len(), 1);
     assert!(app.agents.contains_key(&AgentId(0)), "still attached to the same agent");
     assert!(matches!(app.active_view, ActiveView::AgentDashboard));

@@ -1913,7 +1913,7 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
                     vec![]
                 }
                 // A working durable dpi agent this TUI is not attached to: abort its turn on the backend, stay here.
-                // The next roster poll shows it idle.
+                // The next roster poll shows it idle and clears the toast.
                 Some(e)
                     if e.activity == crate::app::roster::RosterActivity::Working
                         && app.external_agent
@@ -1922,8 +1922,9 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
                     let target = e.session_id.clone();
                     if let Some(d) = app.dashboard.as_mut() {
                         d.delete_confirm = None;
+                        d.error_toast = Some(crate::views::dashboard::state::STOPPING_TURN_TOAST.to_owned());
+                        d.stopping_turn = Some(target.clone());
                     }
-                    app.show_toast("Stopping the agent's turn");
                     vec![Effect::PiUiInput {
                         session_id: acp::SessionId::new(target.clone()),
                         method: "pi/dpi/abort",

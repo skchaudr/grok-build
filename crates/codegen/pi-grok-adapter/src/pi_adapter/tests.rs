@@ -740,6 +740,22 @@ fn dpi_remote_location_keeps_the_location_and_drops_card_and_envelope() {
     );
 }
 
+#[test]
+fn dpi_refreshed_card_marks_a_pushed_card_as_a_refresh() {
+    let pushed = json!({
+        "type": "extension_ui_request",
+        "method": "setRemote",
+        "label": "mini:/srv",
+        "card": { "title": "dpi · a on mini", "rows": [["activity", "last message just now"]] },
+    });
+    assert_eq!(
+        dpi_refreshed_card(&pushed),
+        Some(json!({ "title": "dpi · a on mini", "rows": [["activity", "last message just now"]], "refresh": true }))
+    );
+    assert_eq!(dpi_refreshed_card(&json!({ "method": "setRemote", "label": "mini:/srv" })), None);
+    assert_eq!(dpi_refreshed_card(&json!({ "card": null })), None);
+}
+
 fn dpi_snapshot() -> Value {
     json!({
         "info": { "device": "mini", "session": "modal-test" },

@@ -232,6 +232,32 @@ fn sessionless_pi_ui_lands_on_the_pi_session_not_the_claude_one_on_screen() {
     assert_eq!(test_agent(&app, AgentId(1)).pi_widgets.len(), 1);
 }
 
+/// The shim re-sends the attach card after each turn with `refresh`: the shown card updates in place, and a refresh
+/// with no card shown adds nothing.
+#[test]
+fn attach_card_refresh_updates_the_shown_card_in_place() {
+    let mut app = make_app_with_agent("sess-pi");
+    let card = |activity: &str, refresh: bool| {
+        pi(
+            "pi/ui/attach_card",
+            serde_json::json!({ "title": "dpi · a on mini", "rows": [["activity", activity]], "refresh": refresh }),
+        )
+    };
+    assert!(handle_ext_notification(&card("no messages yet", true), &mut app));
+    assert_eq!(test_agent(&app, AgentId(0)).scrollback.len(), 0, "nothing shown: a refresh adds no card");
+
+    assert!(handle_ext_notification(&card("no messages yet", false), &mut app));
+    assert!(handle_ext_notification(&card("last message just now · 2 messages", true), &mut app));
+    let agent = test_agent(&app, AgentId(0));
+    let cards: Vec<_> = (0..agent.scrollback.len())
+        .filter_map(|i| match &agent.scrollback.entry(i).unwrap().block {
+            crate::scrollback::RenderBlock::AttachCard(card) => Some(card.rows.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cards, vec![vec![("activity".to_owned(), "last message just now · 2 messages".to_owned())]]);
+}
+
 #[test]
 fn pi_notifications_are_kept_for_notify() {
     let mut app = make_app_with_agent("sess-pi");
@@ -267,4 +293,60 @@ fn dpi_catalog_rows_show_their_live_activity_on_the_dashboard() {
     assert!(row("s-c:main").resident, "a durable agent is live on its backend");
     assert_eq!(row("local-pi").activity, RosterActivity::Dormant, "no activity: unchanged");
     assert!(!row("local-pi").resident);
+}
+
+/// Ctrl+X's "Stopping the agent's turn" toast stays while the roster still shows the agent working, and clears once it
+/// goes idle.
+#[test]
+fn dpi_stopping_toast_clears_when_the_stopped_row_goes_idle() {
+    use crate::views::dashboard::state::STOPPING_TURN_TOAST;
+    let mut app = make_app_with_agent("s-a:main");
+    app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
+    app.active_view = crate::app::app_view::ActiveView::AgentDashboard;
+    let mut dashboard = crate::views::dashboard::DashboardState::default();
+    dashboard.error_toast = Some(STOPPING_TURN_TOAST.to_owned());
+    dashboard.stopping_turn = Some("s-b:main".to_owned());
+    app.dashboard = Some(dashboard);
+    let catalog = |activity: &str| {
+        pi(
+            "pi/ui/session_catalog",
+            serde_json::json!({ "scope": "current", "sessions": [
+                { "id": "s-b:main", "cwd": "/w", "activity": activity },
+                { "id": "s-c:main", "cwd": "/w", "activity": "idle" },
+            ] }),
+        )
+    };
+    handle_ext_notification(&catalog("working"), &mut app);
+    let d = app.dashboard.as_ref().unwrap();
+    assert_eq!(d.error_toast.as_deref(), Some(STOPPING_TURN_TOAST), "abort not landed yet: keep the toast");
+    assert_eq!(d.stopping_turn.as_deref(), Some("s-b:main"));
+
+    handle_ext_notification(&catalog("idle"), &mut app);
+    let d = app.dashboard.as_ref().unwrap();
+    assert_eq!(d.error_toast, None);
+    assert_eq!(d.stopping_turn, None);
+}
+
+/// A newer toast that replaced the stopping toast is left alone when the stopped row goes idle.
+#[test]
+fn dpi_stopped_row_going_idle_leaves_a_newer_toast() {
+    let mut app = make_app_with_agent("s-a:main");
+    app.external_agent = true;
+    app.external_agent_label = Some("pi".into());
+    app.active_view = crate::app::app_view::ActiveView::AgentDashboard;
+    let mut dashboard = crate::views::dashboard::DashboardState::default();
+    dashboard.error_toast = Some("\u{2717} Select a session first".to_owned());
+    dashboard.stopping_turn = Some("s-b:main".to_owned());
+    app.dashboard = Some(dashboard);
+    handle_ext_notification(
+        &pi(
+            "pi/ui/session_catalog",
+            serde_json::json!({ "scope": "current", "sessions": [{ "id": "s-b:main", "cwd": "/w", "activity": "idle" }] }),
+        ),
+        &mut app,
+    );
+    let d = app.dashboard.as_ref().unwrap();
+    assert_eq!(d.error_toast.as_deref(), Some("\u{2717} Select a session first"));
+    assert_eq!(d.stopping_turn, None);
 }

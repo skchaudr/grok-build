@@ -781,10 +781,14 @@ impl PiAgent {
                 // forwards Pi's semantic widget payload.
                 self.send_ext_notification("pi/ui/widget", event).await;
             }
-            // dpi-rpc shim: the agent's backend location changed after a turn (a checkout, a cd).
+            // dpi-rpc shim, after a turn: the agent's backend location (a checkout, a cd) and the refreshed attach card.
             "setremote" => {
+                let card = dpi_refreshed_card(&event);
                 self.send_ext_notification("pi/ui/remote", dpi_remote_location(event))
                     .await;
+                if let Some(card) = card {
+                    self.send_ext_notification("pi/ui/attach_card", card).await;
+                }
             }
             // dpi-rpc shim: the /dpi-help card, drawn by the pager as a block with headings and key names.
             "dpihelp" => {

@@ -372,6 +372,22 @@ test("after a turn ends, a changed branch is pushed as setRemote; an unchanged o
   } finally { s.close(); state.branch = "main"; }
 });
 
+test("after a turn ends, the attach card shown at attach is re-sent with the new activity", async () => {
+  state.streams.length = 0;
+  const s = await shim();
+  try {
+    const { card } = (await s.call({ type: "dpi_remote", card: true })).data;
+    assert.match(Object.fromEntries(card.rows).activity, /^last message \d+d ago · 3 messages$/);
+    await s.until(() => state.streams.length > 0);
+    entries["s1/1"].push({ id: 30, kind: "pi.assistant", model: [msg("assistant", Date.now(), "a reply")] });
+    state.streams.at(-1).write(`data: ${JSON.stringify({ type: "batch", events: [{ type: "run_end" }] })}\n\n`);
+    const push = await s.until((l) => l.method === "setRemote");
+    const rows = Object.fromEntries(push.card.rows);
+    assert.equal(rows.activity, "last message just now · 4 messages");
+    assert.equal(push.label, "mini-host:/w/proj", "the location rides along unchanged");
+  } finally { s.close(); entries["s1/1"].pop(); }
+});
+
 test("get_fork_messages lists user turns by dpi entry id", async () => {
   const s = await shim();
   try {

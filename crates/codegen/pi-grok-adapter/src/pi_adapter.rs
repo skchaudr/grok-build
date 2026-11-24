@@ -751,6 +751,14 @@ fn dpi_remote_location(mut data: Value) -> Value {
     data
 }
 
+/// The attach card a pushed `setRemote` carries after a turn, marked `refresh` so the pager updates the card it
+/// already shows instead of adding a second one.
+fn dpi_refreshed_card(event: &Value) -> Option<Value> {
+    let mut card = event.get("card").filter(|card| card.is_object())?.clone();
+    card["refresh"] = Value::Bool(true);
+    Some(card)
+}
+
 /// `_meta` key the pager reads a dpi option's settings section from (`{"category": "Agent"}`).
 const DPI_OPTION_META: &str = "dpi";
 

@@ -155,7 +155,12 @@ pub(super) fn handle(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
             let Some(agent) = pi_target(app, session_id.as_deref()) else {
                 return false;
             };
-            agent.scrollback.push_block(RenderBlock::AttachCard(card));
+            // `refresh`: the shim's after-turn update of the card already shown.
+            if params.get("refresh").and_then(serde_json::Value::as_bool) == Some(true) {
+                agent.scrollback.replace_attach_card(card);
+            } else {
+                agent.scrollback.push_block(RenderBlock::AttachCard(card));
+            }
             true
         }
         "pi/ui/dpi_help" => {

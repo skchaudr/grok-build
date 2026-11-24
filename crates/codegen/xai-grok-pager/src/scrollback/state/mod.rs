@@ -823,6 +823,24 @@ impl ScrollbackState {
         false
     }
 
+    /// Swap the newest dpi attach card for a refreshed one (the shim re-sends it after each turn). False when no card
+    /// is shown: a refresh never adds one.
+    pub fn replace_attach_card(&mut self, card: super::blocks::AttachCardBlock) -> bool {
+        let Some((&id, entry)) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|(_, entry)| matches!(entry.block, RenderBlock::AttachCard(_)))
+        else {
+            return false;
+        };
+        entry.block = RenderBlock::AttachCard(card);
+        entry.invalidate_cache();
+        self.dirty_heights.insert(id);
+        self.bump_content_generation();
+        true
+    }
+
     /// Push a text chunk to a thinking block entry.
     /// Similar to `push_chunk_to_agent()`, this handles all necessary cache invalidation for streaming thinking content.
     /// Returns true if successful, false if the entry doesn't exist or isn't a thinking block.

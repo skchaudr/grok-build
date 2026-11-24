@@ -948,6 +948,27 @@ fn apply_dpi_roster_activity(app: &mut AppView, sessions: &[serde_json::Value]) 
         row.resident = true;
         row.session_kind = Some("external".to_owned());
     }
+    clear_stopping_turn_toast(app);
+}
+
+/// Ctrl+X's "Stopping the agent's turn" toast lasts until the roster shows that agent no longer working.
+fn clear_stopping_turn_toast(app: &mut AppView) {
+    use crate::views::dashboard::state::STOPPING_TURN_TOAST;
+    let Some(target) = app.dashboard.as_ref().and_then(|d| d.stopping_turn.clone()) else {
+        return;
+    };
+    let still_working = app.dashboard_local_sessions.iter().any(|row| {
+        row.session_id == target && row.activity == crate::app::roster::RosterActivity::Working
+    });
+    if still_working {
+        return;
+    }
+    if let Some(d) = app.dashboard.as_mut() {
+        d.stopping_turn = None;
+        if d.error_toast.as_deref() == Some(STOPPING_TURN_TOAST) {
+            d.error_toast = None;
+        }
+    }
 }
 
 /// Record the shell's latest `session/new` setup step so a create timeout can name where it stalled.

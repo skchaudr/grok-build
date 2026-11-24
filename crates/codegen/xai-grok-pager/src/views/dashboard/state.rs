@@ -355,6 +355,9 @@ impl PersistedDashboard {
     }
 }
 
+/// Toast shown while Ctrl+X stops a dpi agent's turn; cleared when the roster shows that agent idle.
+pub(crate) const STOPPING_TURN_TOAST: &str = "Stopping the agent's turn";
+
 /// In-memory dashboard state. Refreshed every render frame off `app.agents`. Selection is keyed by
 /// `DashboardRowId` so a rename / reorder / completion does not invalidate the cursor as long as
 /// the row's id is stable.
@@ -431,6 +434,8 @@ pub struct DashboardState {
     /// Pending dispatch feedback toast (e.g. "✗ Session no longer exists").
     /// Rendered verbatim by `paint_dispatch_feedback_badge`; error messages are built via [`Self::set_error_toast`].
     pub error_toast: Option<String>,
+    /// dpi agent whose turn Ctrl+X is stopping. The roster poll clears [`STOPPING_TURN_TOAST`] once that row is no longer working.
+    pub(crate) stopping_turn: Option<String>,
     /// Row armed for delete, and when.
     /// A second gesture on the same row within [`CONFIRM_WINDOW`] deletes it (see [`Self::armed_delete_row`]); otherwise it lapses.
     /// Cleared on any focus change.
@@ -1155,6 +1160,7 @@ impl DashboardState {
             peek_reply_target_cwd: None,
             rename: None,
             error_toast: None,
+            stopping_turn: None,
             delete_confirm: None,
             workspace_membership_mode: false,
             selected_stop_action: None,
