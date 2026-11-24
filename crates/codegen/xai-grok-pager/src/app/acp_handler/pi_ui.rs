@@ -8,6 +8,7 @@ use crate::app::pi_remote_tui::{self, Layout};
 use crate::app::app_view::AppView;
 use crate::app::agent_view::AgentView;
 use crate::scrollback::block::RenderBlock;
+use crate::scrollback::blocks::SessionEvent;
 
 /// Handle one `pi/*` notification; `false` for methods this module does not own.
 pub(super) fn handle(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
@@ -231,6 +232,25 @@ pub(super) fn handle(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
                 changed |= dismiss(agent, &tool_call_id);
             }
             changed
+        }
+        // A compaction the agent ran with no "after" count (dpi): the line shows now, even while idle,
+        // where `auto_compact_completed` would wait for the next turn to finish.
+        "pi/ui/compaction_done" => {
+            let Some(agent) = pi_target(app, session_id.as_deref()) else {
+                return false;
+            };
+            agent.session.set_compaction_activity(None);
+            agent.session.compact_held_prompt = None;
+            let event = if params.get("nothingToCompact").and_then(serde_json::Value::as_bool) == Some(true) {
+                SessionEvent::NothingToCompact
+            } else {
+                SessionEvent::PiCompactionDone {
+                    tokens_before: params.get("tokensBefore").and_then(serde_json::Value::as_u64),
+                    elapsed_ms: params.get("elapsedMs").and_then(serde_json::Value::as_i64),
+                }
+            };
+            agent.scrollback.push_block(RenderBlock::session_event(event));
+            true
         }
         "pi/ui/compaction_summary" => {
             let Some(summary) = str_of(&["summary"]).filter(|s| !s.trim().is_empty()) else {

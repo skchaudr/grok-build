@@ -641,6 +641,40 @@ fn compaction_events_project_to_native_session_updates() {
         cancelled["update"]["sessionUpdate"],
         "auto_compact_cancelled"
     );
+    assert!(compaction_done_notification("session-1", &json!({ "errorMessage": "x" }), None).is_none());
+    assert!(
+        compaction_done_notification(
+            "session-1",
+            &json!({ "result": { "estimatedTokensAfter": 20_000, "summary": "s" } }),
+            None
+        )
+        .is_none(),
+        "Pi's own counts keep the native auto_compact_completed line"
+    );
+}
+
+#[test]
+fn dpi_compaction_without_after_count_projects_to_compaction_done() {
+    let done = compaction_end_notification(
+        "session-1",
+        &json!({ "result": { "tokensBefore": 205_600, "summary": "Kept the plan" } }),
+        Some(66_600),
+    );
+    assert!(done.is_none(), "no invented tokens_after");
+    let done = compaction_done_notification(
+        "session-1",
+        &json!({ "result": { "tokensBefore": 205_600, "summary": "Kept the plan" } }),
+        Some(66_600),
+    )
+    .expect("done line");
+    assert_eq!(done["tokensBefore"], 205_600);
+    assert_eq!(done["elapsedMs"], 66_600);
+    assert_eq!(done["nothingToCompact"], false);
+
+    let nothing = compaction_done_notification("session-1", &json!({ "reason": "manual" }), Some(900))
+        .expect("nothing line");
+    assert_eq!(nothing["nothingToCompact"], true);
+    assert!(nothing["tokensBefore"].is_null());
 }
 
 #[test]

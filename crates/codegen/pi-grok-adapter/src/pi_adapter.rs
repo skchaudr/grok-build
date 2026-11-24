@@ -1379,6 +1379,36 @@ fn compaction_end_notification(
     Some(json!({ "sessionId": session_id, "update": update }))
 }
 
+/// `pi/ui/compaction_done` for a successful compaction `compaction_end_notification` cannot report:
+/// the dpi backend gives no "after" count, and a task with no result found nothing to compact.
+fn compaction_done_notification(
+    session_id: &str,
+    event: &Value,
+    elapsed_ms: Option<i64>,
+) -> Option<Value> {
+    let failed = string(event, &["errorMessage", "error"]).is_some_and(|error| !error.is_empty());
+    if failed || event.get("aborted").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let result = event.get("result").filter(|result| result.is_object());
+    if result
+        .and_then(|result| result.get("estimatedTokensAfter"))
+        .and_then(Value::as_u64)
+        .is_some()
+    {
+        return None;
+    }
+    let nothing = !result
+        .and_then(|result| string(result, &["summary"]))
+        .is_some_and(|summary| !summary.trim().is_empty());
+    Some(json!({
+        "sessionId": session_id,
+        "tokensBefore": result.and_then(|result| result.get("tokensBefore")).and_then(Value::as_u64),
+        "elapsedMs": elapsed_ms,
+        "nothingToCompact": nothing,
+    }))
+}
+
 /// Send a Pager foreground-to-background request to the injected Bash extension.
 ///
 /// The per-process metadata path is minted by the composition binary and passed

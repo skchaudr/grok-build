@@ -952,12 +952,56 @@ test("/__pi_shortcut_dispatch <key> runs the mapped action, whatever the key's c
   } finally { s.close(); }
 });
 
+test("a backend compaction reaches the TUI as compaction_start, then compaction_end with the summary, no result, or the error", async () => {
+  const wrap = (text) => ({ role: "user", content: [{ type: "text", text: `The conversation history before this point was compacted into the following summary:\n\n<summary>\n${text}\n</summary>` }], timestamp: 1 });
+  const placed = (id, taskId, text) => [{ type: "message_start", message: wrap(text) }, { type: "message_end", entry: { id, kind: "pi.compaction", byTaskId: taskId, head: 20, model: [wrap(text)] } }];
+  state.doneTasks = [
+    { id: 51, kind: "pi.compaction", state: { status: "terminal", outcome: { status: "completed", result: {} } } },
+    { id: 53, kind: "pi.compaction", state: { status: "terminal", outcome: { status: "completed", result: { submissionId: 60 } } } },
+  ];
+  state.streams.length = 0;
+  const s = await shim({}, "dpi://s1/4");
+  const batch = (events) => state.streams.at(-1).write(`data: ${JSON.stringify({ type: "batch", events })}\n\n`);
+  const ends = () => s.lines.filter((l) => l.type === "compaction_end");
+  try {
+    await s.call({ type: "get_state" });
+    await s.until(() => state.streams.length > 0);
+    // Placed at once: the summary entry comes in the batch that ends the task, and only compaction_end carries it.
+    batch([{ type: "compaction_start", taskId: 50, reason: "manual", blocking: false }]);
+    await s.until((l) => l.type === "compaction_start" && l.reason === "manual");
+    assert.equal((await s.call({ type: "get_state" })).data.isCompacting, true);
+    batch([...placed(21, 50, "Kept the plan"), { type: "compaction_end", taskId: 50, reason: "manual" }]);
+    const done = await s.until((l) => l.type === "compaction_end");
+    assert.deepEqual(done, { type: "compaction_end", reason: "manual", result: { summary: "Kept the plan", tokensBefore: 200 } });
+    assert.ok(!s.lines.some((l) => l.type === "message_start" || l.type === "message_end"), "the wrapped summary is not a user message");
+    assert.equal((await s.call({ type: "get_state" })).data.isCompacting, false);
+    // Nothing to compact: the task completed without placing a summary.
+    batch([{ type: "compaction_start", taskId: 51, reason: "manual", blocking: false }]);
+    batch([{ type: "compaction_end", taskId: 51, reason: "manual" }]);
+    await s.until(() => ends().length === 2);
+    assert.deepEqual(ends()[1], { type: "compaction_end", reason: "manual" });
+    // A failure carries the backend's error.
+    batch([{ type: "compaction_end", taskId: 52, reason: "threshold", error: "Summarization failed: rate limited" }]);
+    await s.until(() => ends().length === 3);
+    assert.deepEqual(ends()[2], { type: "compaction_end", reason: "threshold", errorMessage: "Summarization failed: rate limited" });
+    // Placed through a submission waiting for the turn: compaction_end waits for the summary entry.
+    batch([{ type: "compaction_start", taskId: 53, reason: "threshold", blocking: false }]);
+    batch([{ type: "compaction_end", taskId: 53, reason: "threshold" }, { type: "run_start" }]);
+    await s.until((l) => l.type === "agent_start");
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(ends().length, 3, "no outcome before the summary is placed");
+    batch(placed(22, 53, "Later summary"));
+    await s.until(() => ends().length === 4);
+    assert.deepEqual(ends()[3], { type: "compaction_end", reason: "threshold", result: { summary: "Later summary", tokensBefore: 200 } });
+  } finally { s.close(); state.doneTasks = []; }
+});
+
 test("/dpi-compact passes instructions; /dpi-rename renames the session for the main agent and the agent otherwise", async () => {
   const s = await shim();
   try {
     let at = mark();
     await s.call({ type: "prompt", message: "/dpi-compact keep the schema decisions" });
-    await s.until((l) => l.method === "notify" && l.message.includes("task #42"));
+    await notified(s, "Compacting this agent's context (task #42). Stored history stays.");
     assert.deepEqual(sent(at), ['POST /sessions/s1/agents/1/compact {"instructions":"keep the schema decisions"}']);
     at = mark();
     await s.call({ type: "prompt", message: "/dpi-rename Deep work" });

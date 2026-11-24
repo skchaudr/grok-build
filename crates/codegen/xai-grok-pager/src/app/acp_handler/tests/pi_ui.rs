@@ -408,3 +408,20 @@ fn dpi_catalog_hides_hidden_extra_agents_and_records_row_kinds() {
     assert_eq!(row.title.as_deref(), Some("beta / helper (hidden)"));
     assert_eq!(app.dashboard.as_ref().unwrap().dpi_rows.get("s-b:2"), Some(&DpiRowKind::Extra { hidden: true }));
 }
+
+#[test]
+fn pi_compaction_done_lands_in_the_transcript_at_once_even_while_idle() {
+    let mut app = make_app_with_agent("sess-pi");
+    assert!(handle_ext_notification(
+        &pi("pi/ui/compaction_done", serde_json::json!({ "tokensBefore": 205_600, "elapsedMs": 66_600, "nothingToCompact": false })),
+        &mut app,
+    ));
+    let event = last_session_event(&test_agent(&app, AgentId(0)).scrollback).expect("a session event");
+    assert_eq!(event.message(), "Context compacted from 205.6k tokens (66.6s)");
+    assert!(handle_ext_notification(
+        &pi("pi/ui/compaction_done", serde_json::json!({ "elapsedMs": 900, "nothingToCompact": true })),
+        &mut app,
+    ));
+    let event = last_session_event(&test_agent(&app, AgentId(0)).scrollback).expect("a session event");
+    assert_eq!(event.message(), "Nothing to compact.");
+}

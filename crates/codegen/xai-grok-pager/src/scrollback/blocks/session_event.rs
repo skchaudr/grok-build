@@ -95,6 +95,13 @@ pub enum SessionEvent {
         /// How long compaction took (milliseconds).
         elapsed_ms: Option<i64>,
     },
+    /// A Pi compaction whose backend reports no "after" count (dpi): the line leaves it out.
+    PiCompactionDone {
+        tokens_before: Option<u64>,
+        elapsed_ms: Option<i64>,
+    },
+    /// A compaction task that finished with nothing to compact.
+    NothingToCompact,
     /// Pi's persisted compaction summary, rendered as a foldable Markdown block.
     CompactionSummary { summary: String },
     /// Auto-compaction failed.
@@ -430,25 +437,12 @@ impl SessionEvent {
                 tokens_before,
                 tokens_after,
                 elapsed_ms,
-            } => {
-                let after = format_tokens(*tokens_after);
-                // Older shells don't send tokens_before; keep the legacy format
-                let body = match tokens_before {
-                    Some(before) if *before > 0 => {
-                        format!(
-                            "Context compacted: {} → {after} tokens",
-                            format_tokens(*before)
-                        )
-                    }
-                    _ => format!("Context compacted → {after} tokens"),
-                };
-                if let Some(ms) = elapsed_ms {
-                    let secs = *ms as f64 / 1000.0;
-                    format!("{body} ({secs:.1}s)")
-                } else {
-                    body
-                }
-            }
+            } => compacted_line(*tokens_before, Some(*tokens_after), *elapsed_ms),
+            SessionEvent::PiCompactionDone {
+                tokens_before,
+                elapsed_ms,
+            } => compacted_line(*tokens_before, None, *elapsed_ms),
+            SessionEvent::NothingToCompact => "Nothing to compact.".to_string(),
             SessionEvent::CompactionFailed { error } => {
                 if error.trim().is_empty() {
                     "Compaction failed.".to_string()
@@ -601,6 +595,23 @@ impl SessionEvent {
                 | SessionEvent::TurnHalted { .. }
                 | SessionEvent::TurnFailed { .. }
         )
+    }
+}
+
+/// "Context compacted: 205.6k → 21.4k tokens (66.6s)", leaving out any count the agent did not report.
+fn compacted_line(before: Option<u64>, after: Option<u64>, elapsed_ms: Option<i64>) -> String {
+    let before = before.filter(|before| *before > 0).map(format_tokens);
+    let after = after.map(format_tokens);
+    let body = match (before, after) {
+        (Some(before), Some(after)) => format!("Context compacted: {before} → {after} tokens"),
+        // Older shells don't send tokens_before; keep the legacy format
+        (None, Some(after)) => format!("Context compacted → {after} tokens"),
+        (Some(before), None) => format!("Context compacted from {before} tokens"),
+        (None, None) => "Context compacted".to_string(),
+    };
+    match elapsed_ms {
+        Some(ms) => format!("{body} ({:.1}s)", ms as f64 / 1000.0),
+        None => body,
     }
 }
 
@@ -1178,6 +1189,21 @@ mod tests {
             };
             assert_eq!(event.message(), "Context 9% full. Compacting…");
         }
+    }
+
+    #[test]
+    fn pi_compaction_done_leaves_out_missing_counts() {
+        let event = SessionEvent::PiCompactionDone {
+            tokens_before: Some(205_600),
+            elapsed_ms: Some(66_600),
+        };
+        assert_eq!(event.message(), "Context compacted from 205.6k tokens (66.6s)");
+        let event = SessionEvent::PiCompactionDone {
+            tokens_before: None,
+            elapsed_ms: Some(1_200),
+        };
+        assert_eq!(event.message(), "Context compacted (1.2s)");
+        assert_eq!(SessionEvent::NothingToCompact.message(), "Nothing to compact.");
     }
 
     #[test]

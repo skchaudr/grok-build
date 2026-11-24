@@ -261,6 +261,10 @@ impl PiAgent {
         let notification = (|| {
             let mut state = self.state.borrow_mut();
             state.compaction_started_at = Some(Instant::now());
+            // "Context N% full" explains an automatic compaction; a requested one shows only the status line.
+            if string(event, &["reason"]) == Some("manual") {
+                return None;
+            }
             let tokens_used = state.last_context_tokens?;
             let context_window = state
                 .bootstrap
@@ -296,6 +300,8 @@ impl PiAgent {
         if let Some(notification) = compaction_end_notification(&session_id, event, elapsed_ms) {
             self.send_ext_notification("x.ai/session/update", notification)
                 .await;
+        } else if let Some(done) = compaction_done_notification(&session_id, event, elapsed_ms) {
+            self.send_ext_notification("pi/ui/compaction_done", done).await;
         }
         if let Some(summary) = event
             .get("result")

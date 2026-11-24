@@ -86,11 +86,17 @@ function translate(e) {
     case "turn_end":
       return [{ type: e.type }];
     case "message_start":
-      return [{ type: "message_start", message: e.message }];
+      return isSummaryMessage(e.message) ? [] : [{ type: "message_start", message: e.message }];
     case "message_end": {
+      // A compaction entry's message is the summary, wrapped for the model: it reaches the TUI with compaction_end.
+      if (e.entry?.kind === "pi.compaction") return compactionPlaced(e.entry);
       const message = lastModel(e.entry);
       return message ? [{ type: "message_end", message }] : [];
     }
+    case "compaction_start":
+      return compactionStart(e);
+    case "compaction_end":
+      return compactionEnd(e); // a Promise: callers await translate()
     case "text_delta":
     case "thinking_delta":
       return [{ type: "message_update", assistantMessageEvent: { type: e.type, contentIndex: e.contentIndex, delta: e.delta } }];
@@ -124,6 +130,83 @@ function translate(e) {
   }
 }
 
+// ---- compaction: the backend's compaction task -> Pi compaction_start/compaction_end ----
+// The backend reports no token count after a compaction, so compaction_end carries only tokensBefore (the context
+// size of the last answer before it) and the summary; a task that finished without placing a summary had nothing to
+// compact and ends with no result.
+const SUMMARY_PREFIX = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+const SUMMARY_SUFFIX = "\n</summary>";
+const compactions = new Map(); // taskId -> { tokensBefore: Promise, summary?, ended? }
+const compactionOf = (taskId) => {
+  if (!compactions.has(taskId)) compactions.set(taskId, {});
+  return compactions.get(taskId);
+};
+const isSummaryMessage = (m) => m?.role === "user" && textOf(m.content).startsWith(SUMMARY_PREFIX);
+function summaryOf(entry) {
+  const text = textOf(lastModel(entry)?.content).trim();
+  return text.startsWith(SUMMARY_PREFIX) && text.endsWith(SUMMARY_SUFFIX.trim())
+    ? text.slice(SUMMARY_PREFIX.length, text.length - SUMMARY_SUFFIX.trim().length).trim()
+    : text;
+}
+function compactionStart(e) {
+  const c = compactionOf(e.taskId);
+  if (c.started) return [];
+  c.started = true;
+  c.reason = e.reason;
+  c.tokensBefore = activeMessages().then(usageTokens, () => undefined);
+  return [{ type: "compaction_start", reason: e.reason ?? "manual" }];
+}
+// The summary entry: before compaction_end in the same batch when placed at once, later when it waited for a turn.
+function compactionPlaced(entry) {
+  const c = compactionOf(entry.byTaskId);
+  c.summary = summaryOf(entry);
+  return c.ended ? compactionEnded(entry.byTaskId, c) : [];
+}
+async function compactionEnd(e) {
+  const c = compactionOf(e.taskId);
+  c.reason = e.reason;
+  if (e.error) {
+    compactions.delete(e.taskId);
+    return [{ type: "compaction_end", reason: e.reason, errorMessage: e.error }];
+  }
+  if (c.summary === undefined) {
+    const placed = await compactionResult(e.taskId);
+    // Placed through a submission that waits for the turn to end: the summary entry finishes it.
+    if (placed) return (c.ended = true), [];
+  }
+  return compactionEnded(e.taskId, c);
+}
+async function compactionEnded(taskId, c) {
+  compactions.delete(taskId);
+  const tokensBefore = await c.tokensBefore;
+  if (c.summary === undefined) return [{ type: "compaction_end", reason: c.reason }];
+  return [{ type: "compaction_end", reason: c.reason, result: { summary: c.summary, ...(tokensBefore ? { tokensBefore } : {}) } }];
+}
+// Whether the finished task placed a summary that is not in this TUI's stream yet ({} means nothing to compact).
+async function compactionResult(taskId) {
+  try {
+    const done = await api("GET", `/sessions/${encodeURIComponent(session)}/tasks?status=terminal&limit=20`);
+    const result = done.find((t) => t.id === taskId)?.state?.outcome?.result ?? {};
+    if (result.entryId === undefined && result.submissionId === undefined) return false;
+    const entry = (await activeEntries()).find((x) => x.kind === "pi.compaction" && x.byTaskId === taskId);
+    if (entry) compactionOf(taskId).summary = summaryOf(entry);
+    return !entry;
+  } catch (err) {
+    log(`compaction #${taskId}: ${err.message}`);
+    return false;
+  }
+}
+// A snapshot after (re)connecting: show compactions already running, end the ones that finished while away.
+async function compactionSnapshot(snapshot) {
+  const live = new Set((snapshot?.compactions ?? []).map((c) => c.taskId));
+  const events = [];
+  for (const c of snapshot?.compactions ?? []) events.push(...compactionStart(c));
+  for (const [taskId, c] of compactions) {
+    if (c.started && !c.ended && !live.has(taskId)) events.push(...(await compactionEnd({ taskId, reason: c.reason })));
+  }
+  return events;
+}
+
 // The backend writes ": ping" every 15s. A laptop that slept keeps a dead socket
 // that never errors, so silence past this limit means reconnect.
 const STREAM_SILENCE_MS = 45_000;
@@ -137,7 +220,7 @@ async function catchUp(snapshot, lastSeen) {
   const missed = (snapshot?.entries ?? []).filter((x) => Number.isInteger(x?.id) && x.id > lastSeen);
   // A prompt this TUI sent ran entirely while the stream was down: open the run so it is acknowledged.
   if (awaitingRun && missed.length) for (const t of translate({ type: "run_start" })) out(t);
-  for (const entry of missed) for (const t of translate({ type: "message_end", entry })) out(t);
+  for (const entry of missed) for (const t of await translate({ type: "message_end", entry })) out(t);
   if (!running) return;
   try {
     const a = await api("GET", agentPath());
@@ -179,9 +262,10 @@ async function runStream(signal) {
           if (msg.type === "snapshot") {
             if (lastSeen !== null) await catchUp(msg.snapshot, lastSeen);
             lastSeen = maxEntryId(msg.snapshot?.entries, lastSeen ?? 0);
+            for (const t of await compactionSnapshot(msg.snapshot)) out(t);
           } else if (msg.type === "batch") {
             for (const e of msg.events) {
-              for (const t of translate(e)) out(t);
+              for (const t of await translate(e)) out(t);
               if (e.type === "run_end") refreshRemote(); // a turn may have switched branches
               if (Number.isInteger(e.entry?.id)) lastSeen = Math.max(lastSeen ?? 0, e.entry.id);
             }
@@ -508,7 +592,7 @@ async function getState() {
     model: { ...(known ?? {}), provider, id: modelId },
     thinkingLevel: a.config.thinkingLevel ?? "medium",
     isStreaming: running || !!a.busy,
-    isCompacting: false,
+    isCompacting: [...compactions.values()].some((c) => c.started),
     pendingMessageCount: 0,
   };
 }
@@ -737,7 +821,8 @@ async function showPlayground() {
 
 async function compactNow(instructions) {
   const { taskId } = await api("POST", agentPath() + "/compact", instructions ? { instructions } : {});
-  notify(`Compacting this agent's context (task #${taskId}); /dpi-tasks shows how it goes. Stored history stays.`);
+  // The status line shows it running and the transcript gets the outcome; this line answers the command.
+  notify(`Compacting this agent's context (task #${taskId}). Stored history stays.`);
 }
 
 function resetAgent(note) {
