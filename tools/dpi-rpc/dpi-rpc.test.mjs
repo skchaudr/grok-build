@@ -64,7 +64,7 @@ const server = createServer((req, res) => {
     if (p === "/sessions" && req.method === "GET") {
       return json(res, 200, [
         { id: "s1", name: "one", cwd: "/w", model: "m", createdAt: 1000, agents: agents1 },
-        { id: "s2", name: "two", cwd: "/home/bob/two", model: "m", createdAt: 9000, agents: [{ id: 1, name: "Main", kind: "root", busy: false }] },
+        { id: "s2", name: "two", cwd: "/home/bob/two", model: "m", createdAt: 9000, agents: [{ id: 1, name: "Main", kind: "root", busy: false }, { id: 5, name: "Helper", kind: "root", busy: false }] },
       ]);
     }
     if (p === "/sessions" && req.method === "POST") return json(res, 201, { id: "s3", agents: [{ id: 1 }] });
@@ -156,6 +156,11 @@ test("dpi_list_sessions fills parent, message count and activity time", async ()
     assert.equal(row("s1:2").messageCount, 0); // entries fetch failed: row still listed
     assert.equal(row("s1:2").modifiedAt, new Date(1000).toISOString());
     assert.equal(row("s2:1").modifiedAt, new Date(9000).toISOString());
+    // The playground's main agent is the session's first root agent; a second root (/dpi-new-agent) is an extra agent.
+    assert.equal(row("s2:1").name, "two");
+    assert.equal(row("s2:1").parentSessionPath, undefined);
+    assert.equal(row("s2:5").name, "two / Helper");
+    assert.equal(row("s2:5").parentSessionPath, "dpi://s2/1");
   } finally { s.close(); }
 });
 
@@ -324,7 +329,7 @@ test("/dpi-sessions lists every session and marks the attached one", async () =>
   const s = await shim();
   try {
     await s.call({ type: "prompt", message: "/dpi-sessions" });
-    await notified(s, "2 sessions on mini-host (▸ this one; ctrl+r switches):\n▸ one · 3 agents · 1 running · /w\n  two · 1 agent · ~/two");
+    await notified(s, "2 sessions on mini-host (▸ this one; ctrl+r switches):\n▸ one · 3 agents · 1 running · /w\n  two · 2 agents · ~/two");
   } finally { s.close(); }
 });
 

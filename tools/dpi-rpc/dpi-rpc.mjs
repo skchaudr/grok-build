@@ -226,6 +226,12 @@ function parseTarget(value) {
   return [value, "main"];
 }
 
+// The session's main agent, as the playground picks it: its first root agent. Other agents, including more root agents
+// from /dpi-new-agent, are its extra agents. A session read without its agent list falls back to the agent's kind.
+const mainAgentId = (s) => (s.agents?.find((x) => x.kind === "root") ?? s.agents?.[0])?.id;
+const isMainAgent = (s, a) => (s.agents?.length ? String(a.id) === String(mainAgentId(s)) : a.kind === "root");
+const agentTitle = (s, a) => (isMainAgent(s, a) ? s.name : `${s.name} / ${a.name}`);
+
 // A dashboard row: its id "<session>:<agent>" (dpi_list_sessions) or a dpi:// path.
 function rowTarget(value) {
   const target = String(value ?? "");
@@ -460,7 +466,7 @@ async function remote(card = false, busy = undefined) {
   if (s.err && (card || !a.config.cwd)) throw s.err;
   const host = hostName();
   const cwd = a.config.cwd ?? s.cwd;
-  const name = s.err || !s.name ? null : a.kind === "root" ? s.name : `${s.name} / ${a.name}`;
+  const name = s.err || !s.name ? null : agentTitle(s, a);
   const r = { host, cwd, label: `${host}:${tilde(cwd)}`, ...(a.branch ? { branch: a.branch } : {}), ...(name ? { session: name } : {}) };
   if (!card) return r;
   const [entries, live] = await Promise.all([activeEntries(), api("GET", `/sessions/${encodeURIComponent(session)}/tasks?status=live`).catch(() => [])]);
@@ -497,7 +503,7 @@ async function getState() {
   const known = device.models.find((m) => m.provider === provider && m.id === modelId);
   return {
     sessionId: `${s.id}:${a.id}`,
-    sessionName: a.kind === "root" ? s.name : `${s.name} / ${a.name}`,
+    sessionName: agentTitle(s, a),
     model: { ...(known ?? {}), provider, id: modelId },
     thinkingLevel: a.config.thinkingLevel ?? "medium",
     isStreaming: running || !!a.busy,
@@ -756,10 +762,11 @@ async function newAgent(name) {
 // The main agent is the session: its name is the session's. Any other agent has a name of its own.
 async function renameAgent(name) {
   if (!name) throw new Error("usage: /dpi-rename <name>");
-  const a = await api("GET", agentPath());
-  if (a.kind === "root") await api("PATCH", sessionPath(), { name });
+  const [a, s] = await Promise.all([api("GET", agentPath()), api("GET", sessionPath())]);
+  const main = isMainAgent(s, a);
+  if (main) await api("PATCH", sessionPath(), { name });
   else await api("PATCH", agentPath(), { name });
-  notify(`${a.kind === "root" ? "Session" : "Agent"} renamed to ${name}.`);
+  notify(`${main ? "Session" : "Agent"} renamed to ${name}.`);
 }
 
 async function stopAgent() {
@@ -925,7 +932,7 @@ const handlers = {
         return {
           id: `${s.id}:${a.id}`,
           path: `dpi://${s.id}/${a.id}`,
-          name: a.kind === "root" ? s.name : `${s.name} / ${a.name}`,
+          name: agentTitle(s, a),
           cwd: s.cwd,
           createdAt: new Date(s.createdAt).toISOString(),
           modifiedAt: new Date(last).toISOString(),
@@ -934,7 +941,8 @@ const handlers = {
           activity: a.busy ? "working" : "idle",
           ...(hidden.has(`${s.id}:${a.id}`) ? { hidden: true } : {}),
           modelId: s.model,
-          parentSessionPath: a.kind === "root" ? undefined : `dpi://${s.id}/${a.parentId ?? a.ownerAgentId ?? "main"}`,
+          // Main agent: none. A fork or subagent: its parent; another root agent: the main agent.
+          parentSessionPath: isMainAgent(s, a) ? undefined : `dpi://${s.id}/${a.parentId ?? a.ownerAgentId ?? mainAgentId(s) ?? "main"}`,
         };
       }),
     };
