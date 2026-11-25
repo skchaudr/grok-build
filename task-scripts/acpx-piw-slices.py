@@ -24,21 +24,51 @@ Living plan (Sab + Claude + Pi):
      replace the `"A run is in progress; press Esc to cancel it."` block (`agent.rs:1463`) with `run_path`'s gate
      matcher (`match_waiting_gate_text`) and live mid-run steering classifier (`classify_mid_run_input`: `pause`,
      `resume`, `queue-follow-up`, `change-settings`, `/status`, `/preflight`).
-   - C3 (`allowFailure` exit 101 showing `✓` + preserving view metadata): Reproduce -> check `action.exitCode != 0`
-     and `output.ok == false` in `piw_driver.rs` and `mirror.rs`; emit visible start/finish cards for `Shell` and
-     `Compute` steps in `project.rs`; in `mirror.rs` `build_flow_json` copy the snapshot node fields `timeoutMs`,
-     `mountPath`, `localNodeId`, `includeTransition` into flow.json and add them to `bundle::FlowNode` (exact struct in
-     STEP_DIGEST_SHARED_API).
-     UNRESOLVED REQUIREMENTS (not dropped; no verified source yet, resolve before dispatch): workflow and per-include `maxSteps`, validator rejections, tool inputs/outputs.
+   - C3 (`allowFailure` exit 101 showing `✓` + preserving view metadata, `maxSteps`, validator rejections, and tool
+     payloads): Reproduce ->
+     (1) Check `action.exitCode != 0` and `output.ok == false` in `piw_driver.rs` and `mirror.rs`; emit visible
+         start/finish cards for `Shell` and `Compute` steps in `project.rs`.
+     (2) In `mirror.rs`, resolve `view.workflow.content` via `input.text_of` whenever `view.workflow` was paged
+         (`VIEW_PAGE_BYTES * 2`, e.g. `monitor` run `20261124T064326952Z-monitor-cd63bbf0`) so the full
+         `WorkflowDefinitionSnapshot` (including `composition.mounts`) is available.
+     (3) In `mirror.rs` `build_flow_json`, copy per-node `timeoutMs`, `mountPath`, `localNodeId`, and
+         `includeTransition` into `flow.json` `nodes.<id>`, copy `snapshot.composition.mounts` (`mountPath`,
+         `workflowName`, optional `maxSteps`) into top-level `"mounts"` in `flow.json`, and write top-level
+         `"maxSteps"` in `flow.json` only when verified for that specific run:
+         - from `snapshot.maxSteps` if present,
+         - else from `view.state.workflowSource` (or `view.manifest.workflowSource` / `view.queue.workflowSource`):
+           - for `{"kind": "builtin", "id": id, "revision": rev}`, look up the pinned `(id, revision)` table from
+             `pi-workflows/src/builtins/catalog.ts` (`plain-summary@3 -> 2`, `workspace-preparation@1 -> 5`,
+             `sanity-check@6 -> 8`, `autoplan@6 -> 16`, `change-verification@2 -> 30`, `autodoc@3 -> 80`,
+             `plan-approval@4 -> 100` [engine default `DEFAULT_MAX_STEPS = 100`], `autoimplement@14 -> 320`,
+             `plan-change@1 -> 400`, `monitor@13 -> 200_000`; unknown revision -> `None`),
+           - for `{"kind": "file", "path": path, "hash": sha256_hex}`, read `path` on disk and verify
+             `sha256(bytes) == sha256_hex` (matching `workflow-runner-entry.ts:561` `resolveVerifiedWorkflow`; an
+             edited or missing file is not proof of the historical run's limit and yields `None`). When the hash
+             matches, extract top-level `maxSteps` or apply `DEFAULT_MAX_STEPS = 100` (`engine.ts:75, 555`).
+         Add the corresponding fields to `bundle::FlowNode`, `bundle::FlowMount`, and `bundle::FlowDef`.
+     (4) In `mirror.rs`, preserve tool inputs, outputs, and truncation flags in `sessions/main/events.ndjson` from
+         one authoritative source per run (`input.activity` `StepActivity` when present; `view.session.eventPage.items`
+         when `input.activity` is empty on origin-session runs), correlated by `(attempt_id, tool_call_id)`:
+         - write `"rawInput"` on the initial `"tool_call"` line (and on any `"tool_call_update"` that supplies a
+           non-empty `tool.input`, because ACPX streams `input: {}` on `pending` and the populated arguments on the
+           subsequent update),
+         - write `"rawOutput"` on `"tool_call"` / `"tool_call_update"` whenever `tool.output` is `Some` (or from
+           non-empty `act.text` on a `"completed"` / `"failed"` update when `tool.output` is `None`),
+         - write `"truncated": true` when `tool.truncated` is `true`,
+         - keep `"title"`, `"status"`, and `"kind"` on `"tool_call"` / `"tool_call_update"` so `detail.rs`
+           `parse_conversation_items` continues to work unchanged while `step_digest` reads `rawInput`, `rawOutput`,
+           and `truncated` from the step's `conversation` sequence range `eventStartSeq..=eventEndSeq`.
 
 3. All 6 Workflow-Structure Signals (a)-(f), Workflow Creator / Preflight Entry Point, Cross-Run Step History,
    and Step-to-Transcript/Trace Linkage in the 6 Slices:
    - `step_digest` (`crates/codegen/xai-grok-pager/src/acpx/step_digest.rs`):
-     Single canonical failure-tail trimmer, untaken-branch pruner, effective outcome check, file scope digest,
-     the structural signals the server sends ((a) loop attempt count, (c) reviewer switch verdict + reason,
-     (d) step `elapsed vs timeoutMs` with >=75% warning and `TIMED OUT`, (e) steps used, (f) included child
-     workflows with named exits; (b) validator rejections and the `maxSteps` limit are unresolved requirements),
-     and `StepTraceLink` (`step_trace_link`) linking each step card to its transcript event range and artifact paths.
+     Single canonical failure-tail trimmer, untaken-branch pruner, effective outcome check, file scope digest from
+     preserved `rawInput` tool calls, all 6 structural signals ((a) loop attempt count, (b) validator rejections and
+     correction attempts from the step's mirrored transcript slice, (c) reviewer switch verdict + reason, (d) step
+     `elapsed vs timeoutMs` with >=75% warning and `TIMED OUT`, (e) root and per-include `maxSteps` used/remaining
+     using the engine's non-transition step counting rule, (f) included child workflows with named exits), and
+     `StepTraceLink` (`step_trace_link`) linking each step card to its transcript event range and artifact paths.
    - `workflow_preflight` (`crates/codegen/xai-grok-pager/src/acpx/workflow_preflight.rs`):
      Workflow creator entry point (start/clone a workflow from past runs and `.workflow.ts` templates), cross-run
      per-step duration and failure history (`analyze_workflow_history`: min/median/max duration, failure/timeout
@@ -88,25 +118,73 @@ Environment:
 # trace-link API across the workspace.
 STEP_DIGEST_SHARED_API = """
 // ==== Data sources (verified against pi-workflows and grok-build source; read nothing else, guess no keys) ====
-// The piw server's workflow snapshot sends, per node: `timeoutMs` (number|null), `mountPath` (string[]),
-// `localNodeId` (string), `includeTransition` ("entry"|"exit") (pi-workflows src/server/view.ts projectWorkflowNode).
-// Included node ids are `<mountPath joined by "/">/<localId>` (src/workflows/composition.ts qualify); an include's
-// exit node has qualified id `<mount>/__piw_exit_<exitName>`, `includeTransition == "exit"`, and `localNodeId` equal
-// to the exit name itself (pi-workflows src/workflows/store.ts snapshot builder). Step records carry attemptId (a UUID, no attempt number), nodeId,
-// outcome ("ok"|"timed_out"|"failed"|"cancelled"), startedAt, finishedAt, output, error, action{exitCode}, conversation.
-// UNRESOLVED REQUIREMENTS (not dropped; no verified source yet, resolve before dispatch): workflow and per-include `maxSteps`, validator rejections, tool inputs/outputs.
-// The engine has no per-loop attempt limit (loops are bounded only by maxSteps), so there is no "max attempts".
+// IMPORTANT — Pre-C3 attachment vs Post-C3 bundle types:
+// The attached `bundle.rs#L1-345` excerpt shows today's pre-C3 `FlowNode` (4 fields) and `FlowDef` (4 fields).
+// Before compiling this slice, the coordinator's C3 change updates `mirror.rs` and `crate::acpx::bundle` so that
+// `flow.json` and `sessions/main/events.ndjson` carry the verified server metadata below. Import `FlowNode`,
+// `FlowMount`, and `FlowDef` from `crate::acpx::bundle` (do NOT redefine them), and write code and tests against
+// these exact post-C3 `crate::acpx::bundle` declarations:
 //
-// The coordinator's C3 change (before integration) makes mirror.rs copy those four node fields into flow.json and
-// adds them to the bundle. Write against this `FlowNode` exactly:
+//   #[derive(Debug, Clone, Default, PartialEq)]
 //   pub struct FlowNode {
-//       pub id: String, pub kind: NodeKind, pub summary: Option<String>, pub is_shell: bool,
+//       pub id: String,
+//       pub kind: NodeKind,
+//       pub summary: Option<String>,
+//       pub is_shell: bool,
 //       pub timeout_ms: Option<u64>,            // snapshot `timeoutMs`; None when absent or null
 //       pub mount_path: Vec<String>,            // snapshot `mountPath`; empty for root-workflow nodes
-//       pub local_node_id: Option<String>,      // snapshot `localNodeId`
-//       pub include_transition: Option<String>, // "entry" | "exit"
+//       pub local_node_id: Option<String>,      // snapshot `localNodeId`; for includeTransition=="exit", the exit name
+//       pub include_transition: Option<String>, // snapshot `includeTransition`: Some("entry" | "exit") or None
 //   }
-// Look a step's node up with `run.flow.nodes.iter().find(|n| n.id == step.node_id)`.
+//
+//   #[derive(Debug, Clone, Default, PartialEq, Eq)]
+//   pub struct FlowMount {
+//       pub mount_path: Vec<String>,            // snapshot `composition.mounts[i].mountPath`
+//       pub workflow_name: String,              // snapshot `composition.mounts[i].workflowName`
+//       pub max_steps: Option<usize>,           // snapshot `composition.mounts[i].maxSteps`; None when child has no cap
+//   }
+//
+//   #[derive(Debug, Clone, Default, PartialEq)]
+//   pub struct FlowDef {
+//       pub name: String,
+//       pub start_at: String,
+//       pub nodes: Vec<FlowNode>,
+//       pub edges: Vec<FlowEdge>,
+//       pub max_steps: Option<usize>,           // verified root `maxSteps` (configured or default 100); None when unknown
+//       pub mounts: Vec<FlowMount>,             // snapshot `composition.mounts`
+//   }
+//
+// Verified upstream producers and mirror mappings:
+// 1. Node & include metadata (`pi-workflows/src/workflows/store.ts` `createDefinitionSnapshot`, `src/server/view.ts`
+//    `projectWorkflowNode`): per node `timeoutMs` (number|null), `mountPath` (string[]), `localNodeId` (string),
+//    `includeTransition` ("entry"|"exit"). Included node ids are `<mountPath.join("/")>/<localId>`; an include's exit
+//    node has qualified id `<mount>/__piw_exit_<exitName>`, `includeTransition == "exit"`, and `localNodeId` equal to
+//    `<exitName>` itself (e.g. `"passed"`). Look up a step's node via `run.flow.nodes.iter().find(|n| n.id == step.node_id)`.
+// 2. Root and included-workflow `maxSteps`:
+//    - Root limit (`pi-workflows/src/workflows/engine.ts:75, 555`): `workflow.maxSteps ?? DEFAULT_MAX_STEPS (100)`.
+//      `mirror.rs` writes top-level `"maxSteps"` into `flow.json` (`run.flow.max_steps`) ONLY when verified against
+//      the run's immutable `workflowSource` (`sha256(file) == source.hash` or pinned builtin `(id, revision)`). If a
+//      file was edited after the run or the source is unverified, `run.flow.max_steps` is `None` (unknown).
+//    - Included-workflow limit (`pi-workflows/src/workflows/composition.ts:232-238`): each mount in
+//      `snapshot.composition.mounts` (`run.flow.mounts`) carries `max_steps: Some(n)` only when the child workflow
+//      explicitly declared `maxSteps`; otherwise `max_steps: None` (no separate child cap).
+//    - Step counting rule (`engine.ts:564-573`, `countExecutableSteps` at `engine.ts:1707-1715`, and
+//      `assertInvocationStepLimit` at `engine.ts:1717-1752`): include transition steps (`include_transition ==
+//      Some("entry" | "exit")`, or node id matching a mount entry / `<mount>/__piw_exit_<name>`) are NOT counted
+//      against `maxSteps`. Root `used_steps` counts all non-transition steps in `run.steps`. Included-workflow
+//      `used_steps` counts all non-transition steps inside that mount (`step.node_id.starts_with("<mount>/")`)
+//      after the most recent `"entry"` transition step (`step.node_id == "<mount>"`) in `run.steps` (or across all
+//      `run.steps` if no `"entry"` step is present).
+// 3. Tool inputs/outputs and validator rejections (`pi-workflows/src/server/step-activity.ts`,
+//    `src/server/acpx-executor.ts:311-334`, `src/server/rpc-executor.ts:86-105`, `src/server/server.ts:1654-1695`,
+//    and `src/piw/mirror.rs`):
+//    - In C3, `mirror.rs` writes one authoritative stream per attempt into `sessions/main/events.ndjson` (bounded by
+//      `step.conversation` `event_start_seq..=event_end_seq`): from `StepActivity` for ACPX/RPC runs, or from
+//      `view.session.eventPage.items` for origin-session runs.
+//    - Each tool call is written as `{"seq": N, "direction": "inbound", "message": {"method": "session/update",
+//      "params": {"update": {"sessionUpdate": "tool_call" | "tool_call_update", "toolCallId": "<id>",
+//      "title": "<title>", "kind": "<kind>", "status": "pending" | "in_progress" | "completed" | "failed",
+//      "rawInput": <Value>, "rawOutput": <Value>, "truncated": <bool>}}}}`.
 
 // ==== Shared contract: crate::acpx::step_digest (or xai_grok_pager::acpx::step_digest from pager-bin) ====
 use std::collections::HashSet;
@@ -129,7 +207,7 @@ impl StepFileDigest {
     pub fn summary_line(&self) -> String;
 }
 
-/// (a) Loop attempt count for one step execution (counted from `run.steps`; the engine has no attempt limit).
+/// (a) Loop attempt count for one step execution (counted from `run.steps`; the engine has no per-node attempt limit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeAttemptBudget {
     pub attempt: usize,
@@ -140,7 +218,25 @@ impl NodeAttemptBudget {
     pub fn badge_label(&self) -> Option<String>;
 }
 
-/// (b) Validator rejections: UNRESOLVED REQUIREMENT (no verified source yet); not part of this contract until resolved.
+/// (b) Validator rejections and correction attempts for one step attempt, extracted from the step's transcript slice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ValidationDigest {
+    pub rejection_count: usize,
+    pub correction_attempts: usize,
+    pub resolved: bool,
+    pub last_error: Option<String>,
+    pub last_rejected_output: Option<String>,
+}
+
+impl ValidationDigest {
+    /// Returns:
+    /// - `None` when `self.rejection_count == 0`,
+    /// - `Some(format!("1 validation rejected -> corrected ({err})"))` (or `"N validations rejected -> corrected ({err})"`)
+    ///   when `self.resolved` is `true` (omitting `" ({err})"` when `self.last_error` is `None`),
+    /// - `Some(format!("1 validation rejected ({err})"))` (or `"N validations rejected ({err})"`)
+    ///   when `self.resolved` is `false` (omitting `" ({err})"` when `self.last_error` is `None`).
+    pub fn badge_label(&self) -> Option<String>;
+}
 
 /// (c) Reviewer or router verdict extracted from a step's output and outgoing switch edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,17 +263,22 @@ impl StepTimeBudget {
     pub fn badge_label(&self) -> String;
 }
 
-/// (e) Steps used by the run. The `maxSteps` limit and remainder are an UNRESOLVED REQUIREMENT (no verified source yet).
+/// (e) Executable (non-transition) steps used and remaining against the root workflow's `maxSteps`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepBudgetSummary {
     pub used_steps: usize,
+    pub max_steps: Option<usize>,
+    pub remaining_steps: Option<usize>,
 }
 
 impl StepBudgetSummary {
+    /// - When `max_steps == Some(max)`: `Some(format!("steps {}/{max} ({} left)", self.used_steps, self.remaining_steps.unwrap_or(0)))`.
+    /// - When `max_steps == None` and `self.used_steps > 0`: `Some(format!("steps {}/?", self.used_steps))`.
+    /// - When `max_steps == None` and `self.used_steps == 0`: `None`.
     pub fn badge_label(&self) -> Option<String>;
 }
 
-/// (f) Summary of an included child workflow, grouped by `FlowNode::mount_path` (joined with "/").
+/// (f) Summary of an included child workflow, grouped by `FlowNode::mount_path` / `FlowMount::mount_path` (joined with "/").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncludeScopeSummary {
     pub mount_path: String,
@@ -185,6 +286,8 @@ pub struct IncludeScopeSummary {
     pub executed_child_nodes: usize,
     pub total_child_nodes: usize,
     pub used_steps: usize,
+    pub max_steps: Option<usize>,
+    pub remaining_steps: Option<usize>,
     pub active: bool,
     pub named_exit: Option<String>,
 }
@@ -232,8 +335,9 @@ pub fn active_branch_nodes(
     edges: &[(String, String)],
     visited: &HashSet<String>,
 ) -> HashSet<String>;
-pub fn digest_step_files(step: &Step, observed_tools: &[&str]) -> StepFileDigest;
+pub fn digest_step_files(run: &Run, step: &Step, observed_tools: &[&str]) -> StepFileDigest;
 pub fn step_attempt_budget(run: &Run, step: &Step) -> NodeAttemptBudget;
+pub fn extract_step_validations(run: &Run, step: &Step, observed_tools: &[&str]) -> ValidationDigest;
 pub fn extract_step_verdict(run: &Run, step_index: usize) -> Option<StepVerdict>;
 pub fn step_time_budget(run: &Run, step: &Step, now_ms: i64) -> StepTimeBudget;
 pub fn run_step_budget(run: &Run) -> StepBudgetSummary;
@@ -266,13 +370,13 @@ TASKS = [
         "prompt": f"""
 Slice id: step_digest
 Target file: crates/codegen/xai-grok-pager/src/acpx/step_digest.rs
-Goal: Implement the single canonical failure-tail trimmer, untaken-branch node pruner, effective step outcome check, per-step file progress / out-of-scope file audit, step-to-transcript/trace linkage (`StepTraceLink`), and the workflow-structure extractors whose data the server sends: (a) loop attempt counts, (c) reviewer/router verdicts with reasons, (d) step `elapsed vs timeoutMs` time budgets and timeouts, (e) steps used, and (f) included child workflows with named exits. (b) validator rejections, the `maxSteps` limit, and tool inputs/outputs are unresolved requirements (no verified source yet), not dropped.
+Goal: Implement the single canonical failure-tail trimmer, untaken-branch node pruner, effective step outcome check, per-step file progress and out-of-scope file audit from preserved tool inputs, step-to-transcript/trace linkage (`StepTraceLink`), and all six workflow-structure extractors: (a) loop attempt counts, (b) validator rejections and correction attempts from the step's mirrored transcript slice, (c) reviewer/router verdicts with reasons, (d) step `elapsed vs timeoutMs` time budgets and timeouts, (e) root and per-include `maxSteps` used and remaining, and (f) included child workflows with named exits.
 
 Ownership:
-Return this complete file only. Do not modify other files or redefine `Step`, `Outcome`, `ActionReceipt`, `FlowEdge`, or `Run` (import them from `crate::acpx::bundle::{{fmt_duration, FlowEdge, NodeKind, Outcome, Run, RunStatus, Step}}`). The coordinator owns registering `pub mod step_digest;` in `src/acpx/mod.rs` and wiring it into `mirror.rs`, `detail.rs`, `run.rs`, and `grok-acpx-acp`.
+Return this complete file only. Do not modify other files or redefine `Step`, `Outcome`, `ActionReceipt`, `FlowEdge`, `FlowNode`, `FlowMount`, `FlowDef`, or `Run` (import them from `crate::acpx::bundle::{{fmt_duration, FlowDef, FlowEdge, FlowMount, FlowNode, NodeKind, Outcome, Run, RunStatus, Step}}`). The coordinator owns registering `pub mod step_digest;` in `src/acpx/mod.rs`, applying C3 to `bundle.rs` and `mirror.rs`, and wiring `step_digest` into `mirror.rs`, `detail.rs`, `run.rs`, and `grok-acpx-acp`.
 {RUST_GROK_ENV}
 Existing interfaces:
-- `crate::acpx::bundle::{{fmt_duration, ActionReceipt, FlowEdge, NodeKind, NodeState, Outcome, Run, RunStatus, Step}}` (`bundle.rs#L1-345`, `#L555-590`).
+- `crate::acpx::bundle::{{fmt_duration, ActionReceipt, FlowDef, FlowEdge, FlowMount, FlowNode, NodeKind, NodeState, Outcome, Run, RunStatus, Step}}` (note: `bundle.rs#L1-345` shows the pre-C3 `FlowNode` and `FlowDef`; code against the post-C3 `FlowNode`, `FlowMount`, and `FlowDef` shown in `STEP_DIGEST_SHARED_API` below).
 
 Public surface the coordinator and sibling slices will call:
 ```rust
@@ -280,12 +384,50 @@ Public surface the coordinator and sibling slices will call:
 ```
 
 Behavior details:
-- `StepFileDigest::summary_line(&self) -> String`, `effective_outcome`, `non_zero_exit_code`, `trim_failure_tail`, `step_failure_reason`, `latest_run_failure`, `active_branch_nodes`, and `digest_step_files`:
-  - Follow `STEP_DIGEST_SHARED_API`. For `Outcome::TimedOut` when `trim_failure_tail` finds no text, `step_failure_reason` returns `Some(format!("timed out after {{}}", fmt_duration(step.duration_ms())))`.
-- `active_branch_nodes(start_at, node_ids, edges, visited)`: walk forward from `start_at`. At a node with several outgoing edges, follow only edges whose target is in `visited` when at least one target is in `visited`; when none is visited yet (decision not made), keep every branch. Return the reachable set. Example: nodes `route_host -> {{resolve_group1_air, resolve_group2_shell}}`, `visited = {{route_host, resolve_group2_shell}}` drops `resolve_group1_air`; with `visited = {{route_host}}` both branches stay.
+- `effective_outcome`, `non_zero_exit_code`, `trim_failure_tail`, `step_failure_reason`, `latest_run_failure`:
+  - `non_zero_exit_code(step)`: checks `step.action.as_ref().and_then(|a| a.exit_code).filter(|&c| c != 0)` first, then `step.output.get("exitCode").and_then(Value::as_i64).filter(|&c| c != 0)`.
+  - `effective_outcome(step)`: if `step.outcome != Outcome::Ok`, return `step.outcome`; if `non_zero_exit_code(step).is_some()` or `step.output.get("ok").and_then(Value::as_bool) == Some(false)`, return `Outcome::Failed`; else `Outcome::Ok`.
+  - For `Outcome::TimedOut` when `trim_failure_tail` finds no text, `step_failure_reason` returns `Some(format!("timed out after {{}}", fmt_duration(step.duration_ms())))`.
+- `active_branch_nodes(start_at, node_ids, edges, visited)`:
+  - Walk forward from `start_at`. At a node with several outgoing edges, follow only edges whose target is in `visited` when at least one target is in `visited`; when none is visited yet (decision not made), keep every branch. Return the reachable set.
+  - Example: nodes `route_host -> {{resolve_group1_air, resolve_group2_shell}}`, `visited = {{route_host, resolve_group2_shell}}` drops `resolve_group1_air`; with `visited = {{route_host}}` both branches stay.
+- Reading a step's mirrored transcript slice (`sessions/main/events.ndjson`):
+  - Resolve `(events_path, event_range)` via `step_trace_link(run, step)`. When `events_path` exists on disk, read lines whose `"seq"` falls within `event_range` (inclusive; when `event_range` is `None`, read all lines only if `run.steps.len() <= 1`).
+  - Each inbound `session/update` line has `update = val.pointer("/message/params/update")` with `sessionUpdate == "tool_call" | "tool_call_update"`. Correlate updates by `toolCallId` (preserving first-seen order per `toolCallId`): merge `title`, `kind`, `status`, `rawInput` (keeping the latest non-empty object/value when a `pending` call starts with `{{}}` and a later update supplies the arguments), `rawOutput` (keeping the latest non-null value), `content`, and `truncated` (`true` if any event for that `toolCallId` had `"truncated": true`).
+- `digest_step_files(run: &Run, step: &Step, observed_tools: &[&str]) -> StepFileDigest`:
+  - `expected_files`: extract distinct repo-relative file paths from `step.prompt_text.as_deref().unwrap_or("")` (tokens containing `'/'` and ending with a known source/config extension such as `.rs`, `.ts`, `.js`, `.py`, `.toml`, `.json`, `.md`, `.sh`, `.yml`, `.yaml`, or `Cargo.lock` / `.gitignore`, stripping surrounding backticks/quotes/punctuation and stripping any leading `/.../crates/` or `/.../src/` worktree prefix to start at `crates/`, `src/`, `task-scripts/`, `.pi/`, etc.).
+  - `touched_files`: collect distinct normalized repo-relative paths (in first-seen order) from:
+    1. Merged tool calls in the step's transcript slice that modify or stage files:
+       - Edit/Write tool calls (`kind` or `title` case-insensitively matching `"edit"`, `"write"`, `"multiedit"`, `"searchreplace"`, or `rawInput.get("variant")` matching `"SearchReplace"` / `"Write"`, or `rawInput` having `"new_string"` / `"oldText"` / `"edits"` / `"content"` alongside `"file_path"` / `"path"`): extract `rawInput.get("file_path").or_else(|| rawInput.get("path"))`.
+       - Execute/Bash tool calls (`kind` or `title` matching `"execute"` / `"bash"` or `rawInput.get("command")`): extract file paths passed to `git add` or `git rm` in `rawInput["command"]`.
+       (Ignore read-only tools like `read`, `grep`, `find`, `ls`, `search_tool`, `ToolSearch`, and `workflow`.)
+    2. `observed_tools` strings (extracting paths from `"Edit ..."` / `"Write ..."` / `"git add ..."`).
+  - Normalize every extracted path by stripping leading worktree prefixes up to `crates/`, `src/`, `task-scripts/`, `.pi/`, `docs/`, `tests/`, or `tui/` when present; if a path is outside the repo/worktree (e.g. `/Users/sab-mini/repos/pi-workflows/_tmp_git_add_g2.sh` when `expected_files` are under `crates/`), keep its normalized path so it is flagged in `out_of_scope_files`.
+  - `out_of_scope_files`: when `expected_files` is non-empty, every path in `touched_files` not present in `expected_files`; when `expected_files` is empty, `Vec::new()`.
+  - `current_file`: `touched_files.last().cloned()`.
+  - `StepFileDigest::summary_line(&self) -> String`:
+    - If `expected_files.is_empty() && touched_files.is_empty()`: `String::new()`.
+    - Start with `if !expected_files.is_empty() {{ format!("files {{}}/{{}}", touched_files.len().saturating_sub(out_of_scope_files.len()), expected_files.len()) }} else {{ format!("files {{}}", touched_files.len()) }}`.
+    - If `!out_of_scope_files.is_empty()`, append `format!(" (!{{}} out-of-scope)", out_of_scope_files.len())`.
+    - If let `Some(curr) = &self.current_file`, append `format!(" · {{curr}}")`.
 - (a) `step_attempt_budget(run: &Run, step: &Step) -> NodeAttemptBudget`:
   - `observed_attempts` = number of `run.steps` with `s.node_id == step.node_id`; `attempt` = 1-based position of `step.attempt_id` among them. Attempt ids are UUIDs: never parse them. If `step.attempt_id` is not in `run.steps`, `attempt = observed_attempts + 1`.
   - `badge_label(&self)`: `Some(format!("attempt {{}}", self.attempt))` when `self.attempt > 1 || self.observed_attempts > 1`, else `None`.
+- (b) `extract_step_validations(run: &Run, step: &Step, observed_tools: &[&str]) -> ValidationDigest`:
+  - Inspect the merged tool calls in the step's transcript slice (`sessions/main/events.ndjson` in `event_range`) in chronological order:
+    - Identify **workflow submission calls**: tool calls where (`title` or `kind` is `"workflow"`, `"workflow__workflow"`, or `"mcp__workflow__workflow"`, OR `rawInput.get("tool_name")` is one of those, OR `rawInput` has `"action": "submit"` and `"requestId"`), AND the inner input (`rawInput.get("tool_input").unwrap_or(&rawInput)`) has `"action": "submit"` (or only workflow submission calls when `"action"` is omitted on a failed `"workflow"` tool call). Ignore `"action": "update"` calls and unrelated tools (`bash`, `edit`, `ToolSearch`, etc.).
+    - For each workflow submission call `(idx, call)` out of `total_submit_calls` on this attempt:
+      - Extract `output_preview` from `inner_input.get("output")` (compact JSON truncated to 120 chars).
+      - Extract raw output text from `call.raw_output` (or `call.content`): string directly, or `content[0].text`, or `result.content[0].text`, or `error`, or compact JSON.
+      - Skip transport/permission denials that blocked execution before the validator ran (specifically when output text contains `"was not executed: Denied by permission policy"` or `"workflow step channel is unavailable"`).
+      - The submission call is **rejected** if:
+        1. Output text contains `"The workflow rejected your submission"` (extract the clean error reason after the first `":\\n"` or `":"` and before `"Call the `workflow` tool again"`, trimming whitespace and collapsing newlines to spaces), OR
+        2. `call.status == "failed"` (extract the clean error reason from output text, stripping any `"The workflow rejected your submission for step ...:"` prefix and `"Call the `workflow` tool again with a corrected output."` suffix), OR
+        3. `idx + 1 < total_submit_calls` (an earlier `"submit"` call on the same attempt that was followed by a re-submission on the same attempt, as in `RpcStepExecutor`).
+      - A submission call is **accepted** if it is not rejected and (`call.status == "completed"` or output text contains `"Submission accepted"` or `"Workflow step output accepted"` or (`idx + 1 == total_submit_calls && effective_outcome(step) == Outcome::Ok && step.finished_ms > step.started_ms`)).
+  - Also scan `observed_tools` entries containing `"The workflow rejected your submission"`; and if `rejection_count == 0` while the step is currently waiting (`run.summary.waiting_on.as_deref() == Some(&step.node_id)` and `step.kind != NodeKind::Checkpoint`), check `run.summary.status_detail.as_deref()` when it starts with or contains `"The workflow rejected your submission"`.
+  - Set `resolved = rejection_count > 0 && (has_accepted_submit_after_last_rejection || (effective_outcome(step) == Outcome::Ok && step.finished_ms > step.started_ms && run.summary.current_node.as_deref() != Some(&step.node_id) && run.summary.waiting_on.as_deref() != Some(&step.node_id)))`.
+  - Set `correction_attempts = if resolved {{ rejection_count }} else {{ total_submit_calls_after_first_rejection }}`.
 - (c) `extract_step_verdict(run: &Run, step_index: usize) -> Option<StepVerdict>`:
   - Match `FlowEdge::Switch {{ from, on, cases }}` for `step.node_id` against `step.output` (resolving `on` stripped of `"$."`) or the next executed step `run.steps.get(step_index + 1)`, or explicit `"verdict"` / `"decision"` string fields in `step.output`.
   - Extract `reason` from keys `["reason", "rationale", "summary", "explanation", "detail", "notes"]` in `step.output` (skipping `"summary"` on `NodeKind::Checkpoint`), collapsed to one line of at most 160 chars.
@@ -295,28 +437,44 @@ Behavior details:
   - `timed_out`: `effective_outcome(step) == Outcome::TimedOut`.
   - `near_expiry`: `!timed_out && timeout_ms.is_some_and(|t| t > 0 && elapsed_ms.saturating_mul(100) / t >= 75)`.
 - (e) `run_step_budget(run: &Run) -> StepBudgetSummary`:
-  - `used_steps = run.steps.len()`. `badge_label` is `Some(format!("steps {{}}", used_steps))` when `used_steps > 0`.
-- (f) `parse_scoped_node_id(node_id) -> (mount, local, exit)`: split at the last `'/'` (`mount` is `None` without one); `exit` is `Some(name)` when `local` starts with `__piw_exit_`. Used where only an id is available (e.g. `FlowSketch`).
-- `summarize_included_workflows(run: &Run)`: group `run.flow.nodes` with non-empty `mount_path` by `mount_path.join("/")`. `total_child_nodes` = nodes in the group; `executed_child_nodes` = distinct node ids of the group seen in `run.steps`; `used_steps` = steps on those nodes; `invocations` = steps on the group's `include_transition == Some("entry")` node; `active` = `run.summary.current_node` is in the group; `named_exit` = `local_node_id` of the latest executed group node whose `include_transition == Some("exit")` (that field is the exit name). `summary_line` reads like `"verify: 4/6 nodes · 5 steps · exit:passed"`.
+  - Uses the engine's `countExecutableSteps` rule (`engine.ts:564-573, 1707-1715`): count `step` in `run.steps` where the node is **not** an include transition step (`run.flow.nodes.iter().find(|n| n.id == step.node_id).and_then(|n| n.include_transition.as_deref())` is neither `Some("entry")` nor `Some("exit")`, and `parse_scoped_node_id(&step.node_id).2.is_none()`, and `!run.flow.mounts.iter().any(|m| m.mount_path.join("/") == step.node_id)`).
+  - `max_steps = run.flow.max_steps`.
+  - `remaining_steps = max_steps.map(|m| m.saturating_sub(used_steps))`.
+- (f) `parse_scoped_node_id(node_id) -> (mount, local, exit)`:
+  - Split at the last `'/'` (`mount` is `None` without one); `exit` is `Some(name)` when `local` starts with `__piw_exit_`.
+- `summarize_included_workflows(run: &Run) -> Vec<IncludeScopeSummary>`:
+  - Group `run.flow.nodes` with non-empty `mount_path` by `mount_path.join("/")` (in BTreeMap order).
+  - Look up `max_steps` from `run.flow.mounts.iter().find(|m| m.mount_path.join("/") == mount_key).and_then(|m| m.max_steps)`. Do NOT manufacture a cap when `max_steps` is `None`.
+  - A node in the group is a transition node if `node.include_transition.as_deref()` is `Some("entry")` or `Some("exit")` (or `node.id == mount_key` or `parse_scoped_node_id(&node.id).2.is_some()`).
+  - `total_child_nodes`: nodes in the group; `executed_child_nodes`: distinct node ids of the group seen in `run.steps`.
+  - `invocations`: count of `run.steps` on the group's `include_transition == Some("entry")` node (defaulting to `1` if `executed_child_nodes > 0` and no explicit entry node was in `run.flow.nodes`).
+  - `used_steps`: matching `assertInvocationStepLimit` (`engine.ts:1717-1752`), find the last index in `run.steps` of the group's `"entry"` transition step; in the slice of `run.steps` after that entry index (or all `run.steps` if no entry step was recorded), count non-transition steps belonging to the group (`step.node_id.starts_with(&format!("{{mount_key}}/"))` or in the group's node ids).
+  - `remaining_steps = max_steps.map(|m| m.saturating_sub(used_steps))`.
+  - `active`: `run.summary.current_node.as_deref()` is in the group.
+  - `named_exit`: `local_node_id` (or `parse_scoped_node_id` exit name fallback) of the latest executed group node whose `include_transition == Some("exit")`.
+  - `summary_line(&self)`:
+    - Start with `format!("{{}}: {{}}/{{}} nodes", self.mount_path, self.executed_child_nodes, self.total_child_nodes)`.
+    - If `self.max_steps` is `Some(max)`: append `format!(" · {{}}/{{max}} steps ({{}} left)", self.used_steps, self.remaining_steps.unwrap_or(0))`.
+    - Else: append `format!(" · {{}} steps", self.used_steps)`.
+    - If `self.invocations > 1`: append `format!(" · {{}}x", self.invocations)`.
+    - If `self.active`: append `" · active"`.
+    - Else if let `Some(exit) = &self.named_exit`: append `format!(" · exit:{{exit}}")`.
 - `step_trace_link(run: &Run, step: &Step) -> StepTraceLink`:
   - Resolve `session_events_path` and `event_range` from `step.conversation`: look up `run.session_events_path(&conv.session_id).map(Path::to_path_buf)` and `Some((conv.event_start_seq, conv.event_end_seq))`. If `step.conversation` is `None` and `step.kind == NodeKind::Acp`, fall back to `run.sessions.first().map(|s| s.events_path.clone())`.
   - Resolve `stdout_path`, `stderr_path`, and `output_artifact_path` by joining `run.summary.dir` with `art.path` when `step.stdout`, `step.stderr`, or `step.output_artifact` is `Some(art)`.
-  - `is_openable(&self)`: true when `session_events_path.is_some() || stdout_path.is_some() || stderr_path.is_some() || output_artifact_path.is_some()`.
-  - `badge_label(&self)`:
-    - If `event_range` is `Some((start, end))`: `Some(format!("trace: events {{start}}..{{end}}"))`
-    - Else if `stderr_path.is_some()`: `Some("trace: stderr".to_string())`
-    - Else if `stdout_path.is_some()`: `Some("trace: stdout".to_string())`
-    - Else if `session_events_path.is_some()`: `Some("trace: transcript".to_string())`
-    - Else if `output_artifact_path.is_some()`: `Some("trace: artifact".to_string())`
-    - Else `None`.
 
 Tests:
 - `effective_outcome` catches `exit_code: Some(101)` and preserves `Outcome::TimedOut`.
 - `active_branch_nodes` drops the untaken branch after the decision and keeps both branches before it (example above).
 - `step_attempt_budget` formats `"attempt 2"` for the second of two `cargo_check` steps with UUID attempt ids.
+- `extract_step_validations` reads a temp `events.ndjson` transcript slice where seq 10..11 is a rejected `workflow` `"submit"` call (`rawInput: {{"action": "submit", "requestId": "req-1", "output": {{"resolvedCount": 12}}}}`, `rawOutput: "The workflow rejected your submission for step \\"resolve_group2_shell\\":\\nresolvedCount must equal 35\\n\\nCall the `workflow` tool again with a corrected output."`) and seq 12..13 is an accepted `workflow` `"submit"` call (`rawInput: {{"action": "submit", "requestId": "req-1", "output": {{"resolvedCount": 35}}}}`, `rawOutput: "Submission accepted. This step is complete; do not call the workflow tool again."`), plus an unrelated failed `bash` tool call at seq 9 (`status: "failed"`, `rawOutput: "exit 1"`), and verifies `rejection_count == 1`, `correction_attempts == 1`, `resolved == true`, `last_error == Some("resolvedCount must equal 35".into())`, and `badge_label() == Some("1 validation rejected -> corrected (resolvedCount must equal 35)".into())`.
+- `digest_step_files` reads a temp `events.ndjson` transcript slice containing preserved `rawInput` payloads for an `edit` tool call on `crates/codegen/xai-grok-shell/src/lib.rs` (in `expected_files` from `step.prompt_text`) and an out-of-scope `edit` tool call on `/Users/sab-mini/repos/pi-workflows/_tmp_git_add_g2.sh` (derived from `beta8-merge` seq 1343), verifying `expected_files`, `touched_files`, `out_of_scope_files == vec!["/Users/sab-mini/repos/pi-workflows/_tmp_git_add_g2.sh"]`, and `summary_line()` containing `"(!1 out-of-scope)"`.
 - `extract_step_verdict` extracts `route_key: "needs_work"`, `target_node: Some("repair")`, and `reason`.
 - `step_time_budget` reads `FlowNode::timeout_ms`, detects `near_expiry: true` at `90_000 / 120_000 ms`, `timed_out: true` on `Outcome::TimedOut`, and `timeout_ms: None` when the node has none.
-- `summarize_included_workflows` groups by `mount_path` and reports `named_exit: Some("passed")` from node `verify/__piw_exit_passed` with `include_transition: Some("exit")` and `local_node_id: Some("passed")`.
+- `run_step_budget` and `summarize_included_workflows` test:
+  1. a non-default root `FlowDef::max_steps = Some(320)` where `run.steps` includes `"entry"` and `"exit"` transition steps alongside 5 executable steps, verifying `run_step_budget` excludes the transition steps (`used_steps: 5`, `max_steps: Some(320)`, `remaining_steps: Some(315)`),
+  2. an included workflow mount WITH its own cap (`FlowMount {{ mount_path: vec!["verify".into()], workflow_name: "change-verification".into(), max_steps: Some(30) }}`) reporting `used_steps: 2`, `max_steps: Some(30)`, `remaining_steps: Some(28)`, and `named_exit: Some("passed")` from `verify/__piw_exit_passed` (`include_transition: Some("exit")`, `local_node_id: Some("passed")`), and
+  3. an included workflow mount WITHOUT its own cap (`FlowMount {{ mount_path: vec!["approval".into()], workflow_name: "plan-approval".into(), max_steps: None }}`) reporting `max_steps: None`, `remaining_steps: None`, and no manufactured cap in `summary_line()`.
 - `step_trace_link` resolves `session_events_path`, `event_range: Some((10, 25))`, and artifact paths under `run.summary.dir`.
 """ + RETURN_FORMAT_TEMPLATE.format(target="crates/codegen/xai-grok-pager/src/acpx/step_digest.rs"),
     },
@@ -335,10 +493,10 @@ Target file: crates/codegen/xai-grok-pager/src/acpx/workflow_preflight.rs
 Goal: Provide (1) the workflow creator entry point that indexes existing workflows and past run records into reusable starting templates, (2) cross-run per-step duration and failure analysis (`analyze_workflow_history`) so time limits are proposed from actual past step durations in workflow state rather than guessed, and (3) the preflight budget & loop gate (`audit_workflow_preflight`) that flags `beta8-merge.workflow.ts` for ungrounded/missing time limits and its unbounded `repair_compile -> cargo_check` loop before launch.
 
 Ownership:
-Return this complete file only. Do not modify other files, add dependencies, or redefine `Run`, `Step`, `FlowDef`, `FlowEdge`, or `Outcome` (import them from `crate::acpx::bundle::*` and use `crate::acpx::step_digest::*`). The coordinator owns registering `pub mod workflow_preflight;` in `src/acpx/mod.rs` and wiring it into `/flow` preflight in `grok-acpx-acp` and `/acpx`.
+Return this complete file only. Do not modify other files, add dependencies, or redefine `Run`, `Step`, `FlowDef`, `FlowMount`, `FlowNode`, `FlowEdge`, or `Outcome` (import them from `crate::acpx::bundle::*` and use `crate::acpx::step_digest::*`). The coordinator owns registering `pub mod workflow_preflight;` in `src/acpx/mod.rs` and wiring it into `/flow` preflight in `grok-acpx-acp` and `/acpx`.
 {RUST_GROK_ENV}
 Existing interfaces:
-- `crate::acpx::bundle::{{fmt_duration, FlowDef, FlowEdge, FlowNode, NodeKind, Outcome, Run, RunStatus, Step}}` (`bundle.rs#L1-345`, `#L555-590`).
+- `crate::acpx::bundle::{{fmt_duration, FlowDef, FlowEdge, FlowMount, FlowNode, NodeKind, Outcome, Run, RunStatus, Step}}` (`bundle.rs#L1-345`, `#L555-590`; use the post-C3 `FlowNode`, `FlowMount`, and `FlowDef` fields in `STEP_DIGEST_SHARED_API` below).
 - Shared `crate::acpx::step_digest` contract:
 ```rust
 {STEP_DIGEST_SHARED_API}
@@ -461,8 +619,8 @@ pub fn discover_workflow_templates(
 /// Detect directed cycle back-edges `(from, to)` in `flow` using DFS from `flow.start_at` (plus any unvisited nodes in `flow.nodes` order).
 pub fn find_cycle_back_edges(flow: &FlowDef) -> Vec<(String, String)>;
 
-/// Audit `flow` (and optional `raw_flow_json` for `"maxSteps"`, `"nodes.<id>.timeoutMs"`, `"nodes.<id>.maxAttempts"`)
-/// against `past_runs` and `overrides`.
+/// Audit `flow` (reading `node.timeout_ms`, `flow.max_steps`, and optional `raw_flow_json` for `"maxSteps"`,
+/// `"nodes.<id>.timeoutMs"`, `"nodes.<id>.maxAttempts"`) against `past_runs` and `overrides`.
 pub fn audit_workflow_preflight(
     flow: &FlowDef,
     raw_flow_json: Option<&Value>,
@@ -623,13 +781,13 @@ Tests:
         "prompt": f"""
 Slice id: modal_view
 Target file: crates/codegen/xai-grok-pager/src/views/acpx_modal/modal_view.rs
-Goal: Declutter the `/acpx` modal run view by pruning untaken switch branches via `crate::acpx::step_digest::active_branch_nodes`, adding full-modal graph and detail maximize/zoom modes with vertical graph scrolling, rendering a clear waiting-gate banner with the preceding step's failure reason, and formatting per-step structural and trace-link badges for (a), (c), (d), (f) plus `StepTraceLink` (see the data-source notes in the shared contract).
+Goal: Declutter the `/acpx` modal run view by pruning untaken switch branches via `crate::acpx::step_digest::active_branch_nodes`, adding full-modal graph and detail maximize/zoom modes with vertical graph scrolling, rendering a clear waiting-gate banner with the preceding step's failure reason, and formatting per-step structural and trace-link badges for all six workflow features (a)-(f) plus `StepTraceLink`.
 
 Ownership:
 Return this complete file only. Do not modify other files, add dependencies, or duplicate branch-pruning or failure-tail trimming logic (call `crate::acpx::step_digest::*`). The coordinator owns registering `pub(crate) mod modal_view;` in `views/acpx_modal.rs` and wiring it into `views/acpx_modal/run.rs` and `detail.rs`.
 {RUST_GROK_ENV}
 Existing interfaces:
-- `crate::acpx::bundle::{{FlowDef, FlowEdge, FlowNode, NodeKind, NodeState, Outcome, Run, RunStatus, Step}}` (`bundle.rs#L1-330`).
+- `crate::acpx::bundle::{{FlowDef, FlowEdge, FlowMount, FlowNode, NodeKind, NodeState, Outcome, Run, RunStatus, Step}}` (`bundle.rs#L1-330`; use the post-C3 `FlowNode`, `FlowMount`, and `FlowDef` fields in `STEP_DIGEST_SHARED_API` below).
 - `crate::render::line_utils::truncate_str` and `crate::theme::Theme`.
 - Shared `crate::acpx::step_digest` contract:
 ```rust
@@ -728,12 +886,14 @@ pub fn build_waiting_gate_banner(
 ) -> Vec<Line<'static>>;
 
 /// Build a compact structural + trace-link annotation string for `run.steps[step_index]` at `now_ms`, combining:
-/// - (f) `format!("exit:{{exit_name}}")` if `parse_scoped_node_id(&step.node_id).2` is `Some(exit_name)`,
+/// - (f) `format!("exit:{{exit_name}}")` if the step's `FlowNode` has `include_transition.as_deref() == Some("exit")`
+///   and `local_node_id.as_deref()` (or `parse_scoped_node_id(&step.node_id).2`) is `Some(exit_name)`,
 /// - (a) `step_attempt_budget(run, step).badge_label()`,
 /// - (d) `step_time_budget(run, step, now_ms).badge_label()` when `timeout_ms.is_some()` or `timed_out`,
 /// - `"exit <code>"` when `non_zero_exit_code(step)` is `Some(code)`,
+/// - (b) `extract_step_validations(run, step, &[]).badge_label()`,
 /// - (c) `extract_step_verdict(run, step_index).map(|v| v.summary_line())`,
-/// - `digest_step_files(step, &[]).summary_line()` when non-empty,
+/// - `digest_step_files(run, step, &[]).summary_line()` when non-empty,
 /// - `step_trace_link(run, step).badge_label()` when `Some`.
 /// Joins non-empty parts with `" · "`.
 pub fn format_step_structure_annotation(run: &Run, step_index: usize, now_ms: i64) -> String;
@@ -745,7 +905,7 @@ Tests:
 - `prune_run_for_graph` removes the unvisited `"air"` switch case and its unreachable node once `route_host` has transitioned to `"mini"` in `run.steps`.
 - `slice_graph_viewport` scrolls vertically in `ModalZoom::Graph` and appends the `"press m to maximize graph"` hint in `ModalZoom::Split`.
 - `build_waiting_gate_banner` renders both the `"WAITING FOR YOUR ANSWER"` warning line and the `"✗ Preceding failure in cargo_check (exit 101): ..."` error line.
-- `format_step_structure_annotation` combines loop attempt badge, time budget, reviewer verdict, file progress, and `step_trace_link` badge (`"trace: events 1..5"`).
+- `format_step_structure_annotation` combines loop attempt badge, time budget, validator rejection badge (from a temp `events.ndjson` with a rejected-then-accepted workflow submission), reviewer verdict, file progress, and `step_trace_link` badge (`"trace: events 1..5"`).
 """ + RETURN_FORMAT_TEMPLATE.format(target="crates/codegen/xai-grok-pager/src/views/acpx_modal/modal_view.rs"),
     },
     {
@@ -761,13 +921,13 @@ Tests:
         "prompt": f"""
 Slice id: run_status_bar
 Target file: crates/codegen/xai-grok-pager/src/acpx/run_status_bar.rs
-Goal: Provide a single-line live run status bar and a structured multi-line `/status` report (Issue 12 + structural items (a), (c), (d), (e) steps used, (f) + `step_trace_link` transcript/artifact badge) inside Grok Build without querying SQLite or the server CLI.
+Goal: Provide a single-line live run status bar and a structured multi-line `/status` report (Issue 12 + all six structural items (a)-(f) + `step_trace_link` transcript/artifact badge) inside Grok Build without querying SQLite or the server CLI.
 
 Ownership:
 Return this complete file only. Do not modify other files, add dependencies, or duplicate outcome/failure/file-digest/structure logic (use `crate::acpx::step_digest::*`). The coordinator owns registering `pub mod run_status_bar;` in `src/acpx/mod.rs` and wiring it into `grok-acpx-acp` (`/status` and turn status updates) and `/acpx`.
 {RUST_GROK_ENV}
 Existing interfaces:
-- `crate::acpx::bundle::{{fmt_duration, gate_choices, NodeKind, NodeState, Outcome, Run, RunStatus, Step}}` (`bundle.rs#L1-345`, `#L555-590`, `#L1255-1275`).
+- `crate::acpx::bundle::{{fmt_duration, gate_choices, FlowDef, FlowEdge, FlowMount, FlowNode, NodeKind, NodeState, Outcome, Run, RunStatus, Step}}` (`bundle.rs#L1-345`, `#L555-590`, `#L1255-1275`; use the post-C3 `FlowNode`, `FlowMount`, and `FlowDef` fields in `STEP_DIGEST_SHARED_API` below).
 - Shared `crate::acpx::step_digest` contract:
 ```rust
 {STEP_DIGEST_SHARED_API}
@@ -785,7 +945,7 @@ Behavior details:
 - `format_run_status_line(run: &Run, answered: Option<&str>, now_ms: i64) -> String`:
   - Let `title` be `run.summary.title` if non-empty, else `run.summary.flow_name`, else `run.summary.run_id`.
   - Let `(done, total) = run.progress()` and `dur = fmt_duration(run.duration_ms(now_ms))`.
-  - Let `step_budget = run_step_budget(run).badge_label()` (`Some("steps N")`).
+  - Let `step_budget = run_step_budget(run).badge_label()` (`Some("steps X/Y (Z left)")` when `max_steps` is known, or `Some("steps X/?")` when unknown).
   - When `run.summary.status == RunStatus::Waiting` and `answered.is_none()`:
     - Let `gate_node = run.summary.waiting_on.as_deref().or(run.summary.current_node.as_deref()).unwrap_or("gate")`.
     - Collect choice labels from `bundle::gate_choices(run)` as `"1: <c1>, 2: <c2>"`.
@@ -803,7 +963,8 @@ Behavior details:
       if let `Some(badge) = step_attempt_budget(run, step).badge_label()`, append `format!(" · {{badge}}")`;
       let `tb = step_time_budget(run, step, now_ms)`;
       if `tb.timeout_ms.is_some() || tb.timed_out`, append `format!(" · {{}}", tb.badge_label())`;
-      let `fline = digest_step_files(step, &[]).summary_line()`;
+      if let `Some(vbadge) = extract_step_validations(run, step, &[]).badge_label()`, append `format!(" · {{vbadge}}")`;
+      let `fline = digest_step_files(run, step, &[]).summary_line()`;
       if `!fline.is_empty()`, append `format!(" · {{fline}}")`.
   - Otherwise (Completed, Failed, TimedOut, Unknown, or Waiting with `answered.is_some()`):
     - Effective status is `RunStatus::Completed` when `run.summary.status == RunStatus::Waiting && answered.is_some()`, else `run.summary.status`.
@@ -816,13 +977,13 @@ Behavior details:
   - Line 1: `format!("**{{}}** (`{{}}`)", format_run_status_line(run, answered, now_ms), run.summary.run_id)`
   - If `summarize_included_workflows(run)` is non-empty:
     append a `"\\n**Included workflows:**"` section with one bullet `"- {{inc.summary_line()}}"` per included workflow.
-  - Next section: one bullet per executed step `(idx, step)` in `run.steps.iter().enumerate()` including effective glyph (`✓`, `⏱`, `✗`, `⊘`, `?`), display node name (`mount ↳ exit:name` for included exits), attempt badge, agent name, `step_time_budget(run, step, now_ms).badge_label()`, `(exit <code>)` when non-zero, reviewer verdict summary line, file progress summary line, and `step_trace_link(run, step).badge_label()` when present.
+  - Next section: one bullet per executed step `(idx, step)` in `run.steps.iter().enumerate()` including effective glyph (`✓`, `⏱`, `✗`, `⊘`, `?`), display node name (`mount ↳ exit:name` for included exits), attempt badge, agent name, `step_time_budget(run, step, now_ms).badge_label()`, `(exit <code>)` when non-zero, validator rejection badge (`extract_step_validations(run, step, &[]).badge_label()`), reviewer verdict summary line, file progress summary line (`digest_step_files(run, step, &[]).summary_line()`), and `step_trace_link(run, step).badge_label()` when present.
   - Waiting gate section when `run.summary.status == RunStatus::Waiting && answered.is_none()`.
 
 Tests:
-- `format_run_status_line` for a running workflow on the second attempt of a loop step whose `FlowNode::timeout_ms` is `Some(120_000)` shows `"steps 7"`, `"attempt 2"`, `"⚠ 1m30s/2m00s (75%)"`, and file progress.
+- `format_run_status_line` for a running workflow with `FlowDef::max_steps = Some(20)` on the second attempt of a loop step whose `FlowNode::timeout_ms` is `Some(120_000)` shows `"steps 2/20 (18 left)"`, `"attempt 2"`, `"⚠ 1m30s/2m00s (75%)"`, and file progress.
 - `format_run_status_line` for a waiting workflow after a failed `cargo_check` (`exitCode: 101`) shows `"WAITING FOR YOUR ANSWER at final_review_gate [1: accept, 2: repair] · last failed: cargo_check (exit 101)"`.
-- `format_run_status_report` includes `"Included workflows:"`, per-step attempt counts, time budgets, reviewer verdicts, `step_trace_link` badges, effective glyphs (`⏱` for `TimedOut`, `✗` for `exitCode: 101`), and waiting gate details.
+- `format_run_status_report` includes `"Included workflows:"` (with an included mount cap `"5/30 steps (25 left)"`), per-step attempt counts, time budgets, validator rejection badge, reviewer verdicts, `step_trace_link` badges, effective glyphs (`⏱` for `TimedOut`, `✗` for `exitCode: 101`), and waiting gate details.
 """ + RETURN_FORMAT_TEMPLATE.format(target="crates/codegen/xai-grok-pager/src/acpx/run_status_bar.rs"),
     },
     {
