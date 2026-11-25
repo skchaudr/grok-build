@@ -1,0 +1,13 @@
+{
+  "name": "grok-build",
+  // Same image as the Codespaces default, so the tooling does not change.
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
+  "customizations": {
+    "codespaces": {
+      // Lets this repo's codespaces read the private skchaudr/nvim config.
+      "repositories": {
+        "skchaudr/nvim": { "permissions": { "contents": "read" } }
+      }
+    }
+  }
+}
