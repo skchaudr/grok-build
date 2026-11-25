@@ -28,8 +28,8 @@ Living plan (Sab + Claude + Pi):
      and `output.ok == false` in `piw_driver.rs` and `mirror.rs`; emit visible start/finish cards for `Shell` and
      `Compute` steps in `project.rs`; in `mirror.rs` `build_flow_json` copy the snapshot node fields `timeoutMs`,
      `mountPath`, `localNodeId`, `includeTransition` into flow.json and add them to `bundle::FlowNode` (exact struct in
-     STEP_DIGEST_SHARED_API). The server does not send `maxSteps` or validator rejections; showing them needs a
-     pi-workflows view change first (not in v1).
+     STEP_DIGEST_SHARED_API).
+     UNRESOLVED REQUIREMENTS (not dropped; no verified source yet, resolve before dispatch): workflow and per-include `maxSteps`, validator rejections, tool inputs/outputs.
 
 3. All 6 Workflow-Structure Signals (a)-(f), Workflow Creator / Preflight Entry Point, Cross-Run Step History,
    and Step-to-Transcript/Trace Linkage in the 6 Slices:
@@ -37,7 +37,7 @@ Living plan (Sab + Claude + Pi):
      Single canonical failure-tail trimmer, untaken-branch pruner, effective outcome check, file scope digest,
      the structural signals the server sends ((a) loop attempt count, (c) reviewer switch verdict + reason,
      (d) step `elapsed vs timeoutMs` with >=75% warning and `TIMED OUT`, (e) steps used, (f) included child
-     workflows with named exits; (b) validator rejections and the `maxSteps` limit are not sent, so out of v1),
+     workflows with named exits; (b) validator rejections and the `maxSteps` limit are unresolved requirements),
      and `StepTraceLink` (`step_trace_link`) linking each step card to its transcript event range and artifact paths.
    - `workflow_preflight` (`crates/codegen/xai-grok-pager/src/acpx/workflow_preflight.rs`):
      Workflow creator entry point (start/clone a workflow from past runs and `.workflow.ts` templates), cross-run
@@ -91,9 +91,10 @@ STEP_DIGEST_SHARED_API = """
 // The piw server's workflow snapshot sends, per node: `timeoutMs` (number|null), `mountPath` (string[]),
 // `localNodeId` (string), `includeTransition` ("entry"|"exit") (pi-workflows src/server/view.ts projectWorkflowNode).
 // Included node ids are `<mountPath joined by "/">/<localId>` (src/workflows/composition.ts qualify); an include's
-// exit node has local id `__piw_exit_<exitName>`. Step records carry attemptId (a UUID, no attempt number), nodeId,
+// exit node has qualified id `<mount>/__piw_exit_<exitName>`, `includeTransition == "exit"`, and `localNodeId` equal
+// to the exit name itself (pi-workflows src/workflows/store.ts snapshot builder). Step records carry attemptId (a UUID, no attempt number), nodeId,
 // outcome ("ok"|"timed_out"|"failed"|"cancelled"), startedAt, finishedAt, output, error, action{exitCode}, conversation.
-// NOT sent by the server, so NOT in this contract: workflow `maxSteps`, per-include `maxSteps`, validator rejections.
+// UNRESOLVED REQUIREMENTS (not dropped; no verified source yet, resolve before dispatch): workflow and per-include `maxSteps`, validator rejections, tool inputs/outputs.
 // The engine has no per-loop attempt limit (loops are bounded only by maxSteps), so there is no "max attempts".
 //
 // The coordinator's C3 change (before integration) makes mirror.rs copy those four node fields into flow.json and
@@ -139,7 +140,7 @@ impl NodeAttemptBudget {
     pub fn badge_label(&self) -> Option<String>;
 }
 
-/// (b) Validator rejections: not sent by the server; deliberately absent in v1.
+/// (b) Validator rejections: UNRESOLVED REQUIREMENT (no verified source yet); not part of this contract until resolved.
 
 /// (c) Reviewer or router verdict extracted from a step's output and outgoing switch edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,7 +167,7 @@ impl StepTimeBudget {
     pub fn badge_label(&self) -> String;
 }
 
-/// (e) Steps used by the run (`maxSteps` itself is not sent by the server, so no limit or remainder is shown).
+/// (e) Steps used by the run. The `maxSteps` limit and remainder are an UNRESOLVED REQUIREMENT (no verified source yet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepBudgetSummary {
     pub used_steps: usize,
@@ -265,7 +266,7 @@ TASKS = [
         "prompt": f"""
 Slice id: step_digest
 Target file: crates/codegen/xai-grok-pager/src/acpx/step_digest.rs
-Goal: Implement the single canonical failure-tail trimmer, untaken-branch node pruner, effective step outcome check, per-step file progress / out-of-scope file audit, step-to-transcript/trace linkage (`StepTraceLink`), and the workflow-structure extractors whose data the server sends: (a) loop attempt counts, (c) reviewer/router verdicts with reasons, (d) step `elapsed vs timeoutMs` time budgets and timeouts, (e) steps used, and (f) included child workflows with named exits. (b) validator rejections and the `maxSteps` limit are not sent by the server and are out of v1.
+Goal: Implement the single canonical failure-tail trimmer, untaken-branch node pruner, effective step outcome check, per-step file progress / out-of-scope file audit, step-to-transcript/trace linkage (`StepTraceLink`), and the workflow-structure extractors whose data the server sends: (a) loop attempt counts, (c) reviewer/router verdicts with reasons, (d) step `elapsed vs timeoutMs` time budgets and timeouts, (e) steps used, and (f) included child workflows with named exits. (b) validator rejections, the `maxSteps` limit, and tool inputs/outputs are unresolved requirements (no verified source yet), not dropped.
 
 Ownership:
 Return this complete file only. Do not modify other files or redefine `Step`, `Outcome`, `ActionReceipt`, `FlowEdge`, or `Run` (import them from `crate::acpx::bundle::{{fmt_duration, FlowEdge, NodeKind, Outcome, Run, RunStatus, Step}}`). The coordinator owns registering `pub mod step_digest;` in `src/acpx/mod.rs` and wiring it into `mirror.rs`, `detail.rs`, `run.rs`, and `grok-acpx-acp`.
@@ -296,7 +297,7 @@ Behavior details:
 - (e) `run_step_budget(run: &Run) -> StepBudgetSummary`:
   - `used_steps = run.steps.len()`. `badge_label` is `Some(format!("steps {{}}", used_steps))` when `used_steps > 0`.
 - (f) `parse_scoped_node_id(node_id) -> (mount, local, exit)`: split at the last `'/'` (`mount` is `None` without one); `exit` is `Some(name)` when `local` starts with `__piw_exit_`. Used where only an id is available (e.g. `FlowSketch`).
-- `summarize_included_workflows(run: &Run)`: group `run.flow.nodes` with non-empty `mount_path` by `mount_path.join("/")`. `total_child_nodes` = nodes in the group; `executed_child_nodes` = distinct node ids of the group seen in `run.steps`; `used_steps` = steps on those nodes; `invocations` = steps on the group's `include_transition == Some("entry")` node; `active` = `run.summary.current_node` is in the group; `named_exit` = the exit name of the latest executed node whose `local_node_id` starts with `__piw_exit_`. `summary_line` reads like `"verify: 4/6 nodes · 5 steps · exit:passed"`.
+- `summarize_included_workflows(run: &Run)`: group `run.flow.nodes` with non-empty `mount_path` by `mount_path.join("/")`. `total_child_nodes` = nodes in the group; `executed_child_nodes` = distinct node ids of the group seen in `run.steps`; `used_steps` = steps on those nodes; `invocations` = steps on the group's `include_transition == Some("entry")` node; `active` = `run.summary.current_node` is in the group; `named_exit` = `local_node_id` of the latest executed group node whose `include_transition == Some("exit")` (that field is the exit name). `summary_line` reads like `"verify: 4/6 nodes · 5 steps · exit:passed"`.
 - `step_trace_link(run: &Run, step: &Step) -> StepTraceLink`:
   - Resolve `session_events_path` and `event_range` from `step.conversation`: look up `run.session_events_path(&conv.session_id).map(Path::to_path_buf)` and `Some((conv.event_start_seq, conv.event_end_seq))`. If `step.conversation` is `None` and `step.kind == NodeKind::Acp`, fall back to `run.sessions.first().map(|s| s.events_path.clone())`.
   - Resolve `stdout_path`, `stderr_path`, and `output_artifact_path` by joining `run.summary.dir` with `art.path` when `step.stdout`, `step.stderr`, or `step.output_artifact` is `Some(art)`.
@@ -315,7 +316,7 @@ Tests:
 - `step_attempt_budget` formats `"attempt 2"` for the second of two `cargo_check` steps with UUID attempt ids.
 - `extract_step_verdict` extracts `route_key: "needs_work"`, `target_node: Some("repair")`, and `reason`.
 - `step_time_budget` reads `FlowNode::timeout_ms`, detects `near_expiry: true` at `90_000 / 120_000 ms`, `timed_out: true` on `Outcome::TimedOut`, and `timeout_ms: None` when the node has none.
-- `summarize_included_workflows` groups by `mount_path` and reports `named_exit: Some("passed")` from a `verify/__piw_exit_passed` node.
+- `summarize_included_workflows` groups by `mount_path` and reports `named_exit: Some("passed")` from node `verify/__piw_exit_passed` with `include_transition: Some("exit")` and `local_node_id: Some("passed")`.
 - `step_trace_link` resolves `session_events_path`, `event_range: Some((10, 25))`, and artifact paths under `run.summary.dir`.
 """ + RETURN_FORMAT_TEMPLATE.format(target="crates/codegen/xai-grok-pager/src/acpx/step_digest.rs"),
     },
@@ -629,7 +630,7 @@ Return this complete file only. Do not modify other files, add dependencies, or 
 {RUST_GROK_ENV}
 Existing interfaces:
 - `crate::acpx::bundle::{{FlowDef, FlowEdge, FlowNode, NodeKind, NodeState, Outcome, Run, RunStatus, Step}}` (`bundle.rs#L1-330`).
-- `crate::theme::Theme`. There is no shared truncation helper in this crate: write a private `fn truncate_to_width(s: &str, max_width: usize) -> String` in this file using `unicode_width::UnicodeWidthStr`/`UnicodeWidthChar`.
+- `crate::render::line_utils::truncate_str` and `crate::theme::Theme`.
 - Shared `crate::acpx::step_digest` contract:
 ```rust
 {STEP_DIGEST_SHARED_API}
