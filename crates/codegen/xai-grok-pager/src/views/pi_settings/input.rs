@@ -275,9 +275,9 @@ fn chooser_key(state: &mut PiSettingsState, key: &KeyEvent) -> Outcome {
             let close = state.close_on_picker_exit;
             // Model rows (default_model, fork_secondary_model, recap_model) are DynamicEnum and carry a model's display
             // name, which `action_for_string` resolves; `action_for_enum_commit` has no arm for them, so the pick was
-            // dropped. Claude and dpi rows are DynamicEnum too, but they are session options and commit as before.
-            let session_row = crate::settings::claude::is_claude_key(setting)
-                || crate::settings::dpi::is_dpi_key(setting);
+            // dropped. Claude rows are DynamicEnum too, but they are session options and commit as before. When the
+            // dpi settings module (sab/dpi-polish) is merged, its rows are session options as well and belong here.
+            let session_row = crate::settings::claude::is_claude_key(setting);
             let model_row = !session_row
                 && matches!(
                     state.registry.find(setting).map(|m| &m.kind),
