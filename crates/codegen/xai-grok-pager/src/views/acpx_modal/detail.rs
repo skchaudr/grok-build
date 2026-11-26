@@ -1673,18 +1673,21 @@ mod tests {
                         kind: NodeKind::Action,
                         summary: None,
                         is_shell: true,
+                        ..Default::default()
                     },
                     FlowNode {
                         id: "work".to_string(),
                         kind: NodeKind::Acp,
                         summary: None,
                         is_shell: false,
+                        ..Default::default()
                     },
                     FlowNode {
                         id: "review".to_string(),
                         kind: NodeKind::Checkpoint,
                         summary: Some("human review".to_string()),
                         is_shell: false,
+                        ..Default::default()
                     },
                 ],
                 edges: vec![
@@ -1697,6 +1700,7 @@ mod tests {
                         to: "review".to_string(),
                     },
                 ],
+                ..Default::default()
             },
             steps: Vec::new(),
             events: Vec::new(),

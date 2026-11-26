@@ -776,7 +776,9 @@ impl AnswerMachine {
     fn cleanup_if_claimed(&mut self, client: &dyn GateTransport) {
         if self.claimed_role && !self.released_role {
             self.released_role = true;
-            client.unwatch_session(&self.gate.session_id);
+            // Release the coordinator claim without dropping the shared session
+            // watch. unwatch_session clears the snapshot and hides the next gate.
+            let _ = client.watch_session(&self.gate.session_id, false);
         }
     }
 
@@ -2226,15 +2228,19 @@ mod tests {
             Some(&json!("session-epoch-aaa"))
         );
 
-        // Answer accepted -> Accepted and unwatch_session called
+        // Answer accepted -> Accepted; coordinator released, session still watched.
         mock.respond(&ans_req.request_id, &ans_req.operation, "accepted", None);
         assert_eq!(machine.poll(&mock, t0), AnswerProgress::Accepted);
-        assert_eq!(mock.unwatches(), vec!["sess-1".to_string()]);
+        assert!(mock.unwatches().is_empty());
+        assert_eq!(
+            mock.watches().last().map(|(id, coord)| (id.as_str(), *coord)),
+            Some(("sess-1", false))
+        );
 
         // Repeated poll stays Accepted and sends nothing more
         assert_eq!(machine.poll(&mock, t0), AnswerProgress::Accepted);
         assert_eq!(mock.requests().len(), 2);
-        assert_eq!(mock.unwatches().len(), 1);
+        assert!(mock.unwatches().is_empty());
     }
 
     #[test]
@@ -2501,7 +2507,11 @@ mod tests {
         // Server deduplicates and returns "adopted"
         mock.respond(&req2.request_id, &req2.operation, "adopted", None);
         assert_eq!(machine.poll(&mock, t0), AnswerProgress::Accepted);
-        assert_eq!(mock.unwatches(), vec!["sess-1".to_string()]);
+        assert!(mock.unwatches().is_empty());
+        assert_eq!(
+            mock.watches().last().map(|(id, coord)| (id.as_str(), *coord)),
+            Some(("sess-1", false))
+        );
     }
 
     #[test]
@@ -2588,7 +2598,11 @@ mod tests {
                 AnswerProgress::Refused(msg) => assert!(msg.contains("coordinator")),
                 other => panic!("expected coordinator timeout, got {other:?}"),
             }
-            assert_eq!(mock.unwatches(), vec!["sess-1".to_string()]);
+            assert!(mock.unwatches().is_empty());
+            assert_eq!(
+                mock.watches().last().map(|(id, coord)| (id.as_str(), *coord)),
+                Some(("sess-1", false))
+            );
         }
 
         // 3. Branch report response timeout (30s)
@@ -2630,7 +2644,11 @@ mod tests {
                 AnswerProgress::Refused(msg) => assert!(msg.contains("branch report")),
                 other => panic!("expected branch report timeout, got {other:?}"),
             }
-            assert_eq!(mock.unwatches(), vec!["sess-1".to_string()]);
+            assert!(mock.unwatches().is_empty());
+            assert_eq!(
+                mock.watches().last().map(|(id, coord)| (id.as_str(), *coord)),
+                Some(("sess-1", false))
+            );
         }
 
         // 4. Answer response timeout (30s)
@@ -2768,6 +2786,10 @@ mod tests {
             },
         );
         assert!(result.is_err());
-        assert_eq!(mock.unwatches(), vec!["sess-1".to_string()]);
+        assert!(mock.unwatches().is_empty());
+        assert_eq!(
+            mock.watches().last().map(|(id, coord)| (id.as_str(), *coord)),
+            Some(("sess-1", false))
+        );
     }
 }

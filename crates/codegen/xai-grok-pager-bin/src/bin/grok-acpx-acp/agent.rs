@@ -78,7 +78,62 @@ struct WaitingGate {
 /// the server socket, not by starting another flow.
 #[derive(Debug, Clone)]
 struct WaitingPiwGate {
-    gate: PiwGate,
+    gate: Option<PiwGate>,
+    node: String,
+    question: String,
+    choices: Vec<GateChoice>,
+}
+
+impl WaitingPiwGate {
+    fn from_gate(gate: PiwGate) -> Self {
+        let node = gate.node_id.clone();
+        let question = gate.question.clone();
+        let choices = piw_choices_as_gate_choices(&gate);
+        Self {
+            gate: Some(gate),
+            node,
+            question,
+            choices,
+        }
+    }
+
+    fn from_event(
+        gate: Option<PiwGate>,
+        node: String,
+        question: String,
+        choices: Vec<GateChoice>,
+    ) -> Self {
+        if let Some(gate) = gate {
+            let mut waiting = Self::from_gate(gate);
+            if !node.is_empty() {
+                waiting.node = node;
+            }
+            if !question.is_empty() {
+                waiting.question = question;
+            }
+            if !choices.is_empty() {
+                waiting.choices = choices;
+            }
+            waiting
+        } else {
+            Self {
+                gate: None,
+                node,
+                question,
+                choices,
+            }
+        }
+    }
+}
+
+fn piw_choices_as_gate_choices(gate: &PiwGate) -> Vec<GateChoice> {
+    gate.choices
+        .iter()
+        .map(|choice| GateChoice {
+            label: choice.label.clone(),
+            flow_file: piw_gate::answer_target(&gate.run_id, &choice.key),
+        })
+        .collect()
 }
 
 /// What happened to a gate question asked in the chat.
@@ -101,6 +156,16 @@ enum WaitingOutcome {
     Resumed,
     Parked,
     Cancelled,
+}
+
+/// What to do with a prompt that arrived while a run is active or waiting.
+enum OccupiedPrompt {
+    /// No watched run; handle the prompt as a new command.
+    NotOccupied,
+    /// Another turn owns `in_flight`; do not clear it and do not cancel.
+    LeaveInFlight,
+    /// This turn handled the input (gate answer, refusal, or control).
+    Handled { ran_flow: bool },
 }
 
 /// The response to a gate question, as one of [`GateAsk`]. A response that
@@ -129,6 +194,8 @@ struct PiwWatch {
     run_id: String,
     handle: PiwRunHandle,
     rx: Option<mpsc::UnboundedReceiver<DriverEvent>>,
+    /// Kept across waiting gates so the transcript is not rebuilt blank.
+    projector: Option<Projector>,
 }
 
 #[derive(Debug, Clone)]
@@ -327,8 +394,8 @@ impl AcpxAgent {
         initial_input: Value,
         timing: &TurnTiming,
     ) {
-        let mut current_flow = initial_flow;
-        let mut current_input = initial_input;
+        let current_flow = initial_flow;
+        let current_input = initial_input;
 
         loop {
             if self.is_session_cancelled(session_id) {
@@ -458,37 +525,9 @@ impl AcpxAgent {
                 flow_path,
             };
 
-            match self.ask_gate_question(session_id, &gate).await {
-                Some(label) => {
-                    if self.is_session_cancelled(session_id) {
-                        break;
-                    }
-                    match self.prepare_chained_run(session_id, &gate, &label, timing).await {
-                        Some((next_flow, next_input)) => {
-                            current_flow = next_flow;
-                            current_input = next_input;
-                        }
-                        None => {
-                            self.remember_waiting_gate(session_id, gate);
-                            break;
-                        }
-                    }
-                }
-                None => {
-                    let node_name = gate.node.clone();
-                    let choices = gate.choices.clone();
-                    self.remember_waiting_gate(session_id, gate);
-                    if !self.is_session_cancelled(session_id) {
-                        self.send_parent_text(
-                            session_id,
-                            parked_gate_hint(&node_name, &choices),
-                            timing,
-                        )
-                        .await;
-                    }
-                    break;
-                }
-            }
+            // Issue 11: park on the inline card. Do not open the question modal.
+            self.remember_waiting_gate(session_id, gate);
+            break;
         }
     }
 
@@ -623,7 +662,12 @@ impl AcpxAgent {
                 sess.waiting_piw = None;
                 sess.running_run_id = Some(run_id.clone());
                 sess.shown_runs.insert(run_id.clone());
-                sess.piw = Some(PiwWatch { run_id: run_id.clone(), handle, rx: Some(rx) });
+                sess.piw = Some(PiwWatch {
+                    run_id: run_id.clone(),
+                    handle,
+                    rx: Some(rx),
+                    projector: Some(Projector::new(session_id)),
+                });
             }
         }
         self.pump_piw_events(session_id, timing).await;
@@ -633,16 +677,24 @@ impl AcpxAgent {
     /// a gate (the receiver is parked back in the session so `/answer` can
     /// resume it) or finishes (the watch is dropped).
     async fn pump_piw_events(&self, session_id: &str, timing: &TurnTiming) {
-        let rx = {
+        let (mut rx, mut projector) = {
             let mut st = self.state.borrow_mut();
-            st.sessions
+            let Some(watch) = st
+                .sessions
                 .get_mut(session_id)
                 .and_then(|sess| sess.piw.as_mut())
-                .and_then(|watch| watch.rx.take())
+            else {
+                return;
+            };
+            let Some(rx) = watch.rx.take() else {
+                return;
+            };
+            let projector = watch
+                .projector
+                .take()
+                .unwrap_or_else(|| Projector::new(session_id));
+            (rx, projector)
         };
-        let Some(mut rx) = rx else { return };
-
-        let mut projector = Projector::new(session_id);
         let mut parked = false;
         // Once the turn is cancelled, the run's final state gets this long to
         // arrive so the chat ends on the run cancelled, not on a timer.
@@ -670,10 +722,17 @@ impl AcpxAgent {
                 }
             };
 
-            let mut waiting: Option<(String, String, String, Vec<GateChoice>)> = None;
-            if let DriverEvent::Waiting { node, attempt, question, choices, .. } = &ev {
-                waiting = Some((node.clone(), attempt.clone(), question.clone(), choices.clone()));
-            }
+            let waiting = if let DriverEvent::Waiting {
+                node,
+                question,
+                choices,
+                ..
+            } = &ev
+            {
+                Some((node.clone(), question.clone(), choices.clone()))
+            } else {
+                None
+            };
 
             let outs = projector.on_event(&ev);
             for out in outs {
@@ -684,23 +743,19 @@ impl AcpxAgent {
                 break;
             }
 
-            if let Some((node, attempt, question, choices)) = waiting {
-                match self
-                    .handle_piw_waiting(session_id, &node, &attempt, &question, &choices, timing)
-                    .await
-                {
-                    WaitingOutcome::Resumed => {}
-                    WaitingOutcome::Parked => {
-                        parked = true;
-                        break;
-                    }
-                    WaitingOutcome::Cancelled => {
-                        // The question was withdrawn with the turn being
-                        // cancelled: keep pumping until the run's cancelled
-                        // final state ends the turn.
-                        cancel_grace_until = Some(Instant::now() + Duration::from_secs(5));
-                    }
-                }
+            // Issue 11: park immediately. The inline card is already in the
+            // transcript; do not open the auto-pop-up question modal.
+            if let Some((node, question, choices)) = waiting {
+                let gate = {
+                    let st = self.state.borrow();
+                    st.sessions
+                        .get(session_id)
+                        .and_then(|sess| sess.piw.as_ref())
+                        .and_then(|watch| watch.handle.gate())
+                };
+                self.remember_inline_waiting(session_id, gate, node, question, choices);
+                parked = true;
+                break;
             }
         }
 
@@ -710,6 +765,7 @@ impl AcpxAgent {
             if parked {
                 if let Some(watch) = sess.piw.as_mut() {
                     watch.rx = Some(rx);
+                    watch.projector = Some(projector);
                     parked_run_id = Some(watch.run_id.clone());
                 }
             } else {
@@ -900,9 +956,27 @@ impl AcpxAgent {
 
     fn remember_waiting_piw(&self, session_id: &str, gate: Option<PiwGate>) {
         let Some(gate) = gate else { return };
+        self.store_waiting_piw(session_id, WaitingPiwGate::from_gate(gate));
+    }
+
+    fn remember_inline_waiting(
+        &self,
+        session_id: &str,
+        gate: Option<PiwGate>,
+        node: String,
+        question: String,
+        choices: Vec<GateChoice>,
+    ) {
+        self.store_waiting_piw(
+            session_id,
+            WaitingPiwGate::from_event(gate, node, question, choices),
+        );
+    }
+
+    fn store_waiting_piw(&self, session_id: &str, waiting: WaitingPiwGate) {
         let mut st = self.state.borrow_mut();
         if let Some(sess) = st.sessions.get_mut(session_id) {
-            sess.waiting_piw = Some(WaitingPiwGate { gate });
+            sess.waiting_piw = Some(waiting);
         }
     }
 
@@ -1310,6 +1384,272 @@ impl AcpxAgent {
     }
 }
 
+impl AcpxAgent {
+    /// Plain text while a run is active or parked at a gate. Never cancels the run.
+    async fn handle_occupied_run_input(
+        &self,
+        session_id: &str,
+        text: &str,
+        timing: &TurnTiming,
+    ) -> OccupiedPrompt {
+        let (in_flight, waiting_gate, waiting_piw) = {
+            let st = self.state.borrow();
+            let Some(sess) = st.sessions.get(session_id) else {
+                return OccupiedPrompt::NotOccupied;
+            };
+            (
+                sess.in_flight,
+                sess.waiting_gate.clone(),
+                sess.waiting_piw.clone(),
+            )
+        };
+        let waiting = waiting_gate.is_some() || waiting_piw.is_some();
+        if !in_flight && !waiting {
+            return OccupiedPrompt::NotOccupied;
+        }
+
+        if waiting {
+            if let Some(cmd) = crate::run_path::classify_mid_run_input(text)
+                && !matches!(cmd, crate::run_path::MidRunCommand::QueueFollowUp { .. })
+            {
+                self.dispatch_mid_run_command(session_id, &cmd, timing).await;
+                return if in_flight {
+                    OccupiedPrompt::LeaveInFlight
+                } else {
+                    OccupiedPrompt::Handled { ran_flow: false }
+                };
+            }
+            let (node, choices) = if let Some(waiting) = waiting_piw.as_ref() {
+                (waiting.node.clone(), waiting.choices.clone())
+            } else {
+                let gate = waiting_gate.as_ref().expect("waiting");
+                (gate.node.clone(), gate.choices.clone())
+            };
+            match crate::run_path::match_waiting_gate_text(&node, &choices, text) {
+                crate::run_path::GateTextMatch::Matched { label, notes } => {
+                    let ran_flow = self
+                        .answer_waiting_gate(session_id, waiting_piw, waiting_gate, &label, notes.as_deref(), timing)
+                        .await;
+                    OccupiedPrompt::Handled { ran_flow }
+                }
+                crate::run_path::GateTextMatch::Refused { refusal_message } => {
+                    self.send_parent_text(session_id, refusal_message, timing).await;
+                    if in_flight {
+                        OccupiedPrompt::LeaveInFlight
+                    } else {
+                        OccupiedPrompt::Handled { ran_flow: false }
+                    }
+                }
+            }
+        } else {
+            match crate::run_path::classify_mid_run_input(text) {
+                Some(cmd) => {
+                    self.dispatch_mid_run_command(session_id, &cmd, timing).await;
+                    OccupiedPrompt::LeaveInFlight
+                }
+                None => {
+                    self.send_parent_text(
+                        session_id,
+                        "Unrecognized command. The run is still in progress and was not cancelled.",
+                        timing,
+                    )
+                    .await;
+                    OccupiedPrompt::LeaveInFlight
+                }
+            }
+        }
+    }
+
+    async fn answer_waiting_gate(
+        &self,
+        session_id: &str,
+        waiting_piw: Option<WaitingPiwGate>,
+        waiting_gate: Option<WaitingGate>,
+        label: &str,
+        notes: Option<&str>,
+        timing: &TurnTiming,
+    ) -> bool {
+        let typed = match notes.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(notes) => format!("{label} {notes}"),
+            None => label.to_string(),
+        };
+        if let Some(waiting) = waiting_piw {
+            let gate = waiting.gate.clone().or_else(|| {
+                self.state
+                    .borrow()
+                    .sessions
+                    .get(session_id)
+                    .and_then(|sess| sess.piw.as_ref())
+                    .and_then(|watch| watch.handle.gate())
+            });
+            if self
+                .answer_piw_gate(session_id, gate, &typed, timing)
+                .await
+            {
+                {
+                    let mut st = self.state.borrow_mut();
+                    if let Some(sess) = st.sessions.get_mut(session_id) {
+                        sess.waiting_piw = None;
+                        sess.in_flight = true;
+                        sess.cancelled = false;
+                    }
+                }
+                self.pump_piw_events(session_id, timing).await;
+                return true;
+            }
+            return false;
+        }
+        let Some(gate) = waiting_gate else {
+            self.send_parent_text(session_id, "No gate is waiting.", timing)
+                .await;
+            return false;
+        };
+        {
+            let mut st = self.state.borrow_mut();
+            if let Some(sess) = st.sessions.get_mut(session_id) {
+                sess.waiting_gate = None;
+                sess.in_flight = true;
+                sess.cancelled = false;
+            }
+        }
+        if let Some((next_flow, next_input)) = self
+            .prepare_chained_run(session_id, &gate, label, timing)
+            .await
+        {
+            self.run_flow_chain(session_id, next_flow, next_input, timing)
+                .await;
+            true
+        } else {
+            self.remember_waiting_gate(session_id, gate);
+            false
+        }
+    }
+
+    async fn dispatch_mid_run_command(
+        &self,
+        session_id: &str,
+        cmd: &crate::run_path::MidRunCommand,
+        timing: &TurnTiming,
+    ) {
+        match cmd {
+            crate::run_path::MidRunCommand::Status => {
+                let report = self.mid_run_status_report(session_id);
+                self.send_parent_text(session_id, report, timing).await;
+            }
+            crate::run_path::MidRunCommand::Pause => {
+                self.forward_piw_control(session_id, "run.pause", json!({}));
+                self.send_parent_text(
+                    session_id,
+                    "Pause requested. The run was not cancelled.",
+                    timing,
+                )
+                .await;
+            }
+            crate::run_path::MidRunCommand::Resume => {
+                self.forward_piw_control(session_id, "run.resume", json!({}));
+                self.send_parent_text(
+                    session_id,
+                    "Resume requested. The run was not cancelled.",
+                    timing,
+                )
+                .await;
+            }
+            crate::run_path::MidRunCommand::ChangeSetting { key, value } => {
+                self.forward_piw_control(
+                    session_id,
+                    "run.set",
+                    json!({"key": key, "value": value}),
+                );
+                self.send_parent_text(
+                    session_id,
+                    format!("Queued setting `{key}`=`{value}`. The run was not cancelled."),
+                    timing,
+                )
+                .await;
+            }
+            crate::run_path::MidRunCommand::QueueFollowUp { prompt } => {
+                self.forward_piw_control(session_id, "run.steer", json!({"prompt": prompt}));
+                self.send_parent_text(
+                    session_id,
+                    format!("Queued steering note: {prompt}\n\nThe run was not cancelled."),
+                    timing,
+                )
+                .await;
+            }
+        }
+    }
+
+    fn forward_piw_control(&self, session_id: &str, operation: &str, payload: Value) {
+        let run_id = {
+            let st = self.state.borrow();
+            st.sessions.get(session_id).and_then(|sess| {
+                sess.piw
+                    .as_ref()
+                    .map(|watch| watch.run_id.clone())
+                    .or_else(|| sess.running_run_id.clone())
+                    .or_else(|| {
+                        sess.waiting_piw
+                            .as_ref()
+                            .and_then(|waiting| waiting.gate.as_ref().map(|gate| gate.run_id.clone()))
+                    })
+                    .or_else(|| sess.waiting_gate.as_ref().map(|gate| gate.run_id.clone()))
+            })
+        };
+        let Some(run_id) = run_id else {
+            return;
+        };
+        let Some(client) = piw_shared_client() else {
+            return;
+        };
+        let _ = client.send(operation, Some(&run_id), None, payload);
+    }
+
+    fn mid_run_status_report(&self, session_id: &str) -> String {
+        let (run_id, run_dir) = {
+            let st = self.state.borrow();
+            let sess = st.sessions.get(session_id);
+            let run_id = sess.and_then(|sess| {
+                sess.piw
+                    .as_ref()
+                    .map(|watch| watch.run_id.clone())
+                    .or_else(|| sess.running_run_id.clone())
+                    .or_else(|| sess.waiting_gate.as_ref().map(|gate| gate.run_id.clone()))
+                    .or_else(|| {
+                        sess.waiting_piw
+                            .as_ref()
+                            .and_then(|waiting| waiting.gate.as_ref().map(|gate| gate.run_id.clone()))
+                    })
+            });
+            let run_dir = sess.and_then(|sess| sess.waiting_gate.as_ref().map(|gate| gate.run_dir.clone()));
+            (run_id, run_dir)
+        };
+        let mut dirs = Vec::new();
+        if let Some(dir) = run_dir {
+            dirs.push(dir);
+        }
+        if let Some(id) = run_id.as_deref() {
+            if let Some(root) = xai_grok_pager::piw::runtime::mirror_root() {
+                dirs.push(root.join(id));
+            }
+            dirs.push(self.runs_dir().join(id));
+        }
+        for dir in dirs {
+            if let Ok(run) = xai_grok_pager::acpx::bundle::load_run(&dir) {
+                return xai_grok_pager::acpx::run_status_bar::format_run_status_report(
+                    &run,
+                    None,
+                    utc_now_ms(),
+                );
+            }
+        }
+        match run_id.as_deref() {
+            Some(id) => format!("Run `{id}` is in progress. No mirrored bundle is available yet."),
+            None => "A run is in progress.".to_string(),
+        }
+    }
+}
+
+
 #[async_trait::async_trait(?Send)]
 impl acp::Agent for AcpxAgent {
     async fn initialize(
@@ -1415,7 +1755,6 @@ impl acp::Agent for AcpxAgent {
     ) -> Result<acp::SetSessionModeResponse, acp::Error> {
         Ok(acp::SetSessionModeResponse::new())
     }
-
     async fn prompt(
         &self,
         arguments: acp::PromptRequest,
@@ -1431,47 +1770,65 @@ impl acp::Agent for AcpxAgent {
             prompt_id: client_prompt_id.clone(),
         };
 
-        let (already_in_flight, waiting_labels) = {
+        let prompt_text = join_prompt_text(&arguments.prompt);
+        match self
+            .handle_occupied_run_input(&session_id, &prompt_text, &timing)
+            .await
+        {
+            OccupiedPrompt::LeaveInFlight => {
+                return Ok(prompt_response(
+                    acp::StopReason::EndTurn,
+                    client_prompt_id.as_deref(),
+                    false,
+                ));
+            }
+            OccupiedPrompt::Handled { ran_flow } => {
+                let was_cancelled = {
+                    let mut st = self.state.borrow_mut();
+                    if let Some(sess) = st.sessions.get_mut(&session_id) {
+                        let cancelled = sess.cancelled;
+                        sess.in_flight = false;
+                        sess.cancelled = false;
+                        sess.running_handle = None;
+                        sess.running_run_id = None;
+                        cancelled
+                    } else {
+                        false
+                    }
+                };
+                let reason = if was_cancelled {
+                    acp::StopReason::Cancelled
+                } else {
+                    acp::StopReason::EndTurn
+                };
+                return Ok(prompt_response(
+                    reason,
+                    client_prompt_id.as_deref(),
+                    ran_flow,
+                ));
+            }
+            OccupiedPrompt::NotOccupied => {}
+        }
+
+        let waiting_labels = {
             let mut st = self.state.borrow_mut();
             let sess = st
                 .sessions
                 .get_mut(&session_id)
                 .expect("session ensured above");
-            if sess.in_flight {
-                (true, Vec::new())
-            } else {
-                sess.in_flight = true;
-                sess.cancelled = false;
-                // A plain message that names a waiting gate's label answers
-                // it, whether the gate is an acpx checkpoint or a parked
-                // pi-workflows question.
-                let mut labels: Vec<String> = sess
-                    .waiting_gate
-                    .as_ref()
-                    .map(|g| g.choices.iter().map(|c| c.label.clone()).collect())
-                    .unwrap_or_default();
-                if let Some(waiting) = sess.waiting_piw.as_ref() {
-                    labels.extend(waiting.gate.choices.iter().map(|c| c.label.clone()));
-                }
-                (false, labels)
+            sess.in_flight = true;
+            sess.cancelled = false;
+            let mut labels: Vec<String> = sess
+                .waiting_gate
+                .as_ref()
+                .map(|g| g.choices.iter().map(|c| c.label.clone()).collect())
+                .unwrap_or_default();
+            if let Some(waiting) = sess.waiting_piw.as_ref() {
+                labels.extend(waiting.choices.iter().map(|c| c.label.clone()));
             }
+            labels
         };
 
-        if already_in_flight {
-            self.send_parent_text(
-                &session_id,
-                "A run is in progress; press Esc to cancel it.",
-                &timing,
-            )
-            .await;
-            return Ok(prompt_response(
-                acp::StopReason::EndTurn,
-                client_prompt_id.as_deref(),
-                false,
-            ));
-        }
-
-        let prompt_text = join_prompt_text(&arguments.prompt);
         let cmd = parse_command(&prompt_text, &waiting_labels);
         // True when this turn runs (or resumes) a flow or workflow run: its
         // transcript ends with the run's own duration line.
@@ -1539,7 +1896,7 @@ impl acp::Agent for AcpxAgent {
                     // A parked pi-workflows run: the answer goes back through
                     // the server and the same run resumes.
                     if self
-                        .answer_piw_gate(&session_id, Some(waiting.gate.clone()), &label, &timing)
+                        .answer_piw_gate(&session_id, waiting.gate.clone(), &label, &timing)
                         .await
                     {
                         {

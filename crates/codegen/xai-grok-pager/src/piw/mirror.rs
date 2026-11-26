@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::acpx::bundle::parse_ts;
-use crate::piw::client::{ActivityKind, ConnState, Content, PiwClient, RunView, StepActivity};
+use crate::piw::client::{
+    self, ActivityKind, ConnState, Content, PiwClient, RunView, StepActivity,
+};
 use crate::piw::gate::{PiwGate, answer_target, gate_from};
 
 const FOLDER_PREFIX: &str = "piw-";
@@ -34,7 +36,7 @@ pub struct MirrorInput<'a> {
     pub gate: Option<&'a PiwGate>,              // the gate it is parked on
     /// Text of a view value: a JSON string as itself, another inline value as compact JSON, a `$artifact`
     /// reference once fetched (None while pending).
-    pub text_of: &'a dyn Fn(&serde_json::Value) -> Option<String>,
+    pub text_of: &'a dyn Fn(&serde_json::Value, Option<&str>) -> Option<String>,
 }
 
 /// The run folder name used for a pi-workflows run id (safe as one path component, reversible).
@@ -120,12 +122,10 @@ fn write_run_at(
         .and_then(|v| v.get("manifest"))
         .or_else(|| input.summary.and_then(|s| s.get("manifest")))
         .filter(|v| v.is_object());
-    let workflow_val = view_val
-        .and_then(|v| v.get("workflow"))
-        .filter(|v| v.is_object());
+    let workflow_val = view_val.and_then(|v| resolve_workflow_snapshot(v, input.text_of));
 
     let flow_name = str_at(state_val, "workflowName")
-        .or_else(|| str_at(workflow_val, "name"))
+        .or_else(|| str_at(workflow_val.as_ref(), "name"))
         .or_else(|| str_at(queue_val, "workflowName"))
         .or_else(|| str_at(manifest_src, "workflowName"))
         .or_else(|| str_at(input.summary, "workflowName"))
@@ -204,7 +204,7 @@ fn write_run_at(
         .or_else(|| {
             display_val
                 .and_then(|d| d.get("reasonContent"))
-                .and_then(|v| (input.text_of)(v))
+                .and_then(|v| (input.text_of)(v, None))
                 .as_deref()
                 .map(|_| "")
                 .and_then(|_| None)
@@ -214,7 +214,7 @@ fn write_run_at(
             if matches!(acpx_status, "failed" | "timed_out") {
                 display_val
                     .and_then(|d| d.get("reasonContent"))
-                    .and_then(|v| (input.text_of)(v))
+                    .and_then(|v| (input.text_of)(v, None))
                     .filter(|s| !s.is_empty())
                     .or_else(|| str_at(display_val, "reason").map(ToOwned::to_owned))
             } else {
@@ -245,7 +245,7 @@ fn write_run_at(
     // Build flow.json from workflow snapshot (when available).
     let mut node_meta_map: HashMap<String, NodeMeta> = HashMap::new();
     if let Some(wf) = workflow_val {
-        let flow_json = build_flow_json(wf, &flow_name, input.gate, &mut node_meta_map);
+        let flow_json = build_flow_json(&wf, &flow_name, input.gate, view_val, &mut node_meta_map);
         let flow_bytes = serde_json::to_vec_pretty(&flow_json)?;
         write_file_if_changed(&run_dir.join("flow.json"), &flow_bytes)?;
     }
@@ -310,24 +310,38 @@ fn write_run_at(
                     let is_first = meta.seen_tools.insert(tool_key);
                     let seq = next_session_seq(&mut meta, &act.attempt_id);
                     let status = tool.status.as_deref().unwrap_or("in_progress");
-                    let update = if is_first {
-                        let mut u = Map::new();
-                        u.insert("sessionUpdate".to_string(), json!("tool_call"));
-                        u.insert("toolCallId".to_string(), json!(tool.tool_call_id));
-                        u.insert("title".to_string(), json!(tool.title));
-                        u.insert("status".to_string(), json!(status));
-                        if let Some(ref k) = tool.kind {
-                            u.insert("kind".to_string(), json!(k));
+                    let mut u = Map::new();
+                    u.insert(
+                        "sessionUpdate".to_string(),
+                        json!(if is_first { "tool_call" } else { "tool_call_update" }),
+                    );
+                    u.insert("toolCallId".to_string(), json!(tool.tool_call_id));
+                    u.insert("title".to_string(), json!(tool.title));
+                    u.insert("status".to_string(), json!(status));
+                    if let Some(ref k) = tool.kind {
+                        u.insert("kind".to_string(), json!(k));
+                    }
+                    let input_nonempty = tool.input.as_ref().is_some_and(|v| {
+                        !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty())
+                    });
+                    if is_first {
+                        if let Some(ref input) = tool.input {
+                            u.insert("rawInput".to_string(), input.clone());
                         }
-                        Value::Object(u)
-                    } else {
-                        json!({
-                            "sessionUpdate": "tool_call_update",
-                            "toolCallId": tool.tool_call_id,
-                            "title": tool.title,
-                            "status": status
-                        })
-                    };
+                    } else if input_nonempty {
+                        if let Some(ref input) = tool.input {
+                            u.insert("rawInput".to_string(), input.clone());
+                        }
+                    }
+                    if let Some(ref output) = tool.output {
+                        u.insert("rawOutput".to_string(), output.clone());
+                    } else if matches!(status, "completed" | "failed") && !act.text.is_empty() {
+                        u.insert("rawOutput".to_string(), json!(act.text));
+                    }
+                    if tool.truncated {
+                        u.insert("truncated".to_string(), json!(true));
+                    }
+                    let update = Value::Object(u);
                     let line = json!({
                         "seq": seq,
                         "at": act.at,
@@ -391,13 +405,15 @@ fn write_run_at(
             let node_id = str_at(Some(step), "nodeId").unwrap_or("").to_string();
             let raw_node_type = str_at(Some(step), "nodeType").unwrap_or("");
             let acpx_node_type = map_node_type(raw_node_type);
-            let outcome = str_at(Some(step), "outcome").unwrap_or("ok");
+            let declared_outcome = str_at(Some(step), "outcome").unwrap_or("ok");
+            let outcome = step_outcome(step);
+            let forced_step_failed = outcome == "failed" && declared_outcome != "failed";
             let s_started = str_at(Some(step), "startedAt").unwrap_or("").to_string();
             let s_finished = str_at(Some(step), "finishedAt").unwrap_or("").to_string();
 
             let prompt_text = step
                 .get("prompt")
-                .and_then(|p| if p.is_null() { None } else { (input.text_of)(p) });
+                .and_then(|p| if p.is_null() { None } else { (input.text_of)(p, None) });
 
             let output_val = step
                 .get("output")
@@ -434,7 +450,7 @@ fn write_run_at(
                     }
                     let msg_text = step
                         .get("output")
-                        .and_then(|o| if o.is_null() { None } else { (input.text_of)(o) })
+                        .and_then(|o| if o.is_null() { None } else { (input.text_of)(o, None) })
                         .filter(|s| !s.is_empty());
                     if let Some(text) = msg_text {
                         let seq = next_session_seq(&mut meta, &attempt_id);
@@ -554,6 +570,19 @@ fn write_run_at(
                             }),
                         ));
                     }
+                }
+                if forced_step_failed {
+                    trace_candidates.push((
+                        format!("step_failed:{attempt_id}"),
+                        s_finished.clone(),
+                        json!({
+                            "scope": "node",
+                            "type": EventKind::StepFailed.as_str(),
+                            "nodeId": node_id,
+                            "attemptId": attempt_id,
+                            "payload": { "outcome": "failed" }
+                        }),
+                    ));
                 }
                 let dur_ms = duration_between(&s_started, &s_finished);
                 trace_candidates.push((
@@ -1061,7 +1090,7 @@ fn mirror_worker(
                     Vec::new()
                 };
 
-                let text_of = |val: &Value| resolve_client_text(&client, id, val);
+                let text_of = |val: &Value, artifact_path: Option<&str>| resolve_client_text(&client, id, val, artifact_path);
                 let input = MirrorInput {
                     summary: summary_by_id.get(id),
                     view: view.as_ref(),
@@ -1091,12 +1120,27 @@ fn mirror_worker(
     }
 }
 
-fn resolve_client_text(client: &PiwClient, run_id: &str, val: &Value) -> Option<String> {
+fn resolve_client_text(
+    client: &PiwClient,
+    run_id: &str,
+    val: &Value,
+    artifact_path: Option<&str>,
+) -> Option<String> {
     if is_artifact_ref(val) {
-        return match client.content(run_id, val) {
-            Content::Ready(s) => Some(s),
-            Content::Pending | Content::Invalid(_) => None,
-        };
+        if let Content::Ready(s) = client.content(run_id, val) {
+            return Some(s);
+        }
+    }
+    if let Some(path) = artifact_path {
+        if let Ok(text) = fs::read_to_string(path) {
+            return Some(text);
+        }
+        let artifact = json!({
+            "$artifact": { "path": path, "mediaType": "application/json", "bytes": 0, "sha256": "" }
+        });
+        if let Content::Ready(s) = client.content(run_id, &artifact) {
+            return Some(s);
+        }
     }
     match val {
         Value::Null => None,
@@ -1196,10 +1240,223 @@ fn map_node_type(raw: &str) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventKind {
+    StepFailed,
+}
+
+impl EventKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::StepFailed => "step_failed",
+        }
+    }
+}
+
+struct StepAction {
+    exit_code: Option<i64>,
+}
+
+fn step_outcome(step: &Value) -> String {
+    let declared = str_at(Some(step), "outcome").unwrap_or("ok");
+    let status = str_at(Some(step), "status").unwrap_or("");
+    let base = if declared == "completed" || declared.is_empty() {
+        "ok"
+    } else {
+        declared
+    };
+    let action = step.get("action").and_then(|a| {
+        if a.is_null() {
+            None
+        } else {
+            Some(StepAction {
+                exit_code: a.get("exitCode").and_then(Value::as_i64),
+            })
+        }
+    });
+    let output = step.get("output").filter(|o| !o.is_null());
+    let failed = action.as_ref().and_then(|a| a.exit_code).filter(|&c| c != 0).is_some()
+        || output
+            .as_ref()
+            .and_then(|o| o.get("exitCode"))
+            .and_then(Value::as_i64)
+            .filter(|&c| c != 0)
+            .is_some()
+        || output.as_ref().and_then(|o| o.get("ok")).and_then(Value::as_bool) == Some(false);
+    if status == "completed" && failed && base == "ok" {
+        return "failed".to_string();
+    }
+    if status.is_empty() && base == "ok" && failed {
+        return "failed".to_string();
+    }
+    base.to_string()
+}
+
+fn resolve_workflow_snapshot(
+    view: &Value,
+    text_of: &dyn Fn(&Value, Option<&str>) -> Option<String>,
+) -> Option<Value> {
+    let workflow = view.get("workflow")?;
+    if !workflow.is_object() {
+        return None;
+    }
+    if let Some(content) = workflow.get("content") {
+        let artifact_path = workflow
+            .get("artifact_path")
+            .or_else(|| workflow.get("artifactPath"))
+            .and_then(Value::as_str);
+        let content_text = content.as_str();
+        let parsed = content_text.and_then(|s| serde_json::from_str::<Value>(s).ok());
+        let parsed_ok = parsed
+            .as_ref()
+            .is_some_and(|v| v.get("nodes").is_some() || v.get("name").is_some());
+        let paged = workflow_was_paged(workflow);
+        let parse_failed = content_text.is_some() && !parsed_ok;
+        if paged || is_artifact_ref(content) || (parse_failed && artifact_path.is_some()) {
+            if let Some(text) = text_of(content, artifact_path) {
+                if let Ok(full) = serde_json::from_str::<Value>(&text) {
+                    if full.get("nodes").is_some() || full.get("startAt").is_some() {
+                        return Some(full);
+                    }
+                }
+            }
+        }
+        if parsed_ok {
+            return parsed;
+        }
+    }
+    if workflow.get("nodes").is_some() || workflow.get("name").is_some() || workflow.get("startAt").is_some() {
+        Some(workflow.clone())
+    } else {
+        None
+    }
+}
+
+fn workflow_was_paged(workflow: &Value) -> bool {
+    if workflow.get("content").is_none() {
+        return false;
+    }
+    let node_short = matches!(
+        (
+            workflow.get("nodeTotal").and_then(Value::as_u64),
+            workflow.get("nodes").and_then(Value::as_object).map(|o| o.len() as u64)
+        ),
+        (Some(total), Some(len)) if total > len
+    );
+    let edge_short = matches!(
+        (
+            workflow.get("edgeTotal").and_then(Value::as_u64),
+            workflow.get("edges").and_then(Value::as_array).map(|a| a.len() as u64)
+        ),
+        (Some(total), Some(len)) if total > len
+    );
+    node_short
+        || edge_short
+        || workflow.get("content").is_some_and(is_artifact_ref)
+        || workflow.get("truncated").and_then(Value::as_bool) == Some(true)
+}
+
+fn verified_max_steps(snapshot: &Value, view: Option<&Value>) -> Option<u64> {
+    if let Some(n) = snapshot.get("maxSteps").and_then(Value::as_u64).filter(|&n| n > 0) {
+        return Some(n);
+    }
+    let source = view.and_then(workflow_source_value)?;
+    match str_at(Some(source), "kind") {
+        Some("builtin") => {
+            let id = str_at(Some(source), "id")?;
+            let rev = str_at(Some(source), "revision")?;
+            builtin_max_steps(id, rev)
+        }
+        Some("file") => verified_file_max_steps(source),
+        _ => None,
+    }
+}
+
+fn workflow_source_value(view: &Value) -> Option<&Value> {
+    view.get("state")
+        .and_then(|s| s.get("workflowSource"))
+        .or_else(|| view.get("manifest").and_then(|m| m.get("workflowSource")))
+        .or_else(|| view.get("queue").and_then(|q| q.get("workflowSource")))
+}
+
+fn builtin_max_steps(id: &str, rev: &str) -> Option<u64> {
+    match (id, rev) {
+        ("plain-summary", "3") => Some(2),
+        ("workspace-preparation", "1") => Some(5),
+        ("sanity-check", "6") => Some(8),
+        ("autoplan", "6") => Some(16),
+        ("change-verification", "2") => Some(30),
+        ("autodoc", "3") => Some(80),
+        ("plan-approval", "4") => Some(100),
+        ("autoimplement", "14") => Some(320),
+        ("plan-change", "1") => Some(400),
+        ("monitor", "13") => Some(200_000),
+        _ => None,
+    }
+}
+
+fn verified_file_max_steps(source: &Value) -> Option<u64> {
+    let path = str_at(Some(source), "path")?;
+    let hash = str_at(Some(source), "hash")?;
+    let bytes = fs::read(path).ok()?;
+    if !client::sha256_hex(&bytes).eq_ignore_ascii_case(hash) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    Some(extract_top_level_max_steps(&text).unwrap_or(100))
+}
+
+fn extract_top_level_max_steps(text: &str) -> Option<u64> {
+    if let Ok(v) = serde_json::from_str::<Value>(text) {
+        return v.get("maxSteps").and_then(Value::as_u64).filter(|&n| n > 0);
+    }
+    let mut depth = 0i32;
+    let mut i = 0;
+    let bytes = text.as_bytes();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            _ if depth == 1 && text[i..].starts_with("maxSteps") => {
+                let rest = text[i + "maxSteps".len()..].trim_start();
+                let rest = rest
+                    .strip_prefix(':')
+                    .or_else(|| rest.strip_prefix('='))
+                    .unwrap_or(rest)
+                    .trim_start();
+                let num: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '_')
+                    .collect();
+                let num = num.replace('_', "");
+                if let Ok(n) = num.parse::<u64>() {
+                    if n > 0 {
+                        return Some(n);
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn copy_node_snapshot_fields(nobj: &mut Map<String, Value>, nv: &Value) {
+    for key in ["timeoutMs", "mountPath", "localNodeId", "includeTransition"] {
+        if let Some(v) = nv.get(key) {
+            if !v.is_null() {
+                nobj.insert(key.to_string(), v.clone());
+            }
+        }
+    }
+}
+
 fn build_flow_json(
     wf: &Value,
     fallback_name: &str,
     gate: Option<&PiwGate>,
+    view: Option<&Value>,
     out_meta: &mut HashMap<String, NodeMeta>,
 ) -> Value {
     let name = str_at(Some(wf), "name")
@@ -1247,6 +1504,7 @@ fn build_flow_json(
                     nobj.insert("summary".to_string(), json!(s));
                 }
             }
+            copy_node_snapshot_fields(&mut nobj, nv);
             nodes_out.insert(id.clone(), Value::Object(nobj));
         }
     }
@@ -1257,13 +1515,24 @@ fn build_flow_json(
         .cloned()
         .unwrap_or_default();
 
-    json!({
+    let mut flow = json!({
         "schema": "acpx.flow-definition-snapshot.v1",
         "name": name,
         "startAt": start_at,
         "nodes": Value::Object(nodes_out),
         "edges": Value::Array(edges_out)
-    })
+    });
+    if let Some(mounts) = wf
+        .pointer("/composition/mounts")
+        .or_else(|| wf.get("mounts"))
+        .filter(|m| m.is_array())
+    {
+        flow["mounts"] = mounts.clone();
+    }
+    if let Some(max_steps) = verified_max_steps(wf, view) {
+        flow["maxSteps"] = json!(max_steps);
+    }
+    flow
 }
 
 fn collect_steps(view: &Value, state: Option<&Value>) -> Vec<Value> {
@@ -1300,9 +1569,9 @@ fn collect_steps(view: &Value, state: Option<&Value>) -> Vec<Value> {
     }
 }
 
-fn resolve_output_value(val: &Value, text_of: &dyn Fn(&Value) -> Option<String>) -> Value {
+fn resolve_output_value(val: &Value, text_of: &dyn Fn(&Value, Option<&str>) -> Option<String>) -> Value {
     if is_artifact_ref(val) {
-        return match text_of(val) {
+        return match text_of(val, None) {
             Some(s) => serde_json::from_str::<Value>(&s).unwrap_or(Value::String(s)),
             None => Value::Null,
         };
@@ -1421,7 +1690,12 @@ mod tests {
     use crate::piw::gate::{GateKind, PiwGateChoice};
     use tempfile::tempdir;
 
-    fn inline_text_of(val: &Value) -> Option<String> {
+    fn inline_text_of(val: &Value, artifact_path: Option<&str>) -> Option<String> {
+        if let Some(path) = artifact_path {
+            if let Ok(text) = fs::read_to_string(path) {
+                return Some(text);
+            }
+        }
         match val {
             Value::Null => None,
             Value::String(s) => Some(s.clone()),

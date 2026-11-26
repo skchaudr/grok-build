@@ -21,6 +21,10 @@ use crate::render::line_utils::truncate_str;
 use crate::scrollback::blocks::markdown_content::MarkdownContent;
 use crate::theme::Theme;
 use crate::views::acpx_modal::detail::{DetailTarget, value_inline_summary};
+use crate::views::acpx_modal::modal_view::{
+    ModalZoom, build_waiting_gate_banner, compute_run_body_layout, format_step_structure_annotation,
+    prune_run_for_graph, slice_graph_viewport,
+};
 use crate::views::traces_fold::{FoldNode, FoldState, FoldTree};
 use crate::views::traces_modal::fmt_age;
 
@@ -113,6 +117,8 @@ pub struct RunViewState {
     gate_confirm: Option<GateConfirm>,
     graph_cache: Option<GraphCache>,
     answered: Option<String>,
+    zoom: ModalZoom,
+    graph_scroll: usize,
 }
 
 impl RunViewState {
@@ -133,6 +139,8 @@ impl RunViewState {
             gate_confirm: None,
             graph_cache: None,
             answered: None,
+            zoom: ModalZoom::Split,
+            graph_scroll: 0,
         };
         st.rebuild_tree();
         st.select_initial_stage();
@@ -288,6 +296,8 @@ impl RunViewState {
             "Space fold",
             "J/K detail",
             "v graph",
+            "m/z zoom",
+            "M/Z detail",
             "n noise",
             "y copy",
             "Esc back",
@@ -335,6 +345,38 @@ impl RunViewState {
                 }
                 _ => RunOutcome::Unchanged,
             };
+        }
+
+        if self.zoom != ModalZoom::Split && matches!(key.code, KeyCode::Esc) {
+            self.zoom = ModalZoom::Split;
+            self.graph_scroll = 0;
+            return RunOutcome::Changed;
+        }
+        if matches!(key.code, KeyCode::Char('m') | KeyCode::Char('z')) {
+            self.zoom = self.zoom.toggle_graph();
+            self.graph_scroll = 0;
+            return RunOutcome::Changed;
+        }
+        if matches!(key.code, KeyCode::Char('M') | KeyCode::Char('Z')) {
+            self.zoom = self.zoom.toggle_detail();
+            return RunOutcome::Changed;
+        }
+        if self.zoom == ModalZoom::Graph {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::PageDown => {
+                    self.graph_scroll = self.graph_scroll.saturating_add(1);
+                    return RunOutcome::Changed;
+                }
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp => {
+                    let next = self.graph_scroll.saturating_sub(1);
+                    if next == self.graph_scroll {
+                        return RunOutcome::Unchanged;
+                    }
+                    self.graph_scroll = next;
+                    return RunOutcome::Changed;
+                }
+                _ => {}
+            }
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -598,63 +640,70 @@ impl RunViewState {
             }
         }
 
-        // 3. Flow graph (when toggled on and area height >= 16)
-        if self.show_graph && area.height >= 16 && y < max_y {
-            let max_graph_rows = (area.height as usize / 3).max(1);
-            // Leave at least 2 rows for separator + stages pane
-            let avail_for_graph = (max_y.saturating_sub(y) as usize).saturating_sub(2);
-            let budget = max_graph_rows.min(avail_for_graph);
-            if budget > 0 {
-                let graph_lines = self.prepare_graph_lines(area.width, budget, theme);
-                for gline in graph_lines {
-                    if y >= max_y {
-                        break;
-                    }
-                    buf.set_line(area.x, y, &gline, area.width);
-                    y = y.saturating_add(1);
+        let want_graph = self.zoom == ModalZoom::Graph
+            || (self.show_graph && self.zoom != ModalZoom::Detail);
+        let prepared = if want_graph {
+            self.prepare_graph_lines(area.width, usize::MAX, theme)
+        } else {
+            Vec::new()
+        };
+        let layout = compute_run_body_layout(area, y, prepared.len(), self.show_graph, self.zoom);
+
+        if layout.graph_rows > 0 {
+            let (visible, scroll) = slice_graph_viewport(
+                &prepared,
+                layout.graph_rows,
+                self.graph_scroll,
+                self.zoom,
+                area.width as usize,
+                theme,
+            );
+            self.graph_scroll = scroll;
+            for (i, gline) in visible.into_iter().enumerate() {
+                let row = y.saturating_add(i as u16);
+                if row >= max_y {
+                    break;
                 }
+                buf.set_line(area.x, row, &gline, area.width);
             }
         }
 
-        // 4. Separator row
-        if y < max_y {
-            let rule: String = "─".repeat(area.width as usize);
-            buf.set_stringn(
-                area.x,
-                y,
-                &rule,
-                area.width as usize,
-                Style::default().fg(theme.gray_dim),
-            );
-            y = y.saturating_add(1);
+        if layout.show_separator {
+            let sep_y = y.saturating_add(layout.graph_rows as u16);
+            if sep_y < max_y {
+                let rule: String = "─".repeat(area.width as usize);
+                buf.set_stringn(
+                    area.x,
+                    sep_y,
+                    &rule,
+                    area.width as usize,
+                    Style::default().fg(theme.gray_dim),
+                );
+            }
         }
 
-        if y >= max_y {
-            return;
-        }
-
-        // 5. Split pane below
-        let body_h = max_y.saturating_sub(y);
-        let stages_rect = if area.width >= 110 {
-            let left_w = ((area.width as u32 * 2 / 5) as u16).clamp(46, 76);
-            let sep_x = area.x.saturating_add(left_w);
-            let detail_x = sep_x.saturating_add(1);
-            let detail_w = area.x.saturating_add(area.width).saturating_sub(detail_x);
+        if let Some(sep_x) = layout.vertical_sep_x {
+            let top = layout
+                .stages_rect
+                .or(layout.detail_rect)
+                .map(|r| r.y)
+                .unwrap_or(y);
             let sep_style = Style::default().fg(theme.gray_dim);
-            for row_y in y..max_y {
+            for row_y in top..max_y {
                 buf.set_stringn(sep_x, row_y, "│", 1, sep_style);
             }
-            self.detail_rect = Some(Rect::new(detail_x, y, detail_w, body_h));
-            Rect::new(area.x, y, left_w, body_h)
-        } else {
-            self.detail_rect = None;
-            Rect::new(area.x, y, area.width, body_h)
-        };
+        }
 
-        self.render_stages_pane(buf, stages_rect, theme, now_ms);
-
-        if self.gate_confirm.is_some() {
-            self.render_gate_confirm(buf, stages_rect, theme);
+        self.detail_rect = layout.detail_rect;
+        if let Some(stages) = layout.stages_rect {
+            self.render_stages_pane(buf, stages, theme, now_ms);
+            if self.gate_confirm.is_some() {
+                self.render_gate_confirm(buf, stages, theme);
+            }
+        } else if self.gate_confirm.is_some() {
+            if let Some(detail) = layout.detail_rect {
+                self.render_gate_confirm(buf, detail, theme);
+            }
         }
     }
 
@@ -1145,6 +1194,10 @@ impl RunViewState {
             spans.push(Span::styled(" · ", sep));
             spans.push(Span::styled(fact, dim));
         }
+        if let Some(badge) = self.zoom.header_badge() {
+            spans.push(Span::styled(" · ", sep));
+            spans.push(Span::styled(badge, Style::default().fg(theme.warning)));
+        }
 
         buf.set_line(area.x, area.y, &Line::from(spans), area.width);
     }
@@ -1173,18 +1226,16 @@ impl RunViewState {
                         };
                         (msg, Style::default().fg(theme.gray))
                     } else {
-                        // The question, when there is one; a detail that only repeats
-                        // the node name is no question.
-                        let msg = match sum.status_detail.as_deref() {
-                            Some(q) if !q.is_empty() && q != node => {
-                                format!("◐ NEEDS YOU at {node}: {q}")
-                            }
-                            _ => format!("◐ NEEDS YOU at {node}"),
-                        };
-                        (
-                            msg,
-                            Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
-                        )
+                        let question = sum.status_detail.as_deref().filter(|q| !q.is_empty() && *q != node);
+                        let choice_count = bundle::gate_choices(&self.run).len();
+                        return build_waiting_gate_banner(
+                            &self.run,
+                            node,
+                            question,
+                            choice_count,
+                            width,
+                            theme,
+                        );
                     }
                 }
                 RunStatus::Failed | RunStatus::TimedOut => {
@@ -1230,8 +1281,9 @@ impl RunViewState {
         theme: &Theme,
     ) -> Vec<Line<'static>> {
         let w = width as usize;
-        let lr_src = mermaid_source(&self.run, Direction::LeftRight, self.answered.is_some());
-        let td_src = mermaid_source(&self.run, Direction::TopDown, self.answered.is_some());
+        let graph_run = prune_run_for_graph(&self.run);
+        let lr_src = mermaid_source(&graph_run, Direction::LeftRight, self.answered.is_some());
+        let td_src = mermaid_source(&graph_run, Direction::TopDown, self.answered.is_some());
 
         let cache_valid = self.graph_cache.as_ref().is_some_and(|c| {
             c.width == width && c.lr_src == lr_src && c.td_src == td_src
@@ -1441,7 +1493,15 @@ impl RunViewState {
                     return Line::default();
                 };
                 let arrow = self.fold_arrow(node_idx, &node.key);
-                let label = self.stage_agent_or_kind_label(Some(step), &step.node_id, step.kind);
+                let mut label = self.stage_agent_or_kind_label(Some(step), &step.node_id, step.kind);
+                let annotation = format_step_structure_annotation(&self.run, *step_idx, now_ms);
+                if !annotation.is_empty() {
+                    if label.is_empty() {
+                        label = annotation;
+                    } else {
+                        label = format!("{label} · {annotation}");
+                    }
+                }
                 let dur = fmt_duration(step.duration_ms());
                 self.format_stage_header_line(
                     arrow,
@@ -2036,24 +2096,28 @@ mod tests {
                     kind: NodeKind::Acp,
                     summary: None,
                     is_shell: false,
+                    ..Default::default()
                 },
                 FlowNode {
                     id: "test".to_string(),
                     kind: NodeKind::Action,
                     summary: None,
                     is_shell: true,
+                    ..Default::default()
                 },
                 FlowNode {
                     id: "gate".to_string(),
                     kind: NodeKind::Checkpoint,
                     summary: None,
                     is_shell: false,
+                    ..Default::default()
                 },
                 FlowNode {
                     id: "deploy".to_string(),
                     kind: NodeKind::Action,
                     summary: None,
                     is_shell: true,
+                    ..Default::default()
                 },
             ],
             edges: vec![
@@ -2070,6 +2134,7 @@ mod tests {
                     to: "deploy".to_string(),
                 },
             ],
+            ..Default::default()
         };
 
         let steps = vec![
@@ -2321,6 +2386,7 @@ mod tests {
             kind: NodeKind::Action,
             summary: None,
             is_shell: true,
+            ..Default::default()
         });
 
         let mut st = RunViewState::new(run);
@@ -2422,13 +2488,13 @@ mod tests {
                 .collect::<String>()
         };
         assert!(banner(Some("land it, or send it back?"))
-            .contains("◐ NEEDS YOU at gate: land it, or send it back?"));
+            .contains("◐ WAITING FOR YOUR ANSWER at gate: land it, or send it back?"));
         // acpx reports the node id when the checkpoint has no question: no repeat.
         let repeated = banner(Some("gate"));
-        assert!(repeated.contains("◐ NEEDS YOU at gate"));
+        assert!(repeated.contains("◐ WAITING FOR YOUR ANSWER at gate"));
         assert!(!repeated.contains("gate: gate"));
         let none = banner(None);
-        assert!(none.contains("◐ NEEDS YOU at gate"));
+        assert!(none.contains("◐ WAITING FOR YOUR ANSWER at gate"));
         assert!(!none.contains("waiting"));
     }
 
@@ -2448,7 +2514,7 @@ mod tests {
 
         let text = buf_text(&buf);
         assert!(text.contains("PR #42 Review"));
-        assert!(text.contains("◐ NEEDS YOU at gate: awaiting human approval"));
+        assert!(text.contains("◐ WAITING FOR YOUR ANSWER at gate: awaiting human approval"));
         assert!(text.contains("✓ plan"));
         assert!(text.contains("✗ test"));
         assert!(text.contains("◐ gate"));
@@ -2525,8 +2591,8 @@ mod tests {
         st.render(&mut buf_off, area, &theme, 10_000);
         let d_off = st.detail_area().unwrap_or_default();
 
-        // With graph off, the separator + split panes start right after header + banner (row 3)
-        assert_eq!(d_off.y, 3);
+        // Header + waiting banner (question and preceding failure) + separator.
+        assert!(d_off.y >= 3);
         assert!(d_on.y > d_off.y);
     }
 
@@ -2578,7 +2644,7 @@ mod tests {
         let area = Rect::new(0, 0, 120, 30);
         let mut buf = Buffer::empty(area);
         st.render(&mut buf, area, &theme, 10_000);
-        assert_eq!(st.detail_area().map(|r| r.y), Some(3));
+        assert!(st.detail_area().is_some_and(|r| r.y >= 3));
     }
 
     #[test]

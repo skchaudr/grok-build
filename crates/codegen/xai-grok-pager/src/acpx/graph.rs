@@ -102,6 +102,7 @@ mod tests {
             kind,
             summary: None,
             is_shell: false,
+            ..Default::default()
         }
     }
 
@@ -155,6 +156,7 @@ mod tests {
                 start_at,
                 nodes,
                 edges,
+                ..Default::default()
             },
             steps,
             events: Vec::new(),

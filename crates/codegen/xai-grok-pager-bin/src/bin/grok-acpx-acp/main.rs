@@ -13,6 +13,7 @@ mod driver;
 mod piw_driver;
 mod piw_server;
 mod project;
+mod run_path;
 
 use agent_client_protocol as acp;
 use anyhow::{Context, Result};

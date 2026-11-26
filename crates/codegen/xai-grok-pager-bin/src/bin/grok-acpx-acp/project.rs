@@ -49,6 +49,8 @@ pub struct Projector {
     started_at_ms: i64,
     flow: Option<FlowSketch>,
     plan_states: HashMap<String, PlanNodeState>,
+    exit_codes: HashMap<String, i64>,
+    last_failure: Option<crate::run_path::PrecedingFailure>,
     attempts: HashMap<String, AttemptState>,
     shell_attempts: HashMap<String, ShellAttemptState>,
     parent_after_block: bool,
@@ -64,6 +66,8 @@ impl Projector {
             started_at_ms: 0,
             flow: None,
             plan_states: HashMap::new(),
+            exit_codes: HashMap::new(),
+            last_failure: None,
             attempts: HashMap::new(),
             shell_attempts: HashMap::new(),
             parent_after_block: false,
@@ -99,8 +103,8 @@ impl Projector {
                     .filter(|s| !s.is_empty())
                     .unwrap_or(flow_path.as_str());
 
-                let states = HashMap::new();
-                let chart = mermaid(flow, &states);
+                let states = self.glyph_states();
+                let chart = crate::run_path::active_mermaid(flow, &states);
                 let text = format!(
                     "\n**▶ {title}**\n\n`{flow_file_name}` · {run_id}\n\n```mermaid\n{chart}\n```\n\n"
                 );
@@ -182,7 +186,22 @@ impl Projector {
                     self.parent_after_block = true;
                     outs
                 }
-                StepKind::Shell | StepKind::Compute | StepKind::Other => {
+                StepKind::Shell | StepKind::Compute => {
+                    let mut outs = Vec::new();
+                    if self.set_node_state(node, PlanNodeState::InProgress)
+                        && let Some(plan_out) = self.build_plan_out()
+                    {
+                        outs.push(plan_out);
+                    }
+                    let kind_label = if *kind == StepKind::Shell {
+                        "shell"
+                    } else {
+                        "compute"
+                    };
+                    outs.push(self.step_card(node, kind_label, true, true, None));
+                    outs
+                }
+                StepKind::Other => {
                     let mut outs = Vec::new();
                     if self.set_node_state(node, PlanNodeState::InProgress)
                         && let Some(plan_out) = self.build_plan_out()
@@ -278,7 +297,31 @@ impl Projector {
                 exit_code,
                 ..
             } => {
-                let is_ok = outcome == "ok";
+                let output_code = output
+                    .get("exitCode")
+                    .or_else(|| output.get("exit_code"))
+                    .and_then(Value::as_i64);
+                let code = (*exit_code).or(output_code);
+                let ok_false = output.get("ok").and_then(Value::as_bool) == Some(false);
+                let is_ok = outcome == "ok" && !code.is_some_and(|c| c != 0) && !ok_false;
+                if let Some(code) = code {
+                    self.exit_codes.insert(node.clone(), code);
+                }
+                if !is_ok {
+                    let output_tail = if output.is_null() {
+                        None
+                    } else {
+                        serde_json::to_string(output).ok()
+                    };
+                    self.last_failure = Some(crate::run_path::PrecedingFailure::from_raw(
+                        node,
+                        error.as_deref(),
+                        stderr.as_deref(),
+                        output_tail.as_deref(),
+                        stdout.as_deref(),
+                        code,
+                    ));
+                }
                 let new_plan_state = if is_ok {
                     PlanNodeState::Completed
                 } else {
@@ -427,6 +470,7 @@ impl Projector {
                             update: acp::SessionUpdate::ToolCallUpdate(tcu),
                         });
                         self.parent_after_block = true;
+                        outs.push(self.step_card(node, "shell", false, is_ok, code));
                     }
 
                     StepKind::Compute | StepKind::Other => {
@@ -449,6 +493,9 @@ impl Projector {
                             update: acp::SessionUpdate::ToolCall(tc),
                         });
                         self.parent_after_block = true;
+                        if *kind == StepKind::Compute {
+                            outs.push(self.step_card(node, "compute", false, is_ok, code));
+                        }
                     }
 
                     StepKind::Checkpoint => {
@@ -483,15 +530,21 @@ impl Projector {
 
             DriverEvent::Waiting {
                 node,
-                question: _,
-                choices: _,
+                question,
+                choices,
                 ..
             } => {
                 let state_changed = self.set_node_state(node, PlanNodeState::InProgress);
-                // The question itself is printed once, by the ask panel below; the
-                // transcript line only marks the gate as waiting.
+                // Inline card (Issue 11): no auto-pop-up. Include the preceding
+                // failure tail so the gate shows why it is waiting.
+                let card = crate::run_path::format_inline_waiting_gate(
+                    node,
+                    question,
+                    choices,
+                    self.last_failure.as_ref(),
+                );
                 let text = format!(
-                    "{}\n\n{}\n\n**◐ {node}**\n\n",
+                    "{}\n\n{}\n\n{card}\n\n",
                     self.mermaid_fence(),
                     self.taken_path()
                 );
@@ -586,22 +639,10 @@ impl Projector {
         let Some(flow) = self.flow.as_ref() else {
             return String::new();
         };
-        flow.nodes
-            .iter()
-            .filter_map(|n| {
-                let glyph = match self.plan_states.get(&n.id)? {
-                    PlanNodeState::Pending => return None,
-                    PlanNodeState::InProgress => '◐',
-                    PlanNodeState::Completed => '✓',
-                    PlanNodeState::Failed => '✗',
-                };
-                Some(format!("{glyph} {}", n.id))
-            })
-            .collect::<Vec<_>>()
-            .join(" → ")
+        crate::run_path::compact_path_line(flow, &self.glyph_states(), &self.exit_codes)
     }
 
-    fn mermaid_states(&self) -> HashMap<String, char> {
+    fn glyph_states(&self) -> HashMap<String, char> {
         self.plan_states
             .iter()
             .filter_map(|(id, state)| {
@@ -620,8 +661,37 @@ impl Projector {
         let Some(flow) = self.flow.as_ref() else {
             return String::new();
         };
-        let chart = mermaid(flow, &self.mermaid_states());
+        let chart = crate::run_path::active_mermaid(flow, &self.glyph_states());
         format!("\n\n```mermaid\n{chart}\n```")
+    }
+
+    fn step_card(
+        &mut self,
+        node: &str,
+        kind_label: &str,
+        started: bool,
+        ok: bool,
+        exit_code: Option<i64>,
+    ) -> Out {
+        let glyph = if started {
+            "▶"
+        } else if ok {
+            "✓"
+        } else {
+            "✗"
+        };
+        let verb = if started {
+            String::new()
+        } else if ok {
+            " finished".to_string()
+        } else {
+            " failed".to_string()
+        };
+        let exit = match exit_code {
+            Some(code) if !started => format!(" · exit {code}"),
+            _ => String::new(),
+        };
+        self.parent_message(&format!("\n**{glyph} {node}** · {kind_label}{verb}{exit}\n"))
     }
 
     fn set_node_state(&mut self, node: &str, state: PlanNodeState) -> bool {
@@ -1579,19 +1649,18 @@ mod tests {
         match &outs[0] {
             Out::Update { update, .. } => {
                 let text = chunk_text(update).unwrap_or_default();
-                // The gate line marks the gate as waiting; the question itself is
-                // printed once, by the ask panel, not again here.
+                // The question and choices are inline (no auto-pop-up modal).
                 assert!(
-                    text.contains("**◐ human_gate**\n"),
-                    "gate line must not repeat the question, got: {text}"
+                    text.contains("WAITING FOR YOUR ANSWER"),
+                    "inline gate card missing, got: {text}"
                 );
                 assert!(
-                    !text.contains("Approve changes?"),
-                    "the question must appear only in the ask panel, got: {text}"
+                    text.contains("Approve changes?"),
+                    "the question must be in the inline card, got: {text}"
                 );
-                // The choices live in the question pop-up only; the transcript shows the question once.
+                assert!(text.contains("1. **Approve**"));
+                assert!(text.contains("2. **Rework**"));
                 assert!(!text.contains("deploy.flow.json"));
-                assert!(text.contains("◐ human_gate"));
             }
             _ => panic!("expected AgentMessageChunk"),
         }

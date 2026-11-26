@@ -459,27 +459,32 @@ mod tests {
                         kind: NodeKind::Acp,
                         summary: None,
                         is_shell: false,
+                        ..Default::default()
                     },
                     FlowNode {
                         id: "route".into(),
                         kind: NodeKind::Compute,
                         summary: None,
                         is_shell: false,
+                        ..Default::default()
                     },
                     FlowNode {
                         id: "build".into(),
                         kind: NodeKind::Action,
                         summary: None,
                         is_shell: true,
+                        ..Default::default()
                     },
                     FlowNode {
                         id: "rollback".into(),
                         kind: NodeKind::Action,
                         summary: None,
                         is_shell: true,
+                        ..Default::default()
                     },
                 ],
                 edges: Vec::new(),
+                ..Default::default()
             },
             steps: vec![
                 Step {

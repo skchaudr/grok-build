@@ -146,11 +146,16 @@ pub fn watch(
                 }
 
                 if let Some(rv) = client.run_view(&run_id_owned) {
-                    if watched_session.is_none()
-                        && let Some(sid) = extract_origin_session_id(&rv.view)
-                    {
-                        client.watch_session(&sid, false);
-                        watched_session = Some(sid);
+                    if let Some(sid) = extract_origin_session_id(&rv.view) {
+                        if watched_session.as_deref() != Some(sid.as_str()) {
+                            watched_session = Some(sid.clone());
+                        }
+                        // A cleaned-up gate answer releases the coordinator role
+                        // without dropping the snapshot. If the snapshot is gone,
+                        // re-subscribe so the next gate stays visible.
+                        if client.session(&sid).is_none() {
+                            let _ = client.watch_session(&sid, true);
+                        }
                     }
 
                     let view_changed = last_view.as_ref() != Some(&rv);
@@ -187,13 +192,17 @@ pub fn watch(
                 if !tailer.finished()
                     && let Some(rv) = &last_view
                     && let Some(sid) = &watched_session
-                    && let Some(session_snapshot) = client.session(sid)
                 {
-                    let gate = gate_from(rv, &session_snapshot);
-                    store_gate(&gate_slot, gate.clone());
-                    for ev in tailer.on_gate(gate.as_ref()) {
-                        if tx.send(ev).is_err() {
-                            break;
+                    if client.session(sid).is_none() {
+                        let _ = client.watch_session(sid, true);
+                    }
+                    if let Some(session_snapshot) = client.session(sid) {
+                        let gate = gate_from(rv, &session_snapshot);
+                        store_gate(&gate_slot, gate.clone());
+                        for ev in tailer.on_gate(gate.as_ref()) {
+                            if tx.send(ev).is_err() {
+                                break;
+                            }
                         }
                     }
                 }
@@ -557,7 +566,11 @@ impl PiwTailer {
                 rec.started_at.as_deref().and_then(parse_ts),
                 rec.finished_at.as_deref().and_then(parse_ts),
             );
-            let outcome = rec.outcome.unwrap_or_default();
+            let outcome = effective_step_outcome(
+                rec.outcome.as_deref().unwrap_or_default(),
+                rec.full,
+                &materialized_output,
+            );
             let error = rec
                 .full
                 .and_then(|s| extract_non_empty_str(s.get("error")))
@@ -938,6 +951,51 @@ impl PiwTailer {
     }
 }
 
+/// Non-zero `action.exitCode` / `output.exitCode`, or `output.ok == false`, is a
+/// failure even when `allowFailure` leaves `status`/`outcome` as completed/ok.
+fn effective_step_outcome(declared: &str, full: Option<&Value>, output: &Value) -> String {
+    let status = full
+        .and_then(|s| s.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let action = full.and_then(|s| s.get("action")).filter(|v| !v.is_null());
+    let failed = step_reports_failure(action, output, full);
+    let normalized = match declared {
+        "" | "completed" => "ok",
+        other => other,
+    };
+    if failed && (normalized == "ok" || status == "completed") {
+        return "failed".to_string();
+    }
+    normalized.to_string()
+}
+
+fn step_reports_failure(action: Option<&Value>, output: &Value, full: Option<&Value>) -> bool {
+    read_exit_code(action, output, full).is_some_and(|code| code != 0) || output_ok_is_false(output, full)
+}
+
+fn read_exit_code(action: Option<&Value>, output: &Value, full: Option<&Value>) -> Option<i64> {
+    fn code_of(value: Option<&Value>) -> Option<i64> {
+        value
+            .and_then(|v| v.get("exitCode").or_else(|| v.get("exit_code")))
+            .and_then(Value::as_i64)
+    }
+    code_of(action)
+        .or_else(|| code_of(Some(output)))
+        .or_else(|| code_of(full.and_then(|s| s.get("output"))))
+        .or_else(|| code_of(full.and_then(|s| s.get("action"))))
+}
+
+fn output_ok_is_false(output: &Value, full: Option<&Value>) -> bool {
+    fn not_ok(value: &Value) -> bool {
+        value.get("ok").and_then(Value::as_bool) == Some(false)
+    }
+    not_ok(output)
+        || full
+            .and_then(|s| s.get("output"))
+            .is_some_and(not_ok)
+}
+
 struct FinishedAttempt<'a> {
     attempt_id: Option<String>,
     node_id: Option<String>,
@@ -1302,8 +1360,12 @@ fn build_flow_sketch(
         for (id, nval) in obj {
             let kind = classify_node_kind(nval);
             let summary = extract_non_empty_str(nval.get("summary"));
-            let profile = extract_non_empty_str(nval.get("agent"))
+            let mut profile = extract_non_empty_str(nval.get("agent"))
                 .or_else(|| extract_non_empty_str(nval.get("profile")));
+            // Pi agent nodes omit `agent`; the card must still read "pi".
+            if profile.is_none() && kind == StepKind::Acp {
+                profile = Some("pi".to_string());
+            }
             let model = extract_non_empty_str(nval.get("model"))
                 .or_else(|| extract_non_empty_str(nval.get("modelId")));
             let effort = nval

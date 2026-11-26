@@ -1,6 +1,7 @@
 pub(crate) mod detail;
 pub(crate) mod inspector;
 pub(crate) mod ledger;
+pub(crate) mod modal_view;
 pub(crate) mod run;
 
 use std::collections::HashMap;

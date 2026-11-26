@@ -16,12 +16,13 @@ pub enum RunStatus {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum NodeKind {
     Acp,
     Action,
     Compute,
     Checkpoint,
+    #[default]
     Unknown,
 }
 
@@ -183,12 +184,29 @@ impl Step {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct FlowNode {
     pub id: String,
     pub kind: NodeKind,
     pub summary: Option<String>,
     pub is_shell: bool,
+    /// Snapshot `timeoutMs`. `None` when absent, null, or not a positive integer.
+    pub timeout_ms: Option<u64>,
+    /// Snapshot `mountPath`. Empty for root-workflow nodes.
+    pub mount_path: Vec<String>,
+    /// Snapshot `localNodeId`. For `includeTransition == "exit"`, the exit name.
+    pub local_node_id: Option<String>,
+    /// Snapshot `includeTransition`: `Some("entry" | "exit")` or `None`.
+    pub include_transition: Option<String>,
+}
+
+/// One included workflow from `flow.json` `mounts` (snapshot `composition.mounts`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlowMount {
+    pub mount_path: Vec<String>,
+    pub workflow_name: String,
+    /// Child `maxSteps` when the included workflow declared one. `None` means no separate child cap.
+    pub max_steps: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -204,14 +222,27 @@ pub enum FlowEdge {
     },
 }
 
+impl Default for FlowEdge {
+    fn default() -> Self {
+        Self::Simple {
+            from: String::new(),
+            to: String::new(),
+        }
+    }
+}
+
 /// flow.json. `nodes` is ordered breadth-first from `start_at` following edges (Simple first, then Switch cases in
 /// order); nodes not reachable are appended sorted by id.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct FlowDef {
     pub name: String,
     pub start_at: String,
     pub nodes: Vec<FlowNode>,
     pub edges: Vec<FlowEdge>,
+    /// Verified root `maxSteps` (configured or engine default 100). `None` when unverified.
+    pub max_steps: Option<usize>,
+    /// Snapshot `composition.mounts`.
+    pub mounts: Vec<FlowMount>,
 }
 
 /// One line of trace.ndjson.
@@ -706,12 +737,71 @@ fn build_summary(dir: &Path, live: Option<&Value>, manifest: Option<&Value>) -> 
 }
 
 fn empty_flow_def() -> FlowDef {
-    FlowDef {
-        name: String::new(),
-        start_at: String::new(),
-        nodes: Vec::new(),
-        edges: Vec::new(),
+    FlowDef::default()
+}
+
+/// Positive integer `timeoutMs`. Absent, null, zero, and non-integers are `None`.
+fn parse_timeout_ms(v: &Value) -> Option<u64> {
+    v.get("timeoutMs")
+        .and_then(Value::as_u64)
+        .filter(|&n| n > 0)
+}
+
+/// `mountPath` / `path` as a string array, or a `/`-split string.
+fn parse_path_segments(v: &Value) -> Vec<String> {
+    match v {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        Value::String(s) => s
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        _ => Vec::new(),
     }
+}
+
+fn parse_nonempty_string(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn parse_positive_usize(v: &Value, key: &str) -> Option<usize> {
+    v.get(key)
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|&n| n > 0)
+}
+
+fn parse_flow_mount(v: &Value) -> Option<FlowMount> {
+    let path_val = v.get("mountPath").or_else(|| v.get("path"))?;
+    let mount_path = parse_path_segments(path_val);
+    if mount_path.is_empty() {
+        return None;
+    }
+    let workflow_name = parse_nonempty_string(v, "workflowName").unwrap_or_default();
+    Some(FlowMount {
+        mount_path,
+        workflow_name,
+        max_steps: parse_positive_usize(v, "maxSteps"),
+    })
+}
+
+fn parse_flow_mounts(v: &Value) -> Vec<FlowMount> {
+    let Some(arr) = v
+        .get("mounts")
+        .or_else(|| v.pointer("/composition/mounts"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    arr.iter().filter_map(parse_flow_mount).collect()
 }
 
 fn parse_flow_def(v: &Value) -> FlowDef {
@@ -737,6 +827,13 @@ fn parse_flow_def(v: &Value) -> FlowDef {
                     kind,
                     summary,
                     is_shell,
+                    timeout_ms: parse_timeout_ms(nv),
+                    mount_path: nv
+                        .get("mountPath")
+                        .map(parse_path_segments)
+                        .unwrap_or_default(),
+                    local_node_id: parse_nonempty_string(nv, "localNodeId"),
+                    include_transition: parse_nonempty_string(nv, "includeTransition"),
                 },
             );
         }
@@ -818,6 +915,8 @@ fn parse_flow_def(v: &Value) -> FlowDef {
         start_at,
         nodes: ordered_nodes,
         edges,
+        max_steps: parse_positive_usize(v, "maxSteps"),
+        mounts: parse_flow_mounts(v),
     }
 }
 
