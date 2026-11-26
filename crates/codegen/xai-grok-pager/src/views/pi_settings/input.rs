@@ -273,8 +273,23 @@ fn chooser_key(state: &mut PiSettingsState, key: &KeyEvent) -> Outcome {
             // committing it dismisses the panel rather than dropping the user
             // into a browse list they never asked for.
             let close = state.close_on_picker_exit;
+            // Model rows (default_model, fork_secondary_model, recap_model) are DynamicEnum and carry a model's display
+            // name, which `action_for_string` resolves; `action_for_enum_commit` has no arm for them, so the pick was
+            // dropped. Claude and dpi rows are DynamicEnum too, but they are session options and commit as before.
+            let session_row = crate::settings::claude::is_claude_key(setting)
+                || crate::settings::dpi::is_dpi_key(setting);
+            let model_row = !session_row
+                && matches!(
+                    state.registry.find(setting).map(|m| &m.kind),
+                    Some(SettingKind::DynamicEnum { .. })
+                );
+            let commit = if model_row {
+                actions::action_for_string(setting, canonical, &state.pager_snapshot)
+            } else {
+                actions::action_for_enum_commit(setting, &canonical)
+            };
             state.to_browse();
-            match (actions::action_for_enum_commit(setting, &canonical), close) {
+            match (commit, close) {
                 (Some(action), true) => Outcome::ActionThenClose(action),
                 (Some(action), false) => Outcome::Action(action),
                 (None, true) => Outcome::Close,

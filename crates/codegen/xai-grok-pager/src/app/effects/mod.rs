@@ -2213,7 +2213,7 @@ pub(crate) fn execute(
             tasks
                 .spawn(async move {
                     let mut choice = choice;
-                    let wire = crate::acp::model_state::model_switch_wire(
+                    let wires = crate::acp::model_state::model_switch_wires(
                         session_id,
                         &choice.model_id,
                         choice.effort,
@@ -2221,25 +2221,27 @@ pub(crate) fn execute(
                         model_config_id.as_deref(),
                         thought_level_config_id.as_deref(),
                     );
-                    let sent = match wire {
-                        crate::acp::model_state::ModelSwitchWire::SetConfigOption(req) => {
-                            match acp_send(req, &tx).await {
-                                Ok(resp) => {
+                    let mut sent = Ok(());
+                    for wire in wires {
+                        sent = match wire {
+                            crate::acp::model_state::ModelSwitchWire::SetConfigOption(req) => {
+                                acp_send(req, &tx).await.map(|resp| {
                                     if let Some(resolved) = crate::acp::model_state::models_or_config_option(
                                         None,
                                         Some(&resp.config_options),
                                     ) {
                                         choice.model_id = resolved.current_model_id;
                                     }
-                                    Ok(())
-                                }
-                                Err(e) => Err(e),
+                                })
                             }
+                            crate::acp::model_state::ModelSwitchWire::SetModel(req) => {
+                                acp_send(req, &tx).await.map(|_| ())
+                            }
+                        };
+                        if sent.is_err() {
+                            break;
                         }
-                        crate::acp::model_state::ModelSwitchWire::SetModel(req) => {
-                            acp_send(req, &tx).await.map(|_| ())
-                        }
-                    };
+                    }
                     let result = sent.map_err(|e| {
                             use xai_grok_shell::agent::config::ModelSwitchIncompatibleAgentError;
                             if let Some(typed) = ModelSwitchIncompatibleAgentError::from_acp_error(

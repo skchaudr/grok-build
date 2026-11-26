@@ -826,6 +826,33 @@ pub(crate) fn model_switch_wire(
     )
 }
 
+/// The requests one model pick sends, in order. An agent that advertises both a `model` and a
+/// `thought_level` select (claude-agent-acp) needs the model first, then the effort: a model switch
+/// can reset the effort, and `model_switch_wire` alone sends only the effort when one is chosen.
+pub(crate) fn model_switch_wires(
+    session_id: acp::SessionId,
+    model_id: &acp::ModelId,
+    effort: Option<ReasoningEffort>,
+    context_window: Option<std::num::NonZeroU64>,
+    model_config_id: Option<&str>,
+    thought_level_config_id: Option<&str>,
+) -> Vec<ModelSwitchWire> {
+    if let (Some(_), Some(_), Some(_)) = (model_config_id, thought_level_config_id, effort) {
+        return vec![
+            model_switch_wire(session_id.clone(), model_id, None, None, model_config_id, None),
+            model_switch_wire(session_id, model_id, effort, None, None, thought_level_config_id),
+        ];
+    }
+    vec![model_switch_wire(
+        session_id,
+        model_id,
+        effort,
+        context_window,
+        model_config_id,
+        thought_level_config_id,
+    )]
+}
+
 impl From<Option<acp::SessionModelState>> for ModelState {
     fn from(state: Option<acp::SessionModelState>) -> Self {
         state
@@ -1028,6 +1055,26 @@ mod tests {
         };
         assert_eq!(req.config_id.0.as_ref(), "thought_level");
         assert_eq!(req.value.as_value_id().unwrap().0.as_ref(), "high");
+    }
+
+    #[test]
+    fn model_pick_with_effort_sends_model_then_effort() {
+        let wires = model_switch_wires(
+            acp::SessionId::new("sess-1"),
+            &acp::ModelId::new(Arc::from("haiku")),
+            Some(ReasoningEffort::High),
+            None,
+            Some("model"),
+            Some("effort"),
+        );
+        let ids: Vec<String> = wires
+            .iter()
+            .map(|w| match w {
+                ModelSwitchWire::SetConfigOption(req) => req.config_id.0.to_string(),
+                ModelSwitchWire::SetModel(_) => "set_model".to_owned(),
+            })
+            .collect();
+        assert_eq!(ids, ["model", "effort"]);
     }
 
     #[test]
