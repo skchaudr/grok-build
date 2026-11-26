@@ -872,4 +872,116 @@ mod tests {
             "missing failure node on timed out run: {line}"
         );
     }
+
+    #[test]
+    #[ignore]
+    fn live_beta8_merge_v1_acceptance_check() {
+        use std::fs;
+        use std::path::Path;
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+        use crate::acpx::bundle;
+        use crate::acpx::step_digest::{
+            digest_step_files, effective_outcome, run_step_budget, summarize_included_workflows,
+        };
+        use crate::acpx::workflow_preflight::{
+            audit_workflow_preflight, format_preflight_markdown, PreflightOverrides,
+        };
+        use crate::piw::client::PiwClient;
+        use crate::piw::mirror::PiwMirror;
+        use crate::views::acpx_modal::modal_view::{
+            build_waiting_gate_banner, format_step_structure_annotation, prune_run_for_graph,
+        };
+        use crate::theme::Theme;
+
+        let mirror_root = Path::new("/Users/sab-mini/.grok/cache/pi-workflows-mirror");
+        let beta8_id = "20261124T063602457Z-beta8-merge-8814563d";
+        let monitor_id = "20261124T064326952Z-monitor-cd63bbf0";
+        let beta8_dir = mirror_root.join(format!("piw-{beta8_id}"));
+        let monitor_dir = mirror_root.join(format!("piw-{monitor_id}"));
+
+        if let Some(sock) = PiwClient::default_socket_path().filter(|p| p.exists()) {
+            for dir in [&beta8_dir, &monitor_dir] {
+                let _ = fs::remove_file(dir.join(".mirror_meta.json"));
+                let _ = fs::remove_file(dir.join("flow.json"));
+                let _ = fs::remove_file(dir.join("trace.ndjson"));
+                let _ = fs::remove_file(dir.join("projections/steps.json"));
+                let _ = fs::remove_file(dir.join("sessions/main/events.ndjson"));
+            }
+            let client = Arc::new(PiwClient::connect(&sock).expect("connect PiwClient"));
+            let mirror = PiwMirror::start(client, mirror_root.to_path_buf()).expect("start PiwMirror");
+            mirror.want_run(beta8_id);
+            mirror.want_run(monitor_id);
+            for _ in 0..100 {
+                thread::sleep(Duration::from_millis(150));
+                if beta8_dir.join("flow.json").is_file()
+                    && beta8_dir.join("sessions/main/events.ndjson").is_file()
+                    && monitor_dir.join("flow.json").is_file()
+                {
+                    thread::sleep(Duration::from_millis(300));
+                    break;
+                }
+            }
+            mirror.stop();
+        }
+
+        let beta8_run = bundle::load_run(&beta8_dir).expect("load re-mirrored beta8-merge run");
+        let monitor_run = bundle::load_run(&monitor_dir).expect("load re-mirrored monitor run");
+
+        println!("=== 1. PREFLIGHT AUDIT ON beta8-merge ===");
+        let preflight = audit_workflow_preflight(
+            &beta8_run.flow,
+            None,
+            std::slice::from_ref(&beta8_run),
+            &PreflightOverrides::default(),
+        );
+        println!("{}", format_preflight_markdown(&preflight));
+        assert!(!preflight.ready_to_launch(), "beta8-merge without overrides must be blocked by preflight");
+
+        println!("=== 2. PRUNED GRAPH NODES ON beta8-merge ===");
+        let pruned = prune_run_for_graph(&beta8_run);
+        let pruned_ids: Vec<&str> = pruned.flow.nodes.iter().map(|n| n.id.as_str()).collect();
+        println!("Original nodes ({}): {:?}", beta8_run.flow.nodes.len(), beta8_run.flow.nodes.iter().map(|n| &n.id).collect::<Vec<_>>());
+        println!("Pruned nodes   ({}): {:?}", pruned_ids.len(), pruned_ids);
+        assert!(!pruned_ids.contains(&"resolve_group1_air"), "untaken air branch must be pruned");
+        assert!(pruned_ids.contains(&"resolve_group2_shell"), "taken mini branch must remain");
+
+        println!("=== 3. STEP OUTCOMES & ANNOTATIONS ON beta8-merge ===");
+        let now_ms = beta8_run.summary.updated_ms;
+        for (idx, step) in beta8_run.steps.iter().enumerate() {
+            let eff = effective_outcome(step);
+            let ann = format_step_structure_annotation(&beta8_run, idx, now_ms);
+            println!("  step[{idx}] {} -> outcome={eff:?} | {ann}", step.node_id);
+        }
+        let cargo_step = beta8_run.steps.iter().find(|s| s.node_id == "cargo_check").expect("cargo_check step");
+        assert_eq!(effective_outcome(cargo_step), Outcome::Failed, "cargo_check exit 101 must be Outcome::Failed");
+        let g2_step = beta8_run.steps.iter().find(|s| s.node_id == "resolve_group2_shell").expect("resolve_group2_shell step");
+        let g2_files = digest_step_files(&beta8_run, g2_step, &[]);
+        println!("  resolve_group2_shell files: expected={}, touched={}, out_of_scope={:?}", g2_files.expected_files.len(), g2_files.touched_files.len(), g2_files.out_of_scope_files);
+
+        println!("=== 4. STATUS REPORT ON beta8-merge ===");
+        println!("{}", format_run_status_report(&beta8_run, None, now_ms));
+
+        println!("=== 5. WAITING GATE BANNER ON beta8-merge ===");
+        let theme = Theme::default();
+        let banner = build_waiting_gate_banner(
+            &beta8_run,
+            "final_review_gate",
+            Some("cargo_check failed with exit 101; choose accept or repair"),
+            2,
+            120,
+            &theme,
+        );
+        for line in &banner {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            println!("  BANNER: {text}");
+        }
+
+        println!("=== 6. MONITOR RUN BUDGETS & INCLUDED WORKFLOWS ===");
+        println!("  monitor root step budget: {:?}", run_step_budget(&monitor_run));
+        for inc in summarize_included_workflows(&monitor_run) {
+            println!("  monitor include: {}", inc.summary_line());
+        }
+    }
 }

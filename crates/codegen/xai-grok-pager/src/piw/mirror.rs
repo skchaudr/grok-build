@@ -1099,8 +1099,12 @@ fn mirror_worker(
                     text_of: &text_of,
                 };
                 let connected_now = if connected { Some(now_ms) } else { None };
-                let _ = write_run_at(&root, &input, connected_now);
-                if view.is_some() {
+                let wrote_dir = write_run_at(&root, &input, connected_now).ok();
+                if view.is_some()
+                    && wrote_dir
+                        .as_ref()
+                        .is_some_and(|d| d.join("flow.json").is_file())
+                {
                     ever_full.insert(id.clone());
                 }
                 if needs_stall || (connected && is_running) {
@@ -1127,9 +1131,10 @@ fn resolve_client_text(
     artifact_path: Option<&str>,
 ) -> Option<String> {
     if is_artifact_ref(val) {
-        if let Content::Ready(s) = client.content(run_id, val) {
-            return Some(s);
-        }
+        return match client.content(run_id, val) {
+            Content::Ready(s) => Some(s),
+            _ => None,
+        };
     }
     if let Some(path) = artifact_path {
         if let Ok(text) = fs::read_to_string(path) {
@@ -1319,6 +1324,9 @@ fn resolve_workflow_snapshot(
                         return Some(full);
                     }
                 }
+            }
+            if is_artifact_ref(content) {
+                return None;
             }
         }
         if parsed_ok {
