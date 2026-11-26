@@ -15,7 +15,7 @@ import {
 } from "@osolmaz/pi-workflows";
 
 // Bounded Sonnet repair loop for the gathered beta8 merge tree.
-// check fails -> guard -> repair (at most maxRepairs times) -> check ...; then you decide at the gate.
+// cargo_check fails -> repair_limit -> sonnet_repair (at most maxRepairs times) -> cargo_check ...; then your_review.
 const WORKTREE = "/Volumes/Mini-SSD/offload/repos/grok-build/.worktrees/beta8-rest";
 
 type Settings = { maxRepairs: number };
@@ -48,12 +48,12 @@ export default defineWorkflow({
   name: "beta8-repair",
   title: "Repair beta8-rest until cargo check passes",
   settings,
-  startAt: "disk",
+  startAt: "check_disk_space",
   maxSteps: 40,
   nodes: {
     // Stops the run (no failure route) instead of handing a full disk to Sonnet.
-    disk: shell({
-      effect: idempotentEffect("beta8-repair.disk"),
+    check_disk_space: shell({
+      effect: idempotentEffect("beta8-repair.check_disk_space"),
       timeoutMs: 30_000,
       exec: () => ({
         command: "bash",
@@ -68,8 +68,8 @@ export default defineWorkflow({
     }),
 
     // Non-zero exit fails the node, so the card shows the failure; diagnostics go to stderr -> result.error.
-    check: shell({
-      effect: idempotentEffect("beta8-repair.check"),
+    cargo_check: shell({
+      effect: idempotentEffect("beta8-repair.cargo_check"),
       timeoutMs: 5_400_000,
       exec: () => ({
         command: "nice",
@@ -78,26 +78,26 @@ export default defineWorkflow({
       }),
     }),
 
-    guard: settingsRoute({
+    repair_limit: settingsRoute({
       run: ({ state, settings }) => {
-        const used = state.steps.filter((s) => s.nodeId === "repair").length;
-        return { route: used < (settings as Settings).maxRepairs ? "retry" : "max", used };
+        const used = state.steps.filter((s) => s.nodeId === "sonnet_repair").length;
+        return { route: used < (settings as Settings).maxRepairs ? "under_limit" : "limit_reached", used };
       },
     }),
 
-    repair: agent({
+    sonnet_repair: agent({
       agent: "claude",
       model: "sonnet",
       timeoutMs: 3_600_000,
       prompt: ({ results, state }) => {
         const earlier = state.steps
-          .filter((s) => s.nodeId === "repair" && s.outcome === "ok")
+          .filter((s) => s.nodeId === "sonnet_repair" && s.outcome === "ok")
           .map((s, i) => `${i + 1}. ${(s.output as RepairOutput).notes}`);
         return [
           `Work strictly inside ${WORKTREE}. It holds the gathered Grok Build + Dwsy v0.1.14-beta.8 merge (all 151 conflicts resolved and staged).`,
           "`cargo check --workspace --bins` fails with:",
           "```",
-          results.check?.error ?? "(no diagnostics captured; run cargo check yourself)",
+          results.cargo_check?.error ?? "(no diagnostics captured; run cargo check yourself)",
           "```",
           ...(earlier.length > 0 ? ["Earlier repair passes in this run:", ...earlier, ""] : []),
           "Fix the compile errors. Keep both sides' intent: our fork's multi-host, traces, acpx, piw, Pi/Claude notification routing and isolated grok-home wiring, plus upstream beta.8's additions (mention catalogs, working messages, timeline, thinking_stream_mode, tool-call density, emphasis).",
@@ -120,12 +120,12 @@ export default defineWorkflow({
       },
     }),
 
-    gate: humanDecision({
+    your_review: humanDecision({
       audience: "operator",
       choices: gateChoices,
       request: ({ results, state }) => {
-        const passed = results.check?.outcome === "ok";
-        const repairs = state.steps.filter((s) => s.nodeId === "repair");
+        const passed = results.cargo_check?.outcome === "ok";
+        const repairs = state.steps.filter((s) => s.nodeId === "sonnet_repair");
         const notes = repairs
           .filter((s) => s.outcome === "ok")
           .map((s, i) => `${i + 1}. ${(s.output as RepairOutput).notes}`)
@@ -134,31 +134,31 @@ export default defineWorkflow({
           title: passed
             ? `cargo check passed after ${repairs.length} repair(s)`
             : `cargo check still failing after ${repairs.length} repair(s)`,
-          subject: { check: results.check, repair: results.repair },
+          subject: { cargo_check: results.cargo_check, sonnet_repair: results.sonnet_repair },
           presentation: {
             schema: "pi-workflows.decision-presentation.v1",
             summary: passed ? "Accept, or stop." : "Another Sonnet repair, or stop.",
             blocks: [
               ...(notes ? [{ kind: "preformatted" as const, text: notes }] : []),
-              { kind: "preformatted" as const, text: results.check?.error ?? "(no errors)" },
+              { kind: "preformatted" as const, text: results.cargo_check?.error ?? "(no errors)" },
             ],
           },
         };
       },
     }),
 
-    completed: compute({ run: ({ results }) => ({ ok: true, worktree: WORKTREE, check: results.check?.outcome }) }),
+    accepted: compute({ run: ({ results }) => ({ ok: true, worktree: WORKTREE, cargo_check: results.cargo_check?.outcome }) }),
     stopped: compute({ run: () => ({ ok: false, worktree: WORKTREE }) }),
   },
   edges: [
-    { from: "disk", to: "check" },
-    { from: "check", switch: { on: "$result.outcome", cases: { ok: "gate", failed: "guard", timed_out: "guard" } } },
-    { from: "guard", switch: { on: "$.route", cases: { retry: "repair", max: "gate" } } },
-    { from: "repair", switch: { on: "$result.outcome", cases: { ok: "disk", failed: "gate", timed_out: "gate" } } },
+    { from: "check_disk_space", to: "cargo_check" },
+    { from: "cargo_check", switch: { on: "$result.outcome", cases: { ok: "your_review", failed: "repair_limit", timed_out: "repair_limit" } } },
+    { from: "repair_limit", switch: { on: "$.route", cases: { under_limit: "sonnet_repair", limit_reached: "your_review" } } },
+    { from: "sonnet_repair", switch: { on: "$result.outcome", cases: { ok: "check_disk_space", failed: "your_review", timed_out: "your_review" } } },
     humanDecisionEdge({
-      from: "gate",
+      from: "your_review",
       choices: gateChoices,
-      cases: { accept: "completed", repair: "repair", stop: "stopped" },
+      cases: { accept: "accepted", repair: "sonnet_repair", stop: "stopped" },
     }),
   ],
 });
