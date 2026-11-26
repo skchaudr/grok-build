@@ -1,0 +1,795 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>piw workbench</title>
+    <style>
+      :root {
+        --bg: #1e1e2e;
+        --node: #313244;
+        --head: #45475a;
+        --text: #cdd6f4;
+        --dim: #7f849c;
+        --accent: #89b4fa;
+        --ok: #a6e3a1;
+        --bad: #f38ba8;
+        --warn: #f9e2af;
+        --mauve: #cba6f7;
+        --agent: #a6e3a1;
+        --compute: #89b4fa;
+        --action: #f9e2af;
+        --check: #cba6f7;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font:
+          13px/1.35 ui-monospace,
+          Menlo,
+          monospace;
+      }
+      .bar {
+        display: flex;
+        gap: 16px;
+        padding: 6px 12px;
+        background: #181825;
+      }
+      .bar .mode {
+        color: var(--accent);
+      }
+      .bar .dim,
+      .dim {
+        color: var(--dim);
+      }
+      #canvas {
+        position: relative;
+        margin: 16px 12px;
+      }
+      svg {
+        position: absolute;
+        inset: 0;
+        overflow: visible;
+        pointer-events: none;
+      }
+      .edge {
+        stroke: #6c7086;
+        fill: none;
+        marker-end: url(#a);
+      }
+      .el {
+        fill: var(--dim);
+        font:
+          11px ui-monospace,
+          Menlo,
+          monospace;
+      }
+      .card {
+        position: absolute;
+        width: 224px;
+        border: 1px solid #585b70;
+        background: var(--node);
+        cursor: pointer;
+      }
+      .card .h {
+        background: var(--head);
+        text-align: center;
+        padding: 2px 4px;
+        border-bottom: 1px solid #585b70;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .card .r {
+        padding: 1px 8px;
+        min-height: 1.35em;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .card.ok {
+        border-color: var(--ok);
+      }
+      .card.bad {
+        border-color: var(--bad);
+      }
+      .card.wait {
+        border-color: var(--warn);
+      }
+      .card.off {
+        opacity: 0.35;
+      }
+      .card.missing {
+        border-color: var(--bad);
+        border-style: dashed;
+      }
+      .card.sel {
+        outline: 2px solid var(--mauve);
+        outline-offset: 1px;
+      }
+      .card.picked .h {
+        background: #5b4a7a;
+      }
+      .note {
+        position: absolute;
+        width: 224px;
+        height: 64px;
+        resize: none;
+        font:
+          12px/1.35 ui-monospace,
+          Menlo,
+          monospace;
+        color: var(--text);
+        background: transparent;
+        border: 1px dashed #45475a;
+        padding: 4px 6px;
+      }
+      .note:focus {
+        outline: none;
+        border-color: var(--mauve);
+        background: #181825;
+      }
+      .note::placeholder {
+        color: #585b70;
+      }
+      .phase-note {
+        width: 300px;
+      }
+      .phase {
+        position: absolute;
+        color: var(--mauve);
+      }
+      .band {
+        stroke: #313244;
+        stroke-dasharray: 4 4;
+        fill: none;
+      }
+      .end {
+        position: absolute;
+        color: var(--dim);
+      }
+      .t-agent {
+        color: var(--agent);
+      }
+      .t-compute {
+        color: var(--compute);
+      }
+      .t-action {
+        color: var(--action);
+      }
+      .t-check {
+        color: var(--check);
+      }
+      .ok-c {
+        color: var(--ok);
+      }
+      .bad-c {
+        color: var(--bad);
+      }
+      .warn-c {
+        color: var(--warn);
+      }
+      .keys {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        padding: 5px 12px;
+        background: #181825;
+      }
+      .keys b {
+        color: var(--accent);
+        font-weight: normal;
+      }
+      .pop {
+        position: fixed;
+        top: 60px;
+        right: 20px;
+        width: 300px;
+        background: #181825;
+        border: 1px solid var(--mauve);
+        padding: 10px;
+        display: none;
+      }
+      .pop.on {
+        display: block;
+      }
+      .pop input {
+        width: 70px;
+        font: inherit;
+        background: var(--node);
+        color: var(--text);
+        border: 1px solid #585b70;
+        padding: 2px 4px;
+      }
+      .pop .row {
+        margin: 6px 0;
+      }
+      pre#out {
+        position: fixed;
+        inset: 40px 40px 40px 40px;
+        margin: 0;
+        padding: 12px;
+        background: #11111b;
+        border: 1px solid var(--accent);
+        overflow: auto;
+        display: none;
+      }
+      pre#out.on {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      <span id="title"></span><span class="mode" id="mode"></span
+      ><span class="dim" id="meta"></span><span class="dim" id="save"></span>
+    </div>
+    <div id="canvas"></div>
+    <div class="pop" id="pop"></div>
+    <pre id="out"></pre>
+    <div class="keys" id="keys"></div>
+
+    <!-- Comments typed into the page. serve.mjs rewrites this block; keys are graph title, then step or phase id. -->
+    <script type="application/json" id="notes">
+{
+  "beta8-repair": {
+    "check_disk_space": "Looks good"
+  }
+}
+</script>
+
+    <script>
+      // beta8 run 8814563d: elapsed from state.sqlite node_attempts; limits from beta8-merge.workflow.ts.
+      const T = {
+        agent: ["●", "agent"],
+        compute: ["ƒ", "compute"],
+        shell: ["$", "action"],
+        gate: ["◆", "check"],
+      };
+      const BETA8 = {
+        title: "beta8-merge",
+        meta: "8814563d · cancelled · 8 of 30 steps",
+        phases: [
+          { id: "route", label: "Route", y0: 0, y1: 0 },
+          { id: "resolve", label: "Resolve conflicts", y0: 1, y1: 3 },
+          { id: "gather", label: "Gather", y0: 4, y1: 5 },
+          { id: "verify", label: "Verify and repair", y0: 6, y1: 8 },
+        ],
+        nodes: {
+          route_host: {
+            t: "compute",
+            x: 1,
+            y: 0,
+            s: "ok",
+            el: "0s",
+            d: "picks the Air or Mini path",
+          },
+          resolve_group1_air: {
+            t: "agent",
+            x: 0,
+            y: 1,
+            s: "off",
+            lim: "60m",
+            d: "Air: login, config, MCP",
+            note: "not this host",
+          },
+          resolve_group2_shell: {
+            t: "agent",
+            x: 2,
+            y: 1,
+            s: "ok",
+            el: "16.2m",
+            lim: "60m",
+            d: "Mini: shell crates",
+          },
+          resolve_group3_pager: {
+            t: "agent",
+            x: 2,
+            y: 2,
+            s: "ok",
+            el: "49.3m",
+            lim: "60m",
+            d: "Mini: pager conflicts",
+          },
+          resolve_group4_acp_session: {
+            t: "agent",
+            x: 2,
+            y: 3,
+            s: "ok",
+            el: "4.9m",
+            lim: "60m",
+            d: "Mini: ACP session files",
+          },
+          wait_for_air_gate: {
+            t: "gate",
+            x: 1,
+            y: 4,
+            s: "ok",
+            el: "20.5m",
+            d: "you confirm Air is done",
+          },
+          gather_resolved_files: {
+            t: "shell",
+            x: 1,
+            y: 5,
+            s: "ok",
+            el: "0.7s",
+            lim: "5m",
+            d: "copies groups, stages 151",
+          },
+          cargo_check: {
+            t: "shell",
+            x: 1,
+            y: 6,
+            s: "bad",
+            el: "0.1s",
+            lim: "90m",
+            d: "compiles the merged tree",
+            note: "exit 101 shown as ✓",
+          },
+          final_review_gate: {
+            t: "gate",
+            x: 1,
+            y: 7,
+            s: "bad",
+            el: "36.2m",
+            d: "you accept or repair",
+            note: "cancelled by typed text",
+          },
+          repair_compile: {
+            t: "agent",
+            x: 2,
+            y: 8,
+            s: "off",
+            lim: "60m",
+            d: "Sonnet fixes the errors",
+            note: "no attempt limit",
+          },
+          done: { t: "compute", x: 0, y: 8, s: "off", d: "finish" },
+        },
+        edges: [
+          ["route_host", "resolve_group1_air"],
+          ["route_host", "resolve_group2_shell"],
+          ["resolve_group2_shell", "resolve_group3_pager"],
+          ["resolve_group3_pager", "resolve_group4_acp_session"],
+          ["resolve_group4_acp_session", "wait_for_air_gate"],
+          ["resolve_group1_air", "wait_for_air_gate"],
+          ["wait_for_air_gate", "gather_resolved_files"],
+          ["gather_resolved_files", "cargo_check"],
+          ["cargo_check", "final_review_gate"],
+          ["final_review_gate", "done", "done"],
+          ["final_review_gate", "repair_compile", "repair"],
+          ["repair_compile", "cargo_check", "↺"],
+        ],
+      };
+      const draftFrom = () => ({
+        title: "beta8-repair",
+        maxSteps: 60,
+        phases: [
+          { id: "preflight", label: "Preflight", y0: 0, y1: 0 },
+          { id: "check", label: "Check", y0: 1, y1: 1 },
+          { id: "plan", label: "Scout, plan, your approval", y0: 2, y1: 4 },
+          { id: "repair", label: "Repair", y0: 5, y1: 5 },
+          { id: "review", label: "Review", y0: 6, y1: 6 },
+        ],
+        nodes: {
+          check_disk_space: { t: "shell", x: 1, y: 0, lim: 0.5, cmd: "df /Volumes/Mini-SSD", d: "stops if < 15 GB free" },
+          cargo_check: { t: "shell", x: 1, y: 1, lim: 90, cmd: "cargo check --workspace --bins", d: "compiles beta8-rest" },
+          repair_limit: { t: "compute", x: 2, y: 2, max: 3, d: "counts repairs" },
+          scout_and_plan: { t: "agent", x: 0, y: 3, lim: 20, agent: "claude", model: "sonnet", d: "read-only: Read Grep Glob" },
+          approve_plan: { t: "gate", x: 0, y: 4, choices: ["approve", "revise", "stop"], d: "you approve the plan" },
+          sonnet_repair: { t: "agent", x: 0, y: 5, lim: 60, agent: "claude", model: "sonnet", d: "+ Edit Write Bash" },
+          your_review: { t: "gate", x: 2, y: 6, choices: ["accept", "repair", "stop"], d: "you decide" },
+        },
+        edges: [
+          ["check_disk_space", "cargo_check", ""],
+          ["cargo_check", "your_review", "ok"],
+          ["cargo_check", "repair_limit", "failed"],
+          ["repair_limit", "scout_and_plan", "under limit"],
+          ["repair_limit", "your_review", "limit reached"],
+          ["scout_and_plan", "approve_plan", ""],
+          ["approve_plan", "scout_and_plan", "revise"],
+          ["approve_plan", "sonnet_repair", "approve"],
+          ["sonnet_repair", "check_disk_space", "↺"],
+        ],
+        ends: [
+          ["your_review", "accepted", 1],
+          ["your_review", "stopped", 2],
+        ],
+      });
+
+      const S = { mode: "replay", sel: "cargo_check", picked: new Set(), draft: null, live: null };
+      const graph = () => (S.mode === "replay" ? BETA8 : S.draft);
+      const $ = (id) => document.getElementById(id);
+      const GXV = 260;
+      const W = 224,
+        H = 86,
+        PX = 3 * GXV + 80, // phase comment column, right of the loop gutter
+        GX = GXV,
+        GY = 168,
+        NH = 68; // open comment area under each card
+      // Comments live in this file (the notes block above), saved through serve.mjs. Opened as a
+      // file there is nothing to save them, so the boxes are read-only.
+      const NOTES = JSON.parse($("notes").textContent);
+      const SERVED = location.protocol !== "file:";
+      const noteOf = (id) => NOTES[graph().title]?.[id] || "";
+      const saved = { timer: null, dirty: false };
+      const showSave = (text, cls = "dim") => {
+        $("save").textContent = text;
+        $("save").className = cls;
+      };
+      async function saveNotes(commit) {
+        clearTimeout(saved.timer);
+        if (commit && !saved.dirty) return;
+        if (commit) saved.dirty = false;
+        try {
+          const res = await fetch("/notes", {
+            method: "PUT",
+            keepalive: true,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ notes: NOTES, commit }),
+          });
+          const r = await res.json();
+          if (!r.saved) throw new Error(r.error);
+          if (!commit) showSave("comments saved");
+          else if (r.pushed) showSave(`comments committed ${r.sha}`);
+          else showSave(`committed ${r.sha}, push failed: ${r.error}`, "warn-c");
+        } catch (error) {
+          if (commit) saved.dirty = true;
+          const why = error instanceof TypeError ? "serve.mjs is not running" : error.message;
+          showSave(`comments NOT saved: ${why}`, "bad-c");
+        }
+      }
+
+      function rows(id, n) {
+        const [badge, cls] = T[n.t];
+        const b = `<span class="t-${cls}">${badge}</span>`;
+        const dash = '<span class="bad-c">—</span>';
+        const card = (top, extra = "", extraCls = "dim") =>
+          `<div class="r">${b} ${top}</div><div class="r">${n.d}</div><div class="r ${extraCls}">${extra}</div>`;
+        if (S.mode === "replay") {
+          const st = { ok: "✓", bad: "✗", off: "·" }[n.s];
+          const time = n.el
+            ? "◷ " + n.el + (n.lim ? " / " + n.lim : "")
+            : n.lim
+              ? "◷ — / " + n.lim
+              : "";
+          return card(`${st}  ${time}`, n.note || "", n.s === "bad" ? "warn-c" : "dim");
+        }
+        if (S.mode === "draft") {
+          if (n.t === "compute") return card(`↻ ${n.max ? "≤ " + n.max : dash} repairs`);
+          if (n.t === "gate") return card(n.choices.join(" · "));
+          return card(`◷ ${n.lim ? n.lim + "m" : dash}`, n.cmd || n.agent + "/" + n.model);
+        }
+        const L = S.live;
+        if (n.t === "compute") return card(`↻ ${L.repairs} / ${L.max} repairs`);
+        if (n.t === "gate" && id !== "your_review") return card(`✓ approved ↻ ${L.repairs}`);
+        if (n.t === "gate")
+          return card(
+            "◐ waiting",
+            '<b class="warn-c">1</b> accept <b class="warn-c">2</b> repair <b class="warn-c">3</b> stop',
+            "",
+          );
+        if (id === "cargo_check")
+          return card(`✗ ↻ ${L.repairs + 1}  ◷ 0.1s / ${n.lim}m`, "exit 101", "warn-c");
+        if (n.t === "shell") return card(`✓ ↻ ${L.repairs + 1}  ◷ 1s / ${n.lim}m`, n.cmd);
+        return card(`✓ ↻ ${L.repairs}  ◷ 4m / ${n.lim}m`, n.agent + "/" + n.model);
+      }
+
+      function missing(id, n) {
+        return (
+          S.mode === "draft" &&
+          ((n.t === "compute" && !n.max) || (n.t !== "compute" && n.t !== "gate" && !n.lim))
+        );
+      }
+      function cardClass(id, n) {
+        const c = ["card"];
+        if (S.mode === "replay") c.push(n.s);
+        else if (S.mode === "live") c.push(id === "your_review" ? "wait" : id === "cargo_check" ? "bad" : "ok");
+        if (missing(id, n)) c.push("missing");
+        if (S.sel === id) c.push("sel");
+        if (S.picked.has(id)) c.push("picked");
+        return c.join(" ");
+      }
+
+      function render() {
+        const g = graph();
+        $("title").textContent = g.title;
+        $("mode").textContent = `(${S.mode})`;
+        $("meta").innerHTML =
+          S.mode === "replay"
+            ? g.meta
+            : S.mode === "draft"
+              ? `maxSteps ${g.maxSteps ?? '<span class="bad-c">—</span>'}`
+              : `steps ${S.live.steps} / ${g.maxSteps}`;
+        const pos = (id) => {
+          const n = g.nodes[id];
+          return [n.x * GX, n.y * GY];
+        };
+        let svg = `<svg><defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0L10,5L0,10z" fill="#6c7086"/></marker></defs>`;
+        for (const [a, b, label] of g.edges) {
+          const [ax, ay] = pos(a),
+            [bx, by] = pos(b);
+          let d, lx, ly;
+          if (by <= ay) {
+            // loop back: right-hand gutter
+            const gx = Math.max(ax, bx) + W + 24;
+            d = `M${ax + W},${ay + H / 2} L${gx},${ay + H / 2} L${gx},${by + H / 2} L${bx + W + 2},${by + H / 2}`;
+            lx = gx + 4;
+            ly = (ay + by) / 2 + H / 2;
+          } else {
+            d = `M${ax + W / 2},${ay + H + NH} L${bx + W / 2},${by - 2}`;
+            // label near the source end so labels of crossing edges don't stack at the midpoint
+            const t = ax === bx && by - ay > GY ? 0.25 : 0.5;
+            lx = ax + (bx - ax) * t + W / 2 + 4;
+            ly = ay + H + NH + (by - ay - H - NH) * t;
+          }
+          svg += `<path class="edge" d="${d}"/>${label ? `<text class="el" x="${lx}" y="${ly}">${label}</text>` : ""}`;
+        }
+        let html = "";
+        for (const [id, n] of Object.entries(g.nodes)) {
+          const [x, y] = pos(id);
+          html += `<div class="${cardClass(id, n)}" data-id="${id}" style="left:${x}px;top:${y}px"><div class="h">${id}</div>${rows(id, n)}</div>`;
+          html += `<textarea class="note" data-note="${id}" style="left:${x}px;top:${y + H + 2}px" placeholder="c  comment"${SERVED ? "" : " readonly"}>${noteOf(id).replace(/</g, "&lt;")}</textarea>`;
+        }
+        for (const [from, label, col] of g.ends || []) {
+          const [, y] = pos(from);
+          html += `<div class="end" style="left:${col * GX + W / 2 - 40}px;top:${y + GY + 4}px">■ ${label}</div>`;
+          svg += `<path class="edge" d="M${pos(from)[0] + W / 2},${y + H + NH} L${col * GX + W / 2},${y + GY}"/>`;
+        }
+        for (const p of g.phases || []) {
+          const top = p.y0 * GY - 14;
+          if (p.y0 > 0) svg += `<path class="band" d="M-8,${top - 8} L${PX + 300},${top - 8}"/>`;
+          const h = (p.y1 - p.y0 + 1) * GY - 40;
+          html += `<div class="phase" style="left:${PX}px;top:${top}px">${p.label}</div>`;
+          html += `<textarea class="note phase-note" data-note="phase:${p.id}" style="left:${PX}px;top:${top + 20}px;height:${h}px" placeholder="comment on ${p.label.toLowerCase()}"${SERVED ? "" : " readonly"}>${noteOf("phase:" + p.id).replace(/</g, "&lt;")}</textarea>`;
+        }
+        const maxY = Math.max(...Object.values(g.nodes).map((n) => n.y)) + 2;
+        $("canvas").style.height = maxY * GY + "px";
+        $("canvas").innerHTML = svg + "</svg>" + html;
+        document.querySelectorAll(".card").forEach(
+          (el) =>
+            (el.onclick = () => {
+              S.sel = el.dataset.id;
+              render();
+              if (S.mode === "draft") edit();
+            }),
+        );
+        document.querySelectorAll(".note").forEach((el) => {
+          el.oninput = () => {
+            (NOTES[graph().title] ??= {})[el.dataset.note] = el.value;
+            saved.dirty = true;
+            clearTimeout(saved.timer);
+            saved.timer = setTimeout(() => saveNotes(false), 400);
+          };
+          el.onblur = () => saveNotes(true);
+          el.onfocus = () => {
+            if (el.dataset.note.startsWith("phase:")) return;
+            S.sel = el.dataset.note;
+            document
+              .querySelectorAll(".card")
+              .forEach((c) => c.classList.toggle("sel", c.dataset.id === S.sel));
+          };
+        });
+        $("keys").innerHTML = keys();
+      }
+
+      function keys() {
+        const k = (key, label) => `<b>${key}</b> ${label}`;
+        if (S.mode === "replay")
+          return [
+            k("←↑↓→", "move"),
+            k("c", "comment"),
+            k("space", "pick"),
+            k("w", `make reusable${S.picked.size ? " (" + S.picked.size + ")" : ""}`),
+            k("2", "draft"),
+          ].join("   ");
+        if (S.mode === "draft") {
+          const miss = draftMissing();
+          return [
+            k("enter", "edit"),
+            k("c", "comment"),
+            k("m", "maxSteps"),
+            miss.length
+              ? `<span class="bad-c">missing: ${miss.join(", ")}</span>`
+              : k("s", "save .workflow.ts"),
+            k("1", "replay"),
+            k("3", "live"),
+          ].join("   ");
+        }
+        return [
+          k("1 2 3", "answer gate"),
+          k("c", "comment"),
+          k("+", "raise ↻"),
+          k("p", "pause"),
+          k("x", "cancel"),
+          `<span class="dim">${S.live.log.at(-1) || ""}</span>`,
+        ].join("   ");
+      }
+
+      function draftMissing() {
+        const d = S.draft,
+          m = [];
+        for (const [id, n] of Object.entries(d.nodes))
+          if (missing(id, n)) m.push(n.t === "compute" ? id + " ↻" : id + " ◷");
+        if (!d.maxSteps) m.push("maxSteps");
+        return m;
+      }
+
+      // --- draft editing: one small popup, only that node's limit fields
+      function edit() {
+        const n = S.draft.nodes[S.sel],
+          f = [];
+        if (S.draft.nodes[S.sel].t === "compute") f.push(["max", "↻ repairs"]);
+        if (n.lim !== undefined) f.push(["lim", "◷ minutes"]);
+        if (!f.length) return;
+        $("pop").innerHTML =
+          `<div>${S.sel}</div>` +
+          f
+            .map(
+              ([k, l]) => `<div class="row">${l} <input data-k="${k}" value="${n[k] ?? ""}"></div>`,
+            )
+            .join("") +
+          `<div class="dim">enter save · esc close</div>`;
+        $("pop").classList.add("on");
+        $("pop").querySelector("input").focus();
+      }
+      function closePop(save) {
+        if (save)
+          $("pop")
+            .querySelectorAll("input")
+            .forEach((i) => {
+              const v = +i.value;
+              const tgt = i.dataset.k === "maxSteps" ? S.draft : S.draft.nodes[S.sel];
+              tgt[i.dataset.k] = v > 0 ? v : null;
+            });
+        $("pop").classList.remove("on");
+        render();
+      }
+      function editMaxSteps() {
+        $("pop").innerHTML =
+          `<div>workflow</div><div class="row">maxSteps <input data-k="maxSteps" value="${S.draft.maxSteps ?? ""}"></div><div class="dim">fixed for the whole run</div>`;
+        $("pop").classList.add("on");
+        $("pop").querySelector("input").focus();
+      }
+
+      // --- generated file
+      // Shows the workflow file beside this doc (beta8-repair.workflow.ts), not a generated one.
+      const generate = async () =>
+        SERVED
+          ? (await fetch("/source")).text()
+          : "Opened as a file: start serve.mjs to read beta8-repair.workflow.ts from here.";
+
+      // --- keyboard
+      const move = (dx, dy) => {
+        const g = graph(),
+          cur = g.nodes[S.sel];
+        let best = null,
+          bd = 1e9;
+        for (const [id, n] of Object.entries(g.nodes)) {
+          const ddx = n.x - cur.x,
+            ddy = n.y - cur.y;
+          if (id === S.sel || (dx && Math.sign(ddx) !== dx) || (dy && Math.sign(ddy) !== dy))
+            continue;
+          const dist = Math.abs(ddx) + Math.abs(ddy) * 1.1;
+          if (dist < bd) {
+            bd = dist;
+            best = id;
+          }
+        }
+        if (best) {
+          S.sel = best;
+          render();
+        }
+      };
+      const setMode = (m) => {
+        if (m !== "replay" && !S.draft) return;
+        if (m === "live" && draftMissing().length) return;
+        if (m === "live" && !S.live)
+          S.live = { repairs: 1, max: S.draft.nodes.repair_limit.max, steps: 5, log: [] };
+        S.mode = m;
+        S.sel = Object.keys(graph().nodes).includes(S.sel)
+          ? S.sel
+          : m === "live"
+            ? "your_review"
+            : "cargo_check";
+        render();
+      };
+      document.addEventListener("keydown", (e) => {
+        if (e.target.classList?.contains("note")) {
+          if (e.key === "Escape") e.target.blur();
+          return;
+        }
+        if (e.key === "c" && !$("pop").classList.contains("on")) {
+          e.preventDefault();
+          document.querySelector(`.note[data-note="${S.sel}"]`)?.focus();
+          return;
+        }
+        if ($("pop").classList.contains("on")) {
+          if (e.key === "Enter") closePop(true);
+          if (e.key === "Escape") closePop(false);
+          return;
+        }
+        if ($("out").classList.contains("on")) {
+          if (e.key === "Escape") $("out").classList.remove("on");
+          return;
+        }
+        const k = e.key;
+        if (k === "ArrowLeft" || k === "h") move(-1, 0);
+        else if (k === "ArrowRight" || k === "l") move(1, 0);
+        else if (k === "ArrowUp" || k === "k") move(0, -1);
+        else if (k === "ArrowDown" || k === "j") move(0, 1);
+        else if (S.mode === "replay" && k === " ") {
+          e.preventDefault();
+          S.picked.has(S.sel) ? S.picked.delete(S.sel) : S.picked.add(S.sel);
+          render();
+        } else if (S.mode === "replay" && k === "w" && S.picked.size) {
+          S.draft = draftFrom();
+          S.picked.clear();
+          setMode("draft");
+        } else if (k === "1") S.mode === "live" ? answer(1) : setMode("replay");
+        else if (k === "2") S.mode === "live" ? answer(2) : setMode("draft");
+        else if (k === "3") S.mode === "live" ? answer(3) : setMode("live");
+        else if (S.mode === "draft" && k === "Enter") edit();
+        else if (S.mode === "draft" && k === "m") editMaxSteps();
+        else if (S.mode === "draft" && k === "s" && !draftMissing().length) {
+          generate().then((text) => {
+            $("out").textContent = text;
+            $("out").classList.add("on");
+          });
+        } else if (S.mode === "live" && k === "+") {
+          S.live.max++;
+          S.live.log.push(`↻ limit → ${S.live.max} (next attempt)`);
+          render();
+        } else if (S.mode === "live" && k === "p") {
+          S.live.log.push("pause sent");
+          render();
+        } else if (S.mode === "live" && k === "x") {
+          S.live.log.push("cancel sent");
+          render();
+        }
+      });
+      function answer(i) {
+        const L = S.live,
+          c = ["accept", "repair", "stop"][i - 1];
+        if (c === "repair" && L.repairs >= L.max)
+          L.log.push(`↻ ${L.repairs}/${L.max} used: press + first`);
+        else {
+          L.log.push(`answered: ${c}`);
+          if (c === "repair") L.repairs++;
+        }
+        render();
+      }
+
+      window.workbench = {
+        state: () =>
+          JSON.parse(
+            JSON.stringify({
+              mode: S.mode,
+              sel: S.sel,
+              draft: S.draft,
+              live: S.live,
+              missing: S.draft ? draftMissing() : null,
+              notes: Object.fromEntries(
+                [
+                  ...Object.keys(graph().nodes),
+                  ...(graph().phases || []).map((p) => "phase:" + p.id),
+                ]
+                  .map((id) => [id, noteOf(id)])
+                  .filter(([, v]) => v),
+              ),
+            }),
+          ),
+        generate,
+      };
+      S.draft = draftFrom();
+      setMode("draft");
+      if (!SERVED) showSave("comments are read-only: opened as a file, not through serve.mjs", "warn-c");
+      addEventListener("pagehide", () => saveNotes(true));
+    </script>
+  </body>
+</html>
