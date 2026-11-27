@@ -17,6 +17,7 @@ MODAL = "crates/codegen/xai-grok-pager/src/views/acpx_modal"
 ACPX = "crates/codegen/xai-grok-pager/src/acpx"
 APP_MODAL = f"{MODAL}.rs"
 CHAT = "crates/codegen/xai-grok-pager-bin/src/bin/grok-acpx-acp/agent.rs"
+CHAT_DRIVER = "crates/codegen/xai-grok-pager-bin/src/bin/grok-acpx-acp/driver.rs"
 GATE = "crates/codegen/xai-grok-pager/src/piw/gate.rs"
 ARTIFACTS = "task-scripts/acpx-disclosure-returns"
 
@@ -179,8 +180,9 @@ the attached excerpts, and update the attached probe test's rail assertions
 cached bundle read; show unknown when extras are missing, never fake 0. Do not
 add I/O to render or widen the cache/read limit. Keep existing styles. For a
 concrete Flows selection, y copies the canonical '/open <run_id>' command;
-leave Sessions y untouched. The coordinator must verify mirrored /open works
-before shipping this copy behavior.
+leave Sessions y untouched. The modal's copy notice is fixed separately by the
+coordinator; the coordinator must also verify mirrored /open works before
+shipping this copy behavior.
 
 Tests: three finished runs of one name plus a same-name pending run; folded
 and expanded navigation with Space; newest tie by run_id; matching and
@@ -244,6 +246,56 @@ first view, and agent without evidence doesn't invent it; a pending gate still
 presents the question and choices; full evidence affordances remain accurate.
 Adapt tests that explicitly asserted the old detail order; keep unrelated
 formatter and navigation expectations intact.
+""",
+    ),
+    task(
+        "bare-command-picker",
+        source(CHAT, (1, 120), (1124, 1256), (1370, 1388), (1820, 2018),
+               (2099, 2247), (2288, 2345), (2370, 2410), (2463, 2528), (2529, 2640))
+        + source(CHAT_DRIVER, (394, 530), (1499, 1527), (2168, 2219)),
+        rf"""
+Ownership: {CHAT} and {CHAT_DRIVER}, including their tests. Edit nothing else.
+
+Goal: in Grok ACPX chat a bare /open or bare /flow shows a pick list instead
+of the help text. Today parse_command returns Command::Help for both; the
+attached parse_command_unknown_slash_and_acpx_help test asserts that and must
+change for these two commands only.
+
+Bare /open: show one question through the existing x.ai/ask_user_question
+machinery (ask_question_raw, shaped like ask_gate_question, noFreeform true)
+listing the 20 most recent runs from driver::list_runs on runs_dir(), newest
+first. Option id and label are the run ID. The description carries what the
+operator needs to choose: flow name, title when it differs from the flow name,
+status, and start time formatted with the existing helper. Choosing a run does
+exactly what `/open <run_id>` does now; move the current Open arm into one
+helper that both paths call, keeping its "Already shown above." and
+not-found replies. Dismissing the question, an unknown choice, or a cancelled
+session opens nothing and sends one short line. No runs: reply
+"No acpx runs found." without a question. Opening stays inspection only.
+
+Bare /flow: list the configured default_flow() first when it exists, then the
+distinct flowPath values from the manifests of the 20 most recent runs, newest
+use first, each with the flow name, last status and last start time of its
+most recent run. Add one driver function for that read next to list_runs,
+reusing read_json_file, json_str and parse_ts; skip manifests without a
+flowPath. Choosing a flow starts nothing yet: ask a second question for the
+task text (free-form allowed, same machinery). A nonempty task then starts
+exactly what `/flow <path> <task>` starts today through the existing Flow arm
+logic, including the .workflow.ts route; an empty or dismissed answer starts
+nothing and says so. No candidates: reply with the help text as today.
+
+Keep `/open <id>`, `/flow <file> ...`, /runs, /answer (bare /answer still
+Help) and plain-text handling unchanged. Update available_commands and
+help_markdown so both commands say the argument is optional. Keep the
+question's toolCallId distinct from gate tool call IDs.
+
+Tests: parse_command returns the new bare variants for "/open" and "/flow"
+(and still Help for "/runs extra" and bare "/answer"); build the option lists
+through pure functions you add and test them: newest-first order, run ID as id
+and label, description content, title omitted when equal to the flow name,
+duplicate flowPath collapsed to its newest run, default flow first and not
+repeated, manifests without flowPath skipped (driver test with temp dirs like
+the attached test_list_runs_order_and_title_fallback), and the empty cases.
 """,
     ),
     task(
@@ -316,8 +368,11 @@ reveal choices and must never submit, cancel or start a run. No speculative
 cause for the earlier cancellation report. Indicate how to recover after an
 uncertain submission by reconciling server state before any resend.
 
-Specify a fresh parked fixture with at least one meaningful next step and an
-observable alternate branch. Give a walkthrough that inspects one run on all
+Specify a fresh parked fixture whose gate guards something the operator
+would want to stop for: a build or test step attached to the next branch, or a
+result worth checking before going on. A gate that guards neither is not worth
+a fixture. Give it at least one meaningful next step and an observable
+alternate branch. Give a walkthrough that inspects one run on all
 three surfaces, compares state before and after inspection and bare /answer,
 submits exactly one allowed answer through an authorized surface, and checks
 that all three show the engine's branch and next step without reopening if
