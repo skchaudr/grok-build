@@ -1,73 +1,78 @@
-# Handoff 004 — ACPX & Pi-Workflows TUI Progressive Disclosure + Live Beta8 Repair
+# Handoff 004 — Operating Pi workflows through ACPX: fixes, progressive disclosure, beta8 repair
 
-Date: 2026-11-26
-Repos:
-- `/Volumes/Mini-SSD/offload/repos/grok-build` (`main` @ `7d5b381c`)
-- `/Volumes/Mini-SSD/offload/repos/grok-build/.worktrees/beta8-rest` (`HEAD` `6a337a00` merging `d5b609c8` `v0.1.14-beta.8`)
-- `/Users/sab-mini/repos/pi-workflows` (`main` @ `9250527`, `~/.cargo/bin/piw` rebuilt and installed)
+2026-11-26. Merges two handoffs written at the same time: one on `main` (`01b73d87`), one on `acpx-tui-slices` in `~/repos/grok-build-acpx-src` (`412ec679`). This is a handoff, not an approved UI spec or a request to implement everything below. Read the goal and the next fixes first.
 
----
+Refs (recheck before implementing):
+- `grok-build` `main`: `7d5b381c` / `bbca9e73` when written. The main worktree has unrelated uncommitted changes and untracked slice output; preserve them.
+- `beta8-rest` worktree: `.worktrees/beta8-rest`, `HEAD` `6a337a00` merging `d5b609c8` (`v0.1.14-beta.8`).
+- `pi-workflows`: `~/repos/pi-workflows` `main` @ `3ba95d8` (one note cited `9250527`, its parent); `~/.cargo/bin/piw` rebuilt and installed. Standalone `piw` builds separately from that repo.
+- `~/repos/grok-build-acpx-src` is a separate, older worktree.
 
-## 1. Where We Are Right Now (Tail-End Summary)
+## Goal
 
-All 7 Antigravity ACP (`gemini-4-neon`, `thought_level=medium`) slices and C1–C3 fixes are integrated, tested, committed on `main`, and installed on both `sab-mini` and `sab-air`:
-- `7d5b381c` (`grok-build`): fixed `mirror.rs` paged `$artifact` workflow resolution so finished runs with large workflow definitions (`monitor` with 255 nodes and 22 mounts) wait for `Content::Ready` before marking `ever_full`, and added `live_beta8_merge_v1_acceptance_check`.
-- Refreshed live mirror bundles in `/Users/sab-mini/.grok/cache/pi-workflows-mirror/` for both `piw-20261124T063602457Z-beta8-merge-8814563d` and `piw-20261124T064326952Z-monitor-cd63bbf0`.
-- Confirmed in the live `/acpx` TUI on `beta8-merge`:
-  - Branch-pruned DAG (`resolve_group1_air -> air_done -> stopped` pruned).
-  - Full-pane graph zoom (`m` / `z`) and detail zoom (`M` / `Z`) with `Esc` restoring split view.
-  - `7 ✗ cargo_check` now renders red `✗` with `115ms/1h30m · exit 101` instead of a false green `✓`.
-  - Stage rows show verdicts, time budgets, file scope checks, and trace event ranges.
+Run robust `pi-workflows` (PIW) with any compatible ACP agent harness, including harnesses other than Pi. ACPX is the bridge to those agents. PIW owns workflow execution and state. The Grok UI lets the human start, follow, inspect, and intervene in the work directly, without asking another agent to interpret the run or act on the operator's behalf.
 
----
+Design direction: **a substantially minimal first screen, with interactive, wizard-style disclosure into a lot of information**. Keep the full evidence available, reveal it at the point of use, and give consequential actions an explicit path of their own. Look at what the system could support; missing wiring in draft one is normal. Distinguish that from real limits such as unrecorded evidence or irreversible external effects.
 
-## 2. Immediate Next Step: 4 Small Progressive-Disclosure Fixes in `/acpx` and `grok acpx`
+## Where things stand
 
-Hands-on inspection of the `/acpx` Ledger screen (`Flows 75`) and Run screen (`runs › beta8-merge`), together with GPT-Sol's design critique, identified 4 targeted fixes to eliminate info-overload without destabilizing the modal:
+- All 7 Antigravity ACP slices (`gemini-4-neon`, `thought_level=medium`) and fixes C1–C3 are integrated and committed on `main` (integration `f52a8905`, whose subject says 6 slices; staged Rust in `task-scripts/acpx-piw-slices_out/`); one note reports them tested and installed on sab-mini and sab-air. The other note: those reported tests did not prove live gate usability, the three-surface operator walkthrough (item 3 below) was not verified, and no release build or upstream sync happened in that session.
+- `7d5b381c`: `mirror.rs` paged `$artifact` workflow resolution now waits for `Content::Ready` before marking `ever_full`, so finished runs with large definitions (`monitor`: 255 nodes, 22 mounts) resolve; adds `live_beta8_merge_v1_acceptance_check`.
+- Live mirror bundles refreshed in `~/.grok/cache/pi-workflows-mirror/` for `piw-20261124T063602457Z-beta8-merge-8814563d` and `piw-20261124T064326952Z-monitor-cd63bbf0`.
+- Confirmed in the live `/acpx` TUI on `beta8-merge`: branch-pruned DAG (`resolve_group1_air -> air_done -> stopped` pruned); graph zoom (`m`/`z`) and detail zoom (`M`/`Z`), `Esc` restores split; `7 ✗ cargo_check` renders red `✗` with `115ms/1h30m · exit 101` instead of a false green `✓`; stage rows show verdicts, time budgets, file-scope checks, trace event ranges.
+- **Seven-slice proof:** `slices acp → acpx exec → agy acp --sandbox` ran seven Gemini 4 Neon medium workers concurrently; the runner accepted all seven returns, no tool calls observed. It used the standalone slice runner, so it proved ACP transport and concurrency, not the full PIW operator loop. Use it as the model for a PIW exercise with parallel workers and a human decision. The single-slice restriction was removed in `pi-workflows` `a792390`.
 
-### Fix 1 — Collapse stage trace events by default in `Mode::Run` (`crates/codegen/xai-grok-pager/src/views/acpx_modal/run.rs`)
-- **Problem seen in screenshot**: When opening `runs › beta8-merge`, stages `4`, `5`, `6`, and `7` start expanded (`▼`), filling the left pane with raw `+0ms node_started`, `+730ms action_completed`, and `+49m19s node_outcome` rows and pushing stages `1..3` off the top of the viewport.
-- **Fix**:
-  - In `RunViewState`, fold completed `StepStage` roots (`▸`) by default when building/initializing the fold tree so the left pane defaults to the clean, ordered executed timeline (`1 ✓ route_host` through `7 ✗ cargo_check`, including repeated loop attempts in execution order).
-  - Pressing `Space` or `Right` on any stage still expands its raw trace events on demand.
-  - Filter `c. Skipped / NotRun flow nodes` against `modal_view::pruned_flow(&self.run)` so untaken branch nodes are not counted as skipped.
+## Start next
 
-### Fix 2 — Adaptive Step Digest & visible Run ID in `DetailPanel` (`crates/codegen/xai-grok-pager/src/views/acpx_modal/detail.rs`)
-- **Problem seen in screenshot**:
-  - Neither the Ledger screen nor `runs › beta8-merge` displays the run ID (`piw-20261124T063602457Z-beta8-merge-8814563d`), while the right pane of `cargo_check` shows a 36-char internal attempt UUID (`ed61e682-b67d-4068-bf97-03a233c59335`) and raw JSON wrapper keys (`durationMs 105`, `exitCode 101`, `ok false`, `outputTail ...`).
-  - For agent steps, `build_step_lines` dumps `Prompt`, `Command`, full `Conversation`, raw `Result`, `stdout`, `stderr`, and `Events` all at once into the right pane of `Mode::Run`, duplicating the `Enter` Step Inspector tabs.
-  - On the Ledger preview (`build_run_lines`), `Stages` iterates unpruned `&run.flow.nodes` (showing dead `○ resolve_group1_air`, `○ air_done`, `○ stopped` rows) and dumps raw `Last result` JSON.
-- **Fix**:
-  - Show the run ID (and short copyable slug) in the `build_run_lines` header and `run.rs` header; replace the raw attempt UUID in `build_step_lines` with human step facts (`attempt N`, `elapsed / timeout`, `exit <code>`).
-  - Make `build_step_lines` adaptive to the step kind and outcome:
-    - **Failed shell/action step (`cargo_check`)**: lead immediately with the error / failure tail (e.g. `error: duplicate key xai-tty-utils in crates/codegen/xai-grok-update/Cargo.toml:38:1`), then the command and cwd; strip redundant JSON wrapper keys (`durationMs`, `exitCode`, `ok`, `outputTail`).
-    - **Waiting gate**: lead with the gate question, numbered choices, and preceding failure tail.
-    - **Agent / compute step**: lead with the step digest (verdict or validator rejections/corrections, file scope summary, and concise output notes), plus a footer hint (`Enter: open Output / Prompt / Stderr / Events tabs · r: replay step in pager`) instead of dumping the entire raw conversation and event log into the overview pane.
-  - In `build_run_lines` (the Ledger preview), show only the executed timeline in order + active/waiting status + concise failure/outcome summary (no unrun `○` nodes and no raw `Last result` JSON dump).
+### Part 1 — Fixes and release checks
 
-### Fix 3 — Fold repeat finished runs & improve readability in Ledger (`crates/codegen/xai-grok-pager/src/views/acpx_modal/ledger.rs`)
-- **Problem seen in screenshot**:
-  - `FINISHED 65` lists 63 repetitive historical test runs (`mixed`, `mixed-talk`, `ship: slugify`) flat, and each row wastes horizontal space on an unpruned 24-dot Morse-code rail (`✓○✓○✓✓✓○✗○○○`).
-  - Pressing `y` copies the full filesystem directory path instead of a runnable run ID.
-- **Fix**:
-  - Keep `NEEDS YOU` and `RUNNING` runs individually visible, and fold repeat finished runs of the same workflow under their latest run (`▸ mixed-talk (22 runs)`, expandable with `Space`/`Right`).
-  - Replace the unpruned dot rail with truthful step progress (`7 steps ran` or active-branch progress) so workflow name and status have room to read.
-  - Make `y` copy the run ID (or copyable `/open <id>` target).
+Keep these separate from the disclosure redesign. Release order: verify the fixes before upstream sync, retest the merged build, then install on mini and sab-air with `scripts/install-fork.sh`.
 
-### Fix 4 — Make `/runs` and `/open` in `grok acpx` find `pi-workflows` runs by name or ID prefix (`crates/codegen/xai-grok-pager-bin/src/bin/grok-acpx-acp/agent.rs`)
-- **Problem**: `/runs` and `/open` only look in `~/.acpx/flows/runs` (`self.runs_dir()`) and ignore `~/.grok/cache/pi-workflows-mirror/`. Users cannot type `/open beta8-merge` or see `pi-workflows` runs in `/runs`.
-- **Fix**:
-  - Include `~/.grok/cache/pi-workflows-mirror` in `/runs` and `resolve_run_dir`.
-  - Allow `/open <query>` to match by exact `run_id`, `piw-<run_id>`, unique ID prefix/suffix (e.g. `8814563d`), or workflow name (e.g. `/open beta8-merge` opens the most recent `beta8-merge` run).
+1. **Conversation keyboard focus is too faint.** Sab found it hard to see on sab-air in **Kanagawa Lotus and Monosami Ink Light**; strengthen both outlines (Lotus was visible in the mini capture; that does not override his report). Uncommitted, unbuilt, unverified palette edits are already in the main checkout: Lotus `#432a62`, Ink Light `#363229`, in `scripts/themes/zed_port.py` and generated `crates/codegen/xai-grok-pager-render/src/theme/zed_ports.rs`. The outline comes from `Theme::selection_border_visible()` in `scrollback/scrollback_pane.rs`; `bg_visual` is a different cue. Review focus before and after moving it, on the changed build, in every shipped theme per `AGENTS.md`, with both reported themes checked on the Air. HY4 Flash's earlier audit also flagged Monosami Light, Kanso Pearl, and Dayfox; keep those visible as follow-ups (the pending edit only touches Sab's two). Prior captures of the installed build, which do not verify the pending change: `/tmp/grok-nav-focus-review/final/png/`, `/tmp/acpx-focus-review/`.
+2. **Queued-message double-send.** Capture a uniquely labelled queued prompt during a busy turn; compare outbound ACP `session/prompt` requests with agent receipt and rendered rows. Two requests = duplicate delivery; one request and two rows = duplicate display. Queue drain and one-shot echo suppression live in `app/dispatch/queue.rs`, `app/agent.rs`, `acp/tracker.rs` (Luna source review; not reproduced). Add a regression for the case that actually fails.
+3. **Pending-gate interaction.** After a run has parked, open the ACPX modal, standalone PIW, and Grok ACPX chat. Verify the actual question and choices are discoverable; inspecting the gate or typing bare `/answer` never changes or cancels the run; an explicit answer from one surface yields the engine's real next state in the others. Distinguish `Answer sent` / `Answer accepted` from run completion — `detail.rs` currently maps waiting + local answer to completed. Confirmation copy must distinguish answering the existing PIW run from launching a native ACPX continuation flow (`run.rs` uses native-flow copy for mirrored answers). Ask for text or checkpoint input only when the gate requires it. The earlier `/answer` cancellation report still has no traced cause.
 
----
+### Part 2 — Four progressive-disclosure fixes in `/acpx` and `grok acpx`
 
-## 3. State of `beta8-rest` Merge Worktree (For Follow-Up Live Run)
+From hands-on inspection of the Ledger (`Flows 75`) and Run (`runs › beta8-merge`) screens plus GPT-Sol's critique; targeted to cut overload without destabilising the modal. Fix 3 refines the existing full-width ledger, while the design section below says to try a small entry screen before committing to one — decide whether Fix 3 is interim or superseded.
 
-- Worktree: `/Volumes/Mini-SSD/offload/repos/grok-build/.worktrees/beta8-rest`
-- Merge state: all 151 conflicted files resolved (`git diff --name-only --diff-filter=U` is `0`; `git diff --check` is clean).
-- Compile state:
-  - `cargo check --workspace --bins` passes with **0 errors** (`2m 22s`).
-  - `cargo check --workspace --bins --tests --keep-going` has **150 compile error lines** across `--tests` targets in `xai-grok-login`, `xai-grok-shell`, `xai-grok-workspace`, `xai-grok-sampler`, `xai-grok-pager-minimal`, and `xai-grok-pager`.
-- Live repair workflow ready to test after the 4 UI fixes:
-  - `/Volumes/Mini-SSD/offload/repos/grok-build/.pi/workflows/beta8-repair.workflow.ts`
+1. **Collapse stage trace events by default** (`views/acpx_modal/run.rs`). Stages `4`–`7` open expanded (`▼`) with raw `+0ms node_started` / `+730ms action_completed` / `+49m19s node_outcome` rows, pushing `1..3` off screen. In `RunViewState`, fold completed `StepStage` roots (`▸`) by default so the left pane shows the ordered executed timeline (`1 ✓ route_host` … `7 ✗ cargo_check`, repeated loop attempts in order); `Space`/`Right` still expands. Filter `c. Skipped / NotRun flow nodes` against `modal_view::pruned_flow(&self.run)` so untaken branches are not counted as skipped.
+2. **Adaptive step digest and visible run ID** (`views/acpx_modal/detail.rs`). Today neither screen shows the run ID; the `cargo_check` pane shows a 36-char attempt UUID and raw JSON keys (`durationMs`, `exitCode`, `ok`, `outputTail`); agent steps dump Prompt, Command, Conversation, Result, stdout, stderr, Events at once, duplicating the `Enter` inspector tabs; the Ledger preview (`build_run_lines`) iterates unpruned `run.flow.nodes` (dead `○ resolve_group1_air`, `○ air_done`, `○ stopped`) and dumps `Last result` JSON. Fix:
+   - Show the run ID (and a short copyable slug) in the `build_run_lines` and `run.rs` headers; replace the attempt UUID with `attempt N`, `elapsed / timeout`, `exit <code>`.
+   - `build_step_lines` adapts to kind and outcome. **Failed shell step:** lead with the failure tail (e.g. `error: duplicate key xai-tty-utils in crates/codegen/xai-grok-update/Cargo.toml:38:1`), then command and cwd; drop the wrapper keys. **Waiting gate:** question, numbered choices, preceding failure tail. **Agent/compute step:** digest (verdict or validator rejections/corrections, file-scope summary, concise output notes) plus footer `Enter: open Output / Prompt / Stderr / Events tabs · r: replay step in pager`.
+   - Ledger preview: executed timeline in order, active/waiting status, concise failure/outcome — no unrun `○` nodes, no raw JSON.
+3. **Fold repeat finished runs in the Ledger** (`views/acpx_modal/ledger.rs`). `FINISHED 65` lists 63 repetitive test runs (`mixed`, `mixed-talk`, `ship: slugify`) flat, each with an unpruned 24-dot rail (`✓○✓○✓✓✓○✗○○○`); `y` copies a filesystem path. Keep `NEEDS YOU` and `RUNNING` rows individual; fold repeats under the latest (`▸ mixed-talk (22 runs)`, `Space`/`Right` expands); replace the rail with truthful progress (`7 steps ran` or active-branch progress); `y` copies the run ID (or `/open <id>`).
+4. **`/runs` and `/open` in `grok acpx` find PIW runs** (`crates/codegen/xai-grok-pager-bin/src/bin/grok-acpx-acp/agent.rs`). Both only read `~/.acpx/flows/runs` (`self.runs_dir()`). Include `~/.grok/cache/pi-workflows-mirror` in `/runs` and `resolve_run_dir`; let `/open <query>` match exact `run_id`, `piw-<run_id>`, a unique ID prefix/suffix (`8814563d`), or workflow name (`/open beta8-merge` → most recent run).
+
+## Design: start from each view's purpose
+
+Sab's screenshots show a prettier table alone is not enough. Flows showed 75 runs, truncated the `Needs you` reasons, and gave the other pane to all 13 `beta8-merge` stages plus raw Cargo output. Sessions was easier to scan because every row did the same job — not offered as the design to copy. In code, the wide Flows ledger reuses the run-detail panel before the operator has entered the run.
+
+| Surface | First job | Reveal on request |
+| --- | --- | --- |
+| ACPX landing / Flows | Find what needs attention, open a run, or start work. Try a small entry screen before a full-width table. | Full lists, repeated runs, filters, sorting, metadata. Age alone does not settle a pending decision. |
+| Sessions | Find a conversation and choose what to do with it. | Usage, paths, saved transcript. Distinguish replay from attaching to / resuming a live agent if those are added. |
+| Live run | Where the run is and what the human can do now; an actual pending question up front. | Executed attempt timeline, graph, supported controls. Keep repeated attempts in order (`cargo_check → repair_compile → cargo_check`); the DAG answers a different question. |
+| Step inspector | Explain one attempt, most relevant evidence first. | Full output, logs, prompt, response, tool activity, metadata. A retry action must make its scope and effects explicit. |
+| Replay | What happened at the selected attempt, with a route back to the current run. | Full conversation and tool evidence as recorded. The modal opens separate read-only playback; ACPX chat `/open <run>` projects a run into the chat and can restore gate state. Keep historical evidence and current authority distinct. |
+
+Prototype the wizard on a real pending gate: **open run → read question → choose → supply required input if any → confirm effect → see the engine's response**. The operator can consult failure evidence and return to the same choice. Evaluate on the failed `beta8-merge` run and a run genuinely waiting on a human before settling columns or panes. Asking about a run, steering an agent, and controlling a workflow are distinct actions; inspecting evidence never takes a branch.
+
+PIW already defines start, pause, resume, cancel, restart, supported settings changes, queued follow-ups, and gate answers (`~/repos/pi-workflows/src/client/protocol.ts`); these can back explicit UI actions where the run supports them. A fresh run and retry-from-here differ: exact continuation needs saved state and a policy for effects that already happened. Replay cannot recover evidence never captured or undo a push or other external effect.
+
+## `beta8-rest` merge worktree
+
+- All 151 conflicted files resolved (`git diff --name-only --diff-filter=U` empty; `git diff --check` clean).
+- `cargo check --workspace --bins`: **0 errors** (2m 22s).
+- `cargo check --workspace --bins --tests --keep-going`: **150 compile-error lines** in test targets of `xai-grok-login`, `xai-grok-shell`, `xai-grok-workspace`, `xai-grok-sampler`, `xai-grok-pager-minimal`, `xai-grok-pager`.
+- Live repair workflow, ready to test after the Part 2 fixes: `.pi/workflows/beta8-repair.workflow.ts`.
+
+## Code anchors
+
+- Modal routing, ledger preview, gate submission, replay request: `crates/codegen/xai-grok-pager/src/views/acpx_modal.rs`, `views/acpx_modal/{ledger,run,detail,inspector}.rs`. PIW gate model and projection: `src/piw/{gate,mirror}.rs`.
+- Launch/cancel and separate replay: `crates/codegen/xai-grok-pager/src/app/dispatch/{acpx_run,standalone_traces}.rs`. ACPX chat command routing: `crates/codegen/xai-grok-pager-bin/src/bin/grok-acpx-acp/{agent,run_path,piw_driver}.rs`.
+- Draft gaps, not architectural blockers: chat `run.set` / `run.steer` wiring; the inspector's 256 KiB artifact display cap.
+
+## Future agent chains
+
+The implementation agent hands off an exact build and a runnable fixture. A fresh vision reviewer (e.g. HY4 Flash) operates the UI, captures before/after images, and reports what it could verify. Failures route back to the original agent, and completion requires fresh evidence against the final build. The theme audit produced captures, but no automatic repair-handback chain was built.
