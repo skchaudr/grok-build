@@ -9,7 +9,7 @@ new dependencies, unsafe, or new production unwrap/expect. Preserve theme styles
 and keymaps unless the task explicitly changes them. Do not change gate
 authority, workflow state, ledger routing, or release behavior.
 
-=== REPOSITORY CONTEXT (17 excerpts) ===
+=== REPOSITORY CONTEXT (16 excerpts) ===
 
 ### `crates/codegen/xai-grok-pager/src/views/acpx_modal/ledger.rs` lines 1-315 of 2990 (repository grok-build)
 ````
@@ -1039,7 +1039,7 @@ impl LedgerState {
         &self,
 ````
 
-### `crates/codegen/xai-grok-pager/src/views/acpx_modal/ledger.rs` lines 1120-1555 of 2990 (repository grok-build)
+### `crates/codegen/xai-grok-pager/src/views/acpx_modal/ledger.rs` lines 1120-1696 of 2990 (repository grok-build)
 ````
     fn build_summary_spans(&self, theme: &Theme) -> Vec<Span<'static>> {
         let waiting = self
@@ -1477,10 +1477,97 @@ impl LedgerState {
         buf.set_line(row.x, row.y, &line, row.width);
     }
 
-````
+    fn flow_question_lines(
+        &self,
+        run: &RunSummary,
+        w: usize,
+        now_ms: i64,
+    ) -> (String, usize, Vec<String>) {
+        let extra = self.extras.get(&run.run_id);
+        let stalled = extra.map(|e| e.stalled).unwrap_or(false);
+        let (raw_state_text, _) = self.flow_state_text(run, extra, stalled, &Theme::default());
+        if raw_state_text.is_empty() || w == 0 {
+            return (String::new(), 0, Vec::new());
+        }
 
-### `crates/codegen/xai-grok-pager/src/views/acpx_modal/ledger.rs` lines 1647-1696 of 2990 (repository grok-build)
-````
+        let show_rail = w >= 48;
+        let show_age = w >= 64;
+        let show_rail_count = w >= 80;
+        let show_duration = w >= 96;
+        let show_agents = w >= 120;
+
+        let rail_width = if show_rail {
+            let count_w = |n: usize| {
+                if show_rail_count {
+                    format!(" {n}/{n}").width()
+                } else {
+                    0
+                }
+            };
+            self.extras
+                .values()
+                .map(|e| {
+                    if e.rail.is_empty() {
+                        0
+                    } else {
+                        e.rail.len().min(RAIL_MARKS_CAP) + count_w(e.rail.len())
+                    }
+                })
+                .max()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let agents_w = if show_agents {
+            extra
+                .map(|e| e.agents.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| 1 + truncate_str(s, 26).width())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let age_w = if show_age {
+            1 + fmt_age(now_ms.saturating_sub(run.updated_ms)).width()
+        } else {
+            0
+        };
+        let dur_w = if show_duration {
+            let end_ms = if run.status.is_live() && !stalled {
+                now_ms
+            } else {
+                run.finished_ms.unwrap_or(run.updated_ms)
+            };
+            let dur_ms = (end_ms - run.started_ms).max(0) as u64;
+            1 + fmt_duration(dur_ms).width()
+        } else {
+            0
+        };
+
+        let prefix_w = run.status.glyph().width() + 1;
+        let rail_col_w = if rail_width > 0 { 1 + rail_width } else { 0 };
+        let fixed_w = prefix_w + rail_col_w + agents_w + age_w + dur_w;
+        let flex_budget = w.saturating_sub(fixed_w);
+        let longest_title = self.runs.iter().map(|r| r.title.width()).max().unwrap_or(0);
+
+        if flex_budget <= 17 {
+            let indent = prefix_w;
+            let wrap_w = w.saturating_sub(indent).max(1);
+            let mut lines = vec![String::new()];
+            lines.extend(wrap_words(&raw_state_text, wrap_w));
+            (String::new(), indent, lines)
+        } else {
+            let half = (flex_budget - 1).div_euclid(2);
+            let title_col = longest_title.clamp(16, half.max(16));
+            let indent = prefix_w + title_col + rail_col_w + 1;
+            let state_w = (flex_budget - 1 - title_col).max(1);
+            let lines = wrap_words(&raw_state_text, state_w);
+            let first = lines.first().cloned().unwrap_or_default();
+            (first, indent, lines)
+        }
+    }
+
     fn flow_state_text(
         &self,
         run: &RunSummary,
@@ -2640,15 +2727,27 @@ if a newer member arrives. On explicit collapse of a selected child, move
 selection to the visible representative. Leave the Agent Turns tab
 (LedgerTab::Sessions; its label now reads Agent Turns) behavior alone.
 
-Replace the visible dot rail with '<N> steps ran' where N is the number of
-recorded Step entries, including repeat attempts. RowExtra contract: add
-`pub steps_ran: Option<usize>` and keep the existing `rail` field (literals
-outside the excerpts still set it); None means unknown. row_extra fills
-steps_ran from the run it already loads. Update every RowExtra literal inside
-the attached excerpts, and update the attached probe test's rail assertions
-(the 5/262 count and the check marks) to the new text. The coordinator adds
-`steps_ran` to the RowExtra literals outside the excerpts. Reuse the parent's
-cached bundle read; show unknown when extras are missing, never fake 0. Do not
+Each Flows row shows three things that answer different questions: the
+existing dot rail (the run's shape: one mark per flow node, unrun nodes
+included), '<N> steps ran' (how much happened), and the executed path (what
+happened, in order), e.g. `✓ cargo_check → ✗ repair_compile → ✓ cargo_check`.
+The count and the path come only from recorded Step entries in run.steps
+order, repeat attempts included, each glyph from that step's outcome; never
+from flow nodes. The ' done/total' suffix after the rail is replaced by the
+count. RowExtra contract: add `pub executed: Option<Vec<(String, Outcome)>>`
+(node_id and outcome per recorded step, in order) and keep `rail` (literals
+outside the excerpts still set it). None means unknown and renders
+'steps unknown', never 0; Some(empty) renders 'no steps ran'. row_extra in
+crates/codegen/xai-grok-pager/src/views/acpx_modal.rs fills executed from the run it already loads. At full width show
+rail, count and path together, truncating the path with … to the space left.
+At narrower widths keep the row readable: drop the path from the row first,
+then follow the existing width thresholds, and give the selected run its full
+executed path on wrapped lines below the row, the way flow_question_lines adds
+a waiting run's question (keep row-height and scroll math consistent for both).
+Update every RowExtra literal inside the attached excerpts, and update the
+attached probe test's rail assertions (the 5/262 count and the check marks) to
+the new text. The coordinator adds `executed: None` to the RowExtra literals
+outside the excerpts. Reuse the parent's cached bundle read. Do not
 add I/O to render or widen the cache/read limit. Keep existing styles. For a
 concrete Flows selection, y copies the canonical '/open <run_id>' command;
 on the Agent Turns tab y still copies the selected record ID. A confirmed copy
@@ -2660,7 +2759,11 @@ Tests: three finished runs of one name plus a same-name pending run; folded
 and expanded navigation with Space; newest tie by run_id; matching and
 preserving an older ID on refresh; a stalled Running run and an answered
 Waiting run of the grouped name staying individual; a group under the Recent
-and Name orders; counts including repetitions vs missing extras; exact y
+and Name orders; count and path including a retry (cargo_check, repair_compile, cargo_check in
+order) vs missing extras ('steps unknown') vs no steps; the rail still showing
+unrun nodes while count and path exclude them; full-width row with all three;
+a narrow selected row showing its full path below it and a narrow unselected
+row without it; exact y
 behavior on both tabs. Stay out of unrelated existing gate-status tests.
 
 Edit list format. The file is Markdown. List the edits in application order;

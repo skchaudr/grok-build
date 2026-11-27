@@ -139,7 +139,7 @@ wholesale.
     task(
         "finished-run-ledger",
         source(f"{MODAL}/ledger.rs", (1, 315), (317, 528), (550, 940),
-               (943, 1036), (1120, 1555), (1647, 1696), (2124, 2278),
+               (943, 1036), (1120, 1696), (2124, 2278),
                (2279, 2421), (2499, 2710), (2756, 2813))
         + source(APP_MODAL, (1, 103), (311, 368), (695, 741), (1432, 1510))
         + source(f"{ACPX}/bundle.rs", (1, 50), (150, 187), (261, 350)),
@@ -170,15 +170,27 @@ if a newer member arrives. On explicit collapse of a selected child, move
 selection to the visible representative. Leave the Agent Turns tab
 (LedgerTab::Sessions; its label now reads Agent Turns) behavior alone.
 
-Replace the visible dot rail with '<N> steps ran' where N is the number of
-recorded Step entries, including repeat attempts. RowExtra contract: add
-`pub steps_ran: Option<usize>` and keep the existing `rail` field (literals
-outside the excerpts still set it); None means unknown. row_extra fills
-steps_ran from the run it already loads. Update every RowExtra literal inside
-the attached excerpts, and update the attached probe test's rail assertions
-(the 5/262 count and the check marks) to the new text. The coordinator adds
-`steps_ran` to the RowExtra literals outside the excerpts. Reuse the parent's
-cached bundle read; show unknown when extras are missing, never fake 0. Do not
+Each Flows row shows three things that answer different questions: the
+existing dot rail (the run's shape: one mark per flow node, unrun nodes
+included), '<N> steps ran' (how much happened), and the executed path (what
+happened, in order), e.g. `✓ cargo_check → ✗ repair_compile → ✓ cargo_check`.
+The count and the path come only from recorded Step entries in run.steps
+order, repeat attempts included, each glyph from that step's outcome; never
+from flow nodes. The ' done/total' suffix after the rail is replaced by the
+count. RowExtra contract: add `pub executed: Option<Vec<(String, Outcome)>>`
+(node_id and outcome per recorded step, in order) and keep `rail` (literals
+outside the excerpts still set it). None means unknown and renders
+'steps unknown', never 0; Some(empty) renders 'no steps ran'. row_extra in
+{APP_MODAL} fills executed from the run it already loads. At full width show
+rail, count and path together, truncating the path with … to the space left.
+At narrower widths keep the row readable: drop the path from the row first,
+then follow the existing width thresholds, and give the selected run its full
+executed path on wrapped lines below the row, the way flow_question_lines adds
+a waiting run's question (keep row-height and scroll math consistent for both).
+Update every RowExtra literal inside the attached excerpts, and update the
+attached probe test's rail assertions (the 5/262 count and the check marks) to
+the new text. The coordinator adds `executed: None` to the RowExtra literals
+outside the excerpts. Reuse the parent's cached bundle read. Do not
 add I/O to render or widen the cache/read limit. Keep existing styles. For a
 concrete Flows selection, y copies the canonical '/open <run_id>' command;
 on the Agent Turns tab y still copies the selected record ID. A confirmed copy
@@ -190,7 +202,11 @@ Tests: three finished runs of one name plus a same-name pending run; folded
 and expanded navigation with Space; newest tie by run_id; matching and
 preserving an older ID on refresh; a stalled Running run and an answered
 Waiting run of the grouped name staying individual; a group under the Recent
-and Name orders; counts including repetitions vs missing extras; exact y
+and Name orders; count and path including a retry (cargo_check, repair_compile, cargo_check in
+order) vs missing extras ('steps unknown') vs no steps; the rail still showing
+unrun nodes while count and path exclude them; full-width row with all three;
+a narrow selected row showing its full path below it and a narrow unselected
+row without it; exact y
 behavior on both tabs. Stay out of unrelated existing gate-status tests.
 """,
     ),
