@@ -100,7 +100,7 @@ export default defineWorkflow({
       timeoutMs: 5_400_000,
       exec: () => ({
         command: "nice",
-        args: ["-n", "15", "cargo", "check", "--workspace", "--bins", "--message-format", "short"],
+        args: ["-n", "15", "cargo", "check", "--workspace", "--all-targets", "--message-format", "short"],
         cwd: WORKTREE,
       }),
     }),
@@ -125,7 +125,7 @@ export default defineWorkflow({
         return [
           `Read-only scouting inside ${WORKTREE}: the gathered Grok Build + Dwsy v0.1.14-beta.8 merge (conflicts resolved and staged, merge not committed).`,
           "You can only read files (Read, Grep, Glob). Do not try to edit or run commands.",
-          "`cargo check --workspace --bins` fails with:",
+          "`cargo check --workspace --all-targets` fails with:",
           "```",
           cargoErrors(results),
           "```",
@@ -134,7 +134,7 @@ export default defineWorkflow({
             ? ["Your previous plan:", previous.plan, "The reviewer asked for these changes:", answer.input.instructions, ""]
             : []),
           "1. Group the errors by cause. For each, say which side it comes from: our fork (multi-host, traces, acpx, piw, Pi/Claude notification routing, isolated grok-home wiring) or upstream beta.8 (mention catalogs, working messages, timeline, thinking_stream_mode, tool-call density, emphasis), and what the other side expects.",
-          "2. Propose the exact edits that fix them while keeping both sides' intent: file, item, and change. No deleting or stubbing features to make it compile.",
+          "2. Propose the exact edits that fix them while keeping both sides' intent: file, item, and change. No deleting or stubbing features to make it compile. Fix a failing test so it tests the merged code; propose removing or disabling a test only when the code it tested is gone on purpose, and list each such test by name so the reviewer sees it.",
           'Submit {"findings": "<causes and sides>", "plan": "<numbered edits>", "files": ["<path relative to the worktree>"]}.',
         ].join("\n");
       },
@@ -183,7 +183,7 @@ export default defineWorkflow({
         const earlier = earlierRepairs(state.steps);
         return [
           `Work strictly inside ${WORKTREE}. It holds the gathered Grok Build + Dwsy v0.1.14-beta.8 merge (conflicts resolved and staged, merge not committed).`,
-          "`cargo check --workspace --bins` fails with:",
+          "`cargo check --workspace --all-targets` fails with:",
           "```",
           cargoErrors(results),
           "```",
@@ -192,8 +192,8 @@ export default defineWorkflow({
           plan.plan,
           `Files in the plan: ${plan.files.join(", ")}`,
           "If an edit the errors need is outside the plan, make it only if it is the same kind of fix, and list it in your notes. If the plan is wrong, stop and say why in your notes instead of improvising a different fix.",
-          "Do not delete or stub out features to make it compile. Stage edited files with `git add <file>`. Do NOT commit and do not abort the merge.",
-          "You may run `nice -n 15 cargo check --workspace --bins --message-format short` yourself.",
+          "Do not delete or stub out features to make it compile. Do not delete or disable a test unless the plan names it. Stage edited files with `git add <file>`. Do NOT commit and do not abort the merge.",
+          "You may run `nice -n 15 cargo check --workspace --all-targets --message-format short` yourself.",
           'When done, submit {"notes": "<what you fixed, anything outside the plan, and anything you could not fix>"}.',
         ].join("\n");
       },

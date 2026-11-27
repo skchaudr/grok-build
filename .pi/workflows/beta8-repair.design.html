@@ -378,7 +378,7 @@
         ],
         nodes: {
           check_disk_space: { t: "shell", x: 1, y: 0, lim: 0.5, cmd: "df /Volumes/Mini-SSD", d: "stops if < 15 GB free" },
-          cargo_check: { t: "shell", x: 1, y: 1, lim: 90, cmd: "cargo check --workspace --bins", d: "compiles beta8-rest" },
+          cargo_check: { t: "shell", x: 1, y: 1, lim: 90, cmd: "cargo check --workspace --all-targets", d: "compiles code and tests" },
           repair_limit: { t: "compute", x: 2, y: 2, max: 3, d: "counts repairs" },
           scout_and_plan: { t: "agent", x: 0, y: 3, lim: 20, agent: "claude", model: "sonnet", d: "read-only: Read Grep Glob" },
           approve_plan: { t: "gate", x: 0, y: 4, choices: ["approve", "revise", "stop"], d: "you approve the plan" },
