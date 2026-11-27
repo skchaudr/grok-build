@@ -1,0 +1,49 @@
+# ACPX disclosure: five packets for review
+
+This document indexes the five larger changes DeepSeek proposed after Handoff 004. The worker input definitions, source excerpt references, and artifact contracts are in `acpx-disclosure-slices.py`. The exact rendered prompts for the first review are preserved in `task-scripts/acpx-disclosure-review/_packets/`.
+
+Keep review and run evidence in a named, persistent project directory. Never use `/private/tmp` or the macOS per-user temp directory for rendered prompts, reviews, raw events, receipts, or staged returns. For another dry run, use `slices acp task-scripts/acpx-disclosure-slices.py --dry-run --output <new-repository-local-directory>`. Use a fresh directory to keep earlier review snapshots intact. Before any live dispatch, also set the runner's scratch location to a repository-local directory: `--output` governs artifacts but does not control the empty worker scratch directory.
+
+Code packets (1–3) return exact old/new edit lists, not diffs: each edit quotes an existing block verbatim and gives its complete replacement. The coordinator matches every OLD block exactly once on the pinned base, stops on zero or several matches, applies the edits, and lets Git produce the diff. Design packets (4–5) return Markdown. Packet 1 is the first pilot.
+
+All five receive independent packet review; returned code is reviewed separately before integration. This index does not authorize dispatch, integration, PIW changes, or release.
+
+## 1. Executed timeline
+
+Runner packet `executed-timeline`. Owns the stage pane in `acpx_modal/run.rs`. Fold finished attempts by default and preserve user expansion, ordered loop attempts, pending choices and the existing key map. An answered gate's stage keeps its expanded display. A live repeated attempt (build → repair → build with the second build running) reads as its own stage. Derive skipped nodes from the same pruned flow as the graph. Accept when `cargo_check → repair_compile → cargo_check` remains visible in order, evidence expands by key, and an untaken branch is absent from Skipped.
+
+## 2. Finished-run ledger
+
+Runner packet `finished-run-ledger`.
+
+**Owns:** Flows grouping, selection, progress and copy in `crates/codegen/xai-grok-pager/src/views/acpx_modal/ledger.rs`, alongside its tests. Start from `run_section`, `filtered_flow_indices`, `build_flow_rows`, `selected_run` and the `y` handler. The packet may draft against the existing ledger as the full-list view. Packet 4 alone owns where an operator enters that view; packet 5 alone owns how live status and gate acknowledgments are established.
+
+**Behavior:** Group finished runs of the same workflow under the newest run (greatest `started_ms`, then greatest `run_id`). Keep `Needs you` and `Running` runs individually selectable, including stalled Running and answered Waiting runs that the legacy label files under Finished. A folded group shows its count; Space opens and closes it, and opening it reveals the individual run IDs in newest-first order. Preserve stable selection by run ID as filtered results and live updates change. Keep existing sort/filter affordances and let a filter matching an older run reveal that run. Replace the per-node dot rail with an executed-step count that includes real repeated attempts and excludes nodes that never ran. `RowExtra` gains `steps_ran: Option<usize>` and keeps `rail`; the coordinator adds `steps_ran` to the test literals outside the packet's excerpts and adds the Space row to the help table in `acpx_modal.rs`. For a concrete selected Flows run, `y` copies an `/open <id>` command; keep Sessions and selected-step copy behavior unchanged. Verify the target can open mirrored runs before promising it on screen.
+
+**Return and review:** A staged edit list for the ledger and the `row_extra` producer, with regression tests. Check three completed `mixed-talk` runs, one waiting `mixed-talk` run, a filter matching only the oldest finished ID, and a refresh while that ID is selected. Review the `Waiting`-to-`Finished` classification against packet 5 before integration. No landing rollout or ledger-preview redesign in this patch.
+
+## 3. Evidence-first detail
+
+Runner packet `attempt-detail` owns the selected-attempt pane in `acpx_modal/detail.rs` and edits no other file. It reuses current evidence helpers, keeps pending choices available and directs operators to the existing inspector, expanded timeline or replay for full evidence. The digest goes first; existing conversation, artifact and event sections may follow, and no function is deleted or renamed. Check a nonzero `cargo_check` against `beta8-merge` and a finished agent attempt with recorded review evidence.
+
+**Deferred, not dropped: ledger preview.** The Flows preview currently calls the full run-detail renderer in `crates/codegen/xai-grok-pager/src/views/acpx_modal.rs`. If the landing review keeps a preview, a separate packet gives it a compact read-only projection: actual run status, executed timeline and a short outcome, with no unrun nodes or raw result wrappers, its own render entry point, cache identity and tests. It is written only after packet 4's recommendation is reviewed.
+
+## 4. ACPX landing screen
+
+Runner packet `acpx-landing`.
+
+**Owns:** The landing/entry experience and route to the existing full ledger. Start from `AcpxModalState`, its initial `Mode::Ledger`, keyboard handling and the preview split in `crates/codegen/xai-grok-pager/src/views/acpx_modal.rs`. Preserve the existing full Runs and Sessions views. No ledger grouping or workflow-control changes here. It designs against the current ungrouped ledger and names its "needs attention" rule as a dependency on packet 5's gate-state contract.
+
+**Prototype outcome:** An operator can see which run needs attention, open it by keyboard, reach the full lists, or find the existing way to start work. A waiting entry identifies the run and the question or reason it needs attention. Opening an entry is inspection only. Exercise narrow and wide terminals with a genuinely parked run, the historical failed `beta8-merge` run and an empty list. Check that Enter, Esc and back navigation preserve focus and that opening the modal cannot start or answer anything.
+
+**Return and review:** A text or screen prototype, exact proposed key routes, and its differences from landing directly on the full ledger. Review that prototype and choose whether the full-list preview remains before asking for a routing patch. No irreversible UI replacement or product code in this first return.
+
+## 5. Gate state and answers across the three surfaces
+
+Runner packet `cross-surface-gate`.
+
+**Owns:** The state and action contract for opening, inspecting and answering an existing PIW run in the Grok `/acpx` modal, standalone PIW and Grok ACPX chat. The PIW engine is authoritative for the pending request and run state. Start from `crates/codegen/xai-grok-pager/src/piw/gate.rs`, the modal's run/detail/ledger views, the chat agent's PIW answer and replay paths, and the standalone PIW client's run controls. Read the standalone checkout for coordination; changes there require separate scope approval.
+
+**Behavior:** Inspecting or typing bare `/answer` reveals the gate when applicable and never submits, starts, or cancels work. Keep a submitted request, server acceptance and the engine's next run state distinct. A run still reported as waiting must never display as completed merely because the client sent an answer. A mirrored historical event cannot supply live authority; opening a currently parked PIW run in chat must not turn its answer into a native ACPX continuation. Ask for text or checkpoint data only when the actual gate requires it. Respect protected decisions and each surface's advertised permissions.
+
+**Return and review:** First return a state transition table and a runnable walkthrough for one newly parked PIW fixture. Start by tracing current behavior, including which surfaces can submit, before proposing implementation. Chat submits through `/answer <label>` and through plain text while a run is occupied; the matrix covers both and keeps what the standalone client does separate from what its protocol lists. Inspect the same run from all three surfaces, compare its state before and after bare `/answer`, send exactly one explicit allowed answer from one supported surface, and verify that each surface displays the engine's accepted branch through the next step. Include a rejected or stale submission case and explain how the UI lets the operator recover without resending an uncertain effect. Review the evidence and ownership split before editing the cross-surface implementation. The earlier cancellation report is untraced; the packet must not assume its cause.
