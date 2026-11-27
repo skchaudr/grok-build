@@ -822,7 +822,7 @@ impl Theme {
             accent_plan: rgb(142, 112, 11),        // #8e700b
             accent_verify: rgb(107, 107, 107),     // #6b6b6b
             accent_remember: rgb(86, 159, 122),    // #569f7a
-            selection_border: rgb(196, 193, 176),  // #c4c1b0
+            selection_border: rgb(54, 50, 41),     // #363229
             hover_border: rgb(212, 210, 196),      // #d4d2c4
             prompt_border: rgb(230, 228, 216),     // #e6e4d8
             prompt_border_active: rgb(18, 18, 18), // #121212
@@ -1461,7 +1461,7 @@ impl Theme {
             accent_plan: rgb(222, 152, 0),          // #de9800
             accent_verify: rgb(118, 107, 144),      // #766b90
             accent_remember: rgb(110, 145, 95),     // #6e915f
-            selection_border: rgb(118, 107, 144),   // #766b90
+            selection_border: rgb(67, 42, 98),      // #432a62
             hover_border: rgb(118, 107, 144),       // #766b90
             prompt_border: rgb(113, 110, 97),       // #716e61
             prompt_border_active: rgb(93, 87, 163), // #5d57a3

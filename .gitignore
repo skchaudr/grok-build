@@ -20,3 +20,4 @@ __pycache__/
 
 # Pending insta snapshots written by a failed snapshot test
 *.snap.new
+task-scripts/acpx-piw-slices_out/

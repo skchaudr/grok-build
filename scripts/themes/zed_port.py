@@ -308,6 +308,10 @@ BG_VISUAL_OVERRIDE = {"kanso_mist": (24, 25, 30), "one_dark_pro": (60, 67, 80), 
 def rust_fn(fn, name, port):
     colors, mods = port.colors(), port.heading_mods()
     colors["md_quote"] = MD_QUOTE[fn]
+    # Thin keyboard-focus outlines need more contrast than selection fills.
+    focus_borders = {"kanagawa_lotus": (67, 42, 98), "monosami_ink_light": (54, 50, 41)}
+    if fn in focus_borders:
+        colors["selection_border"] = focus_borders[fn]
     if fn in BG_VISUAL_OVERRIDE:
         colors["bg_visual"] = BG_VISUAL_OVERRIDE[fn]
     lines = [f"    /// {name} (Zed), ported by scripts/themes/zed_port.py.",
