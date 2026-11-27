@@ -141,7 +141,7 @@ wholesale.
         source(f"{MODAL}/ledger.rs", (1, 315), (317, 528), (550, 940),
                (943, 1036), (1120, 1555), (1647, 1696), (2124, 2278),
                (2279, 2421), (2499, 2710), (2756, 2813))
-        + source(APP_MODAL, (1, 92), (291, 348), (675, 721), (1382, 1460))
+        + source(APP_MODAL, (1, 103), (311, 368), (695, 741), (1432, 1510))
         + source(f"{ACPX}/bundle.rs", (1, 50), (150, 187), (261, 350)),
         rf"""
 Own Flows row grouping, selection and progress in {MODAL}/ledger.rs and its
@@ -181,9 +181,10 @@ the attached excerpts, and update the attached probe test's rail assertions
 cached bundle read; show unknown when extras are missing, never fake 0. Do not
 add I/O to render or widen the cache/read limit. Keep existing styles. For a
 concrete Flows selection, y copies the canonical '/open <run_id>' command;
-on the Agent Turns tab y still copies the selected record ID. The modal's copy notice is fixed separately by the
-coordinator; the coordinator must also verify mirrored /open works before
-shipping this copy behavior.
+on the Agent Turns tab y still copies the selected record ID. A confirmed copy
+already shows "Copied!" (fixed on main). Chat /open <id> already resolves
+mirrored PIW runs read-only (resolve_saved_run); the coordinator still checks a
+live paste of the copied command before shipping it.
 
 Tests: three finished runs of one name plus a same-name pending run; folded
 and expanded navigation with Space; newest tie by run_id; matching and
@@ -199,7 +200,7 @@ behavior on both tabs. Stay out of unrelated existing gate-status tests.
                (1370, 1649), (1650, 2035), (2104, 2377), (2548, 2639))
         + source(f"{MODAL}/inspector.rs", (1, 219), (320, 358))
         + source(f"{MODAL}/run.rs", (552, 611))
-        + source(APP_MODAL, (775, 839))
+        + source(APP_MODAL, (795, 858))
         + source(f"{ACPX}/bundle.rs", (1, 350))
         + source(f"{ACPX}/step_digest.rs", (1, 85), (153, 259), (353, 460))
         + source(f"{ACPX}/step_evidence.rs", (32, 337), (339, 505)),
@@ -252,8 +253,8 @@ formatter and navigation expectations intact.
     ),
     task(
         "bare-command-picker",
-        source(CHAT, (1, 120), (1124, 1256), (1370, 1388), (1820, 2018),
-               (2099, 2247), (2288, 2345), (2370, 2410), (2463, 2528), (2529, 2640))
+        source(CHAT, (1, 121), (1125, 1257), (1258, 1355), (1375, 1393), (1825, 2023),
+               (2104, 2252), (2293, 2350), (2375, 2478), (2531, 2597), (2598, 2783))
         + source(CHAT_DRIVER, (394, 530), (1499, 1527), (2168, 2219)),
         rf"""
 Ownership: {CHAT} and {CHAT_DRIVER}, including their tests. Edit nothing else.
@@ -265,18 +266,24 @@ change for these two commands only.
 
 Bare /open: show one question through the existing x.ai/ask_user_question
 machinery (ask_question_raw, shaped like ask_gate_question, noFreeform true)
-listing the 20 most recent runs from driver::list_runs on runs_dir(), newest
-first. Option id and label are the run ID. The description carries what the
-operator needs to choose: flow name, title when it differs from the flow name,
+listing the 20 most recent saved runs from list_saved_runs(&runs_dir,
+runtime::mirror_root().as_deref(), 20), the same list /runs shows, newest
+first, native ACPX and mirrored PIW runs together. Option id and label are the
+run ID. The description carries what the operator needs to choose: flow name,
+title when it differs from the flow name, source (SavedRunSource::label),
 status, and start time formatted with the existing helper. Choosing a run does
-exactly what `/open <run_id>` does now; move the current Open arm into one
-helper that both paths call, keeping its "Already shown above." and
+exactly what `/open <run_id>` does now, through resolve_saved_run and
+replay_run_into_session with the resolved source, so a mirrored run stays
+read-only and a native run keeps its gate restore; move the current Open arm
+into one helper that both paths call, keeping its "Already shown above." and
 not-found replies. Dismissing the question, an unknown choice, or a cancelled
 session opens nothing and sends one short line. No runs: reply
 "No acpx runs found." without a question. Opening stays inspection only.
 
 Bare /flow: list the configured default_flow() first when it exists, then the
-distinct flowPath values from the manifests of the 20 most recent runs, newest
+distinct flowPath values from the manifests of the 20 most recent native ACPX
+runs (runs_dir only: /flow launches native ACPX, so mirrored PIW runs are not
+flow candidates), newest
 use first, each with the flow name, last status and last start time of its
 most recent run. Add one driver function for that read next to list_runs,
 reusing read_json_file, json_str and parse_ts; skip manifests without a
@@ -291,10 +298,11 @@ Help) and plain-text handling unchanged. Update available_commands and
 help_markdown so both commands say the argument is optional. Keep the
 question's toolCallId distinct from gate tool call IDs.
 
-Tests: parse_command returns the new bare variants for "/open" and "/flow"
+Tests: keep the attached saved_runs_list_both_sources_and_only_native_replay_restores_a_gate
+test passing unchanged. parse_command returns the new bare variants for "/open" and "/flow"
 (and still Help for "/runs extra" and bare "/answer"); build the option lists
-through pure functions you add and test them: newest-first order, run ID as id
-and label, description content, title omitted when equal to the flow name,
+through pure functions you add and test them: newest-first order across both
+sources, run ID as id and label, description content including the source, title omitted when equal to the flow name,
 duplicate flowPath collapsed to its newest run, default flow first and not
 repeated, manifests without flowPath skipped (driver test with temp dirs like
 the attached test_list_runs_order_and_title_fallback), and the empty cases.
@@ -302,8 +310,8 @@ the attached test_list_runs_order_and_title_fallback), and the empty cases.
     ),
     task(
         "acpx-landing",
-        source(APP_MODAL, (1, 242), (291, 376), (484, 541), (631, 668),
-               (730, 895), (1123, 1193))
+        source(APP_MODAL, (1, 262), (311, 396), (504, 561), (651, 688),
+               (750, 920), (1148, 1243))
         + source(f"{MODAL}/ledger.rs", (105, 168), (259, 310), (377, 445))
         + source(f"{ACPX}/bundle.rs", (261, 295)),
         """
@@ -336,12 +344,12 @@ this proposed entry route. List the interactive checks a reviewer can run.
     task(
         "cross-surface-gate",
         source(GATE, (1, 373), (475, 813))
-        + source(APP_MODAL, (377, 538), (1464, 1563))
+        + source(APP_MODAL, (397, 558), (1514, 1613))
         + source(f"{MODAL}/run.rs", (1143, 1195))
         + source(f"{MODAL}/detail.rs", (244, 271))
         + source(f"{MODAL}/ledger.rs", (310, 389))
-        + source(CHAT, (679, 780), (895, 1049), (1124, 1217), (1257, 1350),
-                 (1389, 1527), (1839, 1957), (2099, 2158))
+        + source(CHAT, (680, 781), (896, 1050), (1125, 1218), (1258, 1355),
+                 (1394, 1532), (1844, 1962), (2104, 2163), (2388, 2450))
         + source("tui/src/ui/run_command.rs", (1, 85), (177, 215), repo="piw")
         + source("tui/src/render.rs", (271, 416), repo="piw")
         + source("tui/src/protocol.rs", (1, 34), repo="piw"),
@@ -363,7 +371,12 @@ while a run is occupied (handle_occupied_run_input, answer_waiting_gate);
 cover each, and the question path that reveals choices. Ground submission,
 refusal and reconnection in answer_request, the AnswerMachine and its refusal
 and connection-loss handling. Distinguish checkpoint input from a protected
-decision and the PIW route from native ACPX replay; note which current
+decision and the PIW route from native ACPX replay. Current state: chat
+/open <id> resolves native and mirrored runs (resolve_saved_run); a mirrored
+replay shows the question and choices read-only and arms no answer
+(saved_run_events, replay_run_into_session with SavedRunSource::PiwMirror), and
+native replay still restores its gate. Live PIW answers after /open are this
+packet's design question; note which current
 functions would need changes and which repo owns them. Separate gate
 inspection, an explicit answer, and native flow launch. Bare /answer may
 reveal choices and must never submit, cancel or start a run. No speculative
