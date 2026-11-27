@@ -1065,7 +1065,7 @@ impl LedgerState {
 
         let left_flows = format!(" Flows {flow_count} ");
         let left_sep = "│";
-        let left_sess = format!(" Sessions {sess_count} ");
+        let left_sess = format!(" Agent Turns {sess_count} ");
         let left_width = left_flows.width() + left_sep.width() + left_sess.width();
 
         let left_line = Line::from(vec![
@@ -1698,9 +1698,9 @@ impl LedgerState {
         let indices = self.filtered_session_indices();
         if indices.is_empty() {
             let msg = if !self.session_filter.is_empty() || self.session_active_only {
-                "No matching sessions"
+                "No matching agent turns"
             } else {
-                "No acpx sessions found"
+                "No agent turns found"
             };
             render_empty_centered(buf, area, msg, theme);
             return;
@@ -2635,7 +2635,7 @@ mod tests {
 
         let r0 = row_text(&buf, 0);
         assert!(r0.contains("Flows 3"));
-        assert!(r0.contains("Sessions 0"));
+        assert!(r0.contains("Agent Turns 0"));
         assert!(r0.contains("1 needs you · 1 running"));
         assert!(r0.contains("[grouped]"));
 

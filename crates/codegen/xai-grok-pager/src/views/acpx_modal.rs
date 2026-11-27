@@ -853,7 +853,7 @@ fn render_notice_row(buf: &mut Buffer, content: Rect, notice: &str, theme: &Them
 }
 
 const LEDGER_KEYS: &[(&str, &str)] = &[
-    ("Tab / h / l", "Switch between Flows and Sessions"),
+    ("Tab / h / l", "Switch between Flows and Agent Turns"),
     ("j / k / ↑ / ↓", "Move selection"),
     ("g / G", "Jump to first / last row"),
     ("J / K", "Scroll the preview of the selected run"),
@@ -862,7 +862,7 @@ const LEDGER_KEYS: &[(&str, &str)] = &[
     ("a", "Only running and waiting runs"),
     ("s", "Cycle order: grouped, recent, name"),
     ("y", "Copy selected id or path"),
-    ("R", "Rescan flows and sessions on disk"),
+    ("R", "Rescan flows and agent turns on disk"),
     ("?", "Toggle this key reference"),
     ("Esc", "Clear filter or close modal"),
 ];
