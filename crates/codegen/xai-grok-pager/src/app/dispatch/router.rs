@@ -1814,7 +1814,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             let delivery = crate::clipboard::copy_text_or_file(&text);
             with_active_agent(app, |agent| {
                 if let Some(crate::views::modal::ActiveModal::Acpx { state }) = agent.active_modal.as_mut() {
-                    state.set_notice(format!("copy: {delivery:?}"));
+                    state.report_copy(&delivery);
                 }
             });
             vec![]

@@ -54,6 +54,7 @@ pub struct Projector {
     attempts: HashMap<String, AttemptState>,
     shell_attempts: HashMap<String, ShellAttemptState>,
     parent_after_block: bool,
+    gates_read_only: bool,
 }
 
 impl Projector {
@@ -71,7 +72,12 @@ impl Projector {
             attempts: HashMap::new(),
             shell_attempts: HashMap::new(),
             parent_after_block: false,
+            gates_read_only: false,
         }
+    }
+
+    pub fn show_gates_read_only(&mut self) {
+        self.gates_read_only = true;
     }
 
     /// Map one driver event to the updates that show it. Deterministic: same events -> same Outs (ids derive from
@@ -542,6 +548,7 @@ impl Projector {
                     question,
                     choices,
                     self.last_failure.as_ref(),
+                    self.gates_read_only,
                 );
                 let text = format!(
                     "{}\n\n{}\n\n{card}\n\n",

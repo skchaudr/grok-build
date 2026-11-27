@@ -156,10 +156,12 @@ pub fn format_inline_waiting_gate(
     question: &str,
     choices: &[GateChoice],
     failure: Option<&PrecedingFailure>,
+    read_only: bool,
 ) -> String {
     let mut sections = Vec::new();
     let node_display = format_compact_node_name(node);
-    sections.push(format!("**⏸ WAITING FOR YOUR ANSWER** · `{node_display}`"));
+    let status = if read_only { "WAITING · SAVED REPLAY" } else { "WAITING FOR YOUR ANSWER" };
+    sections.push(format!("**⏸ {status}** · `{node_display}`"));
 
     let trimmed_question = question.trim();
     if !trimmed_question.is_empty() {
@@ -192,12 +194,16 @@ pub fn format_inline_waiting_gate(
             choice_lines.push(format!("{}. **{}**", idx + 1, choice.label));
         }
         sections.push(choice_lines.join("\n"));
+    }
+    if read_only {
+        sections.push("This replay is read-only. Answer from the live workflow view.".to_string());
+    } else if choices.is_empty() {
+        sections.push("Reply in chat to continue.".to_string());
+    } else {
         sections.push(
             "Reply in chat with a choice number or label (optional notes after `:`, e.g. `repair: ...`)."
                 .to_string(),
         );
-    } else {
-        sections.push("Reply in chat to continue.".to_string());
     }
 
     sections.join("\n\n")
@@ -720,6 +726,7 @@ mod tests {
             "Cargo check failed. How should we proceed?",
             &choices,
             Some(&failure),
+            false,
         );
 
         assert!(card.contains("WAITING FOR YOUR ANSWER"));

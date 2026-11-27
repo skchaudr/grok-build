@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 use xai_acp_lib::{AcpClientMessage, acp_send};
+use xai_grok_pager::acpx::bundle;
 use xai_grok_pager::piw::client::PiwClient;
 use xai_grok_pager::piw::gate::{self as piw_gate, PiwGate};
 use xai_grok_pager::piw::runtime;
@@ -1258,11 +1259,15 @@ impl AcpxAgent {
         &self,
         session_id: &str,
         run_dir: &Path,
+        source: SavedRunSource,
         is_replay: bool,
         timing: Option<&TurnTiming>,
     ) -> anyhow::Result<()> {
-        let events = driver::replay(run_dir)?;
+        let events = saved_run_events(run_dir, source)?;
         let mut projector = Projector::new(session_id);
+        if source == SavedRunSource::PiwMirror {
+            projector.show_gates_read_only();
+        }
         let mut run_id = run_dir
             .file_name()
             .and_then(|n| n.to_str())
@@ -1300,7 +1305,7 @@ impl AcpxAgent {
                     choices,
                     at_ms,
                 } => {
-                    if !choices.is_empty() {
+                    if source == SavedRunSource::Native && !choices.is_empty() {
                         waiting = Some((
                             node.clone(),
                             attempt.clone(),
@@ -1716,7 +1721,7 @@ impl acp::Agent for AcpxAgent {
         let runs_dir = self.runs_dir();
         if let Some(run_dir) = resolve_run_dir(&runs_dir, &session_id) {
             let _ = self
-                .replay_run_into_session(&session_id, &run_dir, true, None)
+                .replay_run_into_session(&session_id, &run_dir, SavedRunSource::Native, true, None)
                 .await;
         }
 
@@ -1842,7 +1847,7 @@ impl acp::Agent for AcpxAgent {
             }
             Command::Runs => {
                 let runs_dir = self.runs_dir();
-                let runs = driver::list_runs(&runs_dir, 20);
+                let runs = list_saved_runs(&runs_dir, runtime::mirror_root().as_deref(), 20);
                 self.send_parent_text(&session_id, format_runs_table(&runs), &timing)
                     .await;
             }
@@ -1858,10 +1863,10 @@ impl acp::Agent for AcpxAgent {
                         .await;
                 } else {
                     let runs_dir = self.runs_dir();
-                    match resolve_run_dir(&runs_dir, &run_id) {
-                        Some(run_dir) => {
+                    match resolve_saved_run(&runs_dir, runtime::mirror_root().as_deref(), &run_id) {
+                        Some((run_dir, source)) => {
                             if let Err(err) = self
-                                .replay_run_into_session(&session_id, &run_dir, false, Some(&timing))
+                                .replay_run_into_session(&session_id, &run_dir, source, false, Some(&timing))
                                 .await
                             {
                                 self.send_parent_text(
@@ -2380,6 +2385,69 @@ fn resolve_run_dir(runs_dir: &Path, run_id: &str) -> Option<PathBuf> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SavedRunSource {
+    Native,
+    PiwMirror,
+}
+
+impl SavedRunSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Native => "ACPX",
+            Self::PiwMirror => "PIW mirror",
+        }
+    }
+}
+
+type ListedRun = (String, String, String, String, i64);
+
+fn list_saved_runs(base: &Path, mirror: Option<&Path>, limit: usize) -> Vec<(ListedRun, SavedRunSource)> {
+    let mut runs: Vec<_> = driver::list_runs(base, limit)
+        .into_iter()
+        .map(|run| (run, SavedRunSource::Native))
+        .collect();
+    if let Some(mirror) = mirror {
+        runs.extend(driver::list_runs(mirror, limit).into_iter().map(|run| (run, SavedRunSource::PiwMirror)));
+    }
+    runs.sort_by(|(a, _), (b, _)| b.4.cmp(&a.4).then_with(|| b.0.cmp(&a.0)));
+    runs.truncate(limit);
+    runs
+}
+
+fn resolve_saved_run(base: &Path, mirror: Option<&Path>, id: &str) -> Option<(PathBuf, SavedRunSource)> {
+    resolve_run_dir(base, id)
+        .map(|dir| (dir, SavedRunSource::Native))
+        .or_else(|| {
+            resolve_run_dir(mirror?, id).map(|dir| (dir, SavedRunSource::PiwMirror))
+        })
+}
+
+fn saved_run_events(dir: &Path, source: SavedRunSource) -> anyhow::Result<Vec<DriverEvent>> {
+    let mut events = driver::replay(dir)?;
+    if source == SavedRunSource::PiwMirror
+        && events.iter().any(|event| matches!(event, DriverEvent::Waiting { .. }))
+    {
+        // The mirror keeps the authoritative gate question and choices in its
+        // projections, even when the trace has no checkpoint outcome to replay.
+        let run = bundle::load_run(dir)?;
+        for event in &mut events {
+            if let DriverEvent::Waiting { node, question, choices, .. } = event
+                && run.summary.waiting_on.as_deref() == Some(node.as_str())
+            {
+                if let Some(detail) = run.summary.status_detail.as_ref() {
+                    *question = detail.clone();
+                }
+                *choices = bundle::gate_choices(&run)
+                    .into_iter()
+                    .map(|(label, _)| GateChoice { label, flow_file: String::new() })
+                    .collect();
+            }
+        }
+    }
+    Ok(events)
+}
+
 fn resolve_cancel_target_session(
     sessions: &HashMap<String, SessionState>,
     requested_id: &str,
@@ -2460,14 +2528,15 @@ fn prompt_response(
     response
 }
 
-fn format_runs_table(runs: &[(String, String, String, String, i64)]) -> String {
+fn format_runs_table(runs: &[(ListedRun, SavedRunSource)]) -> String {
     if runs.is_empty() {
         return "No acpx runs found.".to_string();
     }
-    let mut out = String::from("| run | flow | status | started |\n| --- | --- | --- | --- |\n");
-    for (run_id, flow_name, _title, status, started_ms) in runs {
+    let mut out = String::from("| run | flow | source | status | started |\n| --- | --- | --- | --- | --- |\n");
+    for ((run_id, flow_name, _title, status, started_ms), source) in runs {
         let started = format_iso8601_ms(*started_ms);
-        out.push_str(&format!("| `{run_id}` | {flow_name} | {status} | {started} |\n"));
+        let source = source.label();
+        out.push_str(&format!("| `{run_id}` | {flow_name} | {source} | {status} | {started} |\n"));
     }
     out
 }
@@ -2528,6 +2597,80 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn saved_runs_list_both_sources_and_only_native_replay_restores_a_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let native = tmp.path().join("native");
+        let mirror = tmp.path().join("mirror");
+        let at = "2026-11-20T01:14:34Z";
+        for (base, id) in [(&native, "native-run"), (&mirror, "workflow-run")] {
+            let dir = base.join(id);
+            std::fs::create_dir_all(dir.join("projections")).unwrap();
+            let projection = json!({"status":"waiting", "waitingOn":"gate", "statusDetail":"Approve the build?"});
+            for (file, data) in [
+                ("manifest.json", json!({"runId":id, "flowName":"build", "startedAt":at})),
+                ("flow.json", json!({"name":"build", "startAt":"gate", "nodes":{"gate":{"nodeType":"checkpoint"}}, "edges":[]})),
+                ("projections/live.json", projection),
+                ("projections/steps.json", json!([{"attemptId":"a1","nodeId":"gate","nodeType":"checkpoint","outcome":"ok","output":{"next":{"approve":"piw:choice"}}}])),
+            ] {
+                std::fs::write(dir.join(file), data.to_string()).unwrap();
+            }
+            if base == &native {
+                let outcome = json!({"seq":1,"at":at,"type":"node_outcome","nodeId":"gate","attemptId":"a1","payload":{"nodeType":"checkpoint","outcome":"ok","outputInline":{"next":{"approve":"land.flow.ts"}}}});
+                std::fs::write(dir.join("trace.ndjson"), format!("{outcome}\n")).unwrap();
+            }
+        }
+
+        let table = format_runs_table(&list_saved_runs(&native, Some(&mirror), 20));
+        assert!(table.contains("`native-run` | build | ACPX | waiting"), "{table}");
+        assert!(table.contains("`workflow-run` | build | PIW mirror | waiting"), "{table}");
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = tokio::spawn(async move {
+            let mut updates = String::new();
+            while let Some(message) = rx.recv().await {
+                use std::fmt::Write as _;
+                writeln!(&mut updates, "{message:?}").unwrap();
+                match message {
+                    AcpClientMessage::SessionNotification(args) => args.response_tx.send(Ok(())).unwrap(),
+                    AcpClientMessage::ExtNotification(args) => args.response_tx.send(Ok(())).unwrap(),
+                    _ => panic!("unexpected ACP request: {message:?}"),
+                }
+            }
+            updates
+        });
+        let agent = AcpxAgent::new(AgentConfig {
+            driver: DriverConfig {
+                acpx_bin: PathBuf::from("acpx"),
+                runs_dir: native.clone(),
+                cwd: tmp.path().to_path_buf(),
+                extra_path: Vec::new(),
+                poll_ms: 100,
+            },
+            default_flow: None,
+        }, tx);
+        for id in ["native-run", "workflow-run"] {
+            agent.ensure_session(id, None);
+            let (dir, source) = resolve_saved_run(&native, Some(&mirror), id).unwrap();
+            agent.replay_run_into_session(id, &dir, source, false, None).await.unwrap();
+            let st = agent.state.borrow();
+            let session = &st.sessions[id];
+            if id == "native-run" {
+                let gate = session.waiting_gate.as_ref().expect("native gate restored");
+                assert_eq!(gate.choices[0].flow_file, "land.flow.ts");
+            } else {
+                assert!(session.waiting_gate.is_none());
+                assert!(session.waiting_piw.is_none());
+                assert!(matches!(parse_command("approve", &[]), Command::Task { .. }));
+            }
+        }
+        drop(agent);
+        let updates = client.await.unwrap();
+        assert!(updates.contains("Approve the build?"), "{updates}");
+        assert!(updates.contains("**approve**"), "{updates}");
+        assert!(updates.contains("This replay is read-only"), "{updates}");
+    }
 
     #[test]
     fn parse_command_flow_empty_input() {

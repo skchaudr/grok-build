@@ -64,6 +64,17 @@ pub enum AcpxOutcome {
     RunFlow { flow_file: PathBuf, input_json: String },
 }
 
+struct ModalNotice {
+    text: String,
+    warning: bool,
+}
+
+impl ModalNotice {
+    fn warning(text: String) -> Self {
+        Self { text, warning: true }
+    }
+}
+
 pub struct AcpxModalState {
     pub window: ModalWindowState,
     runs_base: Option<PathBuf>,
@@ -74,7 +85,7 @@ pub struct AcpxModalState {
     inspector: Option<(usize, InspectorState)>,
     mode: Mode,
     help_open: bool,
-    notice: Option<String>,
+    notice: Option<ModalNotice>,
     /// The right-hand panel: the selected run beside the list, the selected stage beside a run.
     detail: DetailPanel,
     /// The run selected in the list, loaded for the preview.
@@ -139,7 +150,7 @@ impl AcpxModalState {
                 true
             }
             Err(err) => {
-                self.notice = Some(format!("cannot open run: {err}"));
+                self.set_notice(format!("cannot open run: {err}"));
                 false
             }
         }
@@ -190,12 +201,21 @@ impl AcpxModalState {
     }
 
     pub fn notice(&self) -> Option<&str> {
-        self.notice.as_deref()
+        self.notice.as_ref().map(|notice| notice.text.as_str())
     }
 
     /// One line shown at the bottom until the next key.
     pub fn set_notice(&mut self, text: String) {
-        self.notice = Some(text);
+        self.notice = Some(ModalNotice::warning(text));
+    }
+
+    pub fn report_copy(&mut self, delivery: &crate::clipboard::CopyDelivery) {
+        let confirmed = matches!(delivery, crate::clipboard::CopyDelivery::Clipboard { result, .. }
+            if result.delivery.is_confirmed());
+        self.notice = Some(ModalNotice {
+            text: delivery.toast_message().into_owned(),
+            warning: !confirmed,
+        });
     }
 
     pub fn handle_key(&mut self, key: &KeyEvent) -> AcpxOutcome {
@@ -422,7 +442,7 @@ impl AcpxModalState {
             .client()
             .send("run.cancel", Some(&run_id), None, serde_json::json!({}));
         let _ = request;
-        self.notice = Some(format!("{run_id}: cancel sent"));
+        self.set_notice(format!("{run_id}: cancel sent"));
         true
     }
 
@@ -435,12 +455,12 @@ impl AcpxModalState {
             match answerer.poll() {
                 piw_gate::AnswerProgress::Pending => {}
                 piw_gate::AnswerProgress::Accepted => {
-                    self.notice = Some("answer accepted; the run continues".to_string());
+                    self.notice = Some(ModalNotice::warning("answer accepted; the run continues".to_string()));
                     any_done = true;
                     changed = true;
                 }
                 piw_gate::AnswerProgress::Refused(message) => {
-                    self.notice = Some(message);
+                    self.notice = Some(ModalNotice::warning(message));
                     any_done = true;
                     changed = true;
                 }
@@ -457,15 +477,15 @@ impl AcpxModalState {
     /// a flow. The answer itself is a `GateAnswerer` polled on the tick.
     fn answer_mirror_gate(&mut self, run_id: &str, choice_label: &str, choice_key: &str) -> AcpxOutcome {
         let Some(m) = runtime::mirror() else {
-            self.notice = Some("no workflow server is running; answer there instead".to_string());
+            self.set_notice("no workflow server is running; answer there instead".to_string());
             return AcpxOutcome::Changed;
         };
         let Some(gate) = m.gate(run_id) else {
-            self.notice = Some("this run is not parked on a question the mirror can see".to_string());
+            self.set_notice("this run is not parked on a question the mirror can see".to_string());
             return AcpxOutcome::Changed;
         };
         let Some(index) = gate.choices.iter().position(|c| c.key == choice_key) else {
-            self.notice = Some(format!("choice `{choice_key}` is not one this run waits on"));
+            self.set_notice(format!("choice `{choice_key}` is not one this run waits on"));
             return AcpxOutcome::Changed;
         };
         let answer = PiwGateAnswer::Choice {
@@ -477,7 +497,7 @@ impl AcpxModalState {
             gate,
             answer,
         ));
-        self.notice = Some(format!("{choice_label}: answer sent"));
+        self.set_notice(format!("{choice_label}: answer sent"));
         AcpxOutcome::Changed
     }
 
@@ -528,7 +548,7 @@ impl AcpxModalState {
                 };
                 let input_json = bundle::gate_input(run, &choice).to_string();
                 // Back to the list, where the new run appears.
-                self.notice = Some(format!("{choice}: started {}", flow_file.display()));
+                self.set_notice(format!("{choice}: started {}", flow_file.display()));
                 self.mode = Mode::Ledger;
                 self.run_view = None;
                 AcpxOutcome::RunFlow { flow_file, input_json }
@@ -608,15 +628,15 @@ impl AcpxModalState {
         };
         let run = rv.run();
         let Some(step) = run.steps.get(idx) else {
-            self.notice = Some("no event log for this step".to_string());
+            self.set_notice("no event log for this step".to_string());
             return AcpxOutcome::Changed;
         };
         let Some(conv) = step.conversation.as_ref() else {
-            self.notice = Some("no event log for this step".to_string());
+            self.set_notice("no event log for this step".to_string());
             return AcpxOutcome::Changed;
         };
         let Some(events_path) = run.session_events_path(&conv.session_id) else {
-            self.notice = Some("no event log for this step".to_string());
+            self.set_notice("no event log for this step".to_string());
             return AcpxOutcome::Changed;
         };
         let title = format!("{} › {}", run.summary.title, step.node_id);
@@ -831,24 +851,29 @@ pub fn render_acpx_modal(
         }
     }
 
-    if let Some(notice) = state.notice.as_deref() {
+    if let Some(notice) = state.notice.as_ref() {
         render_notice_row(buf, content, notice, &theme);
     }
 }
 
-fn render_notice_row(buf: &mut Buffer, content: Rect, notice: &str, theme: &Theme) {
+fn render_notice_row(buf: &mut Buffer, content: Rect, notice: &ModalNotice, theme: &Theme) {
     if content.height == 0 || content.width == 0 {
         return;
     }
     let y = content.y + content.height - 1;
     let row_rect = Rect::new(content.x, y, content.width, 1);
-    let warn_style = Style::default()
-        .fg(theme.warning)
-        .bg(theme.bg_base)
-        .add_modifier(Modifier::BOLD);
-    buf.set_style(row_rect, warn_style);
-    let text = truncate_str(&format!("! {notice}"), content.width as usize);
-    let line = Line::from(Span::styled(text, warn_style));
+    let (style, text) = if notice.warning {
+        (
+            Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
+            format!("! {}", notice.text),
+        )
+    } else {
+        (Style::default().fg(theme.text_primary), notice.text.clone())
+    };
+    let style = style.bg(theme.bg_base);
+    buf.set_style(row_rect, style);
+    let text = truncate_str(&text, content.width as usize);
+    let line = Line::from(Span::styled(text, style));
     buf.set_line(content.x, y, &line, content.width);
 }
 
@@ -857,7 +882,7 @@ const LEDGER_KEYS: &[(&str, &str)] = &[
     ("j / k / ↑ / ↓", "Move selection"),
     ("g / G", "Jump to first / last row"),
     ("J / K", "Scroll the preview of the selected run"),
-    ("Enter", "Open selected flow run or replay session"),
+    ("Enter", "Open selected flow run or replay agent turn"),
     ("/", "Filter rows by text"),
     ("a", "Only running and waiting runs"),
     ("s", "Cycle order: grouped, recent, name"),
@@ -1131,6 +1156,31 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[test]
+    fn copy_notice_distinguishes_confirmed_clipboard_from_file_fallback() {
+        use crate::clipboard::{ClipboardDelivery, CopyDelivery, CopyResult};
+
+        let mut state = AcpxModalState::open_at(None, None);
+        let area = Rect::new(0, 0, 48, 1);
+        let theme = Theme::default();
+        let mut buf = Buffer::empty(area);
+        state.report_copy(&CopyDelivery::Clipboard {
+            result: CopyResult {
+                message: "Copied!",
+                message_lead: "Copied!",
+                ticks: 30,
+                delivery: ClipboardDelivery::Confirmed,
+            },
+            file: None,
+        });
+        render_notice_row(&mut buf, area, state.notice.as_ref().unwrap(), &theme);
+        assert!(buffer_text(&buf).starts_with("Copied!"));
+
+        state.report_copy(&CopyDelivery::File { path: PathBuf::from("/work/last-copy.txt") });
+        render_notice_row(&mut buf, area, state.notice.as_ref().unwrap(), &theme);
+        assert!(buffer_text(&buf).starts_with("! Clipboard unreachable:"));
     }
 
     #[test]
