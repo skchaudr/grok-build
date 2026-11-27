@@ -48,6 +48,17 @@ Runner packet `cross-surface-gate`.
 
 **Return and review:** First return a state transition table and a runnable walkthrough for one newly parked PIW fixture. The fixture's gate guards a build or test step, or a result worth checking before going on; Sab: gates matter when the result is uncertain or a build is attached, and a gate guarding neither can be ignored. Start by tracing current behavior, including which surfaces can submit, before proposing implementation. Chat submits through `/answer <label>` and through plain text while a run is occupied; the matrix covers both and keeps what the standalone client does separate from what its protocol lists. Inspect the same run from all three surfaces, compare its state before and after bare `/answer`, send exactly one explicit allowed answer from one supported surface, and verify that each surface displays the engine's accepted branch through the next step. Include a rejected or stale submission case and explain how the UI lets the operator recover without resending an uncertain effect. Review the evidence and ownership split before editing the cross-surface implementation. The earlier cancellation report is untraced; the packet must not assume its cause.
 
+## Before packet 6: mirrored `/runs` and read-only `/open` (one owner)
+
+Packet 6's pick lists must use the same run discovery and open behavior as `/runs` and `/open <id>`, so this lands first, with one owner, and packet 6 is re-rendered from that commit.
+
+- `/runs` lists mirrored PIW runs beside native ACPX runs, each marked with its source.
+- `/open <id>` on a native ACPX run keeps restoring its waiting gate (`replay_run_into_session`, `sess.waiting_gate`), as Handoff 004 describes.
+- `/open <id>` on a mirrored PIW run is read-only: it replays the run and shows a waiting gate's question and choices, but sets no `waiting_gate`, so typing a choice label cannot answer a PIW gate as a native ACPX continuation. Live PIW answers belong to packet 5.
+- Tests: a native waiting run reopened by `/open` still accepts its gate answer; a mirrored waiting run reopened by `/open` shows the question, and a typed choice label answers nothing; `/runs` lists a mirrored run.
+
+The label-only edits land directly, outside the packets: the copy notice uses `delivery.toast_message()` (`app/dispatch/router.rs:1817`), and the Enter help row says "replay agent turn" (`views/acpx_modal.rs:860`).
+
 ## 6. Bare `/open` and `/flow` pick lists in ACPX chat
 
 Runner packet `bare-command-picker`. Owns `grok-acpx-acp/agent.rs` and `driver.rs`; no other code packet edits either file (packet 5 only reads `agent.rs`). From the friction log: commands that take arguments are good, a list to choose from when no argument is given is better.
