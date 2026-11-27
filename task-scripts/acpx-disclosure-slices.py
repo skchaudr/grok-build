@@ -167,7 +167,8 @@ Enter still opens the selected run. Expanding reveals older member runs in
 newest-first order by the same rule. When search matches an older ID, keep it
 selectable even if previously folded. Refresh keeps selection by run ID, even
 if a newer member arrives. On explicit collapse of a selected child, move
-selection to the visible representative. Leave Sessions behavior alone.
+selection to the visible representative. Leave the Agent Turns tab
+(LedgerTab::Sessions; its label now reads Agent Turns) behavior alone.
 
 Replace the visible dot rail with '<N> steps ran' where N is the number of
 recorded Step entries, including repeat attempts. RowExtra contract: add
@@ -180,7 +181,7 @@ the attached excerpts, and update the attached probe test's rail assertions
 cached bundle read; show unknown when extras are missing, never fake 0. Do not
 add I/O to render or widen the cache/read limit. Keep existing styles. For a
 concrete Flows selection, y copies the canonical '/open <run_id>' command;
-leave Sessions y untouched. The modal's copy notice is fixed separately by the
+on the Agent Turns tab y still copies the selected record ID. The modal's copy notice is fixed separately by the
 coordinator; the coordinator must also verify mirrored /open works before
 shipping this copy behavior.
 
@@ -307,7 +308,7 @@ the attached test_list_runs_order_and_title_fallback), and the empty cases.
         + source(f"{ACPX}/bundle.rs", (261, 295)),
         """
 Produce an operator-facing first-screen prototype, not a product patch.
-Inputs: the current AcpxModalState routes and full Flows/Sessions lists in
+Inputs: the current AcpxModalState routes and full Flows and Agent Turns lists in
 this packet; a genuinely waiting run asking 'Approve integration?', a
 failed beta8-merge run with cargo_check exit 101, and a running fixture.
 The screen's first job is to identify work needing attention, open a run,
