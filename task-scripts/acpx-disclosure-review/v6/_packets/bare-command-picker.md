@@ -1442,18 +1442,25 @@ not-found replies. Dismissing the question, an unknown choice, or a cancelled
 session opens nothing and sends one short line. No runs: reply
 "No acpx runs found." without a question. Opening stays inspection only.
 
-Bare /flow: list the configured default_flow() first when it exists, then the
-distinct flowPath values from the manifests of the 20 most recent native ACPX
-runs (runs_dir only: /flow launches native ACPX, so mirrored PIW runs are not
-flow candidates), newest
-use first, each with the flow name, last status and last start time of its
-most recent run. Add one driver function for that read next to list_runs,
-reusing read_json_file, json_str and parse_ts; skip manifests without a
-flowPath. Choosing a flow starts nothing yet: ask a second question for the
-task text (free-form allowed, same machinery). A nonempty task then starts
-exactly what `/flow <path> <task>` starts today through the existing Flow arm
-logic, including the .workflow.ts route; an empty or dismissed answer starts
-nothing and says so. No candidates: reply with the help text as today.
+Bare /flow: list the configured default_flow() first when it exists, then
+the flowPath values recorded in the manifests of the 20 most recent runs from
+both sources, runs_dir() and runtime::mirror_root(), newest first, each with
+the flow name, source, last status and last start time of its most recent
+run. /flow <file>.workflow.ts already routes to PIW (is_workflow_file,
+run_piw_flow), so a mirrored run's workflow is a valid candidate. Add one
+driver function next to list_runs that reads one runs directory's manifests,
+reusing read_json_file, json_str and parse_ts, and call it for each source;
+skip manifests without a flowPath. Resolve every candidate, the default flow
+included, the way explicit /flow resolves its file (resolve_flow_path against
+session_cwd); skip a candidate whose resolved path is not an existing file
+(recorded paths under /private/tmp are often gone); deduplicate by resolved
+path, keeping the newest run's description. Selecting a candidate does exactly
+what typing `/flow <resolved path>` does today: it goes through the existing
+Flow arm with input {} and starts a new run, the .workflow.ts route included.
+Move that arm's body into one helper both paths call. Dismissing the question,
+an unknown choice or a cancelled session starts nothing and sends one short
+line. No candidates left after filtering: reply with the help text as today.
+Mirrored /open stays read-only.
 
 Keep `/open <id>`, `/flow <file> ...`, /runs, /answer (bare /answer still
 Help) and plain-text handling unchanged. Update available_commands and
@@ -1465,9 +1472,14 @@ test passing unchanged. parse_command returns the new bare variants for "/open" 
 (and still Help for "/runs extra" and bare "/answer"); build the option lists
 through pure functions you add and test them: newest-first order across both
 sources, run ID as id and label, description content including the source, title omitted when equal to the flow name,
-duplicate flowPath collapsed to its newest run, default flow first and not
-repeated, manifests without flowPath skipped (driver test with temp dirs like
-the attached test_list_runs_order_and_title_fallback), and the empty cases.
+flow candidates from both sources, a relative flowPath resolved against the
+session cwd, a missing file skipped (pass the file check in as a closure so the
+pure function needs no real paths), two runs whose paths resolve to the same
+file collapsed to the newest, default flow first and not repeated, manifests
+without flowPath skipped (driver test with temp dirs like the attached
+test_list_runs_order_and_title_fallback), selection mapped to the same
+Command::Flow { file, input: {} } that typing /flow <path> produces, and the
+empty cases.
 
 Edit list format. The file is Markdown. List the edits in application order;
 each edit has exactly this shape:
