@@ -2515,14 +2515,14 @@ mod mid_turn_esc_hint_tests {
             })
             .count()
     }
-    /// Esc never cancels a running turn; it names the registry cancel key instead, in every mode and from either pane.
+    /// Esc never cancels a running turn; it names the registry cancel key instead, from the conversation and from the minimal prompt.
+    /// The full-screen prompt moves to the conversation instead (`esc_mid_turn_from_prompt_moves_to_conversation`).
     #[test]
     fn mid_turn_esc_shows_ctrl_c_hint_instead_of_cancelling() {
         for (vim_mode, minimal, pane) in [
-            (false, false, AgentPane::Prompt),
-            (true, false, AgentPane::Prompt),
-            (true, true, AgentPane::Prompt),
             (false, false, AgentPane::Scrollback),
+            (true, false, AgentPane::Scrollback),
+            (true, true, AgentPane::Prompt),
         ] {
             let mut agent = running_agent(vim_mode);
             agent.active_pane = pane;
@@ -2571,6 +2571,7 @@ mod mid_turn_esc_hint_tests {
     fn esc_while_cancelling_is_swallowed_without_hint() {
         let mut agent = running_agent(false);
         agent.session.state = AgentState::TurnCancelling;
+        agent.active_pane = AgentPane::Scrollback;
         let outcome = press_esc(&mut agent);
         assert!(matches!(outcome, InputOutcome::Changed), "got {outcome:?}");
         assert_eq!(None, agent.active_toast_message());

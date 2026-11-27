@@ -823,22 +823,36 @@ impl AgentView {
             return Some(InputOutcome::Changed);
         }
 
+        // From the prompt, Esc leaves for the conversation (vim's insert → normal); the draft stays put
+        // Minimal has no scrollback pane, so it keeps the clear / rewind arms below
+        let to_conversation = self.active_pane == AgentPane::Prompt
+            && !self.is_minimal_mode()
+            && registry.find(ActionId::FocusScrollback).is_some();
+
         // Mid-turn (running or already cancelling), Esc cancels only when the F2 policy says so
         // A streaming wake turn follows the same policy as a running turn (the pane state is Idle only because wake turns are not adopted)
         // Push the grace deadline out so an Esc mash past the turn's end cannot silently arm the rewind picker below
-        if self.stoppable_activity_running() || self.any_cancel_pending() {
+        let mid_turn = self.stoppable_activity_running() || self.any_cancel_pending();
+        if mid_turn {
             if self.stoppable_activity_running() {
                 if crate::app::esc_cancels_turn() {
                     self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
                     self.suppress_rewind_arm(std::time::Instant::now());
                     return Some(InputOutcome::Action(Action::CancelTurn));
                 }
-                if let Some(cancel_key) = registry.key_for(ActionId::CancelTurn) {
+                if !to_conversation
+                    && let Some(cancel_key) = registry.key_for(ActionId::CancelTurn)
+                {
                     let cancel_key = cancel_key.display();
                     self.show_cancel_key_hint(&format!("Press {cancel_key} to cancel the turn"));
                 }
             }
             self.suppress_rewind_arm(std::time::Instant::now());
+        }
+        if to_conversation {
+            return Some(InputOutcome::Action(Action::FocusScrollback));
+        }
+        if mid_turn {
             return Some(InputOutcome::Changed);
         }
 

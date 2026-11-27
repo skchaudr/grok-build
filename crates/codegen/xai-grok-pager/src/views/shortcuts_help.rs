@@ -203,7 +203,7 @@ You can also drag an image file into the prompt.";
 const UNDO_LONG_HELP: &str = "\
 Undoes the last change in the prompt editor.\n\
 Covers typing, deletes, line/word kills, and clearing a draft.\n\
-Pressed right after a stash or a double-Esc clear, brings the draft back.";
+Pressed right after a stash or a Ctrl+C clear, brings the draft back.";
 
 const REDO_LONG_HELP: &str = "\
 Redoes the last undone change in the prompt editor.\n\

@@ -501,6 +501,28 @@ mod tests {
     use crate::key;
     use crossterm::event::{KeyCode, KeyModifiers};
 
+    /// The session overlay cycles on Ctrl+PgUp / Ctrl+PgDn (Ctrl+] kept for next); Ctrl+[ is Esc everywhere, so it binds nothing here.
+    #[test]
+    fn dashboard_overlay_cycle_keys() {
+        let registry = ActionRegistry::defaults();
+        let lookup = |code, modifiers| {
+            registry.lookup(&KeyEvent::new(code, modifiers), When::DashboardOverlay)
+        };
+        assert_eq!(
+            lookup(KeyCode::PageUp, KeyModifiers::CONTROL),
+            Some(ActionId::DashboardOverlayPrev)
+        );
+        assert_eq!(
+            lookup(KeyCode::PageDown, KeyModifiers::CONTROL),
+            Some(ActionId::DashboardOverlayNext)
+        );
+        assert_eq!(
+            lookup(KeyCode::Char(']'), KeyModifiers::CONTROL),
+            Some(ActionId::DashboardOverlayNext)
+        );
+        assert_eq!(lookup(KeyCode::Char('['), KeyModifiers::CONTROL), None);
+    }
+
     fn non_vscode_registry() -> ActionRegistry {
         ActionRegistry::non_vscode_for_test()
     }

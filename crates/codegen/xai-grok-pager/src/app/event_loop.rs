@@ -3433,11 +3433,30 @@ struct RoutedInputEvent {
 fn tty_suspend_armed(app: &AppView) -> bool {
     app.pending_editor.is_some() || app.pending_pager_path.is_some()
 }
+/// Ctrl+[ is Esc, as in a terminal without the Kitty protocol and in vim.
+/// With `DISAMBIGUATE_ESCAPE_CODES` pushed it arrives as its own key, so map it back here,
+/// before any view sees it; that keeps Esc reachable when a host app (dictation) swallows Esc.
+fn ctrl_bracket_as_esc(event: Event) -> Event {
+    match event {
+        Event::Key(key)
+            if key.code == KeyCode::Char('[') && key.modifiers == KeyModifiers::CONTROL =>
+        {
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc,
+                modifiers: KeyModifiers::NONE,
+                ..key
+            })
+        }
+        other => other,
+    }
+}
+
 fn normalize_input_event(
     timed: TimedInputEvent,
     live_input_started_at: std::time::Instant,
 ) -> RoutedInputEvent {
     let TimedInputEvent { event, arrived_at } = timed;
+    let event = ctrl_bracket_as_esc(event);
     let is_startup_replay = arrived_at < live_input_started_at;
     #[cfg(target_os = "linux")]
     {
@@ -4348,6 +4367,47 @@ fn traces_state_mut(app: &mut AppView) -> Option<&mut crate::views::traces_modal
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Ctrl+[ reaches every view as a bare Esc (the Kitty protocol reports it as its own key); other Ctrl chords and a plain `[` pass through.
+    #[test]
+    fn ctrl_bracket_is_esc() {
+        let at = std::time::Instant::now();
+        let routed = |key: KeyEvent| {
+            normalize_input_event(
+                TimedInputEvent {
+                    event: Event::Key(key),
+                    arrived_at: at,
+                },
+                at,
+            )
+            .event
+        };
+        assert_eq!(
+            routed(KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        );
+        assert_eq!(
+            routed(KeyEvent::new_with_kind(
+                KeyCode::Char('['),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Release,
+            )),
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            ))
+        );
+        for key in [
+            KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL),
+            KeyEvent::new(
+                KeyCode::Char('['),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        ] {
+            assert_eq!(routed(key), Event::Key(key));
+        }
+    }
     fn nth<T>(xs: &[T], i: usize) -> &T {
         let Some(x) = xs.get(i) else {
             panic!("expected index {i}, len {}", xs.len());

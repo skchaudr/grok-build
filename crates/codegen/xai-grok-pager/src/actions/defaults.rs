@@ -448,7 +448,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Rewinds the conversation to an earlier turn, discarding later turns. File changes made after that turn are left as-is.\nPick a turn from the list; a running turn is offered for cancel first. When Confirm before rewind is on (default), each pick asks Yes / Yes, and don't ask again / No. Picking \"Yes, and don't ask again\" turns the setting off in /settings.\nDestructive: later turns are dropped.\nAlso reachable idle with an empty prompt via Esc Esc (within 800ms), same as `/rewind`.",
+                "Rewinds the conversation to an earlier turn, discarding later turns. File changes made after that turn are left as-is.\nPick a turn from the list; a running turn is offered for cancel first. When Confirm before rewind is on (default), each pick asks Yes / Yes, and don't ask again / No. Picking \"Yes, and don't ask again\" turns the setting off in /settings.\nDestructive: later turns are dropped.\nAlso reachable idle from the conversation with an empty prompt via Esc Esc (within 800ms), same as `/rewind`.",
             ),
         },
         ActionDef {
@@ -505,7 +505,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Moves focus from the prompt to the scrollback so you can navigate the transcript.\nTab works in both simple and vim scrollback modes.\nEsc is reserved for the cancel / clear / rewind policy, not focus.",
+                "Moves focus from the prompt to the scrollback so you can navigate the transcript.\nTab and Esc (or Ctrl+[) both work, in simple and vim scrollback modes; the draft stays in the prompt.\nIf F2 makes Esc cancel a running turn, Esc cancels instead while one runs.",
             ),
         },
         ActionDef {
@@ -520,7 +520,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Interrupts the agent's current turn and stops generation, keeping the session open.\nBy default Esc cancels immediately while a turn is running; F2 can require Ctrl+C instead.\nCtrl+C cancels when the prompt is empty; with a non-empty draft it clears the prompt first and leaves the turn running.\nIt stops the turn, not the app; use the quit shortcut to exit.",
+                "Interrupts the agent's current turn and stops generation, keeping the session open.\nBy default Esc cancels immediately while a turn is running; F2 can require Ctrl+C instead, and Esc then moves to the conversation.\nCtrl+C cancels when the prompt is empty; with a non-empty draft it clears the prompt first and leaves the turn running.\nIt stops the turn, not the app; use the quit shortcut to exit.",
             ),
         },
         ActionDef {
@@ -1218,12 +1218,13 @@ pub(super) fn default_actions(
             id: ActionId::DashboardOverlayPrev,
             label: "prev session",
             description: "Previous session",
-            default_key: key!('[', CONTROL),
+            // Not Ctrl+[: that is Esc everywhere (see `event_loop::normalize_input_event`)
+            default_key: key!(PageUp, CONTROL),
             alt_keys: vec![],
             category: Category::Dashboard,
             context: When::DashboardOverlay,
             hint_priority: None,
-            hint_key_display: Some("Ctrl+["),
+            hint_key_display: Some("Ctrl+PgUp"),
             requires_confirmation: false,
             long_help: None,
         },
@@ -1231,12 +1232,12 @@ pub(super) fn default_actions(
             id: ActionId::DashboardOverlayNext,
             label: "next session",
             description: "Next session",
-            default_key: key!(']', CONTROL),
-            alt_keys: vec![],
+            default_key: key!(PageDown, CONTROL),
+            alt_keys: vec![key!(']', CONTROL)],
             category: Category::Dashboard,
             context: When::DashboardOverlay,
             hint_priority: None,
-            hint_key_display: Some("Ctrl+]"),
+            hint_key_display: Some("Ctrl+PgDn"),
             requires_confirmation: false,
             long_help: None,
         },

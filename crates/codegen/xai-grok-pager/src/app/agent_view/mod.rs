@@ -28,17 +28,18 @@
 //!       after overlays/dropdowns/selection returned Changed / stole Esc:
 //!       turn running, F2 cancel policy = Esc → CancelTurn (even with a draft;
 //!         the draft is preserved, unlike Ctrl+C's clear-first gesture)
-//!       turn running, F2 cancel policy = Ctrl+C → Changed (swallow Esc)
-//!       turn cancelling → CancelTurn in every mode (retry lost ack;
-//!         Ctrl+C escalates to Quit)
-//!       idle + non-empty prompt, prompt pane only → ArmPending ClearPrompt (2× within 800ms, hint)
+//!       otherwise, full-screen prompt pane → FocusScrollback (draft kept;
+//!         Ctrl+[ arrives as Esc, see `event_loop::ctrl_bracket_as_esc`)
+//!       turn running, F2 cancel policy = Ctrl+C → Changed (swallow Esc, hint Ctrl+C)
+//!       turn cancelling → Changed (Ctrl+C escalates to Quit)
+//!       idle + non-empty prompt, minimal prompt only → ArmPending ClearPrompt (2× within 800ms, hint)
 //!       idle + empty + messages, either pane (Normal composer mode, no
 //!         needs-input overlay pending, no open history search, and not
 //!         within ESC_CANCEL_REWIND_GRACE of a mid-turn Esc) →
 //!         ArmPending RewindShowPicker (2×, silent)
 //!       idle otherwise (scrollback-pane draft / latent mode / pending overlay /
 //!         open history search / mid-turn Esc grace, or empty + no messages) →
-//!         Changed (swallow Esc; not FocusScrollback)
+//!         Changed (swallow Esc)
 //!   → 4. return Unchanged → bubbles to app_view for global actions (quit)
 //! ```
 //!

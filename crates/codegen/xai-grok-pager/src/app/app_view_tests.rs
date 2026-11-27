@@ -3951,14 +3951,14 @@ fn ctrl_c_running_prompt_with_text_clears_text_and_preserves_turn() {
     );
 }
 /// Mid-turn Esc is swallowed at the app level too: no `CancelTurn`, no armed double-press, no trigger stamp, draft intact, and a toast naming Ctrl+C.
-/// Covers both panes, vim on and off, and the minimal screen mode (which used to Esc-cancel regardless of vim).
+/// Covers the conversation pane, vim on and off, and the minimal screen mode's prompt (which used to Esc-cancel regardless of vim).
+/// The full-screen prompt moves to the conversation instead: `esc_mid_turn_from_prompt_moves_to_conversation`.
 #[test]
 fn esc_mid_turn_hints_ctrl_c_instead_of_cancelling() {
     for (vim_mode, minimal, pane) in [
-        (false, false, crate::views::agent::ActivePane::Prompt),
-        (true, false, crate::views::agent::ActivePane::Prompt),
-        (true, true, crate::views::agent::ActivePane::Prompt),
         (false, false, crate::views::agent::ActivePane::Scrollback),
+        (true, false, crate::views::agent::ActivePane::Scrollback),
+        (true, true, crate::views::agent::ActivePane::Prompt),
     ] {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
@@ -4032,6 +4032,31 @@ fn esc_mid_turn_hints_ctrl_c_instead_of_cancelling() {
         }
     }
 }
+/// With Ctrl+C as the cancel key (F2), Esc from the full-screen prompt mid-turn moves to the conversation:
+/// no cancel, no hint toast, no armed clear, the draft and the turn both survive.
+#[test]
+fn esc_mid_turn_from_prompt_moves_to_conversation() {
+    for vim_mode in [false, true] {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.active_pane = crate::views::agent::ActivePane::Prompt;
+        agent.vim_mode = vim_mode;
+        agent.prompt.textarea.set_text("draft while streaming");
+        let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::FocusScrollback)),
+            "vim={vim_mode}: got {outcome:?}"
+        );
+        assert!(app.pending_action.is_none());
+        let agent = app.agents.get(&id).expect("agent");
+        assert!(agent.cancel_trigger_hint.is_none());
+        assert!(agent.toast.is_none(), "vim={vim_mode}: no cancel hint");
+        assert!(agent.session.state.is_turn_running());
+        assert_eq!(agent.prompt.textarea.text(), "draft while streaming");
+    }
+}
 /// A manual `/compact` in flight (CommandRunning) and a streaming wake turn (pane state Idle) get the same hint, not a cancel.
 #[test]
 fn esc_during_compact_or_wake_turn_hints_instead_of_cancelling() {
@@ -4042,7 +4067,7 @@ fn esc_during_compact_or_wake_turn_hints_instead_of_cancelling() {
         command: crate::app::agent::AgentCommand::Compact,
         started_at: std::time::Instant::now(),
     };
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
+    agent.active_pane = crate::views::agent::ActivePane::Scrollback;
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         matches!(outcome, InputOutcome::Changed),
@@ -4078,7 +4103,7 @@ fn esc_during_compact_or_wake_turn_hints_instead_of_cancelling() {
         prompt_id: "task-completed-bg1".into(),
         cancel_sent: false,
     });
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
+    agent.active_pane = crate::views::agent::ActivePane::Scrollback;
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         matches!(outcome, InputOutcome::Changed),
@@ -4255,7 +4280,7 @@ fn esc_cancel_grace_holds_rewind_arm_then_expires() {
     let id = super::super::agent::AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
     agent.session.state = AgentState::TurnRunning;
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
+    agent.active_pane = crate::views::agent::ActivePane::Scrollback;
     agent.vim_mode = false;
     agent
         .scrollback
@@ -4301,52 +4326,25 @@ fn esc_cancel_grace_holds_rewind_arm_then_expires() {
     );
 }
 #[test]
-fn idle_non_empty_double_esc_clears_prompt() {
+fn idle_prompt_esc_moves_to_conversation_keeping_draft() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
     agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.prompt.textarea.set_text("draft to clear");
+    agent.prompt.textarea.set_text("draft to keep");
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(matches!(outcome, InputOutcome::Changed));
-    let pending = app.pending_action.as_ref().expect("arm clear");
-    assert_eq!(pending.label, Some("clear"));
-    assert!(matches!(pending.action, Action::ClearPrompt));
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(matches!(outcome, InputOutcome::Action(Action::ClearPrompt)));
-    assert!(app.pending_action.is_none());
-    let effects = crate::app::dispatch::dispatch(Action::ClearPrompt, &mut app);
-    assert!(effects.is_empty());
     assert!(
-        app.agents
-            .get(&id)
-            .unwrap_or_else(|| panic!("missing map entry"))
-            .prompt
-            .textarea
-            .text()
-            .is_empty()
+        matches!(outcome, InputOutcome::Action(Action::FocusScrollback)),
+        "Esc leaves the prompt for the conversation, got {outcome:?}"
     );
-    assert!(
-        app.agents
-            .get(&id)
-            .unwrap_or_else(|| panic!("missing map entry"))
-            .session
-            .prompt_history
-            .is_empty(),
-        "the cleared draft goes to the stash, never to the history"
-    );
-    assert_eq!(
-        app.agents
-            .get(&id)
-            .unwrap_or_else(|| panic!("missing map entry"))
-            .prompt_stash
-            .as_ref()
-            .map(|entry| entry.prompt.text.as_str()),
-        Some("draft to clear")
-    );
+    assert!(app.pending_action.is_none(), "Esc no longer arms a clear");
+    crate::app::dispatch::dispatch(Action::FocusScrollback, &mut app);
+    let agent = app.agents.get(&id).expect("agent");
+    assert_eq!(agent.active_pane, crate::views::agent::ActivePane::Scrollback);
+    assert_eq!(agent.prompt.textarea.text(), "draft to keep");
 }
 #[test]
-fn idle_empty_with_messages_double_esc_opens_rewind_silent() {
+fn idle_empty_with_messages_esc_to_conversation_then_double_esc_opens_rewind() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
@@ -4356,6 +4354,13 @@ fn idle_empty_with_messages_double_esc_opens_rewind_silent() {
         .push_block(crate::scrollback::block::RenderBlock::user_prompt(
             "earlier",
         ));
+    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(
+        outcome,
+        InputOutcome::Action(Action::FocusScrollback)
+    ));
+    assert!(app.pending_action.is_none());
+    crate::app::dispatch::dispatch(Action::FocusScrollback, &mut app);
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(matches!(outcome, InputOutcome::Changed));
     let pending = app.pending_action.as_ref().expect("arm rewind");
@@ -4377,7 +4382,7 @@ fn external_idle_empty_double_esc_opens_session_tree() {
     let id = super::super::agent::AgentId(0);
     app.external_agent = true;
     let agent = app.agents.get_mut(&id).unwrap();
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
+    agent.active_pane = crate::views::agent::ActivePane::Scrollback;
     agent
         .scrollback
         .push_block(crate::scrollback::block::RenderBlock::user_prompt(
@@ -4407,7 +4412,7 @@ fn external_idle_empty_without_messages_double_esc_opens_session_tree() {
     let id = super::super::agent::AgentId(0);
     app.external_agent = true;
     let agent = app.agents.get_mut(&id).unwrap();
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
+    agent.active_pane = crate::views::agent::ActivePane::Scrollback;
     assert!(agent.scrollback.is_empty());
 
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
@@ -4432,13 +4437,13 @@ fn idle_empty_no_messages_esc_is_swallowed() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
+    agent.active_pane = crate::views::agent::ActivePane::Scrollback;
     assert!(agent.scrollback.is_empty());
     assert!(agent.prompt.textarea.text().is_empty());
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         matches!(outcome, InputOutcome::Changed),
-        "idle empty with no messages must swallow Esc (not FocusScrollback), got {outcome:?}"
+        "idle empty with no messages must swallow Esc (not FocusPrompt), got {outcome:?}"
     );
     assert!(app.pending_action.is_none());
     assert_eq!(
@@ -4446,7 +4451,7 @@ fn idle_empty_no_messages_esc_is_swallowed() {
             .get(&id)
             .unwrap_or_else(|| panic!("missing map entry"))
             .active_pane,
-        crate::views::agent::ActivePane::Prompt
+        crate::views::agent::ActivePane::Scrollback
     );
 }
 #[test]
@@ -4457,6 +4462,7 @@ fn mouse_send_retires_armed_clear_so_next_esc_swallows() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.active_pane = crate::views::agent::ActivePane::Prompt;
         agent.prompt.textarea.set_text("draft to clear");
+        agent.prompt.set_screen_mode(crate::app::ScreenMode::Minimal);
         agent.vim_mode = true;
     }
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
@@ -4500,6 +4506,7 @@ fn assert_submit_path_retires_clear_arm(action: Action) {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.active_pane = crate::views::agent::ActivePane::Prompt;
         agent.prompt.textarea.set_text("draft to clear");
+        agent.prompt.set_screen_mode(crate::app::ScreenMode::Minimal);
         agent.vim_mode = true;
     }
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
@@ -4554,6 +4561,7 @@ fn stale_idle_clear_arm_never_fires_on_busy_agent() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.active_pane = crate::views::agent::ActivePane::Prompt;
         agent.prompt.textarea.set_text("draft to clear");
+        agent.prompt.set_screen_mode(crate::app::ScreenMode::Minimal);
         agent.vim_mode = true;
     }
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
@@ -4594,7 +4602,7 @@ fn stale_idle_rewind_arm_never_fires_on_busy_agent() {
     let id = super::super::agent::AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.active_pane = crate::views::agent::ActivePane::Prompt;
+        agent.active_pane = crate::views::agent::ActivePane::Scrollback;
         agent.vim_mode = true;
         agent
             .scrollback
@@ -4631,6 +4639,7 @@ fn stale_idle_clear_arm_never_fires_on_wake_turn() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.active_pane = crate::views::agent::ActivePane::Prompt;
         agent.prompt.textarea.set_text("draft to clear");
+        agent.prompt.set_screen_mode(crate::app::ScreenMode::Minimal);
         agent.vim_mode = true;
     }
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
@@ -4666,7 +4675,7 @@ fn esc_consumed_by_policy_disarms_esc_d_combo() {
     let id = super::super::agent::AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.active_pane = crate::views::agent::ActivePane::Prompt;
+        agent.active_pane = crate::views::agent::ActivePane::Scrollback;
         assert!(agent.scrollback.is_empty());
         assert!(agent.prompt.textarea.text().is_empty());
     }
@@ -4684,7 +4693,7 @@ fn esc_consumed_by_policy_disarms_esc_d_combo() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
-        agent.active_pane = crate::views::agent::ActivePane::Prompt;
+        agent.active_pane = crate::views::agent::ActivePane::Scrollback;
         agent.vim_mode = true;
     }
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
@@ -4705,6 +4714,7 @@ fn idle_non_empty_esc_ttl_expiry_re_arms_without_clearing() {
     let agent = app.agents.get_mut(&id).unwrap();
     agent.active_pane = crate::views::agent::ActivePane::Prompt;
     agent.prompt.textarea.set_text("still here");
+    agent.prompt.set_screen_mode(crate::app::ScreenMode::Minimal);
     let _ = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     if let Some(p) = app.pending_action.as_mut() {
         p.expires_at = std::time::Instant::now() - std::time::Duration::from_millis(1);
@@ -4725,7 +4735,7 @@ fn idle_non_empty_esc_ttl_expiry_re_arms_without_clearing() {
     assert_eq!(pending.label, Some("clear"));
 }
 #[test]
-fn idle_images_only_double_esc_arms_clear() {
+fn idle_images_only_prompt_esc_moves_to_conversation_keeping_chips() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
@@ -4741,31 +4751,15 @@ fn idle_images_only_double_esc_arms_clear() {
         ));
     assert!(agent.prompt.textarea.text().is_empty());
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(matches!(outcome, InputOutcome::Changed));
-    let pending = app.pending_action.as_ref().expect("arm clear for images");
-    assert!(matches!(pending.action, Action::ClearPrompt));
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(matches!(outcome, InputOutcome::Action(Action::ClearPrompt)));
+    assert!(matches!(
+        outcome,
+        InputOutcome::Action(Action::FocusScrollback)
+    ));
     assert!(app.pending_action.is_none());
-    let effects = crate::app::dispatch::dispatch(Action::ClearPrompt, &mut app);
-    assert!(effects.is_empty());
-    assert!(
-        app.agents
-            .get(&id)
-            .unwrap_or_else(|| panic!("missing map entry"))
-            .prompt
-            .images
-            .is_empty(),
-        "second Esc must clear the image chips"
-    );
-    assert!(
-        app.agents
-            .get(&id)
-            .unwrap_or_else(|| panic!("missing map entry"))
-            .session
-            .prompt_history
-            .is_empty(),
-        "an images-only (empty-text) clear records nothing in prompt history"
+    assert_eq!(
+        app.agents.get(&id).expect("agent").prompt.images.len(),
+        1,
+        "Esc must not drop the image chips"
     );
 }
 /// Scrollback-pane double-Esc, idle, empty prompt, and messages: first Esc arms `RewindShowPicker` silently, second within the TTL opens the picker.
@@ -6794,7 +6788,7 @@ fn overlay_esc_dismisses_btw_before_dashboard_backout() {
 /// policy and is consumed there.
 
 #[test]
-fn overlay_esc_running_turn_empty_prompt_swallows_when_ctrl_c_required() {
+fn overlay_esc_running_turn_empty_prompt_moves_to_conversation_when_ctrl_c_required() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
     app.active_view = ActiveView::Agent(id);
@@ -6809,8 +6803,8 @@ fn overlay_esc_running_turn_empty_prompt_swallows_when_ctrl_c_required() {
     assert!(agent.prompt.text().is_empty());
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
-        matches!(outcome, InputOutcome::Changed),
-        "running-turn overlay Esc (empty prompt) must swallow, not detach/cancel, got {outcome:?}",
+        matches!(outcome, InputOutcome::Action(Action::FocusScrollback)),
+        "running-turn overlay Esc (empty prompt) moves to the conversation, not detach/cancel, got {outcome:?}",
     );
     assert!(
         !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
@@ -6947,7 +6941,7 @@ fn overlay_esc_cancelling_scrollback_swallows_not_backout() {
 /// Counterpart to the back-out: a NON-EMPTY draft Esc in an overlay must pass through to the agent's policy (arms "press again to clear").
 /// It must never back out, so the user doesn't lose a draft by reaching for the dashboard.
 #[test]
-fn overlay_esc_with_draft_arms_clear_not_backout() {
+fn overlay_esc_with_draft_moves_to_conversation_not_backout() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
     app.active_view = ActiveView::Agent(id);
@@ -6963,8 +6957,11 @@ fn overlay_esc_with_draft_arms_clear_not_backout() {
         !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
         "a drafted overlay prompt Esc must NOT back out, got {outcome:?}",
     );
-    let pending = app.pending_action.as_ref().expect("clear arm");
-    assert_eq!(pending.label, Some("clear"));
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::FocusScrollback)),
+        "a drafted overlay prompt Esc moves to the conversation, got {outcome:?}",
+    );
+    assert!(app.pending_action.is_none());
 }
 /// A Bash/Remember empty prompt keeps Esc as its mode-exit even in an overlay.
 /// The back-out is gated to `PromptInputMode::Normal`, so the special-mode Esc is not stolen as a dashboard back-out.

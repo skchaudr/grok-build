@@ -870,7 +870,11 @@ impl AgentView {
             if self.overlay_can_cycle {
                 hints.insert(
                     0,
-                    HintItem::paired(key!('[', CONTROL), key!(']', CONTROL), "prev/next agent"),
+                    HintItem::paired(
+                        key!(PageUp, CONTROL),
+                        key!(PageDown, CONTROL),
+                        "prev/next agent",
+                    ),
                 );
             }
             hints.insert(0, HintItem::new(
