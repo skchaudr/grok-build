@@ -1,16 +1,20 @@
-# Handoff 004 — Operating Pi workflows through ACPX: fixes, progressive disclosure, beta8 repair
+---
+title: "Handoff 004 — Operating Pi workflows through ACPX: fixes, progressive disclosure, beta8 repair"
+date: 2026-11-26
+tags: []
+---
 
-2026-11-26. Two sessions wrote a 004 at the same time; this merges them. It is a handoff, not an approved UI spec or a request to implement everything below. Paths, commits and code locations are left to the repo (`git log`, grep); recheck refs before implementing. The main worktree has unrelated uncommitted changes and untracked slice output — preserve them.
+# Handoff 004 — Operating Pi workflows through ACPX: fixes, progressive disclosure, beta8 repair
 
 ## Goal
 
 Run robust `pi-workflows` (PIW) with any compatible ACP agent harness, not only Pi. ACPX is the bridge to those agents; PIW owns workflow execution and state; the Grok UI lets the human start, follow, inspect and intervene directly, without asking another agent to interpret the run or act on their behalf.
 
-Sab's design direction: **a substantially minimal first screen, with interactive, wizard-style disclosure into a lot of information.** Keep the full evidence available, reveal it at the point of use, and give consequential actions an explicit path of their own. Missing wiring in a first draft is normal; distinguish it from real limits such as evidence that was never recorded or external effects that cannot be undone.
+Sab's design direction: **progressive disclosure of information, not complete dumps** Keep the full evidence available, reveal it at the point of use, and give consequential actions an explicit path of their own. 
 
 ## Where things stand
 
-The seven Antigravity slices (Gemini 4 Neon, medium thinking) and fixes C1–C3 landed on `main`. One session reports them tested and installed on both Macs. The other cautions that those tests did not prove a live gate is usable, that the three-surface gate walkthrough below was never done, and that no release build or upstream sync happened in that session.
+The seven Antigravity slices (Gemini 4 Neon, medium thinking) and fixes C1–C3 landed on `main`. The three-surface gate walkthrough below was never done, and that no release build or upstream sync happened in that session.
 
 The seven-slice run itself proved ACP transport and concurrency — seven workers at once through `acpx` into `agy`, all returns accepted, no tool calls — but it used the standalone slice runner, not the PIW operator loop. It is the model for the next exercise: a PIW run with parallel workers and a human decision in the middle.
 
@@ -22,9 +26,7 @@ A mirror fix then let large finished runs (the 255-node `monitor` workflow) load
 
 Keep these separate from the disclosure redesign. Release order: verify the fixes, then upstream sync, retest the merged build, and only then install on mini and sab-air with `scripts/install-fork.sh`.
 
-1. **Keyboard focus in the conversation is too faint.** Sab found it hard to see on sab-air in both Kanagawa Lotus and Monosami Ink Light. That is enough to strengthen both, even though Lotus looked visible in the mini capture. A palette edit for exactly those two themes sits uncommitted in the main checkout, never built or looked at. Note the outline comes from the selection border, not `bg_visual`. Look before and after in every shipped theme (per `AGENTS.md`), with both reported themes checked on the Air. HY4 Flash's earlier audit also flagged Monosami Light, Kanso Pearl and Dayfox; keep those visible as follow-ups. Earlier captures in `/tmp` are of the installed build and do not verify the pending change.
-2. **Queued messages sometimes send twice.** Nobody has reproduced it. A source review found where the queue drains and where the one-shot echo is suppressed, but that proves nothing. Capture a uniquely labelled queued prompt during a busy turn and count outbound `session/prompt` requests against what the agent received and what rendered: two requests means duplicate delivery, one request and two rows means duplicate display. Add a regression for whichever actually fails.
-3. **The pending-gate interaction is unproven.** After a run has parked, open it from the ACPX modal, standalone PIW and Grok ACPX chat. The question and choices must be discoverable; inspecting the gate or typing bare `/answer` must never change or cancel the run; an explicit answer on one surface must show the engine's real next state on the others. Today the detail pane treats "waiting + answered locally" as completed, and mirrored answers get confirmation copy meant for launching a native ACPX continuation — the UI must tell `Answer sent` / `Answer accepted` apart from run completion, and answering an existing PIW run apart from starting a new flow. Ask for text or checkpoint input only when the gate needs it. An earlier report of `/answer` cancelling a run still has no traced cause.
+**The pending-gate interaction is unproven.** After a run has parked, open it from the ACPX modal, standalone PIW and Grok ACPX chat. The question and choices must be discoverable; inspecting the gate or typing bare `/answer` must never change or cancel the run; an explicit answer on one surface must show the engine's real next state on the others. Today the detail pane treats "waiting + answered locally" as completed, and mirrored answers get confirmation copy meant for launching a native ACPX continuation — the UI must tell `Answer sent` / `Answer accepted` apart from run completion, and answering an existing PIW run apart from starting a new flow. Ask for text or checkpoint input only when the gate needs it. An earlier report of `/answer` cancelling a run still has no traced cause.
 
 ### Part 2 — Four progressive-disclosure fixes in `/acpx` and `grok acpx`
 
