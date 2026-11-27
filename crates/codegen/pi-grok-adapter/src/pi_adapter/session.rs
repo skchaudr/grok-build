@@ -892,17 +892,6 @@ impl PiAgent {
     /// After Pi fork/clone replaces the runtime session file, rebind adapter state.
     pub(super) async fn rebind_after_session_branch(&self) -> Result<PiBootstrap, acp::Error> {
         let bootstrap = self.refresh().await.map_err(acp_internal)?;
-        if let Some(path) = bootstrap
-            .state
-            .session_file
-            .as_deref()
-            .filter(|path| !path.is_empty())
-        {
-            self.state
-                .borrow_mut()
-                .session_paths
-                .insert(bootstrap.state.session_id.clone(), PathBuf::from(path));
-        }
         {
             let mut state = self.state.borrow_mut();
             let plan_path = plan_file_path(&bootstrap.state, &state.session_dir);
@@ -942,6 +931,9 @@ impl PiAgent {
             state.subagent_bridge_sequences.clear();
             state.subagent_session_to_id.clear();
             state.pending_subagent_replays.clear();
+        }
+        if let Some((id, path)) = bound_session_path(&bootstrap.state) {
+            state.session_paths.insert(id, path);
         }
         state.bootstrap = bootstrap;
     }

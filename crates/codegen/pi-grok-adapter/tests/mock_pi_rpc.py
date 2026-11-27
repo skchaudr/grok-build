@@ -64,6 +64,9 @@ state = {
     "pendingMessageCount": 0,
 }
 
+new_sessions = 0
+session_ids_by_file = {state["sessionFile"]: state["sessionId"]}
+
 for raw in sys.stdin:
     try:
         request = json.loads(raw)
@@ -181,6 +184,15 @@ for raw in sys.stdin:
         emit({"type": "agent_end", "messages": [], "willRetry": False})
         emit({"type": "agent_settled"})
     elif kind == "new_session":
+        # Like Pi: a fresh session id and file, written lazily (no JSONL yet).
+        new_sessions += 1
+        state["sessionId"] = f"mock-pi-new-{new_sessions}"
+        state["sessionFile"] = f"/tmp/mock-pi-new-{new_sessions}.jsonl"
+        session_ids_by_file[state["sessionFile"]] = state["sessionId"]
+        success(request, {"cancelled": False})
+    elif kind == "switch_session" and request.get("sessionPath") in session_ids_by_file:
+        state["sessionFile"] = request["sessionPath"]
+        state["sessionId"] = session_ids_by_file[request["sessionPath"]]
         success(request, {"cancelled": False})
     elif kind in {"abort", "compact", "set_model", "set_thinking_level", "set_session_name"}:
         success(request, {} if kind == "compact" else ...)

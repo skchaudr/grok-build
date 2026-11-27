@@ -309,6 +309,7 @@ impl PiAgent {
         eval_v2_only: bool,
     ) -> Result<Self> {
         let acp_session_id = bootstrap.state.session_id.clone();
+        let session_paths = bound_session_path(&bootstrap.state).into_iter().collect();
         let plan_file = plan_file_path(&bootstrap.state, &session_dir);
         let plan_mode = load_plan_tracker(&plan_file)?;
         let model_map = bootstrap
@@ -343,7 +344,7 @@ impl PiAgent {
                 bash_running: false,
                 live_assistant: None,
                 session_dir: session_dir.clone(),
-                session_paths: HashMap::new(),
+                session_paths,
                 tool_args: HashMap::new(),
                 tool_usage: HashMap::new(),
                 last_context_tokens: None,
@@ -415,6 +416,16 @@ impl PiAgent {
         self.replace_bootstrap(bootstrap.clone());
         Ok(bootstrap)
     }
+}
+
+/// The id and file of the session Pi is bound to, so it stays loadable by id
+/// even before any catalog listing has seen it (`/new`, fork, clone).
+fn bound_session_path(state: &PiState) -> Option<(String, PathBuf)> {
+    state
+        .session_file
+        .as_deref()
+        .filter(|path| !path.is_empty())
+        .map(|path| (state.session_id.clone(), PathBuf::from(path)))
 }
 
 fn build_model_catalog(

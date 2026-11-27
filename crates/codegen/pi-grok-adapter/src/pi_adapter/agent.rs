@@ -81,7 +81,12 @@ impl acp::Agent for PiAgent {
         arguments: acp::LoadSessionRequest,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
         let requested = arguments.session_id.0.to_string();
-        let active = self.state.borrow().bootstrap.state.session_id.clone();
+        let mut active = self.state.borrow().bootstrap.state.session_id.clone();
+        if requested != active && !self.state.borrow().session_paths.contains_key(&requested) {
+            // The cached id can trail Pi (it may already be on the requested
+            // session); ask Pi before calling the session unknown.
+            active = self.refresh().await.map_err(acp_internal)?.state.session_id;
+        }
         if requested != active {
             let session_path = self
                 .state

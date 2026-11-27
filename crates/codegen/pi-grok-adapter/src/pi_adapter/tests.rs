@@ -711,3 +711,91 @@ fn codemode_nested_calls_are_suppressed_by_known_parent_ids() {
         })
     ));
 }
+
+/// A `PiAgent` over `tests/mock_pi_rpc.py`, with a client that acknowledges every notification.
+async fn mock_pi_agent() -> (PiAgent, PiRpc, crate::pi_rpc::PiProcess, tempfile::TempDir) {
+    let mock = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/mock_pi_rpc.py");
+    let process = PiRpc::spawn(crate::pi_rpc::SpawnConfig {
+        program: "python3".into(),
+        prefix_args: vec![mock.display().to_string()],
+        cwd: std::env::temp_dir(),
+        pi_args: Vec::new(),
+        env: Vec::new(),
+    })
+    .await
+    .unwrap();
+    let rpc = process.rpc.clone();
+    let bootstrap = PiBootstrap::load(&rpc).await.unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+    tokio::task::spawn_local(async move {
+        while let Some(message) = client_rx.recv().await {
+            match message {
+                AcpClientMessage::SessionNotification(args) => {
+                    let _ = args.response_tx.send(Ok(()));
+                }
+                AcpClientMessage::ExtNotification(args) => {
+                    let _ = args.response_tx.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    });
+    let agent = PiAgent::new(
+        rpc.clone(),
+        client_tx,
+        bootstrap,
+        session_dir.path().to_path_buf(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .unwrap();
+    (agent, rpc, process, session_dir)
+}
+
+fn load_request(session_id: &str) -> acp::LoadSessionRequest {
+    acp::LoadSessionRequest::new(acp::SessionId::new(session_id.to_owned()), std::env::temp_dir())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn load_session_accepts_a_session_pi_moved_to_behind_the_adapter() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (agent, rpc, _process, _dir) = mock_pi_agent().await;
+            // Pi starts a session the adapter has not refreshed onto, and no catalog lists.
+            rpc.request(json!({ "type": "new_session" })).await.unwrap();
+            acp::Agent::load_session(&agent, load_request("mock-pi-new-1"))
+                .await
+                .expect("the session Pi is on loads without a catalog entry");
+            assert_eq!(agent.session_id().0.as_ref(), "mock-pi-new-1");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn load_session_returns_to_a_session_the_adapter_was_bound_to() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (agent, _rpc, _process, _dir) = mock_pi_agent().await;
+            let created = acp::Agent::new_session(
+                &agent,
+                acp::NewSessionRequest::new(std::env::temp_dir()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(created.session_id.0.as_ref(), "mock-pi-new-1");
+            acp::Agent::load_session(&agent, load_request("mock-pi-session"))
+                .await
+                .expect("the startup session stays loadable after /new");
+            acp::Agent::load_session(&agent, load_request("mock-pi-new-1"))
+                .await
+                .expect("the /new session stays loadable after switching away");
+            assert_eq!(agent.session_id().0.as_ref(), "mock-pi-new-1");
+        })
+        .await;
+}
