@@ -1,0 +1,37 @@
+{
+  "slice": "executed-timeline",
+  "ok": true,
+  "error": null,
+  "requested": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "agent": "agy acp --sandbox"
+  },
+  "effective": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "legacyCurrentModelId": "gemini-4-neon-high",
+    "tier": "Google AI Pro"
+  },
+  "timeToFirstCodeSeconds": 159.64,
+  "totalSeconds": 229.11,
+  "toolCallCount": 0,
+  "toolCalls": [],
+  "returnedBytes": 41553,
+  "returnedLines": 1140,
+  "quotaPercentage": "unknown",
+  "stopReason": "end_turn",
+  "usage": {
+    "inputTokens": 36046,
+    "outputTokens": 33527,
+    "cachedReadTokens": 0,
+    "cachedWriteTokens": 0,
+    "thoughtTokens": 21865,
+    "totalTokens": 69573
+  },
+  "stagedFiles": [
+    "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run1/grok-build/task-scripts/acpx-disclosure-returns/executed-timeline.edits.md"
+  ],
+  "rawEventsPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run1/_returns/executed-timeline.events.jsonl",
+  "rawReturnPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run1/_returns/executed-timeline.md"
+}
