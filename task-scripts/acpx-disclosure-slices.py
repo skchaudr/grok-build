@@ -197,21 +197,20 @@ behavior on both tabs. Stay out of unrelated existing gate-status tests.
         source(f"{MODAL}/detail.rs", (1, 243), (436, 533), (680, 1102),
                (1370, 1649), (1650, 2035), (2104, 2377), (2548, 2639))
         + source(f"{MODAL}/inspector.rs", (1, 219), (320, 358))
-        + source(f"{MODAL}/run.rs", (160, 215), (552, 611))
-        + source(APP_MODAL, (60, 130), (186, 290), (484, 541), (775, 900), (973, 1194))
+        + source(f"{MODAL}/run.rs", (552, 611))
+        + source(APP_MODAL, (775, 839))
         + source(f"{ACPX}/bundle.rs", (1, 350))
         + source(f"{ACPX}/step_digest.rs", (1, 85), (153, 259), (353, 460))
         + source(f"{ACPX}/step_evidence.rs", (32, 337), (339, 505)),
         rf"""
-Ownership: the selected-attempt view in {MODAL}/detail.rs, including tests,
-and in {APP_MODAL} only the Run-mode focus routing: the AcpxModalState field and
-initializer for it, handle_key, handle_run_key, wants_esc, the Mode::Run render
-call, RUN_KEYS, and tests in its test module. Do not edit run.rs (attached
-read-only; another packet owns it), the ledger, the inspector, or the Flows
-preview call. Preserve the existing run and node views, inspector, ledger rows,
-run copy behavior, gates, and entry routing. Keep DetailTarget's public
-variants unchanged so the timeline slice can proceed without touching its
-match arms. Preserve the existing scroll and narrow-width behavior.
+Ownership: the selected-attempt view in {MODAL}/detail.rs, including tests.
+Edit no other file. Preserve the existing run and node views, inspector, ledger
+rows, run copy behavior, gates, entry routing, and the Flows preview call in
+{APP_MODAL} (attached read-only to show how DetailPanel is called). Keep
+DetailTarget's public variants unchanged so the timeline slice can proceed
+without touching its match arms. Preserve the existing scroll and narrow-width
+behavior. Detail-pane focus and linewise copy are a later packet built on this
+one; don't add a cursor or selection here.
 
 Goal: show a compact attempt digest first, with the full evidence available
 through current inspector, timeline expansion, and conversation replay.
@@ -241,32 +240,8 @@ value_plain_text is used by the inspector and value_inline_summary by run.rs).
 Keep meaningful evidence for other kinds of attempts available. Preserve
 narrow-width wrapping and cache behavior. Don't add extra reads on every render.
 
-Detail focus and linewise copy. The detail pane scrolls today but can't take
-keyboard focus, so nothing in it can be selected or copied. In Mode::Run, Tab
-and Shift+Tab move focus between the stage tree and the detail pane (two
-targets, both directions), except while the run view captures keys. Focus
-always starts on the stage tree and returns there when the run closes. While
-the detail pane has focus, keys go to it, not the stage tree: j/k and Up/Down
-move a line cursor and keep it visible; v starts or ends a visual line range
-from the cursor; y copies the cursor line or the range; Y copies the whole
-pane; Esc first ends visual mode, then returns focus to the stage tree, and
-only Esc on the stage tree leaves the run as today (wants_esc stays true in
-Mode::Run). Copy returns AcpxOutcome::Copy with plain text: no styles, no
-indentation or breaks added by wrapping; a wrapped source line copies whole.
-Draw the cursor line and range with existing theme styles and only while the
-pane has focus; mark the focused pane the way the existing views mark focus.
-Changing the selected stage resets the cursor to the top. With the tree
-focused every current key, including J/K/D/U scrolling and y copying the
-stage output, behaves as today. Add the new keys to RUN_KEYS under a
-"detail pane" label.
-
-Tests: Tab into the detail pane of a failed shell attempt, move to its error
-tail line, y copies exactly that line; v plus movement plus y copies the range
-joined with newlines; Y copies the pane; Esc ends visual mode, then returns
-focus to the tree with the same stage selected, then leaves the run; Shift+Tab
-cycles the other way; with the tree focused, y still copies the stage output
-and v still toggles noise. Failed shell orders tail before command and cwd
-without saying success on a nonzero exit; repeated attempt shows its own number and timing; agent
+Tests: failed shell orders tail before command and cwd without saying success
+on a nonzero exit; repeated attempt shows its own number and timing; agent
 with brief evidence does not dump its prompt/output wrappers/transcript in the
 first view, and agent without evidence doesn't invent it; a pending gate still
 presents the question and choices; full evidence affordances remain accurate.

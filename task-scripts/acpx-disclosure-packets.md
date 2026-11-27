@@ -24,7 +24,7 @@ Runner packet `finished-run-ledger`.
 
 ## 3. Evidence-first detail
 
-Runner packet `attempt-detail` owns the selected-attempt pane in `acpx_modal/detail.rs` and, in `acpx_modal.rs`, only the Run-mode focus routing (`handle_key`, `handle_run_key`, `wants_esc`, the Run render call and `RUN_KEYS`); it does not touch `run.rs`. Tab and Shift+Tab move focus between the stage tree and the detail pane; there `v`, `y`, `Y` and Esc work like the pager's line viewer. Acceptance: Tab into the detail pane, select the compiler-error line, copy it, and return to the same stage. It reuses current evidence helpers, keeps pending choices available and directs operators to the existing inspector, expanded timeline or replay for full evidence. The digest goes first; existing conversation, artifact and event sections may follow, and no function is deleted or renamed. Check a nonzero `cargo_check` against `beta8-merge` and a finished agent attempt with recorded review evidence.
+Runner packet `attempt-detail` owns the selected-attempt pane in `acpx_modal/detail.rs` and edits no other file. It reuses current evidence helpers, keeps pending choices available and directs operators to the existing inspector, expanded timeline or replay for full evidence. The digest goes first; existing conversation, artifact and event sections may follow, and no function is deleted or renamed. Detail-pane focus and copy are packet 3b, built on this one. Check a nonzero `cargo_check` against `beta8-merge` and a finished agent attempt with recorded review evidence.
 
 **Deferred, not dropped: ledger preview.** The Flows preview currently calls the full run-detail renderer in `crates/codegen/xai-grok-pager/src/views/acpx_modal.rs`. If the landing review keeps a preview, a separate packet gives it a compact read-only projection: actual run status, executed timeline and a short outcome, with no unrun nodes or raw result wrappers, its own render entry point, cache identity and tests. It is written only after packet 4's recommendation is reviewed.
 
@@ -54,14 +54,34 @@ Runner packet `bare-command-picker`. Owns `grok-acpx-acp/agent.rs` and `driver.r
 
 **Behavior:** A bare `/open` shows the existing question pop-up (`x.ai/ask_user_question`, as gates use) listing the 20 newest runs with flow name, title, status and start time; choosing one does exactly what `/open <run_id>` does. A bare `/flow` lists the default flow and the flow files of recent runs, with each one's last status and start time; choosing one asks for the task text, and only a nonempty task starts the run. Dismissing either question starts or opens nothing. Bare `/answer` stays as it is until packet 5's contract settles gate answers.
 
-## 7. Inspector linewise copy (deferred)
+## Focus and copy track (3b, 7, 8)
 
-Not rendered. Packet 3 carries detail-pane focus and linewise copy; this packet gives the inspector body the same keys once packet 3's version has been used and checked, so both share one tested pattern. The inspector's Tab and Shift+Tab keep switching its tabs, and `Y` copies the whole tab, which is what `y` does today; `y` copies the cursor line or range.
+From the friction logs of 11-26 and 11-27: the modal shows evidence that can't be reached, selected or copied. Three packets share one key contract, taken from the pager's line viewer, so every read-only pane behaves the same:
+
+- Tab and Shift+Tab move focus between the panes of the current view, both directions; the focused pane is marked the way existing views mark focus.
+- In a focused text pane: `j`/`k` and Up/Down move a line cursor and keep it visible; `v` starts or ends a visual line range; `y` copies the cursor line or the range; `Y` copies the whole pane.
+- Copy is plain text: no styles, no indentation or breaks added by wrapping; a wrapped source line copies whole. The notice reads as a normal copy message.
+- Esc first ends visual mode, then returns focus to where the operator came from, then leaves the view, landing on the same row or stage they left.
+- Keys on a list or tree keep their current meaning when it has focus.
+
+Each packet is rendered only after the code it edits has landed, with fresh excerpts and this contract pasted in verbatim. Packet 3b goes first; 7 and 8 reuse its implementation once it has been used and checked.
+
+### 3b. Detail pane focus and copy
+
+Edits `acpx_modal/detail.rs` (cursor and range in `DetailPanel`) and, in `acpx_modal.rs`, only the Run-mode routing: `handle_key`, `handle_run_key`, `wants_esc`, the Run render call and `RUN_KEYS`. It does not touch `run.rs`. Tab and Shift+Tab move between the stage tree and the detail pane; with the tree focused, `v` keeps the noise toggle, `y` keeps copying the stage output and `J`/`K`/`D`/`U` keep scrolling the detail pane. Waits for packet 3. Acceptance: Tab into the detail pane of a failed run, select the compiler-error line, copy it, and return to the same stage.
+
+### 7. Inspector body
+
+The inspector body gets the same cursor and range. Its Tab and Shift+Tab keep switching inspector tabs; `Y` copies the whole tab, which is what `y` does today, and `y` copies the cursor line or range.
+
+### 8. Agent Turns replay view
+
+Enter on an Agent Turns row opens the saved record's stream in the pager's read-only replay view (`app/dispatch/standalone_traces.rs` `open_acpx`, the same view used for Claude and grok trace replays). A record from a one-shot worker holds one prompt and one reply. Acceptance from the 11-27 friction log: open a row, reach the prompt and the reply, copy an exact line or range from either, and press Esc to return to the same list row. Reuse the pager's own controls in that view rather than adding new ones. First step, before the packet is written: drive the installed build in a Rex tab and record which pager keys already work in this view and where routing stops; the packet fixes only what that trace shows broken.
 
 ## Coordinator integration items
 
 - **Copy notice.** The modal reports a copy as a raw debug dump: `app/dispatch/router.rs:1817` formats `copy: {delivery:?}`, which prints the internal clipboard structure even when the copy worked. That is the "warning or error" in the friction log. Every other copy path shows `delivery.toast_message()`; the traces modal does it in `report_copy` (`views/traces_modal.rs:1001`). Replace the debug format with the toast message in the first integration build, before packet 2's `/open` copy ships.
-- **Clipboard delivery, live.** A returned `AcpxOutcome::Copy` with the right text does not prove the text reaches the clipboard. On sab-air, in the installed build: open a failed run, Tab into the detail pane, `y` the compiler-error line, paste it into another app and compare it with the exact line; check the notice reads as a normal copy message. Repeat on the Sessions tab with `y`. Do the same for packet 2's `/open` copy before it ships.
+- **Clipboard delivery, live.** A returned `AcpxOutcome::Copy` with the right text does not prove the text reaches the clipboard. On sab-air, in the installed build: open a failed run, Tab into the detail pane, `y` the compiler-error line, paste it into another app and compare it with the exact line; check the notice reads as a normal copy message. Repeat on the Agent Turns tab with `y`: it copies the selected record ID. Do the same for packet 2's `/open` copy before it ships.
 - **Help-table row** for packet 2's Space goes into `acpx_modal.rs`'s `LEDGER_KEYS`, which no packet owns. Packet 3 owns `RUN_KEYS`.
 - **Disjoint edits in `acpx_modal.rs`.** Packet 2 edits the `row_extra` producer and its tests; packet 3 edits the Run-mode routing, render call and `RUN_KEYS`. Old/new blocks are matched by content, so both apply as long as no OLD block of one overlaps the other's; check that before applying the second.
 
