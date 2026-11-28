@@ -708,6 +708,12 @@ fn row_extra(summary: &RunSummary) -> RowExtra {
         .unwrap_or_default();
     RowExtra {
         rail: run.flow.nodes.iter().map(|node| run.node_state(&node.id)).collect(),
+        executed: Some(
+            run.steps
+                .iter()
+                .map(|step| (step.node_id.clone(), step.outcome))
+                .collect(),
+        ),
         agents,
         stalled: false,
         question: (run.summary.status == bundle::RunStatus::Waiting).then(|| run.summary.status_detail.clone()).flatten(),
@@ -883,6 +889,7 @@ const LEDGER_KEYS: &[(&str, &str)] = &[
     ("g / G", "Jump to first / last row"),
     ("J / K", "Scroll the preview of the selected run"),
     ("Enter", "Open selected flow run or replay agent turn"),
+    ("Space", "Expand or collapse a finished-run group (Flows)"),
     ("/", "Filter rows by text"),
     ("a", "Only running and waiting runs"),
     ("s", "Cycle order: grouped, recent, name"),
