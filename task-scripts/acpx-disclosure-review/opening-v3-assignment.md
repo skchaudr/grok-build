@@ -12,7 +12,7 @@ Why: the ledger's "answered" state exists only for native ACPX gates. A native g
 
 Edit `task-scripts/acpx-disclosure-slices.py` and `docs/acpx-modal-opening-screen.md`, then dry-render into a new `task-scripts/acpx-disclosure-review/opening-v3/`. Leave `opening-v2/` as it is. No excerpt needs to change; all 18 matched the source.
 
-### 1. Answered waits (decided)
+### 1. Answered waits (decided) — blocks dispatch
 
 `acpx-disclosure-slices.py:178–181`, replace
 
@@ -33,13 +33,15 @@ with wording to this effect:
 
 ### 2–5. The other findings
 
+These do not carry equal weight. Only point 1 blocks dispatch. Points 2 and 3 would show the first time the screen is used and cost a sentence each to prevent. Points 4 and 5 can be left for a later packet if they make this one harder to write.
+
 These are mine, not Sab's rulings. Each is a sentence or two of task text plus a test; the evidence is in the review. Accept or contest each in the v3 disposition.
 
-2. **Waiting and finished groups of one flow fold independently.** Fold state is `flow_expanded_groups` keyed by `flow_name` (`ledger.rs:186`); `mixed-talk` has 2 waiting and 11 finished runs today. Add a test with a flow that has both.
-3. **A selected waiting-group header across refresh.** State the rule: the header stays selected by group key; when its group is no longer shown as a group (one member left, a filter, Recent or Name order), the newest member is selected. `reconcile_flow_selection` (`ledger.rs:782`) falls back to the first row today.
-4. **Recorded path for runs past `EXTRAS_LIMIT` (80).** Say the path for those runs is read once per run through the cache that already holds their answers (`acpx_modal.rs:328–347`), and that this is not widening the cache limit. There are 75 runs now.
+2. **[Bug on first use]** **Waiting and finished groups of one flow fold independently.** Fold state is `flow_expanded_groups` keyed by `flow_name` (`ledger.rs:186`); `mixed-talk` has 2 waiting and 11 finished runs today. Add a test with a flow that has both.
+3. **[Bug on first use, inferred from code, not seen]** **A selected waiting-group header across refresh.** State the rule: the header stays selected by group key; when its group is no longer shown as a group (one member left, a filter, Recent or Name order), the newest member is selected. `reconcile_flow_selection` (`ledger.rs:782`) falls back to the first row today.
+4. **[Edge case, not reachable today]** **Recorded path for runs past `EXTRAS_LIMIT` (80).** Say the path for those runs is read once per run through the cache that already holds their answers (`acpx_modal.rs:328–347`), and that this is not widening the cache limit. There are 75 runs now.
 
-5. **Header count and stalled runs.** Found after the review was published; it is in the review's nonblocking list. The header summary counts running runs that are not stalled (`ledger.rs:1364`), and the packet lists stalled runs under Running, so the header and the section count would differ. Recommended: the header counts what the Running section lists.
+5. **[Cosmetic]** **Header count and stalled runs.** Found after the review was published; it is in the review's nonblocking list. The header summary counts running runs that are not stalled (`ledger.rs:1364`), and the packet lists stalled runs under Running, so the header and the section count would differ. Recommended: the header counts what the Running section lists.
 
 ## Hand back
 
