@@ -1,0 +1,37 @@
+{
+  "slice": "cross-surface-gate",
+  "ok": true,
+  "error": null,
+  "requested": {
+    "model": "gemini-4-neon",
+    "thought_level": "high",
+    "agent": "agy acp --sandbox"
+  },
+  "effective": {
+    "model": "gemini-4-neon",
+    "thought_level": "high",
+    "legacyCurrentModelId": "gemini-4-neon-high",
+    "tier": "Google AI Pro"
+  },
+  "timeToFirstCodeSeconds": 127.27,
+  "totalSeconds": 229.46,
+  "toolCallCount": 0,
+  "toolCalls": [],
+  "returnedBytes": 49805,
+  "returnedLines": 340,
+  "quotaPercentage": "unknown",
+  "stopReason": "end_turn",
+  "usage": {
+    "inputTokens": 37626,
+    "outputTokens": 29758,
+    "cachedReadTokens": 0,
+    "cachedWriteTokens": 0,
+    "thoughtTokens": 16115,
+    "totalTokens": 67384
+  },
+  "stagedFiles": [
+    "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run2/grok-build/task-scripts/acpx-disclosure-returns/cross-surface-gate.md"
+  ],
+  "rawEventsPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run2/_returns/cross-surface-gate.events.jsonl",
+  "rawReturnPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run2/_returns/cross-surface-gate.md"
+}

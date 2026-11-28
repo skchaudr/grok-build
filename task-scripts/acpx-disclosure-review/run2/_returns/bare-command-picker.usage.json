@@ -1,0 +1,37 @@
+{
+  "slice": "bare-command-picker",
+  "ok": true,
+  "error": null,
+  "requested": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "agent": "agy acp --sandbox"
+  },
+  "effective": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "legacyCurrentModelId": "gemini-4-neon-high",
+    "tier": "Google AI Pro"
+  },
+  "timeToFirstCodeSeconds": 140.64,
+  "totalSeconds": 236.46,
+  "toolCallCount": 0,
+  "toolCalls": [],
+  "returnedBytes": 51505,
+  "returnedLines": 1443,
+  "quotaPercentage": "unknown",
+  "stopReason": "end_turn",
+  "usage": {
+    "inputTokens": 29875,
+    "outputTokens": 31299,
+    "cachedReadTokens": 0,
+    "cachedWriteTokens": 0,
+    "thoughtTokens": 17152,
+    "totalTokens": 61174
+  },
+  "stagedFiles": [
+    "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run2/grok-build/task-scripts/acpx-disclosure-returns/bare-command-picker.edits.md"
+  ],
+  "rawEventsPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run2/_returns/bare-command-picker.events.jsonl",
+  "rawReturnPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run2/_returns/bare-command-picker.md"
+}
