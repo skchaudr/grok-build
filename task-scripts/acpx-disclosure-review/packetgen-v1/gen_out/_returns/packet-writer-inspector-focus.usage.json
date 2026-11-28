@@ -1,0 +1,57 @@
+{
+  "slice": "packet-writer-inspector-focus",
+  "ok": true,
+  "error": null,
+  "requested": {
+    "model": "gemini-3.8-flash",
+    "thought_level": "high",
+    "agent": "agy acp --sandbox"
+  },
+  "effective": {
+    "model": "gemini-3.8-flash",
+    "thought_level": "high",
+    "legacyCurrentModelId": "gemini-4-neon-high",
+    "tier": "Google AI Pro"
+  },
+  "timeToFirstCodeSeconds": 230.49,
+  "totalSeconds": 256.02,
+  "toolCallCount": 0,
+  "toolCalls": [],
+  "returnedBytes": 10661,
+  "returnedLines": 104,
+  "quota": {
+    "group": "GEMINI MODELS",
+    "beforeAt": "2026-11-28T07:38:39+00:00",
+    "afterAt": "2026-11-28T07:43:05+00:00",
+    "before": {
+      "weekly": 95.38,
+      "weeklyNote": "Refreshes in 6d 15h 5m",
+      "fiveHour": 95.18,
+      "fiveHourNote": "Refreshes in 1h 5m"
+    },
+    "after": {
+      "weekly": 95.25,
+      "weeklyNote": "Refreshes in 6d 15h 0m",
+      "fiveHour": 94.68,
+      "fiveHourNote": "Refreshes in 1h 0m"
+    },
+    "used": {
+      "weekly": 0.13,
+      "fiveHour": 0.5
+    }
+  },
+  "stopReason": "end_turn",
+  "usage": {
+    "inputTokens": 34172,
+    "outputTokens": 33566,
+    "cachedReadTokens": 0,
+    "cachedWriteTokens": 0,
+    "thoughtTokens": 30279,
+    "totalTokens": 67738
+  },
+  "stagedFiles": [
+    "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/packetgen-v1/gen_out/grok-build/task-scripts/acpx-disclosure-review/packetgen-v1/inspector-focus.packet.md"
+  ],
+  "rawEventsPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/packetgen-v1/gen_out/_returns/packet-writer-inspector-focus.events.jsonl",
+  "rawReturnPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/packetgen-v1/gen_out/_returns/packet-writer-inspector-focus.md"
+}

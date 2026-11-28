@@ -1,0 +1,13 @@
+━━ ACP SLICE · packet-writer-inspector-focus ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  target   task-scripts/acpx-disclosure-review/packetgen-v1/inspector-focus.packet.md
+  model    gemini-3.8-flash-high · thought_level=high · agent=agy acp --sandbox
+  packet   16.0k est tokens (62.4 KB · 13 excerpts, 57.7 KB)
+  workdir  /Users/sab-mini/repos/grok-build/task-scripts/acpx-disclosure-review/packetgen-v1/_scratch/slices-acp-packet-writer-inspector-focus-fovr38te/work (empty scratch)
+
+  FAIL      Cannot apply --model "gemini-3.8-flash-high": the ACP agent did not advertise that model. Available models: gemini-4-neon, gemini-4-carbon, gemini-4-argon, gemini-4-hydrogen, gemini-pro-orchestrator-neon, gemini-pro-orchestrator, gemini-pro-orchestrator-argon, gemini-3.8-flash, claude-opus-5-5, claude-sonnet-5-5, gpt-oss-120b-medium.
+────────────────────────────────────────────────────────────────────────
+  FAIL  packet-writer-inspector-focus · acpx exited with code 1; ACP error: Cannot apply --model "gemini-3.8-flash-high": the ACP agent did not advertise that model. Available models: gemini-4-neon, gemini-4-carbon, gemini-4-argon, gemini-4-hydrogen, gemini-pro-orchestrator-neon, gemini-pro-orchestrator, gemini-pro-orchestrator-argon, gemini-3.8-flash, claude-opus-5-5, claude-sonnet-5-5, gpt-oss-120b-medium.; effective ACP model 'gemini-4-neon' != requested 'gemini-3.8-flash-high'; missing expected file block(s) ['task-scripts/acpx-disclosure-review/packetgen-v1/inspector-focus.packet.md']
+  first code: n/a · total: 2.0s · tool calls: 0 · size: 0 bytes · quota: week 95.38→95.38% (used 0.00) · 5h 95.18→95.18% (used 0.00)
+  events: /Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/packetgen-v1/gen_out/_returns/packet-writer-inspector-focus.events.jsonl
+  raw:    /Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/packetgen-v1/gen_out/_returns/packet-writer-inspector-focus.md
+exit 1

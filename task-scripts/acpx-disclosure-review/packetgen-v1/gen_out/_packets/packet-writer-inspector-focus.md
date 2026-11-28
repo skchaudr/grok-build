@@ -1148,7 +1148,7 @@ const STEP_KEYS: &[(&str, &str)] = &[
 
 ````
 
-### `task-scripts/acpx-disclosure-slices.py` lines 14-90 of 575 (repository grok-build)
+### `task-scripts/acpx-disclosure-slices.py` lines 14-90 of 650 (repository grok-build)
 ````
 ROOT = Path(__file__).resolve().parents[1]
 REPOS = {"grok": str(ROOT), "piw": str(Path.home() / "repos/pi-workflows")}
@@ -1229,7 +1229,7 @@ def task(slice_id, context, spec, *, design=False):
 
 ````
 
-### `task-scripts/acpx-disclosure-slices.py` lines 236-292 of 575 (repository grok-build)
+### `task-scripts/acpx-disclosure-slices.py` lines 236-292 of 650 (repository grok-build)
 ````
     task(
         "attempt-detail",
@@ -1290,7 +1290,7 @@ formatter and navigation expectations intact.
     ),
 ````
 
-### `task-scripts/acpx-disclosure-slices.py` lines 293-361 of 575 (repository grok-build)
+### `task-scripts/acpx-disclosure-slices.py` lines 293-361 of 650 (repository grok-build)
 ````
     task(
         "bare-command-picker",
@@ -1363,7 +1363,7 @@ empty cases.
     ),
 ````
 
-### `task-scripts/acpx-disclosure-slices.py` lines 489-573 of 575 (repository grok-build)
+### `task-scripts/acpx-disclosure-slices.py` lines 489-573 of 650 (repository grok-build)
 ````
     task(
         "detail-focus",
