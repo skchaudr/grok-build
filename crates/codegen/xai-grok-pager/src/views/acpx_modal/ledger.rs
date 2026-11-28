@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
@@ -39,6 +39,14 @@ pub struct GateAnswer {
     pub choice: String,   // input.gate.choice: the label that was picked
 }
 
+/// One logical line supplied by the modal for narrow inline preview rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InlinePreviewLine {
+    pub(super) text: String,
+    pub(super) cursor: bool,
+    pub(super) selected: bool,
+}
+
 /// How many step marks a runs-list row shows at most. A workflow with
 /// hundreds of nodes would otherwise stretch the marks column past every
 /// other column; the run view keeps the full picture.
@@ -53,6 +61,7 @@ pub struct RowExtra {
     pub stalled: bool,
     pub question: Option<String>,
     pub answers: Option<GateAnswer>,
+    pub flow_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,27 +113,47 @@ impl SessionOrder {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SectionKind {
-    NeedsYou,
+    WaitingForInput,
     Running,
-    Finished,
+    RecentOutcomes,
 }
 
 impl SectionKind {
     fn label(self) -> &'static str {
         match self {
-            Self::NeedsYou => "NEEDS YOU",
-            Self::Running => "RUNNING",
-            Self::Finished => "FINISHED",
+            Self::WaitingForInput => "Waiting for input",
+            Self::Running => "Running",
+            Self::RecentOutcomes => "Recent outcomes",
         }
     }
 
     fn color(self, theme: &Theme) -> Color {
         match self {
-            Self::NeedsYou => theme.warning,
+            Self::WaitingForInput => theme.warning,
             Self::Running => theme.accent_running,
-            Self::Finished => theme.gray_dim,
+            Self::RecentOutcomes => theme.gray_dim,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WaitingGroupKey {
+    flow_name: String,
+    source_root: PathBuf,
+    recorded_flow_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FlowSelection {
+    Run(String),
+    WaitingGroup(WaitingGroupKey),
+}
+
+#[derive(Debug, Clone)]
+enum FlowGroupKind {
+    Single,
+    FinishedGroup(String),
+    WaitingGroup(WaitingGroupKey),
 }
 
 #[derive(Debug, Clone)]
@@ -133,19 +162,50 @@ struct FlowGroupEntry {
     rep_idx: usize,
     /// Member indices in `runs` ordered newest-first (`members[0] == rep_idx`).
     members: Vec<usize>,
-    /// Non-empty `flow_name` when `members.len() >= 2`, else `None`.
-    group_key: Option<String>,
+    kind: FlowGroupKind,
 }
 
 #[derive(Debug, Clone)]
-struct VisibleFlowItem {
-    run_idx: usize,
-    /// When this row represents a group of 2+ finished runs: `(member_count, expanded)`.
-    group_rep: Option<(usize, bool)>,
-    /// True when this row is an older member inside an expanded group.
-    is_child: bool,
-    /// When this row belongs to a group (rep or child): `(flow_name, rep_run_id)`.
-    group_ref: Option<(String, String)>,
+enum GroupRef {
+    Finished { key: String, rep_run_id: String },
+    Waiting { key: WaitingGroupKey },
+}
+
+#[derive(Debug, Clone)]
+enum VisibleFlowItem {
+    Run {
+        run_idx: usize,
+        /// When this row represents a group of 2+ finished runs: `(member_count, expanded)`.
+        group_rep: Option<(usize, bool)>,
+        /// True when this row is a member inside an expanded finished or waiting group.
+        is_child: bool,
+        /// When this row belongs to a group (rep or child).
+        group_ref: Option<GroupRef>,
+    },
+    WaitingGroup {
+        key: WaitingGroupKey,
+        count: usize,
+        expanded: bool,
+        latest_updated_ms: i64,
+    },
+}
+
+impl VisibleFlowItem {
+    fn selection(&self, runs: &[RunSummary]) -> Option<FlowSelection> {
+        match self {
+            Self::Run { run_idx, .. } => runs
+                .get(*run_idx)
+                .map(|r| FlowSelection::Run(r.run_id.clone())),
+            Self::WaitingGroup { key, .. } => Some(FlowSelection::WaitingGroup(key.clone())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContinuationStyle {
+    Warning,
+    Muted,
+    Preview { cursor: bool, selected: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -157,16 +217,23 @@ enum FlowListRow {
         group_rep: Option<(usize, bool)>,
         is_child: bool,
     },
+    WaitingGroup {
+        key: WaitingGroupKey,
+        count: usize,
+        expanded: bool,
+        latest_updated_ms: i64,
+    },
     Continuation {
         indent: usize,
+        prefix: &'static str,
         text: String,
-        is_warning: bool,
+        style: ContinuationStyle,
     },
 }
 
 impl FlowListRow {
     fn is_selectable(&self) -> bool {
-        matches!(self, Self::Run { .. })
+        matches!(self, Self::Run { .. } | Self::WaitingGroup { .. })
     }
 }
 
@@ -181,9 +248,11 @@ pub struct LedgerState {
     flow_filter: String,
     flow_active_only: bool,
     flow_order: FlowOrder,
-    flow_selected_run_id: Option<String>,
+    flow_selection: Option<FlowSelection>,
     flow_scroll: usize,
     flow_expanded_groups: HashSet<String>,
+    flow_expanded_waiting_groups: HashSet<WaitingGroupKey>,
+    inline_preview: Option<Vec<InlinePreviewLine>>,
 
     session_filter: String,
     session_active_only: bool,
@@ -214,9 +283,11 @@ impl LedgerState {
             flow_filter: String::new(),
             flow_active_only: false,
             flow_order: FlowOrder::Grouped,
-            flow_selected_run_id: None,
+            flow_selection: None,
             flow_scroll: 0,
             flow_expanded_groups: HashSet::new(),
+            flow_expanded_waiting_groups: HashSet::new(),
+            inline_preview: None,
 
             session_filter: String::new(),
             session_active_only: false,
@@ -292,11 +363,49 @@ impl LedgerState {
         if self.tab != LedgerTab::Flows {
             return None;
         }
-        let id = self.flow_selected_run_id.as_deref()?;
-        let indices = self.filtered_flow_indices();
-        indices
-            .into_iter()
-            .find_map(|idx| self.runs.get(idx).filter(|r| r.run_id == id))
+        let FlowSelection::Run(id) = self.flow_selection.as_ref()? else {
+            return None;
+        };
+        self.visible_flow_items().into_iter().find_map(|item| match item {
+            VisibleFlowItem::Run { run_idx, .. } => {
+                self.runs.get(run_idx).filter(|r| r.run_id == *id)
+            }
+            VisibleFlowItem::WaitingGroup { .. } => None,
+        })
+    }
+
+    pub fn selected_waiting_group(&self) -> Option<(&str, usize)> {
+        if self.tab != LedgerTab::Flows {
+            return None;
+        }
+        let FlowSelection::WaitingGroup(key) = self.flow_selection.as_ref()? else {
+            return None;
+        };
+        let entry = self.build_flow_entries().into_iter().find(|entry| {
+            matches!(&entry.kind, FlowGroupKind::WaitingGroup(k) if k == key)
+        })?;
+        Some((key.flow_name.as_str(), entry.members.len()))
+    }
+
+    pub fn selected_run_is_finished_group(&self) -> bool {
+        if self.tab != LedgerTab::Flows {
+            return false;
+        }
+        let Some(FlowSelection::Run(ref id)) = self.flow_selection else {
+            return false;
+        };
+        self.visible_flow_items().into_iter().any(|item| match item {
+            VisibleFlowItem::Run {
+                run_idx,
+                group_rep: Some(_),
+                ..
+            } => self.runs.get(run_idx).map(|r| &r.run_id) == Some(id),
+            _ => false,
+        })
+    }
+
+    pub(super) fn set_inline_preview(&mut self, lines: Option<Vec<InlinePreviewLine>>) {
+        self.inline_preview = lines;
     }
 
     pub fn set_sessions(&mut self, sessions: Vec<SessionSummary>) {
@@ -419,13 +528,12 @@ impl LedgerState {
     }
 
     fn run_section(&self, run: &RunSummary) -> SectionKind {
-        let stalled = self.is_stalled(run);
         if run.status == RunStatus::Waiting && !self.is_answered(run) {
-            SectionKind::NeedsYou
-        } else if run.status == RunStatus::Running && !stalled {
+            SectionKind::WaitingForInput
+        } else if run.status == RunStatus::Running {
             SectionKind::Running
         } else {
-            SectionKind::Finished
+            SectionKind::RecentOutcomes
         }
     }
 
@@ -437,6 +545,39 @@ impl LedgerState {
             )
     }
 
+    fn is_groupable_waiting(&self, run: &RunSummary) -> bool {
+        !run.flow_name.is_empty() && run.status == RunStatus::Waiting && !self.is_answered(run)
+    }
+
+    fn waiting_group_key(&self, run: &RunSummary) -> Option<WaitingGroupKey> {
+        if !self.is_groupable_waiting(run) {
+            return None;
+        }
+        let source_root = run
+            .dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let recorded_flow_path = self
+            .extras
+            .get(&run.run_id)
+            .and_then(|e| e.flow_path.as_ref())
+            .filter(|p| p.is_absolute())
+            .cloned();
+        Some(WaitingGroupKey {
+            flow_name: run.flow_name.clone(),
+            source_root,
+            recorded_flow_path,
+        })
+    }
+
+    fn cmp_waiting_newest_first(a: &RunSummary, b: &RunSummary) -> std::cmp::Ordering {
+        b.updated_ms
+            .cmp(&a.updated_ms)
+            .then_with(|| b.started_ms.cmp(&a.started_ms))
+            .then_with(|| a.run_id.cmp(&b.run_id))
+    }
+
     fn cmp_group_newest_first(a: &RunSummary, b: &RunSummary) -> std::cmp::Ordering {
         b.started_ms
             .cmp(&a.started_ms)
@@ -444,38 +585,65 @@ impl LedgerState {
     }
 
     fn build_flow_entries(&self) -> Vec<FlowGroupEntry> {
-        let mut grouped: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut waiting_grouped: HashMap<WaitingGroupKey, Vec<usize>> = HashMap::new();
+        let mut finished_grouped: HashMap<&str, Vec<usize>> = HashMap::new();
         let mut entries: Vec<FlowGroupEntry> = Vec::new();
 
         for (i, run) in self.runs.iter().enumerate() {
             if !self.matches_flow_filter(run) {
                 continue;
             }
-            if Self::is_groupable_finished(run) {
-                grouped.entry(run.flow_name.as_str()).or_default().push(i);
+            if self.flow_order == FlowOrder::Grouped
+                && let Some(key) = self.waiting_group_key(run)
+            {
+                waiting_grouped.entry(key).or_default().push(i);
+            } else if Self::is_groupable_finished(run) {
+                finished_grouped
+                    .entry(run.flow_name.as_str())
+                    .or_default()
+                    .push(i);
             } else {
                 entries.push(FlowGroupEntry {
                     rep_idx: i,
                     members: vec![i],
-                    group_key: None,
+                    kind: FlowGroupKind::Single,
                 });
             }
         }
 
-        for (flow_name, mut members) in grouped {
+        for (key, mut members) in waiting_grouped {
+            if members.len() >= 2 {
+                members
+                    .sort_by(|&a, &b| Self::cmp_waiting_newest_first(&self.runs[a], &self.runs[b]));
+                let rep_idx = members[0];
+                entries.push(FlowGroupEntry {
+                    rep_idx,
+                    members,
+                    kind: FlowGroupKind::WaitingGroup(key),
+                });
+            } else if let Some(&idx) = members.first() {
+                entries.push(FlowGroupEntry {
+                    rep_idx: idx,
+                    members: vec![idx],
+                    kind: FlowGroupKind::Single,
+                });
+            }
+        }
+
+        for (flow_name, mut members) in finished_grouped {
             if members.len() >= 2 {
                 members.sort_by(|&a, &b| Self::cmp_group_newest_first(&self.runs[a], &self.runs[b]));
                 let rep_idx = members[0];
                 entries.push(FlowGroupEntry {
                     rep_idx,
                     members,
-                    group_key: Some(flow_name.to_string()),
+                    kind: FlowGroupKind::FinishedGroup(flow_name.to_string()),
                 });
             } else if let Some(&idx) = members.first() {
                 entries.push(FlowGroupEntry {
                     rep_idx: idx,
                     members: vec![idx],
-                    group_key: None,
+                    kind: FlowGroupKind::Single,
                 });
             }
         }
@@ -486,14 +654,14 @@ impl LedgerState {
                     let ra = &self.runs[a.rep_idx];
                     let rb = &self.runs[b.rep_idx];
                     let sa = match self.run_section(ra) {
-                        SectionKind::NeedsYou => 0,
+                        SectionKind::WaitingForInput => 0,
                         SectionKind::Running => 1,
-                        SectionKind::Finished => 2,
+                        SectionKind::RecentOutcomes => 2,
                     };
                     let sb = match self.run_section(rb) {
-                        SectionKind::NeedsYou => 0,
+                        SectionKind::WaitingForInput => 0,
                         SectionKind::Running => 1,
-                        SectionKind::Finished => 2,
+                        SectionKind::RecentOutcomes => 2,
                     };
                     sa.cmp(&sb)
                         .then_with(|| rb.updated_ms.cmp(&ra.updated_ms))
@@ -527,37 +695,69 @@ impl LedgerState {
     }
 
     fn expand_entry(&self, entry: &FlowGroupEntry) -> Vec<VisibleFlowItem> {
-        if let Some(ref key) = entry.group_key {
-            let expanded = self.flow_expanded_groups.contains(key);
-            let rep_id = self
-                .runs
-                .get(entry.rep_idx)
-                .map(|r| r.run_id.clone())
-                .unwrap_or_default();
-            let mut items = vec![VisibleFlowItem {
-                run_idx: entry.rep_idx,
-                group_rep: Some((entry.members.len(), expanded)),
-                is_child: false,
-                group_ref: Some((key.clone(), rep_id.clone())),
-            }];
-            if expanded {
-                for &child_idx in &entry.members[1..] {
-                    items.push(VisibleFlowItem {
-                        run_idx: child_idx,
-                        group_rep: None,
-                        is_child: true,
-                        group_ref: Some((key.clone(), rep_id.clone())),
-                    });
+        match &entry.kind {
+            FlowGroupKind::WaitingGroup(key) => {
+                let expanded = self.flow_expanded_waiting_groups.contains(key);
+                let latest_updated_ms = self
+                    .runs
+                    .get(entry.rep_idx)
+                    .map(|r| r.updated_ms)
+                    .unwrap_or(0);
+                let mut items = vec![VisibleFlowItem::WaitingGroup {
+                    key: key.clone(),
+                    count: entry.members.len(),
+                    expanded,
+                    latest_updated_ms,
+                }];
+                if expanded {
+                    for &member_idx in &entry.members {
+                        items.push(VisibleFlowItem::Run {
+                            run_idx: member_idx,
+                            group_rep: None,
+                            is_child: true,
+                            group_ref: Some(GroupRef::Waiting { key: key.clone() }),
+                        });
+                    }
                 }
+                items
             }
-            items
-        } else {
-            vec![VisibleFlowItem {
+            FlowGroupKind::FinishedGroup(key) => {
+                let expanded = self.flow_expanded_groups.contains(key);
+                let rep_id = self
+                    .runs
+                    .get(entry.rep_idx)
+                    .map(|r| r.run_id.clone())
+                    .unwrap_or_default();
+                let mut items = vec![VisibleFlowItem::Run {
+                    run_idx: entry.rep_idx,
+                    group_rep: Some((entry.members.len(), expanded)),
+                    is_child: false,
+                    group_ref: Some(GroupRef::Finished {
+                        key: key.clone(),
+                        rep_run_id: rep_id.clone(),
+                    }),
+                }];
+                if expanded {
+                    for &child_idx in &entry.members[1..] {
+                        items.push(VisibleFlowItem::Run {
+                            run_idx: child_idx,
+                            group_rep: None,
+                            is_child: true,
+                            group_ref: Some(GroupRef::Finished {
+                                key: key.clone(),
+                                rep_run_id: rep_id.clone(),
+                            }),
+                        });
+                    }
+                }
+                items
+            }
+            FlowGroupKind::Single => vec![VisibleFlowItem::Run {
                 run_idx: entry.rep_idx,
                 group_rep: None,
                 is_child: false,
                 group_ref: None,
-            }]
+            }],
         }
     }
 
@@ -571,43 +771,63 @@ impl LedgerState {
     fn has_any_flow_group(&self) -> bool {
         self.build_flow_entries()
             .iter()
-            .any(|entry| entry.group_key.is_some())
+            .any(|entry| !matches!(entry.kind, FlowGroupKind::Single))
     }
 
     fn toggle_selected_flow_group(&mut self) -> bool {
         if self.tab != LedgerTab::Flows {
             return false;
         }
-        let Some(sel_id) = self.flow_selected_run_id.as_deref() else {
+        let Some(sel) = self.flow_selection.as_ref() else {
             return false;
         };
         let items = self.visible_flow_items();
         let Some(item) = items
             .into_iter()
-            .find(|it| self.runs.get(it.run_idx).map(|r| r.run_id.as_str()) == Some(sel_id))
+            .find(|it| it.selection(&self.runs).as_ref() == Some(sel))
         else {
             return false;
         };
-        let Some((key, rep_id)) = item.group_ref else {
-            return false;
-        };
-        if self.flow_expanded_groups.contains(&key) {
-            self.flow_expanded_groups.remove(&key);
-            if item.is_child {
-                self.flow_selected_run_id = Some(rep_id);
+        match item {
+            VisibleFlowItem::WaitingGroup { key, .. } => {
+                if self.flow_expanded_waiting_groups.contains(&key) {
+                    self.flow_expanded_waiting_groups.remove(&key);
+                } else {
+                    self.flow_expanded_waiting_groups.insert(key);
+                }
+                true
             }
-        } else {
-            self.flow_expanded_groups.insert(key);
+            VisibleFlowItem::Run {
+                is_child,
+                group_ref: Some(GroupRef::Finished { key, rep_run_id }),
+                ..
+            } => {
+                if self.flow_expanded_groups.contains(&key) {
+                    self.flow_expanded_groups.remove(&key);
+                    if is_child {
+                        self.flow_selection = Some(FlowSelection::Run(rep_run_id));
+                    }
+                } else {
+                    self.flow_expanded_groups.insert(key);
+                }
+                true
+            }
+            VisibleFlowItem::Run {
+                group_ref: Some(GroupRef::Waiting { key }),
+                ..
+            } => {
+                if self.flow_expanded_waiting_groups.contains(&key) {
+                    self.flow_expanded_waiting_groups.remove(&key);
+                    self.flow_selection = Some(FlowSelection::WaitingGroup(key));
+                } else {
+                    self.flow_expanded_waiting_groups.insert(key);
+                }
+                true
+            }
+            VisibleFlowItem::Run {
+                group_ref: None, ..
+            } => false,
         }
-        true
-    }
-
-    /// Returns visible selectable indices into `self.runs` in display order.
-    fn filtered_flow_indices(&self) -> Vec<usize> {
-        self.visible_flow_items()
-            .into_iter()
-            .map(|item| item.run_idx)
-            .collect()
     }
 
     /// Build visual rows for the Flows tab. `list_height` is used to decide whether blank rows
@@ -621,34 +841,29 @@ impl LedgerState {
             let mut out = Vec::new();
             for entry in &entries {
                 for item in self.expand_entry(entry) {
-                    out.push(FlowListRow::Run {
-                        idx: item.run_idx,
-                        group_rep: item.group_rep,
-                        is_child: item.is_child,
-                    });
-                    self.append_continuations(&mut out, item.run_idx, item.is_child, now_ms);
+                    self.push_visible_flow_item(&mut out, item, now_ms);
                 }
             }
             return out;
         }
 
-        let mut needs_you = Vec::new();
+        let mut waiting = Vec::new();
         let mut running = Vec::new();
         let mut finished = Vec::new();
         for entry in entries {
             if let Some(r) = self.runs.get(entry.rep_idx) {
                 match self.run_section(r) {
-                    SectionKind::NeedsYou => needs_you.push(entry),
+                    SectionKind::WaitingForInput => waiting.push(entry),
                     SectionKind::Running => running.push(entry),
-                    SectionKind::Finished => finished.push(entry),
+                    SectionKind::RecentOutcomes => finished.push(entry),
                 }
             }
         }
 
         let sections: Vec<(SectionKind, usize, Vec<VisibleFlowItem>)> = [
-            (SectionKind::NeedsYou, needs_you),
+            (SectionKind::WaitingForInput, waiting),
             (SectionKind::Running, running),
-            (SectionKind::Finished, finished),
+            (SectionKind::RecentOutcomes, finished),
         ]
         .into_iter()
         .filter(|(_, sec_entries)| !sec_entries.is_empty())
@@ -665,7 +880,7 @@ impl LedgerState {
         let extra_rows: usize = sections
             .iter()
             .flat_map(|(_, _, items)| items.iter())
-            .map(|item| self.continuation_lines_for(item.run_idx, item.is_child, now_ms).len())
+            .map(|item| self.continuation_lines_for_item(item, now_ms).len())
             .sum();
         let non_blank_rows: usize = sections
             .iter()
@@ -685,15 +900,55 @@ impl LedgerState {
                 count: run_count,
             });
             for item in items {
-                out.push(FlowListRow::Run {
-                    idx: item.run_idx,
-                    group_rep: item.group_rep,
-                    is_child: item.is_child,
-                });
-                self.append_continuations(&mut out, item.run_idx, item.is_child, now_ms);
+                self.push_visible_flow_item(&mut out, item, now_ms);
             }
         }
         out
+    }
+
+    fn push_visible_flow_item(
+        &self,
+        out: &mut Vec<FlowListRow>,
+        item: VisibleFlowItem,
+        now_ms: i64,
+    ) {
+        match item {
+            VisibleFlowItem::Run {
+                run_idx,
+                group_rep,
+                is_child,
+                ..
+            } => {
+                out.push(FlowListRow::Run {
+                    idx: run_idx,
+                    group_rep,
+                    is_child,
+                });
+                self.append_continuations(out, run_idx, is_child, now_ms);
+            }
+            VisibleFlowItem::WaitingGroup {
+                key,
+                count,
+                expanded,
+                latest_updated_ms,
+            } => {
+                let continuations = self.continuation_lines_for_waiting_group(&key);
+                out.push(FlowListRow::WaitingGroup {
+                    key,
+                    count,
+                    expanded,
+                    latest_updated_ms,
+                });
+                for (indent, prefix, text, style) in continuations {
+                    out.push(FlowListRow::Continuation {
+                        indent,
+                        prefix,
+                        text,
+                        style,
+                    });
+                }
+            }
+        }
     }
 
     fn append_continuations(
@@ -703,13 +958,85 @@ impl LedgerState {
         is_child: bool,
         now_ms: i64,
     ) {
-        for (indent, text, is_warning) in self.continuation_lines_for(idx, is_child, now_ms) {
+        for (indent, prefix, text, style) in self.continuation_lines_for(idx, is_child, now_ms) {
             out.push(FlowListRow::Continuation {
                 indent,
+                prefix,
                 text,
-                is_warning,
+                style,
             });
         }
+    }
+
+    fn continuation_lines_for_item(
+        &self,
+        item: &VisibleFlowItem,
+        now_ms: i64,
+    ) -> Vec<(usize, &'static str, String, ContinuationStyle)> {
+        match item {
+            VisibleFlowItem::Run {
+                run_idx, is_child, ..
+            } => self.continuation_lines_for(*run_idx, *is_child, now_ms),
+            VisibleFlowItem::WaitingGroup { key, .. } => {
+                self.continuation_lines_for_waiting_group(key)
+            }
+        }
+    }
+
+    fn preview_continuation_lines(
+        &self,
+        indent: usize,
+        lines: &[InlinePreviewLine],
+    ) -> Vec<(usize, &'static str, String, ContinuationStyle)> {
+        if self.last_render_width == 0 {
+            return Vec::new();
+        }
+        let marker_w = 2;
+        let wrap_w = self
+            .last_render_width
+            .saturating_sub(indent + marker_w)
+            .max(1);
+        let mut out = Vec::new();
+        for line in lines {
+            let style = ContinuationStyle::Preview {
+                cursor: line.cursor,
+                selected: line.selected,
+            };
+            let wrapped = if line.text.trim().is_empty() {
+                vec![String::new()]
+            } else {
+                wrap_words(&line.text, wrap_w)
+            };
+            for (i, seg) in wrapped.into_iter().enumerate() {
+                let prefix = if i == 0 && line.cursor {
+                    "▸ "
+                } else if line.selected {
+                    "▎ "
+                } else {
+                    "  "
+                };
+                out.push((indent, prefix, seg, style));
+            }
+        }
+        out
+    }
+
+    fn continuation_lines_for_waiting_group(
+        &self,
+        key: &WaitingGroupKey,
+    ) -> Vec<(usize, &'static str, String, ContinuationStyle)> {
+        let is_selected = matches!(
+            self.flow_selection,
+            Some(FlowSelection::WaitingGroup(ref sel_key)) if sel_key == key
+        );
+        if !is_selected {
+            return Vec::new();
+        }
+        let Some(ref preview_lines) = self.inline_preview else {
+            return Vec::new();
+        };
+        let indent = RunStatus::Waiting.glyph().width() + 1;
+        self.preview_continuation_lines(indent, preview_lines)
     }
 
     fn continuation_lines_for(
@@ -717,19 +1044,31 @@ impl LedgerState {
         idx: usize,
         is_child: bool,
         now_ms: i64,
-    ) -> Vec<(usize, String, bool)> {
+    ) -> Vec<(usize, &'static str, String, ContinuationStyle)> {
         let Some(run) = self.runs.get(idx) else {
             return Vec::new();
         };
-        let is_selected = self.flow_selected_run_id.as_deref() == Some(run.run_id.as_str());
+        let is_selected = matches!(
+            self.flow_selection,
+            Some(FlowSelection::Run(ref id)) if id == &run.run_id
+        );
         if !is_selected {
             return Vec::new();
+        }
+        if let Some(ref preview_lines) = self.inline_preview {
+            let indent = (if is_child { 2 } else { 0 }) + run.status.glyph().width() + 1;
+            return self.preview_continuation_lines(indent, preview_lines);
         }
         let mut out = Vec::new();
         if run.status == RunStatus::Waiting && !self.is_answered(run) {
             let (_, indent, lines) =
                 self.flow_question_lines(run, self.last_render_width, now_ms);
-            out.extend(lines.into_iter().skip(1).map(|t| (indent, t, true)));
+            out.extend(
+                lines
+                    .into_iter()
+                    .skip(1)
+                    .map(|t| (indent, "", t, ContinuationStyle::Warning)),
+            );
         }
         if !self.can_show_inline_path(run, self.last_render_width, now_ms) {
             let extra = self.extras.get(&run.run_id);
@@ -738,7 +1077,7 @@ impl LedgerState {
                 let indent = (if is_child { 2 } else { 0 }) + run.status.glyph().width() + 1;
                 let wrap_w = self.last_render_width.saturating_sub(indent).max(1);
                 for line in wrap_words(&path, wrap_w) {
-                    out.push((indent, line, false));
+                    out.push((indent, "", line, ContinuationStyle::Muted));
                 }
             }
         }
@@ -782,30 +1121,60 @@ impl LedgerState {
     fn reconcile_flow_selection(&mut self) {
         let entries = self.build_flow_entries();
         if entries.is_empty() {
-            self.flow_selected_run_id = None;
+            self.flow_selection = None;
             self.flow_scroll = 0;
             return;
         }
-        if let Some(ref cur_id) = self.flow_selected_run_id {
-            for entry in &entries {
-                if entry
-                    .members
-                    .iter()
-                    .any(|&idx| self.runs.get(idx).map(|r| &r.run_id) == Some(cur_id))
-                {
-                    if let Some(ref key) = entry.group_key
-                        && self.runs.get(entry.rep_idx).map(|r| &r.run_id) != Some(cur_id)
+        match self.flow_selection.clone() {
+            Some(FlowSelection::Run(cur_id)) => {
+                for entry in &entries {
+                    if entry
+                        .members
+                        .iter()
+                        .any(|&idx| self.runs.get(idx).map(|r| &r.run_id) == Some(&cur_id))
                     {
-                        self.flow_expanded_groups.insert(key.clone());
+                        match &entry.kind {
+                            FlowGroupKind::FinishedGroup(key)
+                                if self.runs.get(entry.rep_idx).map(|r| &r.run_id)
+                                    != Some(&cur_id) =>
+                            {
+                                self.flow_expanded_groups.insert(key.clone());
+                            }
+                            FlowGroupKind::WaitingGroup(key) => {
+                                self.flow_expanded_waiting_groups.insert(key.clone());
+                            }
+                            _ => {}
+                        }
+                        return;
                     }
+                }
+            }
+            Some(FlowSelection::WaitingGroup(ref cur_key)) => {
+                if entries.iter().any(|e| {
+                    matches!(&e.kind, FlowGroupKind::WaitingGroup(k) if k == cur_key)
+                }) {
+                    return;
+                }
+                if let Some(entry) = entries.iter().find(|e| {
+                    self.runs
+                        .get(e.rep_idx)
+                        .is_some_and(|r| self.waiting_group_key(r).as_ref() == Some(cur_key))
+                }) && let Some(r) = self.runs.get(entry.rep_idx)
+                {
+                    self.flow_selection = Some(FlowSelection::Run(r.run_id.clone()));
                     return;
                 }
             }
+            None => {}
         }
-        if let Some(first) = entries.first()
-            && let Some(r) = self.runs.get(first.rep_idx)
-        {
-            self.flow_selected_run_id = Some(r.run_id.clone());
+        if let Some(first) = entries.first() {
+            self.flow_selection = match &first.kind {
+                FlowGroupKind::WaitingGroup(key) => Some(FlowSelection::WaitingGroup(key.clone())),
+                FlowGroupKind::FinishedGroup(_) | FlowGroupKind::Single => self
+                    .runs
+                    .get(first.rep_idx)
+                    .map(|r| FlowSelection::Run(r.run_id.clone())),
+            };
         }
     }
 
@@ -833,24 +1202,24 @@ impl LedgerState {
     fn move_selection(&mut self, delta: isize) -> bool {
         match self.tab {
             LedgerTab::Flows => {
-                let indices = self.filtered_flow_indices();
-                if indices.is_empty() {
+                let items = self.visible_flow_items();
+                if items.is_empty() {
                     return false;
                 }
                 let cur_pos = self
-                    .flow_selected_run_id
+                    .flow_selection
                     .as_ref()
-                    .and_then(|id| {
-                        indices
+                    .and_then(|sel| {
+                        items
                             .iter()
-                            .position(|&i| self.runs.get(i).map(|r| &r.run_id) == Some(id))
+                            .position(|it| it.selection(&self.runs).as_ref() == Some(sel))
                     })
                     .unwrap_or(0);
-                let max_pos = indices.len().saturating_sub(1);
+                let max_pos = items.len().saturating_sub(1);
                 let new_pos = (cur_pos as isize + delta).clamp(0, max_pos as isize) as usize;
-                let new_id = self.runs.get(indices[new_pos]).map(|r| r.run_id.clone());
-                if new_id != self.flow_selected_run_id {
-                    self.flow_selected_run_id = new_id;
+                let new_sel = items[new_pos].selection(&self.runs);
+                if new_sel != self.flow_selection {
+                    self.flow_selection = new_sel;
                     true
                 } else {
                     false
@@ -889,13 +1258,10 @@ impl LedgerState {
     fn jump_start(&mut self) -> bool {
         match self.tab {
             LedgerTab::Flows => {
-                let indices = self.filtered_flow_indices();
-                let first_id = indices
-                    .first()
-                    .and_then(|&i| self.runs.get(i))
-                    .map(|r| r.run_id.clone());
-                if first_id.is_some() && first_id != self.flow_selected_run_id {
-                    self.flow_selected_run_id = first_id;
+                let items = self.visible_flow_items();
+                let first_sel = items.first().and_then(|it| it.selection(&self.runs));
+                if first_sel.is_some() && first_sel != self.flow_selection {
+                    self.flow_selection = first_sel;
                     true
                 } else {
                     false
@@ -920,13 +1286,10 @@ impl LedgerState {
     fn jump_end(&mut self) -> bool {
         match self.tab {
             LedgerTab::Flows => {
-                let indices = self.filtered_flow_indices();
-                let last_id = indices
-                    .last()
-                    .and_then(|&i| self.runs.get(i))
-                    .map(|r| r.run_id.clone());
-                if last_id.is_some() && last_id != self.flow_selected_run_id {
-                    self.flow_selected_run_id = last_id;
+                let items = self.visible_flow_items();
+                let last_sel = items.last().and_then(|it| it.selection(&self.runs));
+                if last_sel.is_some() && last_sel != self.flow_selection {
+                    self.flow_selection = last_sel;
                     true
                 } else {
                     false
@@ -1076,7 +1439,13 @@ impl LedgerState {
             }
             KeyCode::Enter => match self.tab {
                 LedgerTab::Flows => {
-                    if let Some(run) = self.selected_run() {
+                    if let Some(FlowSelection::WaitingGroup(key)) = self.flow_selection.clone() {
+                        if self.flow_expanded_waiting_groups.insert(key) {
+                            LedgerOutcome::Changed
+                        } else {
+                            LedgerOutcome::Unchanged
+                        }
+                    } else if let Some(run) = self.selected_run() {
                         LedgerOutcome::OpenRun(run.dir.clone())
                     } else {
                         LedgerOutcome::Unchanged
@@ -1223,18 +1592,18 @@ impl LedgerState {
                 if rows.len() <= list_height {
                     return None;
                 }
-                let indices = self.filtered_flow_indices();
-                let total = indices.len();
+                let items = self.visible_flow_items();
+                let total = items.len();
                 if total == 0 {
                     return None;
                 }
                 let pos = self
-                    .flow_selected_run_id
+                    .flow_selection
                     .as_ref()
-                    .and_then(|id| {
-                        indices
+                    .and_then(|sel| {
+                        items
                             .iter()
-                            .position(|&i| self.runs.get(i).map(|r| &r.run_id) == Some(id))
+                            .position(|it| it.selection(&self.runs).as_ref() == Some(sel))
                     })
                     .unwrap_or(0)
                     + 1;
@@ -1424,24 +1793,53 @@ impl LedgerState {
             return;
         }
 
-        // Find visual row index of the selected run
-        let selected_visual_idx = self.flow_selected_run_id.as_ref().and_then(|sel_id| {
-            rows.iter().position(|row| match row {
-                FlowListRow::Run { idx, .. } => {
+        // Find visual row index of the selected run or waiting group
+        let selected_visual_idx = self.flow_selection.as_ref().and_then(|sel| {
+            rows.iter().position(|row| match (row, sel) {
+                (FlowListRow::Run { idx, .. }, FlowSelection::Run(sel_id)) => {
                     self.runs.get(*idx).map(|r| &r.run_id) == Some(sel_id)
                 }
+                (
+                    FlowListRow::WaitingGroup { key, .. },
+                    FlowSelection::WaitingGroup(sel_key),
+                ) => key == sel_key,
                 _ => false,
             })
         });
 
-        // Adjust scroll to keep selection visible (and include header row immediately above if at top)
+        // Adjust scroll to keep selection (and any focused inline preview cursor) visible.
         if let Some(sel_v) = selected_visual_idx {
             let mut sel_end = sel_v + 1;
-            while matches!(rows.get(sel_end), Some(FlowListRow::Continuation { .. })) {
+            let mut cursor_range: Option<(usize, usize)> = None;
+            while let Some(FlowListRow::Continuation { style, .. }) = rows.get(sel_end) {
+                if matches!(style, ContinuationStyle::Preview { cursor: true, .. }) {
+                    cursor_range = match cursor_range {
+                        None => Some((sel_end, sel_end + 1)),
+                        Some((start, _)) => Some((start, sel_end + 1)),
+                    };
+                }
                 sel_end += 1;
             }
             let sel_h = sel_end - sel_v;
-            if sel_v < self.flow_scroll {
+            if let Some((cur_start, cur_end)) = cursor_range {
+                if sel_h <= list_h {
+                    if sel_v < self.flow_scroll {
+                        self.flow_scroll = sel_v;
+                        if sel_v > 0
+                            && matches!(rows.get(sel_v - 1), Some(FlowListRow::Header { .. }))
+                            && list_h > sel_h
+                        {
+                            self.flow_scroll = sel_v - 1;
+                        }
+                    } else if sel_end > self.flow_scroll + list_h {
+                        self.flow_scroll = sel_end.saturating_sub(list_h).min(sel_v);
+                    }
+                } else if cur_start < self.flow_scroll {
+                    self.flow_scroll = cur_start;
+                } else if cur_end > self.flow_scroll + list_h {
+                    self.flow_scroll = cur_end.saturating_sub(list_h).min(cur_start);
+                }
+            } else if sel_v < self.flow_scroll {
                 self.flow_scroll = sel_v;
                 // If the row right above `sel_v` is a section header, show it too when possible
                 if sel_v > 0
@@ -1483,8 +1881,10 @@ impl LedgerState {
                     is_child,
                 } => {
                     if let Some(run) = self.runs.get(*idx) {
-                        let is_selected =
-                            self.flow_selected_run_id.as_deref() == Some(run.run_id.as_str());
+                        let is_selected = matches!(
+                            self.flow_selection,
+                            Some(FlowSelection::Run(ref id)) if id == &run.run_id
+                        );
                         self.render_flow_row(
                             buf,
                             row_rect,
@@ -1497,23 +1897,105 @@ impl LedgerState {
                         );
                     }
                 }
+                FlowListRow::WaitingGroup {
+                    key,
+                    count,
+                    expanded,
+                    latest_updated_ms,
+                } => {
+                    let is_selected = matches!(
+                        self.flow_selection,
+                        Some(FlowSelection::WaitingGroup(ref sel_key)) if sel_key == key
+                    );
+                    self.render_waiting_group_row(
+                        buf,
+                        row_rect,
+                        key,
+                        *count,
+                        *expanded,
+                        *latest_updated_ms,
+                        is_selected,
+                        theme,
+                        now_ms,
+                    );
+                }
                 FlowListRow::Continuation {
                     indent,
+                    prefix,
                     text,
-                    is_warning,
+                    style,
                 } => {
                     buf.set_style(row_rect, Style::default().bg(theme.bg_highlight));
-                    let content = format!("{}{}", " ".repeat(*indent), text);
-                    let fg = if *is_warning {
-                        theme.warning
-                    } else {
-                        theme.gray
-                    };
-                    let line = Line::from(Span::styled(
-                        truncate_str(&content, row_rect.width as usize),
-                        Style::default().fg(fg).add_modifier(Modifier::BOLD),
-                    ));
-                    buf.set_line(row_rect.x, row_rect.y, &line, row_rect.width);
+                    match style {
+                        ContinuationStyle::Warning => {
+                            let content = format!("{}{}", " ".repeat(*indent), text);
+                            let line = Line::from(Span::styled(
+                                truncate_str(&content, row_rect.width as usize),
+                                Style::default()
+                                    .fg(theme.warning)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                            buf.set_line(row_rect.x, row_rect.y, &line, row_rect.width);
+                        }
+                        ContinuationStyle::Muted => {
+                            let content = format!("{}{}", " ".repeat(*indent), text);
+                            let line = Line::from(Span::styled(
+                                truncate_str(&content, row_rect.width as usize),
+                                Style::default()
+                                    .fg(theme.gray)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                            buf.set_line(row_rect.x, row_rect.y, &line, row_rect.width);
+                        }
+                        ContinuationStyle::Preview { cursor, selected } => {
+                            let w = row_rect.width as usize;
+                            let pad_str = " ".repeat((*indent).min(w));
+                            let rem_after_pad = w.saturating_sub(pad_str.width());
+                            let prefix_cut = truncate_str(prefix, rem_after_pad);
+                            let rem_after_prefix =
+                                rem_after_pad.saturating_sub(prefix_cut.width());
+                            let text_cut = truncate_str(text, rem_after_prefix);
+
+                            let prefix_style = if *cursor && *selected {
+                                Style::default()
+                                    .fg(theme.command)
+                                    .add_modifier(Modifier::BOLD)
+                            } else if *cursor {
+                                Style::default()
+                                    .fg(theme.accent_assistant)
+                                    .add_modifier(Modifier::BOLD)
+                            } else if *selected {
+                                Style::default()
+                                    .fg(theme.command)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(theme.gray_dim)
+                            };
+
+                            let text_style = if *cursor && *selected {
+                                Style::default()
+                                    .fg(theme.text_primary)
+                                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                            } else if *cursor {
+                                Style::default()
+                                    .fg(theme.text_primary)
+                                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                            } else if *selected {
+                                Style::default()
+                                    .fg(theme.text_primary)
+                                    .add_modifier(Modifier::REVERSED)
+                            } else {
+                                Style::default().fg(theme.gray)
+                            };
+
+                            let line = Line::from(vec![
+                                Span::raw(pad_str),
+                                Span::styled(prefix_cut, prefix_style),
+                                Span::styled(text_cut, text_style),
+                            ]);
+                            buf.set_line(row_rect.x, row_rect.y, &line, row_rect.width);
+                        }
+                    }
                 }
             }
         }
@@ -1775,8 +2257,16 @@ impl LedgerState {
             String::new()
         };
 
-        // Raw state text before cutting
-        let (raw_state_text, state_color) = self.flow_state_text(run, extra, stalled, theme);
+        // When the modal supplies an inline preview for this selected row, avoid duplicating
+        // the gate question or inline executed path on the row itself.
+        let preview_replaces_row_detail = selected && self.inline_preview.is_some();
+        let (raw_state_text, state_color) =
+            if preview_replaces_row_detail && run.status == RunStatus::Waiting && !answered {
+                let wait_target = run.waiting_on.as_deref().unwrap_or("checkpoint");
+                (format!("waiting: {wait_target}"), theme.warning)
+            } else {
+                self.flow_state_text(run, extra, stalled, theme)
+            };
 
         // Calculate fixed columns width:
         // "<glyph> " (2 cols) + optional gaps & columns
@@ -1802,11 +2292,16 @@ impl LedgerState {
         let fixed_w = base_prefix_w + rail_col_w + agents_col_w + age_col_w + dur_col_w;
         let flex_budget = w.saturating_sub(fixed_w);
 
-        let wrap_selected_waiting =
-            selected && run.status == RunStatus::Waiting && !answered && !raw_state_text.is_empty();
+        let wrap_selected_waiting = !preview_replaces_row_detail
+            && selected
+            && run.status == RunStatus::Waiting
+            && !answered
+            && !raw_state_text.is_empty();
         let executed_path = format_executed_path(extra.and_then(|e| e.executed.as_deref()));
-        let inline_path_available =
-            show_inline_path && !executed_path.is_empty() && flex_budget > 17;
+        let inline_path_available = !preview_replaces_row_detail
+            && show_inline_path
+            && !executed_path.is_empty()
+            && flex_budget > 17;
         let (display_state_text, display_state_color) = if inline_path_available {
             if run.status == RunStatus::Completed || raw_state_text.is_empty() {
                 (executed_path, theme.gray)
@@ -1956,6 +2451,122 @@ impl LedgerState {
             spans.push(Span::raw(" ".repeat(w - left_w - right_w)));
         }
         spans.extend(right_spans);
+
+        let line = Line::from(spans);
+        buf.set_line(row.x, row.y, &line, row.width);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_waiting_group_row(
+        &self,
+        buf: &mut Buffer,
+        row: Rect,
+        key: &WaitingGroupKey,
+        count: usize,
+        expanded: bool,
+        latest_updated_ms: i64,
+        selected: bool,
+        theme: &Theme,
+        now_ms: i64,
+    ) {
+        let w = row.width as usize;
+        if w == 0 {
+            return;
+        }
+        let base_mod = if selected {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        };
+        if selected {
+            buf.set_style(row, Style::default().bg(theme.bg_highlight));
+        }
+
+        let glyph = RunStatus::Waiting.glyph();
+        let marker = if expanded { "▾ " } else { "▸ " };
+        let count_str = format!("{count} waiting");
+        let age_str = if w >= 64 {
+            fmt_age(now_ms.saturating_sub(latest_updated_ms))
+        } else {
+            String::new()
+        };
+
+        let prefix_w = glyph.width() + 1;
+        let age_col_w = if !age_str.is_empty() {
+            1 + age_str.width()
+        } else {
+            0
+        };
+        let avail = w.saturating_sub(prefix_w + age_col_w);
+
+        let mut spans: Vec<Span<'static>> = vec![Span::styled(
+            format!("{glyph} "),
+            Style::default().fg(theme.warning).add_modifier(base_mod),
+        )];
+
+        if avail > count_str.width() + marker.width() + 1 {
+            let max_title = avail - 1 - count_str.width();
+            let longest_title = self
+                .runs
+                .iter()
+                .map(|r| r.title.width().max(r.flow_name.width()))
+                .max()
+                .unwrap_or(0)
+                + 2;
+            let title_col = longest_title.clamp(16.min(max_title), max_title);
+            let name_budget = title_col.saturating_sub(marker.width());
+            let label = truncate_str(&key.flow_name, name_budget);
+            let used_w = marker.width() + label.width();
+            let pad = title_col.saturating_sub(used_w);
+
+            spans.push(Span::styled(
+                marker.to_string(),
+                Style::default().fg(theme.gray).add_modifier(base_mod),
+            ));
+            if !label.is_empty() {
+                spans.push(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(theme.text_primary)
+                        .add_modifier(base_mod),
+                ));
+            }
+            if pad > 0 {
+                spans.push(Span::raw(" ".repeat(pad)));
+            }
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                count_str,
+                Style::default().fg(theme.warning).add_modifier(base_mod),
+            ));
+        } else {
+            let combined = format!("{marker}{} {count_str}", key.flow_name);
+            let cut = truncate_str(&combined, avail);
+            if !cut.is_empty() {
+                spans.push(Span::styled(
+                    cut,
+                    Style::default()
+                        .fg(theme.text_primary)
+                        .add_modifier(base_mod),
+                ));
+            }
+        }
+
+        if !age_str.is_empty() {
+            let left_w: usize = spans.iter().map(|s| s.content.width()).sum();
+            let right_w = 1 + age_str.width();
+            if left_w + right_w <= w {
+                let gap = w - left_w - right_w;
+                if gap > 0 {
+                    spans.push(Span::raw(" ".repeat(gap)));
+                }
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    age_str,
+                    Style::default().fg(theme.gray).add_modifier(base_mod),
+                ));
+            }
+        }
 
         let line = Line::from(spans);
         buf.set_line(row.x, row.y, &line, row.width);
@@ -2599,6 +3210,7 @@ mod tests {
                 stalled: false,
                 question: Some("tests and review are in: land it, or send it back?".to_string()),
                 answers: None,
+                flow_path: None,
             },
         );
         extras.insert(
@@ -2614,6 +3226,7 @@ mod tests {
                 stalled: false,
                 question: None,
                 answers: None,
+                flow_path: None,
             },
         );
         // A workflow with hundreds of nodes (the monitor run: 262) must not
@@ -2638,6 +3251,7 @@ mod tests {
                 stalled: false,
                 question: None,
                 answers: None,
+                flow_path: None,
             },
         );
         state.set_extras(extras);
@@ -2764,11 +3378,12 @@ mod tests {
                 stalled: true,
                 question: None,
                 answers: None,
+                flow_path: None,
             },
         );
         state.set_extras(extras);
 
-        // Stalled run is not considered live
+        // Stalled run is not considered live, but remains under Running with its stalled label.
         assert!(!state.any_live());
 
         let theme = Theme::default();
@@ -2776,8 +3391,9 @@ mod tests {
         let area_ = buf.area;
         state.render(&mut buf, area_, &theme, 10_000);
         let text = all_text(&buf);
-        assert!(!text.contains("RUNNING 1"));
-        assert!(text.contains("FINISHED 2"));
+        assert!(!text.contains("Waiting for input"), "{text}");
+        assert!(text.contains("Running 1"), "{text}");
+        assert!(text.contains("Recent outcomes 1"), "{text}");
         assert!(text.contains("⊘ Stalled Run"));
         assert!(text.contains("stalled at deploy_step"));
     }
@@ -3034,6 +3650,7 @@ mod tests {
                 stalled: false,
                 question: Some("Ship to prod?".to_string()),
                 answers: None,
+                flow_path: None,
             },
         );
         state.set_extras(extras);
@@ -3050,7 +3667,7 @@ mod tests {
         assert!(r0.contains("[grouped]"));
 
         let full = all_text(&buf);
-        assert!(full.contains("NEEDS YOU 1"));
+        assert!(full.contains("Waiting for input 1"));
         assert!(full.contains("Release pipeline"));
         assert!(full.contains("✓✓✓✗◐○ 4 steps ran"));
         assert!(full.contains("Ship to prod?"));
@@ -3087,6 +3704,7 @@ mod tests {
                     stalled: false,
                     question: Some("Ship it?".to_string()),
                     answers: None,
+                    flow_path: None,
                 },
             );
             if answered {
@@ -3102,6 +3720,7 @@ mod tests {
                             run_id: "r-wait".to_string(),
                             choice: "Accept".to_string(),
                         }),
+                        flow_path: None,
                     },
                 );
             }
@@ -3145,6 +3764,7 @@ mod tests {
                 stalled: false,
                 question: Some("Approve?".to_string()),
                 answers: None,
+                flow_path: None,
             },
         );
         state.set_extras(extras);
@@ -3194,6 +3814,7 @@ mod tests {
                 stalled: false,
                 question: Some("Continue old?".to_string()),
                 answers: None,
+                flow_path: None,
             },
         );
         extras.insert(
@@ -3205,6 +3826,7 @@ mod tests {
                 stalled: false,
                 question: Some("Continue new?".to_string()),
                 answers: None,
+                flow_path: None,
             },
         );
         extras.insert(
@@ -3219,6 +3841,7 @@ mod tests {
                     run_id: "r-old-wait".to_string(),
                     choice: "Approve".to_string(),
                 }),
+                flow_path: None,
             },
         );
         state.set_extras(extras);
@@ -3229,9 +3852,9 @@ mod tests {
         state.render(&mut buf, area, &theme, 10_000);
         let full = all_text(&buf);
         assert!(full.contains("1 needs you"));
-        assert!(full.contains("NEEDS YOU 1"));
-        assert!(full.contains("FINISHED 2"));
-        let fin_pos = full.find("FINISHED 2").unwrap_or(0);
+        assert!(full.contains("Waiting for input 1"));
+        assert!(full.contains("Recent outcomes 2"));
+        let fin_pos = full.find("Recent outcomes 2").unwrap_or(0);
         let old_pos = full.find("Old Gate").unwrap_or(0);
         assert!(old_pos > fin_pos);
     }
@@ -3271,13 +3894,13 @@ mod tests {
             LedgerOutcome::Unchanged
         );
 
-        // Render folded state: FINISHED count is in units of runs (3 grouped + 2 empty-name = 5).
+        // Render folded state: Recent outcomes count is in units of runs (3 grouped + 2 empty-name = 5).
         let mut buf = Buffer::empty(Rect::new(0, 0, 120, 14));
         let area = buf.area;
         state.render(&mut buf, area, &Theme::default(), 10_000);
         let folded_text = all_text(&buf);
-        assert!(folded_text.contains("NEEDS YOU 1"), "{folded_text}");
-        assert!(folded_text.contains("FINISHED 5"), "{folded_text}");
+        assert!(folded_text.contains("Waiting for input 1"), "{folded_text}");
+        assert!(folded_text.contains("Recent outcomes 5"), "{folded_text}");
         assert!(folded_text.contains("▸"), "{folded_text}");
         assert!(folded_text.contains("(3)"), "{folded_text}");
 
@@ -3408,6 +4031,7 @@ mod tests {
                 stalled: true,
                 question: None,
                 answers: None,
+                flow_path: None,
             },
         );
         extras.insert(
@@ -3422,21 +4046,28 @@ mod tests {
                     run_id: "r-ans".to_string(),
                     choice: "Ship".to_string(),
                 }),
+                flow_path: None,
             },
         );
         // Extras first so the initial selection sees r-ans as already answered.
         state.set_extras(extras);
         state.set_runs(vec![r1, r2, stalled, answered, next]);
 
-        // All 5 are in FINISHED; r-next, r-ans, r-stalled are individual; only r2/r1 form a group.
+        // r-stalled stays under Running; r-next, r-ans, and the r2/r1 group are under Recent outcomes.
         let mut buf = Buffer::empty(Rect::new(0, 0, 120, 14));
         let area = buf.area;
         state.render(&mut buf, area, &Theme::default(), 10_000);
         let text = all_text(&buf);
-        assert!(text.contains("FINISHED 5"), "{text}");
+        assert!(!text.contains("Waiting for input"), "{text}");
+        assert!(text.contains("Running 1"), "{text}");
+        assert!(text.contains("Recent outcomes 4"), "{text}");
         assert!(text.contains("(2)"), "{text}");
 
-        // Walk down: r-next -> r-ans -> r-stalled -> r2 (group).
+        // Walk down: r-stalled (Running) -> r-next -> r-ans -> r2 (group).
+        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r-stalled"));
+        assert_eq!(state.handle_key(&key(KeyCode::Char(' '))), LedgerOutcome::Unchanged);
+
+        state.handle_key(&key(KeyCode::Down));
         assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r-next"));
         assert_eq!(state.handle_key(&key(KeyCode::Char(' '))), LedgerOutcome::Unchanged);
 
@@ -3445,14 +4076,12 @@ mod tests {
         assert_eq!(state.handle_key(&key(KeyCode::Char(' '))), LedgerOutcome::Unchanged);
 
         state.handle_key(&key(KeyCode::Down));
-        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r-stalled"));
-        assert_eq!(state.handle_key(&key(KeyCode::Char(' '))), LedgerOutcome::Unchanged);
-
-        state.handle_key(&key(KeyCode::Down));
         assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r2"));
+        assert!(state.selected_run_is_finished_group());
         assert_eq!(state.handle_key(&key(KeyCode::Char(' '))), LedgerOutcome::Changed);
         state.handle_key(&key(KeyCode::Down));
         assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("r1"));
+        assert!(!state.selected_run_is_finished_group());
     }
 
     #[test]
@@ -3522,6 +4151,7 @@ mod tests {
                 stalled: false,
                 question: None,
                 answers: None,
+                flow_path: None,
             },
         );
         extras.insert(
@@ -3533,6 +4163,7 @@ mod tests {
                 stalled: false,
                 question: None,
                 answers: None,
+                flow_path: None,
             },
         );
         // r-unknown intentionally has no RowExtra entry.
@@ -3598,6 +4229,7 @@ mod tests {
                     stalled: false,
                     question: None,
                     answers: None,
+                    flow_path: None,
                 },
             );
         }
@@ -3679,6 +4311,7 @@ mod tests {
                 stalled: false,
                 question: Some("Proceed?".to_string()),
                 answers: None,
+                flow_path: None,
             },
         );
         state.set_extras(extras_unanswered.clone());
@@ -3689,7 +4322,7 @@ mod tests {
         state.render(&mut buf, area, &theme, 10_000);
         let full = all_text(&buf);
         assert!(full.contains("1 needs you"));
-        assert!(full.contains("NEEDS YOU 1"));
+        assert!(full.contains("Waiting for input 1"));
 
         let mut extras_answered = extras_unanswered.clone();
         extras_answered.insert(
@@ -3704,6 +4337,7 @@ mod tests {
                     run_id: "r-wait".to_string(),
                     choice: "Yes".to_string(),
                 }),
+                flow_path: None,
             },
         );
         state.set_extras(extras_answered);
@@ -3717,7 +4351,7 @@ mod tests {
         state.render(&mut buf3, area, &theme, 10_000);
         let full3 = all_text(&buf3);
         assert!(full3.contains("1 needs you"));
-        assert!(full3.contains("NEEDS YOU 1"));
+        assert!(full3.contains("Waiting for input 1"));
     }
 
     #[test]
@@ -3737,6 +4371,7 @@ mod tests {
                 stalled: false,
                 question: Some("Which?".to_string()),
                 answers: None,
+                flow_path: None,
             },
         );
         extras.insert(
@@ -3751,6 +4386,7 @@ mod tests {
                     run_id: "r-wait".to_string(),
                     choice: "OldChoice".to_string(),
                 }),
+                flow_path: None,
             },
         );
         extras.insert(
@@ -3765,6 +4401,7 @@ mod tests {
                     run_id: "r-wait".to_string(),
                     choice: "NewChoice".to_string(),
                 }),
+                flow_path: None,
             },
         );
 
@@ -3814,6 +4451,7 @@ mod tests {
                 stalled: false,
                 question: Some(question.clone()),
                 answers: None,
+                flow_path: None,
             },
         );
         extras.insert(
@@ -3825,6 +4463,7 @@ mod tests {
                 stalled: false,
                 question: Some("Short?".to_string()),
                 answers: None,
+                flow_path: None,
             },
         );
         state.set_extras(extras);
@@ -3844,5 +4483,332 @@ mod tests {
         state.render(&mut buf2, area, &theme, 10_000);
         assert!(row_text(&buf2, 2).contains("First Gate"));
         assert!(row_text(&buf2, 3).contains("Second Gate"));
+    }
+
+    #[test]
+    fn waiting_groups_fold_ship_and_mixed_talk_expand_navigate_and_survive_refresh() {
+        let now_ms = 10_000_000_000i64;
+        let five_days_ms = 5 * 24 * 60 * 60 * 1_000i64;
+        let mut runs = vec![
+            make_named_run(
+                "ship-old",
+                "ship: slugify",
+                "ship old",
+                RunStatus::Waiting,
+                now_ms - five_days_ms - 5_000,
+                now_ms - five_days_ms,
+            ),
+            make_named_run("ship-2", "ship: slugify", "ship 2", RunStatus::Waiting, now_ms - 40_000, now_ms - 40_000),
+            make_named_run("ship-3", "ship: slugify", "ship 3", RunStatus::Waiting, now_ms - 30_000, now_ms - 30_000),
+            make_named_run("ship-4", "ship: slugify", "ship 4", RunStatus::Waiting, now_ms - 20_000, now_ms - 20_000),
+            make_named_run("ship-5", "ship: slugify", "ship 5", RunStatus::Waiting, now_ms - 10_000, now_ms - 10_000),
+            make_named_run("mix-1", "mixed-talk", "mix 1", RunStatus::Waiting, now_ms - 25_000, now_ms - 25_000),
+            make_named_run("mix-2", "mixed-talk", "mix 2", RunStatus::Waiting, now_ms - 15_000, now_ms - 15_000),
+        ];
+
+        let mut state = LedgerState::new();
+        state.set_runs(runs.clone());
+
+        // Top selection is the newest waiting group; no run is selected, no copy on group header.
+        assert_eq!(state.selected_waiting_group(), Some(("ship: slugify", 5)));
+        assert!(state.selected_run().is_none());
+        assert!(!state.selected_run_is_finished_group());
+        assert_eq!(state.handle_key(&key(KeyCode::Char('y'))), LedgerOutcome::Unchanged);
+
+        // Render collapsed state: two groups, section count in units of runs, empty sections omitted.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 14));
+        let area = buf.area;
+        state.render(&mut buf, area, &Theme::default(), now_ms);
+        let text = all_text(&buf);
+        assert!(text.contains("7 needs you"), "{text}");
+        assert!(text.contains("Waiting for input 7"), "{text}");
+        assert!(!text.contains("Running"), "{text}");
+        assert!(!text.contains("Recent outcomes"), "{text}");
+        assert!(text.contains("ship: slugify"), "{text}");
+        assert!(text.contains("5 waiting"), "{text}");
+        assert!(text.contains("mixed-talk"), "{text}");
+        assert!(text.contains("2 waiting"), "{text}");
+
+        // Enter on waiting group expands it without opening a member; second Enter is a no-op.
+        assert_eq!(state.handle_key(&key(KeyCode::Enter)), LedgerOutcome::Changed);
+        assert_eq!(state.selected_waiting_group(), Some(("ship: slugify", 5)));
+        assert_eq!(state.handle_key(&key(KeyCode::Enter)), LedgerOutcome::Unchanged);
+
+        // Walk down through all 5 members newest-first, reaching the 5-day-old wait.
+        let expected_ids = ["ship-5", "ship-4", "ship-3", "ship-2", "ship-old"];
+        for expected in expected_ids {
+            assert_eq!(state.handle_key(&key(KeyCode::Down)), LedgerOutcome::Changed);
+            assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some(expected));
+        }
+        assert_eq!(
+            state.handle_key(&key(KeyCode::Enter)),
+            LedgerOutcome::OpenRun(PathBuf::from("/tmp/runs/ship-old"))
+        );
+
+        // Individual run ID survives a refresh when a newer member arrives.
+        runs.push(make_named_run(
+            "ship-6",
+            "ship: slugify",
+            "ship 6",
+            RunStatus::Waiting,
+            now_ms - 5_000,
+            now_ms - 5_000,
+        ));
+        state.set_runs(runs);
+        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("ship-old"));
+
+        // Explicit Space collapse on a child returns selection to the waiting group row.
+        assert_eq!(state.handle_key(&key(KeyCode::Char(' '))), LedgerOutcome::Changed);
+        assert_eq!(state.selected_waiting_group(), Some(("ship: slugify", 6)));
+        assert!(state.selected_run().is_none());
+
+        // Next row is the second collapsed waiting group.
+        assert_eq!(state.handle_key(&key(KeyCode::Down)), LedgerOutcome::Changed);
+        assert_eq!(state.selected_waiting_group(), Some(("mixed-talk", 2)));
+
+        // Recent order unfolds waits so they can be browsed individually.
+        assert_eq!(state.handle_key(&key(KeyCode::Char('s'))), LedgerOutcome::Changed);
+        assert!(state.selected_waiting_group().is_none());
+        assert!(state.selected_run().is_some());
+    }
+
+    #[test]
+    fn waiting_groups_separate_by_source_root_and_recorded_flow_path() {
+        let mut r_proj_a1 = make_named_run("a1", "ship", "Ship A1", RunStatus::Waiting, 1_000, 5_000);
+        let mut r_proj_a2 = make_named_run("a2", "ship", "Ship A2", RunStatus::Waiting, 2_000, 6_000);
+        let mut r_proj_b = make_named_run("b1", "ship", "Ship B1", RunStatus::Waiting, 3_000, 4_000);
+        let mut r_missing_a1 = make_named_run("m1", "ship", "Ship M1", RunStatus::Waiting, 1_000, 3_000);
+        let mut r_missing_a2 = make_named_run("m2", "ship", "Ship M2", RunStatus::Waiting, 1_500, 2_500);
+        let mut r_missing_other_root =
+            make_named_run("m3", "ship", "Ship M3", RunStatus::Waiting, 1_000, 1_000);
+
+        r_proj_a1.dir = PathBuf::from("/tmp/root-a/a1");
+        r_proj_a2.dir = PathBuf::from("/tmp/root-a/a2");
+        r_proj_b.dir = PathBuf::from("/tmp/root-a/b1");
+        r_missing_a1.dir = PathBuf::from("/tmp/root-a/m1");
+        r_missing_a2.dir = PathBuf::from("/tmp/root-a/m2");
+        r_missing_other_root.dir = PathBuf::from("/tmp/root-b/m3");
+
+        let mut extras = HashMap::new();
+        for (id, path) in [
+            ("a1", Some("/proj-a/ship.yaml")),
+            ("a2", Some("/proj-a/ship.yaml")),
+            ("b1", Some("/proj-b/ship.yaml")),
+            ("m1", None),
+            ("m2", None),
+            ("m3", None),
+        ] {
+            extras.insert(
+                id.to_string(),
+                RowExtra {
+                    flow_path: path.map(PathBuf::from),
+                    ..RowExtra::default()
+                },
+            );
+        }
+
+        let mut state = LedgerState::new();
+        state.set_extras(extras);
+        state.set_runs(vec![
+            r_proj_a1,
+            r_proj_a2,
+            r_proj_b,
+            r_missing_a1,
+            r_missing_a2,
+            r_missing_other_root,
+        ]);
+
+        // Order by newest updated_ms:
+        // 1. WaitingGroup (proj-a, 2 members, updated 6000)
+        // 2. Single run b1 (proj-b, updated 4000)
+        // 3. WaitingGroup (missing path in root-a, 2 members, updated 3000)
+        // 4. Single run m3 (missing path in root-b, updated 1000)
+        assert_eq!(state.selected_waiting_group(), Some(("ship", 2)));
+        assert!(state.selected_run().is_none());
+
+        state.handle_key(&key(KeyCode::Down));
+        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("b1"));
+        assert!(state.selected_waiting_group().is_none());
+
+        state.handle_key(&key(KeyCode::Down));
+        assert_eq!(state.selected_waiting_group(), Some(("ship", 2)));
+        assert!(state.selected_run().is_none());
+
+        state.handle_key(&key(KeyCode::Down));
+        assert_eq!(state.selected_run().map(|r| r.run_id.as_str()), Some("m3"));
+        assert!(state.selected_waiting_group().is_none());
+    }
+
+    #[test]
+    fn five_unanswered_and_two_answered_native_waits_group_as_five_with_two_under_recent_outcomes() {
+        let mut runs = Vec::new();
+        let mut extras = HashMap::new();
+        for i in 1..=5 {
+            let id = format!("w-{i}");
+            runs.push(make_named_run(
+                &id,
+                "ship: slugify",
+                &format!("Ship {i}"),
+                RunStatus::Waiting,
+                i * 1_000,
+                i * 1_000,
+            ));
+            extras.insert(
+                id,
+                RowExtra {
+                    rail: vec![NodeState::Waiting],
+                    question: Some(format!("Ship {i}?")),
+                    ..RowExtra::default()
+                },
+            );
+        }
+        for (i, choice) in [(6, "Accept"), (7, "Retry")] {
+            let wait_id = format!("w-{i}");
+            let cont_id = format!("cont-{i}");
+            runs.push(make_named_run(
+                &wait_id,
+                "ship: slugify",
+                &format!("Answered {i}"),
+                RunStatus::Waiting,
+                i * 1_000,
+                i * 1_000,
+            ));
+            runs.push(make_named_run(
+                &cont_id,
+                "ship-next",
+                &format!("Continuation {i}"),
+                RunStatus::Completed,
+                i * 1_000 + 500,
+                i * 1_000 + 500,
+            ));
+            extras.insert(
+                cont_id,
+                RowExtra {
+                    answers: Some(GateAnswer {
+                        run_id: wait_id,
+                        choice: choice.to_string(),
+                    }),
+                    ..RowExtra::default()
+                },
+            );
+        }
+
+        let mut state = LedgerState::new();
+        state.set_extras(extras);
+        state.set_runs(runs);
+
+        assert_eq!(state.selected_waiting_group(), Some(("ship: slugify", 5)));
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 16));
+        let area = buf.area;
+        state.render(&mut buf, area, &Theme::default(), 20_000);
+        let text = all_text(&buf);
+        assert!(text.contains("5 needs you"), "{text}");
+        assert!(text.contains("Waiting for input 5"), "{text}");
+        assert!(text.contains("5 waiting"), "{text}");
+        assert!(text.contains("Recent outcomes 4"), "{text}");
+        let recent_pos = text.find("Recent outcomes 4").expect("recent outcomes header");
+        let ans6_pos = text.find("answered: Accept").expect("first answered row");
+        let ans7_pos = text.find("answered: Retry").expect("second answered row");
+        assert!(ans6_pos > recent_pos, "{text}");
+        assert!(ans7_pos > recent_pos, "{text}");
+    }
+
+    #[test]
+    fn inline_preview_replaces_question_and_path_renders_cursor_wrapping_and_scrolls() {
+        let mut state = LedgerState::new();
+        let wait = make_named_run("r-wait", "ship", "Ship Gate", RunStatus::Waiting, 1_000, 2_000);
+        let mut extras = HashMap::new();
+        extras.insert(
+            "r-wait".to_string(),
+            RowExtra {
+                rail: vec![NodeState::Done(Outcome::Ok), NodeState::Waiting],
+                executed: Some(vec![
+                    ("plan".to_string(), Outcome::Ok),
+                    ("cargo_check".to_string(), Outcome::Ok),
+                ]),
+                question: Some("Ship to prod now?".to_string()),
+                ..RowExtra::default()
+            },
+        );
+        state.set_extras(extras);
+        state.set_runs(vec![wait]);
+
+        // Supply inline preview with question, path, focused wrapped cursor line, and selected line.
+        let long_cursor = "Diagnostic line alpha beta gamma delta epsilon zeta eta theta iota kappa";
+        state.set_inline_preview(Some(vec![
+            InlinePreviewLine {
+                text: "Ship to prod now?".to_string(),
+                cursor: false,
+                selected: false,
+            },
+            InlinePreviewLine {
+                text: long_cursor.to_string(),
+                cursor: true,
+                selected: false,
+            },
+            InlinePreviewLine {
+                text: "✓ plan → ✓ cargo_check".to_string(),
+                cursor: false,
+                selected: true,
+            },
+        ]));
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 56, 14));
+        let area = buf.area;
+        state.render(&mut buf, area, &Theme::default(), 10_000);
+        let text = all_text(&buf);
+        // Question and executed path appear only once (not duplicated on the run row).
+        assert_eq!(text.matches("Ship to prod now?").count(), 1, "{text}");
+        assert_eq!(text.matches("cargo_check").count(), 1, "{text}");
+        // Focused cursor marker and wrapped words are visible.
+        assert!(text.contains("▸ Diagnostic"), "{text}");
+        assert!(text.contains("kappa"), "{text}");
+        assert!(text.contains("▎ ✓ plan"), "{text}");
+
+        // Tall preview exceeding viewport scrolls focused cursor into view; clearing cursor
+        // keeps the selected row reachable.
+        let mut tall: Vec<InlinePreviewLine> = (0..12)
+            .map(|i| InlinePreviewLine {
+                text: format!("preview-line-{i:02}"),
+                cursor: i == 11,
+                selected: false,
+            })
+            .collect();
+        state.set_inline_preview(Some(tall.clone()));
+        let mut small_buf = Buffer::empty(Rect::new(0, 0, 60, 6));
+        let small_area = small_buf.area;
+        state.render(&mut small_buf, small_area, &Theme::default(), 10_000);
+        let focused_text = all_text(&small_buf);
+        assert!(focused_text.contains("▸ preview-line-11"), "{focused_text}");
+
+        // Unfocus preview cursor -> selected row returns into view even though preview is tall.
+        tall[11].cursor = false;
+        state.set_inline_preview(Some(tall));
+        let mut unfocused_buf = Buffer::empty(Rect::new(0, 0, 60, 6));
+        state.render(&mut unfocused_buf, small_area, &Theme::default(), 10_000);
+        let unfocused_text = all_text(&unfocused_buf);
+        assert!(unfocused_text.contains("Ship Gate"), "{unfocused_text}");
+
+        // Inline preview supplied for a selected waiting group renders below the group row
+        // without resolving a member.
+        let mut g_state = LedgerState::new();
+        g_state.set_runs(vec![
+            make_named_run("g1", "ship", "Ship 1", RunStatus::Waiting, 1_000, 1_000),
+            make_named_run("g2", "ship", "Ship 2", RunStatus::Waiting, 2_000, 2_000),
+        ]);
+        g_state.set_inline_preview(Some(vec![InlinePreviewLine {
+            text: "2 separate gates; Space reveals them".to_string(),
+            cursor: true,
+            selected: false,
+        }]));
+        let mut g_buf = Buffer::empty(Rect::new(0, 0, 72, 10));
+        let g_area = g_buf.area;
+        g_state.render(&mut g_buf, g_area, &Theme::default(), 10_000);
+        let g_text = all_text(&g_buf);
+        assert!(g_state.selected_run().is_none());
+        assert_eq!(g_state.selected_waiting_group(), Some(("ship", 2)));
+        assert!(g_text.contains("2 waiting"), "{g_text}");
+        assert!(g_text.contains("▸ 2 separate gates; Space reveals them"), "{g_text}");
     }
 }

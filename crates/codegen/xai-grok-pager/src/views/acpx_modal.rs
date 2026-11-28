@@ -799,6 +799,7 @@ fn row_extra(summary: &RunSummary) -> RowExtra {
         stalled: false,
         question: (run.summary.status == bundle::RunStatus::Waiting).then(|| run.summary.status_detail.clone()).flatten(),
         answers: parse_gate_answer(&run.input),
+        flow_path: bundle::flow_path(&summary.dir),
     }
 }
 
@@ -1741,6 +1742,22 @@ mod tests {
             state.ledger.answered_choice("waiting-run"),
             Some("ship")
         );
+    }
+
+    #[test]
+    fn row_extra_reads_recorded_flow_path_without_requiring_file_to_exist() {
+        let fx = write_fixture("completed");
+        let missing_path = "/nonexistent/project-alpha/flows/ship.yaml";
+        fs::write(
+            fx.run_dir.join("manifest.json"),
+            format!(r#"{{"flowPath":"{missing_path}"}}"#),
+        )
+        .expect("write manifest.json");
+
+        let runs = bundle::list_runs(&fx.runs_base);
+        let summary = runs.first().expect("one run");
+        let extra = row_extra(summary);
+        assert_eq!(extra.flow_path, Some(PathBuf::from(missing_path)));
     }
 }
 
