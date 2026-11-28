@@ -32,3 +32,17 @@ Review (before the implementer ran):
 - Baseline: Opus's packet 7 (`inspector-copy`, v8) attaches all of inspector.rs, 60.3 KB, 13 ranges; run4 return: Neon medium, 257 s, 32,522 in, 34,530 out, 1,608 lines.
 
 Step 4 dispatches the Flash packet unchanged to Neon medium to measure what those gaps cost.
+
+## Result 2: Neon medium on the Flash packet, unedited (Rex pane `slice-inspector-focus-flashpacket`, 23:44:28 to 23:48:45)
+
+PASS, 0 tool calls, total 234.8 s, first code 120.0 s, input 27,211, output 35,833 (thought 16,530), 1,895 lines.
+Opus packet 7 baseline (run4): 257.0 s, first code 147.6 s, input 32,522, output 34,530 (thought 18,380), 1,608 lines.
+
+Matching against the base commit `2dee6724` (the working tree already carries someone's applied packet 7, so the check used `git show` copies, not the tree): Flash edit list 7 of 7 OLD blocks match exactly once; Opus edit list 8 of 8.
+
+Predicted gaps, as they showed in the return:
+- The unattached tests: the Flash return ends with a conditional coordinator follow-up ("if any existing unit tests assert ... update those assertions") instead of changing `per_tab_scroll_memory_and_clamping`. Opus's return has no follow-ups.
+- Test helpers: Flash's new tests call `row_text`, which was not in any attached excerpt (it exists with that name); `render_text` is not used. Opus's tests use both, with `render_text` quoted in OLD.
+- Test count: Flash adds 11 tests and rewrites 2; Opus adds 10.
+
+Not measured: neither edit list was compiled or run. Compile and test results decide whether the gaps cost anything.
