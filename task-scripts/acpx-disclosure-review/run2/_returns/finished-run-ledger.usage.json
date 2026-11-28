@@ -1,0 +1,37 @@
+{
+  "slice": "finished-run-ledger",
+  "ok": true,
+  "error": null,
+  "requested": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "agent": "agy acp --sandbox"
+  },
+  "effective": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "legacyCurrentModelId": "gemini-4-neon-high",
+    "tier": "Google AI Pro"
+  },
+  "timeToFirstCodeSeconds": 287.14,
+  "totalSeconds": 493.81,
+  "toolCallCount": 0,
+  "toolCalls": [],
+  "returnedBytes": 114675,
+  "returnedLines": 3095,
+  "quotaPercentage": "unknown",
+  "stopReason": "end_turn",
+  "usage": {
+    "inputTokens": 41837,
+    "outputTokens": 70863,
+    "cachedReadTokens": 0,
+    "cachedWriteTokens": 0,
+    "thoughtTokens": 37975,
+    "totalTokens": 112700
+  },
+  "stagedFiles": [
+    "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run2/grok-build/task-scripts/acpx-disclosure-returns/finished-run-ledger.edits.md"
+  ],
+  "rawEventsPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run2/_returns/finished-run-ledger.events.jsonl",
+  "rawReturnPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run2/_returns/finished-run-ledger.md"
+}
