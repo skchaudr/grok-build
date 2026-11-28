@@ -1,0 +1,37 @@
+{
+  "slice": "inspector-copy",
+  "ok": true,
+  "error": null,
+  "requested": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "agent": "agy acp --sandbox"
+  },
+  "effective": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "legacyCurrentModelId": "gemini-4-neon-high",
+    "tier": "Google AI Pro"
+  },
+  "timeToFirstCodeSeconds": 147.55,
+  "totalSeconds": 257.03,
+  "toolCallCount": 0,
+  "toolCalls": [],
+  "returnedBytes": 56141,
+  "returnedLines": 1608,
+  "quota": null,
+  "stopReason": "end_turn",
+  "usage": {
+    "inputTokens": 32522,
+    "outputTokens": 34530,
+    "cachedReadTokens": 0,
+    "cachedWriteTokens": 0,
+    "thoughtTokens": 18380,
+    "totalTokens": 67052
+  },
+  "stagedFiles": [
+    "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run4/grok-build/task-scripts/acpx-disclosure-returns/inspector-copy.edits.md"
+  ],
+  "rawEventsPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run4/_returns/inspector-copy.events.jsonl",
+  "rawReturnPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run4/_returns/inspector-copy.md"
+}
