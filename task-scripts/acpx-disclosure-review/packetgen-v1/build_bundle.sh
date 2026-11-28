@@ -22,8 +22,17 @@ ITEMS='^\s*(pub(\(crate\))? )?(fn|struct|enum|impl|const|static|mod) |^\s*#\[cfg
   echo "## Coordinator integration item (verbatim)"
   sed -n '86p' "$PK"
   echo
-  echo "## Facts the operator has not stated but the code shows"
-  echo "The inspector has no Tab-to-pane focus. Tab already switches inspector tabs and stays that way. Today y copies the whole active tab (test copy_returns_active_tab_full_text); after this packet Y does that and y copies the cursor line or visual range."
+  echo "## Defects the operator hit on the installed build (sab-air, 2026-11-27 23:29), in his words"
+  echo "He opened /acpx, a past run, one step with Enter (the inspector), and copied output. The page looks good and works badly:"
+  echo "1. To read another step he has to press Esc, go down a step and press Enter again; he wants to open one step and use the arrow keys to reach the others."
+  echo "2. Tab on a step moves between the step's output and its meta (inspector tabs). That is expected; it stays."
+  echo "3. y copies the whole tab, one line or fifty. He wants the same linewise copy the grok build line viewer has."
+  echo
+  echo "## What the code shows about those defects"
+  echo "Step switching already exists as [ and ] (STEP_KEYS: Previous / next step in run), listed only in the ? overlay, and Left/Right are bound to horizontal scroll (also h/l). Up/Down and j/k scroll today and become the line cursor under the contract, so they cannot also change steps. Today y copies the whole active tab (test copy_returns_active_tab_full_text); after this packet Y does that and y copies the cursor line or visual range."
+  echo
+  echo "## Decision made for the writer (the coordinator's pick; the operator may overrule)"
+  echo "Left and Right switch to the previous and next step, like [ and ]; h and l keep horizontal scroll. The footer of the inspector shows the step keys and the cursor keys while it is open."
 } > "$OUT/objective.md"
 
 {
