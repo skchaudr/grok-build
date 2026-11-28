@@ -571,4 +571,79 @@ the cursor; the copied text contains no section-rule characters. Update the
 wants_esc test only if its expectations change.
 """,
     ),
+    task(
+        "inspector-copy",
+        source(f"{MODAL}/inspector.rs", (1, 700), (701, 1365))
+        + source(APP_MODAL, (625, 700), (1000, 1013), (1280, 1405)),
+        rf"""
+Packet 7. Ownership: {MODAL}/inspector.rs (all of it, including tests) and,
+in {APP_MODAL}, only the STEP_KEYS table and the Step-mode tests attached.
+handle_step_key and open_step_at are attached read-only: they already turn
+InspectorOutcome::Prev / Next into opening the previous / next step and
+Back into returning to the run on the same step; keep using those outcomes.
+
+The operator's test on the installed build: he opened a past run, pressed
+Enter on a step, and tried to copy its output. Two problems:
+1. To look at the next step he had to press Esc, move down, press Enter.
+   `[` and `]` already do this but nobody finds them; arrow keys should.
+2. `y` copies the whole tab, one line or fifty. He wants Grok Build's
+   linewise copy: put a cursor on a line, copy that line or a range.
+
+Key contract (shared with the run detail pane, which already works this way):
+- Left / Right (KeyCode::Left / KeyCode::Right) return InspectorOutcome::Prev /
+  Next. `[` and `]` keep doing the same. h / l keep horizontal scrolling when
+  wrap is off and do nothing when wrap is on, as now; Left / Right no longer
+  scroll horizontally.
+- Tab, Shift+Tab (BackTab) and 1-7 keep switching inspector tabs, unchanged.
+- The body has a line cursor per tab (store it in TabEntry next to scroll_y).
+  The cursor is on a source line: one line of the tab's text, the numbered
+  line in the gutter. j / k and Down / Up move it by one source line;
+  PageDown / PageUp and Ctrl+D / Ctrl+U by half the body height in source
+  lines; g / Home and G / End to the first / last line. Scrolling follows the
+  cursor so every visual row of the cursor line stays visible when it fits.
+- v starts or ends a visual range anchored at the cursor line.
+- y returns InspectorOutcome::Copy with the cursor's source line, or every
+  source line in the range, in order, joined with "\n". It copies the source
+  text exactly: no gutter numbers, no wrap breaks, no horizontal-scroll cut.
+  When the tab shows a JSON value as rows (TabEntry.copy is Some), y copies
+  the shown rows' text, not the raw JSON.
+- Y returns InspectorOutcome::Copy with the whole tab exactly as `y` does
+  today: TabEntry.copy when present, else the tab text.
+- Esc: first ends visual mode (InspectorOutcome::Changed); with no visual
+  range it returns Back, as now.
+- Switching tabs keeps each tab's own cursor and ends visual mode. A tab with
+  an empty artifact has no cursor; y and Y on it copy what they copy today.
+- r, w and the rest keep their current meaning.
+- Show the cursor line: every visual row of it gets theme.bg_highlight across
+  the body width, gutter included; rows of the visual range get the same
+  style. The cursor is always shown in the inspector body (it is the only
+  pane), starting on line 1 of each tab.
+- shortcuts() lists, in this order: "←/→: step", "j/k: line", "v: range",
+  "y: copy line", "Y: copy tab", "Tab/1-7: tab", "w: wrap", then
+  "r: replay" when present, then "Esc: back".
+- STEP_KEYS rows: Tab / 1-7 tabs; "← / → , [ / ]" previous / next step;
+  j / k / ↑ / ↓ move the line cursor; PgUp / PgDn, g / G; v range; y copy
+  line or range; Y copy whole tab; w wrap; r replay; ? keys; Esc ends the
+  range, then back to the run. Fix the existing tab row text to match the
+  real tabs (Output, Prompt, Response, Stdout, Stderr, Error, Meta; 1-7).
+
+Tests, in the existing styles. Rewrite existing tests that relied on j/k
+scrolling or y copying the whole tab only as far as the new contract
+requires, and keep their intent:
+- Right then Left return Next and Prev; `]` and `[` still do.
+- With wrap off, h / l still scroll horizontally and Left / Right do not.
+- j moves the cursor to line 2 and y copies exactly line 2; v, j, j, y
+  copies lines 2-4 joined with "\n"; Y copies the whole tab.
+- With wrap on at a narrow width, a long line that wraps to three rows: y
+  with the cursor on it copies the original line with no added space or
+  newline, and all three rows carry the highlight.
+- On a JSON-valued Output tab, y copies the shown row and Y the raw JSON.
+- Esc with a range ends it and returns Changed; the next Esc returns Back.
+- Tab to another tab and back keeps the first tab's cursor.
+- G moves the cursor to the last line and the last line is visible.
+- In {APP_MODAL}: from Mode::Step, Right opens the next step and Left the
+  previous (like the existing `]` test), and Esc lands the run view on the
+  step that was open.
+""",
+    ),
 ]
