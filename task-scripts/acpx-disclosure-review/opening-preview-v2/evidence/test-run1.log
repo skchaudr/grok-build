@@ -1,0 +1,358 @@
+warning: function `find_project_grok_configs` is never used
+   --> crates/codegen/xai-grok-permission-rules/src/resolution.rs:214:4
+    |
+214 | fn find_project_grok_configs(cwd: &Path) -> Vec<PathBuf> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `xai-grok-permission-rules` (lib) generated 1 warning
+   Compiling xai-grok-traces v0.1.0 (/Volumes/Mini-SSD/offload/repos/grok-build/crates/codegen/xai-grok-traces)
+   Compiling xai-grok-pager v1.0.45 (/Volumes/Mini-SSD/offload/repos/grok-build/crates/codegen/xai-grok-pager)
+warning: unnecessary parentheses around pattern
+   --> crates/codegen/xai-grok-pager/src/views/block_viewer/mod.rs:661:13
+    |
+661 |         let (RenderBlock::ToolCall(ToolCallBlock::Other(b) | ToolCallBlock::Skill(b))) =
+    |             ^                                                                        ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+661 -         let (RenderBlock::ToolCall(ToolCallBlock::Other(b) | ToolCallBlock::Skill(b))) =
+661 +         let RenderBlock::ToolCall(ToolCallBlock::Other(b) | ToolCallBlock::Skill(b)) =
+    |
+
+warning: unused doc comment
+   --> crates/codegen/xai-grok-pager/src/app/mod.rs:194:1
+    |
+194 | /// Read the cached external-agent profile flag (see [`EXTERNAL_AGENT_ACTIVE`]).
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: type `ViewSurface` is more private than the item `rail_width`
+  --> crates/codegen/xai-grok-pager/src/views/timeline.rs:54:1
+   |
+54 | / pub fn rail_width(
+55 | |     show_timeline: bool,
+56 | |     surface: ViewSurface,
+57 | |     area_width: u16,
+58 | |     marker_count: usize,
+59 | | ) -> u16 {
+   | |________^ function `rail_width` is reachable at visibility `pub`
+   |
+note: but type `ViewSurface` is only usable at visibility `pub(crate)`
+  --> crates/codegen/xai-grok-pager/src/app/agent_view/role.rs:58:1
+   |
+58 | pub(crate) enum ViewSurface {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(private_interfaces)]` on by default
+
+warning: function `pContent_update` should have a snake case name
+   --> crates/codegen/xai-grok-pager/src/acp/acpx_feed.rs:122:4
+    |
+122 | fn pContent_update(params: &Value) -> Option<&Value> {
+    |    ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `p_content_update`
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: the `terminal:` in this pattern is redundant
+   --> crates/codegen/xai-grok-pager/src/app/mod.rs:848:9
+    |
+848 |         terminal: mut terminal,
+    |         ^^^^^^^^^^^^^^^^^^^^^^ help: use shorthand field pattern: `mut terminal`
+    |
+    = note: `#[warn(non_shorthand_field_patterns)]` on by default
+
+warning: type `role::ViewSurface` is more private than the item `views::timeline::rail_width`
+  --> crates/codegen/xai-grok-pager/src/views/timeline.rs:54:1
+   |
+54 | / pub fn rail_width(
+55 | |     show_timeline: bool,
+56 | |     surface: ViewSurface,
+57 | |     area_width: u16,
+58 | |     marker_count: usize,
+59 | | ) -> u16 {
+   | |________^ function `views::timeline::rail_width` is reachable at visibility `pub`
+   |
+note: but type `role::ViewSurface` is only usable at visibility `pub(crate)`
+  --> crates/codegen/xai-grok-pager/src/app/agent_view/role.rs:58:1
+   |
+58 | pub(crate) enum ViewSurface {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(private_interfaces)]` on by default
+
+warning: `xai-grok-pager` (lib) generated 4 warnings (run `cargo fix --lib -p xai-grok-pager` to apply 2 suggestions)
+warning: `xai-grok-pager` (lib test) generated 5 warnings (3 duplicates)
+    Finished `release` profile [optimized] target(s) in 4m 36s
+     Running unittests src/lib.rs (target/release/deps/xai_grok_pager-bb6727bf444072cf)
+
+running 248 tests
+test acp::acpx_feed::tests::prompt_emits_user_message_chunk_and_sets_prompt_id ... ok
+test acp::acpx_feed::tests::convert_reads_from_file ... ok
+test acp::acpx_feed::tests::underscore_methods_like_auth_status_update_are_dropped ... ok
+test acp::acpx_feed::tests::meta_contains_is_replay_unique_event_ids_prompt_id_and_timestamp ... ok
+test acp::acpx_feed::tests::bare_stream_format_skips_journal_header_and_uses_line_numbers_for_range ... ok
+test acp::acpx_feed::tests::agent_message_and_thought_chunks_forwarded_in_order ... ok
+test acp::acpx_feed::tests::range_filters_inclusively_on_seq ... ok
+test acpx::bundle::tests::test_enums_glyphs_and_labels ... ok
+test acp::acpx_feed::tests::non_transcript_session_updates_are_dropped ... ok
+test acpx::bundle::tests::test_fmt_duration_units ... ok
+test acpx::bundle::tests::test_parse_ts ... ok
+test acp::acpx_feed::tests::unparseable_and_blank_lines_in_the_middle_are_skipped ... ok
+test acp::acpx_feed::tests::tool_call_and_tool_call_update_forwarded ... ok
+test acpx::bundle::tests::test_read_artifact_security_and_utf8_cap ... ok
+test acpx::bundle::tests::test_list_runs_ordering_and_manifest_fallback ... ok
+test acpx::bundle::tests::test_failed_step_and_node_state ... ok
+test acpx::bundle::tests::test_progress ... ok
+test acpx::bundle::tests::test_flow_switch_and_bfs_order_with_unreachable ... ok
+test acpx::bundle::tests::test_value_text ... ok
+test acpx::bundle::tests::test_refresh_keeps_half_written_and_detects_change ... ok
+test acpx::bundle::tests::test_taken_path_and_edge_taken ... ok
+test acpx::graph::tests::test_edge_to_unknown_node_skipped ... ok
+test acpx::graph::tests::test_answered_gate_is_drawn_done ... ok
+test acpx::bundle::tests::test_refresh_keeps_the_restored_gate_question ... ok
+test acpx::graph::tests::test_label_escaping_special_characters ... ok
+test acpx::graph::tests::test_linear_flow_all_done ... ok
+test acpx::graph::tests::test_node_currently_running ... ok
+test acpx::graph::tests::test_node_ran_twice_loop_yields_one_node_line ... ok
+test acpx::graph::tests::test_nothing_run_yet ... ok
+test acpx::graph::tests::test_switch_with_one_case_taken ... ok
+test acpx::graph::tests::test_top_down_header ... ok
+test acpx::graph::tests::test_waiting_checkpoint ... ok
+test acpx::bundle::tests::test_running_run_current_node ... ok
+test acpx::launch::tests::argv_minimal ... ok
+test acpx::launch::tests::argv_with_input_and_agent_and_approve_all ... ok
+test acpx::launch::tests::argv_with_approve_all_before_flow ... ok
+test acpx::bundle::tests::test_torn_ndjson_and_trace_details ... ok
+test acpx::bundle::tests::test_waiting_run_and_sessions ... ok
+test acpx::launch::tests::parse_result_garbage_returns_none ... ok
+test acpx::launch::tests::parse_result_with_noise_and_multiple_lines ... ok
+test acpx::launch::tests::parse_result_sample_waiting_line ... ok
+test acpx::launch::tests::parse_result_without_optional_fields_and_with_error ... ok
+test acpx::launch::tests::parse_run_args_cases ... ok
+test acpx::run_status_bar::tests::live_beta8_merge_v1_acceptance_check ... ignored
+test acpx::run_status_bar::tests::render_step_bullet_includes_validation_and_file_badges ... ok
+test acpx::run_status_bar::tests::running_status_line_shows_step_budget_attempt_timeout_and_file_progress ... ok
+test acpx::launch::tests::process_sleeps_starting_then_cancel ... ok
+test acpx::run_status_bar::tests::title_fallbacks_and_terminal_statuses_format_cleanly ... ok
+test acpx::run_status_bar::tests::waiting_status_line_shows_gate_choices_and_last_failure_exit_code ... ok
+test acpx::sessions::tests::test_agent_label_variants ... ok
+test acpx::run_status_bar::tests::status_report_includes_mounts_attempts_budgets_validations_verdicts_links_glyphs_and_gate ... ok
+test acpx::launch::tests::find_new_run_filters_and_picks_newest ... ok
+test acpx::sessions::tests::test_missing_base_directory_returns_empty ... ok
+test acpx::sessions::tests::test_both_casings_and_bundle_sample ... ok
+test acpx::sessions::tests::test_cost_shapes ... ok
+test acpx::sessions::tests::test_ordering_by_last_use ... ok
+test acpx::sessions::tests::test_title_fallbacks ... ok
+test acpx::step_digest::tests::active_branch_nodes_drops_untaken_branch_after_decision ... ok
+test acpx::step_digest::tests::effective_outcome_catches_non_zero_exit_and_preserves_timed_out ... ok
+test acpx::sessions::tests::test_token_object_vs_number ... ok
+test acpx::step_digest::tests::extract_step_verdict_reads_switch_output_and_reason ... ok
+test acpx::step_digest::tests::parse_scoped_node_id_extracts_mount_local_and_exit ... ok
+test acpx::step_digest::tests::run_step_budget_and_included_workflows_respect_caps_and_transitions ... ok
+test acpx::step_digest::tests::step_attempt_budget_counts_uuid_attempts ... ok
+test acpx::step_digest::tests::step_time_budget_handles_near_expiry_timeout_and_no_timeout ... ok
+test acpx::step_digest::tests::trim_failure_tail_keeps_the_cut_off_root_error_and_its_location ... ok
+test acpx::step_digest::tests::trim_failure_tail_prefers_error_then_stderr_and_respects_limits ... ok
+test acpx::sessions::tests::test_skips_invalid_and_non_json_files ... ok
+test acpx::step_evidence::tests::step_trace_link_resolves_session_range_and_artifacts ... ok
+test acpx::step_evidence::tests::digest_step_files_tracks_in_scope_and_out_of_scope_edits ... ok
+test acpx::step_evidence::tests::read_attempt_tool_calls_merges_updates_and_respects_range ... ok
+test acpx::workflow_preflight::tests::analyze_workflow_history_aggregates_durations_and_allow_failure_exit_codes ... ok
+test acpx::workflow_preflight::tests::compute_recommended_timeout_ms_rounds_up_to_30s_with_60s_floor ... ok
+test acpx::workflow_preflight::tests::audit_workflow_preflight_flags_beta8_merge_and_clears_with_overrides ... ok
+test acpx::workflow_preflight::tests::audit_workflow_preflight_reads_raw_flow_json_fallbacks ... ok
+test acpx::workflow_preflight::tests::find_cycle_back_edges_detects_beta8_repair_cycle_and_empty_for_dag ... ok
+test acpx::workflow_preflight::tests::format_preflight_markdown_renders_budgets_loops_and_issues ... ok
+test acpx::workflow_preflight::tests::discover_workflow_templates_merges_runs_and_files ... ok
+test actions::tests::f4_opens_acpx_and_f2_still_opens_settings ... ok
+test acpx::step_evidence::tests::extract_step_validations_handles_resolved_and_unresolved_rejections ... ok
+test piw::runtime::tests::mirror_never_started_keeps_plain_acpx_listing ... ok
+test acpx::launch::tests::process_exits_nonzero_with_stderr_failed ... ok
+test acpx::launch::tests::process_prints_result_and_exits_finished ... ok
+test scrollback::blocks::acpx_flow::tests::exit_code_result_formats_exit_code ... ok
+test scrollback::blocks::acpx_flow::tests::completed_header_shows_done_in_elapsed ... ok
+test scrollback::blocks::acpx_flow::tests::cancelled_survives_update_from_run ... ok
+test scrollback::blocks::acpx_flow::tests::failed_status_renders_error_line_and_note ... ok
+test scrollback::blocks::acpx_flow::tests::collapsed_mode_shows_single_header_line ... ok
+test scrollback::blocks::acpx_flow::tests::route_result_renders_arrow ... ok
+test scrollback::blocks::acpx_flow::tests::rows_in_flow_order_with_glyphs_and_agent_labels ... ok
+test scrollback::blocks::acpx_flow::tests::run_id_hint_line_present_once_known ... ok
+test scrollback::blocks::acpx_flow::tests::started_state_extracts_filename_and_shows_starting ... ok
+test scrollback::blocks::acpx_flow::tests::untaken_branch_row_is_not_run_with_no_duration ... ok
+test scrollback::blocks::acpx_flow::tests::waiting_status_renders_detail_and_no_resume_hint ... ok
+test scrollback::blocks::subagent::tests::card_noun_is_step_in_acpx_mode_and_subagent_in_a_normal_session ... ok
+test scrollback::blocks::subagent::tests::unset_preview_rows_is_5_in_a_normal_session_and_24_in_acpx_mode ... ok
+test acp::tracker::tests::acpx_shell_step_output_is_foldable ... ok
+test acp::tracker::tests::acpx_shell_step_nonzero_exit_sets_error ... ok
+test views::acpx_modal::detail::tests::answered_gate_with_unknown_choice_ticks_nothing ... ok
+test views::acpx_modal::detail::tests::answer_arriving_redraws_a_cached_panel ... ok
+test app::agent_view::side_panel::tests::f4_asks_for_the_acpx_popup ... ok
+test views::acpx_modal::detail::tests::focus_highlight_visual_range_and_target_change_reset_cursor ... ok
+test views::acpx_modal::detail::tests::answered_gate_is_drawn_done_without_pickable_keys ... ok
+test views::acpx_modal::detail::tests::empty_list_and_object_values_read_as_empty_in_dim_style ... ok
+test views::acpx_modal::detail::tests::test_action_step_shows_command_exit_code_and_stdout ... ok
+test views::acpx_modal::detail::tests::test_agent_without_evidence_does_not_invent_it ... ok
+test views::acpx_modal::detail::tests::test_array_output_of_40_items_renders_all_without_cap ... ok
+test views::acpx_modal::detail::tests::test_last_result_object_and_array_renders_clean_without_json_punctuation ... ok
+test views::acpx_modal::detail::tests::test_agent_with_brief_evidence_omits_prompt_wrappers_and_transcript_in_first_view ... ok
+test views::acpx_modal::detail::tests::test_conversation_filters_seq_range_and_skips_auth_status_update ... ok
+test views::acpx_modal::detail::tests::test_conversation_thought_tool_call_and_message ... ok
+test views::acpx_modal::detail::tests::test_failed_shell_orders_failure_tail_before_command_and_cwd_without_success ... ok
+test views::acpx_modal::detail::tests::test_missing_events_file_renders_dim_row ... ok
+test views::acpx_modal::detail::tests::test_pending_gate_keeps_question_and_choices_conspicuous ... ok
+test views::acpx_modal::detail::tests::test_repeated_attempt_shows_own_number_and_timing ... ok
+test views::acpx_modal::detail::tests::test_run_target_lists_stages_and_waiting_gate_choices ... ok
+test views::acpx_modal::detail::tests::test_node_target_not_run ... ok
+test views::acpx_modal::detail::tests::test_wrap_breaks_on_spaces_and_keeps_blank_lines ... ok
+test views::acpx_modal::detail::tests::test_wrap_hard_breaks_long_words_and_tabs ... ok
+test views::acpx_modal::detail::tests::test_wrap_wide_characters ... ok
+test views::acpx_modal::detail::tests::test_small_and_zero_rects_do_not_panic_and_stay_inside_area ... ok
+test views::acpx_modal::detail::tests::test_scroll_clamps_and_returns_false_at_limits ... ok
+test views::acpx_modal::detail::tests::test_running_node_tail_follows_and_stops_on_scroll_up ... ok
+test views::acpx_modal::detail::tests::test_string_output_wraps_and_empty_or_null_hides_section ... ok
+test views::acpx_modal::detail::tests::test_target_change_resets_scroll ... ok
+test views::acpx_modal::detail::tests::test_step_sections_order_prompt_result_events ... ok
+test views::acpx_modal::inspector::tests::acp_step_tab_set ... ok
+test views::acpx_modal::inspector::tests::copy_returns_active_tab_full_text ... ok
+test views::acpx_modal::inspector::tests::arrow_and_bracket_keys_step_prev_and_next ... ok
+test views::acpx_modal::inspector::tests::esc_ends_visual_range_before_returning_back ... ok
+test views::acpx_modal::inspector::tests::digit_and_tab_cycle_selection ... ok
+test views::acpx_modal::detail::tests::wrapped_failure_line_copies_exact_source_on_second_row ... ok
+test views::acpx_modal::inspector::tests::failed_step_opens_on_error_tab ... ok
+test views::acpx_modal::inspector::tests::json_output_tab_reads_as_rows_and_copy_still_gives_raw_json ... ok
+test views::acpx_modal::inspector::tests::line_cursor_range_and_whole_tab_copy ... ok
+test views::acpx_modal::inspector::tests::missing_artifact_shows_error_text_in_tab ... ok
+test views::acpx_modal::inspector::tests::replay_only_on_step_with_conversation ... ok
+test views::acpx_modal::inspector::tests::render_100x20_has_header_and_tabs_and_0x0_does_not_panic ... ok
+test views::acpx_modal::inspector::tests::prev_next_and_back_keys ... ok
+test views::acpx_modal::inspector::tests::per_tab_scroll_memory_and_clamping ... ok
+test views::acpx_modal::inspector::tests::shell_action_tab_set_and_empty_stderr ... ok
+test views::acpx_modal::inspector::tests::string_output_tab_is_unchanged ... ok
+test views::acpx_modal::inspector::tests::shift_g_moves_cursor_to_last_line_and_makes_it_visible ... ok
+test views::acpx_modal::inspector::tests::short_content_is_centred_as_one_block ... ok
+test views::acpx_modal::gate_answer_target_tests::answer_target_is_parsed_and_routed_not_launched ... ok
+test views::acpx_modal::inspector::tests::tall_content_starts_at_the_top_row ... ok
+test views::acpx_modal::inspector::tests::tab_switch_keeps_cursor_and_ends_visual_mode ... ok
+test views::acpx_modal::inspector::tests::wide_content_starts_at_the_left_column ... ok
+test views::acpx_modal::gate_answer_target_tests::cancel_open_mirror_run_without_mirror_is_a_no_op ... ok
+test views::acpx_modal::inspector::tests::wrap_off_hl_scrolls_horizontally_and_arrows_do_not ... ok
+test views::acpx_modal::inspector::tests::wrapped_cursor_line_copies_original_and_highlights_all_three_rows ... ok
+test views::acpx_modal::inspector::tests::wrap_toggle_changes_visual_line_count ... ok
+test views::acpx_modal::inspector::tests::wrapping_wide_cjk_chars_never_exceeds_width ... ok
+test views::acpx_modal::ledger::tests::active_only_toggle_filters_runs_and_sessions ... ok
+test views::acpx_modal::ledger::tests::executed_count_and_path_with_retry_unknown_empty_and_unrun_rail ... ok
+test views::acpx_modal::ledger::tests::enter_y_and_rescan_outcomes_on_both_tabs ... ok
+test views::acpx_modal::ledger::tests::filter_typing_enter_and_esc_ordering ... ok
+test views::acpx_modal::ledger::tests::answered_gate_row_count_includes_the_answered_gate_and_matches_the_rail ... ok
+test views::acpx_modal::ledger::tests::answered_gate_counts_only_unanswered_and_moves_answered_to_finished ... ok
+test views::acpx_modal::inspector::tests::wrap_mode_centres_the_wrapped_lines ... ok
+test views::acpx_modal::ledger::tests::finished_group_folds_expands_navigates_and_keeps_pending_individual ... ok
+test views::acpx_modal::ledger::tests::finished_group_tie_breaks_representative_and_order_by_run_id ... ok
+test views::acpx_modal::ledger::tests::finished_group_search_matches_older_id_and_refresh_preserves_selection ... ok
+test views::acpx_modal::ledger::tests::finished_group_works_under_recent_and_name_orders ... ok
+test views::acpx_modal::ledger::tests::grouped_order_and_navigation_skips_headers_and_clamps ... ok
+test views::acpx_modal::ledger::tests::five_unanswered_and_two_answered_native_waits_group_as_five_with_two_under_recent_outcomes ... ok
+test views::acpx_modal::ledger::tests::inline_preview_replaces_question_and_path_renders_cursor_wrapping_and_scrolls ... ok
+test views::acpx_modal::ledger::tests::narrow_width_wraps_full_path_only_for_selected_run ... ok
+test views::acpx_modal::ledger::tests::order_cycling_on_flows_and_sessions ... ok
+test views::acpx_modal::ledger::tests::render_at_0x0_and_empty_state_do_not_panic ... ok
+test views::acpx_modal::ledger::tests::render_at_50x8_keeps_title_and_does_not_panic ... ok
+test views::acpx_modal::ledger::tests::probe_title_state_age_render_at_live_width ... ok
+test views::acpx_modal::ledger::tests::render_at_120x14_shows_tabs_needs_you_question_rail_and_count ... ok
+test views::acpx_modal::ledger::tests::set_extras_before_set_runs_matches_reverse_and_latest_started_wins ... ok
+test views::acpx_modal::ledger::tests::selected_unanswered_waiting_run_wraps_200_char_question_and_unselected_stays_one_row ... ok
+test views::acpx_modal::ledger::tests::set_runs_preserves_selected_run_id_and_any_live ... ok
+test views::acpx_modal::ledger::tests::stalled_running_run_is_placed_under_finished_with_stalled_at ... ok
+test views::acpx_modal::ledger::tests::stalled_running_and_answered_waiting_same_flow_name_stay_individual ... ok
+test views::acpx_modal::ledger::tests::tab_switching_keeps_per_tab_selection_and_selected_run_behavior ... ok
+test views::acpx_modal::ledger::tests::waiting_groups_separate_by_source_root_and_recorded_flow_path ... ok
+test views::acpx_modal::ledger::tests::y_copies_open_command_on_flows_and_record_id_on_sessions ... ok
+test views::acpx_modal::ledger::tests::unanswered_waiting_run_remains_in_needs_you_and_reverts_when_answer_removed ... ok
+test views::acpx_modal::modal_view::tests::compute_run_body_layout_handles_graph_detail_and_split_modes ... ok
+test views::acpx_modal::ledger::tests::waiting_groups_fold_ship_and_mixed_talk_expand_navigate_and_survive_refresh ... ok
+test views::acpx_modal::modal_view::tests::format_step_structure_annotation_includes_exit_name_and_exit_code ... ok
+test views::acpx_modal::modal_view::tests::modal_zoom_toggles_cleanly_between_modes ... ok
+test views::acpx_modal::modal_view::tests::build_waiting_gate_banner_renders_warning_and_preceding_failure ... ok
+test views::acpx_modal::modal_view::tests::prune_run_for_graph_removes_untaken_switch_branch ... ok
+test views::acpx_modal::modal_view::tests::slice_graph_viewport_scrolls_in_graph_zoom_and_hints_in_split ... ok
+test views::acpx_modal::run::tests::answer_arriving_while_confirm_is_open_closes_the_confirm ... ok
+test views::acpx_modal::run::tests::bang_jumps_to_failed_step_and_wraps ... ok
+test views::acpx_modal::run::tests::answered_gate_keeps_expanded_choices_across_set_answered_and_sync ... ok
+test views::acpx_modal::run::tests::banner_shows_the_gate_question_and_falls_back_to_the_node_name ... ok
+test views::acpx_modal::run::tests::c_and_brackets_navigate_stage_headers ... ok
+test views::acpx_modal::run::tests::collapse_on_child_jumps_to_parent ... ok
+test views::acpx_modal::modal_view::tests::format_step_structure_annotation_combines_all_badges_and_trace_link ... ok
+test views::acpx_modal::run::tests::detail_target_for_step_child_live_root_and_skipped_node ... ok
+test views::acpx_modal::run::tests::distinct_attempts_of_one_node_stay_in_order_and_start_collapsed ... ok
+test views::acpx_modal::run::tests::enter_and_r_outcomes_for_acp_and_non_acp_steps ... ok
+test views::acpx_modal::run::tests::finished_stages_start_collapsed_and_preserve_expansion_on_noise_toggle ... ok
+test views::acpx_modal::run::tests::initial_selection_starts_on_waiting_stage ... ok
+test views::acpx_modal::run::tests::gate_choices_confirmation_flow ... ok
+test views::acpx_modal::run::tests::manual_expansion_persists_across_sync_while_newly_finished_step_collapses ... ok
+test views::acpx_modal::inspector::tests::tiny_areas_do_not_panic ... ok
+test views::acpx_modal::run::tests::running_loop_with_recorded_live_step_keeps_live_attempt_expanded_after_repair ... ok
+test views::acpx_modal::run::tests::running_loop_without_recorded_step_shows_live_stage_after_repair ... ok
+test views::acpx_modal::run::tests::shift_e_toggles_all_folds ... ok
+test views::acpx_modal::run::tests::step_result_summary_keeps_route_exit_and_error_forms ... ok
+test views::acpx_modal::run::tests::answered_waiting_run_updates_banner_choices_shortcuts_and_keys ... ok
+test views::acpx_modal::run::tests::render_with_v_off_hides_graph_rows ... ok
+test views::acpx_modal::run::tests::render_narrow_100x30_has_no_detail_area ... ok
+test views::acpx_modal::run::tests::render_tiny_40x8_and_0x0_does_not_panic ... ok
+test views::acpx_modal::run::tests::switch_pruning_omits_untaken_branch_from_skipped_section ... ok
+test views::acpx_modal::run::tests::sync_keeps_selection_when_step_is_appended ... ok
+test views::acpx_modal::run::tests::render_wide_160x40_shows_banner_stages_separator_and_clean_detail_area ... ok
+test views::acpx_modal::run::tests::y_esc_and_detail_scroll_outcomes ... ok
+test views::acpx_modal::run::tests::waiting_short_question_takes_one_row ... ok
+test views::acpx_modal::run::tests::step_tree_result_line_is_plain_text_not_raw_json ... ok
+test views::acpx_modal::tests::copy_notice_distinguishes_confirmed_clipboard_from_file_fallback ... ok
+test views::acpx_modal::run::tests::answered_gate_is_drawn_done_in_graph_stages_and_detail_pane ... ok
+test views::acpx_modal::run::tests::waiting_run_without_next_shows_empty_gate_row ... ok
+test views::acpx_modal::tests::diagnostic_lines_keep_original_bytes_except_the_line_terminator ... ok
+test views::acpx_modal::run::tests::waiting_long_question_wraps_at_80_columns_and_shows_every_word ... ok
+test views::acpx_modal::run::tests::step_tree_gate_rows_drop_the_key_numbers_once_answered ... ok
+test views::acpx_modal::tests::open_run_missing_dir_sets_notice_and_next_key_clears_it ... ok
+test views::acpx_modal::tests::detail_focus_tab_backtab_and_without_detail_area ... ok
+test views::acpx_modal::tests::detail_focus_range_copy_all_esc_unwind_and_tree_keys ... ok
+test views::acpx_modal::tests::open_at_lists_runs_and_sessions_and_navigates_modes ... ok
+test views::acpx_modal::tests::opening_session_in_ledger_returns_replay_with_none_range ... ok
+test views::acpx_modal::tests::preview_copy_returns_diagnostic_line_with_trailing_space_and_tab ... ok
+test views::acpx_modal::tests::poll_detects_live_json_status_change_on_disk ... ok
+test views::acpx_modal::tests::question_mark_toggles_help_overlay_and_any_key_closes_it ... ok
+test views::acpx_modal::tests::replay_on_acp_step_returns_expected_request ... ok
+test views::acpx_modal::tests::one_line_step_error_does_not_hide_compiler_stderr ... ok
+test views::acpx_modal::tests::known_run_status_survives_cancellation_text_and_earlier_cancelled_attempt ... ok
+test views::acpx_modal::tests::preview_refresh_open_back_tab_reachability_filter_and_empty_layouts ... ok
+test views::acpx_modal::tests::render_at_120x30_draws_title_and_tiny_sizes_do_not_panic ... ok
+test views::acpx_modal::tests::row_extra_reads_recorded_flow_path_without_requiring_file_to_exist ... ok
+test views::acpx_modal::tests::step_arrows_navigate_steps_and_esc_lands_on_open_step ... ok
+test views::acpx_modal::tests::step_next_bracket_advances_and_esc_preserves_run_selection ... ok
+test views::acpx_modal::tests::row_extra_reads_gate_answer_and_handles_missing_or_malformed_gate ... ok
+test views::acpx_modal::tests::running_finished_group_cancelled_retries_and_missing_evidence_summaries ... ok
+test views::acpx_modal::tests::wants_esc_reflects_mode_and_help_state ... ok
+test views::acpx_modal::tests::wants_poll_is_false_for_waiting_run ... ok
+test views::acpx_modal::tests::waiting_group_and_individual_wait_and_answered_wait_preview_evidence ... ok
+test views::acpx_modal::tests::failed_cargo_check_preview_copies_exact_multiline_diagnostic_wide_and_narrow ... FAILED
+test app::dispatch::tests::modes::open_acpx_opens_the_acpx_modal ... ok
+test views::acpx_modal::tests::run_outside_extras_limit_gets_answers_with_empty_rail ... ok
+
+failures:
+
+---- views::acpx_modal::tests::failed_cargo_check_preview_copies_exact_multiline_diagnostic_wide_and_narrow stdout ----
+
+thread 'views::acpx_modal::tests::failed_cargo_check_preview_copies_exact_multiline_diagnostic_wide_and_narrow' (73221378) panicked at crates/codegen/xai-grok-pager/src/views/acpx_modal.rs:3022:9:
+assertion `left == right` failed
+  left: Copy("  --> crates/codegen/xai-grok-pager/src/views/acpx_modal.rs:42:9")
+ right: Copy("error[E0308]: mismatched types in acpx_modal opening preview diagnostic line")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    views::acpx_modal::tests::failed_cargo_check_preview_copies_exact_multiline_diagnostic_wide_and_narrow
+
+test result: FAILED. 246 passed; 1 failed; 1 ignored; 0 measured; 11422 filtered out; finished in 0.15s
+
+error: test failed, to rerun pass `-p xai-grok-pager --lib`
+exit=101
