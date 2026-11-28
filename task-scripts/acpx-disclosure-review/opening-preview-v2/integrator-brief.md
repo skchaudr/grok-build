@@ -1,0 +1,9 @@
+# Integrate the ACPX opening preview
+
+Owner: Sonnet Integrator 2 (`c88036`). This is the second opening-screen slice, after ledger delta `2bf86ead`. Prompt commit `376d1b57`; returned edits at `grok-build/task-scripts/acpx-disclosure-returns/acpx-opening-preview.edits.md` relative to this directory. All 10 OLD blocks match exactly once and do not overlap, checked before handoff. Recheck against the current tree. Scope is only `crates/codegen/xai-grok-pager/src/views/acpx_modal.rs` and its tests. Preserve concurrent work and the existing detail/inspector behavior. One active Cargo process for this integration.
+
+Material review notes to address before landing:
+- `diagnostic_lines_from_text` trims trailing whitespace before storing copyable lines. Preserve original line bytes excluding the line terminator; add an exact-copy test with trailing spaces or a tab. Check the packet's failure fixture can surface the useful diagnostic when a generic step error and compiler stderr both exist; keep original bytes of whichever diagnostic is shown.
+- `build_run_preview_lines` / `is_run_cancelled` can override a real completed or failed state when `status_detail` merely contains `cancel`, or an individual attempt was cancelled. Preserve known status and use concrete saved cancellation evidence for a run-level Cancelled display. Check a completed run with cancellation-related text and a genuinely cancelled run.
+
+Recheck wide and narrow focus/copy, preserved row after Esc, answered native history, and no workflow actions from preview keys. Run targeted ACPX tests and preserve exact evidence and the report under this directory; workspace-local scratch only. Commit and push the accepted product and integration report. No parallel build, worker dispatch, live gate action, or unrelated fix. Report test results and any actual acceptance blocker. Keep installation separate from the code/test handoff.

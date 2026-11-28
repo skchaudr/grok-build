@@ -1,0 +1,59 @@
+{
+  "slice": "acpx-opening-preview",
+  "ok": true,
+  "error": null,
+  "requested": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "agent": "agy acp --sandbox"
+  },
+  "effective": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "legacyCurrentModelId": "gemini-4-neon-high",
+    "tier": "Google AI Pro"
+  },
+  "timeToFirstCodeSeconds": 197.99,
+  "totalSeconds": 388.59,
+  "toolCallCount": 0,
+  "toolCalls": [],
+  "returnedBytes": 103530,
+  "returnedLines": 2808,
+  "quota": {
+    "group": "GEMINI MODELS",
+    "beforeAt": "2026-11-28T08:38:36+00:00",
+    "afterAt": "2026-11-28T08:45:14+00:00",
+    "before": {
+      "weekly": 92.47,
+      "weeklyNote": "Refreshes in 6d 14h 5m",
+      "fiveHour": 86.95,
+      "fiveHourNote": "Refreshes in 5m"
+    },
+    "after": {
+      "weekly": 92.01,
+      "weeklyNote": "Refreshes in 6d 13h 58m",
+      "fiveHour": 97.13,
+      "fiveHourNote": "Refreshes in 4h 58m"
+    },
+    "used": {
+      "weekly": 0.46,
+      "fiveHour": null
+    }
+  },
+  "quotaMissing": null,
+  "quotaBefore": null,
+  "stopReason": "end_turn",
+  "usage": {
+    "inputTokens": 26821,
+    "outputTokens": 51984,
+    "cachedReadTokens": 12169,
+    "cachedWriteTokens": 0,
+    "thoughtTokens": 23403,
+    "totalTokens": 90974
+  },
+  "stagedFiles": [
+    "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/opening-preview-v2/grok-build/task-scripts/acpx-disclosure-returns/acpx-opening-preview.edits.md"
+  ],
+  "rawEventsPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/opening-preview-v2/_returns/acpx-opening-preview.events.jsonl",
+  "rawReturnPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/opening-preview-v2/_returns/acpx-opening-preview.md"
+}
