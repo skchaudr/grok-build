@@ -361,28 +361,28 @@ empty cases.
     ),
     task(
         "acpx-opening-preview",
-        source(APP_MODAL, (1, 310), (354, 396), (504, 558), (651, 694),
-               (748, 927), (1004, 1164), (1193, 1249), (1275, 1296), (1415, 1437))
-        + source(f"{MODAL}/ledger.rs", (18, 58), (233, 353), (955, 1125), (1178, 1215))
-        + source(f"{MODAL}/detail.rs", (1369, 1434))
+        source(APP_MODAL, (1, 311), (354, 397), (505, 633), (726, 775),
+               (838, 1021), (1098, 1261), (1286, 1343), (1368, 1389),
+               (1458, 1560), (1649, 1672))
+        + source(f"{MODAL}/ledger.rs", (18, 62), (361, 466), (1318, 1546), (1547, 1584))
+        + source(f"{MODAL}/detail.rs", (1660, 1725))
         + source(f"{ACPX}/bundle.rs", (1, 135), (150, 187), (237, 361), (617, 625), (1356, 1370))
-        + source(f"{ACPX}/step_digest.rs", (157, 306))
+        + source(f"{ACPX}/step_digest.rs", (157, 329))
         + source("docs/acpx-modal-opening-screen.md", (1, 62)),
         rf"""
 This implements the reviewed opening-screen preview and replaces the old
-packet 4 design assignment. This draft must be re-rendered after
-acpx-opening-ledger-delta is integrated; the preview input must contain the
-landed definitions of InlinePreviewLine and all three ledger methods in the
-shared interface, with exact line ranges verified before dispatch. Own only
-{APP_MODAL}: preview state, selected
+packet 4 design assignment. The ledger delta landed in 2bf86ead. The ledger
+excerpts include the real InlinePreviewLine and all three preview methods.
+Own only {APP_MODAL}: preview state, selected
 preview evidence, Ledger-mode rendering and input, help and relevant tests.
 Keep Flows as the initial view. Do not edit ledger.rs, detail.rs or Run/Step
 behavior; the ledger supplies the shared interface below. No new landing mode.
 Do not edit row_extra or its tests owned by packet 2; attach the new code to
 anchors in the preview/input/render regions. The ledger packet adds no APP_MODAL
 imports; it uses qualified paths for new helpers there. If a shared function is
-edited, leave its non-Ledger arms intact. Packet 3b must render from the merged
-base before editing shared input/render functions.
+edited, leave its non-Ledger arms intact. Packet 3b is already landed: preserve
+its Run detail focus, copy and Esc behavior, along with the Step inspector's
+landed navigation. Do not reset either view's independent focus state.
 
 Replace the current ledger DetailPanel render with one compact, read-only
 preview built from the existing selected-run bundle cache. Reuse recorded
