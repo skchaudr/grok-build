@@ -1002,14 +1002,20 @@ const RUN_KEYS: &[(&str, &str)] = &[
 ];
 
 const STEP_KEYS: &[(&str, &str)] = &[
-    ("Tab / 1-5", "Switch inspector tab (Output / Prompt / Stdout / Stderr / Events)"),
-    ("[ / ]", "Previous / next step in run"),
-    ("j / k / ↑ / ↓", "Scroll active pane"),
-    ("PgUp / PgDn", "Page up / down"),
+    (
+        "Tab / 1-7",
+        "Switch inspector tab (Output / Prompt / Response / Stdout / Stderr / Error / Meta)",
+    ),
+    ("← / → , [ / ]", "Previous / next step in run"),
+    ("j / k / ↑ / ↓", "Move line cursor"),
+    ("PgUp / PgDn, g / G", "Page up / down, top / bottom"),
+    ("v", "Start / end visual line range"),
+    ("y", "Copy cursor line or visual range"),
+    ("Y", "Copy whole tab content"),
+    ("w", "Toggle line wrapping"),
     ("r", "Replay ACP conversation for this step"),
-    ("y", "Copy current tab content"),
     ("?", "Toggle this key reference"),
-    ("Esc / Backspace", "Back to run view"),
+    ("Esc", "End visual range, or back to run view"),
 ];
 
 fn render_help_overlay(buf: &mut Buffer, area: Rect, mode: Mode, theme: &Theme) {
@@ -1377,6 +1383,45 @@ mod tests {
                 title: "acpx · Bug Triage Session".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn step_arrows_navigate_steps_and_esc_lands_on_open_step() {
+        let fx = write_fixture("completed");
+        let mut state =
+            AcpxModalState::open_at(Some(fx.runs_base.clone()), Some(fx.sessions_base.clone()));
+        state.handle_key(&key(KeyCode::Enter));
+        assert_eq!(state.mode(), Mode::Run);
+
+        // Start at step 0 and open it
+        if let Some(rv) = state.run_view.as_mut() {
+            rv.select_step(0);
+        }
+        state.handle_key(&key(KeyCode::Enter));
+        assert_eq!(state.mode(), Mode::Step);
+        assert_eq!(state.inspector.as_ref().map(|(i, _)| *i), Some(0));
+
+        // Right opens the next step
+        let out = state.handle_key(&key(KeyCode::Right));
+        assert_eq!(out, AcpxOutcome::Changed);
+        assert_eq!(state.inspector.as_ref().map(|(i, _)| *i), Some(1));
+
+        // Left opens the previous step
+        let out = state.handle_key(&key(KeyCode::Left));
+        assert_eq!(out, AcpxOutcome::Changed);
+        assert_eq!(state.inspector.as_ref().map(|(i, _)| *i), Some(0));
+
+        // Move back to step 1, then Esc returns to Run view on step 1
+        assert_eq!(state.handle_key(&key(KeyCode::Right)), AcpxOutcome::Changed);
+        assert_eq!(state.inspector.as_ref().map(|(i, _)| *i), Some(1));
+
+        state.handle_key(&key(KeyCode::Esc));
+        assert_eq!(state.mode(), Mode::Run);
+
+        // Re-opening from Run view confirms step 1 remained selected
+        state.handle_key(&key(KeyCode::Enter));
+        assert_eq!(state.mode(), Mode::Step);
+        assert_eq!(state.inspector.as_ref().map(|(i, _)| *i), Some(1));
     }
 
     #[test]

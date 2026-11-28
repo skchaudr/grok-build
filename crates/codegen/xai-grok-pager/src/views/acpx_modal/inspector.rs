@@ -59,8 +59,9 @@ struct TabEntry {
     text: String,
     is_empty_artifact: bool,
     scroll_y: usize,
+    cursor: usize,
     scroll_x: usize,
-    /// What `y` copies when it differs from what the tab shows (a JSON value shown as rows copies its raw JSON).
+    /// What `Y` copies when it differs from what the tab shows (a JSON value shown as rows copies its raw JSON).
     copy: Option<String>,
 }
 
@@ -70,6 +71,7 @@ pub struct InspectorState {
     position: (usize, usize),
     tabs: Vec<TabEntry>,
     active_tab: usize,
+    visual_anchor: Option<usize>,
     wrap: bool,
     last_body_height: usize,
     last_body_width: usize,
@@ -88,7 +90,7 @@ impl InspectorState {
         // 1. Output
         let output_val_text = value_text(&step.output);
         if !output_val_text.is_empty() {
-            // A JSON value reads as rows, not braces and quotes; `y` still copies the raw JSON.
+            // A JSON value reads as rows, not braces and quotes; `Y` still copies the raw JSON.
             let (text, copy) = if step.output.is_string() {
                 (output_val_text, None)
             } else {
@@ -102,6 +104,7 @@ impl InspectorState {
                 text,
                 is_empty_artifact: false,
                 scroll_y: 0,
+                cursor: 0,
                 scroll_x: 0,
                 copy,
             });
@@ -112,6 +115,7 @@ impl InspectorState {
                 text,
                 is_empty_artifact: is_empty,
                 scroll_y: 0,
+                cursor: 0,
                 scroll_x: 0,
                 copy: None,
             });
@@ -126,6 +130,7 @@ impl InspectorState {
                 text: prompt.clone(),
                 is_empty_artifact: false,
                 scroll_y: 0,
+                cursor: 0,
                 scroll_x: 0,
                 copy: None,
             });
@@ -140,6 +145,7 @@ impl InspectorState {
                 text: raw.clone(),
                 is_empty_artifact: false,
                 scroll_y: 0,
+                cursor: 0,
                 scroll_x: 0,
                 copy: None,
             });
@@ -153,6 +159,7 @@ impl InspectorState {
                 text,
                 is_empty_artifact: is_empty,
                 scroll_y: 0,
+                cursor: 0,
                 scroll_x: 0,
                 copy: None,
             });
@@ -166,6 +173,7 @@ impl InspectorState {
                 text,
                 is_empty_artifact: is_empty,
                 scroll_y: 0,
+                cursor: 0,
                 scroll_x: 0,
                 copy: None,
             });
@@ -180,6 +188,7 @@ impl InspectorState {
                 text: err.clone(),
                 is_empty_artifact: false,
                 scroll_y: 0,
+                cursor: 0,
                 scroll_x: 0,
                 copy: None,
             });
@@ -192,6 +201,7 @@ impl InspectorState {
             text: meta_text,
             is_empty_artifact: false,
             scroll_y: 0,
+            cursor: 0,
             scroll_x: 0,
             copy: None,
         });
@@ -215,6 +225,7 @@ impl InspectorState {
             position,
             tabs,
             active_tab,
+            visual_anchor: None,
             wrap: true,
             last_body_height: 20,
             last_body_width: 80,
@@ -229,10 +240,17 @@ impl InspectorState {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         match key.code {
-            KeyCode::Esc => InspectorOutcome::Back,
+            KeyCode::Esc => {
+                if self.visual_anchor.take().is_some() {
+                    InspectorOutcome::Changed
+                } else {
+                    InspectorOutcome::Back
+                }
+            }
             KeyCode::Tab => {
                 if !self.tabs.is_empty() {
                     self.active_tab = (self.active_tab + 1) % self.tabs.len();
+                    self.visual_anchor = None;
                     InspectorOutcome::Changed
                 } else {
                     InspectorOutcome::Unchanged
@@ -241,6 +259,7 @@ impl InspectorState {
             KeyCode::BackTab => {
                 if !self.tabs.is_empty() {
                     self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+                    self.visual_anchor = None;
                     InspectorOutcome::Changed
                 } else {
                     InspectorOutcome::Unchanged
@@ -250,20 +269,21 @@ impl InspectorState {
                 let idx = (c as usize) - ('1' as usize);
                 if idx < self.tabs.len() && idx != self.active_tab {
                     self.active_tab = idx;
+                    self.visual_anchor = None;
                     InspectorOutcome::Changed
                 } else {
                     InspectorOutcome::Unchanged
                 }
             }
             KeyCode::Char('j') | KeyCode::Down if !ctrl => {
-                if self.scroll(1) {
+                if self.move_cursor(1) {
                     InspectorOutcome::Changed
                 } else {
                     InspectorOutcome::Unchanged
                 }
             }
             KeyCode::Char('k') | KeyCode::Up if !ctrl => {
-                if self.scroll(-1) {
+                if self.move_cursor(-1) {
                     InspectorOutcome::Changed
                 } else {
                     InspectorOutcome::Unchanged
@@ -271,7 +291,7 @@ impl InspectorState {
             }
             KeyCode::PageDown => {
                 let half = (self.last_body_height / 2).max(1) as isize;
-                if self.scroll(half) {
+                if self.move_cursor(half) {
                     InspectorOutcome::Changed
                 } else {
                     InspectorOutcome::Unchanged
@@ -279,7 +299,7 @@ impl InspectorState {
             }
             KeyCode::PageUp => {
                 let half = (self.last_body_height / 2).max(1) as isize;
-                if self.scroll(-half) {
+                if self.move_cursor(-half) {
                     InspectorOutcome::Changed
                 } else {
                     InspectorOutcome::Unchanged
@@ -287,7 +307,7 @@ impl InspectorState {
             }
             KeyCode::Char('d') if ctrl => {
                 let half = (self.last_body_height / 2).max(1) as isize;
-                if self.scroll(half) {
+                if self.move_cursor(half) {
                     InspectorOutcome::Changed
                 } else {
                     InspectorOutcome::Unchanged
@@ -295,34 +315,27 @@ impl InspectorState {
             }
             KeyCode::Char('u') if ctrl => {
                 let half = (self.last_body_height / 2).max(1) as isize;
-                if self.scroll(-half) {
+                if self.move_cursor(-half) {
                     InspectorOutcome::Changed
                 } else {
                     InspectorOutcome::Unchanged
                 }
             }
             KeyCode::Char('g') | KeyCode::Home if !ctrl => {
-                if let Some(tab) = self.tabs.get_mut(self.active_tab)
-                    && tab.scroll_y != 0
-                {
-                    tab.scroll_y = 0;
+                if self.set_cursor(0) {
                     InspectorOutcome::Changed
                 } else {
                     InspectorOutcome::Unchanged
                 }
             }
             KeyCode::Char('G') | KeyCode::End if !ctrl => {
-                let max_scroll = self.max_scroll_y();
-                if let Some(tab) = self.tabs.get_mut(self.active_tab)
-                    && tab.scroll_y != max_scroll
-                {
-                    tab.scroll_y = max_scroll;
+                if self.set_cursor(usize::MAX) {
                     InspectorOutcome::Changed
                 } else {
                     InspectorOutcome::Unchanged
                 }
             }
-            KeyCode::Left | KeyCode::Char('h') if !ctrl => {
+            KeyCode::Char('h') if !ctrl => {
                 if self.wrap {
                     return InspectorOutcome::Unchanged;
                 }
@@ -335,7 +348,7 @@ impl InspectorState {
                     InspectorOutcome::Unchanged
                 }
             }
-            KeyCode::Right | KeyCode::Char('l') if !ctrl => {
+            KeyCode::Char('l') if !ctrl => {
                 if self.wrap {
                     return InspectorOutcome::Unchanged;
                 }
@@ -346,17 +359,31 @@ impl InspectorState {
                     InspectorOutcome::Unchanged
                 }
             }
-            KeyCode::Char('w') if !ctrl => {
-                self.wrap = !self.wrap;
-                let max_scroll = self.max_scroll_y();
-                if let Some(tab) = self.tabs.get_mut(self.active_tab)
-                    && tab.scroll_y > max_scroll
-                {
-                    tab.scroll_y = max_scroll;
+            KeyCode::Char('v') if !ctrl => {
+                let Some(tab) = self.tabs.get(self.active_tab) else {
+                    return InspectorOutcome::Unchanged;
+                };
+                if tab.is_empty_artifact {
+                    return InspectorOutcome::Unchanged;
+                }
+                if self.visual_anchor.is_some() {
+                    self.visual_anchor = None;
+                } else {
+                    self.visual_anchor = Some(tab.cursor);
                 }
                 InspectorOutcome::Changed
             }
+            KeyCode::Char('w') if !ctrl => {
+                self.wrap = !self.wrap;
+                self.ensure_cursor_visible();
+                InspectorOutcome::Changed
+            }
             KeyCode::Char('y') if !ctrl => {
+                let text = self.copy_selection_text();
+                self.visual_anchor = None;
+                InspectorOutcome::Copy(text)
+            }
+            KeyCode::Char('Y') if !ctrl => {
                 let text = self
                     .tabs
                     .get(self.active_tab)
@@ -371,8 +398,8 @@ impl InspectorState {
                     InspectorOutcome::Unchanged
                 }
             }
-            KeyCode::Char('[') if !ctrl => InspectorOutcome::Prev,
-            KeyCode::Char(']') if !ctrl => InspectorOutcome::Next,
+            KeyCode::Left | KeyCode::Char('[') if !ctrl => InspectorOutcome::Prev,
+            KeyCode::Right | KeyCode::Char(']') if !ctrl => InspectorOutcome::Next,
             _ => InspectorOutcome::Unchanged,
         }
     }
@@ -424,17 +451,121 @@ impl InspectorState {
 
     pub fn shortcuts(&self) -> Vec<&'static str> {
         let mut s = vec![
+            "←/→: step",
+            "j/k: line",
+            "v: range",
+            "y: copy line",
+            "Y: copy tab",
             "Tab/1-7: tab",
-            "j/k: scroll",
             "w: wrap",
-            "y: copy",
-            "[/]: step",
         ];
         if self.step.conversation.is_some() {
             s.push("r: replay");
         }
         s.push("Esc: back");
         s
+    }
+
+    fn move_cursor(&mut self, delta: isize) -> bool {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return false;
+        };
+        if tab.is_empty_artifact {
+            return false;
+        }
+        let last = source_line_count(&tab.text).saturating_sub(1);
+        let cur = tab.cursor.min(last);
+        let next = if delta < 0 {
+            cur.saturating_sub(delta.unsigned_abs())
+        } else {
+            cur.saturating_add(delta as usize).min(last)
+        };
+        self.set_cursor(next)
+    }
+
+    fn set_cursor(&mut self, target: usize) -> bool {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return false;
+        };
+        if tab.is_empty_artifact {
+            return false;
+        }
+        let last = source_line_count(&tab.text).saturating_sub(1);
+        let next = target.min(last);
+        let cursor_changed = next != tab.cursor;
+        tab.cursor = next;
+        let scroll_changed = self.ensure_cursor_visible();
+        cursor_changed || scroll_changed
+    }
+
+    fn ensure_cursor_visible(&mut self) -> bool {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return false;
+        };
+        if tab.is_empty_artifact {
+            return false;
+        }
+        let cursor = tab.cursor;
+        let height = self.last_body_height.max(1);
+        let (visual_lines, total_visual) = self.compute_visual_lines(tab, self.last_body_width);
+        let max_scroll = total_visual.saturating_sub(height);
+
+        let mut first_v = None;
+        let mut last_v = 0usize;
+        for (v_idx, vline) in visual_lines.iter().enumerate() {
+            if vline.src_idx == cursor {
+                if first_v.is_none() {
+                    first_v = Some(v_idx);
+                }
+                last_v = v_idx;
+            }
+        }
+
+        let Some(first_v) = first_v else {
+            return false;
+        };
+
+        let Some(tab_mut) = self.tabs.get_mut(self.active_tab) else {
+            return false;
+        };
+        let prev_scroll = tab_mut.scroll_y;
+        let mut scroll_y = prev_scroll.min(max_scroll);
+
+        if first_v < scroll_y {
+            scroll_y = first_v;
+        } else if last_v >= scroll_y + height {
+            let cursor_rows = last_v - first_v + 1;
+            if cursor_rows <= height {
+                scroll_y = last_v + 1 - height;
+            } else {
+                scroll_y = first_v;
+            }
+        }
+        scroll_y = scroll_y.min(max_scroll);
+        tab_mut.scroll_y = scroll_y;
+        scroll_y != prev_scroll
+    }
+
+    fn selection_range(&self, tab: &TabEntry) -> (usize, usize) {
+        match self.visual_anchor {
+            Some(anchor) => (anchor.min(tab.cursor), anchor.max(tab.cursor)),
+            None => (tab.cursor, tab.cursor),
+        }
+    }
+
+    fn copy_selection_text(&self) -> String {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return String::new();
+        };
+        if tab.is_empty_artifact {
+            return tab.copy.clone().unwrap_or_else(|| tab.text.clone());
+        }
+        let lines = source_lines(&tab.text);
+        let last = lines.len().saturating_sub(1);
+        let (start, end) = self.selection_range(tab);
+        let start = start.min(last);
+        let end = end.min(last);
+        lines[start..=end].join("\n")
     }
 
     fn max_scroll_y(&self) -> usize {
@@ -453,11 +584,7 @@ impl InspectorState {
         tab: &TabEntry,
         area_width: usize,
     ) -> (Vec<VisualLine>, usize) {
-        let src_lines: Vec<&str> = if tab.text.is_empty() {
-            vec![""]
-        } else {
-            tab.text.lines().collect()
-        };
+        let src_lines = source_lines(&tab.text);
         let total_src = src_lines.len().max(1);
         let digits = decimal_digits(total_src).max(2);
         let gutter_width = digits + 2; // "<num>  "
@@ -470,6 +597,7 @@ impl InspectorState {
                 let segments = wrap_line_by_width(raw, content_width);
                 for (seg_idx, seg) in segments.into_iter().enumerate() {
                     out.push(VisualLine {
+                        src_idx: idx,
                         line_no: if seg_idx == 0 { Some(line_no) } else { None },
                         text: seg,
                     });
@@ -478,6 +606,7 @@ impl InspectorState {
                 let sliced = slice_from_col(raw, tab.scroll_x);
                 let cut = truncate_str(&sliced, content_width);
                 out.push(VisualLine {
+                    src_idx: idx,
                     line_no: Some(line_no),
                     text: cut,
                 });
@@ -599,7 +728,7 @@ impl InspectorState {
             return;
         }
 
-        let total_src = tab_snapshot.text.lines().count().max(1);
+        let total_src = source_line_count(&tab_snapshot.text);
         let digits = decimal_digits(total_src).max(2);
         let gutter_width = digits + 2;
 
@@ -632,6 +761,7 @@ impl InspectorState {
         } else {
             Style::default().fg(theme.text_primary)
         };
+        let (sel_start, sel_end) = self.selection_range(&tab_snapshot);
 
         for row_idx in 0..height {
             let v_idx = scroll_y + row_idx;
@@ -639,6 +769,24 @@ impl InspectorState {
                 break;
             };
             let y = area.y + (y_off + row_idx) as u16;
+            let is_selected = vline.src_idx >= sel_start && vline.src_idx <= sel_end;
+
+            let row_gutter_style = if is_selected {
+                gutter_style.bg(theme.bg_highlight)
+            } else {
+                gutter_style
+            };
+            let row_text_style = if is_selected {
+                text_style.bg(theme.bg_highlight)
+            } else {
+                text_style
+            };
+
+            if is_selected {
+                for x in area.x..area.x + area.width {
+                    buf[(x, y)].set_bg(theme.bg_highlight);
+                }
+            }
 
             let gutter_str = match vline.line_no {
                 Some(n) => format!("{n:>digits$}  "),
@@ -647,13 +795,13 @@ impl InspectorState {
 
             if width <= gutter_width {
                 let cut_g = truncate_str(&gutter_str, width);
-                buf.set_stringn(area.x, y, &cut_g, width, gutter_style);
+                buf.set_stringn(area.x, y, &cut_g, width, row_gutter_style);
                 continue;
             }
 
             let line = Line::from(vec![
-                Span::styled(gutter_str, gutter_style),
-                Span::styled(vline.text.clone(), text_style),
+                Span::styled(gutter_str, row_gutter_style),
+                Span::styled(vline.text.clone(), row_text_style),
             ]);
             buf.set_line(area.x + x_off as u16, y, &line, (width - x_off) as u16);
         }
@@ -680,8 +828,25 @@ impl InspectorState {
 }
 
 struct VisualLine {
+    src_idx: usize,
     line_no: Option<usize>,
     text: String,
+}
+
+fn source_lines(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        vec![""]
+    } else {
+        text.lines().collect()
+    }
+}
+
+fn source_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        1
+    } else {
+        text.lines().count().max(1)
+    }
 }
 
 /// Display width of the widest source line.
@@ -1163,9 +1328,13 @@ mod tests {
         assert!(tab.text.contains("  approve  land.flow.ts"), "{}", tab.text);
         assert!(tab.text.contains("meta     (empty)"), "{}", tab.text);
 
-        let out = state.handle_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
-        assert_eq!(out, InspectorOutcome::Copy(value_text(&step.output)));
-        let InspectorOutcome::Copy(raw) = out else { unreachable!() };
+        let expected_row = tab.text.lines().next().unwrap().to_string();
+        let out_line = state.handle_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(out_line, InspectorOutcome::Copy(expected_row));
+
+        let out_tab = state.handle_key(&KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE));
+        assert_eq!(out_tab, InspectorOutcome::Copy(value_text(&step.output)));
+        let InspectorOutcome::Copy(raw) = out_tab else { unreachable!() };
         assert!(raw.contains("\"verdict\": \"approve\""));
     }
 
@@ -1361,5 +1530,206 @@ mod tests {
         assert_eq!(centre_offset(10, 3, 40, 18), (15, 7));
         assert_eq!(centre_offset(10, 30, 40, 18), (0, 0));
         assert_eq!(centre_offset(50, 3, 40, 18), (0, 0));
+    }
+
+    #[test]
+    fn arrow_and_bracket_keys_step_prev_and_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = InspectorState::new(dir.path(), sample_acp_step(), None, (1, 2));
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            InspectorOutcome::Next
+        );
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+            InspectorOutcome::Prev
+        );
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE)),
+            InspectorOutcome::Next
+        );
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE)),
+            InspectorOutcome::Prev
+        );
+    }
+
+    #[test]
+    fn wrap_off_hl_scrolls_horizontally_and_arrows_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut step = sample_acp_step();
+        step.output = json!("x".repeat(120));
+        let mut state = InspectorState::new(dir.path(), step, None, (1, 2));
+        state.handle_key(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert!(!state.wrap);
+
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+            InspectorOutcome::Changed
+        );
+        assert_eq!(state.tabs[0].scroll_x, HORIZ_SCROLL_STEP);
+
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            InspectorOutcome::Next
+        );
+        assert_eq!(state.tabs[0].scroll_x, HORIZ_SCROLL_STEP);
+
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+            InspectorOutcome::Prev
+        );
+        assert_eq!(state.tabs[0].scroll_x, HORIZ_SCROLL_STEP);
+
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            InspectorOutcome::Changed
+        );
+        assert_eq!(state.tabs[0].scroll_x, 0);
+    }
+
+    #[test]
+    fn line_cursor_range_and_whole_tab_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut step = sample_acp_step();
+        step.output = json!("line 1\nline 2\nline 3\nline 4\nline 5");
+        let mut state = InspectorState::new(dir.path(), step, None, (1, 1));
+
+        // j moves cursor to line 2; y copies line 2.
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            InspectorOutcome::Changed
+        );
+        assert_eq!(state.tabs[0].cursor, 1);
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+            InspectorOutcome::Copy("line 2".to_string())
+        );
+
+        // v, j, j, y copies lines 2-4 joined with "\n".
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)),
+            InspectorOutcome::Changed
+        );
+        state.handle_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        state.handle_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+            InspectorOutcome::Copy("line 2\nline 3\nline 4".to_string())
+        );
+
+        // Y copies the whole tab.
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE)),
+            InspectorOutcome::Copy("line 1\nline 2\nline 3\nline 4\nline 5".to_string())
+        );
+    }
+
+    #[test]
+    fn wrapped_cursor_line_copies_original_and_highlights_all_three_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let long_line = format!("{}{}{}", "a".repeat(16), "b".repeat(16), "c".repeat(8));
+        let mut step = sample_acp_step();
+        step.output = json!(format!("{long_line}\nshort"));
+        let mut state = InspectorState::new(dir.path(), step, None, (1, 1));
+        assert!(state.wrap);
+
+        let theme = Theme::default();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 12)); // body 20x10; gutter 4, content 16
+        let area = buf.area;
+        state.render(&mut buf, area, &theme, 0);
+
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+            InspectorOutcome::Copy(long_line)
+        );
+
+        // Body has 4 visual rows (3 for line 1, 1 for line 2), vertically centred at y_off = 3.
+        for y in 5..=7 {
+            for x in 0..20 {
+                assert_eq!(
+                    buf[(x, y)].bg,
+                    theme.bg_highlight,
+                    "expected highlight at ({x}, {y})"
+                );
+            }
+        }
+        assert_ne!(buf[(0, 8)].bg, theme.bg_highlight);
+    }
+
+    #[test]
+    fn esc_ends_visual_range_before_returning_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut step = sample_acp_step();
+        step.output = json!("one\ntwo\nthree");
+        let mut state = InspectorState::new(dir.path(), step, None, (1, 1));
+
+        state.handle_key(&KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        state.handle_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(state.visual_anchor.is_some());
+
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            InspectorOutcome::Changed
+        );
+        assert!(state.visual_anchor.is_none());
+
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            InspectorOutcome::Back
+        );
+    }
+
+    #[test]
+    fn tab_switch_keeps_cursor_and_ends_visual_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut step = sample_acp_step();
+        step.output = json!("out 1\nout 2\nout 3");
+        step.prompt_text = Some("prompt 1\nprompt 2".to_string());
+        let mut state = InspectorState::new(dir.path(), step, None, (1, 1));
+
+        state.handle_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        state.handle_key(&KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(state.tabs[0].cursor, 1);
+        assert!(state.visual_anchor.is_some());
+
+        // Switch to Prompt tab and back to Output tab.
+        state.handle_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(state.active_tab, 1);
+        assert!(state.visual_anchor.is_none());
+        assert_eq!(state.tabs[1].cursor, 0);
+
+        state.handle_key(&KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(state.active_tab, 0);
+        assert_eq!(state.tabs[0].cursor, 1);
+    }
+
+    #[test]
+    fn shift_g_moves_cursor_to_last_line_and_makes_it_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut step = sample_acp_step();
+        step.output = json!(
+            (1..=30)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let mut state = InspectorState::new(dir.path(), step, None, (1, 1));
+        let theme = Theme::default();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10)); // body height = 8
+        let area = buf.area;
+        state.render(&mut buf, area, &theme, 0);
+
+        assert_eq!(
+            state.handle_key(&KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)),
+            InspectorOutcome::Changed
+        );
+        assert_eq!(state.tabs[0].cursor, 29);
+
+        let mut buf = Buffer::empty(area);
+        state.render(&mut buf, area, &theme, 0);
+        let last_row = row_text(&buf, 9);
+        assert!(last_row.contains("line 30"), "last row: {last_row}");
+        assert_eq!(buf[(0, 9)].bg, theme.bg_highlight);
     }
 }
