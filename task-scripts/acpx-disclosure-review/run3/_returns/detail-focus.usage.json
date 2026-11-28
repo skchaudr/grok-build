@@ -1,0 +1,37 @@
+{
+  "slice": "detail-focus",
+  "ok": true,
+  "error": null,
+  "requested": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "agent": "agy acp --sandbox"
+  },
+  "effective": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "legacyCurrentModelId": "gemini-4-neon-high",
+    "tier": "Google AI Pro"
+  },
+  "timeToFirstCodeSeconds": 200.67,
+  "totalSeconds": 339.82,
+  "toolCallCount": 0,
+  "toolCalls": [],
+  "returnedBytes": 77968,
+  "returnedLines": 2337,
+  "quotaPercentage": "unknown",
+  "stopReason": "end_turn",
+  "usage": {
+    "inputTokens": 32769,
+    "outputTokens": 48715,
+    "cachedReadTokens": 0,
+    "cachedWriteTokens": 0,
+    "thoughtTokens": 26345,
+    "totalTokens": 81484
+  },
+  "stagedFiles": [
+    "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run3/grok-build/task-scripts/acpx-disclosure-returns/detail-focus.edits.md"
+  ],
+  "rawEventsPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run3/_returns/detail-focus.events.jsonl",
+  "rawReturnPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/run3/_returns/detail-focus.md"
+}
