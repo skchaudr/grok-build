@@ -1,0 +1,9 @@
+gemini-4-neon · thought_level=medium
+agent: agy acp --sandbox · output: /Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/opening-v1
+
+  slice                  excerpts     ctx KB   packet KB   est in   target
+  finished-run-ledger    16 files   112.8 KB    124.0 KB    31.7k   task-scripts/acpx-disclosure-returns/finished-run-ledger.edits.md
+  acpx-opening-preview   21 files    66.2 KB     76.1 KB    19.5k   task-scripts/acpx-disclosure-returns/acpx-opening-preview.edits.md
+  2 slices               37 files   179.0 KB    200.1 KB    51.2k
+
+Dry run · 2 ACP packets written to /Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/opening-v1/_prompts and /Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/opening-v1/_packets · nothing sent

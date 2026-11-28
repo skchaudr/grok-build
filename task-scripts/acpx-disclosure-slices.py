@@ -1,4 +1,4 @@
-"""Handoff 004: five reviewable ACPX task packets.
+"""Reviewable ACPX task packets, including the reviewed opening screen.
 
 This data-only task file uses the installed `slices acp` runner. Code workers
 return exact old/new edit lists; design workers return Markdown artifacts.
@@ -30,7 +30,8 @@ return placeholder code. Treat the attached excerpts as evidence; lines outside
 the excerpts are not available to you. Rust edition 2024, toolchain 1.94.0. No
 new dependencies, unsafe, or new production unwrap/expect. Preserve theme styles
 and keymaps unless the task explicitly changes them. Do not change gate
-authority, workflow state, ledger routing, or release behavior."""
+authority, workflow state, or release behavior. Change ledger routing only
+where the task explicitly owns a reviewed presentation or focus change."""
 
 EDIT_FORMAT = """
 Edit list format. The file is Markdown. List the edits in application order;
@@ -87,6 +88,26 @@ def task(slice_id, context, spec, *, design=False):
     }
 
 
+OPENING_PREVIEW_INTERFACE = """
+Shared ledger/preview contract (ledger owns the definitions, preview consumes):
+- LedgerState::selected_waiting_group(&self) -> Option<(&str, usize)> returns
+  the selected waiting group's display label and number of members, only on
+  Flows. On that group selected_run() returns None; on a finished group it
+  still returns the representative. The group itself has no gate or run ID.
+- LedgerState::selected_run_is_finished_group(&self) -> bool is true only for
+  a selected finished group representative, not an ordinary run or child.
+- LedgerState::set_inline_preview(&mut self, lines: Option<Vec<InlinePreviewLine>>)
+  sets the selected row's inline preview for the next render. In ledger.rs,
+  pub(super) struct InlinePreviewLine has pub(super) fields text: String,
+  cursor: bool, selected: bool. Each item is one logical line. None preserves
+  the existing ledger continuation behavior; Some, including Some(empty),
+  replaces default question/path continuations so they appear at most once.
+  The ledger wraps for display and scrolls the focused cursor into view; the
+  modal owns unwrapped copy text and never copies display indentation or wraps.
+  Only the modal supplies lines, per render, in the narrow Flows view. No new
+  I/O in the ledger, no new dependencies, and no new gate authority.
+"""
+
 TASKS = [
     task(
         "executed-timeline",
@@ -138,36 +159,51 @@ wholesale.
     ),
     task(
         "finished-run-ledger",
-        source(f"{MODAL}/ledger.rs", (1, 315), (317, 528), (550, 940),
-               (943, 1036), (1120, 1696), (2124, 2278),
-               (2279, 2421), (2499, 2710), (2756, 2813))
-        + source(APP_MODAL, (1, 103), (311, 368), (695, 741), (1432, 1510))
-        + source(f"{ACPX}/bundle.rs", (1, 50), (150, 187), (261, 350)),
+        source(f"{MODAL}/ledger.rs", (1, 528), (529, 942), (943, 1264),
+               (1265, 1696), (2006, 2279), (2280, 2603), (2604, 2989))
+        + source(APP_MODAL, (311, 352), (695, 741), (1432, 1510))
+        + source(f"{ACPX}/bundle.rs", (1, 135), (150, 187), (261, 350), (1347, 1355))
+        + source(f"{ACPX}/step_digest.rs", (157, 182))
+        + source("docs/acpx-modal-opening-screen.md", (1, 62)),
         rf"""
+Carries forward packet 2 and adds the reviewed opening-screen behavior.
 Own Flows row grouping, selection and progress in {MODAL}/ledger.rs and its
-unit tests. In {APP_MODAL} edit only the row_extra producer/cache and its tests
-if needed for executed counts. Do not change preview or modal route. Keep
-LedgerState::selected_run() and LedgerOutcome routing compatible.
+unit tests, including the narrow inline render hook below. In {APP_MODAL}
+edit only the row_extra producer/cache and its tests. Leave modal preview
+state, input and rendering to packet 4. Keep LedgerOutcome routing compatible.
 
 Group two or more actual finished runs with the same nonempty flow_name.
 The newest member represents a collapsed group: the greatest started_ms, and on
-a tie the greatest run_id (run IDs begin with a sortable timestamp). Keep
-active/waiting runs individually selectable. Do not group any run still marked
-Running or Waiting by its actual summary, even if the legacy section label puts
-it in Finished (a stalled Running run, an answered Waiting run). Preserve legacy
-gate classification for now; call no answer operation. Leave empty workflow
-names as individual runs. Keep total counts in units of runs. Preserve sort and
-active filters.
+a tie the greatest run_id. The default Grouped order has Waiting for input,
+Running and Recent outcomes; omit empty sections. Use actual RunStatus: stalled
+Running remains Running with its stalled label, and answered Waiting remains
+Waiting with the recorded answer distinction. Do not fabricate sent/accepted
+status or change gate control. Keep running runs individual and group repeated
+Waiting runs separately from finished groups. Group waits with the same
+nonempty flow_name and source root (the run directory's parent); when an
+absolute recorded flow path is available, also key on it so same-name runs from
+different projects stay separate. Add an optional PathBuf to RowExtra for the
+recorded path, supplied via bundle::flow_path inside cached row_extra; never
+require that a recorded file exists. Missing paths only group with other
+missing paths from the same source root. Waiting groups and their members sort
+by updated_ms newest first with a stable tie; age and build association do not
+change priority or visibility. Leave empty workflow names as individual runs.
+Keep section counts in units of runs. Fold repeated waits in the default
+Grouped order. Recent and Name continue to let operators browse waits by those
+orders without the waiting-group fold; preserve existing sort and active
+filter controls.
 
 Space toggles the selected group open or closed in Flows; it is unbound in the
 attached Flows dispatcher. Tab, BackTab, Left, Right, h and l keep switching
 tabs. Add the Space label to LedgerState::shortcuts(); the coordinator adds the
 help-table row in {APP_MODAL}. Space on a row that is not a group is Unchanged.
-Enter still opens the selected run. Expanding reveals older member runs in
-newest-first order by the same rule. When search matches an older ID, keep it
-selectable even if previously folded. Refresh keeps selection by run ID, even
-if a newer member arrives. On explicit collapse of a selected child, move
-selection to the visible representative. Leave the Agent Turns tab
+Enter on a waiting group expands it without opening a member; Enter on a run
+or a finished group opens the same run as before. Expanded groups expose every
+member. On a waiting group header the list y emits no copy outcome, because
+there is no selected run ID. When search matches an older ID, reveal it even
+if previously folded. Refresh keeps selection by run ID even if a newer
+member arrives. On explicit collapse of a selected child, select the visible
+group row or finished representative as appropriate. Leave the Agent Turns tab
 (LedgerTab::Sessions; its label now reads Agent Turns) behavior alone.
 
 Each Flows row shows three things that answer different questions: the
@@ -187,28 +223,28 @@ At narrower widths keep the row readable: drop the path from the row first,
 then follow the existing width thresholds, and give the selected run its full
 executed path on wrapped lines below the row, the way flow_question_lines adds
 a waiting run's question (keep row-height and scroll math consistent for both).
-Update every RowExtra literal inside the attached excerpts, and update the
-attached probe test's rail assertions (the 5/262 count and the check marks) to
-the new text. The coordinator adds `executed: None` to the RowExtra literals
-outside the excerpts. Reuse the parent's cached bundle read. Do not
-add I/O to render or widen the cache/read limit. Keep existing styles. For a
+Update every RowExtra literal inside the excerpts, and report any remaining
+literal as a coordinator follow-up. Update the probe test's 5/262 assertion.
+Use effective_outcome when the recorded outcome needs correction for a nonzero
+exit. Reuse cached bundle reads, do not add I/O to render or widen the cache
+limit. Keep existing styles. Implement the shared interface below; account for
+inline rows in height, navigation and overflow, including a constrained viewport
+and a focused line that wraps. Status and title must remain readable. For a
 concrete Flows selection, y copies the canonical '/open <run_id>' command;
 on the Agent Turns tab y still copies the selected record ID. A confirmed copy
 already shows "Copied!" (fixed on main). Chat /open <id> already resolves
 mirrored PIW runs read-only (resolve_saved_run); the coordinator still checks a
 live paste of the copied command before shipping it.
 
-Tests: three finished runs of one name plus a same-name pending run; folded
-and expanded navigation with Space; newest tie by run_id; matching and
-preserving an older ID on refresh; a stalled Running run and an answered
-Waiting run of the grouped name staying individual; a group under the Recent
-and Name orders; count and path including a retry (cargo_check, repair_compile, cargo_check in
-order) vs missing extras ('steps unknown') vs no steps; the rail still showing
-unrun nodes while count and path exclude them; full-width row with all three;
-a narrow selected row showing its full path below it and a narrow unselected
-row without it; exact y
-behavior on both tabs. Stay out of unrelated existing gate-status tests.
-""",
+Tests: keep packet 2's finished grouping, filter, recent/name sorts, retry,
+unknown/empty, width and copy assertions. Add five ship waits and two mixed-talk
+waits as two groups; source/project separation; one older wait still reachable;
+Space/Enter expansion and no group y; individual run ID survives a refresh;
+waiting with a recorded answer stays Waiting and stalled Running stays Running;
+no closed or empty section placeholder; inline focused cursor visible with
+wrapping and no duplicate question or path. Update existing assertions for the
+changed section labels and classification only; leave gate evidence intact.
+""" + OPENING_PREVIEW_INTERFACE,
     ),
     task(
         "attempt-detail",
@@ -337,37 +373,70 @@ empty cases.
 """,
     ),
     task(
-        "acpx-landing",
-        source(APP_MODAL, (1, 262), (311, 396), (504, 561), (651, 688),
-               (750, 920), (1148, 1243))
-        + source(f"{MODAL}/ledger.rs", (105, 168), (259, 310), (377, 445))
-        + source(f"{ACPX}/bundle.rs", (261, 295)),
-        """
-Produce an operator-facing first-screen prototype, not a product patch.
-Inputs: the current AcpxModalState routes and full Flows and Agent Turns lists in
-this packet; a genuinely waiting run asking 'Approve integration?', a
-failed beta8-merge run with cargo_check exit 101, and a running fixture.
-The screen's first job is to identify work needing attention, open a run,
-reach the full lists, or find how to start work. Opening is inspection only.
-Do not invent a start route if the attached sources do not establish one.
+        "acpx-opening-preview",
+        source(APP_MODAL, (1, 310), (354, 396), (504, 558), (651, 694),
+               (742, 921), (998, 1158), (1187, 1243), (1269, 1290), (1409, 1431))
+        + source(f"{MODAL}/ledger.rs", (18, 56), (201, 309), (727, 891), (943, 980))
+        + source(f"{MODAL}/detail.rs", (1036, 1101))
+        + source(f"{ACPX}/bundle.rs", (1, 135), (150, 187), (237, 361), (617, 625), (1356, 1370))
+        + source(f"{ACPX}/step_digest.rs", (157, 306))
+        + source("docs/acpx-modal-opening-screen.md", (1, 62)),
+        rf"""
+This implements the reviewed opening-screen preview and replaces the old
+packet 4 design assignment. Own only {APP_MODAL}: preview state, selected
+preview evidence, Ledger-mode rendering and input, help and relevant tests.
+Keep Flows as the initial view. Do not edit ledger.rs, detail.rs or Run/Step
+behavior; the ledger supplies the shared interface below. No new landing mode.
+Do not edit row_extra or its tests owned by packet 2; attach the new code to
+anchors in the preview/input/render regions. The ledger packet adds no APP_MODAL
+imports; it uses qualified paths for new helpers there. If a shared function is
+edited, leave its non-Ledger arms intact. Packet 3b must render from the merged
+base before editing shared input/render functions.
 
-Design against the current, ungrouped ledger shown here; grouping finished
-runs is a separate packet. Which runs need attention depends on a separate
-gate-state contract (for example, an answer the engine accepted while the run
-still reports waiting). State the attention predicate you assume and mark it
-as a dependency on that contract, not a decision.
+Replace the current ledger DetailPanel render with one compact, read-only
+preview built from the existing selected-run bundle cache. Reuse recorded
+status and fields; a waiting group shows its label, count and Space hint,
+never a member's question/choices. A finished group previews the representative
+and identifies it as such; obtain that indicator via the ledger interface.
+An individual wait shows its saved question and choices as plain evidence when
+present, with no pick shortcuts or answer action; an answered wait remains
+waiting until the engine moves it. Running shows the known current step.
+Failed shows the failed attempt, available exit status and a short diagnostic
+using existing step evidence; prefer a complete original diagnostic line to
+a rewritten or summarized copy payload. Completed shows a short recorded
+result, without raw structured wrappers; cancellations stay cancellations.
+Use actual ordered Step attempts for the path and do not show unrun nodes.
+State missing question or diagnostic plainly. Do not read artifacts on every
+render, add new fetches, or widen bundle/cache limits. Keep preview identity
+separate from DetailPanel; clear/clamp the cursor and range on selection,
+refresh or mode changes so stale content cannot be copied.
 
-Return one proposed screen at 80x24, the same state at 50x14, and an empty
-case. Give the exact Tab/Shift+Tab, arrow, Enter, and Esc transitions, return
-focus when closing a run, and an explicit route to both full lists. Name
-which current mode, render branch, and handlers would change. Recommend
-whether the full ledger keeps its compact preview and justify the choice
-using these cases; a deferred preview packet waits on this recommendation.
-Separate any design assumptions from observed behavior.
-No changes to the current full ledger, gate authority, or keymap outside
-this proposed entry route. List the interactive checks a reviewer can run.
-""",
-        design=True,
+At wide widths show the summary on the right; at narrow widths pass its
+logical lines and selection to the ledger inline hook, with one visible copy
+of the selected path (suppress standalone continuation when replaced). Use
+the same logical lines for copy even when the screen wraps them. Tab/Shift+Tab
+move between list and a nonempty preview with visible focus. When no preview
+exists leave navigation usable. h/l or Left/Right from the list still switch
+tabs. Agent Turns behavior stays as-is, including its existing Tab route.
+Keep filter capture and help above preview input. When focused, j/k and
+Up/Down move the line cursor, v starts/ends the range, y copies the exact
+logical line/range, Y copies all preview lines, and Esc clears a selection
+first then returns to the same list row. No render-only wraps, indentation,
+ANSI or truncation in the copied payload. Use AcpxOutcome::Copy. List y keeps
+packet 2 behavior. Route wants_esc accordingly, update displayed shortcuts
+and help, and keep mouse wheel scrolling the pane under pointer without
+mutating the unrelated run-detail panel. Enter from the list still opens the
+selected run (after expanding a waiting group if necessary); Esc from Run
+returns to the same row. No preview key can answer, launch, or cancel.
+
+Tests: failed cargo_check with a multiline diagnostic, a waiting group and
+individual question, running and finished summaries, unavailable evidence,
+wide and narrow focus and wrapping, exact y/v/Y, Esc ordering, selection after
+refresh/open/back, tab reachability and filter capture, empty/tiny layouts and
+no workflow-control outcome from preview input. Coordinator validates the two
+opening packets together and checks real clipboard paste and those views at
+both widths before shipping; do not claim live verification.
+""" + OPENING_PREVIEW_INTERFACE,
     ),
     task(
         "cross-surface-gate",
