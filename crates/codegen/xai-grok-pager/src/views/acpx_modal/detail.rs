@@ -41,16 +41,140 @@ struct CacheKey {
     answered: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct CopyUnit {
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+#[derive(Debug, Default)]
+struct Rows {
+    lines: Vec<Line<'static>>,
+    units: Vec<CopyUnit>,
+}
+
+impl Rows {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn push_unit(&mut self, rows: Vec<Line<'static>>, text: String) {
+        if rows.is_empty() {
+            return;
+        }
+        let start = self.lines.len();
+        self.lines.extend(rows);
+        let end = self.lines.len();
+        self.units.push(CopyUnit { start, end, text });
+    }
+
+    fn append_rows(&mut self, other: Rows) {
+        let offset = self.lines.len();
+        self.lines.extend(other.lines);
+        for mut unit in other.units {
+            unit.start += offset;
+            unit.end += offset;
+            self.units.push(unit);
+        }
+    }
+
+    fn unit_at(&self, row: usize) -> Option<&CopyUnit> {
+        let idx = self.units.partition_point(|u| u.end <= row);
+        self.units
+            .get(idx)
+            .filter(|u| u.start <= row && row < u.end)
+    }
+
+    fn copy_range(&self, start_row: usize, end_row: usize) -> String {
+        if self.lines.is_empty() || start_row > end_row {
+            return String::new();
+        }
+        let last = end_row.min(self.lines.len() - 1);
+        let mut out = Vec::new();
+        let mut row = start_row.min(last);
+        while row <= last {
+            if let Some(unit) = self.unit_at(row) {
+                out.push(unit.text.clone());
+                row = unit.end;
+            } else {
+                out.push(line_plain_text(&self.lines[row]));
+                row += 1;
+            }
+        }
+        out.join("\n")
+    }
+
+    fn copy_all(&self) -> String {
+        if self.lines.is_empty() {
+            String::new()
+        } else {
+            self.copy_range(0, self.lines.len() - 1)
+        }
+    }
+}
+
+impl std::ops::Deref for Rows {
+    type Target = Vec<Line<'static>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.lines
+    }
+}
+
+impl std::ops::DerefMut for Rows {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.lines
+    }
+}
+
+impl IntoIterator for Rows {
+    type Item = Line<'static>;
+    type IntoIter = std::vec::IntoIter<Line<'static>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.lines.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Rows {
+    type Item = &'a Line<'static>;
+    type IntoIter = std::slice::Iter<'a, Line<'static>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.lines.iter()
+    }
+}
+
+fn line_plain_text(line: &Line<'_>) -> String {
+    let mut text = String::new();
+    for span in &line.spans {
+        text.push_str(span.content.as_ref());
+    }
+    text.trim_end().to_string()
+}
+
+fn source_lines(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        vec![""]
+    } else {
+        text.lines().collect()
+    }
+}
+
 pub struct DetailPanel {
     cache_key: Option<CacheKey>,
     /// The picked choice of an answered gate; `Some("")` when it was answered
     /// but the choice is unknown. `None` while the gate is open.
     answered: Option<String>,
     last_target: Option<(PathBuf, DetailTarget)>,
-    lines: Vec<Line<'static>>,
+    lines: Rows,
     scroll: usize,
     tail_follow: bool,
     last_height: usize,
+    focused: bool,
+    cursor: usize,
+    visual_anchor: Option<usize>,
 }
 
 impl Default for DetailPanel {
@@ -65,10 +189,13 @@ impl DetailPanel {
             cache_key: None,
             answered: None,
             last_target: None,
-            lines: Vec::new(),
+            lines: Rows::new(),
             scroll: 0,
             tail_follow: false,
             last_height: 0,
+            focused: false,
+            cursor: 0,
+            visual_anchor: None,
         }
     }
 
@@ -77,6 +204,135 @@ impl DetailPanel {
         if self.answered.as_deref() != answered {
             self.answered = answered.map(str::to_string);
         }
+    }
+
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    pub fn is_visual(&self) -> bool {
+        self.focused && self.visual_anchor.is_some()
+    }
+
+    pub fn set_focused(&mut self, focused: bool) {
+        if self.focused == focused {
+            return;
+        }
+        self.focused = focused;
+        if !focused {
+            self.visual_anchor = None;
+            return;
+        }
+        self.tail_follow = false;
+        if self.lines.is_empty() {
+            self.cursor = 0;
+            return;
+        }
+        let max_row = self.lines.len() - 1;
+        self.cursor = self.cursor.min(max_row);
+        if self.last_height > 0 {
+            let top = self.scroll.min(max_row);
+            let bottom = (top + self.last_height - 1).min(max_row);
+            if self.cursor < top || self.cursor > bottom {
+                self.cursor = top;
+            }
+        }
+    }
+
+    pub fn page_step(&self) -> isize {
+        if self.last_height > 1 {
+            (self.last_height - 1) as isize
+        } else if self.last_height == 1 {
+            1
+        } else {
+            15
+        }
+    }
+
+    pub fn move_cursor(&mut self, delta: isize) -> bool {
+        if self.lines.is_empty() || delta == 0 {
+            return false;
+        }
+        let max_row = self.lines.len() - 1;
+        let cur = self.cursor.min(max_row);
+        let next = if delta < 0 {
+            cur.saturating_sub(delta.unsigned_abs())
+        } else {
+            cur.saturating_add(delta as usize).min(max_row)
+        };
+        self.tail_follow = false;
+        let moved = next != self.cursor;
+        self.cursor = next;
+        self.ensure_cursor_visible(self.last_height);
+        moved
+    }
+
+    pub fn toggle_visual(&mut self) -> bool {
+        if self.lines.is_empty() {
+            return false;
+        }
+        if self.visual_anchor.is_some() {
+            self.visual_anchor = None;
+        } else {
+            self.visual_anchor = Some(self.cursor.min(self.lines.len() - 1));
+        }
+        true
+    }
+
+    pub fn handle_esc(&mut self) -> bool {
+        if !self.focused {
+            return false;
+        }
+        if self.visual_anchor.is_some() {
+            self.visual_anchor = None;
+        } else {
+            self.focused = false;
+        }
+        true
+    }
+
+    pub fn copy_selection(&self) -> Option<String> {
+        let (start, end) = self.selected_range()?;
+        Some(self.lines.copy_range(start, end))
+    }
+
+    pub fn copy_all(&self) -> Option<String> {
+        if self.lines.is_empty() {
+            None
+        } else {
+            Some(self.lines.copy_all())
+        }
+    }
+
+    fn selected_range(&self) -> Option<(usize, usize)> {
+        if !self.focused || self.lines.is_empty() {
+            return None;
+        }
+        let max_row = self.lines.len() - 1;
+        let cur = self.cursor.min(max_row);
+        match self.visual_anchor {
+            Some(anchor) => {
+                let a = anchor.min(max_row);
+                Some((a.min(cur), a.max(cur)))
+            }
+            None => Some((cur, cur)),
+        }
+    }
+
+    fn ensure_cursor_visible(&mut self, height: usize) {
+        if height == 0 || self.lines.is_empty() {
+            return;
+        }
+        let max_row = self.lines.len() - 1;
+        self.cursor = self.cursor.min(max_row);
+        let max_scroll = self.max_scroll(height);
+        self.scroll = self.scroll.min(max_scroll);
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + height {
+            self.scroll = self.cursor + 1 - height;
+        }
+        self.scroll = self.scroll.min(max_scroll);
     }
 
     pub fn scroll(&mut self, delta: isize) -> bool {
@@ -133,6 +389,8 @@ impl DetailPanel {
             );
             self.tail_follow = is_running_node;
             self.scroll = 0;
+            self.cursor = 0;
+            self.visual_anchor = None;
         }
 
         let events_file_len = conversation_file_len(run, target);
@@ -160,7 +418,19 @@ impl DetailPanel {
         }
 
         let max_scroll = self.max_scroll(area.height as usize);
-        if self.tail_follow {
+        if self.lines.is_empty() {
+            self.cursor = 0;
+            self.visual_anchor = None;
+        } else {
+            let last_row = self.lines.len() - 1;
+            self.cursor = self.cursor.min(last_row);
+            if let Some(anchor) = self.visual_anchor.as_mut() {
+                *anchor = (*anchor).min(last_row);
+            }
+        }
+        if self.focused {
+            self.ensure_cursor_visible(area.height as usize);
+        } else if self.tail_follow {
             self.scroll = max_scroll;
         } else if self.scroll > max_scroll {
             self.scroll = max_scroll;
@@ -170,11 +440,19 @@ impl DetailPanel {
         let total = self.lines.len();
         let needs_scrollbar = total > height;
         let text_width = area.width;
+        let highlight = self.selected_range();
 
         for row in 0..height {
             let line_idx = self.scroll + row;
+            let y = area.y + row as u16;
             if let Some(line) = self.lines.get(line_idx) {
-                buf.set_line(area.x, area.y + row as u16, line, text_width);
+                buf.set_line(area.x, y, line, text_width);
+            }
+            if highlight.is_some_and(|(s, e)| line_idx >= s && line_idx <= e) {
+                let hl_style = Style::default().bg(theme.bg_highlight);
+                for x in area.x..area.x + area.width {
+                    buf[(x, y)].set_style(hl_style);
+                }
             }
         }
 
@@ -229,9 +507,9 @@ fn build_lines(
     width: usize,
     theme: &Theme,
     now_ms: i64,
-) -> Vec<Line<'static>> {
+) -> Rows {
     if width < 10 {
-        return Vec::new();
+        return Rows::new();
     }
     match target {
         DetailTarget::Run => build_run_lines(run, answered, width, theme, now_ms),
@@ -239,7 +517,9 @@ fn build_lines(
             if let Some(step) = run.steps.get(*i) {
                 build_step_lines_at(run, *i, step, answered, width, theme, now_ms)
             } else {
-                vec![dim_line("step not found", theme)]
+                let mut rows = Rows::new();
+                rows.push(dim_line("step not found", theme));
+                rows
             }
         }
         DetailTarget::Node(id) => build_node_lines(run, id, answered, width, theme),
@@ -252,8 +532,8 @@ fn build_run_lines(
     width: usize,
     theme: &Theme,
     now_ms: i64,
-) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
+) -> Rows {
+    let mut out = Rows::new();
     let status = run.summary.status;
     // A waiting run whose gate is answered reads as done, like the run header.
     let shown = if status == RunStatus::Waiting && answered.is_some() {
@@ -422,7 +702,7 @@ fn build_run_lines(
         let lines = format_value_lines(&last_step.output, width, theme);
         if !lines.is_empty() {
             push_section_rule(&mut out, "Last result", width, theme);
-            out.extend(lines);
+            out.append_rows(lines);
         }
     }
 
@@ -430,9 +710,7 @@ fn build_run_lines(
     let input_lines = format_value_lines(&run.input, width, theme);
     if !input_lines.is_empty() {
         push_section_rule(&mut out, "Input", width, theme);
-        out.extend(
-            input_lines,
-        );
+        out.append_rows(input_lines);
     }
 
     out
@@ -526,8 +804,8 @@ pub(super) fn value_plain_text(val: &Value) -> String {
         .join("\n")
 }
 
-fn format_value_lines(val: &Value, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
+fn format_value_lines(val: &Value, width: usize, theme: &Theme) -> Rows {
+    let mut out = Rows::new();
     if matches!(val, Value::Null) {
         return out;
     }
@@ -541,7 +819,7 @@ fn format_value_lines(val: &Value, width: usize, theme: &Theme) -> Vec<Line<'sta
 }
 
 fn append_value_lines(
-    out: &mut Vec<Line<'static>>,
+    out: &mut Rows,
     val: &Value,
     indent: usize,
     width: usize,
@@ -574,15 +852,21 @@ fn append_value_lines(
             ]));
         }
         Value::String(s) => {
-            for line in wrap(s, body_w) {
-                if indent == 0 {
-                    out.push(Line::from(Span::styled(line, val_style)));
-                } else {
-                    out.push(Line::from(vec![
-                        Span::raw(pad_indent.clone()),
-                        Span::styled(line, val_style),
-                    ]));
-                }
+            for src_line in source_lines(s) {
+                let rows: Vec<Line<'static>> = wrap(src_line, body_w)
+                    .into_iter()
+                    .map(|line| {
+                        if indent == 0 {
+                            Line::from(Span::styled(line, val_style))
+                        } else {
+                            Line::from(vec![
+                                Span::raw(pad_indent.clone()),
+                                Span::styled(line, val_style),
+                            ])
+                        }
+                    })
+                    .collect();
+                out.push_unit(rows, src_line.to_string());
             }
         }
         Value::Array(arr) => {
@@ -591,7 +875,7 @@ fn append_value_lines(
                 let item_w = width.saturating_sub(indent + 2).max(1);
                 match item {
                     Value::Object(_) | Value::Array(_) => {
-                        let mut sub = Vec::new();
+                        let mut sub = Rows::new();
                         append_value_lines(&mut sub, item, 0, item_w, theme);
                         if sub.is_empty() {
                             sub.push(Line::from(Span::styled(
@@ -599,7 +883,9 @@ fn append_value_lines(
                                 Style::default().fg(theme.gray),
                             )));
                         }
-                        for (idx, sub_line) in sub.into_iter().enumerate() {
+                        let offset = out.len();
+                        let Rows { lines, units } = sub;
+                        for (idx, sub_line) in lines.into_iter().enumerate() {
                             let mut spans = vec![Span::styled(
                                 if idx == 0 {
                                     bullet_prefix.clone()
@@ -610,6 +896,11 @@ fn append_value_lines(
                             )];
                             spans.extend(sub_line.spans);
                             out.push(Line::from(spans));
+                        }
+                        for mut unit in units {
+                            unit.start += offset;
+                            unit.end += offset;
+                            out.units.push(unit);
                         }
                     }
                     _ => {
@@ -707,7 +998,7 @@ fn build_step_lines(
     answered: Option<&str>,
     width: usize,
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> Rows {
     build_step_lines_at(
         run,
         step_idx,
@@ -727,8 +1018,8 @@ fn build_step_lines_at(
     width: usize,
     theme: &Theme,
     now_ms: i64,
-) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
+) -> Rows {
+    let mut out = Rows::new();
 
     let is_last_of_node = run
         .steps
@@ -983,7 +1274,7 @@ fn build_step_lines_at(
         let result_lines = format_value_lines(&step.output, width, theme);
         if !result_lines.is_empty() {
             push_section_rule(&mut out, "Result", width, theme);
-            out.extend(result_lines);
+            out.append_rows(result_lines);
         }
     }
 
@@ -1224,7 +1515,7 @@ fn is_digest_covered_key(key: &str, switch_on_key: Option<&str>) -> bool {
 }
 
 fn append_artifact_section(
-    out: &mut Vec<Line<'static>>,
+    out: &mut Rows,
     title: &str,
     run_dir: &Path,
     artifact: &bundle::ArtifactRef,
@@ -1260,8 +1551,8 @@ fn build_node_lines(
     answered: Option<&str>,
     width: usize,
     theme: &Theme,
-) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
+) -> Rows {
+    let mut out = Rows::new();
     let state = run.node_state(node_id);
     let shown = run.node_state_answered(node_id, answered.is_some());
     let glyph = shown.glyph();
@@ -1367,7 +1658,7 @@ fn build_node_lines(
 }
 
 fn append_gate_section(
-    out: &mut Vec<Line<'static>>,
+    out: &mut Rows,
     run: &Run,
     answered: Option<&str>,
     width: usize,
@@ -1445,7 +1736,7 @@ enum ConvItem {
 }
 
 fn append_conversation(
-    out: &mut Vec<Line<'static>>,
+    out: &mut Rows,
     path: &Path,
     seq_range: Option<(u64, u64)>,
     min_exclusive_seq: Option<u64>,
@@ -1727,7 +2018,7 @@ fn format_trace_event(
 }
 
 fn push_section_rule(
-    out: &mut Vec<Line<'static>>,
+    out: &mut Rows,
     name: &str,
     width: usize,
     theme: &Theme,
@@ -1738,7 +2029,7 @@ fn push_section_rule(
     let used = UnicodeWidthStr::width(prefix) + UnicodeWidthStr::width(mid.as_str());
     let rem = width.saturating_sub(used);
     let trail = "─".repeat(rem);
-    out.push(Line::from(vec![
+    let rule = Line::from(vec![
         Span::styled(prefix, Style::default().fg(theme.gray_dim)),
         Span::styled(
             mid,
@@ -1747,7 +2038,8 @@ fn push_section_rule(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(trail, Style::default().fg(theme.gray_dim)),
-    ]));
+    ]);
+    out.push_unit(vec![rule], name.to_string());
 }
 
 fn title_row_right(
@@ -1794,28 +2086,44 @@ fn title_row_right(
 }
 
 fn push_wrapped(
-    out: &mut Vec<Line<'static>>,
+    out: &mut Rows,
     text: &str,
     width: usize,
     style: Style,
 ) {
-    for line in wrap(text, width) {
-        out.push(Line::from(Span::styled(line, style)));
+    for src_line in source_lines(text) {
+        let rows: Vec<Line<'static>> = wrap(src_line, width)
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, style)))
+            .collect();
+        out.push_unit(rows, src_line.to_string());
     }
 }
 
 fn push_wrapped_capped(
-    out: &mut Vec<Line<'static>>,
+    out: &mut Rows,
     text: &str,
     width: usize,
     max_rows: usize,
     style: Style,
     theme: &Theme,
 ) {
-    let wrapped = wrap(text, width);
-    let total = wrapped.len();
-    for line in wrapped.into_iter().take(max_rows) {
-        out.push(Line::from(Span::styled(line, style)));
+    let mut emitted = 0usize;
+    let mut total = 0usize;
+    for src_line in source_lines(text) {
+        let wrapped = wrap(src_line, width);
+        let line_rows = wrapped.len();
+        total += line_rows;
+        if emitted < max_rows {
+            let take = (max_rows - emitted).min(line_rows);
+            let rows: Vec<Line<'static>> = wrapped
+                .into_iter()
+                .take(take)
+                .map(|line| Line::from(Span::styled(line, style)))
+                .collect();
+            emitted += rows.len();
+            out.push_unit(rows, src_line.to_string());
+        }
     }
     if total > max_rows {
         let more = total - max_rows;
@@ -2708,6 +3016,161 @@ mod tests {
             5_000,
         );
         assert_eq!(panel.scroll, 0);
+    }
+
+    #[test]
+    fn wrapped_failure_line_copies_exact_source_on_second_row() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut run = make_test_run(tmp.path());
+        let long_path =
+            "/workspace/crates/codegen/xai-grok-pager/src/views/acpx_modal/detail.rs";
+        assert!(long_path.len() >= 70);
+        let err_rel = "artifacts/stderr.txt";
+        let err_path = tmp.path().join(err_rel);
+        std::fs::create_dir_all(err_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&err_path, format!("{long_path}\nsecond failure line\n")).expect("write");
+
+        run.steps.push(Step {
+            attempt_id: "list#1".to_string(),
+            node_id: "list".to_string(),
+            kind: NodeKind::Action,
+            outcome: Outcome::Failed,
+            started_ms: 1_000,
+            finished_ms: 2_000,
+            prompt_text: None,
+            raw_text: None,
+            output: json!(long_path),
+            error: None,
+            agent_name: None,
+            action: None,
+            conversation: None,
+            stdout: None,
+            stderr: Some(ArtifactRef {
+                path: err_rel.to_string(),
+                media_type: "text/plain".to_string(),
+                bytes: (long_path.len() + 21) as u64,
+            }),
+            output_artifact: None,
+        });
+
+        let mut panel = DetailPanel::new();
+        let area = Rect::new(0, 0, 32, 30);
+        let mut buf = Buffer::empty(area);
+        panel.render(
+            &mut buf,
+            area,
+            &run,
+            &DetailTarget::Step(0),
+            &Theme::default(),
+            5_000,
+        );
+        panel.set_focused(true);
+
+        // Find the wrapped rows produced for the 70-character path in Result and stderr.
+        let matching_rows: Vec<usize> = panel
+            .lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, line)| {
+                let text = line_plain_text(line);
+                if text.starts_with("/workspace/crates/codegen/") {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(!matching_rows.is_empty(), "expected wrapped path rows");
+        for first_row in matching_rows {
+            // Second wrapped row belongs to the same copy unit as the first row.
+            panel.cursor = first_row + 1;
+            assert_eq!(panel.copy_selection().as_deref(), Some(long_path));
+        }
+
+        // Visual range over the wrapped path unit and the next unit copies each unit once.
+        let stderr_path_row = panel
+            .lines
+            .iter()
+            .enumerate()
+            .rposition(|(_, line)| line_plain_text(line).starts_with("/workspace/crates/codegen/"))
+            .expect("stderr path row");
+        // The Failure section repeats the line earlier; take the stderr occurrence.
+        let second_line_row = panel
+            .lines
+            .iter()
+            .rposition(|line| line_plain_text(line) == "second failure line")
+            .expect("second failure line row");
+        assert!(second_line_row > stderr_path_row + 1);
+        panel.cursor = stderr_path_row + 1;
+        assert!(panel.toggle_visual());
+        panel.cursor = second_line_row;
+        assert_eq!(
+            panel.copy_selection().as_deref(),
+            Some(format!("{long_path}\nsecond failure line").as_str())
+        );
+
+        // Copying all units omits section-rule dashes.
+        let all = panel.copy_all().expect("copy all");
+        assert!(all.contains(long_path));
+        assert!(all.contains("Result"));
+        assert!(all.contains("stderr"));
+        assert!(!all.contains('─'), "copied text must not include rule dashes:\n{all}");
+    }
+
+    #[test]
+    fn focus_highlight_visual_range_and_target_change_reset_cursor() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut run = make_test_run(tmp.path());
+        run.steps.push(Step {
+            attempt_id: "work#1".to_string(),
+            node_id: "work".to_string(),
+            kind: NodeKind::Acp,
+            outcome: Outcome::Ok,
+            started_ms: 1_000,
+            finished_ms: 2_000,
+            prompt_text: None,
+            raw_text: None,
+            output: json!("first\nsecond\nthird"),
+            error: None,
+            agent_name: None,
+            action: None,
+            conversation: None,
+            stdout: None,
+            stderr: None,
+            output_artifact: None,
+        });
+
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 50, 12);
+        let mut panel = DetailPanel::new();
+        let mut buf = Buffer::empty(area);
+
+        // Unfocused: no row receives bg_highlight.
+        panel.render(&mut buf, area, &run, &DetailTarget::Step(0), &theme, 5_000);
+        for y in 0..area.height {
+            assert_ne!(buf[(0, y)].bg, theme.bg_highlight);
+        }
+
+        // Focused with visual range across rows 1..=2 highlights rows 1 and 2 only.
+        panel.set_focused(true);
+        assert!(panel.move_cursor(1));
+        assert!(panel.toggle_visual());
+        assert!(panel.move_cursor(1));
+        let mut buf = Buffer::empty(area);
+        panel.render(&mut buf, area, &run, &DetailTarget::Step(0), &theme, 5_000);
+        assert_ne!(buf[(0, 0)].bg, theme.bg_highlight);
+        assert_eq!(buf[(0, 1)].bg, theme.bg_highlight);
+        assert_eq!(buf[(area.width - 1, 1)].bg, theme.bg_highlight);
+        assert_eq!(buf[(0, 2)].bg, theme.bg_highlight);
+        assert_ne!(buf[(0, 3)].bg, theme.bg_highlight);
+
+        // Switching target resets cursor to 0 and ends visual mode.
+        let mut buf = Buffer::empty(area);
+        panel.render(&mut buf, area, &run, &DetailTarget::Run, &theme, 5_000);
+        assert_eq!(panel.cursor, 0);
+        assert!(!panel.is_visual());
+        assert_eq!(buf[(0, 0)].bg, theme.bg_highlight);
+        assert_ne!(buf[(0, 1)].bg, theme.bg_highlight);
     }
 
     #[test]

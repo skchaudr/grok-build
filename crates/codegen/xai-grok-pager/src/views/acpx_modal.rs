@@ -144,6 +144,7 @@ impl AcpxModalState {
                 view.set_settings(bundle::node_settings(dir), bundle::step_settings(dir));
                 self.run_view = Some(view);
                 self.inspector = None;
+                self.detail.set_focused(false);
                 self.mode = Mode::Run;
                 self.help_open = false;
                 self.notice = None;
@@ -503,13 +504,86 @@ impl AcpxModalState {
 
     fn handle_run_key(&mut self, key: &KeyEvent) -> AcpxOutcome {
         let Some(rv) = self.run_view.as_mut() else {
+            self.detail.set_focused(false);
             self.mode = Mode::Ledger;
             return AcpxOutcome::Changed;
         };
+        let captures = rv.captures_keys();
+        let has_detail = rv.detail_area().is_some();
+
+        if !captures && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            if has_detail {
+                self.detail.set_focused(!self.detail.is_focused());
+                return AcpxOutcome::Changed;
+            }
+            return AcpxOutcome::Unchanged;
+        }
+
+        if !captures && self.detail.is_focused() {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    return if self.detail.move_cursor(1) {
+                        AcpxOutcome::Changed
+                    } else {
+                        AcpxOutcome::Unchanged
+                    };
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    return if self.detail.move_cursor(-1) {
+                        AcpxOutcome::Changed
+                    } else {
+                        AcpxOutcome::Unchanged
+                    };
+                }
+                KeyCode::PageDown => {
+                    let step = self.detail.page_step();
+                    return if self.detail.move_cursor(step) {
+                        AcpxOutcome::Changed
+                    } else {
+                        AcpxOutcome::Unchanged
+                    };
+                }
+                KeyCode::PageUp => {
+                    let step = self.detail.page_step();
+                    return if self.detail.move_cursor(-step) {
+                        AcpxOutcome::Changed
+                    } else {
+                        AcpxOutcome::Unchanged
+                    };
+                }
+                KeyCode::Char('v') => {
+                    return if self.detail.toggle_visual() {
+                        AcpxOutcome::Changed
+                    } else {
+                        AcpxOutcome::Unchanged
+                    };
+                }
+                KeyCode::Char('y') => {
+                    return match self.detail.copy_selection() {
+                        Some(text) => AcpxOutcome::Copy(text),
+                        None => AcpxOutcome::Unchanged,
+                    };
+                }
+                KeyCode::Char('Y') => {
+                    return match self.detail.copy_all() {
+                        Some(text) => AcpxOutcome::Copy(text),
+                        None => AcpxOutcome::Unchanged,
+                    };
+                }
+                KeyCode::Esc => {
+                    if self.detail.handle_esc() {
+                        return AcpxOutcome::Changed;
+                    }
+                }
+                _ => {}
+            }
+        }
+
         match rv.handle_key(key) {
             RunOutcome::Unchanged => AcpxOutcome::Unchanged,
             RunOutcome::Changed => AcpxOutcome::Changed,
             RunOutcome::Back => {
+                self.detail.set_focused(false);
                 self.mode = Mode::Ledger;
                 self.run_view = None;
                 self.inspector = None;
@@ -549,6 +623,7 @@ impl AcpxModalState {
                 let input_json = bundle::gate_input(run, &choice).to_string();
                 // Back to the list, where the new run appears.
                 self.set_notice(format!("{choice}: started {}", flow_file.display()));
+                self.detail.set_focused(false);
                 self.mode = Mode::Ledger;
                 self.run_view = None;
                 AcpxOutcome::RunFlow { flow_file, input_json }
@@ -675,10 +750,16 @@ impl AcpxModalState {
     fn active_shortcut_labels(&self) -> Vec<&'static str> {
         let mut labels = match self.mode {
             Mode::Ledger => self.ledger.shortcuts(),
-            Mode::Run => self
-                .run_view
-                .as_ref()
-                .map_or_else(Vec::new, |rv| rv.shortcuts()),
+            Mode::Run => {
+                let captures = self.run_view.as_ref().is_some_and(|rv| rv.captures_keys());
+                if self.detail.is_focused() && !captures {
+                    vec!["j/k line", "v range", "y copy", "Y all", "Esc tree"]
+                } else {
+                    self.run_view
+                        .as_ref()
+                        .map_or_else(Vec::new, |rv| rv.shortcuts())
+                }
+            }
             Mode::Step => self
                 .inspector
                 .as_ref()
@@ -846,6 +927,8 @@ pub fn render_acpx_modal(
                         state.detail.set_answered(rv.answered());
                         state.detail.render(buf, area, rv.run(), &rv.detail_target(), &theme, now);
                         state.detail_rect = Some(area);
+                    } else {
+                        state.detail.set_focused(false);
                     }
                 }
             }
@@ -902,7 +985,10 @@ const LEDGER_KEYS: &[(&str, &str)] = &[
 const RUN_KEYS: &[(&str, &str)] = &[
     ("j / k / ↑ / ↓", "Move through stages and their substeps"),
     ("[ / ]", "Previous / next stage"),
+    ("Tab / Shift+Tab", "Switch focus between stages and the detail panel"),
     ("J / K, D / U", "Scroll the detail panel by a few rows / by a page"),
+    ("Detail: j / k, PgUp / PgDn", "Move the detail cursor by a row / a page"),
+    ("Detail: v, y / Y", "Select line range; copy line/range or whole panel"),
     ("Enter", "Inspect the selected stage; on a gate row, answer it"),
     ("1-9", "Answer the gate with that choice (asks first)"),
     ("F5", "Jump to the gate"),
@@ -912,7 +998,7 @@ const RUN_KEYS: &[(&str, &str)] = &[
     ("r", "Replay the stage's conversation as a transcript"),
     ("y", "Copy the stage's output"),
     ("?", "Toggle this key reference"),
-    ("Esc", "Back to the list"),
+    ("Esc", "End detail selection / focus, or back to the list"),
 ];
 
 const STEP_KEYS: &[(&str, &str)] = &[
@@ -1320,6 +1406,108 @@ mod tests {
         assert_eq!(
             state.run_view.as_ref().and_then(|rv| rv.selected_step()),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn detail_focus_tab_backtab_and_without_detail_area() {
+        let fx = write_fixture("completed");
+        let mut state =
+            AcpxModalState::open_at(Some(fx.runs_base.clone()), Some(fx.sessions_base.clone()));
+        state.handle_key(&key(KeyCode::Enter));
+        assert_eq!(state.mode(), Mode::Run);
+
+        // Before rendering, detail_area is None so Tab does nothing.
+        assert_eq!(state.handle_key(&key(KeyCode::Tab)), AcpxOutcome::Unchanged);
+        assert!(!state.detail.is_focused());
+
+        // Render wide enough for the detail pane.
+        let area = Rect::new(0, 0, 140, 35);
+        let mut buf = Buffer::empty(area);
+        render_acpx_modal(&mut buf, area, &mut state, false);
+        assert!(state.run_view.as_ref().and_then(|rv| rv.detail_area()).is_some());
+
+        // Tab focuses the detail pane and updates footer shortcuts.
+        assert_eq!(state.handle_key(&key(KeyCode::Tab)), AcpxOutcome::Changed);
+        assert!(state.detail.is_focused());
+        let labels = state.active_shortcut_labels();
+        assert!(labels.contains(&"j/k line"));
+        assert!(labels.contains(&"Esc tree"));
+
+        // Shift+Tab returns focus to the stage tree.
+        assert_eq!(state.handle_key(&key(KeyCode::BackTab)), AcpxOutcome::Changed);
+        assert!(!state.detail.is_focused());
+        assert!(!state.active_shortcut_labels().contains(&"Esc tree"));
+    }
+
+    #[test]
+    fn detail_focus_range_copy_all_esc_unwind_and_tree_keys() {
+        let fx = write_fixture("completed");
+        let mut state =
+            AcpxModalState::open_at(Some(fx.runs_base.clone()), Some(fx.sessions_base.clone()));
+        state.handle_key(&key(KeyCode::Enter));
+        assert_eq!(state.mode(), Mode::Run);
+        if let Some(rv) = state.run_view.as_mut() {
+            rv.select_step(0);
+        }
+
+        let area = Rect::new(0, 0, 140, 35);
+        let mut buf = Buffer::empty(area);
+        render_acpx_modal(&mut buf, area, &mut state, false);
+
+        // With the tree focused, y copies the stage output and v toggles the graph.
+        let tree_copy = state.handle_key(&key(KeyCode::Char('y')));
+        assert!(matches!(tree_copy, AcpxOutcome::Copy(_)));
+        assert_eq!(state.handle_key(&key(KeyCode::Char('v'))), AcpxOutcome::Changed);
+        assert!(!state.detail.is_focused());
+        assert!(!state.detail.is_visual());
+        // Toggle graph back so detail layout stays consistent.
+        state.handle_key(&key(KeyCode::Char('v')));
+        render_acpx_modal(&mut buf, area, &mut state, false);
+
+        // Focus detail pane, move cursor, start visual range, move down, copy 2 units.
+        assert_eq!(state.handle_key(&key(KeyCode::Tab)), AcpxOutcome::Changed);
+        assert_eq!(state.handle_key(&key(KeyCode::Char('v'))), AcpxOutcome::Changed);
+        assert!(state.detail.is_visual());
+        assert_eq!(state.handle_key(&key(KeyCode::Char('j'))), AcpxOutcome::Changed);
+        let range_copy = state.handle_key(&key(KeyCode::Char('y')));
+        match range_copy {
+            AcpxOutcome::Copy(text) => {
+                assert_eq!(text.lines().count(), 2, "expected 2 copied units:\n{text}");
+                assert!(!text.contains('─'));
+            }
+            other => panic!("expected Copy, got {other:?}"),
+        }
+
+        // Y copies the whole pane without section-rule dashes.
+        let all_copy = state.handle_key(&key(KeyCode::Char('Y')));
+        match all_copy {
+            AcpxOutcome::Copy(text) => {
+                assert!(!text.is_empty());
+                assert!(!text.contains('─'), "unexpected rule dash in:\n{text}");
+            }
+            other => panic!("expected Copy, got {other:?}"),
+        }
+
+        // First Esc ends visual mode while keeping detail focus.
+        assert_eq!(state.handle_key(&key(KeyCode::Esc)), AcpxOutcome::Changed);
+        assert!(state.detail.is_focused());
+        assert!(!state.detail.is_visual());
+
+        // Second Esc returns focus to the stage tree.
+        assert_eq!(state.handle_key(&key(KeyCode::Esc)), AcpxOutcome::Changed);
+        assert!(!state.detail.is_focused());
+        assert_eq!(state.mode(), Mode::Run);
+
+        // Third Esc leaves the run, landing on the same run in the ledger.
+        assert_eq!(state.handle_key(&key(KeyCode::Esc)), AcpxOutcome::Changed);
+        assert_eq!(state.mode(), Mode::Ledger);
+        assert!(!state.detail.is_focused());
+        assert_eq!(state.handle_key(&key(KeyCode::Enter)), AcpxOutcome::Changed);
+        assert_eq!(state.mode(), Mode::Run);
+        assert_eq!(
+            state.run_view.as_ref().map(|rv| rv.run().summary.run_id.as_str()),
+            Some("run-001")
         );
     }
 
