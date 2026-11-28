@@ -175,10 +175,12 @@ edit only the row_extra producer/cache and its tests. Leave modal preview
 state, input and rendering to packet 4. Keep LedgerOutcome routing compatible.
 
 The default Grouped order has Waiting for input, Running and Recent outcomes;
-omit empty sections. Use actual RunStatus: stalled
-Running remains Running with its stalled label, and answered Waiting remains
-Waiting with the recorded answer distinction. Do not fabricate sent/accepted
-status or change gate control. Keep running runs individual and group repeated
+omit empty sections. Stalled Running remains Running with its stalled label.
+Preserve the existing run_section/is_answered behavior for native ACPX: a
+Waiting run whose continuation records an answer goes under Recent outcomes as
+an individual answered: <choice> row. Exclude it from waiting groups, section
+counts and the waiting header total. Do not change the saved status, fabricate
+PIW sent/accepted status, or change gate control. Keep running runs individual and group repeated
 Waiting runs separately from finished groups. Group waits with the same
 nonempty flow_name and source root (the run directory's parent); when an
 absolute recorded flow path is available, also key on it so same-name runs from
@@ -223,7 +225,9 @@ Tests: keep packet 2's finished grouping, filter, recent/name sorts, retry,
 unknown/empty, width and copy assertions. Add five ship waits and two mixed-talk
 waits as two groups; source/project separation; one older wait still reachable;
 Space/Enter expansion and no group y; individual run ID survives a refresh;
-waiting with a recorded answer stays Waiting and stalled Running stays Running;
+five unanswered native waits plus two with recorded continuation answers show a
+waiting count and group size of five, with both answered rows under Recent
+outcomes; stalled Running stays Running;
 no closed or empty section placeholder; inline focused cursor visible with
 wrapping and no duplicate question or path. Update existing assertions for the
 changed section labels and classification only; leave gate evidence intact.
@@ -386,8 +390,9 @@ status and fields; a waiting group shows its label, count and Space hint,
 never a member's question/choices. A finished group previews the representative
 and identifies it as such; obtain that indicator via the ledger interface.
 An individual wait shows its saved question and choices as plain evidence when
-present, with no pick shortcuts or answer action; an answered wait remains
-waiting until the engine moves it. Running shows the known current step.
+present, with no pick shortcuts or answer action. A native ACPX run with a
+recorded continuation answer shows that answer as history, not a request for
+input. Leave PIW answer state to packet 5. Running shows the known current step.
 Failed shows the failed attempt, available exit status and a short diagnostic
 using existing step evidence; prefer a complete original diagnostic line to
 a rewritten or summarized copy payload. Completed shows a short recorded

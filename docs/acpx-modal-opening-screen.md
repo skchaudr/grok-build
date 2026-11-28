@@ -14,7 +14,7 @@ Open directly into Flows. Make that screen useful before opening anything. Keep 
 
 Use three sections in the default grouped order: **Waiting for input**, **Running**, and **Recent outcomes**. Omit empty sections. The labels describe what the workflow is doing without guessing what the operator cares about.
 
-- **Waiting for input:** Give every recorded wait the same treatment. Group repeated waits by workflow, project, and source when known, and sort groups and their members by most recent update. Each gate remains individually selectable. A group never borrows a member's question or choices. Age is context; it never hides or downgrades a wait. Keep a distinct status for answers in flight or accepted while the engine still reports waiting. Packet 5 owns gate and answer state.
+- **Waiting for input:** Give every gate that still needs input the same treatment. Group repeated waits by workflow, project, and source when known, and sort groups and their members by most recent update. Each gate remains individually selectable. A group never borrows a member's question or choices. Age is context; it never hides or downgrades a wait. A native ACPX gate with a recorded continuation answer is an individual `answered: <choice>` row under Recent outcomes, even if its saved status is still `waiting`. Exclude it from all waiting counts and groups. Packet 5 owns PIW answer state, including the distinction between an answer in flight and one the engine accepted.
 - **Running:** Keep each run individually selectable. Show the known current stage. A stalled run remains here with a stalled label.
 - **Recent outcomes:** Use packet 2's newest-first finished grouping and preserve each historical run. Keep the latest outcome visible on the collapsed row. Show failures and cancellations in plain language. The dot rail, executed-attempt count, and named execution path retain the agreed width behavior in packet 2. They describe the selected or representative run, never the sum of all members.
 
@@ -54,7 +54,7 @@ The example has a failure selected. On a fresh open, select the first row in the
 | Five `ship: slugify` waits and two `mixed-talk` waits | The default view shows two group rows. Expand `ship: slugify`; each member is separately selectable and shows its own question. A five-day-old wait is still reachable. A known build dependency does not change where its gate appears. |
 | `beta8-merge` failure | Select the run, Tab into its preview, and copy an exact saved diagnostic line when available. Esc returns focus to the same row; Enter opens the full evidence. Repeat the copy from the inline preview at narrow width. |
 | Completed run with retries | Keep the rail, count, and named path; retries occur in recorded order. Narrow width keeps the selected run's full path reachable without widening the screen. |
-| Waiting run updates after an answer | The UI distinguishes the answer status from the engine state. The row moves to outcomes only when the engine reports a terminal state. No input is sent by opening the row. |
+| Native ACPX gate has a recorded continuation answer | The original run can still report `waiting` on disk. Show it under Recent outcomes as answered and exclude it from the waiting count. Five unanswered waits and two answered waits for the same flow produce a group of five. Opening a row sends no input. |
 | Empty list or no matches | Say which case applies. The other tab and clearing a filter stay reachable. |
 
 ## Boundary with the current packets
