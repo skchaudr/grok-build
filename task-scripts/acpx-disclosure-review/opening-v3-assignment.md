@@ -39,14 +39,10 @@ These are mine, not Sab's rulings. Each is a sentence or two of task text plus a
 3. **A selected waiting-group header across refresh.** State the rule: the header stays selected by group key; when its group is no longer shown as a group (one member left, a filter, Recent or Name order), the newest member is selected. `reconcile_flow_selection` (`ledger.rs:782`) falls back to the first row today.
 4. **Recorded path for runs past `EXTRAS_LIMIT` (80).** Say the path for those runs is read once per run through the cache that already holds their answers (`acpx_modal.rs:328–347`), and that this is not widening the cache limit. There are 75 runs now.
 
-### Noticed while writing this, not in the review
-
-The header summary counts running runs that are not stalled (`ledger.rs:1364`). With stalled runs now under Running, the header and the section count disagree. Say in the task text which one the header follows.
-
 ## Hand back
 
 - `opening-v3/_prompts/` and `_packets/` from a dry run (`slices acp … --dry-run --output task-scripts/acpx-disclosure-review/opening-v3`), with `dry-run.log`.
-- `opening-v3/review-disposition.md`: each of the five points above as accepted, changed or contested, with the reason.
+- `opening-v3/review-disposition.md`: each of the four points above as accepted, changed or contested, with the reason.
 - The base commit the excerpts were taken from.
 
 Dry render only. No worker, build or product edit. The preview packet stays on hold until this one lands.

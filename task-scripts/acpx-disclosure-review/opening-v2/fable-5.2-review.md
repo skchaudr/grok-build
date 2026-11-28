@@ -39,6 +39,8 @@ Packet: `opening-v2/_prompts/acpx-opening-ledger-delta.md` at `3dece007`. Read-o
 - **Size.** Estimate only: the functions to replace whole come to about 1,100 production lines (`render_flow_row` 326, `handle_key` 171, `render_flows` 109, grouping and row building about 170, selection and navigation about 230), each quoted as OLD and again as NEW, plus about ten existing tests and nine new ones. Packet 2 returned 3,095 lines in 494 s with 70.9k output tokens; expect more. If the return is cut short or fails matching, the inline preview hook is the part to split off, since nothing calls it until the preview packet.
 - **Same file, two recorded paths.** `mixed-demo` is recorded under both `/tmp/…` and `/private/tmp/…`. No waiting run has this today; if one does, it splits a group.
 
+- **Header count and stalled runs (added 17:05, after the review).** The header summary counts running runs that are not stalled (`ledger.rs:1364`); the packet lists stalled runs under Running, so the header and the section count would differ. Not raised with Sol.
+
 ## Checked and fine
 
 - All 18 excerpts equal the source at `3dece007`, line for line.
