@@ -31,7 +31,7 @@ with wording to this effect:
 - Line 17 ("Keep a distinct status for answers in flight or accepted while the engine still reports waiting"): add that a native ACPX wait whose answer started a continuation run is listed under Recent outcomes as answered, because the native engine never changes that run's status.
 - Line 57 ("The row moves to outcomes only when the engine reports a terminal state"): add the same exception. What an answered pi-workflows wait looks like stays with packet 5.
 
-### 2–4. The other three findings in the review
+### 2–5. The other findings
 
 These are mine, not Sab's rulings. Each is a sentence or two of task text plus a test; the evidence is in the review. Accept or contest each in the v3 disposition.
 
@@ -39,10 +39,12 @@ These are mine, not Sab's rulings. Each is a sentence or two of task text plus a
 3. **A selected waiting-group header across refresh.** State the rule: the header stays selected by group key; when its group is no longer shown as a group (one member left, a filter, Recent or Name order), the newest member is selected. `reconcile_flow_selection` (`ledger.rs:782`) falls back to the first row today.
 4. **Recorded path for runs past `EXTRAS_LIMIT` (80).** Say the path for those runs is read once per run through the cache that already holds their answers (`acpx_modal.rs:328–347`), and that this is not widening the cache limit. There are 75 runs now.
 
+5. **Header count and stalled runs.** Found after the review was published; it is in the review's nonblocking list. The header summary counts running runs that are not stalled (`ledger.rs:1364`), and the packet lists stalled runs under Running, so the header and the section count would differ. Recommended: the header counts what the Running section lists.
+
 ## Hand back
 
 - `opening-v3/_prompts/` and `_packets/` from a dry run (`slices acp … --dry-run --output task-scripts/acpx-disclosure-review/opening-v3`), with `dry-run.log`.
-- `opening-v3/review-disposition.md`: each of the four points above as accepted, changed or contested, with the reason.
+- `opening-v3/review-disposition.md`: each of the five points above as accepted, changed or contested, with the reason.
 - The base commit the excerpts were taken from.
 
 Dry render only. No worker, build or product edit. The preview packet stays on hold until this one lands.
