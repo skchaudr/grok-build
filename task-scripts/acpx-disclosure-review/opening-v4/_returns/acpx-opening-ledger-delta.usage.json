@@ -1,0 +1,37 @@
+{
+  "slice": "acpx-opening-ledger-delta",
+  "ok": true,
+  "error": null,
+  "requested": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "agent": "agy acp --sandbox"
+  },
+  "effective": {
+    "model": "gemini-4-neon",
+    "thought_level": "medium",
+    "legacyCurrentModelId": "gemini-4-neon-high",
+    "tier": "Google AI Pro"
+  },
+  "timeToFirstCodeSeconds": 219.46,
+  "totalSeconds": 552.56,
+  "toolCallCount": 0,
+  "toolCalls": [],
+  "returnedBytes": 185600,
+  "returnedLines": 4974,
+  "quota": null,
+  "stopReason": "end_turn",
+  "usage": {
+    "inputTokens": 45428,
+    "outputTokens": 79570,
+    "cachedReadTokens": 11655,
+    "cachedWriteTokens": 0,
+    "thoughtTokens": 28622,
+    "totalTokens": 136653
+  },
+  "stagedFiles": [
+    "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/opening-v4/grok-build/task-scripts/acpx-disclosure-returns/acpx-opening-ledger-delta.edits.md"
+  ],
+  "rawEventsPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/opening-v4/_returns/acpx-opening-ledger-delta.events.jsonl",
+  "rawReturnPath": "/Volumes/Mini-SSD/offload/repos/grok-build/task-scripts/acpx-disclosure-review/opening-v4/_returns/acpx-opening-ledger-delta.md"
+}
