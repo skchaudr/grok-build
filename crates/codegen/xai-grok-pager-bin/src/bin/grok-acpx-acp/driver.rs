@@ -443,6 +443,75 @@ pub fn list_runs(runs_dir: &Path, limit: usize) -> Vec<(String, String, String, 
     runs
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunFlowRecord {
+    pub run_id: String,
+    pub flow_name: String,
+    pub flow_path: String,
+    pub status: String,
+    pub started_ms: i64,
+}
+
+pub fn list_run_flows(runs_dir: &Path, limit: usize) -> Vec<RunFlowRecord> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(runs_dir) else {
+        return Vec::new();
+    };
+
+    let mut runs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(manifest) = read_json_file(&path.join("manifest.json")) else {
+            continue;
+        };
+        let Some(flow_path) = json_str(&manifest, "flowPath")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let live = read_json_file(&path.join("projections").join("live.json"));
+
+        let run_id = json_str(&manifest, "runId")
+            .or_else(|| entry.file_name().to_str().map(ToString::to_string))
+            .unwrap_or_default();
+        if run_id.is_empty() {
+            continue;
+        }
+        let flow_name = json_str(&manifest, "flowName").unwrap_or_default();
+        let status = live
+            .as_ref()
+            .and_then(|l| json_str(l, "status"))
+            .filter(|s| !s.is_empty())
+            .or_else(|| json_str(&manifest, "status"))
+            .unwrap_or_else(|| "unknown".to_string());
+        let started_ms = json_str(&manifest, "startedAt")
+            .and_then(|s| parse_ts(&s))
+            .unwrap_or(0);
+
+        runs.push(RunFlowRecord {
+            run_id,
+            flow_name,
+            flow_path,
+            status,
+            started_ms,
+        });
+    }
+
+    runs.sort_by(|a, b| {
+        b.started_ms
+            .cmp(&a.started_ms)
+            .then_with(|| b.run_id.cmp(&a.run_id))
+    });
+    runs.truncate(limit);
+    runs
+}
+
 fn make_temp_input_file(input_json: &str) -> anyhow::Result<PathBuf> {
     let dir = std::env::temp_dir();
     let pid = std::process::id();
@@ -2215,6 +2284,87 @@ mod tests {
         let limited = list_runs(runs_dir, 1);
         assert_eq!(limited.len(), 1);
         assert_eq!(limited[0].0, "r2");
+    }
+
+    #[test]
+    fn test_list_run_flows_skips_missing_flow_path_and_orders_newest_first() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let runs_dir = tmp.path();
+
+        let r_missing = runs_dir.join("r-missing");
+        write_file(
+            &r_missing,
+            "manifest.json",
+            &json!({
+                "runId": "r-missing",
+                "flowName": "no-path",
+                "startedAt": "2026-11-20T03:00:00.000Z",
+                "status": "completed"
+            })
+            .to_string(),
+        );
+
+        let r_blank = runs_dir.join("r-blank");
+        write_file(
+            &r_blank,
+            "manifest.json",
+            &json!({
+                "runId": "r-blank",
+                "flowName": "blank-path",
+                "flowPath": "   ",
+                "startedAt": "2026-11-20T02:30:00.000Z",
+                "status": "completed"
+            })
+            .to_string(),
+        );
+
+        let r1 = runs_dir.join("r1");
+        write_file(
+            &r1,
+            "manifest.json",
+            &json!({
+                "runId": "r1",
+                "flowName": "flow-one",
+                "flowPath": "flows/one.flow.ts",
+                "startedAt": "2026-11-20T01:00:00.000Z",
+                "status": "completed"
+            })
+            .to_string(),
+        );
+
+        let r2 = runs_dir.join("r2");
+        write_file(
+            &r2,
+            "manifest.json",
+            &json!({
+                "runId": "r2",
+                "flowName": "flow-two",
+                "flowPath": "/opt/flows/two.workflow.ts",
+                "startedAt": "2026-11-20T02:00:00.000Z",
+                "status": "running"
+            })
+            .to_string(),
+        );
+        write_file(
+            &r2,
+            "projections/live.json",
+            &json!({"status": "waiting"}).to_string(),
+        );
+
+        let list = list_run_flows(runs_dir, 10);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].run_id, "r2");
+        assert_eq!(list[0].flow_name, "flow-two");
+        assert_eq!(list[0].flow_path, "/opt/flows/two.workflow.ts");
+        assert_eq!(list[0].status, "waiting");
+        assert_eq!(list[1].run_id, "r1");
+        assert_eq!(list[1].flow_name, "flow-one");
+        assert_eq!(list[1].flow_path, "flows/one.flow.ts");
+        assert_eq!(list[1].status, "completed");
+
+        let limited = list_run_flows(runs_dir, 1);
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].run_id, "r2");
     }
 
     #[test]

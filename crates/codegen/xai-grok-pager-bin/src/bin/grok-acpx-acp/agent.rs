@@ -57,8 +57,10 @@ pub struct AgentConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Flow { file: String, input: Value },
+    FlowPicker,
     Runs,
     Open { run_id: String },
+    OpenPicker,
     Answer { label: String },
     Task { text: String },
     Help,
@@ -1255,6 +1257,106 @@ impl AcpxAgent {
         serde_json::from_str(response.0.get()).ok()
     }
 
+    async fn ask_picker_question(
+        &self,
+        session_id: &str,
+        kind: &str,
+        question_id: &str,
+        question: &str,
+        options: &[PickerOption],
+    ) -> Option<String> {
+        let tool_call_id = picker_tool_call_id(kind, session_id);
+        let option_values: Vec<Value> = options
+            .iter()
+            .map(|opt| {
+                json!({
+                    "label": opt.label,
+                    "description": opt.description,
+                    "preview": Value::Null,
+                    "id": opt.id,
+                })
+            })
+            .collect();
+
+        let params = json!({
+            "sessionId": session_id,
+            "toolCallId": tool_call_id,
+            "questions": [{
+                "question": question,
+                "options": option_values,
+                "multiSelect": false,
+                "id": question_id,
+            }],
+            "mode": "default",
+            "noFreeform": true,
+        });
+
+        let outer = self.ask_question_raw(session_id, tool_call_id, params).await?;
+        let chosen = extract_gate_answer_label(&outer)?;
+        let trimmed = chosen.trim();
+        options
+            .iter()
+            .find(|opt| opt.id == trimmed || opt.label == trimmed)
+            .map(|opt| opt.id.clone())
+    }
+
+    async fn open_saved_run(&self, session_id: &str, run_id: &str, timing: &TurnTiming) {
+        let already_shown = self
+            .state
+            .borrow()
+            .sessions
+            .get(session_id)
+            .is_some_and(|s| s.shown_runs.contains(run_id));
+        if already_shown {
+            self.send_parent_text(session_id, "Already shown above.", timing)
+                .await;
+            return;
+        }
+        let runs_dir = self.runs_dir();
+        match resolve_saved_run(&runs_dir, runtime::mirror_root().as_deref(), run_id) {
+            Some((run_dir, source)) => {
+                if let Err(err) = self
+                    .replay_run_into_session(session_id, &run_dir, source, false, Some(timing))
+                    .await
+                {
+                    self.send_parent_text(
+                        session_id,
+                        format!("Failed to open run `{run_id}`: {err}"),
+                        timing,
+                    )
+                    .await;
+                }
+            }
+            None => {
+                self.send_parent_text(
+                    session_id,
+                    format!("Run `{run_id}` not found."),
+                    timing,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn run_flow_command(
+        &self,
+        session_id: &str,
+        file: &str,
+        input: Value,
+        timing: &TurnTiming,
+    ) {
+        if is_workflow_file(file) {
+            // A `.workflow.ts` file starts a run on the pi-workflows
+            // server instead of an acpx flow.
+            self.run_piw_flow(session_id, file, input, timing).await;
+        } else {
+            let cwd = self.session_cwd(session_id);
+            let flow_path = resolve_flow_path(&cwd, file);
+            self.run_flow_chain(session_id, flow_path, input, timing)
+                .await;
+        }
+    }
+
     async fn replay_run_into_session(
         &self,
         session_id: &str,
@@ -1852,40 +1954,29 @@ impl acp::Agent for AcpxAgent {
                     .await;
             }
             Command::Open { run_id } => {
-                let already_shown = self
-                    .state
-                    .borrow()
-                    .sessions
-                    .get(&session_id)
-                    .is_some_and(|s| s.shown_runs.contains(&run_id));
-                if already_shown {
-                    self.send_parent_text(&session_id, "Already shown above.", &timing)
+                self.open_saved_run(&session_id, &run_id, &timing).await;
+            }
+            Command::OpenPicker => {
+                let runs_dir = self.runs_dir();
+                let runs = list_saved_runs(&runs_dir, runtime::mirror_root().as_deref(), 20);
+                let options = open_picker_options(&runs);
+                if options.is_empty() {
+                    self.send_parent_text(&session_id, "No acpx runs found.", &timing)
                         .await;
+                } else if let Some(run_id) = self
+                    .ask_picker_question(
+                        &session_id,
+                        "open",
+                        "acpx-open-picker",
+                        "Choose a run to open:",
+                        &options,
+                    )
+                    .await
+                {
+                    self.open_saved_run(&session_id, &run_id, &timing).await;
                 } else {
-                    let runs_dir = self.runs_dir();
-                    match resolve_saved_run(&runs_dir, runtime::mirror_root().as_deref(), &run_id) {
-                        Some((run_dir, source)) => {
-                            if let Err(err) = self
-                                .replay_run_into_session(&session_id, &run_dir, source, false, Some(&timing))
-                                .await
-                            {
-                                self.send_parent_text(
-                                    &session_id,
-                                    format!("Failed to open run `{run_id}`: {err}"),
-                                    &timing,
-                                )
-                                .await;
-                            }
-                        }
-                        None => {
-                            self.send_parent_text(
-                                &session_id,
-                                format!("Run `{run_id}` not found."),
-                                &timing,
-                            )
-                            .await;
-                        }
-                    }
+                    self.send_parent_text(&session_id, "No run opened.", &timing)
+                        .await;
                 }
             }
             Command::Answer { label } => {
@@ -1960,17 +2051,48 @@ impl acp::Agent for AcpxAgent {
                 }
             }
             Command::Flow { file, input } => {
-                if is_workflow_file(&file) {
-                    // A `.workflow.ts` file starts a run on the pi-workflows
-                    // server instead of an acpx flow.
-                    self.run_piw_flow(&session_id, &file, input, &timing).await;
+                self.run_flow_command(&session_id, &file, input, &timing)
+                    .await;
+                ran_flow = true;
+            }
+            Command::FlowPicker => {
+                let default_flow = self.default_flow();
+                let cwd = self.session_cwd(&session_id);
+                let runs_dir = self.runs_dir();
+                let recent_flows =
+                    list_saved_run_flows(&runs_dir, runtime::mirror_root().as_deref(), 20);
+                let options = flow_picker_options(
+                    default_flow.as_deref(),
+                    &recent_flows,
+                    &cwd,
+                    |path| path.is_file(),
+                );
+                if options.is_empty() {
+                    self.send_parent_text(
+                        &session_id,
+                        help_markdown(default_flow.as_deref()),
+                        &timing,
+                    )
+                    .await;
+                } else if let Some(selected) = self
+                    .ask_picker_question(
+                        &session_id,
+                        "flow",
+                        "acpx-flow-picker",
+                        "Choose a flow to run:",
+                        &options,
+                    )
+                    .await
+                    && let Some(Command::Flow { file, input }) =
+                        flow_command_from_selection(&options, &selected)
+                {
+                    self.run_flow_command(&session_id, &file, input, &timing)
+                        .await;
+                    ran_flow = true;
                 } else {
-                    let cwd = self.session_cwd(&session_id);
-                    let flow_path = resolve_flow_path(&cwd, &file);
-                    self.run_flow_chain(&session_id, flow_path, input, &timing)
+                    self.send_parent_text(&session_id, "No flow started.", &timing)
                         .await;
                 }
-                ran_flow = true;
             }
             Command::Task { text } => {
                 if let Some(default_flow) = self.default_flow() {
@@ -2108,8 +2230,11 @@ pub fn parse_command(text: &str, waiting_labels: &[String]) -> Command {
         let cmd_lower = cmd_word.to_ascii_lowercase();
         match cmd_lower.as_str() {
             "flow" => {
+                if rest.trim().is_empty() {
+                    return Command::FlowPicker;
+                }
                 let Some((file, after_file)) = parse_flow_file_and_rest(rest) else {
-                    return Command::Help;
+                    return Command::FlowPicker;
                 };
                 if file.is_empty() {
                     return Command::Help;
@@ -2125,11 +2250,15 @@ pub fn parse_command(text: &str, waiting_labels: &[String]) -> Command {
                 }
             }
             "open" => {
-                let run_id = unquote_arg(rest.trim());
-                if run_id.is_empty() {
-                    Command::Help
+                if rest.trim().is_empty() {
+                    Command::OpenPicker
                 } else {
-                    Command::Open { run_id }
+                    let run_id = unquote_arg(rest.trim());
+                    if run_id.is_empty() {
+                        Command::Help
+                    } else {
+                        Command::Open { run_id }
+                    }
                 }
             }
             "answer" => {
@@ -2230,17 +2359,18 @@ fn session_model_state() -> acp::SessionModelState {
 
 fn available_commands() -> Vec<acp::AvailableCommand> {
     vec![
-        acp::AvailableCommand::new("flow", "Run an acpx flow file").input(
-            acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
-                "<flow file> [task or JSON input]",
+        acp::AvailableCommand::new("flow", "Run an acpx flow file (or pick one when omitted)")
+            .input(acp::AvailableCommandInput::Unstructured(
+                acp::UnstructuredCommandInput::new("[flow file] [task or JSON input]"),
             )),
-        ),
         acp::AvailableCommand::new("runs", "List recent acpx flow runs"),
-        acp::AvailableCommand::new("open", "Replay an existing acpx run into this session").input(
-            acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
-                "<run id>",
-            )),
-        ),
+        acp::AvailableCommand::new(
+            "open",
+            "Replay an existing acpx run into this session (or pick one when omitted)",
+        )
+        .input(acp::AvailableCommandInput::Unstructured(
+            acp::UnstructuredCommandInput::new("[run id]"),
+        )),
         acp::AvailableCommand::new("answer", "Answer a waiting checkpoint gate").input(
             acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
                 "<choice>",
@@ -2474,6 +2604,159 @@ fn gate_tool_call_id(run_id: &str, attempt: &str) -> String {
     format!("acpx-gate:{run_id}:{attempt}")
 }
 
+fn picker_tool_call_id(kind: &str, session_id: &str) -> String {
+    format!("acpx-picker:{kind}:{session_id}:{}", utc_now_ms())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PickerOption {
+    id: String,
+    label: String,
+    description: String,
+}
+
+fn list_saved_run_flows(
+    base: &Path,
+    mirror: Option<&Path>,
+    limit: usize,
+) -> Vec<(driver::RunFlowRecord, SavedRunSource)> {
+    let mut runs: Vec<_> = driver::list_run_flows(base, limit)
+        .into_iter()
+        .map(|run| (run, SavedRunSource::Native))
+        .collect();
+    if let Some(mirror) = mirror {
+        runs.extend(
+            driver::list_run_flows(mirror, limit)
+                .into_iter()
+                .map(|run| (run, SavedRunSource::PiwMirror)),
+        );
+    }
+    runs.sort_by(|(a, _), (b, _)| {
+        b.started_ms
+            .cmp(&a.started_ms)
+            .then_with(|| b.run_id.cmp(&a.run_id))
+    });
+    runs.truncate(limit);
+    runs
+}
+
+fn open_picker_options(runs: &[(ListedRun, SavedRunSource)]) -> Vec<PickerOption> {
+    let mut sorted: Vec<&(ListedRun, SavedRunSource)> = runs.iter().collect();
+    sorted.sort_by(|(a, _), (b, _)| b.4.cmp(&a.4).then_with(|| b.0.cmp(&a.0)));
+    sorted
+        .into_iter()
+        .map(|((run_id, flow_name, title, status, started_ms), source)| {
+            let mut parts = Vec::new();
+            if !flow_name.is_empty() {
+                parts.push(flow_name.as_str());
+            }
+            if !title.is_empty() && title != flow_name {
+                parts.push(title.as_str());
+            }
+            parts.push(source.label());
+            if !status.is_empty() {
+                parts.push(status.as_str());
+            }
+            let started = format_iso8601_ms(*started_ms);
+            parts.push(started.as_str());
+            PickerOption {
+                id: run_id.clone(),
+                label: run_id.clone(),
+                description: parts.join(" · "),
+            }
+        })
+        .collect()
+}
+
+fn format_flow_run_description(run: &driver::RunFlowRecord, source: SavedRunSource) -> String {
+    let mut parts = Vec::new();
+    if !run.flow_name.is_empty() {
+        parts.push(run.flow_name.as_str());
+    }
+    parts.push(source.label());
+    if !run.status.is_empty() {
+        parts.push(run.status.as_str());
+    }
+    let started = format_iso8601_ms(run.started_ms);
+    parts.push(started.as_str());
+    parts.join(" · ")
+}
+
+fn flow_picker_options(
+    default_flow: Option<&Path>,
+    recent_runs: &[(driver::RunFlowRecord, SavedRunSource)],
+    session_cwd: &Path,
+    file_exists: impl Fn(&Path) -> bool,
+) -> Vec<PickerOption> {
+    let mut sorted_runs: Vec<&(driver::RunFlowRecord, SavedRunSource)> =
+        recent_runs.iter().collect();
+    sorted_runs.sort_by(|(a, _), (b, _)| {
+        b.started_ms
+            .cmp(&a.started_ms)
+            .then_with(|| b.run_id.cmp(&a.run_id))
+    });
+
+    let mut options = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+
+    if let Some(default_path) = default_flow {
+        let default_str = default_path.to_string_lossy();
+        let trimmed = default_str.trim();
+        if !trimmed.is_empty() {
+            let resolved = resolve_flow_path(session_cwd, trimmed);
+            if file_exists(&resolved) && seen.insert(resolved.clone()) {
+                let newest_match = sorted_runs.iter().find(|(run, _)| {
+                    let run_path = run.flow_path.trim();
+                    !run_path.is_empty() && resolve_flow_path(session_cwd, run_path) == resolved
+                });
+                let description = match newest_match {
+                    Some((run, source)) => format!(
+                        "default flow · {}",
+                        format_flow_run_description(run, *source)
+                    ),
+                    None => "default flow".to_string(),
+                };
+                let path_str = resolved.to_string_lossy().to_string();
+                options.push(PickerOption {
+                    id: path_str.clone(),
+                    label: path_str,
+                    description,
+                });
+            }
+        }
+    }
+
+    for (run, source) in sorted_runs {
+        let trimmed = run.flow_path.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let resolved = resolve_flow_path(session_cwd, trimmed);
+        if !file_exists(&resolved) || !seen.insert(resolved.clone()) {
+            continue;
+        }
+        let path_str = resolved.to_string_lossy().to_string();
+        options.push(PickerOption {
+            id: path_str.clone(),
+            label: path_str,
+            description: format_flow_run_description(run, *source),
+        });
+    }
+
+    options
+}
+
+fn flow_command_from_selection(options: &[PickerOption], selected: &str) -> Option<Command> {
+    let trimmed = selected.trim();
+    let opt = options
+        .iter()
+        .find(|o| o.id == trimmed || o.label == trimmed)?;
+    Some(Command::Flow {
+        file: opt.id.clone(),
+        input: json!({}),
+    })
+}
+
 fn extract_client_prompt_id(meta: Option<&acp::Meta>) -> Option<String> {
     meta.and_then(|m| m.get("promptId"))
         .and_then(Value::as_str)
@@ -2551,9 +2834,9 @@ fn help_markdown(default_flow: Option<&Path>) -> String {
     };
     format!(
         "### acpx commands\n\
-        - `/flow <file> [task or JSON]` — start an acpx flow run\n\
+        - `/flow [file] [task or JSON]` — start an acpx flow run (or pick a recent flow when omitted)\n\
         - `/runs` — list recent flow runs\n\
-        - `/open <run id>` — replay an existing run into this session\n\
+        - `/open [run id]` — replay an existing run into this session (or pick a recent run when omitted)\n\
         - `/answer <choice>` — answer a waiting checkpoint gate\n\
         - `/acpx-help` — show this command list\n\n\
         {default_desc}\n"
@@ -2765,8 +3048,165 @@ mod tests {
     fn parse_command_unknown_slash_and_acpx_help() {
         assert_eq!(parse_command("/acpx-help", &[]), Command::Help);
         assert_eq!(parse_command("/unknown-cmd arg", &[]), Command::Help);
-        assert_eq!(parse_command("/flow", &[]), Command::Help);
-        assert_eq!(parse_command("/open", &[]), Command::Help);
+        assert_eq!(parse_command("/runs extra", &[]), Command::Help);
+        assert_eq!(parse_command("/answer", &[]), Command::Help);
+        assert_eq!(parse_command("/flow", &[]), Command::FlowPicker);
+        assert_eq!(parse_command("/open", &[]), Command::OpenPicker);
+    }
+
+    #[test]
+    fn open_picker_options_orders_newest_first_and_formats_descriptions() {
+        let runs = vec![
+            (
+                (
+                    "run-older".to_string(),
+                    "build".to_string(),
+                    "build".to_string(),
+                    "completed".to_string(),
+                    1_700_000_000_000,
+                ),
+                SavedRunSource::Native,
+            ),
+            (
+                (
+                    "run-newer".to_string(),
+                    "release".to_string(),
+                    "Ship v2".to_string(),
+                    "waiting".to_string(),
+                    1_700_000_060_000,
+                ),
+                SavedRunSource::PiwMirror,
+            ),
+        ];
+
+        let options = open_picker_options(&runs);
+        assert_eq!(options.len(), 2);
+
+        assert_eq!(options[0].id, "run-newer");
+        assert_eq!(options[0].label, "run-newer");
+        assert!(options[0].description.contains("release"));
+        assert!(options[0].description.contains("Ship v2"));
+        assert!(options[0].description.contains("PIW mirror"));
+        assert!(options[0].description.contains("waiting"));
+        assert!(
+            options[0]
+                .description
+                .contains(&format_iso8601_ms(1_700_000_060_000))
+        );
+
+        assert_eq!(options[1].id, "run-older");
+        assert_eq!(options[1].label, "run-older");
+        assert_eq!(options[1].description.matches("build").count(), 1);
+        assert!(options[1].description.contains("ACPX"));
+        assert!(options[1].description.contains("completed"));
+        assert!(
+            options[1]
+                .description
+                .contains(&format_iso8601_ms(1_700_000_000_000))
+        );
+
+        assert!(open_picker_options(&[]).is_empty());
+    }
+
+    #[test]
+    fn flow_picker_options_resolves_filters_dedups_and_maps_selection() {
+        let cwd = Path::new("/workspace/project");
+        let default_flow = Path::new("flows/default.flow.ts");
+        let existing: HashSet<PathBuf> = [
+            PathBuf::from("/workspace/project/flows/default.flow.ts"),
+            PathBuf::from("/workspace/project/flows/ship.flow.ts"),
+            PathBuf::from("/opt/workflows/deploy.workflow.ts"),
+        ]
+        .into_iter()
+        .collect();
+
+        let recent_runs = vec![
+            (
+                driver::RunFlowRecord {
+                    run_id: "r-old-ship".to_string(),
+                    flow_name: "ship-old".to_string(),
+                    flow_path: "/workspace/project/flows/ship.flow.ts".to_string(),
+                    status: "failed".to_string(),
+                    started_ms: 1_700_000_010_000,
+                },
+                SavedRunSource::Native,
+            ),
+            (
+                driver::RunFlowRecord {
+                    run_id: "r-gone".to_string(),
+                    flow_name: "gone".to_string(),
+                    flow_path: "/private/tmp/gone.flow.ts".to_string(),
+                    status: "completed".to_string(),
+                    started_ms: 1_700_000_090_000,
+                },
+                SavedRunSource::Native,
+            ),
+            (
+                driver::RunFlowRecord {
+                    run_id: "r-default".to_string(),
+                    flow_name: "default".to_string(),
+                    flow_path: "/workspace/project/flows/default.flow.ts".to_string(),
+                    status: "completed".to_string(),
+                    started_ms: 1_700_000_050_000,
+                },
+                SavedRunSource::Native,
+            ),
+            (
+                driver::RunFlowRecord {
+                    run_id: "r-new-ship".to_string(),
+                    flow_name: "ship-new".to_string(),
+                    flow_path: "flows/ship.flow.ts".to_string(),
+                    status: "completed".to_string(),
+                    started_ms: 1_700_000_080_000,
+                },
+                SavedRunSource::Native,
+            ),
+            (
+                driver::RunFlowRecord {
+                    run_id: "r-piw".to_string(),
+                    flow_name: "deploy".to_string(),
+                    flow_path: "/opt/workflows/deploy.workflow.ts".to_string(),
+                    status: "waiting".to_string(),
+                    started_ms: 1_700_000_070_000,
+                },
+                SavedRunSource::PiwMirror,
+            ),
+        ];
+
+        let options = flow_picker_options(
+            Some(default_flow),
+            &recent_runs,
+            cwd,
+            |path| existing.contains(path),
+        );
+
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].id, "/workspace/project/flows/default.flow.ts");
+        assert!(options[0].description.contains("default flow"));
+        assert!(options[0].description.contains("ACPX"));
+
+        assert_eq!(options[1].id, "/workspace/project/flows/ship.flow.ts");
+        assert!(options[1].description.contains("ship-new"));
+        assert!(options[1].description.contains("completed"));
+        assert!(!options[1].description.contains("ship-old"));
+
+        assert_eq!(options[2].id, "/opt/workflows/deploy.workflow.ts");
+        assert!(options[2].description.contains("deploy"));
+        assert!(options[2].description.contains("PIW mirror"));
+        assert!(options[2].description.contains("waiting"));
+
+        let selected_cmd = flow_command_from_selection(&options, &options[2].id);
+        assert_eq!(
+            selected_cmd,
+            Some(parse_command("/flow /opt/workflows/deploy.workflow.ts", &[]))
+        );
+        assert_eq!(flow_command_from_selection(&options, "unknown"), None);
+
+        let empty = flow_picker_options(None, &recent_runs, cwd, |_| false);
+        assert!(empty.is_empty());
+
+        let picker_id = picker_tool_call_id("flow", "sess-1");
+        assert!(!picker_id.starts_with("acpx-gate:"));
     }
 
     #[test]
@@ -2820,7 +3260,7 @@ mod tests {
                 .get("input")
                 .and_then(|i| i.get("hint"))
                 .and_then(Value::as_str),
-            Some("<flow file> [task or JSON input]")
+            Some("[flow file] [task or JSON input]")
         );
         let help_val = serde_json::to_value(&cmds[4]).unwrap();
         assert!(help_val.get("input").is_none() || help_val.get("input") == Some(&Value::Null));
