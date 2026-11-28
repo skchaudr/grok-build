@@ -486,4 +486,89 @@ than guessing. Do not answer a real protected decision or run a workflow.
 """,
         design=True,
     ),
+    task(
+        "detail-focus",
+        source(f"{MODAL}/detail.rs", (1, 260), (415, 445), (525, 740),
+               (975, 995), (1220, 1275), (1365, 1380), (1436, 1500),
+               (1725, 1835), (1975, 2058), (2477, 2540), (2622, 2713))
+        + source(APP_MODAL, (1, 40), (78, 160), (199, 262), (377, 396),
+                 (504, 558), (651, 694), (757, 864), (902, 917),
+                 (1005, 1030), (1156, 1168), (1227, 1250), (1297, 1326))
+        + source(f"{MODAL}/run.rs", (25, 45), (170, 215), (520, 545)),
+        rf"""
+Packet 3b. Ownership: {MODAL}/detail.rs (DetailPanel and its row building)
+and, in {APP_MODAL}, only Run-mode routing: handle_key, handle_run_key,
+wants_esc, open_run, active_shortcut_labels, the Mode::Run render branch,
+RUN_KEYS, and their tests. Do not edit run.rs (attached read-only), the
+ledger, the inspector, the Mode::Ledger preview branch or LEDGER_KEYS.
+
+Goal, from the operator's friction log: in an open run he can Tab into the
+detail pane of a failed stage, select the compiler-error line, copy it
+exactly, and come back to the same stage.
+
+Key contract, shared with later inspector and Agent Turns packets:
+- Tab and Shift+Tab (KeyCode::Tab, KeyCode::BackTab) move focus between the
+  stage tree and the detail pane, both directions. Only when the detail pane
+  is drawn (RunViewState::detail_area() is Some) and the run view is not
+  capturing keys (captures_keys()); otherwise Tab keeps doing nothing.
+- With the detail pane focused: j/k and Up/Down move a line cursor by one row
+  and keep it visible (scroll follows); PageUp/PageDown move by a page; v starts
+  or ends a visual line range anchored at the cursor; y copies the cursor's
+  copy unit, or every unit the range touches; Y copies the whole pane. Copies
+  return AcpxOutcome::Copy(text), so the existing report_copy notice applies.
+- Esc with the pane focused: first ends visual mode, then returns focus to the
+  tree. Esc with the tree focused keeps leaving the run, as now.
+- With the tree focused every current key keeps its meaning: v graph toggle,
+  n noise toggle, y stage-output copy, J/K/D/U scrolling the detail pane, Space, Enter, r.
+- With the pane focused, keys the pane does not use (r, [, ], F5, 1-9, c, !,
+  n, Enter, ?) go to the run view exactly as before.
+- Focus is shown by the cursor row: bg_highlight across the pane width, and
+  the range rows in the same style while visual mode is on. Nothing is
+  highlighted while the tree has focus. The footer shows the pane's keys
+  while it has focus (e.g. "j/k line", "v range", "y copy", "Y all",
+  "Esc tree"), and RUN_KEYS gains rows for Tab and the pane keys.
+- Changing the selected stage (a new DetailTarget) moves the cursor to the
+  first row and ends visual mode. Leaving the run (RunOutcome::Back) and
+  open_run reset focus to the tree, so the Ledger preview never shows a
+  cursor.
+
+Copy units. The pane stores pre-wrapped rows, and wrap() drops the spaces it
+breaks at, so copy text cannot be rebuilt from the rows. Record it where rows
+are made: replace the row vector with a small module-private type (for
+example `Rows`) that derefs to Vec<Line<'static>> so existing `out.push`,
+`out.extend` and `.len()` keep working, and that also records, for rows
+produced by wrapping one source line, the exact source line they copy as.
+- Every row is in exactly one copy unit. A row pushed directly copies as its
+  own visible text with trailing spaces trimmed. Rows from push_wrapped and
+  push_wrapped_capped copy as the source line (each line of the text, split
+  on newlines) whose wrapping produced them, with no indentation, prefix span
+  or break added; a capped unit still copies its whole source line. The
+  string-value loop in append_value_lines (the `wrap(s, body_w)` loop) does
+  the same, copying the value's line without its indent span. Other direct
+  wrap() loops may stay row-by-row.
+- A range copies each touched unit once, in order, joined with newlines. Y
+  copies every unit. Copies are plain text: no styles, no section-rule
+  dashes or scrollbar characters added.
+- Change the signatures of the helpers that take `&mut Vec<Line<'static>>`
+  and of the builders that create the row vector, including
+  format_value_lines, to the new type. Where rows built separately are added
+  to the main rows (the `out.extend(...)` of value lines), keep their units,
+  e.g. with an append method that offsets them; a plain Vec<Line> extended in
+  copies row by row. No function is deleted or renamed; build_lines may
+  return the new type.
+- Cache: units are rebuilt with the rows under the existing CacheKey; no new
+  reads, and nothing per frame beyond drawing.
+
+Tests, in the existing styles: Tab then Shift+Tab move focus and back; Tab
+does nothing without a detail area; with the pane focused j/k move the cursor
+and v, j, y copy a two-unit range; y on the second row of a wrapped failure
+line returns the whole source line exactly, e.g. a 70-character path that wraps
+at width 30 copies as the original line with no added space or newline; Y
+copies all units; Esc ends visual, then returns focus to the tree, then
+leaves the run, landing on the same run in the list; with the tree focused y
+still returns the stage output and v still toggles the graph; a new target resets
+the cursor; the copied text contains no section-rule characters. Update the
+wants_esc test only if its expectations change.
+""",
+    ),
 ]
