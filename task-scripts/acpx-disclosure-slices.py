@@ -158,24 +158,24 @@ wholesale.
 """,
     ),
     task(
-        "finished-run-ledger",
-        source(f"{MODAL}/ledger.rs", (1, 528), (529, 942), (943, 1264),
-               (1265, 1696), (2006, 2279), (2280, 2603), (2604, 2989))
-        + source(APP_MODAL, (311, 352), (695, 741), (1432, 1510))
-        + source(f"{ACPX}/bundle.rs", (1, 135), (150, 187), (261, 350), (1347, 1355))
-        + source(f"{ACPX}/step_digest.rs", (157, 182))
+        "acpx-opening-ledger-delta",
+        source(f"{MODAL}/ledger.rs", (1, 445), (446, 747), (748, 1177),
+               (1178, 1412), (1413, 1637), (1638, 2057), (2367, 2514),
+               (2515, 2785), (2986, 3238), (3239, 3498), (3499, 3848))
+        + source(APP_MODAL, (311, 352), (695, 747), (1439, 1517))
+        + source(f"{ACPX}/bundle.rs", (1, 135), (261, 350), (1347, 1355))
         + source("docs/acpx-modal-opening-screen.md", (1, 62)),
         rf"""
-Carries forward packet 2 and adds the reviewed opening-screen behavior.
+Opening-screen delta after the accepted run2 packet 2 (1f7fe9b1). The
+attached source already has finished grouping, rail/count/path and list copy.
+Preserve those implementation and test contracts. Do not regenerate them.
 Own Flows row grouping, selection and progress in {MODAL}/ledger.rs and its
 unit tests, including the narrow inline render hook below. In {APP_MODAL}
 edit only the row_extra producer/cache and its tests. Leave modal preview
 state, input and rendering to packet 4. Keep LedgerOutcome routing compatible.
 
-Group two or more actual finished runs with the same nonempty flow_name.
-The newest member represents a collapsed group: the greatest started_ms, and on
-a tie the greatest run_id. The default Grouped order has Waiting for input,
-Running and Recent outcomes; omit empty sections. Use actual RunStatus: stalled
+The default Grouped order has Waiting for input, Running and Recent outcomes;
+omit empty sections. Use actual RunStatus: stalled
 Running remains Running with its stalled label, and answered Waiting remains
 Waiting with the recorded answer distinction. Do not fabricate sent/accepted
 status or change gate control. Keep running runs individual and group repeated
@@ -193,10 +193,9 @@ Grouped order. Recent and Name continue to let operators browse waits by those
 orders without the waiting-group fold; preserve existing sort and active
 filter controls.
 
-Space toggles the selected group open or closed in Flows; it is unbound in the
-attached Flows dispatcher. Tab, BackTab, Left, Right, h and l keep switching
-tabs. Add the Space label to LedgerState::shortcuts(); the coordinator adds the
-help-table row in {APP_MODAL}. Space on a row that is not a group is Unchanged.
+Extend the existing Space group toggle to waiting groups. Keep existing
+shortcut/help behavior until packet 4 routes preview focus; no changes to
+Ledger-mode key dispatch or help in {APP_MODAL} in this packet.
 Enter on a waiting group expands it without opening a member; Enter on a run
 or a finished group opens the same run as before. Expanded groups expose every
 member. On a waiting group header the list y emits no copy outcome, because
@@ -206,35 +205,19 @@ member arrives. On explicit collapse of a selected child, select the visible
 group row or finished representative as appropriate. Leave the Agent Turns tab
 (LedgerTab::Sessions; its label now reads Agent Turns) behavior alone.
 
-Each Flows row shows three things that answer different questions: the
-existing dot rail (the run's shape: one mark per flow node, unrun nodes
-included), '<N> steps ran' (how much happened), and the executed path (what
-happened, in order), e.g. `✓ cargo_check → ✗ repair_compile → ✓ cargo_check`.
-The count and the path come only from recorded Step entries in run.steps
-order, repeat attempts included, each glyph from that step's outcome; never
-from flow nodes. The ' done/total' suffix after the rail is replaced by the
-count. RowExtra contract: add `pub executed: Option<Vec<(String, Outcome)>>`
-(node_id and outcome per recorded step, in order) and keep `rail` (literals
-outside the excerpts still set it). None means unknown and renders
-'steps unknown', never 0; Some(empty) renders 'no steps ran'. row_extra in
-{APP_MODAL} fills executed from the run it already loads. At full width show
-rail, count and path together, truncating the path with … to the space left.
-At narrower widths keep the row readable: drop the path from the row first,
-then follow the existing width thresholds, and give the selected run its full
-executed path on wrapped lines below the row, the way flow_question_lines adds
-a waiting run's question (keep row-height and scroll math consistent for both).
-Update every RowExtra literal inside the excerpts, and report any remaining
-literal as a coordinator follow-up. Update the probe test's 5/262 assertion.
-Use effective_outcome when the recorded outcome needs correction for a nonzero
-exit. Reuse cached bundle reads, do not add I/O to render or widen the cache
-limit. Keep existing styles. Implement the shared interface below; account for
-inline rows in height, navigation and overflow, including a constrained viewport
-and a focused line that wraps. Status and title must remain readable. For a
-concrete Flows selection, y copies the canonical '/open <run_id>' command;
-on the Agent Turns tab y still copies the selected record ID. A confirmed copy
-already shows "Copied!" (fixed on main). Chat /open <id> already resolves
-mirrored PIW runs read-only (resolve_saved_run); the coordinator still checks a
-live paste of the copied command before shipping it.
+Implement the shared inline interface using the existing continuation routing
+in build_flow_rows, append_continuations and continuation_lines_for and the
+existing wrapping and scroll paths in render_flows and render_flow_row. Some
+replaces the selected run's existing question/path presentation, including
+its first question fragment or inline row path when duplicated by the supplied
+preview. None leaves packet 2's row and continuation rendering unchanged.
+Something the modal supplies for the selected waiting group must also render
+below its group row, without resolving a member. Give focused preview lines a
+visible cursor/range style and include wrapping in height, scroll and overflow.
+Keep the selected row reachable even if the preview is taller than the viewport.
+Keep recorded rail, count, path and concrete-run y untouched. Update RowExtra
+literals inside attached excerpts for the new optional path; name any remaining
+literal as a coordinator follow-up. Do not add render I/O or widen cache limits.
 
 Tests: keep packet 2's finished grouping, filter, recent/name sorts, retry,
 unknown/empty, width and copy assertions. Add five ship waits and two mixed-talk
@@ -375,15 +358,19 @@ empty cases.
     task(
         "acpx-opening-preview",
         source(APP_MODAL, (1, 310), (354, 396), (504, 558), (651, 694),
-               (742, 921), (998, 1158), (1187, 1243), (1269, 1290), (1409, 1431))
-        + source(f"{MODAL}/ledger.rs", (18, 56), (201, 309), (727, 891), (943, 980))
-        + source(f"{MODAL}/detail.rs", (1036, 1101))
+               (748, 927), (1004, 1164), (1193, 1249), (1275, 1296), (1415, 1437))
+        + source(f"{MODAL}/ledger.rs", (18, 58), (233, 353), (955, 1125), (1178, 1215))
+        + source(f"{MODAL}/detail.rs", (1369, 1434))
         + source(f"{ACPX}/bundle.rs", (1, 135), (150, 187), (237, 361), (617, 625), (1356, 1370))
         + source(f"{ACPX}/step_digest.rs", (157, 306))
         + source("docs/acpx-modal-opening-screen.md", (1, 62)),
         rf"""
 This implements the reviewed opening-screen preview and replaces the old
-packet 4 design assignment. Own only {APP_MODAL}: preview state, selected
+packet 4 design assignment. This draft must be re-rendered after
+acpx-opening-ledger-delta is integrated; the preview input must contain the
+landed definitions of InlinePreviewLine and all three ledger methods in the
+shared interface, with exact line ranges verified before dispatch. Own only
+{APP_MODAL}: preview state, selected
 preview evidence, Ledger-mode rendering and input, help and relevant tests.
 Keep Flows as the initial view. Do not edit ledger.rs, detail.rs or Run/Step
 behavior; the ledger supplies the shared interface below. No new landing mode.
