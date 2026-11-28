@@ -207,14 +207,37 @@ pub fn trim_failure_tail(
 
         if !non_empty_lines.is_empty() {
             let start = non_empty_lines.len().saturating_sub(max_lines);
-            let joined = non_empty_lines.get(start..).unwrap_or_default().join("\n");
-            return Some(truncate_chars(&joined, max_chars));
+            let dropped = non_empty_lines.get(..start).unwrap_or_default();
+            let mut kept = first_error_lines(dropped);
+            kept.extend(non_empty_lines.get(start..).unwrap_or_default());
+            return Some(truncate_chars(&kept.join("\n"), max_chars));
         }
     }
 
     exit_code
         .filter(|&code| code != 0)
         .map(|code| truncate_chars(&format!("exit code {code}"), max_chars))
+}
+
+/// The first `error` line among lines a tail cut off, with the `-->` location
+/// line right after it: the compiler's root cause usually comes first, so a
+/// plain tail would lose it. Empty when no cut-off line starts with `error`.
+/// Ends with `…` when cut-off lines remain between them and the tail.
+fn first_error_lines<'a>(dropped: &[&'a str]) -> Vec<&'a str> {
+    let Some(at) = dropped
+        .iter()
+        .position(|line| line.trim_start().to_ascii_lowercase().starts_with("error"))
+    else {
+        return Vec::new();
+    };
+    let mut lines: Vec<&str> = dropped.get(at).copied().into_iter().collect();
+    if let Some(next) = dropped.get(at + 1).filter(|line| line.trim_start().starts_with("-->")) {
+        lines.push(next);
+    }
+    if at + lines.len() < dropped.len() {
+        lines.push("…");
+    }
+    lines
 }
 
 pub fn step_failure_reason(step: &Step) -> Option<String> {
@@ -840,6 +863,29 @@ mod tests {
 
         let char_capped = trim_failure_tail(Some("abcdefghij"), None, None, None, None, 6, 5);
         assert_eq!(char_capped, Some("abcd…".to_string()));
+    }
+
+    #[test]
+    fn trim_failure_tail_keeps_the_cut_off_root_error_and_its_location() {
+        // beta8-merge cargo_check, saved outputTail, 2026-11-24.
+        let cargo = "error: duplicate key\n  --> crates/codegen/xai-grok-update/Cargo.toml:38:1\n   |\n38 | xai-tty-utils = { workspace = true }\n   | ^^^^^^^^^^^^^\nerror: failed to load manifest for workspace member `/w/crates/codegen/xai-grok-pager`\nreferenced by workspace at `/w/Cargo.toml`\n\nCaused by:\n  failed to load manifest for dependency `xai-grok-update`\n";
+        let trimmed = trim_failure_tail(None, None, Some(cargo), None, Some(101), 6, 480);
+        assert_eq!(
+            trimmed.as_deref(),
+            Some(
+                "error: duplicate key\n  --> crates/codegen/xai-grok-update/Cargo.toml:38:1\n…\n38 | xai-tty-utils = { workspace = true }\n   | ^^^^^^^^^^^^^\nerror: failed to load manifest for workspace member `/w/crates/codegen/xai-grok-pager`\nreferenced by workspace at `/w/Cargo.toml`\nCaused by:\n  failed to load manifest for dependency `xai-grok-update`"
+            )
+        );
+
+        // The error line alone, no gap marker, when nothing else was cut.
+        let adjacent = trim_failure_tail(None, Some("error: boom\na\nb\nc"), None, None, None, 3, 480);
+        assert_eq!(adjacent.as_deref(), Some("error: boom\na\nb\nc"));
+
+        // Nothing cut, or no error among the cut lines: the plain tail.
+        let uncut = trim_failure_tail(None, Some("error: x\ny"), None, None, None, 6, 480);
+        assert_eq!(uncut.as_deref(), Some("error: x\ny"));
+        let no_error = trim_failure_tail(None, Some("warn\na\nb\nc"), None, None, None, 3, 480);
+        assert_eq!(no_error.as_deref(), Some("a\nb\nc"));
     }
 
     #[test]
